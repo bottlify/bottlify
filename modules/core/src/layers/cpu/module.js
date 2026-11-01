@@ -74,7 +74,9 @@ export function processorsFor(config){
  */
 export const DEFAULT_INITIAL_STACK = 0x300000;
 export const DEFAULT_THUNK_BASE = 0x100000;
-export const DEFAULT_THUNK_CAPACITY = 16384 * 16;
+// A 64-bit program with Steam's client registered past 16384 stubs; twice that
+// still leaves the first thread a megabyte and a half under 0x300000.
+export const DEFAULT_THUNK_CAPACITY = 32768 * 16;
 
 /**
  * The record in the run's translation store of how many executors past the

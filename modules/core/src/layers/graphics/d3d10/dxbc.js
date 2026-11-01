@@ -33,6 +33,9 @@ export const SHADER_KIND = Object.freeze({
     PIXEL: 0,
     VERTEX: 1,
     GEOMETRY: 2,
+    HULL: 3,
+    DOMAIN: 4,
+    COMPUTE: 5,
 });
 
 /** The component types a signature element declares. */
@@ -70,6 +73,8 @@ export const SYSTEM_VALUE = Object.freeze({
  * @property {number} mask          Which components the element occupies.
  * @property {number} readWriteMask Which of them the program reads (inputs) or
  *                                  leaves unwritten (outputs).
+ * @property {number} [stream]      The vertex stream a geometry shader's output is
+ *                                  on (OSG5, OSG1); 0 where the signature has none.
  */
 
 /**
@@ -108,20 +113,24 @@ function cString(bytes, at){
  * element with the name stored as an offset into the chunk.
  *
  * @param {Uint8Array} chunk
+ * @param {boolean} [streamed]  each row starts with its stream
+ * @param {number} [size]  bytes a row
  * @returns {SignatureElement[]}
  */
-export function parseSignature(chunk){
+export function parseSignature(chunk, streamed = false, size = 24){
     const count = u32(chunk, 0);
     const rows = u32(chunk, 4);
     /** @type {SignatureElement[]} */
     const elements = [];
     for (let index = 0; index < count; index++)
     {
-        const at = rows + index * 24;
-        if (at + 24 > chunk.length)
+        const start = rows + index * size;
+        if (start + size > chunk.length)
         {
             break;
         }
+        // A streamed row begins with its stream; the rest is laid out as ever.
+        const at = streamed ? start + 4 : start;
         const masks = u32(chunk, at + 20);
         elements.push({
             name: cString(chunk, u32(chunk, at)),
@@ -131,9 +140,32 @@ export function parseSignature(chunk){
             register: u32(chunk, at + 16),
             mask: masks & 0xff,
             readWriteMask: (masks >>> 8) & 0xff,
+            ...(streamed ? { stream: u32(chunk, start) } : {}),
         });
     }
     return elements;
+}
+
+/**
+ * A shader's outputs from whichever signature chunk it has: OSGN, or a
+ * geometry shader's OSG5 or OSG1, whose rows name a stream.
+ *
+ * @param {Map<string, Uint8Array>} chunks
+ * @returns {SignatureElement[]}
+ */
+function outputsOf(chunks){
+    const plain = chunks.get('OSGN');
+    if (plain)
+    {
+        return parseSignature(plain);
+    }
+    const five = chunks.get('OSG5');
+    if (five)
+    {
+        return parseSignature(five, true, 28);
+    }
+    const one = chunks.get('OSG1');
+    return one ? parseSignature(one, true, 32) : [];
 }
 
 /**
@@ -202,9 +234,7 @@ export function parseDxbc(bytes){
     return {
         chunks,
         inputs: chunks.has('ISGN') ? parseSignature(/** @type {Uint8Array} */ (chunks.get('ISGN'))) : [],
-        outputs: chunks.has('OSGN')
-            ? parseSignature(/** @type {Uint8Array} */ (chunks.get('OSGN')))
-            : [],
+        outputs: outputsOf(chunks),
         shader: shaderChunk ? parseShader(shaderChunk) : null,
     };
 }
@@ -216,12 +246,15 @@ export function parseDxbc(bytes){
  *
  * @param {Uint8Array} bytes
  * @param {number} kind  A SHADER_KIND.
+ * @param {number} [most]  The newest shader model the device takes, as 0xMm: 0x40 is
+ *     4.0, the default, and 0x50 is 5.0.
  * @returns {DxbcContainer | null}
  */
-export function parseShaderOfKind(bytes, kind){
+export function parseShaderOfKind(bytes, kind, most = 0x40){
     const container = parseDxbc(bytes);
-    if (!container || !container.shader || container.shader.kind !== kind
-        || container.shader.major !== 4)
+    const shader = container?.shader;
+    if (!container || !shader || shader.kind !== kind || shader.major < 4
+        || ((shader.major << 4) | shader.minor) > most)
     {
         return null;
     }

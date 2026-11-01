@@ -245,7 +245,8 @@ function srgbTwin(format){
  *
  * @param {number} dxgiFormat
  * @param {number} bindFlags
- * @param {{ compressed?: boolean }} [options]  Whether the GPU samples BC blocks.
+ * @param {{ compressed?: boolean, depth32Stencil?: boolean }} [options]  Whether the GPU
+ *     samples BC blocks, and whether it keeps a 32-bit depth with stencil.
  * @returns {TextureStorage | null} null for a format the GPU has no way to hold
  */
 export function textureStorage(dxgiFormat, bindFlags, options = {}){
@@ -279,6 +280,12 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
             : kept(compressed.decoded, compressed.conversion);
     }
     const format = TEXTURE_FORMAT[typed];
+    // A 32-bit depth with stencil needs a device feature; without it the
+    // depth keeps 24 bits.
+    if (format === 'depth32float-stencil8' && options.depth32Stencil === false)
+    {
+        return kept('depth24plus-stencil8', null);
+    }
     return format ? kept(format, null) : null;
 }
 
@@ -303,7 +310,7 @@ export function copyCompatible(a, b){
  *
  * @param {TextureStorage} storage
  * @param {number} viewFormat  The DXGI format the view names.
- * @param {{ compressed?: boolean }} [options]
+ * @param {{ compressed?: boolean, depth32Stencil?: boolean }} [options]
  * @returns {{ format?: string, aspect?: string, reinterpreted: boolean }}
  */
 export function viewFormatOf(storage, viewFormat, options = {}){

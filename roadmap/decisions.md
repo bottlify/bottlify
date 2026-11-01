@@ -640,7 +640,7 @@ the program's block to index 1 and that executable found a null at index 0. *202
 
 **A66. A game platform's own servers are reached from the page only while the platform lets us,
 and its first request to stop is honoured for everyone at once.** The GameHub extension
-(`modules/gamehub`) carries a page's requests to a platform -- Steam's connection managers, which
+(`gamehub/` in the launcher, bottlify-ui) carries a page's requests to a platform -- Steam's connection managers, which
 admit only their own and localhost origins, and its content servers, which send no CORS headers
 -- by rewriting their headers with one ruleset a platform. Each ruleset is switched by the site's
 own configuration (`config.json`'s `bridge`, `"steam": false`), read by the extension on every
@@ -653,7 +653,7 @@ switched off is simply absent. *2026-10-30; restated 2026-10-31.*
 **A67. A Steam bottle is installed with its redistributables already applied, the app's own
 prerequisite installers among them.** Steam downloads the depots an app names from other apps
 (Steamworks Common Redistributables' Visual C++ and DirectX) and, on the first start, runs its
-install scripts' programs silently. The download (`tools/steam-install.mjs`) takes those depots
+install scripts' programs silently. The download (`bottlify-ui/gamehub/tools/steam-install.mjs`) takes those depots
 too -- an anonymous logon opens them -- and `@bottlify/core/steam`'s `redist.js` (run over a
 directory by `tools/redist.mjs`, over the bottle a page writes by an install in the browser) does
 what the programs would at install time instead: it unpacks each one with the engine's cabinet and installer-database
@@ -723,6 +723,27 @@ signature claiming SSE2, SSE3, POPCNT and RDRAND, a VMware hypervisor, and a hig
 leaf of 5, so no brand and no long mode): a program named the machine by its signature. POPCNT
 and RDRAND still execute; they are not announced, since no processor of the class had them. When
 the engine executes SSSE3 and SSE4, the class moves with it. *2026-10-31.*
+
+**A74. A Direct3D 10 dynamic buffer's bytes are undefined after a WRITE_DISCARD map.** The
+documentation says so, and a driver hands out renamed memory that holds whatever it held. The
+guest's map (`seam/d3d10-inguest.js`, `BufferMap`) may move the buffer onto another of its
+storages in guest memory, which holds what it held the last time the buffer was on it. The
+pages the program writes travel whole from that storage, and the rest of the GPU copy is what it
+was, as a DISCARD's rename carries it. A program that writes part of a buffer after a DISCARD and draws
+from the rest reads what Windows would give it: something, not what it wrote before. A buffer is
+given another storage only where the engine watches the program's writes, so an unmap sends the
+pages written and not the storage. *2026-10-31.*
+
+**A75. A geometry, hull or domain shader is made, and a draw with one bound is skipped.** WebGPU
+has none of those stages and none is emulated. Hardware of the levels Direct3D 10 and 11 run at
+always has them, so a program checks nothing before relying on them: refusing the create
+(`E_NOTIMPL`, as Direct3D 10 here did until now) leaves it holding a null shader it goes on to
+bind and release -- Wine's d3d10core and d3d11 tests crash there, hiding every check after. A
+draw through the missing stage would put the program's points and triangles where the stage
+expands, culls or routes them, so it is not drawn at all; the renderer counts it
+(`skipped.stage`) and says so once. A geometry shader with stream output is made in the same
+way, its declaration checked as Windows checks it; one made of a vertex shader's bytecode, which
+only streams out, is no stage, so its draws are drawn. *2026-10-31.*
 
 ## B. From measured optimisation work
 
@@ -1273,3 +1294,13 @@ draws nothing it would have written there that frame: Call of Duty 4 skins its a
 such a buffer, and with the buffer's storages taken in turn they showed in two frames of four.
 Levels inside a texture's chain stay packed, as in Wine, so only a chain's first level is on the
 boundary. *2026-10-21.*
+
+**An element past its stream's stride is read from the vertex's last bytes.** A vertex declaration
+may name elements beyond the stride its stream is bound with: one declaration naming four
+coordinate sets and a lightmap's set at offset 24 is bound over meshes of one, two and three sets
+(strides 12, 16 and 20), and the program's shaders read the lightmap's set through it. WebGPU
+refuses such an attribute, and reading the next vertex's bytes there put the lightmap coordinates
+of one vertex at another's diffuse ones: the lightmaps landed off their atlas tiles in streaks. The
+vertex's own last bytes are its last coordinate set, which is where the mesh holds its lightmap
+coordinates, and what a set the mesh lacks repeats. An element wider than the stride is refused
+still. *2026-11-01.*

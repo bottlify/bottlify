@@ -68,7 +68,7 @@ import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
 import { clientFilesCached } from '../steam-client.mjs';
-import { ownershipTickets, ticketsFromArgv } from '../steam-tickets.mjs';
+import { ownershipTickets, steamAppOf, ticketsFromArgv } from '../steam-tickets.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -160,7 +160,8 @@ function serveControl(port, page){
     return server;
 }
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
-const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
+// A checkout without bundles of its own (a worktree) names the folder that has them.
+const BUNDLES_DIR = process.env.BOTTLIFY_BUNDLES ?? join(REPO_ROOT, 'bundles');
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
 /** Lines per round trip when draining the call log. */
@@ -405,13 +406,13 @@ function parse(argv){
                     rootsFromArgv(argv)).map(root=>Buffer.from(root).toString('base64')) } : {},
             }
             : undefined,
-        // `--steam FILE`: the signed-in Steam account (tools/steam-account.mjs)
+        // `--steam FILE`: the signed-in Steam account (bottlify-ui/gamehub/tools/steam-account.mjs)
         // the engine's Steam client answers for; the app is the manifest's
         // `steam.appId`.
         steamAccount: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
         // `--steam-session FILE` (or `-`, stdin): a signed-in session, which the
-        // app's ownership ticket is asked for with (tools/steam-tickets.mjs) --
+        // app's ownership ticket is asked for with (bottlify-ui/gamehub/tools/steam-tickets.mjs) --
         // what the launcher's bridge gets -- held in memory for this run only.
         steamSession: argv.includes('--steam-session')
             ? argv[argv.indexOf('--steam-session') + 1] : null,
@@ -1847,8 +1848,8 @@ export async function game(options){
 
     const steamClient = options.steamAccount ? await clientFilesCached() : null;
     const tickets = { ...ticketsFromArgv(process.argv.slice(2)),
-        ...options.steamAccount && options.steamSession && manifest.steam?.appId
-            ? await ownershipTickets(options.steamSession, [manifest.steam.appId]) : {} };
+        ...options.steamAccount && options.steamSession && steamAppOf(manifest)
+            ? await ownershipTickets(options.steamSession, [steamAppOf(manifest)]) : {} };
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
@@ -1861,7 +1862,7 @@ export async function game(options){
             // The networking client, for a run that names a relay.
             { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
             // The Steam client's own files, from this machine's cache of Valve's
-            // (tools/steam-client.mjs), for a run with a Steam account.
+            // (bottlify-ui/gamehub/tools/steam-client.mjs), for a run with a Steam account.
             ...steamClient ? [{ prefix: '/steam-client/', root: steamClient.folder }] : [],
         ],
         coi: options.coi,
@@ -1965,7 +1966,7 @@ export async function game(options){
                 .map(([app, ticket])=>[app, Buffer.from(ticket).toString('base64')])),
             win32: options.steamAccount
                 ? { ...options.win32Config, steam: { ...options.steamAccount,
-                    ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } }
+                    ...steamAppOf(manifest) ? { appId: steamAppOf(manifest) } : {} } }
                 : options.win32Config,
             screen: options.screen,
             quantum: options.quantum,

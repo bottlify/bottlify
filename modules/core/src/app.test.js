@@ -265,6 +265,21 @@ test('a window at the end is clipped, and two misses in one window are one reque
     assert.equal(groupBlocks(pair).length, 1);
 });
 
+test('a window takes only the blocks laid beside the miss in the container', ()=>{
+    // An installation's bottle: blocks 0..3 written last, at the container's
+    // end, and blocks 4..7 -- a file that arrived first -- at its start. A miss
+    // on block 4 is in the first window, and so by offset is nothing below it.
+    const head = run(40, 4, 256 << 10);
+    const tail = run(64 << 20, 4, 256 << 10);
+    const layout = [...tail, ...head].map((block, index)=>({ ...block, index }));
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 8 };
+
+    assert.deepEqual(withWindow([layout[4]], bundle, ()=>false).map(block=>block.index),
+        [4, 5, 6, 7], 'took blocks 0..3 from 64 MiB away before');
+    assert.deepEqual(withWindow([layout[3]], bundle, ()=>false).map(block=>block.index),
+        [0, 1, 2, 3]);
+});
+
 test('the window does not begin before an unaligned first block', ()=>{
     // Blocks start after the container's header, so the first window is short
     // by that much and no block before index zero is asked for.
@@ -515,7 +530,7 @@ test('a Windows that is not one of the four is refused before anything is built'
 test('a graphics choice nobody knows is refused before anything is built', async()=>{
     const options = /** @type {any} */ ({ executable: new Uint8Array(0), graphicsApi: 'glide' });
     await assert.rejects(createApp(options),
-        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, opengl/);
+        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, directx11, opengl/);
 });
 
 test('a library loaded as data answers for its resources by the handle it was given', ()=>{

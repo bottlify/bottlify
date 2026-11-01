@@ -93,19 +93,6 @@ export function installCoreCalls(context, kernel){
     /** @param {number} value */
     const clamp01 = value=>(value < 0 ? 0 : value > 1 ? 1 : value);
 
-    /**
-     * The back face set by OpenGL 2.0's calls is the one every draw reads,
-     * whatever GL_EXT_stencil_two_side's enable says.
-     *
-     * @param {StencilQueries[]} faces
-     */
-    const backIsCore = faces=>{
-        if (faces.includes(BACK))
-        {
-            kernel.side.stencilBackFromSelector = false;
-        }
-    };
-
     Object.assign(context, {
         // --- blending ---
 
@@ -180,7 +167,6 @@ export function installCoreCalls(context, kernel){
                 setState(q.ref, [ref | 0]);
                 setState(q.mask, [mask >>> 0]);
             }
-            backIsCore(faces);
         },
 
         /**
@@ -204,7 +190,6 @@ export function installCoreCalls(context, kernel){
                 setState(q.zfail, [zfail]);
                 setState(q.zpass, [zpass]);
             }
-            backIsCore(faces);
         },
 
         /** @param {number} face @param {number} mask */
@@ -223,7 +208,6 @@ export function installCoreCalls(context, kernel){
             {
                 setState(q.write, [mask >>> 0]);
             }
-            backIsCore(faces);
         },
 
         // --- draw buffers ---

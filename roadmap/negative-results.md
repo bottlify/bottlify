@@ -2506,3 +2506,25 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Decision.** Reverted; where GameHub's protocol work runs is for the user to decide (the
   report of 2026-10-31).
 
+
+### 2026-10-31: a Direct3D 10 dynamic buffer given 32 MiB of storages instead of 4 MiB
+
+- **Idea.** In the Crysis timedemo in the graphics worker every trapped `ID3D10Buffer::Map` was a
+  DISCARD that found no storage free at the cap, and each played the command ring on its way in
+  (about 1 ms). Raising the per-buffer byte cap (`STORAGE_BYTES` in `seam/d3d10-ring.js`) from
+  4 MiB to 32 MiB would let a buffer take more storages between two plays of the ring.
+- **Workload.** Crysis SP demo bundle 354fedbfb099f88d57eb9eed (bundle.btl sha256 32579caa...),
+  windows win7, `-dx10 -DEVMODE +map island +exec benchmark_cpu`, `game.mjs --worker
+  --graphics-worker --run-seconds 1200`, hardware WebGPU adapter (adapter info empty), Chrome
+  version not recorded; d3d11 branch at a5301077 plus the counters (E3) and at 2020c855 (E4).
+- **Values.** One run an arm. 4 MiB (E3): ring counters `added 1135, capped 177474`, timedemo
+  runs 4.10 and 4.97 fps, 1029 crossings a frame, Map 178609 traps 168.7 s. 32 MiB (E4): split
+  counters `capped 172241` at the count's cap (32 storages, the FREE word's bits), `cappedBytes
+  0`; timedemo runs 3.59 and 6.18 fps, 1052 crossings a frame, Map 173368 traps 167.6 s. Noise
+  floor: the same tree gave 3.61/6.28 (E2) and 4.10/4.97 (E3).
+- **Why.** The bytes' cap was never what stopped a buffer: every trapped DISCARD met the count's
+  cap of 32 storages, a buffer DISCARDed more often than that between two host calls. The ring's
+  play time (`syncMs`, about 195 s of the run) is the cost of making the recorded calls, which
+  the same records cost whenever they are played; the traps move it, not add to it.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** Back to 4 MiB; the counters that told the two caps apart stay.

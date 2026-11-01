@@ -56,6 +56,10 @@ const PURE_GETTERS = new Set([
     // minutes of one title, each played for nothing -- and a pause the host's
     // entry runs its calls in.
     'ringState', 'whileStill',
+    // Direct3D 10's: which interfaces an object has, asked whenever the seam
+    // hands one out, and whether a map waits for a copy into the resource --
+    // never, on a device with no renderer, whose map is the played one's.
+    'supports', 'pendingReadback',
 ]);
 
 /**
@@ -67,7 +71,12 @@ const PURE_GETTERS = new Set([
  */
 function handsOut(name){
     return name.startsWith('Create') || name.startsWith('Get') || name.startsWith('Query')
-        || name === 'EndStateBlock';
+        || name === 'EndStateBlock'
+        // DXGI's enumerations, and Direct3D 10's getters of a stage's bindings:
+        // EnumAdapters, IAGetVertexBuffers, PSGetShader; and Direct3D 11's
+        // command lists and context states, which a context hands back.
+        || name.startsWith('Enum') || /^[A-Z]{2}Get/.test(name)
+        || name === 'FinishCommandList' || name === 'SwapDeviceContextState';
 }
 
 /** The calls that hand out one of a texture's levels as an object of its own. */
@@ -356,6 +365,9 @@ function visit(value, bind){
  *     bytes of guest memory just copied into the record, by what copied them
  * @property {(ms: number, polls: number, asks: number, beside: boolean, sentAfter: number,
  *     trip: number, events: OcclusionEvent[]) => void} [counted]
+ * @property {(ms: number, polls: number, asks: number, events: OcclusionEvent[]) => void}
+ *     [abandoned]  an occlusion query was issued again before it was told: how long it
+ *     had been waited for, its polls and asks
  *     an occlusion query was answered: this long after its END was issued, after
  *     this many polls of the program's and asks of the played side; `beside`
  *     when its count came with another query's answer; `sentAfter` how long
@@ -723,6 +735,13 @@ export function createRecording(options){
             if (!raws.has(member) && isDeviceObject(member))
             {
                 value[key] = proxyOf(member);
+            }
+            else if (Array.isArray(member) && member.some(one=>!raws.has(one)
+                && isDeviceObject(one)))
+            {
+                // Direct3D 10's getters hand out arrays of objects.
+                value[key] = member.map(one=>(!raws.has(one) && isDeviceObject(one)
+                    ? proxyOf(one) : one));
             }
         }
     };
@@ -1704,6 +1723,15 @@ export function createRecording(options){
             if (name === 'Issue')
             {
                 // A new measurement: what was counted before is not its count.
+                // One issued again before it was told is a count the program
+                // gave up waiting for, which the counts told never show.
+                const untold = timed ? waiting.get(target) : undefined;
+                if (untold)
+                {
+                    untold.events.push(['abandoned', sharedNow(), untold.polls]);
+                    transport.abandoned?.(performance.now() - untold.at, untold.polls,
+                        untold.asks, untold.events);
+                }
                 counts.delete(target);
                 waiting.delete(target);
                 if (/** @type {any} */ (target).type === D3DQUERYTYPE_OCCLUSION
@@ -2329,6 +2357,12 @@ export function createPlayer({ root, ship, read, borrow }){
             if (target === undefined && playing === 'reachable')
             {
                 return call.wait === WAIT.ANSWER ? { answer: false, outs: args } : false;
+            }
+            // A layer reports on the last device it made, which the program may
+            // have made only to ask what the hardware does and let go of.
+            if (target === undefined && playing === 'diagnostics')
+            {
+                return call.wait === WAIT.ANSWER ? { answer: null, outs: args } : null;
             }
             if (playing === REFS_TO)
             {

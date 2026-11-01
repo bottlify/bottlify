@@ -800,19 +800,23 @@ test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask and 
         'with two-sided testing off, the front face\'s calls set the back face too');
 
     // Selecting the back face -- the two-sided enable is still off -- moves
-    // both the setters and the unsuffixed queries onto it.
+    // both the setters and the unsuffixed queries onto the extension's own
+    // back face, a record apart from OpenGL 2.0's (`GL_STENCIL_BACK_*`).
     context.glActiveStencilFaceEXT(GL.BACK);
     assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.BACK]);
     context.glStencilFuncSeparate(GL.BACK, GL.LESS, 1, 0xff);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.LESS],
-        'glGet with no suffix answers the active face, not always the front');
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.LESS]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.ALWAYS],
+        'glGet with no suffix answers the active face -- the extension\'s, untouched yet');
     context.glStencilFunc(GL.ALWAYS, 9, 0xff);
     context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);
     context.glStencilMask(0xaa);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_REF), [9]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_PASS_DEPTH_PASS), [GL.INCR_WRAP]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_WRITEMASK), [0xaa]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [9]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_PASS_DEPTH_PASS), [GL.INCR_WRAP]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0xaa]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.LESS],
+        'OpenGL 2.0\'s back face keeps what glStencilFuncSeparate set');
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_PASS_DEPTH_PASS), [GL.REPLACE]);
 
     // The first block's front record is untouched by any of the above.
     context.glActiveStencilFaceEXT(GL.FRONT);

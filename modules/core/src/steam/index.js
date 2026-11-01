@@ -6,8 +6,12 @@
 
 // The formats of Steam's files, which a page reads where the bytes land: a
 // manifest, a chunk, a KeyValues text, and the QR code a sign-in is shown as.
-// Speaking to Steam -- the account, the keys, the codes -- is GameHub's
-// (`modules/gamehub`), and the install is `@bottlify/core/steam/install`.
+// Speaking to Steam -- the account, the keys, the codes -- is GameHub's (the
+// launcher's extension), and the install is `@bottlify/core/steam/install`.
+// The protobuf, KeyValues and QR codecs are its subpaths as well.
+
+/** @typedef {import('./depot.js').ContentServer} ContentServer */
+
 export { encodeQr, qrToSvg } from './qr.js';
 export { parseText, parseBinary } from './keyvalues.js';
 export {

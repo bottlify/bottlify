@@ -764,3 +764,57 @@ test('a buffer that says it is idle gives a visit nothing, whatever a program di
     }
     assert.ok(checked > 10000, `buffers skipped as idle: ${checked}`);
 });
+
+test('a device reporting its position in bursts shows a cursor that moves each millisecond', ()=>{
+    // SDL2 writes one 10 ms chunk each time the write cursor enters the next,
+    // looking every millisecond, into a buffer of 80 ms. A browser's audio
+    // thread reports where it is a burst of blocks at a time -- 20 to 50 ms in
+    // a virtual machine. A cursor standing still and then jumping two chunks
+    // had SDL write one of them and pass over the other; one carried on round
+    // the circle took a jump past half the buffer for a step back and stood.
+    const format = normaliseFormat({ channels: 2, sampleRate: 44100, bitsPerSample: 32,
+        float: true });
+    const rate = format.sampleRate * format.blockAlign;
+    const chunk = 3528;
+    const bytes = chunk * 8;
+    for (const burst of [20, 50])
+    {
+        const time = clock();
+        const sound = createSoundBuffer({ bytes, address: 0x40000000, format, now: time.now });
+        let played = 0;
+        const voice = {
+            get position(){
+                return played % bytes;
+            },
+            set position(value){
+                played = Math.floor(played / bytes) * bytes + value;
+            },
+            get laps(){
+                return Math.floor(played / bytes);
+            },
+            ends: 0, held: 0, playing: true,
+            play(){}, stop(){}, write(){}, wrote(){},
+        };
+        sound.attachDevice(/** @type {any} */ (voice), ()=>{});
+        sound.play(DSBPLAY_LOOPING);
+        let lastChunk = Math.floor(sound.cursors().write / chunk);
+        let passedOver = 0;
+        let stood = 0;
+        for (let ms = 1; ms <= 2000; ms++)
+        {
+            time.advance(1);
+            if (ms % burst === 0)
+            {
+                const step = Math.round(rate * burst / 1000);
+                played += step - step % format.blockAlign;
+            }
+            const now = Math.floor(sound.cursors().write / chunk);
+            const moved = (now - lastChunk + 8) % 8;
+            passedOver += Math.max(0, moved - 1);
+            stood += moved === 0 ? 1 : 0;
+            lastChunk = now;
+        }
+        assert.equal(passedOver, 0, `${burst} ms bursts: no chunk passed over between two looks`);
+        assert.ok(stood < 2000 * 0.95, `${burst} ms bursts: the cursor keeps moving (${stood})`);
+    }
+});

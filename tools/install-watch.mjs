@@ -56,7 +56,7 @@
  * `--bundle ID` runs an installed program instead (its blocks kept in
  * `bundles/ID/blocks`, or the folder `--blocks DIR` names, between runs), `--file HOST=GUEST` putting
  * a file of this disk on its volume first (`--steam ACCOUNT` signs the run in to
- * Steam as tools/steam-account.mjs's account, for the engine's Steam client;
+ * Steam as bottlify-ui/gamehub/tools/steam-account.mjs's account, for the engine's Steam client;
  * and `--reg 'HKCU\path\name=value'` a
  * registry value, a string or `dword:N`): the bundle in
  * `bundles/ID`, mounted where its installation put it, started at its entry
@@ -264,7 +264,7 @@ const roots = rootsFromArgv(argv);
 const started = Date.now();
 const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
 // `--steam ACCOUNT`: the signed-in Steam account and the games it owns
-// (tools/steam-account.mjs), which the engine's Steam client answers with.
+// (bottlify-ui/gamehub/tools/steam-account.mjs), which the engine's Steam client answers with.
 // `--steam-app N` is the app being run, as Steam tells a game it starts.
 const steam = argv.includes('--steam')
     ? { ...JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')),

@@ -457,6 +457,44 @@ export const IID = Object.freeze({
     ID3D10StateBlock: '{0803425A-57F5-4DD6-9465-A87570834A08}',
     ID3D10ShaderResourceView1: '{9B7E4C87-342C-4106-A19F-4F2704F689F0}',
     ID3D10BlendState1: '{EDAD8D99-8A35-4D6D-8566-2EA276CDE161}',
+    // Direct3D 11's, which the same objects answer to as well.
+    ID3D11Device: '{DB6F6DDB-AC77-4E88-8253-819DF9BBF140}',
+    ID3D11Device1: '{A04BFB29-08EF-43D6-A49C-A9BDBDCBE686}',
+    ID3D11DeviceContext: '{C0BFA96C-E089-44FB-8EAF-26F8796190DA}',
+    ID3D11DeviceContext1: '{BB2C6FAA-B5FB-4082-8E6B-388B8CFA90E1}',
+    ID3D11Multithread: '{9B7E4E00-342C-4106-A19F-4F2704F689F0}',
+    ID3DUserDefinedAnnotation: '{B2DAAD8B-03D4-4DBF-95EB-32AB4B63D0AB}',
+    ID3D11DeviceChild: '{1841E5C8-16B0-489B-BCC8-44CFB0D5DEAE}',
+    ID3D11Asynchronous: '{4B35D0CD-1E15-4258-9C98-1B1333F6DD3B}',
+    ID3D11Query: '{D6C00747-87B7-425E-B84D-44D108560AFD}',
+    ID3D11Predicate: '{9EB576DD-9F77-4D86-81AA-8BAB5FE490E2}',
+    ID3D11Counter: '{6E8C49FB-A371-4770-B440-29086022B741}',
+    ID3D11Resource: '{DC8E63F3-D12B-4952-B47B-5E45026A862D}',
+    ID3D11Buffer: '{48570B85-D1EE-4FCD-A250-EB350722B037}',
+    ID3D11Texture1D: '{F8FB5C27-C6B3-4F75-A4C8-439AF2EF564C}',
+    ID3D11Texture2D: '{6F15AAF2-D208-4E89-9AB4-489535D34F9C}',
+    ID3D11Texture3D: '{037E866E-F56D-4357-A8AF-9DABBE6E250E}',
+    ID3D11View: '{839D1216-BB2E-412B-B7F4-A9DBEBE08ED1}',
+    ID3D11ShaderResourceView: '{B0E06FE0-8192-4E1A-B1CA-36D7414710B2}',
+    ID3D11RenderTargetView: '{DFDBA067-0B8D-4865-875B-D7B4516CC164}',
+    ID3D11DepthStencilView: '{9FDAC92A-1876-48C3-AFAD-25B94F84A9B6}',
+    ID3D11UnorderedAccessView: '{28ACF509-7F5C-48F6-8611-F316010A6380}',
+    ID3D11BlendState: '{75B68FAA-347D-4159-8F45-A0640F01CD9A}',
+    ID3D11BlendState1: '{CC86FABE-DA55-401D-85E7-E3C9DE2877E9}',
+    ID3D11DepthStencilState: '{03823EFB-8D8F-4E1C-9AA2-F64BB2CBFDF1}',
+    ID3D11RasterizerState: '{9BB4AB81-AB1A-4D8F-B506-FC04200B6EE7}',
+    ID3D11RasterizerState1: '{1217D7A6-5039-418C-B042-9CBE256AFD6E}',
+    ID3D11SamplerState: '{DA6FEA51-564C-4487-9810-F0D0F9B4E3A5}',
+    ID3D11InputLayout: '{E4819DDC-4CF0-4025-BD26-5DE82A3E07B7}',
+    ID3D11VertexShader: '{3B301D64-D678-4289-8897-22F8928B72F3}',
+    ID3D11HullShader: '{8E5C6061-628A-4C8E-8264-BBE45CB3D5DD}',
+    ID3D11DomainShader: '{F582C508-0F36-490C-9977-31EECE268CFA}',
+    ID3D11GeometryShader: '{38325B96-EFFB-4022-BA02-2E795B70275C}',
+    ID3D11PixelShader: '{EA82E40D-51DC-4F33-93D4-DB7C9125AE8C}',
+    ID3D11ComputeShader: '{4F5B196E-C2BD-495E-BD01-1FDED38E4969}',
+    ID3D11ClassLinkage: '{DDF57CBA-9543-46E4-A12B-F207A0FE7FED}',
+    ID3D11CommandList: '{A24BC4D1-769E-43F7-8013-98FF566C18E2}',
+    ID3DDeviceContextState: '{5C1E0D8A-7C23-48F9-8C59-A92958CEFF11}',
 });
 
 // --- Direct3D 10 ---
@@ -500,6 +538,89 @@ export const D3D10_MAP = Object.freeze({
 });
 
 export const D3D10_MAP_FLAG_DO_NOT_WAIT = 0x100000;
+
+// --- Direct3D 11 ---
+
+/**
+ * The Direct3D 11 interface each Direct3D 10 one has its twin in: an object
+ * of either version answers to both (`com.js`), as one object serves both
+ * APIs here. The devices are not in it -- which a device answers to is the
+ * version it was made by -- and neither are the 10.1 additions, whose 11
+ * twins are the plain interfaces already named.
+ */
+/** @type {Readonly<Record<string, string>>} */
+export const D3D11_TWIN = Object.freeze({
+    [IID.ID3D10DeviceChild]: IID.ID3D11DeviceChild,
+    [IID.ID3D10Resource]: IID.ID3D11Resource,
+    [IID.ID3D10Buffer]: IID.ID3D11Buffer,
+    [IID.ID3D10Texture1D]: IID.ID3D11Texture1D,
+    [IID.ID3D10Texture2D]: IID.ID3D11Texture2D,
+    [IID.ID3D10Texture3D]: IID.ID3D11Texture3D,
+    [IID.ID3D10View]: IID.ID3D11View,
+    [IID.ID3D10ShaderResourceView]: IID.ID3D11ShaderResourceView,
+    [IID.ID3D10RenderTargetView]: IID.ID3D11RenderTargetView,
+    [IID.ID3D10DepthStencilView]: IID.ID3D11DepthStencilView,
+    [IID.ID3D10BlendState]: IID.ID3D11BlendState,
+    [IID.ID3D10DepthStencilState]: IID.ID3D11DepthStencilState,
+    [IID.ID3D10RasterizerState]: IID.ID3D11RasterizerState,
+    [IID.ID3D10SamplerState]: IID.ID3D11SamplerState,
+    [IID.ID3D10InputLayout]: IID.ID3D11InputLayout,
+    [IID.ID3D10VertexShader]: IID.ID3D11VertexShader,
+    [IID.ID3D10GeometryShader]: IID.ID3D11GeometryShader,
+    [IID.ID3D10PixelShader]: IID.ID3D11PixelShader,
+    [IID.ID3D10Asynchronous]: IID.ID3D11Asynchronous,
+    [IID.ID3D10Query]: IID.ID3D11Query,
+    [IID.ID3D10Predicate]: IID.ID3D11Predicate,
+    [IID.ID3D10Counter]: IID.ID3D11Counter,
+});
+
+/** The version tag `D3D11CreateDevice` is compiled with. */
+export const D3D11_SDK_VERSION = 7;
+
+/** Direct3D 11's binding, past 10's: a resource an unordered-access view writes. */
+export const D3D11_BIND_UNORDERED_ACCESS = 0x80;
+
+export const D3D11_RESOURCE_MISC = Object.freeze({
+    DRAWINDIRECT_ARGS: 0x10,
+    BUFFER_ALLOW_RAW_VIEWS: 0x20,
+    BUFFER_STRUCTURED: 0x40,
+    RESOURCE_CLAMP: 0x80,
+    SHARED_KEYEDMUTEX: 0x100,
+    GDI_COMPATIBLE: 0x200,
+    SHARED_NTHANDLE: 0x800,
+});
+
+export const D3D11_UAV_DIMENSION = Object.freeze({
+    UNKNOWN: 0,
+    BUFFER: 1,
+    TEXTURE1D: 2,
+    TEXTURE1DARRAY: 3,
+    TEXTURE2D: 4,
+    TEXTURE2DARRAY: 5,
+    TEXTURE3D: 8,
+});
+
+/** A buffer view's flags: raw (byte-addressed), and an append or counter structure. */
+export const D3D11_BUFFER_UAV_FLAG = Object.freeze({ RAW: 1, APPEND: 2, COUNTER: 4 });
+
+/** Direct3D 11's limits past 10's. */
+export const D3D11_LIMITS = Object.freeze({
+    VERTEX_INPUT_SLOTS: 32,
+    INPUT_ELEMENTS: 32,
+    UNORDERED_ACCESS_SLOTS: 8,
+    UNORDERED_ACCESS_SLOTS_1: 64,
+    MAX_TEXTURE1D_DIMENSION: 16384,
+    MAX_TEXTURE2D_DIMENSION: 16384,
+    MAX_TEXTURE3D_DIMENSION: 2048,
+    THREAD_GROUP_COUNT: 65535,
+});
+
+/** What D3D11_KEEP_UNORDERED_ACCESS_VIEWS and _KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL say. */
+export const D3D11_KEEP_UNORDERED_ACCESS_VIEWS = 0xffffffff;
+export const D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL = 0xffffffff;
+
+/** D3D11_DEVICE_CONTEXT_TYPE. */
+export const D3D11_DEVICE_CONTEXT = Object.freeze({ IMMEDIATE: 0, DEFERRED: 1 });
 
 export const D3D10_CLEAR = Object.freeze({ DEPTH: 1, STENCIL: 2 });
 

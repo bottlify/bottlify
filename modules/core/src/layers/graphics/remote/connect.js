@@ -17,6 +17,7 @@ import { createLendingBuffers, mayWait } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
 import { recordedDirect3D7 } from './d3d7.js';
 import { recordedOpengl } from './opengl.js';
+import { recordedDirect3D10 } from './d3d10.js';
 
 /** GPUTextureUsage, here without the browser's global. */
 /**
@@ -58,7 +59,7 @@ function plainOf(services){
 
 /**
  * @typedef {Object} GraphicsWorkerEnd
- * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'opengl', factory: (services: any) => any,
+ * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'd3d10' | 'opengl', factory: (services: any) => any,
  *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number, dropped: number,
@@ -523,6 +524,8 @@ export function connectGraphicsWorker(options){
                     return recordedOpengl(factory, services, sender);
                 case 'd3d7':
                     return recordedDirect3D7(services.ddraw, services, sender);
+                case 'd3d10':
+                    return recordedDirect3D10(factory, services, sender);
                 default:
                     return recordedDirect3D(factory, services, sender);
             }
@@ -570,10 +573,20 @@ export function connectGraphicsWorker(options){
                         asks: sum.asks + one.asks, beside: sum.beside + one.beside,
                         sentAfterMs: sum.sentAfterMs + one.sentAfterMs,
                         tripMs: sum.tripMs + one.tripMs, trace: [...sum.trace, ...one.trace],
-                        under: one.under.map((count, index)=>count + (sum.under[index] ?? 0)) };
+                        under: one.under.map((count, index)=>count + (sum.under[index] ?? 0)),
+                        abandoned: one.abandoned ? {
+                            count: sum.abandoned.count + one.abandoned.count,
+                            ms: sum.abandoned.ms + one.abandoned.ms,
+                            maxMs: Math.max(sum.abandoned.maxMs, one.abandoned.maxMs),
+                            polls: sum.abandoned.polls + one.abandoned.polls,
+                            asks: sum.abandoned.asks + one.abandoned.asks,
+                            trace: [...sum.abandoned.trace, ...one.abandoned.trace],
+                        } : sum.abandoned };
                 }, { counted: 0, ms: 0, maxMs: 0, polls: 0, asks: 0, beside: 0, sentAfterMs: 0,
                     tripMs: 0, trace: /** @type {any[]} */ ([]),
-                    under: /** @type {number[]} */ ([]) }),
+                    under: /** @type {number[]} */ ([]),
+                    abandoned: { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
+                        trace: /** @type {any[]} */ ([]) } }),
                 sent: senders.reduce((sum, sender)=>{
                     const { batches, bytes, ms } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,

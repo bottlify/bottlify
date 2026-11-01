@@ -998,6 +998,30 @@ test('GL_EXT_stencil_two_side: a back record set while the two-sided enable is o
         'the back face the draw never enabled must not carry the ops set on GL_BACK');
 });
 
+test('GL_EXT_stencil_two_side: the back face set through the selector survives the front\'s '
+    + 'calls made before two-sided testing is on', async()=>{
+    // A shadow volume's two faces, set as a stencil-shadow renderer sets them:
+    // the back through the selector, then the front, and only then the
+    // two-sided test and no culling. The front's calls set OpenGL 2.0's back
+    // face, not the extension's.
+    const r = rig();
+    const { context } = r;
+    context.glEnable(GL.STENCIL_TEST);
+    context.glStencilFunc(GL.ALWAYS, 1, 0xff);
+    context.glActiveStencilFaceEXT(GL.BACK);
+    context.glStencilOp(GL.KEEP, GL.DECR_WRAP, GL.KEEP);
+    context.glActiveStencilFaceEXT(GL.FRONT);
+    context.glStencilOp(GL.KEEP, GL.INCR_WRAP, GL.KEEP);
+    context.glEnable(GL.STENCIL_TEST_TWO_SIDE_EXT);
+    await drawTriangle(r);
+    const { depthStencil } = r.gpu.of('createRenderPipeline')
+        .find(p=>p.descriptor.depthStencil?.stencilFront?.depthFailOp === 'increment-wrap')
+        ?.descriptor ?? assert.fail('no pipeline took the front\'s ops');
+    assert.equal(depthStencil.stencilFront.depthFailOp, 'increment-wrap');
+    assert.equal(depthStencil.stencilBack.depthFailOp, 'decrement-wrap',
+        'the back face took the front\'s increment before');
+});
+
 test('GL_EXT_stencil_two_side: a differing reference is not reported when the back face '
     + 'never reads it', async()=>{
     const r = rig();

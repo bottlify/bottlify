@@ -142,6 +142,11 @@ export function createRpcFunctions(host){
         })
         : {};
 
+    /** The time fields of the last sequential UUID, in 100 ns ticks. */
+    let lastTicks = 0n;
+    /** The clock sequence and node every sequential UUID of the process carries. */
+    const sequenceAndNode = crypto.getRandomValues(new Uint8Array(8));
+
     return {
         ...runtime,
         ...midl,
@@ -170,17 +175,22 @@ export function createRpcFunctions(host){
          * RPC_STATUS UuidCreateSequential(UUID *Uuid)
          *
          * A version 1 UUID: 100 ns ticks since 1582-10-15 in the time fields,
-         * a random clock sequence, and a node of the adapter address the
-         * machine reports none of -- random, its multicast bit set as RFC 4122
-         * asks of a node that is not an address.
+         * one clock sequence and node for the process -- the node an adapter
+         * address the machine reports none of, random, its multicast bit set
+         * as RFC 4122 asks of a node that is not an address. The time is later
+         * at every call, as the generator RFC 4122 describes keeps it: a
+         * program makes hundreds in a millisecond and keys its objects by the
+         * time fields alone.
          */
         UuidCreateSequential: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                const ticks = BigInt(Date.now()) * 10000n + 0x01b21dd213814000n;
+                const now = BigInt(Date.now()) * 10000n + 0x01b21dd213814000n;
+                lastTicks = now > lastTicks ? now : lastTicks + 1n;
+                const ticks = lastTicks;
                 const bytes = new Uint8Array(GUID_SIZE);
-                crypto.getRandomValues(bytes.subarray(8));
+                bytes.set(sequenceAndNode, 8);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, Number(ticks & 0xffffffffn), true);
                 view.setUint16(4, Number((ticks >> 32n) & 0xffffn), true);

@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { announceSteamClient, createSteamclientFunctions, steamClientDll } from './functions.js';
+import { announceSteamClient, createSteamclientFunctions, steamClientDll, steamFilesOf }
+    from './functions.js';
 import { INTERFACES } from './interfaces.js';
+import { filesystemModule } from '../../filesystem/module.js';
 import { createHive } from '../advapi32/registry.js';
 import { createRegistryService } from '../advapi32/registry-service.js';
 
@@ -15,7 +17,11 @@ const ACCOUNT = { steamId: '76561197960287930', accountName: 'someone', apps: [4
     appId: 620 };
 
 /** A guest of plain memory, and a Steam client over it whose placed methods are kept by address. */
-function fixture(account = /** @type {any} */ (ACCOUNT), pointerSize = 4){
+/**
+ * @param {any} [account] @param {number} [pointerSize]
+ * @param {import('./functions.js').SteamFiles} [files]
+ */
+function fixture(account = ACCOUNT, pointerSize = 4, files = undefined){
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let next = 0x1000;
@@ -49,6 +55,7 @@ function fixture(account = /** @type {any} */ (ACCOUNT), pointerSize = 4){
         environment: ()=>null,
         account,
         pointerSize: /** @type {4 | 8} */ (pointerSize),
+        ...files ? { files } : {},
     });
     /** @param {string} text */
     const put = text=>{
@@ -296,3 +303,89 @@ test('ISteamAppTicket hands out the ticket Steam signed for an owned app, and no
         assert.equal(call(480), 0, 'not owned: none, as Steam has none');
         assert.equal(call(620, 16), 0, 'nor into a buffer too small');
     });
+
+/** Files kept in a map by path, listed below a folder as the client's cloud lists them. */
+function memoryFiles(){
+    /** @type {Map<string, Uint8Array>} */
+    const held = new Map();
+    return {
+        held,
+        /** @param {string} path */
+        read: path=>held.get(path) ?? null,
+        /** @param {string} path @param {Uint8Array} bytes */
+        write: (path, bytes)=>(held.set(path, bytes.slice()), true),
+        /** @param {string} path */
+        remove: path=>held.delete(path),
+        /** @param {string} folder */
+        list: folder=>[...held].filter(([path])=>path.startsWith(`${folder}\\`))
+            .map(([path, bytes])=>({ name: path.slice(folder.length + 1).replace(/\\/g, '/'),
+                size: bytes.length, modified: 1_700_000_000_000 })),
+    };
+}
+
+test('a cloud file written is kept in the account\'s remote folder and read back', ()=>{
+    const files = memoryFiles();
+    const { fns, put, method, view } = fixture(ACCOUNT, 4, files);
+    const client = fns.CreateInterface.handler([put('SteamClient020'), 0]);
+    const version = 'STEAMREMOTESTORAGE_INTERFACE_VERSION008';
+    const slots = INTERFACES[version].split(',');
+    const remote = method(client, INTERFACES.SteamClient020.split(',')
+        .findIndex(entry=>entry.startsWith('GetISteamRemoteStorage:')))
+        .fn.handler([client, 1, 1, put(version)]);
+    /** @param {string} name @param {...number} args */
+    const call = (name, ...args)=>method(remote,
+        slots.findIndex(entry=>entry.startsWith(`${name}:`))).fn.handler([remote, ...args]);
+
+    const data = 0xc000;
+    view.setUint32(data, 0x04030201, true);
+    assert.equal(call('FileWrite', put('saves/slot1.sav'), data, 4), 1);
+    assert.deepEqual([...files.held.keys()], [
+        'C:\\Program Files (x86)\\Steam\\userdata\\22202\\620\\remote\\saves\\slot1.sav']);
+    assert.equal(call('FileExists', put('SAVES\\slot1.sav')), 1, 'either slash, any case');
+    assert.equal(call('GetFileSize', put('saves/slot1.sav')), 4);
+    assert.equal(call('GetFileCount'), 1);
+    const sizeAt = 0xc100;
+    const named = call('GetFileNameAndSize', 0, sizeAt);
+    assert.equal(new TextDecoder().decode(new Uint8Array(view.buffer, named, 15)),
+        'saves/slot1.sav');
+    assert.equal(view.getUint32(sizeAt, true), 4);
+    const into = 0xc200;
+    assert.equal(call('FileRead', put('saves/slot1.sav'), into, 64), 4);
+    assert.equal(view.getUint32(into, true), 0x04030201);
+    assert.equal(call('FileRead', put('missing.sav'), into, 64), 0);
+    assert.equal(call('FileDelete', put('saves/slot1.sav')), 1);
+    assert.equal(call('GetFileCount'), 0);
+});
+
+test('without the guest\'s files the cloud is off and keeps nothing', ()=>{
+    const { fns, put, method, view } = fixture();
+    const client = fns.CreateInterface.handler([put('SteamClient020'), 0]);
+    const version = 'STEAMREMOTESTORAGE_INTERFACE_VERSION008';
+    const slots = INTERFACES[version].split(',');
+    const remote = method(client, INTERFACES.SteamClient020.split(',')
+        .findIndex(entry=>entry.startsWith('GetISteamRemoteStorage:')))
+        .fn.handler([client, 1, 1, put(version)]);
+    /** @param {string} name @param {...number} args */
+    const call = (name, ...args)=>method(remote,
+        slots.findIndex(entry=>entry.startsWith(`${name}:`))).fn.handler([remote, ...args]);
+    view.setUint32(0xc000, 1, true);
+    assert.equal(call('IsCloudEnabledForApp'), 0);
+    assert.equal(call('FileWrite', put('a.sav'), 0xc000, 4), 0);
+    assert.equal(call('GetFileCount'), 0);
+});
+
+test('the guest\'s files hold a cloud file in folders made for it, and list it below', async()=>{
+    const fs = await filesystemModule.create(undefined);
+    const files = steamFilesOf(fs);
+    const folder = 'C:\\Program Files (x86)\\Steam\\userdata\\1\\620\\remote';
+    assert.deepEqual(files.list(folder), [], 'no folder, nothing');
+    assert.equal(files.write(`${folder}\\saves\\slot1.sav`, Uint8Array.of(1, 2, 3)), true);
+    assert.equal(files.write(`${folder}\\saves\\slot1.sav`, Uint8Array.of(4, 5)), true,
+        'written again, replaced');
+    assert.deepEqual([...files.read(`${folder}\\saves\\slot1.sav`) ?? []], [4, 5]);
+    assert.deepEqual(files.list(folder).map(entry=>[entry.name, entry.size]),
+        [['saves/slot1.sav', 2]]);
+    assert.equal(files.read(`${folder}\\none.sav`), null);
+    assert.equal(files.remove(`${folder}\\saves\\slot1.sav`), true);
+    assert.equal(files.remove(`${folder}\\saves\\slot1.sav`), false);
+});

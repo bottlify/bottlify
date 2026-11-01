@@ -27,6 +27,29 @@ import { createXInput } from './xinput.js';
  */
 
 /** The input layer's module for one graph; see `defaultModules`. */
+/**
+ * Where on the screen a viewport of this size begins: the client of the one
+ * visible top-level window that size, whose picture alone it then shows, or
+ * null for the screen itself. A viewport the screen's size is the screen,
+ * even when a window behind a dialog has a client that size.
+ *
+ * @param {number} width @param {number} height
+ * @param {{ width: number, height: number } | null} screen
+ * @param {{ visible: boolean, child: boolean, client: { left: number, top: number,
+ *     right: number, bottom: number } }[]} windows
+ * @returns {{ x: number, y: number } | null}
+ */
+export function viewportOrigin(width, height, screen, windows){
+    if (screen && screen.width === width && screen.height === height)
+    {
+        return null;
+    }
+    const fitting = windows.filter(entry=>entry.visible && !entry.child
+        && entry.client.right - entry.client.left === width
+        && entry.client.bottom - entry.client.top === height);
+    return fitting.length === 1 ? { x: fitting[0].client.left, y: fitting[0].client.top } : null;
+}
+
 export function createInputModule(){
     /**
      * The instance this module object made last, for `diagnostics()` and
@@ -232,6 +255,20 @@ export function createInputModule(){
                 // Where the cursor is on the viewport, for a page drawing it
                 // over a locked pointer.
                 moved: config?.cursorMoved,
+                // A viewport the size of one window's client, and not of the
+                // screen, shows that window's picture alone -- a windowed
+                // program's back buffer -- so it is pointed into from where
+                // that client lies on the screen.
+                origin: (width, height)=>{
+                    try
+                    {
+                        return viewportOrigin(width, height, win32.screenSize?.() ?? null,
+                            win32.windows());
+                    }
+                    catch {
+                        return null;
+                    }
+                },
                 // A device a program holds exclusively is read through
                 // DirectInput alone, and the window hears nothing of it.
                 exclusive: kind=>dinput.exclusive(kind),

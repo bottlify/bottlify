@@ -633,3 +633,35 @@ function readUnicodeString64(memory, descriptorAt){
     const length = memory.view.getUint16(descriptorAt, true);
     return readWide(memory, quad(memory, descriptorAt + 8), length / 2);
 }
+
+test('a library loaded and freed over and over takes entries from memory that comes back', ()=>{
+    // SDL looks for a controller by loading a library and freeing it, every
+    // second for as long as the program runs: entries made from the startup
+    // span, which gives nothing back, used it up, and the next load failed.
+    const memory = guest();
+    let startup = 0;
+    const live = new Set();
+    const blocks = build(memory, {
+        allocate: (/** @type {number} */ size)=>{
+            startup += size;
+            return memory.allocate(size);
+        },
+        threadMemory: {
+            allocate: (/** @type {number} */ size)=>{
+                const at = memory.allocate(size);
+                live.add(at);
+                return at;
+            },
+            free: (/** @type {number} */ at)=>live.delete(at),
+        },
+        modules: [{ name: 'kernel32.dll', base: 0x77000000, size: 0x1000 }],
+    });
+    const before = startup;
+    for (let round = 0; round < 1000; round++)
+    {
+        blocks.addModule({ name: 'xinput1_4.dll', base: 0x10000000, size: 0x1000 });
+        blocks.removeModule(0x10000000);
+    }
+    assert.equal(startup, before, 'the startup span untouched');
+    assert.equal(live.size, 0, 'every entry given back');
+});

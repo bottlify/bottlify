@@ -41,7 +41,7 @@ import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
 import { clientFilesCached } from './steam-client.mjs';
-import { ownershipTickets, ticketsFromArgv } from './steam-tickets.mjs';
+import { ownershipTickets, steamAppOf, ticketsFromArgv } from './steam-tickets.mjs';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -57,13 +57,13 @@ function parse(argv){
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
         map: argv.includes('--map'),
-        // A signed-in Steam account (`tools/steam-account.mjs` writes one): the
+        // A signed-in Steam account (`bottlify-ui/gamehub/tools/steam-account.mjs` writes one): the
         // engine's Steam client runs for the manifest's app, as game.mjs's
         // `--steam` has it, for a game that needs Steam running.
         steam: argv.includes('--steam')
             ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
         // A signed-in session (or `-`, stdin) the app's ownership ticket is
-        // asked for with (tools/steam-tickets.mjs), held for this run only.
+        // asked for with (bottlify-ui/gamehub/tools/steam-tickets.mjs), held for this run only.
         steamSession: argv.includes('--steam-session')
             ? argv[argv.indexOf('--steam-session') + 1] : null,
         // Which executable in the bundle to start. `--which launcher` takes the
@@ -643,9 +643,9 @@ async function main(){
         win32: { ...network ? { network } : {},
             ...steam ? { steam: { ...steam, clientFiles: (await clientFilesCached()).files,
                 ownershipTickets: { ...ticketsFromArgv(process.argv.slice(2)),
-                    ...steamSession && manifest.steam?.appId
-                        ? await ownershipTickets(steamSession, [manifest.steam.appId]) : {} },
-                ...manifest.steam?.appId ? { appId: manifest.steam.appId } : {} } } : {},
+                    ...steamSession && steamAppOf(manifest)
+                        ? await ownershipTickets(steamSession, [steamAppOf(manifest)]) : {} },
+                ...steamAppOf(manifest) ? { appId: steamAppOf(manifest) } : {} } } : {},
             ...roots ? { trustedRoots: roots } : {} },
         executable: new Uint8Array(executable),
         // Where the bundle is mounted and the program started from: where its

@@ -4,7 +4,7 @@ Built. Agreed 2026-10-31 and revised the same day as measurements came in: the s
 moved from the service worker into the tab, then out of the tab into the extension's own frames;
 the sign-in moved into the extension's own page. A number not measured says so.
 
-GameHub is the browser extension in `modules/gamehub`. It extends the launcher and does not work
+GameHub is the browser extension in the launcher's repository, `bottlify-ui/gamehub`. It extends the launcher and does not work
 without it: it keeps the stores' accounts and speaks their protocols, and the page asks it for
 finished answers. Bottlify -- `@bottlify/core` and the launcher -- keeps the engine and the install:
 the page downloads a game's manifests and chunks from the store's CDN itself, decrypts and
@@ -40,11 +40,11 @@ the launcher frames; nothing of a store runs in the launcher's tab.
 Why not the worker: Chrome keeps an extension's service worker at a low priority (its processes
 at Idle on Windows) and stops it when idle. Product info for 704 apps, anonymous, headless Chrome
 156, Parallels ARM VM with 4 vCPU: the worker took 2 to 25 s idle and failed or was restarted with
-four cores kept busy, where a page took 1.1 to 3.6 s (`tools/gamehub-bench.mjs`; the entry of
+four cores kept busy, where a page took 1.1 to 3.6 s (`bottlify-ui/gamehub/tools/gamehub-bench.mjs`; the entry of
 2026-10-31 in `negative-results.md`). A worker that had stopped cost 7 to 19 s to start under the
 same load. Why not the tab: a CM logon takes the refresh token itself -- an access token minted
 from it does not do (GenerateAccessTokenForApp answered EResult 63 for our SteamClient token,
-measured with the user's account, `tools/steam-access-logon.mjs`) -- and the tab's renderer would
+measured with the user's account, `bottlify-ui/gamehub/tools/steam-access-logon.mjs`) -- and the tab's renderer would
 then hold it. Why a frame can: a CM socket opened by an extension page gets the ruleset's Origin
 and Steam takes its logon (Chrome 156, measured; a socket the worker opens is never rewritten).
 

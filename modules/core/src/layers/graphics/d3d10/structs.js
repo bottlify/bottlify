@@ -27,6 +27,7 @@
 
 import {
     D3D10_1_SRV_DIMENSION, D3D10_DSV_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION,
+    D3D11_UAV_DIMENSION,
 } from './constants.js';
 
 /** DXGI_RATIONAL: the refresh rate, as a fraction rather than a number. */
@@ -236,6 +237,12 @@ const RANGE_MS_ARRAY = Object.freeze(['FirstArraySlice', 'ArraySize']);
 const RANGE_BUFFER = Object.freeze(['ElementOffset', 'ElementWidth']);
 const SRV_LEVELS = Object.freeze(['MostDetailedMip', 'MipLevels']);
 const SRV_ARRAY = Object.freeze(['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']);
+const SRV_CUBE_ARRAY = Object.freeze(['MostDetailedMip', 'MipLevels', 'First2DArrayFace',
+    'NumCubes']);
+/** Direct3D 11's buffer views past 10's: the elements, and how they are read. */
+const RANGE_BUFFER_EX = Object.freeze(['FirstElement', 'NumElements', 'Flags']);
+/** A Direct3D 11 depth-stencil view's flags word sits before its union. */
+const flagged = (/** @type {readonly string[]} */ members)=>Object.freeze(['Flags', ...members]);
 
 /**
  * @typedef {Object} ViewUnion
@@ -299,10 +306,52 @@ export const VIEW_UNION = Object.freeze({
             TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
             TEXTURE3D: SRV_LEVELS,
             TEXTURECUBE: SRV_LEVELS,
-            TEXTURECUBEARRAY: Object.freeze(['MostDetailedMip', 'MipLevels',
-                'First2DArrayFace', 'NumCubes']),
+            TEXTURECUBEARRAY: SRV_CUBE_ARRAY,
         }),
         size: 0x18,
+    }),
+    // Direct3D 11's: a shader-resource view adds the extended buffer, a
+    // depth-stencil view a flags word, and the unordered-access view is new.
+    SHADER_RESOURCE11: Object.freeze({
+        dimensions: Object.freeze({ ...D3D10_1_SRV_DIMENSION, BUFFEREX: 11 }),
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER,
+            TEXTURE1D: SRV_LEVELS,
+            TEXTURE1DARRAY: SRV_ARRAY,
+            TEXTURE2D: SRV_LEVELS,
+            TEXTURE2DARRAY: SRV_ARRAY,
+            TEXTURE2DMS: RANGE_MS,
+            TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
+            TEXTURE3D: SRV_LEVELS,
+            TEXTURECUBE: SRV_LEVELS,
+            TEXTURECUBEARRAY: SRV_CUBE_ARRAY,
+            BUFFEREX: RANGE_BUFFER_EX,
+        }),
+        size: 0x18,
+    }),
+    DEPTH_STENCIL11: Object.freeze({
+        dimensions: D3D10_DSV_DIMENSION,
+        members: Object.freeze({
+            TEXTURE1D: flagged(RANGE_1D),
+            TEXTURE1DARRAY: flagged(RANGE_ARRAY),
+            TEXTURE2D: flagged(RANGE_1D),
+            TEXTURE2DARRAY: flagged(RANGE_ARRAY),
+            TEXTURE2DMS: flagged(RANGE_MS),
+            TEXTURE2DMSARRAY: flagged(RANGE_MS_ARRAY),
+        }),
+        size: 0x18,
+    }),
+    UNORDERED_ACCESS: Object.freeze({
+        dimensions: D3D11_UAV_DIMENSION,
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER_EX,
+            TEXTURE1D: RANGE_1D,
+            TEXTURE1DARRAY: RANGE_ARRAY,
+            TEXTURE2D: RANGE_1D,
+            TEXTURE2DARRAY: RANGE_ARRAY,
+            TEXTURE3D: Object.freeze(['MipSlice', 'FirstWSlice', 'WSize']),
+        }),
+        size: 0x14,
     }),
 });
 

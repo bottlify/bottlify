@@ -240,6 +240,13 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      */
     const occlusion = { counted: 0, ms: 0, maxMs: 0, polls: 0, asks: 0, beside: 0,
         sentAfterMs: 0, tripMs: 0, under: OCCLUSION_BOUNDS.map(()=>0) };
+    /**
+     * The counts the program gave up on -- issued again before they were
+     * told -- how long each was waited for, its polls and asks, the last
+     * OCCLUSION_TRACED with their events.
+     */
+    const abandoned = { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
+        /** @type {import('./replay.js').OcclusionEvent[][]} */ trace: [] };
     /** @type {((counts: import('./replay.js').OcclusionCount[]) => void)[]} */
     const countListeners = [];
     /** The last OCCLUSION_TRACED measurements' events, oldest first. */
@@ -518,8 +525,29 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             occlusion.under[bound < 0 ? OCCLUSION_BOUNDS.length - 1 : bound]++;
         },
 
+        /**
+         * A count the program issued again before it was told.
+         *
+         * @param {number} ms @param {number} polls @param {number} asks
+         * @param {import('./replay.js').OcclusionEvent[]} events
+         */
+        abandoned(ms, polls, asks, events){
+            abandoned.count++;
+            abandoned.ms += ms;
+            abandoned.maxMs = Math.max(abandoned.maxMs, ms);
+            abandoned.polls += polls;
+            abandoned.asks += asks;
+            abandoned.trace.push(events);
+            if (abandoned.trace.length > OCCLUSION_TRACED)
+            {
+                abandoned.trace.shift();
+            }
+        },
+
         /** The occlusion counts told so far; see `occlusion` above. */
         occlusion: ()=>({ ...occlusion, ms: Math.round(occlusion.ms),
+            abandoned: { ...abandoned, ms: Math.round(abandoned.ms),
+                maxMs: Math.round(abandoned.maxMs), trace: abandoned.trace.slice() },
             maxMs: Math.round(occlusion.maxMs), sentAfterMs: Math.round(occlusion.sentAfterMs),
             tripMs: Math.round(occlusion.tripMs), under: occlusion.under.slice(),
             trace: occlusionTrace.slice() }),

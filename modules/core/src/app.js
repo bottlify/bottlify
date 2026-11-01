@@ -235,7 +235,8 @@ const hashText = (hash, text)=>{
  * @property {{ asked: any, detail: string } | null} [fallback]
  *     What a run asked for and fell back from (`mode.js`): set by `createApp`, not
  *     something a caller supplies.
- * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
+ * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'directx11' | 'opengl'}
+ *     [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
  *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
  *     those system libraries exist and only their wrappers are built, and the
@@ -681,18 +682,34 @@ export function withWindow(blocks, bundle, resident, bytes = READ_AHEAD_BYTES){
             chosen.set(index, { index, offset: block.offset, packed: block.packed, ahead: true });
         }
     };
+    // A neighbour by index is a neighbour in the container only while the
+    // offsets keep going the same way: a bottle an installation wrote lays its
+    // files where they arrived, and the block before a file's first can be
+    // gigabytes away -- still "past the window's start" by offset, so a walk
+    // that only checked the start took every block below it.
     for (const block of blocks)
     {
         const start = Math.floor(block.offset / bytes) * bytes;
-        for (let index = block.index - 1;
-            index >= 0 && bundle.block(index).offset >= start; index--)
+        for (let index = block.index - 1, after = block.offset; index >= 0; index--)
         {
+            const offset = bundle.block(index).offset;
+            if (offset < start || offset >= after)
+            {
+                break;
+            }
             add(index);
+            after = offset;
         }
-        for (let index = block.index + 1;
-            index < bundle.blockCount && bundle.block(index).offset < start + bytes; index++)
+        for (let index = block.index + 1, before = block.offset; index < bundle.blockCount;
+            index++)
         {
+            const offset = bundle.block(index).offset;
+            if (offset >= start + bytes || offset <= before)
+            {
+                break;
+            }
             add(index);
+            before = offset;
         }
     }
     return [...chosen.values()].sort((left, right)=>left.offset - right.offset);
@@ -3846,6 +3863,15 @@ function journalEvents(events, into){
  * @returns {Promise<any>} an AppController
  */
 async function buildApp(options){
+    /**
+     * The libraries this build synthesises, once their table is made: a file
+     * call the modules make while they are being built (the standard
+     * directories made at start) finds none, rather than the table before it
+     * exists.
+     *
+     * @type {Record<string, unknown> | null}
+     */
+    let builtLibraries = null;
     // Handed in across a replacement, so a caller's subscriptions outlive the
     // process they were made against: the program has changed, the machine it
     // is running in has not.
@@ -5232,7 +5258,7 @@ async function buildApp(options){
                  * Every library this build synthesises, whichever layer
                  * answers for it: what a setup finds in the system folder.
                  */
-                systemLibraries: ()=>Object.keys(allLibraries),
+                systemLibraries: ()=>Object.keys(builtLibraries ?? {}),
                 /**
                  * A synthesised library's image, which its file holds where it
                  * stands in its folder (`withSystemLibraries`): read out of
@@ -5573,6 +5599,7 @@ async function buildApp(options){
      * @type {string[]}
      */
     const leftOutAt64 = [];
+    builtLibraries = allLibraries;
     Object.entries(allLibraries).forEach(([name, table])=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to

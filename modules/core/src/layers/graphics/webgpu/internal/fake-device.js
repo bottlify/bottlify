@@ -249,6 +249,17 @@ export function createFakeDevice(options = {}){
         // from the one above it is not this.
         const written = [...(descriptor.colorAttachments ?? []), descriptor.depthStencilAttachment]
             .map(attachment=>attachment?.view).filter(view=>view?.texture);
+        // Every attachment one size, as WebGPU refuses the frame otherwise.
+        const sizes = written.filter(view=>view.texture.descriptor?.size).map(view=>{
+            const { width, height } = extentOf(view.texture.descriptor.size);
+            const level = view.viewDescriptor?.baseMipLevel ?? 0;
+            return `${Math.max(1, width >> level)}x${Math.max(1, height >> level)}`;
+        });
+        if (new Set(sizes).size > 1 && !encoder.invalid)
+        {
+            encoder.invalid = true;
+            refuse(`Attachments of different sizes (${sizes.join(', ')}) in one pass.`);
+        }
         for (const attachment of descriptor.colorAttachments ?? [])
         {
             // A location left empty is a null, as WebGPU takes it.
@@ -284,7 +295,28 @@ export function createFakeDevice(options = {}){
         pass.beginOcclusionQuery = (/** @type {number} */ index)=>
             record('beginOcclusionQuery', { index });
         pass.endOcclusionQuery = ()=>record('endOcclusionQuery', {});
-        pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
+        /** The pipeline set, and the vertex slots given a buffer. @type {any} */
+        let bound = null;
+        /** @type {Set<number>} */
+        const vertexSlots = new Set();
+        pass.setPipeline = (/** @type {any} */ pipeline)=>{
+            bound = pipeline;
+            record('setPipeline', { pipeline });
+        };
+        // WebGPU's rule a renderer has to keep: every vertex buffer slot the
+        // pipeline reads has a buffer set before the draw, which a real
+        // device refuses the frame over and this one refuses too.
+        const slotsSet = ()=>{
+            const wanted = bound?.descriptor?.vertex?.buffers?.length ?? 0;
+            for (let slot = 0; slot < wanted; slot++)
+            {
+                if (!vertexSlots.has(slot) && !encoder.invalid)
+                {
+                    encoder.invalid = true;
+                    refuse(`Vertex buffer slot ${slot} required by the pipeline was not set.`);
+                }
+            }
+        };
         // A dynamic binding resolves to the byte range the shader would read:
         // the offsets arrive in binding order, and the resource names the
         // buffer and the block's declared size. Recording that, not only the
@@ -333,17 +365,32 @@ export function createFakeDevice(options = {}){
             // same array again for its next draw.
             record('setBindGroup', { index, group, offsets: offsets && [...offsets], resolved });
         };
-        pass.setVertexBuffer = (/** @type {number} */ slot, /** @type {any} */ buffer,
-            /** @type {number} */ offset)=>record('setVertexBuffer', { slot, buffer, offset });
+        /** @param {number} slot @param {any} buffer @param {number} offset */
+        pass.setVertexBuffer = (slot, buffer, offset)=>{
+            vertexSlots.add(slot);
+            record('setVertexBuffer', { slot, buffer, offset });
+        };
         pass.setIndexBuffer = (/** @type {any} */ buffer, /** @type {string} */ format,
             /** @type {number} */ offset)=>record('setIndexBuffer', { buffer, format, offset });
         pass.draw = (/** @type {number[]} */ ...args)=>{
             stats.draws++;
+            slotsSet();
             record('draw', { args });
         };
         pass.drawIndexed = (/** @type {number[]} */ ...args)=>{
             stats.draws++;
+            slotsSet();
             record('drawIndexed', { args });
+        };
+        pass.drawIndirect = (/** @type {any} */ buffer, /** @type {number} */ offset)=>{
+            stats.draws++;
+            slotsSet();
+            record('drawIndirect', { buffer, offset });
+        };
+        pass.drawIndexedIndirect = (/** @type {any} */ buffer, /** @type {number} */ offset)=>{
+            stats.draws++;
+            slotsSet();
+            record('drawIndexedIndirect', { buffer, offset });
         };
         pass.end = ()=>record('endPass', {});
         calls.push({ op: 'beginRenderPass', pass, descriptor });
@@ -364,6 +411,31 @@ export function createFakeDevice(options = {}){
         encoder.copyBufferToTexture = (source, destination, size)=>{
             deferred.push(()=>moveTexels(source, destination, size));
             calls.push({ op: 'copyBufferToTexture', encoder, source, destination, size });
+        };
+        /** A compute pass: its pipeline, its group, and its grid, recorded. @param {any} label */
+        encoder.beginComputePass = label=>{
+            const pass = object('computePass', { descriptor: label });
+            /** @type {any} */
+            let pipeline = null;
+            /** @type {any} */
+            let group = null;
+            pass.setPipeline = (/** @type {any} */ next)=>{
+                pipeline = next;
+            };
+            pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ next)=>{
+                group = next;
+                void index;
+            };
+            pass.dispatchWorkgroups = (/** @type {number[]} */ ...grid)=>{
+                calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group, grid });
+            };
+            /** @param {any} buffer @param {number} offset */
+            pass.dispatchWorkgroupsIndirect = (buffer, offset)=>{
+                calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group,
+                    indirect: { buffer, offset } });
+            };
+            pass.end = ()=>{};
+            return pass;
         };
         /**
          * @param {any} source @param {number} sourceOffset @param {any} destination
@@ -477,6 +549,24 @@ export function createFakeDevice(options = {}){
         createPipelineLayout: recorder('createPipelineLayout'),
         /** @param {any} descriptor */
         createBindGroup: descriptor=>{
+            // WebGPU's rule a renderer has to keep: a buffer binding is no
+            // smaller than its layout says the shader reads. A real device
+            // refuses the frame the group is used in; this one refuses the
+            // call, so a test cannot pass over it.
+            for (const entry of descriptor.entries ?? [])
+            {
+                const declared = descriptor.layout?.descriptor?.entries?.find(
+                    (/** @type {any} */ one)=>one.binding === entry.binding)?.buffer
+                    ?.minBindingSize ?? 0;
+                const buffer = entry.resource?.buffer;
+                const size = entry.resource?.size
+                    ?? (buffer ? (buffer.descriptor?.size ?? 0) - (entry.resource.offset ?? 0) : 0);
+                if (buffer && size < declared)
+                {
+                    throw new Error(`a buffer bound with size ${size} at binding ${entry.binding}`
+                        + ` is too small: the layout reads ${declared}`);
+                }
+            }
             const group = object('createBindGroup', {
                 descriptor, entries: descriptor.entries,
             });
@@ -484,6 +574,12 @@ export function createFakeDevice(options = {}){
             return group;
         },
         createRenderPipeline: recorder('createRenderPipeline'),
+        /** @param {any} descriptor */
+        createComputePipelineAsync: async descriptor=>{
+            const made = object('createComputePipeline', { descriptor });
+            calls.push({ op: 'createComputePipeline', createComputePipeline: made, descriptor });
+            return made;
+        },
         // Recorded under the same name, so a test counts pipelines one way.
         // `options.refusePipeline` names the validation message a descriptor
         // is refused with, for a test of a build that fails;

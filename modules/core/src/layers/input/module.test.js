@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inputModule } from './module.js';
+import { inputModule, viewportOrigin } from './module.js';
 import { WM } from './router.js';
 import { createMessageQueue, ANY_WINDOW } from '../win32/user32/messages.js';
 import { createStubApi } from '../../system/stub.js';
@@ -323,4 +323,21 @@ test('a low-level hook sees device input first, after the cursor moved, and take
     assert.deepEqual(taken.map(entry=>entry.message), [WM.KEYDOWN],
         'the move taken away, the key after it let through in turn');
     assert.deepEqual(reports.map(report=>report.device), ['key']);
+});
+
+test('a viewport the screen\'s size is the screen, whatever window has a client that size', ()=>{
+    // A setup dialog over a game's bordered 1024x768 window, on a 1024x768
+    // screen: taken as that window's picture, every press landed its caption
+    // lower than the dialog's controls.
+    /** @param {number} left @param {number} top @param {number} width @param {number} height */
+    const client = (left, top, width, height)=>({ visible: true, child: false,
+        client: { left, top, right: left + width, bottom: top + height } });
+    const game = client(3, 22, 1024, 768);
+    const dialog = client(300, 250, 430, 135);
+
+    assert.equal(viewportOrigin(1024, 768, { width: 1024, height: 768 }, [game, dialog]), null,
+        'was (3, 22) before');
+    const own = { x: 114, y: 104 };
+    assert.deepEqual(viewportOrigin(800, 600, { width: 1920, height: 1080 },
+        [client(114, 104, 800, 600)]), own, 'a smaller window\'s picture is its own');
 });

@@ -45,7 +45,7 @@
  * in `.bottlify\registry.json`.
  *
  * The installed app is reached as an `AppTree`, so the one install runs over
- * a directory on a host (tools/redist.mjs, tools/steam-install.mjs) and over a
+ * a directory on a host (tools/redist.mjs, bottlify-ui/gamehub/tools/steam-install.mjs) and over a
  * bottle a page writes in the browser (`install.js`).
  */
 
@@ -330,7 +330,9 @@ export function directxFiles(cabinets, machine){
                 for (const list of lists ? lists.split(',').map(one=>one.trim().toLowerCase()) : [])
                 {
                     const [id, below] = (directories.get(list)
-                        ?? directories.get('defaultdestdir') ?? '').split(',').map(one=>one.trim());
+                        ?? directories.get('defaultdestdir') ?? '').split(',')
+                        // A folder below may be quoted: 10,"Driver Cache\i386".
+                        .map(one=>one.trim().replace(/^"(.*)"$/, '$1'));
                     const directory = DIRECTORY_IDS[id];
                     for (const line of directory ? inf.get(list) ?? [] : [])
                     {
@@ -831,9 +833,13 @@ export async function installRedistributables(tree, scripts, machine){
         {
             // DirectX's setup: the cabinets in its own folder.
             const folder = inside.slice(0, inside.lastIndexOf('\\') + 1).toLowerCase();
-            const cabinetPaths = paths.filter(path=>/\.cab$/i.test(path)
-                && path.toLowerCase().startsWith(folder)
-                && !path.slice(folder.length).includes('\\'));
+            // The optional packages alone (`Jun2010_XAudio_x86.cab`): what the
+            // setup installs on XP and later. dxnt.cab, DirectX.cab and the
+            // like carry the system's own DirectX (dsound, ddraw, d3d8,
+            // dinput) for systems before it, which the setup leaves alone
+            // there and the engine answers for itself.
+            const cabinetPaths = paths.filter(path=>path.toLowerCase().startsWith(folder)
+                && /^[a-z]{3}20\d\d_[^\\]+\.cab$/i.test(path.slice(folder.length)));
             const cabinets = await Promise.all(cabinetPaths.map(path=>tree.read(path)));
             /** @type {ReturnType<typeof directxFiles>} */
             let directx;
@@ -924,7 +930,7 @@ export function imageMachine(bytes){
  * What Steam does on an installed app's first start: the install scripts of
  * the app (`extended.installscript` in its product info) and of the
  * redistributables' depots it took (each an `installscript.vdf`) run on the
- * machine its program is for -- how tools/steam-install.mjs and an install in
+ * machine its program is for -- how bottlify-ui/gamehub/tools/steam-install.mjs and an install in
  * the browser both finish.
  *
  * @param {AppTree} tree

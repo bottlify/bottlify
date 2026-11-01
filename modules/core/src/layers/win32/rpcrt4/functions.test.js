@@ -139,3 +139,29 @@ test('a UUID is spelled into a string the caller frees with RpcStringFree', ()=>
     assert.equal(freed.at(-1), wide);
     assert.equal(view.getUint32(0x40, true), 0);
 });
+
+test('sequential UUIDs of one millisecond differ in their time, node and sequence kept', ()=>{
+    // A program keys its objects by the time fields of the UUIDs it makes, a
+    // few hundred in a millisecond while it loads: made from the clock in
+    // milliseconds they were one key, and the objects took one another's place.
+    const memory = new Uint8Array(16 * 64);
+    const fns = createRpcFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: ()=>'',
+    });
+    for (let at = 0; at < 64; at++)
+    {
+        assert.equal(fns.UuidCreateSequential.handler([at * 16]), 0);
+    }
+    const view = new DataView(memory.buffer);
+    const timeOf = (/** @type {number} */ at)=>
+        (BigInt(view.getUint16(at * 16 + 6, true) & 0x0fff) << 48n)
+        | (BigInt(view.getUint16(at * 16 + 4, true)) << 32n)
+        | BigInt(view.getUint32(at * 16, true));
+    for (let at = 1; at < 64; at++)
+    {
+        assert.ok(timeOf(at) > timeOf(at - 1), `the ${at}th later than the one before`);
+        assert.deepEqual([...memory.subarray(at * 16 + 8, at * 16 + 16)],
+            [...memory.subarray(8, 16)], 'one clock sequence and node');
+    }
+});

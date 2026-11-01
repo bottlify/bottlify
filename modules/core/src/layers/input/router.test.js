@@ -30,9 +30,11 @@ const WM_XBUTTONDOWN = 0x020b;
  *
  * @param {{ bounds?: (() => { width: number, height: number }) | null,
  *           window?: () => number,
- *           exclusive?: (device: 'keyboard' | 'mouse') => boolean }} [options]
+ *           exclusive?: (device: 'keyboard' | 'mouse') => boolean,
+ *           origin?: (width: number, height: number)
+ *               => { x: number, y: number } | null }} [options]
  */
-function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
+function harness({ bounds = null, window = ()=>HWND, exclusive, origin } = {}){
     /** @type {any[]} */
     const messages = [];
     /** @type {any[]} */
@@ -67,6 +69,7 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
         exclusive,
         rawInput: report=>reports.push(report),
         moved: (x, y)=>at.push([x, y]),
+        origin,
     });
 
     return {
@@ -875,4 +878,19 @@ test('every event also goes out as the device reported it, for WM_INPUT', ()=>{
         { device: 'key', scan: 0x1d, extended: true, vk: 0x11, down: true, message: WM.KEYDOWN },
         { device: 'key', scan: 0x1e, extended: false, vk: 0x41, down: false, message: WM.KEYUP },
     ], 'a motion of nothing is no report');
+});
+
+test('a viewport showing one window\'s picture points into that window, wherever it lies', ()=>{
+    // A windowed program centred on a 1024x768 desktop: the page shows its
+    // 800x600 client alone, which starts at (114, 104) on the screen. Taken as
+    // the screen's own pixels, a pointer reached only the client's upper left
+    // and the buttons along its bottom could not be clicked.
+    const h = harness({ origin: (width, height)=>(width === 800 && height === 600
+        ? { x: 114, y: 104 } : null) });
+    h.router.confineTo(()=>({ width: 800, height: 600 }));
+    h.send({ kind: 'pointerMove', x: 692, y: 508 });
+    assert.deepEqual(h.router.cursor(), { x: 806, y: 612 });
+    h.send({ kind: 'pointerMove', x: 799, y: 599 });
+    assert.deepEqual(h.router.cursor(), { x: 913, y: 703 }, 'the client\'s far corner');
+    assert.deepEqual(h.at.at(-1), [799 / 800, 599 / 600], 'said back in the viewport\'s terms');
 });

@@ -12,7 +12,7 @@ import {
     SLOT_HEADER_INT32, SLOT_BYTES, GLOBAL_HEADER_INT32,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO,
     STATE_OPEN, GAIN_SCALE, TABLE_BYTES, KIND, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES, FLOAT_SAMPLES, pcmSample,
 } from './mix.js';
 import { convert, createMixer } from './mixer.js';
 
@@ -329,4 +329,28 @@ test('a feed skips to where a chunk says it starts, as after the ring was cleare
     playFeed(queue, block, 1);
     assert.deepEqual([...block], [8, -8]);
     assert.equal(queue.position, 151);
+});
+
+test('a sample is read at its own width and kind, a float as a float', ()=>{
+    // SDL2 hands DirectSound thirty-two-bit floats: read as sixteen-bit
+    // integers, a sine was noise.
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setFloat32(0, 0.25, true);
+    view.setInt32(4, -0x40000000, true);
+    view.setInt16(8, 0x4000, true);
+    bytes[10] = 0x00;
+    bytes[11] = 0x00;
+    bytes[12] = 0xc0;
+    bytes[13] = 0xc0;
+    assert.equal(pcmSample(bytes, 0, 32 | FLOAT_SAMPLES, -1), 0.25, 'float');
+    assert.equal(pcmSample(bytes, 4, 32, -1), -0.5, 'thirty-two-bit integer');
+    assert.equal(pcmSample(bytes, 8, 16, -1), 0.5, 'sixteen-bit');
+    assert.equal(pcmSample(bytes, 10, 24, -1), -0.5, 'twenty-four-bit');
+    assert.equal(pcmSample(bytes, 13, 8, -1), (0xc0 - 128) / 128, 'eight-bit unsigned');
+    // Round a ring: a sample whose bytes cross its end reads from its start.
+    const ring = new Uint8Array(4);
+    new DataView(ring.buffer).setFloat32(0, -1, true);
+    const wrapped = new Uint8Array([ring[2], ring[3], ring[0], ring[1]]);
+    assert.equal(pcmSample(wrapped, 2, 32 | FLOAT_SAMPLES, 3), -1, 'across the ring\'s end');
 });

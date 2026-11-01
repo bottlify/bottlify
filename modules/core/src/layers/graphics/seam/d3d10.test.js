@@ -46,6 +46,7 @@ import {
 } from '../d3d10/shader-fixtures.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from '../d3d10/dxbc.js';
 import { createBackend } from '../webgpu/backend.js';
+import { createDirect3D10 } from '../d3d10/root.js';
 import { FX_KIND, effectBinary } from '../d3d10/effect-fixtures.js';
 import { CONSTANT_TYPE } from '../d3d10/effect.js';
 import { D3D10_DST, STATE_BLOCK_MASK_SIZE, stateBlockMask } from '../d3d10/stateblock.js';
@@ -208,12 +209,14 @@ function seamed(assembly = {}){
         publisher,
         memory: box.services,
         allocate: box.allocate,
-        deviceOptions: ()=>({
+        root: factoryOptions=>createDirect3D10({
+            factoryOptions,
             backend,
             createSampler: descriptor=>({ kind: 'sampler', descriptor }),
             createTexture: gpu.device.createTexture,
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         }),
+        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         gdi: assembly.gdi,
     });
     const d3d10 = seam.libraries['D3D10.dll'];
@@ -1371,7 +1374,7 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.box.memory.readU32(out), 0);
     const outAndBeyond = h.box.place([0xdeadbeef, 0xfeedface]);
     assert.equal(h.device(device, 'CreateGeometryShaderWithStreamOutput',
-        [0, 0, 0, 0, 32, outAndBeyond, outAndBeyond + 4]), E_NOTIMPL);
+        [0, 0, 0, 0, 32, outAndBeyond, outAndBeyond + 4]), E_INVALIDARG);
     assert.equal(h.box.memory.readU32(outAndBeyond), 0, 'the sixth argument is the out');
     assert.equal(h.box.memory.readU32(outAndBeyond + 4), 0xfeedface,
         'the caller\'s next stack word is not an argument');
@@ -2178,9 +2181,10 @@ test('the libraries hand DXGI the window\'s client area for a swap chain asked f
         const measured = [];
         const { libraries } = createGraphicsLibraries({
             graphics: {
-                create: (/** @type {string} */ name)=>(name === 'd3d10'
-                    ? { backend, createSampler: (/** @type {any} */ descriptor)=>({ descriptor }),
-                        createTexture: gpu.device.createTexture }
+                create: (/** @type {string} */ name, /** @type {any} */ caps)=>(name === 'd3d10'
+                    ? createDirect3D10({ ...caps, backend,
+                        createSampler: (/** @type {any} */ descriptor)=>({ descriptor }),
+                        createTexture: gpu.device.createTexture })
                     : null),
                 available: ()=>false,
             },
@@ -2242,7 +2246,8 @@ test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 
     const box = machine();
     let display = { width: 1280, height: 720, bitsPerPixel: 32 };
     const { libraries } = createGraphicsLibraries({
-        graphics: { create: ()=>null, available: ()=>false, adapter: ()=>({ vendor: 'nvidia' }) },
+        graphics: { create: (/** @type {string} */ name, /** @type {any} */ caps)=>
+            createDirect3D10(caps), available: ()=>false, adapter: ()=>({ vendor: 'nvidia' }) },
         only: ['D3D10.dll', 'DXGI.dll'],
         memory: box.services,
         publishInterface: box.publishInterface,

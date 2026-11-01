@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkCompute, linkProgram, translateShader,
 } from './wgsl.js';
 import { DXGI_FORMAT } from './constants.js';
 import {
@@ -35,6 +35,8 @@ import {
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
+    atomicIadd, dclThreadGroup, dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
+    storeRaw, storeStructured, sync, u, vThreadID, vThreadIDInGroupFlattened,
 } from './shader-fixtures.js';
 
 /**
@@ -161,8 +163,10 @@ test('sincos writes the sine and the cosine to its two destinations', ()=>{
 test('a modifier negates or takes the absolute value of the typed read', ()=>{
     assert.equal(emitted([add(r(0), modified(r(1), MODIFIER.NEG), modified(r(2), MODIFIER.ABS))]),
         `r0 = ${U}(((-${F}(r1.xyzw)) + abs(${F}(r2.xyzw))));`);
+    // A move with a source modifier is a float's: WGSL negates no unsigned vector.
     assert.equal(emitted([mov(r(0), modified(r(1), MODIFIER.ABSNEG))]),
-        'r0 = (-abs(r1.xyzw));');
+        'r0 = bitcast<vec4<u32>>((-abs(bitcast<vec4<f32>>(r1.xyzw))));');
+    assert.equal(emitted([ineg(r(0), modified(r(1), MODIFIER.NEG))]).includes('(-'), true);
 });
 
 // --- comparisons ---
@@ -408,7 +412,7 @@ test('the declarations become bindings in the stage group', ()=>{
     const linked = linkProgram(vs, translated);
     assert.deepEqual(linked.groups[1], [
         { binding: BINDING.CONSTANT_BUFFER + 2, visibility: STAGE.FRAGMENT,
-            buffer: { type: 'uniform' } },
+            buffer: { type: 'uniform', minBindingSize: 64 } },
         { binding: BINDING.TEXTURE + 1, visibility: STAGE.FRAGMENT,
             texture: { sampleType: 'float', viewDimension: '2d' } },
         { binding: BINDING.SAMPLER + 3, visibility: STAGE.FRAGMENT,
@@ -803,4 +807,84 @@ test('a vertex shader that writes no position cannot be linked', ()=>{
     const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([1, 1, 1, 1]))));
     assert.deepEqual(linkProgram(vs, ps).unsupported,
         ['a vertex shader that writes no SV_Position']);
+});
+
+test('a pixel output with no system value, COLOR1 of a backwards-compatible shader, writes the'
+    + ' target its register names', ()=>{
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'COLOR', index: 1, systemValue: SYSTEM_VALUE.UNDEFINED, register: 1 }],
+        instructions: [dclOutput(o(1)), mov(o(1), l(1, 0, 0, 1)), ret()],
+    }))));
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, ps);
+    assert.deepEqual(linked.unsupported ?? [], []);
+    assert.match(linked.fragment, /@location\(1\) target1: vec4<f32>,/);
+});
+
+test('two semantics packed into one register pass as one varying, which the pixel stage reads'
+    + ' whole', ()=>{
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [POSITION, { name: 'TEXCOORD', index: 0, register: 1, mask: 0x3 },
+            { name: 'TEXCOORD', index: 1, register: 1, mask: 0xc }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutput(o(1)), mov(o(0), v(0)), mov(o(1), v(0)), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [POSITION, { name: 'TEXCOORD', index: 0, register: 1, mask: 0x3 },
+            { name: 'TEXCOORD', index: 1, register: 1, mask: 0xc }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPs(v(1)), dclOutput(o(0)), mov(o(0), v(1)), ret()],
+    }))));
+    const linked = linkProgram(vs, ps);
+    assert.equal(linked.vertex.match(/@location\(0\) o1: vec4<f32>,/g)?.length, 1);
+    assert.equal(linked.vertex.match(/@location\(1\)/g), null, 'no second varying');
+    assert.equal(linked.fragment.match(/@location\(0\) v1: vec4<f32>,/g)?.length, 1);
+});
+
+test('a compute shader is a module of its own: its group\'s size, its thread ids, the views it'
+    + ' writes as storage, shared memory, and an atomic made on what it is made on', ()=>{
+    const cs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.COMPUTE,
+        major: 5,
+        instructions: [
+            dclThreadGroup(8, 4, 1),
+            dclUavRaw(0),
+            dclUavStructured(1, 8),
+            dclTgsmRaw(0, 64),
+            dclTemps(2),
+            ishl(r(0, 'x'), vThreadID('x'), lu(2)),
+            storeRaw(u(0, 'x'), r(0, 'x'), vThreadID('x')),
+            ldRaw(r(1, 'xy'), r(0, 'x'), u(0, 'xy')),
+            storeStructured(u(1, 'xy'), vThreadID('x'), lu(0), r(1, 'xyxx')),
+            storeRaw(g(0, 'x'), lu(0), vThreadIDInGroupFlattened('x')),
+            sync(0x3),
+            atomicIadd(u(0, 'x'), lu(0), lu(1)),
+            immAtomicImax(r(1, 'x'), u(1, 'x'), vThreadID('xy'), lu(5)),
+            ret(),
+        ],
+    }))));
+    assert.deepEqual(cs.unsupported, []);
+    assert.deepEqual(cs.threadGroup, [8, 4, 1]);
+    assert.deepEqual(cs.uavs.map(uav=>[uav.slot, uav.structure, uav.stride, uav.atomic,
+        uav.loaded]), [[0, 'raw', 0, true, true], [1, 'structured', 8, true, false]]);
+    const linked = linkCompute(cs);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.code, /@compute @workgroup_size\(8, 4, 1\)/);
+    assert.match(linked.code, /var<storage, read_write> u0: array<atomic<u32>>;/);
+    assert.match(linked.code, /var<workgroup> g0: array<u32, 16>;/);
+    assert.match(linked.code, /fn u1_atomic_imax\(i: u32, value: u32, compare: u32\) -> u32/);
+    assert.match(linked.code, /workgroupBarrier\(\);/);
+    // Structure 1 of eight bytes, member at byte 0: dword (index * 8 + 0) / 4.
+    assert.match(linked.code, /\* 8u \+ /);
+    assert.deepEqual(linked.entries.map(entry=>[entry.binding, entry.visibility,
+        entry.buffer?.type]), [
+        [BINDING.UAV, STAGE.COMPUTE, 'storage'], [BINDING.UAV_VIEW, STAGE.COMPUTE, 'uniform'],
+        [BINDING.UAV + 1, STAGE.COMPUTE, 'storage'],
+        [BINDING.UAV_VIEW + 1, STAGE.COMPUTE, 'uniform'],
+    ]);
 });

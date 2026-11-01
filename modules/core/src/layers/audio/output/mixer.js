@@ -12,7 +12,7 @@ import {
     LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
-    slotHeaderOffset, slotPcmOffset,
+    slotHeaderOffset, slotPcmOffset, FLOAT_SAMPLES, pcmSample, sampleBytes,
 } from './mix.js';
 
 /**
@@ -58,8 +58,16 @@ const CAPACITY_FRAMES = OUTPUT_RATE_DEFAULT / 5;
  * @typedef {Object} PcmFormat
  * @property {number} sampleRate
  * @property {number} channels
- * @property {number} bitsPerSample  8 (unsigned) or 16 (signed), as Win32 has it.
+ * @property {number} bitsPerSample  8 (unsigned), or 16, 24 or 32 (signed), as Win32 has it.
+ * @property {boolean} [float]  32-bit IEEE floats rather than integers (WAVE_FORMAT_IEEE_FLOAT).
  */
+
+/**
+ * A format as a slot's `BITS` holds it: the width, and whether its samples are floats.
+ *
+ * @param {PcmFormat} format
+ */
+const sampleCodeOf = format=>format.bitsPerSample | (format.float ? FLOAT_SAMPLES : 0);
 
 /**
  * @overload
@@ -602,7 +610,8 @@ function mixInto(block, track, frames){
  * @returns {Float32Array}
  */
 export function convert(pcm, format, rate, state){
-    const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+    const code = sampleCodeOf(format);
+    const bytesPerSample = sampleBytes(code);
     const stride = bytesPerSample * format.channels;
     const inputFrames = Math.floor(pcm.length / stride);
     if (inputFrames === 0)
@@ -611,7 +620,6 @@ export function convert(pcm, format, rate, state){
     }
 
     const ratio = rate / format.sampleRate;
-    const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 
     /**
      * A channel of an input frame. Frame -1 is the previous buffer's last
@@ -626,13 +634,11 @@ export function convert(pcm, format, rate, state){
         {
             return state.tail ? state.tail[channel] : sample(0, channel);
         }
-        const at = Math.min(frame, inputFrames - 1) * stride + channel * bytesPerSample;
-        // Eight-bit wave audio is unsigned with silence at 128; sixteen-bit is
-        // signed with silence at zero. Reading either as the other is not a
-        // subtle difference -- it is a loud constant offset.
-        return bytesPerSample === 1
-            ? (view.getUint8(at) - 128) / 128
-            : view.getInt16(at, true) / 32768;
+        // Eight-bit wave audio is unsigned with silence at 128; the wider kinds
+        // are signed with silence at zero, or floats. Reading one as another
+        // is no subtle difference -- it is a loud constant offset, or noise.
+        return pcmSample(pcm, Math.min(frame, inputFrames - 1) * stride
+            + channel * bytesPerSample, code, -1);
     };
 
     // At the output's own rate there is nothing to resample: one input frame is
@@ -863,7 +869,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             for (const [field, value] of [
                 [KIND, KIND_DMA], [BASE, base], [LENGTH, format.bytes],
                 [RATE, format.sampleRate], [CHANNELS, format.channels],
-                [BITS, format.bitsPerSample],
+                [BITS, sampleCodeOf(format)],
                 [GAIN, GAIN_SCALE], [LEFT_CUT, 0], [RIGHT_CUT, 0], [PAUSED, 0],
                 [POSITION, 0], [LOOPING, 0], [PLAYING, 0], [MIXED_FRAMES, 0],
                 [FRESH, 0], [STREAMING, 0], [HELD, 0],
@@ -1082,13 +1088,13 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
      */
     function createSlotTrack(format, slot, view){
         const { header, pcm } = view;
-        const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+        const bytesPerSample = sampleBytes(sampleCodeOf(format));
         const stride = bytesPerSample * format.channels;
 
         Atomics.store(header, KIND, KIND_QUEUE);
         Atomics.store(header, RATE, format.sampleRate);
         Atomics.store(header, CHANNELS, format.channels);
-        Atomics.store(header, BITS, format.bitsPerSample);
+        Atomics.store(header, BITS, sampleCodeOf(format));
         Atomics.store(header, GAIN, GAIN_SCALE);
         Atomics.store(header, LEFT_CUT, 0);
         Atomics.store(header, RIGHT_CUT, 0);
@@ -1257,7 +1263,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
         let writtenBytes = 0;
         let localGain = 1;
         let localPaused = false;
-        const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+        const bytesPerSample = sampleBytes(sampleCodeOf(format));
         const stride = bytesPerSample * format.channels;
         const track = {
             format,
