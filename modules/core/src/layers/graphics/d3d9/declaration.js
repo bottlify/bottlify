@@ -488,6 +488,7 @@ export function fixedFunctionLayoutOf(declaration){
  *                          happen to describe one.
  * @property {number} refCount
  * @property {boolean} destroyed  whether its last reference has gone for good
+ * @property {any} counter  its count, which guest code may keep (`ReferenceCount.place`)
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: { elements?: VertexElement[], count?: number }, copy?: boolean)
@@ -516,6 +517,10 @@ export function createVertexDeclaration(options){
         get destroyed(){
             return options.count.destroyed;
         },
+        // Where guest code may count its references (`ReferenceCount.place`):
+        // a program that sets its declaration before every draw takes and
+        // gives back a reference each time.
+        counter: options.count,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 

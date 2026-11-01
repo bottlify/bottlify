@@ -488,6 +488,7 @@ export function functionOf(tokens){
  * @property {ParsedShader} parsed
  * @property {number} refCount
  * @property {boolean} destroyed  whether its last reference has gone for good
+ * @property {any} counter  its count, which guest code may keep (`ReferenceCount.place`)
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: { bytes?: number, tokens?: Uint32Array }, room?: number | null) => number}
@@ -521,6 +522,9 @@ export function createShader(options){
         get destroyed(){
             return options.count.destroyed;
         },
+        // Where guest code may count its references (`ReferenceCount.place`),
+        // as a declaration's: set before every draw, as a declaration is.
+        counter: options.count,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 

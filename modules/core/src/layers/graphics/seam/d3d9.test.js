@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
-import { createPublisher } from './com.js';
+import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import {
     BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, transformSlot,
@@ -222,7 +222,9 @@ function seamed(options = {}){
     const divergences = [];
     /** @type {(number | boolean | string | undefined)[][]} */
     const resolutions = [];
-    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const publisher = createPublisher({ publishInterface: box.publishInterface,
+        cells: options.shadow
+            ? createCountCells({ allocate: box.allocate, memory: box.memory }) : undefined });
     // One measurable window, so a size asked for as zero has a client area to
     // be answered with; a test that wants the unmeasurable path passes null.
     /** @param {number} window */
@@ -2596,4 +2598,24 @@ test('a Present under vertical sync is held to the display\'s rate, and to a mod
         assert.equal(pacing.hz, held, `a display of ${refresh}, ${windowed ? 'windowed'
             : `asking ${asked}`}`);
     }
+});
+
+test('a declaration keeps its count in the guest, as a texture does', ()=>{
+    // A program that sets its declaration and shaders before every draw takes
+    // and gives back a reference on each, every time: counted on the host,
+    // that was two crossings per object per draw.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const elements = 0x3000;
+    h.box.services.writeMemory(elements, Uint8Array.from([
+        0, 0, 0, 0, D3DDECLTYPE.FLOAT3, 0, D3DDECLUSAGE.POSITION, 0,
+        0xff, 0, 0, 0, D3DDECLTYPE.UNUSED, 0, 0, 0,
+    ]));
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreateVertexDeclaration', [elements, out]), D3D_OK);
+    const declaration = h.box.memory.readU32(out);
+    const cell = h.box.memory.readU32(declaration + 8);
+    assert.notEqual(cell, 0, 'the declaration\'s count has a word in the guest (none before)');
+    assert.equal(h.box.memory.readU32(cell), h.object(declaration).refCount);
 });
