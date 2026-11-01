@@ -620,7 +620,7 @@ export function createGlContext(options = {}){
             }
             const backQuery = STENCIL_FACE_QUERIES.get(query);
             const active = backQuery && record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK
-                ? record(backQuery) : entry;
+                ? { ...entry, values: extStencilBack.get(backQuery) ?? entry.values } : entry;
             return readState(active, as);
         },
 
@@ -1672,6 +1672,19 @@ export function createGlContext(options = {}){
     }
 
     /**
+     * GL_EXT_stencil_two_side's back face, a record apart from OpenGL 2.0's
+     * (`GL_STENCIL_BACK_*`), as a driver with both keeps them: the selector's
+     * calls write it alone, and a draw reads it only while two-sided testing
+     * is on, OpenGL 2.0's back face otherwise. By `GL_STENCIL_BACK_*` query.
+     * ponytail: not saved by glPushAttrib, add when a program pushes it.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const extStencilBack = new Map([...STENCIL_FACE_QUERIES.values()]
+        .map(query=>[query, [...record(query).values]]));
+    kernel.side.extStencilBack = extStencilBack;
+
+    /**
      * `glStencilFunc`/`glStencilOp`/`glStencilMask` write only the active
      * face's record. `glActiveStencilFaceEXT` is a selector, like
      * `glActiveTextureARB`, with no dependence on whether two-sided testing
@@ -1687,20 +1700,15 @@ export function createGlContext(options = {}){
     function setStencilFace(frontQuery, backQuery, values){
         if (record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK)
         {
-            setState(backQuery, values);
-            // The extension's back face, which a draw reads only while
-            // two-sided testing is on.
-            kernel.side.stencilBackFromSelector = true;
+            extStencilBack.set(backQuery, [...values]);
             return;
         }
+        // OpenGL 2.0: the one-face calls set both of its faces. The
+        // extension's back face is not one of them: a program that set it
+        // through the selector and then the front, with two-sided testing
+        // still off, keeps the back it set.
         setState(frontQuery, values);
-        // OpenGL 2.0: the one-face calls set both faces, unless two-sided
-        // testing is on and the extension's selector speaks for each.
-        if (record(GL.STENCIL_TEST_TWO_SIDE_EXT).values[0] === 0)
-        {
-            setState(backQuery, [...values]);
-            kernel.side.stencilBackFromSelector = false;
-        }
+        setState(backQuery, [...values]);
     }
 
     /** @param {string} name @param {number} query @param {number} value */

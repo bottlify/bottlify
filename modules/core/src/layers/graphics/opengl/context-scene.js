@@ -349,24 +349,25 @@ export function createSceneBuilder(kernel){
                 })),
             }),
             stencil: stencilFront,
-            // The back face's record: OpenGL 2.0 keeps one always, which
-            // the one-face calls set with the front's (`setStencilFace`) and
-            // glStencil*Separate on its own; GL_EXT_stencil_two_side's
-            // selector writes it too. With two-sided testing off and the
-            // record last written through that selector, the front stands
-            // for both, as the extension has it.
-            stencilBack: stencilFront && (on(GL.STENCIL_TEST_TWO_SIDE_EXT)
-                || !side.stencilBackFromSelector
-                ? {
-                    func: record(GL.STENCIL_BACK_FUNC).values[0],
-                    reference: record(GL.STENCIL_BACK_REF).values[0],
-                    readMask: record(GL.STENCIL_BACK_VALUE_MASK).values[0] & 0xff,
-                    writeMask: record(GL.STENCIL_BACK_WRITEMASK).values[0] & 0xff,
-                    fail: record(GL.STENCIL_BACK_FAIL).values[0],
-                    zfail: record(GL.STENCIL_BACK_PASS_DEPTH_FAIL).values[0],
-                    zpass: record(GL.STENCIL_BACK_PASS_DEPTH_PASS).values[0],
-                }
-                : stencilFront),
+            // The back face: GL_EXT_stencil_two_side's own record while
+            // two-sided testing is on, OpenGL 2.0's otherwise -- which the
+            // one-face calls set with the front's and glStencil*Separate on
+            // its own (`setStencilFace`).
+            stencilBack: stencilFront && (()=>{
+                /** @param {number} query */
+                const back = on(GL.STENCIL_TEST_TWO_SIDE_EXT)
+                    ? (/** @type {number} */ query)=>side.extStencilBack.get(query)[0]
+                    : (/** @type {number} */ query)=>record(query).values[0];
+                return {
+                    func: back(GL.STENCIL_BACK_FUNC),
+                    reference: back(GL.STENCIL_BACK_REF),
+                    readMask: back(GL.STENCIL_BACK_VALUE_MASK) & 0xff,
+                    writeMask: back(GL.STENCIL_BACK_WRITEMASK) & 0xff,
+                    fail: back(GL.STENCIL_BACK_FAIL),
+                    zfail: back(GL.STENCIL_BACK_PASS_DEPTH_FAIL),
+                    zpass: back(GL.STENCIL_BACK_PASS_DEPTH_PASS),
+                };
+            })(),
             polygonOffset: on(GL.POLYGON_OFFSET_FILL)
                 ? {
                     factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],
