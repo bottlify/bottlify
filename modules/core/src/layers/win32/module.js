@@ -4856,6 +4856,9 @@ export function createWin32Module(){
                  */
                 /** Every top-level window's rectangle, as the program declared it. */
                 windows: ()=>windowService.list(),
+                /** The screen's size in the display mode set now, as SM_CXSCREEN answers. */
+                screenSize: ()=>(config?.screen
+                    ? { width: config.screen.width, height: config.screen.height } : null),
                 /** The top-level window a window draws into, for its surface. @param {number} hwnd */
                 windowSurfaceOf: hwnd=>windowService.surfaceOf?.(hwnd) ?? null,
                 /** The top-level windows bottom to top, for the screen to be composed of. */
