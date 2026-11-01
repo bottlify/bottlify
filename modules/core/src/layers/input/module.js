@@ -232,6 +232,26 @@ export function createInputModule(){
                 // Where the cursor is on the viewport, for a page drawing it
                 // over a locked pointer.
                 moved: config?.cursorMoved,
+                // A viewport the size of one window's client, and not of the
+                // screen, shows that window's picture alone -- a windowed
+                // program's back buffer -- so it is pointed into from where
+                // that client lies on the screen.
+                origin: (width, height)=>{
+                    /** @type {{ visible: boolean, child: boolean, client: any }[]} */
+                    let listed;
+                    try
+                    {
+                        listed = win32.windows();
+                    }
+                    catch {
+                        return null;
+                    }
+                    const fitting = listed.filter(entry=>entry.visible && !entry.child
+                        && entry.client.right - entry.client.left === width
+                        && entry.client.bottom - entry.client.top === height);
+                    return fitting.length === 1
+                        ? { x: fitting[0].client.left, y: fitting[0].client.top } : null;
+                },
                 // A device a program holds exclusively is read through
                 // DirectInput alone, and the window hears nothing of it.
                 exclusive: kind=>dinput.exclusive(kind),

@@ -178,6 +178,10 @@ const BUTTONS = Object.freeze({
  *     Where each event goes as the device reported it, for the WM_INPUT of a
  *     program that registered for raw input: user32 decides who is told.
  *     Absent in a build with no windows.
+ * @property {(width: number, height: number) => ({ x: number, y: number } | null)} [origin]
+ *     Where a viewport of that size starts on the screen, when what it shows
+ *     is one window's client rather than the screen: that client's upper left.
+ *     Absent or null, the viewport is the screen from its corner.
  * @property {(x: number, y: number) => void} [moved]
  *     Where the cursor is told, as a fraction of the viewport each way, each
  *     time it moves -- by the pointer or by the program placing it. A locked
@@ -190,9 +194,17 @@ const BUTTONS = Object.freeze({
  * @param {RouterDeps} deps
  */
 export function createInputRouter(
-    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput, moved },
+    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput, moved,
+        origin },
 )
 {
+    /**
+     * Where the viewport's upper left lies on the screen: the client's of a
+     * window whose picture alone fills it, else the screen's own.
+     *
+     * @param {{ width: number, height: number } | null} box
+     */
+    const originOf = box=>(box && origin?.(box.width, box.height)) || { x: 0, y: 0 };
     /** The configured screen, or nothing: what the cursor falls back to. */
     const screen = bounds ?? null;
     // Where the cursor may go. The configured screen until something wires a
@@ -491,8 +503,8 @@ export function createInputRouter(
         }
         const clip = clipRect;
         const [scaleX, scaleY] = scaleOf(clip, box);
-        moved((cursor.x - (clip ? clip.left : 0)) / scaleX / box.width,
-            (cursor.y - (clip ? clip.top : 0)) / scaleY / box.height);
+        const from = clip ? { x: clip.left, y: clip.top } : originOf(box);
+        moved((cursor.x - from.x) / scaleX / box.width, (cursor.y - from.y) / scaleY / box.height);
     };
 
     /** @param {HostInputEvent} event */
@@ -537,12 +549,15 @@ export function createInputRouter(
         }
         const px = cursor.x;
         const py = cursor.y;
+        // A clip is the program's own space on the screen; without one the
+        // viewport is, from wherever its picture starts.
+        const from = clip ? { x: clip.left, y: clip.top } : originOf(box);
         let nx = event.x === undefined || placed
             ? cursor.x + stepX
-            : (clip ? clip.left : 0) + Math.round((event.x | 0) * scaleX);
+            : from.x + Math.round((event.x | 0) * scaleX);
         let ny = event.y === undefined || placed
             ? cursor.y + stepY
-            : (clip ? clip.top : 0) + Math.round((event.y | 0) * scaleY);
+            : from.y + Math.round((event.y | 0) * scaleY);
         if (clip)
         {
             nx = confineRange(nx, clip.left, clip.right);
@@ -550,8 +565,8 @@ export function createInputRouter(
         }
         else if (box)
         {
-            nx = confine(nx, box.width);
-            ny = confine(ny, box.height);
+            nx = confineRange(nx, from.x, from.x + box.width);
+            ny = confineRange(ny, from.y, from.y + box.height);
         }
         cursor.x = nx;
         cursor.y = ny;
