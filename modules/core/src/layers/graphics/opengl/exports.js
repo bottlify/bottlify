@@ -496,6 +496,37 @@ const LIST_TYPES = new Map([
 const ERROR_INVALID_HANDLE = 6;
 
 /**
+ * How many bytes a name of glCallLists' GL_2_BYTES, GL_3_BYTES or GL_4_BYTES
+ * takes (0x1407 to 0x1409: two to four), or 0 for any other type.
+ *
+ * @param {number} type
+ */
+export function byteRunWidth(type){
+    return type >= GL.TWO_BYTES && type <= GL.FOUR_BYTES ? type - GL.TWO_BYTES + 2 : 0;
+}
+
+/**
+ * glCallLists' names given as runs of bytes, each run big-endian: the first
+ * byte the highest.
+ *
+ * @param {Uint8Array} bytes @param {number} width @param {number} count
+ * @returns {number[]}
+ */
+export function byteRunNames(bytes, width, count){
+    const names = [];
+    for (let i = 0; i < count; i++)
+    {
+        let value = 0;
+        for (let k = 0; k < width; k++)
+        {
+            value = value * 256 + bytes[i * width + k];
+        }
+        names.push(value);
+    }
+    return names;
+}
+
+/**
  * @param {OpenglServices} services
  */
 export function createOpengl(services){
@@ -1896,24 +1927,13 @@ export function createOpengl(services){
             const letter = LIST_TYPES.get(type >>> 0);
             if (!letter)
             {
-                // GL_2_BYTES and its siblings: big-endian runs of bytes.
-                const width = (type >>> 0) - 0x1406;
-                if (width < 1 || width > 4)
+                const width = byteRunWidth(type >>> 0);
+                if (width === 0)
                 {
                     return;
                 }
-                const bytes = services.readMemory(lists >>> 0, (count | 0) * width);
-                const offsets = [];
-                for (let i = 0; i < (count | 0); i++)
-                {
-                    let value = 0;
-                    for (let k = 0; k < width; k++)
-                    {
-                        value = value * 256 + bytes[i * width + k];
-                    }
-                    offsets.push(value);
-                }
-                context.glCallLists(count | 0, offsets);
+                context.glCallLists(count | 0, byteRunNames(
+                    services.readMemory(lists >>> 0, (count | 0) * width), width, count | 0));
                 return;
             }
             context.glCallLists(count | 0, readTyped(letter, lists, Math.max(0, count | 0)));

@@ -16,7 +16,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ARGUMENT_WORDS, createOpengl, floatArguments } from './exports.js';
+import {
+    ARGUMENT_WORDS, byteRunNames, byteRunWidth, createOpengl, floatArguments,
+} from './exports.js';
 import { GL, PFD, WGL } from './constants.js';
 import { PIXELFORMATDESCRIPTOR, PIXEL_FORMATS, encodePixelFormat } from './pixelformat.js';
 
@@ -1140,4 +1142,14 @@ test('every export\'s floats and doubles are where its prototype puts them, in i
     assert.equal(floatArguments('glUniformMatrix4fv'), null);
     assert.deepEqual(floatArguments('glBlendColor'), { 0: 'f32', 1: 'f32', 2: 'f32', 3: 'f32' });
     assert.deepEqual(floatArguments('glSampleCoverage'), { 0: 'f32' });
+});
+
+test('glCallLists reads GL_2_BYTES, GL_3_BYTES and GL_4_BYTES names two to four bytes wide,'
+    + ' the first byte highest', ()=>{
+    assert.deepEqual([GL.TWO_BYTES, GL.THREE_BYTES, GL.FOUR_BYTES, GL.FLOAT].map(byteRunWidth),
+        [2, 3, 4, 0]);
+    const bytes = Uint8Array.of(0x01, 0x02, 0x03, 0x04, 0x05, 0x06);
+    assert.deepEqual(byteRunNames(bytes, 2, 3), [0x0102, 0x0304, 0x0506]);
+    assert.deepEqual(byteRunNames(bytes, 3, 2), [0x010203, 0x040506]);
+    assert.deepEqual(byteRunNames(bytes.subarray(0, 4), 4, 1), [0x01020304]);
 });
