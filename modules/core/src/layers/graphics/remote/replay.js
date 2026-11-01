@@ -2346,6 +2346,12 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 return call.wait === WAIT.ANSWER ? { answer: false, outs: args } : false;
             }
+            // A layer reports on the last device it made, which the program may
+            // have made only to ask what the hardware does and let go of.
+            if (target === undefined && playing === 'diagnostics')
+            {
+                return call.wait === WAIT.ANSWER ? { answer: null, outs: args } : null;
+            }
             if (playing === REFS_TO)
             {
                 const counted = refsTo(target, args[0]);

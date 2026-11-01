@@ -104,6 +104,7 @@ function toy(sides){
                     },
                     Touch: ()=>D3D_OK,
                     reachable: ()=>!count.destroyed,
+                    diagnostics: ()=>({ played: side.played }),
                     addRef: ()=>count.addRef(),
                     release: ()=>count.release(),
                 };
@@ -333,6 +334,26 @@ test('a played object collected after it was destroyed is answered as unreachabl
     out.thing.reachable();
     play();
     assert.deepEqual(said.filter(message=>message.type === 'failed'), []);
+});
+
+test('a played object collected after it was destroyed reports no diagnostics', async()=>{
+    // A layer reports on the last device it made; a program that made one
+    // only to ask what it can do and released it stopped the played device.
+    const { root, played, play, said } = toyAcross(false);
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateCounted(out);
+    assert.equal(out.thing.release(), 0);
+    play();
+    await new Promise(resolve=>setImmediate(resolve));
+    v8.setFlagsFromString('--expose-gc');
+    /** @type {() => void} */ (vm.runInNewContext('gc'))();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(played.counted[0].deref(), undefined, 'collected on the played side');
+    out.thing.diagnostics();
+    play();
+    assert.deepEqual(said.filter(message=>message.type === 'failed'), [],
+        'stopped the played device before');
 });
 
 test('one method called on many objects of a kind defines its structures\' shapes once', ()=>{
