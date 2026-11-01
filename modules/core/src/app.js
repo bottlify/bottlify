@@ -682,18 +682,34 @@ export function withWindow(blocks, bundle, resident, bytes = READ_AHEAD_BYTES){
             chosen.set(index, { index, offset: block.offset, packed: block.packed, ahead: true });
         }
     };
+    // A neighbour by index is a neighbour in the container only while the
+    // offsets keep going the same way: a bottle an installation wrote lays its
+    // files where they arrived, and the block before a file's first can be
+    // gigabytes away -- still "past the window's start" by offset, so a walk
+    // that only checked the start took every block below it.
     for (const block of blocks)
     {
         const start = Math.floor(block.offset / bytes) * bytes;
-        for (let index = block.index - 1;
-            index >= 0 && bundle.block(index).offset >= start; index--)
+        for (let index = block.index - 1, after = block.offset; index >= 0; index--)
         {
+            const offset = bundle.block(index).offset;
+            if (offset < start || offset >= after)
+            {
+                break;
+            }
             add(index);
+            after = offset;
         }
-        for (let index = block.index + 1;
-            index < bundle.blockCount && bundle.block(index).offset < start + bytes; index++)
+        for (let index = block.index + 1, before = block.offset; index < bundle.blockCount;
+            index++)
         {
+            const offset = bundle.block(index).offset;
+            if (offset >= start + bytes || offset <= before)
+            {
+                break;
+            }
             add(index);
+            before = offset;
         }
     }
     return [...chosen.values()].sort((left, right)=>left.offset - right.offset);
