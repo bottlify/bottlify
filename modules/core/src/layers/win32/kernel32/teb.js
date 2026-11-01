@@ -454,6 +454,10 @@ export function createProcessBlocks(options){
     const lists = new Map([[loadHead, []], [memoryHead, []], [initHead, []]]);
     /** Each module's entry, by its base. @type {Map<number, number>} */
     const entries = new Map();
+    /** Entries of modules loaded after the start, which an unload gives back. @type {Set<number>} */
+    const freeable = new Set();
+    /** Whether the modules mapped before the start have been entered. */
+    let started = false;
 
     /**
      * `InsertTailList`, done by hand: nothing here keeps a live pointer into
@@ -525,8 +529,18 @@ export function createProcessBlocks(options){
     const addModule = module=>{
         const fullName = module.path ?? module.name;
         const baseName = module.name;
-        const entry = allocate(
-            entryFields.SIZE + fullName.length * 2 + 2 + baseName.length * 2 + 2);
+        const bytes = entryFields.SIZE + fullName.length * 2 + 2 + baseName.length * 2 + 2;
+        // One loaded once the process runs has its entry from the memory a
+        // thread's blocks come from, which gives it back when the library is
+        // unloaded: a program that loads and frees a library every second --
+        // SDL looking for a controller -- spent the startup span, which never
+        // gives anything back, and the next load failed.
+        const entry = started && options.threadMemory
+            ? options.threadMemory.allocate(bytes) : allocate(bytes);
+        if (started && options.threadMemory)
+        {
+            freeable.add(entry);
+        }
         writeMemory(entry, new Uint8Array(entryFields.SIZE));
         writePointer(entry + entryFields.DLL_BASE, module.base);
         writePointer(entry + entryFields.ENTRY_POINT, module.entryPoint ?? 0);
@@ -560,12 +574,17 @@ export function createProcessBlocks(options){
         remove(memoryHead, entry + entryFields.IN_MEMORY_ORDER_LINKS);
         remove(initHead, entry + entryFields.IN_INITIALIZATION_ORDER_LINKS);
         entries.delete(base >>> 0);
+        if (freeable.delete(entry))
+        {
+            options.threadMemory?.free(entry);
+        }
     };
 
     for (const module of options.modules ?? [])
     {
         addModule(module);
     }
+    started = true;
 
     // A thread's blocks go when it does: a program that makes a thread per
     // task and lets each one end has only ever had a few alive, however many
