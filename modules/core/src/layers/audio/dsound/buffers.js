@@ -37,6 +37,9 @@
 /** How far ahead of the play cursor the write cursor sits, in milliseconds. */
 const WRITE_LEAD_MS = 30;
 
+/** The most a device cursor is carried on by the clock past its last report. */
+const DEVICE_BURST_MS = 40;
+
 /**
  * How far behind the play cursor the write cursor sits when stopped.
  *
@@ -79,6 +82,7 @@ export const DSBPAN_RIGHT = 10000;
  * @property {number} blockAlign      Bytes one frame occupies, across channels.
  * @property {number} [averageBytes]   nAvgBytesPerSec as the program gave it, which
  *     GetFormat hands back; DirectSound accepts one that disagrees with the rest.
+ * @property {boolean} [float]  Thirty-two-bit IEEE floats rather than integers.
  */
 
 /**
@@ -97,6 +101,7 @@ export function normaliseFormat(format){
         // is in bytes, so the frame size is what everything else derives from.
         blockAlign: Math.max(1, channels * (bitsPerSample >> 3)),
         ...format.averageBytes === undefined ? {} : { averageBytes: format.averageBytes },
+        ...format.float ? { float: true } : {},
     };
 }
 
@@ -184,6 +189,11 @@ export function createSoundBuffer({
     let device = null;
     /** The device's lap count as last seen. */
     let seenLaps = 0;
+    /** The device's position as it last reported it, and the clock then (`devicePosition`). */
+    let lastReported = -1;
+    let reportedAt = 0;
+    /** The device cursor as last answered, which never goes back. */
+    let shownDevice = 0;
     /**
      * Which bytes the program has written since they were last handed over.
      *
@@ -335,6 +345,64 @@ export function createSoundBuffer({
         }
     };
 
+    /**
+     * The device's position, carried on by the clock between its reports.
+     * A browser's audio thread says where it is a burst of blocks at a time --
+     * twenty milliseconds in a virtual machine -- and a cursor that stands
+     * still and then jumps is one a program pacing itself by it reads wrong:
+     * SDL2 writes one chunk each time the write cursor enters the next, and a
+     * jump of two had it pass one over, which then played a lap-old sound.
+     * Never past one burst beyond the report, and never back.
+     */
+    const devicePosition = ()=>{
+        // A one-shot is no stream to pace by, and carried past its end it
+        // would read as round to its start.
+        if (!looping)
+        {
+            return device.voice.position;
+        }
+        // Counted from the start in laps and bytes, so a report a burst ahead
+        // is ahead however much of a short buffer it covers: read round the
+        // circle, a jump past half of one looked like a step back.
+        const reported = deviceBytes();
+        const at = now();
+        if (reported !== lastReported)
+        {
+            lastReported = reported;
+            reportedAt = at;
+        }
+        const carried = Math.min(Math.max(0, Math.floor((at - reportedAt) * byteRate() / 1000)),
+            Math.floor(byteRate() * DEVICE_BURST_MS / 1000));
+        shownDevice = Math.max(shownDevice, reported + carried);
+        return shownDevice % bytes;
+    };
+
+    /** The device's cursor in bytes from the start: its laps and its position read as one. */
+    const deviceBytes = ()=>{
+        const { voice } = device;
+        let laps = voice.laps;
+        let position = voice.position;
+        if (laps !== voice.laps)
+        {
+            laps = voice.laps;
+            position = voice.position;
+        }
+        return laps * bytes + position;
+    };
+
+    /**
+     * Puts the device's cursor where the program put the buffer's, which may
+     * be behind where it was: carried on from there afresh.
+     *
+     * @param {number} position
+     */
+    const placeDevice = position=>{
+        device.voice.position = position;
+        lastReported = deviceBytes();
+        reportedAt = now();
+        shownDevice = lastReported;
+    };
+
     /** The play cursor as a program sees it. */
     const playCursor = ()=>{
         settle();
@@ -360,7 +428,11 @@ export function createSoundBuffer({
     const cursorsNow = ()=>{
         const play = playCursor();
         const lead = playing ? span(WRITE_LEAD_MS) : bytes - span(STOPPED_MARGIN_MS);
-        return { play, write: alignDown((play + lead) % bytes) };
+        // The write cursor, which a writer paces itself by, moves on with the
+        // clock between the device's reports; the play cursor stays the
+        // device's own, which everything else here reckons from.
+        const from = device && playing ? alignDown(devicePosition() % bytes) : play;
+        return { play, write: alignDown((from + lead) % bytes) };
     };
 
     /**
@@ -539,7 +611,7 @@ export function createSoundBuffer({
             looping = (flags & DSBPLAY_LOOPING) !== 0;
             if (device)
             {
-                device.voice.position = anchorByte;
+                placeDevice(anchorByte);
                 device.voice.play(looping);
             }
         },
@@ -579,7 +651,7 @@ export function createSoundBuffer({
             fedLead = 0;
             if (device)
             {
-                device.voice.position = anchorByte;
+                placeDevice(anchorByte);
             }
         },
 
@@ -882,7 +954,7 @@ export function createSoundBuffer({
             const at = playCursor();
             device = { voice, copy };
             copy(0, bytes);
-            voice.position = at;
+            placeDevice(at);
             seenLaps = voice.laps;
             anchorByte = at;
             if (playing)

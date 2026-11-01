@@ -452,6 +452,7 @@ export function createAudioModule(){
                             sampleRate: buffer.frequency,
                             channels: buffer.format.channels,
                             bitsPerSample: buffer.format.bitsPerSample,
+                            float: buffer.format.float,
                             bytes: buffer.bytes,
                         });
                         if (voice)
@@ -496,6 +497,7 @@ export function createAudioModule(){
                             sampleRate: buffer.frequency,
                             channels: buffer.format.channels,
                             bitsPerSample: buffer.format.bitsPerSample,
+                            float: buffer.format.float,
                         });
                         tracks.set(buffer, track);
                         openTracks++;

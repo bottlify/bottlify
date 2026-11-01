@@ -130,6 +130,8 @@ export const WAVEFORMATEX = Object.freeze({
 });
 /** WAVE_FORMAT_EXTENSIBLE, and where its extension's fields sit after WAVEFORMATEX. */
 const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
+/** WAVE_FORMAT_IEEE_FLOAT; also the first dword of KSDATAFORMAT_SUBTYPE_IEEE_FLOAT. */
+const WAVE_FORMAT_IEEE_FLOAT = 3;
 const EXTENSIBLE = Object.freeze({ wValidBitsPerSample: 18, SubFormat: 24, EXTRA: 22 });
 
 /**
@@ -768,7 +770,15 @@ export function createDirectSound({
         {
             return null;
         }
-        return normaliseFormat({ channels, sampleRate, bitsPerSample, averageBytes });
+        // Floats are said by WAVE_FORMAT_IEEE_FLOAT, or by an extensible
+        // format's KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, whose first dword is that
+        // tag -- SDL2's thirty-two-bit stream, which read as integers is noise.
+        const tag = readU16(address + WAVEFORMATEX.wFormatTag);
+        const float = bitsPerSample === 32 && (tag === WAVE_FORMAT_IEEE_FLOAT
+            || (tag === WAVE_FORMAT_EXTENSIBLE
+                && readU32(address + EXTENSIBLE.SubFormat) === WAVE_FORMAT_IEEE_FLOAT));
+        return normaliseFormat({ channels, sampleRate, bitsPerSample, averageBytes,
+            ...float ? { float } : {} });
     };
 
     /**
