@@ -79,8 +79,8 @@ import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
 import { createSteamStart } from './steamclient/steam-start.js';
-import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll }
-    from './steamclient/functions.js';
+import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll,
+    steamFilesOf } from './steamclient/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions, WINMM_ORDINALS } from './winmm/functions.js';
@@ -3689,6 +3689,7 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
                         .find(([variable])=>variable.toUpperCase() === name.toUpperCase())?.[1]
                         ?? null,
+                    files: steamFilesOf(filesystem),
                     divergence: config?.divergence, log: text=>trace(`steamclient: ${text}`) }),
                 // Chromium's embedding API, answered by the host's own browser
                 // rather than by the framework a program ships (libcef/).

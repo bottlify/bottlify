@@ -55,6 +55,17 @@ import { createSteamObjects } from './objects.js';
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
  * @property {4 | 8} [pointerSize]  8 for steamclient64.dll, a 64-bit process's.
+ * @property {SteamFiles} [files]  The guest's files, where the account's cloud
+ *     files are kept; absent, the cloud holds nothing and takes nothing.
+ */
+
+/**
+ * @typedef {Object} SteamFiles
+ * @property {(path: string) => Uint8Array | null} read  Null for no such file.
+ * @property {(path: string, bytes: Uint8Array) => boolean} write  The folders made on the way.
+ * @property {(path: string) => boolean} remove
+ * @property {(folder: string) => { name: string, size: number, modified: number }[]} list
+ *     Every file below it, named from it with `/` between folders; none for no folder.
  */
 
 /** k_EUniversePublic. */
@@ -97,6 +108,14 @@ const API_CALL_COMPLETED_SIZE = 16;
 const CALL_FAILURE_NONE = -1;
 const CALL_FAILURE_INVALID_HANDLE = 2;
 /** CheckFileSignature_t, and the ECheckFileSignature the client knows: it holds no app's signatures. */
+/** k_unMaxCloudFileChunkSize: a larger file is refused. */
+const MAX_CLOUD_FILE = 100 * 1024 * 1024;
+/** The quota said to a game, a byte count in a dword. */
+const CLOUD_QUOTA = 1024 * 1024 * 1024;
+/** k_ERemoteStoragePlatformAll. */
+const PLATFORM_ALL = 0xffffffff;
+const MAX_PATH = 260;
+
 const CHECK_FILE_SIGNATURE = 705;
 const NO_SIGNATURES_FOR_THIS_APP = 3;
 
@@ -241,6 +260,24 @@ export function createSteamclientFunctions(host){
         }
         writeBool(failed, !ok);
         return ok ? 1 : 0;
+    };
+
+    /** Where the client keeps the account's cloud files for the app on the machine. */
+    const remoteFolder = ()=>`${STEAM_PATH}\\userdata\\${Number(steamId & 0xffffffffn)}`
+        + `\\${appId()}\\remote`;
+    /**
+     * A cloud file's path by the name the game gives it, folders in it
+     * written with either slash.
+     *
+     * @param {number} name
+     */
+    const remotePath = name=>`${remoteFolder()}\\${host.readCString(name >>> 0, MAX_PATH)
+        .replace(/\//g, '\\')}`;
+    const remoteFiles = ()=>host.files?.list(remoteFolder()) ?? [];
+    /** @param {number} name */
+    const remoteEntry = name=>{
+        const wanted = host.readCString(name >>> 0, MAX_PATH).replace(/\\/g, '/').toLowerCase();
+        return remoteFiles().find(entry=>entry.name.toLowerCase() === wanted) ?? null;
     };
 
     /** Every behaviour by method name, shared by every version that has it. */
@@ -425,6 +462,66 @@ export function createSteamclientFunctions(host){
         SetAchievement: ()=>1,
         ClearAchievement: ()=>1,
         GetNumAchievements: ()=>0,
+
+        // ISteamRemoteStorage: the account's cloud files for the app, where the
+        // client keeps them on the machine (`remoteFolder`), so they stay with
+        // the bottle as the program's other files do. Nothing is synchronised
+        // with Steam's servers.
+        FileWrite: ([name, data, size])=>{
+            if (!host.files || (size | 0) < 0 || (size | 0) > MAX_CLOUD_FILE
+                || ((data >>> 0) === 0 && (size | 0) > 0))
+            {
+                return 0;
+            }
+            return host.files.write(remotePath(name), host.readMemory(data >>> 0, size | 0))
+                ? 1 : 0;
+        },
+        FileRead: ([name, data, size])=>{
+            const bytes = host.files?.read(remotePath(name));
+            if (!bytes || (data >>> 0) === 0 || (size | 0) <= 0)
+            {
+                return 0;
+            }
+            const read = bytes.subarray(0, Math.min(bytes.length, size | 0));
+            host.writeMemory(data >>> 0, read);
+            return read.length;
+        },
+        FileExists: ([name])=>(remoteEntry(name) ? 1 : 0),
+        FilePersisted: ([name])=>(remoteEntry(name) ? 1 : 0),
+        GetFileSize: ([name])=>remoteEntry(name)?.size ?? 0,
+        GetFileTimestamp: ([name])=>BigInt(Math.floor((remoteEntry(name)?.modified ?? 0) / 1000)),
+        FileDelete: ([name])=>(host.files?.remove(remotePath(name)) ? 1 : 0),
+        // Forgetting leaves the file on the machine, which is all there is here.
+        FileForget: ([name])=>(remoteEntry(name) ? 1 : 0),
+        GetFileCount: ()=>remoteFiles().length,
+        GetFileNameAndSize: ([index, sizeAt])=>{
+            const entry = remoteFiles()[index | 0];
+            if ((sizeAt >>> 0) !== 0)
+            {
+                writeDword(sizeAt, entry?.size ?? 0);
+            }
+            return entry ? constant(entry.name) : constant('');
+        },
+        // Two counts the quota is said in: dwords before the interface's
+        // thirteenth version, eight bytes since.
+        GetQuota: ([totalAt, availableAt], version)=>{
+            const used = remoteFiles().reduce((sum, entry)=>sum + entry.size, 0);
+            const wide = Number(version.match(/(\d+)$/)?.[1] ?? 0) >= 13;
+            for (const [at, value] of [[totalAt, CLOUD_QUOTA], [availableAt,
+                Math.max(0, CLOUD_QUOTA - used)]])
+            {
+                if ((at >>> 0) !== 0)
+                {
+                    const bytes = new Uint8Array(wide ? 8 : 4);
+                    new DataView(bytes.buffer).setUint32(0, value, true);
+                    host.writeMemory(at >>> 0, bytes);
+                }
+            }
+            return 1;
+        },
+        IsCloudEnabledForAccount: ()=>(host.files ? 1 : 0),
+        IsCloudEnabledForApp: ()=>(host.files ? 1 : 0),
+        GetSyncPlatforms: ([name])=>(remoteEntry(name) ? PLATFORM_ALL : 0),
     };
 
     const objects = createSteamObjects({ register: host.register, allocate: host.allocate,
@@ -531,6 +628,84 @@ export function createSteamclientFunctions(host){
         Breakpad_SteamSetSteamID: cdecl(8, undefined, [0]),
         Breakpad_SteamWriteMiniDumpSetComment: cdecl(4),
         Breakpad_SteamWriteMiniDumpUsingExceptionInfoWithBuildId: cdecl(8),
+    };
+}
+
+/**
+ * The guest's files as the client's cloud reaches them, through the
+ * filesystem layer's own calls.
+ *
+ * @param {any} filesystem  The filesystem layer's API.
+ * @returns {SteamFiles}
+ */
+export function steamFilesOf(filesystem){
+    /** @param {string} path */
+    const folderOf = path=>path.slice(0, path.lastIndexOf('\\'));
+    /** @param {string} folder */
+    const makeFolders = folder=>{
+        const parts = folder.split('\\');
+        for (let count = 2; count <= parts.length; count++)
+        {
+            const prefix = parts.slice(0, count).join('\\');
+            if (!filesystem.stat(prefix))
+            {
+                filesystem.createDirectory(prefix);
+            }
+        }
+    };
+    /**
+     * @param {string} folder @param {string} prefix
+     * @returns {{ name: string, size: number, modified: number }[]}
+     */
+    const below = (folder, prefix)=>filesystem.list(folder).flatMap((/** @type {any} */ entry)=>
+        (entry.directory
+            ? below(`${folder}\\${entry.name}`, `${prefix}${entry.name}/`)
+            : [{ name: `${prefix}${entry.name}`, size: entry.size, modified: entry.modified }]));
+    return {
+        read: path=>{
+            if (!filesystem.stat(path) || filesystem.stat(path).directory)
+            {
+                return null;
+            }
+            const handle = filesystem.open(path);
+            try
+            {
+                return filesystem.read(handle, filesystem.size(handle));
+            }
+            finally
+            {
+                filesystem.close(handle);
+            }
+        },
+        write: (path, bytes)=>{
+            try
+            {
+                makeFolders(folderOf(path));
+                const handle = filesystem.open(path,
+                    { write: true, disposition: filesystem.Disposition.CREATE_ALWAYS });
+                try
+                {
+                    return filesystem.write(handle, bytes) === bytes.length;
+                }
+                finally
+                {
+                    filesystem.close(handle);
+                }
+            }
+            catch {
+                // A folder of that name, or no room: the write is refused.
+                return false;
+            }
+        },
+        remove: path=>{
+            if (!filesystem.stat(path))
+            {
+                return false;
+            }
+            filesystem.deleteFile(path);
+            return true;
+        },
+        list: folder=>(filesystem.stat(folder)?.directory ? below(folder, '') : []),
     };
 }
 
