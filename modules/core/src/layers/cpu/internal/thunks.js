@@ -37,7 +37,7 @@ export const FORWARD_SAVE = 32;
  * in more slots than the region holds would write stubs into whatever follows
  * it, which is the initial stack.
  */
-export const DEFAULT_THUNK_CAPACITY = 16384 * STUB_SIZE;
+export const DEFAULT_THUNK_CAPACITY = 32768 * STUB_SIZE;
 
 /**
  * Emits one stub.
