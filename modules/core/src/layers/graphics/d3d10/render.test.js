@@ -2364,3 +2364,36 @@ test('a back buffer a canvas cannot take is shown through one it can: sRGB bytes
         }
     }
 });
+
+test('a stencil test over a depth buffer with no stencil is left out of the pipeline', async()=>{
+    // Direct3D ignores the stencil operations on D16; WebGPU refused the
+    // pipeline, and with it every frame the program drew.
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Format: DXGI_FORMAT.D16_UNORM, BindFlags: D3D10_BIND.DEPTH_STENCIL,
+    }, null, depth), S_OK);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateDepthStencilView(depth.resource, null, view), S_OK);
+    device.OMSetRenderTargets([h.renderTargetView], view.view);
+    /** @type {{ state?: any }} */
+    const stencilled = {};
+    assert.equal(device.CreateDepthStencilState({
+        DepthEnable: true, DepthWriteMask: 1, DepthFunc: 2, StencilEnable: true,
+        StencilReadMask: 0xff, StencilWriteMask: 0xff,
+        FrontFace: { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 3, StencilFunc: 8 },
+        BackFace: { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 3, StencilFunc: 8 },
+    }, stencilled), S_OK);
+    device.OMSetDepthStencilState(stencilled.state, 1);
+    device.Draw(3, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    const { depthStencil } = h.gpu.of('createRenderPipeline')[0].descriptor;
+    assert.equal(depthStencil.format, 'depth16unorm');
+    assert.equal(depthStencil.stencilFront, undefined, 'passOp replace on depth16unorm before');
+    assert.equal(depthStencil.depthCompare, 'less');
+});

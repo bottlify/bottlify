@@ -1769,7 +1769,9 @@ export function createRenderer(services){
                         depthWriteEnabled: depthEnabled
                             && depthStencil.DepthWriteMask === D3D10_DEPTH_WRITE_MASK.ALL,
                         depthCompare: depthEnabled ? COMPARE[depthStencil.DepthFunc] : 'always',
-                        ...(depthStencil.StencilEnable
+                        // A format with no stencil makes the stencil test a
+                        // no-op in Direct3D; WebGPU refuses the pipeline instead.
+                        ...(depthStencil.StencilEnable && state.depthFormat.includes('stencil')
                             ? {
                                 stencilFront: face('FrontFace'),
                                 stencilBack: face('BackFace'),
