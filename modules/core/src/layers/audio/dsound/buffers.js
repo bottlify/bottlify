@@ -359,7 +359,7 @@ export function createSoundBuffer({
         // would read as round to its start.
         if (!looping)
         {
-            return device.voice.position;
+            return /** @type {NonNullable<typeof device>} */ (device).voice.position;
         }
         // Counted from the start in laps and bytes, so a report a burst ahead
         // is ahead however much of a short buffer it covers: read round the
@@ -379,7 +379,7 @@ export function createSoundBuffer({
 
     /** The device's cursor in bytes from the start: its laps and its position read as one. */
     const deviceBytes = ()=>{
-        const { voice } = device;
+        const { voice } = /** @type {NonNullable<typeof device>} */ (device);
         let laps = voice.laps;
         let position = voice.position;
         if (laps !== voice.laps)
@@ -397,7 +397,7 @@ export function createSoundBuffer({
      * @param {number} position
      */
     const placeDevice = position=>{
-        device.voice.position = position;
+        /** @type {NonNullable<typeof device>} */ (device).voice.position = position;
         lastReported = deviceBytes();
         reportedAt = now();
         shownDevice = lastReported;
