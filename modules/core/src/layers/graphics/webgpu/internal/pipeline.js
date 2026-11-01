@@ -495,21 +495,28 @@ export function pipelineDescriptor(state, layout){
             ...(state.stencil ? stencilDescriptor(state.stencil) : {}),
         };
 
+    /**
+     * One blend component. D3DBLENDOP_MIN and MAX take the source and the
+     * destination as they are, whatever the factors say, and WebGPU refuses a
+     * min or max whose factors are not both one: the program's factors would
+     * make the pipeline invalid and its draws vanish.
+     *
+     * @param {number} src @param {number} dst @param {number} op
+     */
+    const component = (src, dst, op)=>{
+        const operation = lookUp(BLEND_OP, op, 'blend operation');
+        const minMax = operation === 'min' || operation === 'max';
+        return {
+            srcFactor: minMax ? 'one' : lookUp(BLEND_FACTOR, src, 'source blend'),
+            dstFactor: minMax ? 'one' : lookUp(BLEND_FACTOR, dst, 'destination blend'),
+            operation,
+        };
+    };
     const blend = state.blend
         ? {
-            color: {
-                srcFactor: lookUp(BLEND_FACTOR, state.srcBlend, 'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.destBlend, 'destination blend'),
-                operation: lookUp(BLEND_OP, state.blendOp, 'blend operation'),
-            },
-            alpha: {
-                srcFactor: lookUp(BLEND_FACTOR, state.srcBlendAlpha ?? state.srcBlend,
-                    'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.destBlendAlpha ?? state.destBlend,
-                    'destination blend'),
-                operation: lookUp(BLEND_OP, state.blendOpAlpha ?? state.blendOp,
-                    'blend operation'),
-            },
+            color: component(state.srcBlend, state.destBlend, state.blendOp),
+            alpha: component(state.srcBlendAlpha ?? state.srcBlend,
+                state.destBlendAlpha ?? state.destBlend, state.blendOpAlpha ?? state.blendOp),
         }
         : undefined;
 

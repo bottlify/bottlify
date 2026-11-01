@@ -265,6 +265,19 @@ test('a separate alpha blend is folded into the key and blends alpha on its own'
     assert.deepEqual(shared?.alpha, shared?.color, 'without it alpha blends as colour does');
 });
 
+test('MIN and MAX blend with factors of one, whatever the program set', ()=>{
+    // D3DBLENDOP_MIN/MAX ignore SRCBLEND and DESTBLEND; WebGPU requires both
+    // factors to be one for min and max, or the pipeline is invalid.
+    const blend = pipelineDescriptor({ ...baseState(), blend: true, srcBlend: 5, destBlend: 6,
+        blendOp: 5, blendOpAlpha: 4, srcBlendAlpha: 2, destBlendAlpha: 2 }, null).target.blend;
+    assert.deepEqual(blend?.color, { srcFactor: 'one', dstFactor: 'one', operation: 'max' });
+    assert.deepEqual(blend?.alpha, { srcFactor: 'one', dstFactor: 'one', operation: 'min' });
+    const added = pipelineDescriptor({ ...baseState(), blend: true, srcBlend: 5, destBlend: 6,
+        blendOp: 1 }, null).target.blend;
+    assert.deepEqual(added?.color, { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha',
+        operation: 'add' }, 'other operations keep the program\'s factors');
+});
+
 test('a blend factor with no counterpart is refused, not approximated', ()=>{
     // BOTHSRCALPHA sets the source and destination factor from one value: it is
     // a pair, not a factor. Approximating it draws a wrong picture silently.
