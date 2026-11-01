@@ -365,6 +365,9 @@ function visit(value, bind){
  *     bytes of guest memory just copied into the record, by what copied them
  * @property {(ms: number, polls: number, asks: number, beside: boolean, sentAfter: number,
  *     trip: number, events: OcclusionEvent[]) => void} [counted]
+ * @property {(ms: number, polls: number, asks: number, events: OcclusionEvent[]) => void}
+ *     [abandoned]  an occlusion query was issued again before it was told: how long it
+ *     had been waited for, its polls and asks
  *     an occlusion query was answered: this long after its END was issued, after
  *     this many polls of the program's and asks of the played side; `beside`
  *     when its count came with another query's answer; `sentAfter` how long
@@ -1720,6 +1723,15 @@ export function createRecording(options){
             if (name === 'Issue')
             {
                 // A new measurement: what was counted before is not its count.
+                // One issued again before it was told is a count the program
+                // gave up waiting for, which the counts told never show.
+                const untold = timed ? waiting.get(target) : undefined;
+                if (untold)
+                {
+                    untold.events.push(['abandoned', sharedNow(), untold.polls]);
+                    transport.abandoned?.(performance.now() - untold.at, untold.polls,
+                        untold.asks, untold.events);
+                }
                 counts.delete(target);
                 waiting.delete(target);
                 if (/** @type {any} */ (target).type === D3DQUERYTYPE_OCCLUSION

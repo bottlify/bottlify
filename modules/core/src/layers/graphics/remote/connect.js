@@ -573,10 +573,20 @@ export function connectGraphicsWorker(options){
                         asks: sum.asks + one.asks, beside: sum.beside + one.beside,
                         sentAfterMs: sum.sentAfterMs + one.sentAfterMs,
                         tripMs: sum.tripMs + one.tripMs, trace: [...sum.trace, ...one.trace],
-                        under: one.under.map((count, index)=>count + (sum.under[index] ?? 0)) };
+                        under: one.under.map((count, index)=>count + (sum.under[index] ?? 0)),
+                        abandoned: one.abandoned ? {
+                            count: sum.abandoned.count + one.abandoned.count,
+                            ms: sum.abandoned.ms + one.abandoned.ms,
+                            maxMs: Math.max(sum.abandoned.maxMs, one.abandoned.maxMs),
+                            polls: sum.abandoned.polls + one.abandoned.polls,
+                            asks: sum.abandoned.asks + one.abandoned.asks,
+                            trace: [...sum.abandoned.trace, ...one.abandoned.trace],
+                        } : sum.abandoned };
                 }, { counted: 0, ms: 0, maxMs: 0, polls: 0, asks: 0, beside: 0, sentAfterMs: 0,
                     tripMs: 0, trace: /** @type {any[]} */ ([]),
-                    under: /** @type {number[]} */ ([]) }),
+                    under: /** @type {number[]} */ ([]),
+                    abandoned: { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
+                        trace: /** @type {any[]} */ ([]) } }),
                 sent: senders.reduce((sum, sender)=>{
                     const { batches, bytes, ms } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,
