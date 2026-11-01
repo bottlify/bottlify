@@ -93,8 +93,9 @@ export const DECLTYPE_ATTRIBUTE = Object.freeze({
  * Each element is read from its own stream, a vertex buffer per stream at the
  * stride that stream is bound with. An input the declaration has no element
  * for is left out, and the shader reads it as the default vertex; an element
- * of a type WebGPU cannot deliver, or past its stream's stride, refuses the
- * whole layout.
+ * past its stream's stride is read from the vertex's last bytes
+ * (decisions.md); an element of a type WebGPU cannot deliver, or wider than
+ * its stream's stride, refuses the whole layout.
  *
  * @param {readonly VertexElement[]} elements
  * @param {readonly DeclaredInput[]} wanted
@@ -126,12 +127,17 @@ export function vertexLayoutOf(elements, wanted, stride, strideOf = ()=>0){
         {
             streams.set(element.Stream, own);
         }
-        if (own !== 0 && element.Offset + attribute.bytes > own)
+        if (own !== 0 && attribute.bytes > own)
         {
             return { layout: null, error: `element past the stride of ${own}` };
         }
+        // One declaration bound over vertices of several strides -- a mesh
+        // with fewer coordinate sets than the declaration names -- reads what
+        // lies past its vertex from the vertex's last bytes: its last set.
+        const offset = own !== 0 && element.Offset + attribute.bytes > own
+            ? own - attribute.bytes : element.Offset;
         layout.attributes.push({
-            shaderLocation: input.location, offset: element.Offset, format: attribute.format,
+            shaderLocation: input.location, offset, format: attribute.format,
             ...(element.Stream === 0 ? {} : { stream: element.Stream }),
         });
         layout.shapes.set(input.register, {

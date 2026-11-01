@@ -4306,6 +4306,10 @@ export function createRenderer(options){
             // drawn black under right shaders is a constant, or a vertex
             // element, that reached them as zero.
             + (held ? ` layout=${describeDeclaration(held.declaration)}`
+                // Each stream's stride beside it: an element past its stream's
+                // stride is read from the vertex's last bytes.
+                + ` strides=${Array.from({ length: PROGRAM_STREAMS }, (_, stream)=>
+                    strideOf(model, stream)).join('/')}`
                 + ` vc=${describeConstants(held.vertex, held.vertexConstants.floats)}`
                 + ` pc=${describeConstants(held.pixel, held.pixelConstants.floats)}` : ''));
     };
@@ -7752,6 +7756,8 @@ export function createRenderer(options){
                     + `${command.clearStencil !== undefined ? 's' : ''}`;
                 opened = ` pass=s${resourceId(target)}`
                     + `${command.targetId ? `=${command.targetId}` : ''}`
+                    + `${command.depth ? `+z${resourceId(command.depth)}` : ''}`
+                    + `@${command.target?.width}x${command.target?.height}`
                     + `${cleared ? `/clear:${cleared}` : ''}`;
                 continue;
             }
@@ -7780,7 +7786,15 @@ export function createRenderer(options){
                 : '';
             lines.push(`#${lines.length} vs=${command.state?.vertexShader ?? '?'}`
                 + ` ps=${command.state?.pixelShader ?? '?'}`
-                + `${offscreen ? ' !backbuffer' : ''}${opened} [${bound}]${blocks}`);
+                + `${offscreen ? ' !backbuffer' : ''}${opened} [${bound}]`
+                // As the device's own line says them: a layer that shows
+                // through another is a depth test or a blend, which no other
+                // field of a recorded draw shows.
+                + `${command.state ? ` cw=${command.state.colorWrite}`
+                    + ` blend=${command.state.blend
+                        ? `${command.state.srcBlend},${command.state.destBlend}` : '-'}`
+                    + ` z=${command.state.depthTest ? command.state.depthFunc : '-'}`
+                    + `/${command.state.depthWrite ? 1 : 0}` : ''}${blocks}`);
             opened = '';
         }
         let at = lines.length;

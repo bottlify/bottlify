@@ -1294,3 +1294,13 @@ draws nothing it would have written there that frame: Call of Duty 4 skins its a
 such a buffer, and with the buffer's storages taken in turn they showed in two frames of four.
 Levels inside a texture's chain stay packed, as in Wine, so only a chain's first level is on the
 boundary. *2026-10-21.*
+
+**An element past its stream's stride is read from the vertex's last bytes.** A vertex declaration
+may name elements beyond the stride its stream is bound with: one declaration naming four
+coordinate sets and a lightmap's set at offset 24 is bound over meshes of one, two and three sets
+(strides 12, 16 and 20), and the program's shaders read the lightmap's set through it. WebGPU
+refuses such an attribute, and reading the next vertex's bytes there put the lightmap coordinates
+of one vertex at another's diffuse ones: the lightmaps landed off their atlas tiles in streaks. The
+vertex's own last bytes are its last coordinate set, which is where the mesh holds its lightmap
+coordinates, and what a set the mesh lacks repeats. An element wider than the stride is refused
+still. *2026-11-01.*

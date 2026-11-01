@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { constantBlocks, keptBlocks } from './programmable.js';
+import { constantBlocks, keptBlocks, vertexLayoutOf } from './programmable.js';
+import { vertexBuffersOf } from './pipeline.js';
 import { createUniformArena } from '../../d3d8/render.js';
 import { CONSTANT_FILE, createConstantFile } from '../../d3d9/shader.js';
 
@@ -66,4 +67,35 @@ test('another file of the same stage is copied from, not the first one\'s views'
         [1, 1, 1, 1, 2, 2, 2, 2]);
     assert.deepEqual([...constantBlocks(other, 2, arena.take, kept, arena.serial)[0]],
         [3, 3, 3, 3, 4, 4, 4, 4]);
+});
+
+test('an element past its stream\'s stride reads the vertex\'s last bytes', ()=>{
+    // One declaration naming four coordinate sets and a lightmap's at 24, bound
+    // over a mesh of two sets at a stride of 16: the sets past the vertex, and
+    // the lightmap's, read its last set (at 12), not the next vertex's first.
+    const elements = [
+        { Stream: 0, Offset: 0, Type: 2, Usage: 0, UsageIndex: 0 },
+        { Stream: 1, Offset: 8, Type: 15, Usage: 5, UsageIndex: 0 },
+        { Stream: 1, Offset: 16, Type: 15, Usage: 5, UsageIndex: 2 },
+        { Stream: 1, Offset: 24, Type: 15, Usage: 10, UsageIndex: 0 },
+    ];
+    const wanted = [
+        { location: 0, usage: 0, usageIndex: 0, register: 0 },
+        { location: 1, usage: 5, usageIndex: 0, register: 1 },
+        { location: 2, usage: 5, usageIndex: 2, register: 2 },
+        { location: 3, usage: 10, usageIndex: 0, register: 3 },
+    ];
+    const { layout, error } = vertexLayoutOf(elements, wanted, 12, ()=>16);
+    assert.equal(error, null);
+    assert.deepEqual(layout?.streams, [{ stream: 1, stride: 16 }]);
+    const buffers = vertexBuffersOf(12, layout?.attributes ?? [], layout?.streams);
+    assert.deepEqual(buffers.map(buffer=>
+        buffer.attributes.map(one=>[one.shaderLocation, one.offset])),
+    [[[0, 0]], [[1, 8], [2, 12], [3, 12]]]);
+});
+
+test('an element wider than its stream\'s stride is still refused', ()=>{
+    const { error } = vertexLayoutOf([{ Stream: 1, Offset: 0, Type: 3, Usage: 5, UsageIndex: 0 }],
+        [{ location: 0, usage: 5, usageIndex: 0, register: 0 }], 12, ()=>8);
+    assert.equal(error, 'element past the stride of 8');
 });
