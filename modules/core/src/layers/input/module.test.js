@@ -337,7 +337,7 @@ test('a viewport the screen\'s size is the screen, whatever window has a client 
 
     assert.equal(viewportOrigin(1024, 768, { width: 1024, height: 768 }, [game, dialog]), null,
         'was (3, 22) before');
+    const own = { x: 114, y: 104 };
     assert.deepEqual(viewportOrigin(800, 600, { width: 1920, height: 1080 },
-        [client(114, 104, 800, 600)]), { x: 114, y: 104 },
-        'a smaller window\'s picture is its own');
+        [client(114, 104, 800, 600)]), own, 'a smaller window\'s picture is its own');
 });
