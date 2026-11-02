@@ -762,6 +762,15 @@ refused -- is a loss, an error said the first time and every 256th with its coun
 `report()` (`divergence(api, detail, 'loss')`). Nothing of either kind goes only into a
 counter. *2026-11-02.*
 
+**A78. A Direct3D 9 event query is done as soon as it is asked.** D3DQUERYTYPE_EVENT answers TRUE
+to the first GetData after its Issue(END), where Windows answers S_FALSE until the GPU has caught
+up. A program polls one to keep from running ahead of the GPU, and a present here already holds
+it to Direct3D's maximum frame latency (`webgpu/internal/latency.js`): a second wait on the GPU
+would cost a frame of round trip to the graphics worker for nothing the program can see. A program
+that reads a result back after the event (a lock of a render target) waits on that read itself.
+Revisit if a program is found that times its work by how long an event stays pending.
+*2026-11-02.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

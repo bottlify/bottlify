@@ -1457,12 +1457,26 @@ export function createDirect3D9Seam(
         fields.writeStruct(address, D3DRASTER_STATUS, rasterStatus(raster));
     };
 
+    /**
+     * A present of part of the back buffer, or into part of the window, shows
+     * the whole of it: said. The dirty region is a hint, and is not.
+     *
+     * @param {number} sourceRect @param {number} destinationRect
+     */
+    const presentRects = (sourceRect, destinationRect)=>{
+        if ((sourceRect >>> 0) !== 0 || (destinationRect >>> 0) !== 0)
+        {
+            divergence?.('Direct3D 9', 'Present with a source or destination rectangle shows'
+                + ' the whole back buffer in the whole window');
+        }
+    };
+
     const swapChainMethods = {
-        // The rectangles and the dirty region are not honoured; the window,
-        // the chain's own or the override, decides whether the display
-        // shows the picture.
+        // The window, the chain's own or the override, decides whether the
+        // display shows the picture.
         /** @param {any} chain @param {number[]} args */
-        Present: (chain, [, , window])=>{
+        Present: (chain, [sourceRect, destinationRect, window])=>{
+            presentRects(sourceRect, destinationRect);
             showScreen(chainOwners.get(chain));
             return pacedPresent(chain.Present(shownIn(chain, window)));
         },
@@ -1837,10 +1851,10 @@ export function createDirect3D9Seam(
             return hr;
         },
 
-        // Present's four arguments are all optional and all ignored: there
-        // are no rectangles to honour, and the window is the browser's.
-        /** @param {any} device */
-        Present: (/** @type {any} */ device)=>{
+        // The window is the browser's; the rectangles are said.
+        /** @param {any} device @param {number[]} args */
+        Present: (/** @type {any} */ device, /** @type {number[]} */ args = [])=>{
+            presentRects(args[0], args[1]);
             showScreen(device);
             // A mode switch resizes the window a fullscreen device presents
             // into, and the program hears WM_SIZE for it after its device
@@ -2996,7 +3010,8 @@ export function createDirect3D9Seam(
         // The flags ask not to wait for the display, which nothing here
         // does, or not to show the frame, which is not honoured.
         /** @param {any} device */
-        PresentEx: (/** @type {any} */ device)=>deviceMethods.Present(device),
+        PresentEx: (/** @type {any} */ device, /** @type {number[]} */ args)=>
+            deviceMethods.Present(device, args),
         /** @param {any} device @param {number[]} args */
         GetGPUThreadPriority: (device, [out])=>{
             if ((out >>> 0) === 0)

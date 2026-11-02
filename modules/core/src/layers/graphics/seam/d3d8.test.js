@@ -2151,6 +2151,9 @@ test('a reset that changes the mode names the window it presents into', ()=>{
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
         'and the frame names the window');
+    assert.equal(h.device(device, 'Present', [0, 0x1000, 0, 0]), D3D_OK);
+    assert.ok(h.divergences.some(line=>/Present with a source or destination rectangle/
+        .test(line)), 'a rectangle not honoured is said');
 });
 
 test('a surface description fills every field, leaving no stack of the caller to be read',

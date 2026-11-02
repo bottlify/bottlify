@@ -578,6 +578,9 @@ test('a zero back buffer size windowed is the window\'s client area, written bac
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, false],
         'and the screen its first frame takes is its window');
     assert.deepEqual(h.divergences, [], 'a window that was measured is not an assumption');
+    assert.equal(h.device(device, 'Present', [0x1000, 0, 0, 0]), D3D_OK);
+    assert.ok(h.divergences.some(line=>/Present with a source or destination rectangle/
+        .test(line)), 'a rectangle not honoured is said');
     h.release(device);
     h.release(root);
 });

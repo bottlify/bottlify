@@ -4645,10 +4645,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /**
          * Two kinds are offered. An event query asks whether the GPU has
-         * caught up, and it has, as far as the program can tell, the moment it
-         * asks. An occlusion query asks how many pixels a set of draws
-         * produced: the GPU's count where there is one. A device that draws
-         * nothing counts none, unless it draws nothing on purpose
+         * caught up, and it has the moment it asks (`roadmap/decisions.md`, A78):
+         * a present already holds the program to its frame latency. An
+         * occlusion query asks how many pixels a set of draws produced: the
+         * GPU's count where there is one. A device that draws nothing counts
+         * none, unless it draws nothing on purpose
          * (`drawsNothing`, the graphics setting `draw: false`): then every
          * pixel of the target, the one number that culls nothing the program
          * would draw on a GPU. Every other kind is the timing family, and is

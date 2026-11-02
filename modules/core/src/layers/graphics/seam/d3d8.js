@@ -688,14 +688,32 @@ export function createDirect3D8Seam(
      */
     const chainWindows = new WeakMap();
 
-    // IDirect3DSwapChain8: a present, whose rectangles and dirty region are
-    // not honoured and whose window decides whether the display shows the
+    /**
+     * A present of part of the back buffer, or into part of the window, shows
+     * the whole of it: said. The dirty region is a hint, and is not.
+     *
+     * @param {number} sourceRect @param {number} destinationRect
+     */
+    const presentRects = (sourceRect, destinationRect)=>{
+        if ((sourceRect >>> 0) !== 0 || (destinationRect >>> 0) !== 0)
+        {
+            divergence?.('Direct3D 8', 'Present with a source or destination rectangle shows'
+                + ' the whole back buffer in the whole window');
+        }
+    };
+
+    // IDirect3DSwapChain8: a present, whose rectangles are said and not
+    // honoured and whose window decides whether the display shows the
     // picture, and the back buffers.
     const swapChainInterfaces = [describeResource(IID_IDirect3DSwapChain8,
         IDIRECT3DSWAPCHAIN8_SLOTS, {
         /** @param {any} chain @param {number[]} args */
-            Present: (chain, [, , override])=>pacedPresent(chain.Present(
-                ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow)),
+            Present: (chain, [sourceRect, destinationRect, override])=>{
+                presentRects(sourceRect, destinationRect);
+                return pacedPresent(chain.Present(
+                    ((override >>> 0) || chainWindows.get(chain) || deviceWindow)
+                        === deviceWindow));
+            },
             /** @param {any} chain @param {number[]} args */
             GetBackBuffer: (chain, [index, type, out])=>{
                 if ((out >>> 0) === 0)
@@ -1369,11 +1387,10 @@ export function createDirect3D8Seam(
         /** @param {any} device */
         EndScene: (/** @type {any} */ device)=>device.EndScene(),
 
-        // Present's four arguments are all optional and all ignored by the
-        // object behind this: it has no rectangles to honour until something
-        // draws.
-        /** @param {any} device */
-        Present: (/** @type {any} */ device)=>{
+        // Present's rectangles are said; the window is the browser's.
+        /** @param {any} device @param {number[]} args */
+        Present: (/** @type {any} */ device, /** @type {number[]} */ args = [])=>{
+            presentRects(args[0], args[1]);
             showScreen(device);
             return pacedPresent(device.Present());
         },
