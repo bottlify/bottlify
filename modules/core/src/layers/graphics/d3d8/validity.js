@@ -298,7 +298,7 @@ const COMBINED_SOURCES = new Set([
 ]);
 
 /** What a stage may minify and magnify by. @type {Set<number>} */
-const SAMPLED_FILTERS = new Set([D3DTEXF.POINT, D3DTEXF.LINEAR]);
+const SAMPLED_FILTERS = new Set([D3DTEXF.POINT, D3DTEXF.LINEAR, D3DTEXF.ANISOTROPIC]);
 /** What may pick its mip level. @type {Set<number>} */
 const MIP_FILTERS = new Set([D3DTEXF.NONE, D3DTEXF.POINT, D3DTEXF.LINEAR]);
 
