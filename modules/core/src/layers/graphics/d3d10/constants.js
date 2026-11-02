@@ -603,6 +603,9 @@ export const D3D11_UAV_DIMENSION = Object.freeze({
 /** A buffer view's flags: raw (byte-addressed), and an append or counter structure. */
 export const D3D11_BUFFER_UAV_FLAG = Object.freeze({ RAW: 1, APPEND: 2, COUNTER: 4 });
 
+/** D3D11_DSV_FLAG: what a depth-stencil view leaves unwritten. */
+export const D3D11_DSV_FLAG = Object.freeze({ READ_ONLY_DEPTH: 1, READ_ONLY_STENCIL: 2 });
+
 /** Direct3D 11's limits past 10's. */
 export const D3D11_LIMITS = Object.freeze({
     VERTEX_INPUT_SLOTS: 32,

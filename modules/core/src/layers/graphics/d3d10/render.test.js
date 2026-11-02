@@ -28,10 +28,11 @@ import {
     D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_CULL_MODE,
     D3D10_DRIVER_TYPE, D3D10_FILL_MODE, D3D10_FILTER, D3D10_MAP,
     D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION,
-    D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_FORMAT, S_FALSE, S_OK,
+    D3D10_TEXTURE_ADDRESS, D3D10_USAGE, D3D11_DSV_FLAG, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_FALSE,
+    S_OK,
 } from './constants.js';
 import { D3D10_ASYNC_GETDATA_DONOTFLUSH } from './queries.js';
-import { D3D10CreateDeviceAndSwapChain } from './device.js';
+import { D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
@@ -1604,6 +1605,93 @@ test('a depth buffer read through a float view is read, as a depth texture', asy
         /var t0: texture_depth_2d;/.test(call.descriptor.code)), 'declared as a depth texture');
     assert.deepEqual(h.gpu.errors, []);
     assert.equal(h.gpu.count('draw'), 1);
+});
+
+test('a depth buffer bound through a read-only view is tested and read in one pass, and never'
+    + ' written', async()=>{
+    // Soft particles and deferred lighting test against the depth they read:
+    // Direct3D 11 binds both through a view with D3D11_DSV_READ_ONLY_*, and the
+    // runtime then leaves the shader's view bound. The read went missing,
+    // unbound as a target's, and WebGPU takes it only in a read-only pass.
+    const gpu = createFakeDevice();
+    /** @type {string[]} */
+    const said = [];
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        presentTo: ()=>{}, now: ()=>0 });
+    /** @type {any} */
+    const out = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out, {
+        backend, createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        createTexture: gpu.device.createTexture,
+        divergence: (api, detail)=>said.push(detail),
+    }), S_OK);
+    const { device, context } = out;
+    /** @param {any} desc @returns {any} */
+    const texture = desc=>{
+        /** @type {{ resource?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 8, Height: 8, ...desc },
+            null, made), S_OK);
+        return made.resource;
+    };
+    const colour = texture({ Format: DXGI_FORMAT.R8G8B8A8_UNORM,
+        BindFlags: D3D10_BIND.RENDER_TARGET });
+    const depth = texture({ Format: DXGI_FORMAT.R24G8_TYPELESS,
+        BindFlags: D3D10_BIND.DEPTH_STENCIL | D3D10_BIND.SHADER_RESOURCE });
+    /** @type {any} */
+    const views = {};
+    assert.equal(device.CreateRenderTargetView(colour, null, views), S_OK);
+    const rtv = views.view;
+    assert.equal(device.CreateDepthStencilView(depth, { Format: DXGI_FORMAT.D24_UNORM_S8_UINT,
+        ViewDimension: 3, Flags: D3D11_DSV_FLAG.READ_ONLY_DEPTH
+            | D3D11_DSV_FLAG.READ_ONLY_STENCIL, MipSlice: 0 }, views), S_OK);
+    const dsv = views.view;
+    assert.equal(device.CreateShaderResourceView(depth, {
+        Format: DXGI_FORMAT.R24_UNORM_X8_TYPELESS, ViewDimension: 4, MostDetailedMip: 0,
+        MipLevels: 1 }, views), S_OK);
+    const srv = views.view;
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 48, Usage: D3D10_USAGE.IMMUTABLE,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    { pSysMem: floatBytes(TRIANGLE.flat()) }, made), S_OK);
+    const vertices = made.resource;
+    assert.equal(device.CreateInputLayout([POSITION_ELEMENT], passThroughVertexShader(), made),
+        S_OK);
+    context.IASetInputLayout(made.layout);
+    assert.equal(device.CreateVertexShader(passThroughVertexShader(), made), S_OK);
+    context.VSSetShader(made.shader);
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)), ld(o(0), r(0), t(0)), ret(),
+        ],
+    }), made), S_OK);
+    context.PSSetShader(made.shader);
+    context.IASetVertexBuffers(0, [vertices], [16], [0]);
+    context.IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY.TRIANGLELIST);
+    context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0,
+        MaxDepth: 1 }]);
+    context.OMSetRenderTargets([rtv], dsv);
+    context.PSSetShaderResources(0, [srv]);
+    /** @type {any} */
+    const bound = {};
+    context.PSGetShaderResources(0, 1, bound);
+    assert.deepEqual(bound.views, [srv], 'left bound beside a read-only depth view');
+    context.Draw(3, 0);
+    context.Flush();
+    await device.idle();
+    const attachment = gpu.of('beginRenderPass')[0].descriptor.depthStencilAttachment;
+    assert.equal(attachment.depthReadOnly, true);
+    assert.equal(attachment.stencilReadOnly, true);
+    assert.equal(attachment.depthLoadOp, undefined);
+    const pipeline = gpu.of('createRenderPipeline').at(-1).descriptor;
+    assert.equal(pipeline.depthStencil.depthWriteEnabled, false);
+    assert.deepEqual(gpu.errors, [], 'the GPU took the frame');
+    assert.equal(gpu.count('draw'), 1);
+    assert.deepEqual(said.filter(detail=>/unbound|set as none|empty/.test(detail)), []);
 });
 
 test('a view of a typeless texture is cast where WebGPU allows it and said otherwise',

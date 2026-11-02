@@ -21,9 +21,27 @@
 
 import {
     D3D10_DEFAULTS, D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY,
-    D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, D3D11_LIMITS,
-    DXGI_FORMAT,
+    D3D11_DSV_FLAG, D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+    D3D11_LIMITS, DXGI_FORMAT,
 } from './constants.js';
+
+/**
+ * Whether a depth view writes nothing: read-only in depth and, where its
+ * format has one, in stencil. Its resource may be read by a shader while it
+ * is bound, as a shadow map or soft particles read the depth they test.
+ *
+ * @param {any} view
+ */
+export function readOnlyDepthView(view){
+    /** @type {{ desc?: any }} */
+    const out = {};
+    view.GetDesc?.(out);
+    const flags = out.desc?.Flags ?? 0;
+    const stencil = out.desc?.Format === DXGI_FORMAT.D24_UNORM_S8_UINT
+        || out.desc?.Format === DXGI_FORMAT.D32_FLOAT_S8X24_UINT;
+    return (flags & D3D11_DSV_FLAG.READ_ONLY_DEPTH) !== 0
+        && (!stencil || (flags & D3D11_DSV_FLAG.READ_ONLY_STENCIL) !== 0);
+}
 
 /** @param {number} count @returns {any[]} */
 export function emptySlots(count){
@@ -230,7 +248,9 @@ export function createPipelineState(services){
      *
      * @returns {Set<any>}
      */
-    const targetResources = ()=>new Set([...pipeline.renderTargets, pipeline.depthStencilView]
+    const targetResources = ()=>new Set([...pipeline.renderTargets,
+        pipeline.depthStencilView && !readOnlyDepthView(pipeline.depthStencilView)
+            ? pipeline.depthStencilView : null]
         .filter(Boolean).map(view=>view.resource).filter(Boolean));
 
     /** Every stage's shader resources over a target, unbound, and said once. */

@@ -427,8 +427,23 @@ export function createFakeDevice(options = {}){
         // reaches one of them uses it both ways in one synchronisation scope.
         // WebGPU tells them apart by subresource, so a pass that draws a level
         // from the one above it is not this.
-        const written = [...(descriptor.colorAttachments ?? []), descriptor.depthStencilAttachment]
+        // A depth attachment read-only in every aspect it has is read, not
+        // written, and may be sampled in the same pass.
+        const depthAttachment = descriptor.depthStencilAttachment;
+        const depthFormat = depthAttachment?.view?.texture?.format ?? '';
+        const depthReadOnly = depthAttachment?.depthReadOnly === true;
+        const stencilReadOnly = depthAttachment?.stencilReadOnly === true;
+        const readOnly = depthReadOnly && (stencilReadOnly || !STENCIL_FORMATS.has(depthFormat));
+        const written = [...(descriptor.colorAttachments ?? []), readOnly ? null : depthAttachment]
             .map(attachment=>attachment?.view).filter(view=>view?.texture);
+        // A read-only aspect takes no load or store operation.
+        if (((depthReadOnly && (depthAttachment.depthLoadOp || depthAttachment.depthStoreOp))
+            || (stencilReadOnly && (depthAttachment.stencilLoadOp
+                || depthAttachment.stencilStoreOp))) && !encoder.invalid)
+        {
+            encoder.invalid = true;
+            refuse('A read-only depth or stencil aspect is given a load or store operation.');
+        }
         // Every attachment one size, as WebGPU refuses the frame otherwise.
         const sizes = written.filter(view=>view.texture.descriptor?.size).map(view=>{
             const { width, height } = extentOf(view.texture.descriptor.size);
@@ -481,6 +496,17 @@ export function createFakeDevice(options = {}){
         const vertexSlots = new Set();
         pass.setPipeline = (/** @type {any} */ pipeline)=>{
             bound = pipeline;
+            const stencil = pipeline?.descriptor?.depthStencil;
+            const writesStencil = (stencil?.stencilWriteMask ?? 0xffffffff) !== 0
+                && [stencil?.stencilFront, stencil?.stencilBack].some(face=>face
+                    && [face.failOp, face.depthFailOp, face.passOp]
+                        .some(op=>op !== undefined && op !== 'keep'));
+            if (((depthReadOnly && stencil?.depthWriteEnabled)
+                || (stencilReadOnly && writesStencil)) && !encoder.invalid)
+            {
+                encoder.invalid = true;
+                refuse('The pipeline writes a depth or stencil aspect the pass has read-only.');
+            }
             record('setPipeline', { pipeline });
         };
         // WebGPU's rule a renderer has to keep: every vertex buffer slot the

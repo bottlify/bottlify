@@ -34,7 +34,7 @@ import {
     D3D10_FILTER_COMPARISON_BIT, D3D10_INPUT_CLASSIFICATION, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
     D3D10_APPEND_ALIGNED_ELEMENT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BUFFER_UAV_FLAG,
-    D3D11_RESOURCE_MISC, DXGI_FORMAT, FORMAT_INFO, formatPitch,
+    D3D11_DSV_FLAG, D3D11_RESOURCE_MISC, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
 import { clearElement, clearTexel } from './uavclear.js';
 import { SO_NO_RASTERIZED_STREAM } from './streamout.js';
@@ -1618,7 +1618,7 @@ export function createRenderer(services){
             idOf(state.vertexShader), idOf(state.pixelShader), idOf(state.inputLayout),
             idOf(state.blendState), idOf(state.depthStencilState), idOf(state.rasterizerState),
             state.topology, state.targetFormats.join(','), state.targetWriteMasks.join(','),
-            state.depthFormat ?? '-',
+            state.depthFormat ?? '-', state.depthReadOnly ?? 0,
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
         ].join('|');
@@ -1811,8 +1811,11 @@ export function createRenderer(services){
                 ? {
                     depthStencil: {
                         format: state.depthFormat,
+                        // A pass over a read-only aspect takes no pipeline
+                        // that writes it; Direct3D writes nothing there either.
                         depthWriteEnabled: depthEnabled
-                            && depthStencil.DepthWriteMask === D3D10_DEPTH_WRITE_MASK.ALL,
+                            && depthStencil.DepthWriteMask === D3D10_DEPTH_WRITE_MASK.ALL
+                            && (state.depthReadOnly & D3D11_DSV_FLAG.READ_ONLY_DEPTH) === 0,
                         depthCompare: depthEnabled ? COMPARE[depthStencil.DepthFunc] : 'always',
                         // A format with no stencil makes the stencil test a
                         // no-op in Direct3D; WebGPU refuses the pipeline instead.
@@ -1821,7 +1824,9 @@ export function createRenderer(services){
                                 stencilFront: face('FrontFace'),
                                 stencilBack: face('BackFace'),
                                 stencilReadMask: depthStencil.StencilReadMask,
-                                stencilWriteMask: depthStencil.StencilWriteMask,
+                                stencilWriteMask: (state.depthReadOnly
+                                    & D3D11_DSV_FLAG.READ_ONLY_STENCIL) !== 0
+                                    ? 0 : depthStencil.StencilWriteMask,
                             }
                             : {}),
                         depthBias: rasterizer.DepthBias,
@@ -1920,6 +1925,9 @@ export function createRenderer(services){
             sampleCount: backing.sampleCount,
             // What a draw writes, when the format keeps less than the texture does.
             writeMask: desc.Format === DXGI_FORMAT.A8_UNORM ? 0x8 : 0xf,
+            // A depth view's D3D11_DSV_FLAG bits: the aspects it leaves unwritten.
+            readOnly: (desc.Flags ?? 0)
+                & (D3D11_DSV_FLAG.READ_ONLY_DEPTH | D3D11_DSV_FLAG.READ_ONLY_STENCIL),
             surface: {
                 texture: backing.texture,
                 view: backing.texture.createView({
@@ -3480,6 +3488,7 @@ export function createRenderer(services){
                 targetFormats: colour.map(entry=>(entry ? entry.format : null)),
                 targetWriteMasks: colour.map(entry=>(entry ? entry.writeMask : 0)),
                 depthFormat: depth ? depth.format : null,
+                depthReadOnly: depth ? depth.readOnly : 0,
                 sampleMask: pipeline.sampleMask,
                 sampleCount: sizing.sampleCount,
                 strides: pipeline.vertexStrides.slice(),
@@ -3919,6 +3928,17 @@ export function createRenderer(services){
             {
                 pendingClears.delete(depth.key);
             }
+            // A read-only aspect is attached as one, which WebGPU gives no
+            // load or store: a clear still waiting for it cannot be made.
+            const readOnlyDepth = depth ? (depth.readOnly & D3D11_DSV_FLAG.READ_ONLY_DEPTH) !== 0
+                : false;
+            const readOnlyStencil = depth
+                ? (depth.readOnly & D3D11_DSV_FLAG.READ_ONLY_STENCIL) !== 0 : false;
+            if (depthClear && ((readOnlyDepth && (depthClear.flags & D3D10_CLEAR.DEPTH))
+                || (readOnlyStencil && (depthClear.flags & D3D10_CLEAR.STENCIL))))
+            {
+                lose('a clear of a depth buffer drawn through a read-only view is not made');
+            }
             pass = frame.beginPass({
                 targets: targetList.map(entry=>(entry ? entry.surface : null)),
                 clearValues,
@@ -3928,12 +3948,16 @@ export function createRenderer(services){
                     ? {
                         depthStencilAttachment: {
                             view: depth.surface.view,
-                            depthLoadOp: depthClear && (depthClear.flags & D3D10_CLEAR.DEPTH)
-                                ? 'clear'
-                                : 'load',
-                            depthStoreOp: 'store',
-                            depthClearValue: depthClear ? depthClear.depth : 1,
-                            ...(depth.format.endsWith('stencil8')
+                            ...(readOnlyDepth ? { depthReadOnly: true } : {
+                                depthLoadOp: depthClear && (depthClear.flags & D3D10_CLEAR.DEPTH)
+                                    ? 'clear'
+                                    : 'load',
+                                depthStoreOp: 'store',
+                                depthClearValue: depthClear ? depthClear.depth : 1,
+                            }),
+                            ...(depth.format.endsWith('stencil8') && readOnlyStencil
+                                ? { stencilReadOnly: true } : {}),
+                            ...(depth.format.endsWith('stencil8') && !readOnlyStencil
                                 ? {
                                     stencilLoadOp: depthClear
                                         && (depthClear.flags & D3D10_CLEAR.STENCIL)
