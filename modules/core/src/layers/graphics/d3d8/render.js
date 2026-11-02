@@ -2576,23 +2576,38 @@ const ZBIAS_STEP = -0.000005;
  * polygon nearer. A decal laid on a wall leans on it to stay in front:
  * without it the two take turns as the camera moves.
  *
+ * Each ZBIAS step is at least one of the format's steps: WebGPU's bias is a
+ * whole count of them, and 0.000005 of a 16-bit depth is a third of one, so
+ * on D16 a ZBIAS of 1 rounded to no bias at all.
+ *
  * @param {any} model @param {string | undefined} depthFormat
  * @param {string | undefined} topology
+ * @param {(detail: string) => void} [diverge]
  * @returns {{ depthBias?: number, depthBiasSlopeScale?: number }}
  */
-function depthBiasOf(model, depthFormat, topology){
-    // WebGPU allows a bias only on triangles.
-    if (depthFormat === undefined || (topology !== undefined && topology !== 'triangle-list'
-        && !topology.startsWith('triangle-strip') && topology !== POINT_QUADS))
+function depthBiasOf(model, depthFormat, topology, diverge){
+    if (depthFormat === undefined)
     {
         return {};
     }
-    const zbias = model.renderStates.get(D3DRS.ZBIAS) ?? 0;
-    const units = dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)
-        + (zbias & 0xff) * ZBIAS_STEP;
+    const zbias = (model.renderStates.get(D3DRS.ZBIAS) ?? 0) & 0xff;
+    const units = dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0);
     const slope = dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0);
+    // WebGPU allows a bias only on triangles.
+    if (topology !== undefined && topology !== 'triangle-list'
+        && !topology.startsWith('triangle-strip') && topology !== POINT_QUADS)
+    {
+        if (zbias !== 0 || (Number.isFinite(units) && units !== 0)
+            || (Number.isFinite(slope) && slope !== 0))
+        {
+            diverge?.('a depth bias on lines or points is not made: WebGPU biases triangles'
+                + ' alone');
+        }
+        return {};
+    }
     const steps = depthFormat === 'depth16unorm' ? 65536 : 16777216;
-    const depthBias = Number.isFinite(units) ? Math.round(units * steps) : 0;
+    const depthBias = (Number.isFinite(units) ? Math.round(units * steps) : 0)
+        - zbias * Math.max(1, Math.round(-ZBIAS_STEP * steps));
     const depthBiasSlopeScale = Number.isFinite(slope) ? slope : 0;
     return {
         ...depthBias !== 0 ? { depthBias } : {},
@@ -2661,7 +2676,7 @@ export function pipelineStateOf(model, shape){
         depthTest,
         depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
         depthFunc: rs('ZFUNC'),
-        ...depthBiasOf(model, shape.depthFormat, shape.topology),
+        ...depthBiasOf(model, shape.depthFormat, shape.topology, shape.diverge),
         cullMode: rs('CULLMODE'),
         blend: rs('ALPHABLENDENABLE') !== 0,
         srcBlend,

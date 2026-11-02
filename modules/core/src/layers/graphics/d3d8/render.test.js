@@ -2908,6 +2908,15 @@ test('a depth bias reaches the pipeline: Direct3D 9 in depth units, Direct3D 8 i
         assert.equal(pipelineStateOf(eight, shape).depthBias, Math.round(2 * -0.000005 * 16777216));
         assert.equal(pipelineStateOf(eight, { ...shape, depthFormat: undefined }).depthBias,
             undefined, 'no depth, no bias');
+        // 0.000005 of a 16-bit depth is a third of its step: ZBIAS 1 was no bias.
+        const one = { ...model, renderStates: new Map([[D3DRS.ZBIAS, 1], [D3DRS.CULLMODE, 1]]) };
+        assert.equal(pipelineStateOf(one, { ...shape, depthFormat: 'depth16unorm' }).depthBias,
+            -1, 'each step at least one of the format');
+        /** @type {string[]} */
+        const said = [];
+        pipelineStateOf(one, { ...shape, topology: 'line-list',
+            diverge: detail=>said.push(detail) });
+        assert.ok(said.some(detail=>/depth bias on lines/.test(detail)), 'said on lines');
     });
 
 test('the run counts what lighting it was actually asked for', async()=>{
