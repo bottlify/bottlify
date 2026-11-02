@@ -638,8 +638,10 @@ test('the material, clip status and clip planes read back as copies', ()=>{
  * A device over the recording GPU, with guest memory the test owns.
  *
  * @param {{ writable?: boolean, driverRules?: 'legacy' | 'current',
- *     divergence?: (api: string, detail: string, severity?: 'loss') => any }} [options]
- *     Whether the device may write guest memory, the renderer's rules, where it diverges.
+ *     divergence?: (api: string, detail: string, severity?: 'loss') => any,
+ *     reuse?: boolean }} [options]
+ *     Whether the device may write guest memory, the renderer's rules, where it diverges, and
+ *     whether the heap hands a freed address out again.
  */
 function recorded(options = {}){
     const gpu = createFakeDevice();
@@ -655,12 +657,19 @@ function recorded(options = {}){
     const claimed = [];
     /** @type {number[]} */
     const released = [];
+    /** @type {number[]} addresses given back, handed out again first */
+    const given = [];
     const root = ddrawObject({
         allocate: bytes=>{
+            if (options.reuse && given.length > 0)
+            {
+                return /** @type {number} */ (given.pop());
+            }
             const at = next;
             next += bytes + 0xfff & ~0xfff;
             return at;
         },
+        free: address=>given.push(address),
     });
     const d3d = createDirect3D7(root, {
         backend,
@@ -800,6 +809,46 @@ test('recorded: a depth fill of the device\'s depth buffer clears the depth it d
         assert.equal(root.release('IDirectDraw7'), 0);
         assert.ok(root.destroyed);
     });
+
+test('recorded: a target made where a depth buffer\'s pixels were is a colour target, not the'
+    + ' depth buffer', async()=>{
+    // Wine's ddraw7 test_depth_readback and test_viewport: a depth buffer
+    // drawn against and released, then a colour target the heap put at its
+    // address. The device kept its renderer's view of a surface by that
+    // address, and drew into the colour target as the depth buffer it had
+    // been -- a pipeline WebGPU refused -- and a lock of it read the depth
+    // texture back, which threw.
+    const f = recorded({ writable: true, reuse: true });
+    const { device, gpu, root, target } = f;
+    const depth = surface(root, { caps: DDSCAPS_ZBUFFER, width: 16, height: 16,
+        zBufferBitDepth: 16 });
+    const colour = surface(root, { width: 16, height: 16 });
+    assert.equal(colour.addAttachedSurface(depth), D3D_OK);
+    assert.equal(device.SetRenderTarget(colour), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0, 1, 0), D3D_OK);
+    assert.equal(device.SetRenderTarget(target), D3D_OK);
+    assert.equal(colour.deleteAttachedSurface(depth), D3D_OK);
+    const address = depth.buffer;
+    assert.equal(depth.release(), 0);
+    const next = surface(root, { width: 16, height: 16 });
+    assert.equal(next.buffer, address, 'the heap gave the depth buffer\'s pixels out again');
+    assert.equal(device.SetRenderTarget(next), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 1, 0), D3D_OK);
+    device.present(target.buffer);
+    await device.idle();
+    const made = gpu.of('createTexture').filter((/** @type {any} */ call)=>
+        call.descriptor.size.width === 16).map((/** @type {any} */ call)=>call.descriptor.format);
+    assert.equal(made.filter(format=>!format.startsWith('depth')).length, 2,
+        'a colour texture for each colour target');
+    assert.deepEqual(gpu.errors, []);
+
+    assert.equal(device.SetRenderTarget(target), D3D_OK);
+    assert.equal(next.release(), 0);
+    assert.equal(colour.release(), 0);
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+});
 
 test('recorded: a colour fill of the device\'s target clears it on the GPU, no read-back first',
     async()=>{

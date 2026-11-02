@@ -834,8 +834,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         }
         return {
             readBack: surface=>renderer.readSurface(surface).then(
-                (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                    writePixels(surface, pixels.data, write);
+                (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                    if (pixels)
+                    {
+                        writePixels(surface, pixels.data, write);
+                    }
                 }),
             written: surface=>renderer.markDirty(surface),
         };

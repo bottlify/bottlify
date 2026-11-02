@@ -958,8 +958,11 @@ export function createDirect3D7(ddraw, services = {}){
                 return null;
             }
             return renderer.readSurface(adapter).then(
-                (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                    writePixels(adapter, pixels.data, write);
+                (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                    if (pixels)
+                    {
+                        writePixels(adapter, pixels.data, write);
+                    }
                 });
         };
         /** @param {any} surface */
@@ -970,7 +973,22 @@ export function createDirect3D7(ddraw, services = {}){
                 renderer.markDirty(adapter);
             }
         };
-        const stopWatchingPixels = ddraw.watchPixels?.({ readBack, written }) ?? (()=>{});
+        /**
+         * A surface's pixels given back drop the adapter kept by their address:
+         * a surface made later at the same address -- a colour target where a
+         * depth buffer was -- is a new target, not the old one's format and
+         * picture.
+         *
+         * @param {number} buffer
+         */
+        const freed = buffer=>{
+            if (targetAdapters.delete(buffer))
+            {
+                services.presenter?.release(buffer);
+            }
+        };
+        const stopWatchingPixels = ddraw.watchPixels?.({ readBack, written, freed })
+            ?? (()=>{});
 
         /**
          * A colour fill of a surface this device renders into is a clear of

@@ -346,6 +346,9 @@ export function depthFormatForDepth(bitDepth){
  *           holds; null for a surface it keeps no copy of.
  * @property {(surface: Surface) => void} written
  *           The guest bytes are newer than the watcher's copy now.
+ * @property {(buffer: number) => void} [freed]
+ *           The pixels at this address are given back: a copy kept by the
+ *           address is of nothing now, and another surface may get it next.
  */
 
 /** Entries per channel of a DDGAMMARAMP, and its three channels end to end. */
@@ -1057,6 +1060,10 @@ export function createDirectDraw(options = {}){
             }
             // Whatever the surface holds now: a flip moves buffers between a
             // chain's members, and each member gives back the one it ends with.
+            for (const watcher of pixelWatchers)
+            {
+                watcher.freed?.(buffer);
+            }
             free(buffer);
         });
 

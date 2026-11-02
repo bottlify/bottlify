@@ -10220,11 +10220,22 @@ export function createRenderer(options){
          * asked for exactly that. Rows are four bytes a pixel in the
          * surface's GPU format, blue first.
          *
+         * A depth buffer is not read back: WebGPU copies no depth with
+         * stencil out of a texture, and a copy of the others would need its
+         * own conversion into the program's depth format. The read is lost,
+         * said, and answers null; the guest's bytes stay as they were.
+         *
          * @param {any} surface a d3d8 surface
-         * @returns {Promise<{ width: number, height: number, data: Uint8Array }>}
+         * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
          */
         readSurface(surface){
             const gpu = surfaceFor(surface);
+            if (gpu?.format && /^(depth|stencil)/.test(gpu.format))
+            {
+                failure(`a read back of a ${gpu.format} depth buffer into the program's memory`
+                    + ' (a lock) is not made: the program reads the bytes it last wrote');
+                return Promise.resolve(null);
+            }
             const recorded = ensureFrame();
             recording = null;
             recorded.cut = backend.markPresent();

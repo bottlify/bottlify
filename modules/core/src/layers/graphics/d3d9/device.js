@@ -988,8 +988,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         }
         return {
             readBack: surface=>renderer.readSurface(surface).then(
-                (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                    writePixels(surface, pixels.data, write);
+                (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                    if (pixels)
+                    {
+                        writePixels(surface, pixels.data, write);
+                    }
                 }),
             written: surface=>renderer.markDirty?.(surface),
         };
@@ -4328,8 +4331,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 const write = services.writeMemory;
                 return renderer.readSurface(target).then(
-                    (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                        writePixels(destination, pixels.data, write);
+                    (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                        if (pixels)
+                        {
+                            writePixels(destination, pixels.data, write);
+                        }
                         return D3D_OK;
                     });
             }
