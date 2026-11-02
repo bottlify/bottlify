@@ -252,6 +252,27 @@ function oracleProcessVertices(request){
     const colorVertex = state.renderState(D3DRS.COLORVERTEX) !== 0;
     const sceneAmbient = colourOf(state.renderState(D3DRS.AMBIENT));
     const material = state.material;
+    /** A state's dword as the float it holds. @param {number} which */
+    const floatState = which=>new Float32Array(Uint32Array.of(state.renderState(which)).buffer)[0];
+    // Vertex fog, which the specular alpha carries when it is on (Wine's
+    // test_fog_process_vertices): by depth, or distance with range fog.
+    const fogMode = state.renderState(D3DRS.FOGENABLE) !== 0
+        ? state.renderState(D3DRS.FOGVERTEXMODE) : 0;
+    /** @param {number[]} at a camera-space position @returns {number} */
+    const fogAt = at=>{
+        const d = state.renderState(D3DRS.RANGEFOGENABLE) !== 0
+            ? Math.sqrt(at[0] * at[0] + at[1] * at[1] + at[2] * at[2]) : at[2];
+        const start = floatState(D3DRS.FOGSTART);
+        const end = floatState(D3DRS.FOGEND);
+        const density = floatState(D3DRS.FOGDENSITY);
+        /** @param {number} f */
+        const clamped = f=>Math.min(1, Math.max(0, f));
+        if (fogMode === 3)
+        {
+            return clamped(end === start ? (d < end ? 1 : 0) : (end - d) / (end - start));
+        }
+        return clamped(fogMode === 1 ? Math.exp(-density * d) : Math.exp(-((density * d) ** 2)));
+    };
 
     let lastRhw = 0;
     for (let k = 0; k < count; k++)
@@ -360,7 +381,8 @@ function oracleProcessVertices(request){
             {
                 const high = channels.map((channel, index)=>cs[channel] * specular[index]);
                 writeDword(vertexAt + destSpecular.offset,
-                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2], a: 0 }) : 0);
+                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2],
+                        a: fogMode >= 1 && fogMode <= 3 ? fogAt(camera) : cs.a }) : 0);
             }
         }
         else if (copying)
@@ -486,6 +508,13 @@ function deviceState(random){
         [D3DRS.AMBIENTMATERIALSOURCE]: Math.floor(random() * 3),
         [D3DRS.SPECULARMATERIALSOURCE]: Math.floor(random() * 3),
         [D3DRS.EMISSIVEMATERIALSOURCE]: Math.floor(random() * 3),
+        // Vertex fog over every mode and range, the start, end and density as floats.
+        [D3DRS.FOGENABLE]: random() < 0.5 ? 1 : 0,
+        [D3DRS.FOGVERTEXMODE]: Math.floor(random() * 5),
+        [D3DRS.RANGEFOGENABLE]: random() < 0.5 ? 1 : 0,
+        [D3DRS.FOGSTART]: floatBits(random() * 4 - 1),
+        [D3DRS.FOGEND]: floatBits(random() < 0.1 ? 0 : random() * 8),
+        [D3DRS.FOGDENSITY]: floatBits(random() * 2),
     };
     const lights = Array.from({ length: Math.floor(random() * 4) }, ()=>({
         Type: [D3DLIGHTTYPE.POINT, D3DLIGHTTYPE.SPOT, D3DLIGHTTYPE.DIRECTIONAL][
@@ -507,6 +536,11 @@ function deviceState(random){
         material: { Diffuse: colour(random), Ambient: colour(random), Specular: colour(random),
             Emissive: colour(random), Power: random() * 20 },
     };
+}
+
+/** @param {number} value @returns {number} the float's bits */
+function floatBits(value){
+    return new Uint32Array(Float32Array.of(value).buffer)[0];
 }
 
 test('ProcessVertices writes what the vertex-at-a-time implementation wrote, byte for byte', ()=>{
