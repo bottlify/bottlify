@@ -60,9 +60,22 @@ import {
 import {
     CLASS_E_NOAGGREGATION, DDSCAPS_TEXTURE, DDSD_CAPS, DDSD_PIXELFORMAT,
 } from '../ddraw/constants.js';
-import { createLegacyDirect3D, createTextureHandles } from '../d3d7/legacy.js';
+import { clipVolumeMatrix, createLegacyDirect3D, createTextureHandles } from '../d3d7/legacy.js';
 import { loadTexture } from '../d3d7/load.js';
 import { createExecuteBuffer, executeBuffer } from '../d3d7/execute.js';
+
+/** D3DTRANSFORMDATA's size, which TransformVertices checks its dwSize against. */
+const D3DTRANSFORMDATA_SIZE = 0x34;
+/** D3DTRANSFORM_CLIPPED and D3DTRANSFORM_UNCLIPPED. */
+const D3DTRANSFORM_CLIPPED = 1;
+const D3DTRANSFORM_UNCLIPPED = 2;
+/** The planes a D3DHVERTEX says cut its point. */
+const D3DCLIP_LEFT = 0x1;
+const D3DCLIP_RIGHT = 0x2;
+const D3DCLIP_TOP = 0x4;
+const D3DCLIP_BOTTOM = 0x8;
+const D3DCLIP_FRONT = 0x10;
+const D3DCLIP_BACK = 0x20;
 
 /** What an enumeration callback answers to stop. */
 const D3DENUMRET_CANCEL = 0;
@@ -654,6 +667,80 @@ export function createLegacyDirect3DSeam(
                 fields.writeU32(out >>> 0, pointerTo(found, IID_IDirect3DLight));
             }
             return hr;
+        },
+
+        /**
+         * Each point through world, view, projection and the clip volume onto
+         * the viewport's rectangle (Wine's ddraw1.c test_transform_vertices).
+         * Clipped, a D3DHVERTEX says which planes cut it, with the point
+         * before the clip volume's scale; a point cut is left at its clip
+         * coordinates, and the offscreen word is the AND of every point's.
+         *
+         * @param {any} viewport @param {number[]} args
+         */
+        TransformVertices: (viewport, [count, pointer, flags, offscreen])=>{
+            const at = pointer >>> 0;
+            if (at === 0 || fields.readU32(at) !== D3DTRANSFORMDATA_SIZE
+                || (flags & (D3DTRANSFORM_CLIPPED | D3DTRANSFORM_UNCLIPPED)) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const { hr, matrix: m, data: v } = viewport.transformMatrix();
+            if (hr !== D3D_OK || !m || !v)
+            {
+                return hr;
+            }
+            const input = fields.readU32(at + 4);
+            const inSize = fields.readU32(at + 8);
+            const output = fields.readU32(at + 12);
+            const outSize = fields.readU32(at + 16);
+            const homogeneous = fields.readU32(at + 20);
+            const clipped = (flags & D3DTRANSFORM_CLIPPED) !== 0;
+            const clip = clipVolumeMatrix(v);
+            let all = clipped ? 0xffffffff : 0;
+            for (let k = 0; k < (count >>> 0); k++)
+            {
+                const from = input + k * inSize;
+                const [px, py, pz] = [0, 4, 8].map(offset=>fields.readF32(from + offset));
+                /** @param {number} column */
+                const row = column=>px * m[column] + py * m[4 + column] + pz * m[8 + column]
+                    + m[12 + column];
+                const [x, y, z, w] = [row(0), row(1), row(2), row(3)];
+                const to = output + k * outSize;
+                if (clipped)
+                {
+                    const planes = (x > w ? D3DCLIP_RIGHT : 0) | (x < -w ? D3DCLIP_LEFT : 0)
+                        | (y > w ? D3DCLIP_TOP : 0) | (y < -w ? D3DCLIP_BOTTOM : 0)
+                        | (z < 0 ? D3DCLIP_FRONT : 0) | (z > w ? D3DCLIP_BACK : 0);
+                    const h = homogeneous + k * 16;
+                    fields.writeU32(h, planes);
+                    fields.writeF32(h + 4, (x - clip[12] * w) / clip[0]);
+                    fields.writeF32(h + 8, (y - clip[13] * w) / clip[5]);
+                    fields.writeF32(h + 12, (z - clip[14] * w) / clip[10]);
+                    all = (all & planes) >>> 0;
+                    if (planes !== 0)
+                    {
+                        [x, y, z, w].forEach((value, index)=>
+                            fields.writeF32(to + 4 * index, value));
+                        continue;
+                    }
+                }
+                const rhw = 1 / w;
+                fields.writeF32(to, (x * rhw + 1) * v.width * 0.5 + v.x);
+                fields.writeF32(to + 4, (-y * rhw + 1) * v.height * 0.5 + v.y);
+                fields.writeF32(to + 8, z * rhw);
+                fields.writeF32(to + 12, rhw);
+                // The four dwords after the point are carried as they are.
+                for (let word = 0; word < 4; word++)
+                {
+                    fields.writeU32(to + 16 + 4 * word, fields.readU32(from + 16 + 4 * word));
+                }
+            }
+            if ((offscreen >>> 0) !== 0)
+            {
+                fields.writeU32(offscreen >>> 0, all);
+            }
+            return D3D_OK;
         },
 
         /** @param {any} viewport @param {number[]} args */

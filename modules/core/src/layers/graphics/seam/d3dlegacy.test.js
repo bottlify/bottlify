@@ -1490,3 +1490,112 @@ test('Execute runs the instructions through its viewport, and draws nothing past
         h.release(ddraw);
         h.assertAllReleased();
     });
+
+test('TransformVertices carries points onto the viewport, and says which planes cut them',
+    ()=>{
+        // Wine's ddraw1.c test_transform_vertices, its numbers as Windows gave them.
+        const h = seamed();
+        const ddraw = h.create4();
+        const { device, target } = h.createDevice(ddraw, 320, 320);
+        h.device(device, 'GetDirect3D', [0x4500]);
+        const d3d = h.box.memory.readU32(0x4500);
+        const viewport = h.make(d3d, 'CreateViewport');
+        assert.equal(h.device(device, 'AddViewport', [viewport]), D3D_OK);
+        const vp = 0x6000;
+        /** @param {number} x @param {number} y @param {number} w @param {number} hh @param {number[]} floats */
+        const setViewport = (x, y, w, hh, floats)=>{
+            h.box.memory.writeU32(vp, D3DVIEWPORT.SIZE);
+            [x, y, w, hh].forEach((value, index)=>h.box.memory.writeU32(vp + 4 + 4 * index, value));
+            h.box.putFloats(vp + D3DVIEWPORT.dvScaleX, floats);
+            assert.equal(h.viewport(viewport, 'SetViewport', [vp]), D3D_OK);
+        };
+        const input = 0x7000;
+        const output = 0x7400;
+        const homogeneous = 0x7800;
+        const data = 0x7c00;
+        const offscreen = 0x7d00;
+        /** @param {number[][]} points  x, y, z, then five dwords */
+        const put = points=>points.forEach((point, k)=>{
+            h.box.putFloats(input + k * 36, point.slice(0, 4));
+            point.slice(4).forEach((word, i)=>h.box.memory.writeU32(input + k * 36 + 16 + 4 * i,
+                word >>> 0));
+        });
+        /** @param {number} count @param {number} flags */
+        const transform = (count, flags)=>{
+            [0x34, input, 36, output, 40, homogeneous].forEach((value, index)=>
+                h.box.memory.writeU32(data + 4 * index, value));
+            h.box.memory.writeU32(offscreen, 0xdeadbeef);
+            assert.equal(h.viewport(viewport, 'TransformVertices', [count, data, flags,
+                offscreen]), D3D_OK);
+            return h.box.memory.readU32(offscreen);
+        };
+        /** @param {number} k */
+        const out = k=>h.box.floatsAt(output + k * 40, 4);
+        const near = (/** @type {number[]} */ got, /** @type {number[]} */ want)=>
+            assert.ok(got.every((value, i)=>Math.abs(value - want[i]) < 1e-3),
+                `${got} against ${want}`);
+        const UNCLIPPED = 2;
+        const CLIPPED = 1;
+
+        put([[0, 0, 0, 0, 1, 2, 3, 4, 5], [1, 1, 1, 8, 6, 7, 8, 9, 10],
+            [-1, -1, -1, 4, 11, 12, 13, 14, 15], [0.5, 0.5, 0.5, 2, 16, 17, 18, 19, 20],
+            [-0.5, -0.5, -0.5, 1, ~1, ~2, ~3, ~4, ~5], [-0.5, -0.5, 0, 0, ~6, ~7, ~8, ~9, ~0]]);
+        for (let k = 0; k < 6; k++)
+        {
+            h.box.memory.writeU32(output + k * 40 + 32, 0xdeadbeef);
+        }
+        setViewport(0, 0, 256, 256, [1, 1, 256, 256, 0, 1]);
+        assert.equal(transform(6, UNCLIPPED), 0, 'nothing is offscreen unclipped');
+        [[128, 128, 0, 1], [129, 127, 1, 1], [127, 129, -1, 1], [128.5, 127.5, 0.5, 1],
+            [127.5, 128.5, -0.5, 1], [127.5, 128.5, 0, 1]].forEach((want, k)=>near(out(k), want));
+        assert.deepEqual([16, 20, 24, 28, 32].map(at=>h.box.memory.readU32(output + 40 + at)),
+            [6, 7, 8, 9, 0xdeadbeef], 'four dwords carried, the rest left alone');
+
+        setViewport(0, 0, 256, 256, [5, 5, 256, 256, -25, 60]);
+        transform(6, UNCLIPPED);
+        near(out(1), [133, 123, 1, 1]);
+        near(out(3), [130.5, 125.5, 0.5, 1]);
+        setViewport(10, 20, 256, 256, [5, 5, 256, 256, -25, 60]);
+        transform(6, UNCLIPPED);
+        near(out(0), [138, 148, 0, 1]);
+        near(out(2), [133, 153, -1, 1]);
+
+        assert.equal(transform(6, CLIPPED), 0);
+        /** @param {number} k */
+        const hv = k=>[h.box.memory.readU32(homogeneous + k * 16),
+            ...h.box.floatsAt(homogeneous + k * 16 + 4, 3)];
+        assert.deepEqual(hv(2)[0], 0x10, 'behind the front plane');
+        near(hv(2).slice(1), [-1, -1, -1]);
+        assert.deepEqual(hv(1), [0, 1, 1, 1]);
+
+        put([[25.59, 25.59, 1, 0, 1, 2, 3, 4, 5], [25.61, 25.61, 1.01, 0, 1, 2, 3, 4, 5],
+            [-25.59, -25.59, 0, 0, 1, 2, 3, 4, 5], [-25.61, -25.61, -0.01, 0, 1, 2, 3, 4, 5]]);
+        transform(4, CLIPPED);
+        assert.deepEqual([0, 1, 2, 3].map(k=>hv(k)[0]), [0, 0x2 | 0x20 | 0x4, 0, 0x1 | 0x8 | 0x10]);
+        // Wine's 1000 high on a first-generation device; 300 on this one, y still inside.
+        setViewport(0, 0, 10, 300, [5, 5, 256, 256, -25, 60]);
+        transform(4, CLIPPED);
+        assert.deepEqual([0, 1, 2, 3].map(k=>hv(k)[0]), [0x2, 0x2 | 0x20, 0x1, 0x1 | 0x10]);
+
+        // The offscreen word is the AND of every point's planes.
+        setViewport(0, 0, 5, 5, [10000, 10000, 256, 256, -25, 60]);
+        assert.equal(transform(1, UNCLIPPED), 0);
+        assert.equal(transform(1, CLIPPED), 0x2 | 0x4);
+        assert.equal(transform(2, CLIPPED), 0x2 | 0x4);
+        assert.equal(transform(3, CLIPPED), 0);
+
+        h.box.memory.writeU32(data, 0x30);
+        assert.equal(h.viewport(viewport, 'TransformVertices', [1, data, CLIPPED, offscreen]),
+            DDERR_INVALIDPARAMS >>> 0, 'a structure of another size');
+        h.box.memory.writeU32(data, 0x34);
+        assert.equal(h.viewport(viewport, 'TransformVertices', [1, data, 0, offscreen]),
+            DDERR_INVALIDPARAMS >>> 0, 'no clipping flag');
+
+        assert.equal(h.device(device, 'DeleteViewport', [viewport]), D3D_OK);
+        assert.equal(h.release(viewport), 0);
+        h.release(device);
+        h.release(target);
+        h.release(d3d);
+        h.release(ddraw);
+        h.assertAllReleased();
+    });

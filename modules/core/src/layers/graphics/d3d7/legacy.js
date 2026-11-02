@@ -482,6 +482,24 @@ function createViewport(materialOf){
             };
         },
 
+        /**
+         * What IDirect3DViewport::TransformVertices carries a point through, and
+         * the rectangle it lands in; an error without a device or data.
+         *
+         * @returns {{ hr: number, matrix?: ArrayLike<number>, data?: ViewportData }}
+         */
+        transformMatrix(){
+            if (!device)
+            {
+                return { hr: D3DERR_VIEWPORTHASNODEVICE };
+            }
+            if (!data)
+            {
+                return { hr: D3DERR_VIEWPORTDATANOTSET };
+            }
+            return { hr: D3D_OK, matrix: device.transformOf(data), data };
+        },
+
         /** @returns {{ hr: number, viewport?: ViewportData }} */
         getViewport2(){
             return data ? { hr: D3D_OK, viewport: { ...data } }
@@ -1152,6 +1170,26 @@ function createLegacyDevice(inner, version, legacy){
             {
                 applyViewport();
             }
+        },
+
+        /**
+         * World, view and projection, and a viewport's clip volume after them:
+         * the matrix TransformVertices carries a point through.
+         *
+         * @param {ViewportData} data
+         * @returns {ArrayLike<number>}
+         */
+        transformOf(data){
+            /** @param {number} type */
+            const held = type=>{
+                /** @type {{ matrix?: ArrayLike<number> }} */
+                const out = {};
+                inner.GetTransform(type, out);
+                return out.matrix ?? IDENTITY;
+            };
+            return multiplyMatrices(multiplyMatrices(multiplyMatrices(
+                held(D3DTRANSFORMSTATE.WORLD), held(D3DTRANSFORMSTATE.VIEW)), projection),
+            clipVolumeMatrix(data));
         },
 
         /**
