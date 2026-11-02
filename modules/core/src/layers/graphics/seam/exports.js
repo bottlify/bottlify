@@ -133,6 +133,9 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll'];
  *     [deps.windowClientSize]
  *        A window's client area, which is the size a back buffer asked for as
  *        zero by zero takes.
+ * @param {(hwnd: number) => { left: number, top: number, right: number, bottom: number }
+ *     | null} [deps.windowClient]  and where it lies on the screen, which a DirectDraw
+ *     clipper given the window clips to
  * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
  *        The display's gamma ramp, which a DirectDraw primary's sets. The
  *        Direct3D 8 and 9 devices reach it through the objects `graphics`
