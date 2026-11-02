@@ -745,6 +745,23 @@ expands, culls or routes them, so it is not drawn at all; the renderer counts it
 way, its declaration checked as Windows checks it; one made of a vertex shader's bytecode, which
 only streams out, is no stage, so its draws are drawn. *2026-10-31.*
 
+**A76. IDirect3DDevice7 keeps the earlier interfaces' texture filter, address and border render
+states and does not apply them.** D3DRENDERSTATE_TEXTUREMAG, TEXTUREMIN, TEXTUREADDRESS,
+TEXTUREADDRESSU and V, and BORDERCOLOR are what Direct3D 3 to 5 set a texture's sampling by; a
+seventh-generation device takes the texture stage states for it. Set on that device, they are
+stored and read back, and draws go by the stage states. Wine applies them there as well; no
+Windows test of either answer was found. Since the call is accepted and not acted on, it is said
+as a divergence. Revisit if a Direct3D 7 program is found that samples by them. *2026-11-02.*
+
+**A77. A draw is not refused for a state the pipeline cannot express; it is drawn as near as it
+can be, or not drawn, and either is said.** A program is told D3D_OK whatever the device then
+does, as a driver tells it. What is accepted and not done in full -- cylindrical wrapping, a
+texture transform of three or four coordinates, a sphere map -- is a divergence, a warning said
+once. What does not happen at all -- a draw, a frame, an upload, a resolve, an object the GPU
+refused -- is a loss, an error said the first time and every 256th with its count, kept in
+`report()` (`divergence(api, detail, 'loss')`). Nothing of either kind goes only into a
+counter. *2026-11-02.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

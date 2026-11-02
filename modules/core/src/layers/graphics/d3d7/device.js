@@ -126,6 +126,14 @@ const FILTER_NUMBERING = Object.freeze({
 /** How many indices the scratch record can carry; a bigger draw grows it. */
 const INDEX_SCRATCH = 0x10000;
 
+/**
+ * The render states of the earlier interfaces that set a texture's filter,
+ * address and border, which IDirect3DDevice7 keeps and does not apply: its
+ * texture stage states are what draws. Wine applies them on this interface
+ * too; no Windows test of either answer was found (decisions.md).
+ */
+const LEGACY_SAMPLER_STATES = new Set([3, 17, 18, 43, 44, 45]);
+
 /** D3DRENDERSTATE_CLIPPLANEENABLE, and the user planes a D3DSTATUS word has bits for. */
 const D3DRENDERSTATE_CLIPPLANEENABLE = 152;
 const USER_CLIP_PLANES = 6;
@@ -1341,6 +1349,14 @@ export function createDirect3D7(ddraw, services = {}){
                 }
                 renderStates.set(state, value >>> 0);
                 record('renderStates', state, value >>> 0);
+                if (LEGACY_SAMPLER_STATES.has(state))
+                {
+                    services.divergence?.('Direct3D 7', 'the texture filter, address and border'
+                        + ' render states of the earlier interfaces (D3DRENDERSTATE_TEXTUREMAG,'
+                        + ' TEXTUREMIN, TEXTUREADDRESS, TEXTUREADDRESSU and V, BORDERCOLOR) are'
+                        + ' kept and not applied on IDirect3DDevice7: its stage states are what'
+                        + ' draws');
+                }
                 return D3D_OK;
             },
 

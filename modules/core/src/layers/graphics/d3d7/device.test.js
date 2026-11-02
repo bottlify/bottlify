@@ -1260,3 +1260,20 @@ test('recorded: a DXT1 texture is drawn; a palettised one is drawn without, said
         assert.equal(target.release(), 0);
         assert.equal(root.release('IDirectDraw7'), 0);
     });
+
+test('the earlier interfaces\' sampler render states are kept on IDirect3DDevice7, and said', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const f = recorded({ divergence: (api, detail)=>said.push(detail) });
+    const { device, target, root } = f;
+    /** @type {{ value?: number }} */
+    const out = {};
+    // D3DRENDERSTATE_TEXTUREADDRESSU, clamp.
+    assert.equal(device.SetRenderState(44, 3), D3D_OK);
+    assert.equal(device.GetRenderState(44, out), D3D_OK);
+    assert.equal(out.value, 3, 'kept');
+    assert.ok(said.some(detail=>/kept and not applied on IDirect3DDevice7/.test(detail)));
+    assert.equal(device.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+});
