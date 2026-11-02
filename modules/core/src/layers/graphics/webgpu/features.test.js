@@ -22,7 +22,10 @@ test('every place a device is made asks through the one list', ()=>{
     // A list written out twice drifted once: the page's device lacked
     // clip-distances, so a draw made there clipped by discard and one made in
     // the graphics worker by the rasteriser.
-    for (const file of ['../remote/worker.js', '../../../host/serve.js'])
+    // The harness's page too: its own list of two drew the Wine tests' 32-bit
+    // float targets at half precision, where the launcher keeps them whole.
+    for (const file of ['../remote/worker.js', '../../../host/serve.js',
+        '../../../../test/page/game/harness.js'])
     {
         const text = readFileSync(new URL(file, import.meta.url), 'utf8');
         assert.match(text, /requestDevice\(\{ requiredFeatures: gpuFeaturesOf\(adapter\),\s+requiredLimits: gpuLimitsOf\(adapter\) \}\)/,

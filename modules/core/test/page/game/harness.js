@@ -28,6 +28,7 @@ import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
 import { gcNudgeOf } from '../../../src/layers/cpu/internal/gc-nudge.js';
 import { DEFAULT_MEMORY_SIZE } from '../../../src/layers/cpu/module.js';
+import { gpuFeaturesOf, gpuLimitsOf } from '../../../src/layers/graphics/webgpu/features.js';
 import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
 import { createInputRoute } from '../../../src/layers/input/route.js';
 import {
@@ -276,9 +277,9 @@ async function openDevice(errors){
     {
         return { available: false, reason: 'no adapter answered requestAdapter' };
     }
-    const features = ['texture-compression-bc', 'depth-clip-control']
-        .filter(feature=>adapter.features.has(feature));
-    const device = await adapter.requestDevice({ requiredFeatures: features });
+    // The product's device, so a run here draws as the launcher's does.
+    const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter),
+        requiredLimits: gpuLimitsOf(adapter) });
     device.addEventListener('uncapturederror', (/** @type {any} */ event)=>{
         errors.push(`gpu:${event.error.message}`);
     });
