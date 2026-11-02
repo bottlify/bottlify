@@ -20,6 +20,9 @@
  *  - float32-filterable and float32-blendable: with both, a 32-bit float
  *    surface keeps its 32 bits; without them it is kept at half precision;
  *  - texture-formats-tier1: the 16-bit normalised formats, among others;
+ *  - rg11b10ufloat-renderable: a target of R11G11B10_FLOAT, the HDR target a
+ *    Direct3D 10 or 11 program draws into (tier1 brings it too, where an
+ *    adapter has that); without either, every frame drawn into one is refused;
  *  - depth32float-stencil8: a 32-bit depth with stencil keeps its 32 bits;
  *    without it it is kept as depth24plus-stencil8;
  *  - indirect-first-instance: an indirect draw whose arguments a shader wrote
@@ -31,6 +34,7 @@
 export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
     'texture-compression-astc', 'depth-clip-control', 'clip-distances', 'float32-filterable',
     'float32-blendable', 'depth32float-stencil8', 'texture-formats-tier1',
+    'rg11b10ufloat-renderable',
     'indirect-first-instance', 'bgra8unorm-storage',
     ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false ? ['timestamp-query'] : [])]);
 

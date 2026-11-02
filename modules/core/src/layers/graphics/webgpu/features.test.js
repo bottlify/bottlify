@@ -28,3 +28,11 @@ test('every place a device is made asks through the one list', ()=>{
             file);
     }
 });
+
+test('a target of R11G11B10_FLOAT is asked for, where the adapter draws into one', ()=>{
+    // Not asked for, every frame drawn into the HDR target a Direct3D 10 or 11
+    // program makes was refused.
+    assert.ok(OPTIONAL_GPU_FEATURES.includes('rg11b10ufloat-renderable'));
+    assert.deepEqual(gpuFeaturesOf({ features: new Set(['rg11b10ufloat-renderable']) }),
+        ['rg11b10ufloat-renderable']);
+});
