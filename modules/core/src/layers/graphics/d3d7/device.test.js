@@ -351,6 +351,14 @@ test('stage zero modulates by default and the stage states stop at D3D7\'s last'
     assert.equal(out.value, D3DTOP.DISABLE);
     assert.equal(device.SetTextureStageState(0, 25, 1), DDERR_INVALIDPARAMS, 'ADDRESSW is D3D8');
     assert.equal(device.GetTextureStageState(0, 25, out), DDERR_INVALIDPARAMS);
+    // D3DTSS_ADDRESS (12) is both directions at once, U's value read back.
+    assert.equal(device.SetTextureStageState(1, 12, 3), D3D_OK, 'ADDRESS sets U and V');
+    assert.equal(device.GetTextureStageState(1, D3DTSS.ADDRESSU, out), D3D_OK);
+    assert.equal(out.value, 3);
+    assert.equal(device.GetTextureStageState(1, D3DTSS.ADDRESSV, out), D3D_OK);
+    assert.equal(out.value, 3);
+    assert.equal(device.GetTextureStageState(1, 12, out), D3D_OK);
+    assert.equal(out.value, 3);
     assert.equal(device.SetTextureStageState(2, D3DTSS.COLOROP, D3DTOP.ADD), D3D_OK);
     assert.equal(device.GetTextureStageState(2, D3DTSS.COLOROP, out), D3D_OK);
     assert.equal(out.value, D3DTOP.ADD);

@@ -39,6 +39,7 @@ import {
     D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK, D3DERR_SCENE_IN_SCENE,
     D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE, D3DRENDERSTATE,
     D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
+    D3DTSS_ADDRESS,
     D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
     DDLOCK_NOOVERWRITE, DDLOCK_READONLY, DEVICE_IDS, transformStateOf,
 } from './constants.js';
@@ -1379,19 +1380,23 @@ export function createDirect3D7(ddraw, services = {}){
 
             /** @param {number} stage @param {number} type @param {number} value */
             SetTextureStageState(stage, type, value){
-                if (stage < 0 || stage >= STAGE_COUNT || type < 1 || type > D3DTSS_MAX
-                    || type === D3DTSS.ADDRESSW - 13)
+                if (stage < 0 || stage >= STAGE_COUNT || type < 1 || type > D3DTSS_MAX)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
                 const states = stageStatesFor(stage);
-                if (!states.has(type))
+                // D3DTSS_ADDRESS sets both directions at once (d3dtypes.h).
+                const types = type === D3DTSS_ADDRESS ? [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV] : [type];
+                if (!types.every(each=>states.has(each)))
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const stored = FILTER_NUMBERING[type]?.stored(value >>> 0) ?? value >>> 0;
-                states.set(type, stored);
-                record('stageStates', (stage << 8) | type, stored);
+                for (const each of types)
+                {
+                    const stored = FILTER_NUMBERING[each]?.stored(value >>> 0) ?? value >>> 0;
+                    states.set(each, stored);
+                    record('stageStates', (stage << 8) | each, stored);
+                }
                 return D3D_OK;
             },
 
@@ -1401,6 +1406,8 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                // Both directions as one: answered with U's.
+                type = type === D3DTSS_ADDRESS ? D3DTSS.ADDRESSU : type;
                 const states = stageStatesFor(stage);
                 if (!states.has(type))
                 {

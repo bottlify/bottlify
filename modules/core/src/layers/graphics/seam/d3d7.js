@@ -40,8 +40,7 @@ import {
 import { DDPF_ALPHAPIXELS, DDPF_RGB } from '../ddraw/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D7_COMMANDS, clippedBy } from '../d3d7/commands.js';
-import { D3DTSS_MAX } from '../d3d7/constants.js';
-import { D3DTSS } from '../d3d8/constants.js';
+import { D3DTSS_ADDRESS, D3DTSS_MAX } from '../d3d7/constants.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import {
     BUFFER, COMMAND, DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VERTEX_BUFFER7,
@@ -55,7 +54,7 @@ import {
  * TEXTURETRANSFORMFLAGS.
  */
 const STAGE_STATE_TYPES_7 = [...createDefaultStageStates(0).keys()]
-    .filter(type=>type >= 1 && type <= D3DTSS_MAX && type !== D3DTSS.ADDRESSW - 13)
+    .filter(type=>type >= 1 && type <= D3DTSS_MAX && type !== D3DTSS_ADDRESS)
     .reduce((mask, type)=>mask | 1 << type, 0) >>> 0;
 
 /**
@@ -450,8 +449,10 @@ export function createDirect3D7Seam(
             ...(legacyShadows.has(shadow) ? { stageStates: true } : {}) }),
         SetTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
         MultiplyTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
+        // D3DTSS_ADDRESS (12) sets U and V, which the block mirrors.
         SetTextureStageState: (shadow, [stage, type])=>shadow.remirror({
-            stageStates: [(stage & 0xffffff) << 8 | type & 0xff] }),
+            stageStates: (type === 12 ? [12, 13, 14] : [type])
+                .map(each=>(stage & 0xffffff) << 8 | each & 0xff) }),
         SetViewport: shadow=>shadow.remirror({ viewport: true }),
         SetRenderTarget: shadow=>shadow.remirror({ viewport: true }),
         ApplyStateBlock: shadow=>shadow.remirror(),

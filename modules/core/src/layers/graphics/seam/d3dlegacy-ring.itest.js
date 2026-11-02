@@ -418,6 +418,12 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
                     // As the seam's host does: a render state the legacy device
                     // answers for may have set stage states under it.
                     remirror(kind, args);
+                    // D3DTSS_ADDRESS (12) set U and V, which the host mirrors too.
+                    if (kind === 'SetTextureStageState' && args[1] === 12)
+                    {
+                        remirror(kind, [args[0], 13]);
+                        remirror(kind, [args[0], 14]);
+                    }
                     if (kind === 'SetRenderState')
                     {
                         remirrorStages();

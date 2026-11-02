@@ -148,6 +148,8 @@ export function transformStateOf(type){
 
 /** The highest texture stage state D3D7 knows: TEXTURETRANSFORMFLAGS. */
 export const D3DTSS_MAX = 24;
+/** D3DTSS_ADDRESS: both ADDRESSU and ADDRESSV at once, a stage state of Direct3D 6 and 7. */
+export const D3DTSS_ADDRESS = 12;
 
 /** D3DDP_* draw flags. Both are hints this layer does not need. */
 export const D3DDP_WAIT = 0x00000001;
