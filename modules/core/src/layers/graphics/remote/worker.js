@@ -81,7 +81,7 @@ import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
 import { playedDirect3D10 } from './d3d10.js';
 import { createDirect3D10 } from '../d3d10/root.js';
-import { gpuFeaturesOf } from '../webgpu/features.js';
+import { gpuFeaturesOf, gpuLimitsOf } from '../webgpu/features.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -419,7 +419,8 @@ export function serveGraphics(scope, deps){
         {
             throw new Error('no GPU adapter answered requestAdapter in the graphics worker');
         }
-        const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter) });
+        const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter),
+            requiredLimits: gpuLimitsOf(adapter) });
         ledger = trackDevice(device);
         device.lost?.then((/** @type {{ reason?: string }} */ info)=>{
             if (info?.reason === 'destroyed')

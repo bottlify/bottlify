@@ -46,3 +46,35 @@ export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
  */
 export const gpuFeaturesOf = adapter=>OPTIONAL_GPU_FEATURES
     .filter(feature=>adapter.features.has(feature));
+
+/**
+ * The limits a device is asked for at the most its adapter has, rather than
+ * WebGPU's defaults: what Direct3D 10 and 11 promise their programs and the
+ * defaults fall short of: textures of 16384 a side, 128 shader resources
+ * and 16 samplers a stage, compute groups of 1024 threads and 32 KiB shared,
+ * eight unordered views, sixteen vertex streams for Direct3D 9; and with
+ * them every limit of the same kind, so a program is refused only where the
+ * hardware under it would refuse it.
+ */
+export const RAISED_GPU_LIMITS = Object.freeze(['maxTextureDimension1D', 'maxTextureDimension2D',
+    'maxTextureDimension3D', 'maxTextureArrayLayers', 'maxBindGroups', 'maxBindingsPerBindGroup',
+    'maxSampledTexturesPerShaderStage', 'maxSamplersPerShaderStage',
+    'maxStorageBuffersPerShaderStage', 'maxStorageTexturesPerShaderStage',
+    'maxUniformBuffersPerShaderStage', 'maxUniformBufferBindingSize',
+    'maxStorageBufferBindingSize', 'maxDynamicUniformBuffersPerPipelineLayout',
+    'maxDynamicStorageBuffersPerPipelineLayout', 'maxVertexBuffers', 'maxVertexAttributes',
+    'maxVertexBufferArrayStride', 'maxInterStageShaderVariables', 'maxColorAttachments',
+    'maxColorAttachmentBytesPerSample', 'maxBufferSize', 'maxComputeWorkgroupStorageSize',
+    'maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupSizeX', 'maxComputeWorkgroupSizeY',
+    'maxComputeWorkgroupSizeZ', 'maxComputeWorkgroupsPerDimension']);
+
+/**
+ * Those limits at what the adapter has, for `requestDevice`'s requiredLimits;
+ * a limit the adapter does not name is left at its default.
+ *
+ * @param {{ limits?: Record<string, number> }} adapter
+ * @returns {Record<string, number>}
+ */
+export const gpuLimitsOf = adapter=>Object.fromEntries(RAISED_GPU_LIMITS
+    .filter(name=>typeof adapter.limits?.[name] === 'number')
+    .map(name=>[name, /** @type {Record<string, number>} */ (adapter.limits)[name]]));
