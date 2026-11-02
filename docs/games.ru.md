@@ -21,6 +21,7 @@
 - Crysis (демо) (+shader model 3)
 - Delta Force: Xtreme (демо)
 - Desperados (демо)
+- Deus Ex: Human Revolution
 - Diablo (демо)
 - Diablo II (демо)
 - Doom 3 (демо)
@@ -48,7 +49,10 @@
 - Need for Speed: Underground 2 (демо)
 - Need for Speed: Most Wanted (демо)
 - Need for Speed: Carbon (демо)
+- Outlast
 - Painkiller (демо)
+- Portal
+- Portal 2
 - Prey (демо)
 - Prince of Persia: Warrior Within (демо)
 - Quake II (демо)
@@ -63,14 +67,17 @@
 - Star Wars: Republic Commando (демо)
 - StarCraft (демо)
 - Stronghold (демо)
+- Super Hexagon
 - Syberia (демо)
 - Syberia II (демо)
 - Titan Quest (демо)
 - Tom Clancy's Splinter Cell: Pandora Tomorrow (демо)
+- Torchlight
 - TRON 2.0 (демо)
 - Unreal Tournament (демо)
 - Warcraft III (демо)
 - Warcraft III: The Frozen Throne
+- World of Goo
 - World of Warcraft: Classic (только через relay)
 - World of Warcraft: The Burning Crusade (только через relay)
 - World of Warcraft: Wrath of the Lich King (только через relay)

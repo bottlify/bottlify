@@ -21,6 +21,7 @@
 - Crysis (demo) (+shader model 3)
 - Delta Force: Xtreme (demo)
 - Desperados (demo)
+- Deus Ex: Human Revolution
 - Diablo (demo)
 - Diablo II (demo)
 - Doom 3 (demo)
@@ -48,7 +49,10 @@
 - Need for Speed: Underground 2 (demo)
 - Need for Speed: Most Wanted (demo)
 - Need for Speed: Carbon (demo)
+- Outlast
 - Painkiller (demo)
+- Portal
+- Portal 2
 - Prey (demo)
 - Prince of Persia: Warrior Within (demo)
 - Quake II (demo)
@@ -63,14 +67,17 @@
 - Star Wars: Republic Commando (demo)
 - StarCraft (demo)
 - Stronghold (demo)
+- Super Hexagon
 - Syberia (demo)
 - Syberia II (demo)
 - Titan Quest (demo)
 - Tom Clancy's Splinter Cell: Pandora Tomorrow (demo)
+- Torchlight
 - TRON 2.0 (demo)
 - Unreal Tournament (demo)
 - Warcraft III (demo)
 - Warcraft III: The Frozen Throne
+- World of Goo
 - World of Warcraft: Classic (relay only)
 - World of Warcraft: The Burning Crusade (relay only)
 - World of Warcraft: Wrath of the Lich King (relay only)
