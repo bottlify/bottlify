@@ -5208,6 +5208,33 @@ export function createRenderer(options){
         }
     };
 
+    /**
+     * Says that a draw asked for cylindrical wrapping (D3DRS_WRAP0..15),
+     * which is accepted and not done: a coordinate is interpolated straight
+     * across, not the short way round, and a mesh that wraps a texture round
+     * itself shows a band where it closes. The reporter deduplicates.
+     *
+     * @param {RenderModel} model
+     */
+    const reportWrap = model=>{
+        if (!divergence)
+        {
+            return;
+        }
+        for (const first of [128, 198])
+        {
+            for (let index = 0; index < 8; index++)
+            {
+                if ((model.renderStates.get(first + index) ?? 0) !== 0)
+                {
+                    divergence('Direct3D', 'cylindrical wrapping (D3DRS_WRAP0..15) is accepted'
+                        + ' and not applied: coordinates are interpolated straight across');
+                    return;
+                }
+            }
+        }
+    };
+
     /** @param {string} reason */
     const skip = reason=>{
         counters.skipped[/** @type {keyof typeof counters.skipped} */ (reason)]++;
@@ -6356,6 +6383,7 @@ export function createRenderer(options){
                     return null;
                 }
                 counters.prepared.built++;
+                reportWrap(model);
                 keepBounded(programPiecesKept, key, pieces, PIECES_KEPT);
             }
             else
@@ -7267,6 +7295,7 @@ export function createRenderer(options){
         };
         const pixel = fixedFragmentStage(state, vertex.outputs, { tableFogOverDepth });
         counters.prepared.built++;
+        reportWrap(model);
         return {
             // What the fragment stage's block carries past the cascade's rows.
             tail: tailOf(state),
@@ -9156,6 +9185,7 @@ export function createRenderer(options){
         const lighting = lightingOf(model, layout);
         reportTextureTransform(model, cascade.stages.length);
         reportCoordGeneration(cascade.stages);
+        reportWrap(model);
         counters.prepared.built++;
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,

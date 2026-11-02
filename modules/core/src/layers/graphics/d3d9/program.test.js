@@ -2211,3 +2211,20 @@ test('a sampler\'s level-of-detail bias reaches the GPU in the draw\'s own regis
     vs.shader.release();
     ps.shader.release();
 });
+
+test('cylindrical wrapping, accepted and not done, is said', async()=>{
+    const h = harness();
+    // D3DRS_WRAP0, wrapping u.
+    assert.equal(h.device.SetRenderState(128, 1), D3D_OK);
+    await h.draw();
+    assert.ok(h.reports.some(detail=>/cylindrical wrapping \(D3DRS_WRAP0\.\.15\)/.test(detail)),
+        JSON.stringify(h.reports));
+    assert.equal(h.gpu.count('draw'), 1, 'and the draw is made');
+    h.device.SetRenderState(128, 0);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
