@@ -1932,6 +1932,29 @@ test('a level 11 device answers support for a format as Wine test_format_support
     assert.ok(/** @type {number} */ (held.support) & BLENDABLE, 'blended at 11.0');
 });
 
+test('a multisampled texture may name the standard or centre pattern for its quality from'
+    + ' level 10.1, as Wine\'s test_standard_pattern makes one', ()=>{
+    /** @param {number} level @param {number} quality */
+    const made = (level, quality)=>{
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: false };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        const hr = out.device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+            Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 4, Quality: quality },
+            Usage: 0, BindFlags: 0x20 | 0x8, CPUAccessFlags: 0, MiscFlags: 0 }, null, texture);
+        texture.resource?.release();
+        out.device.release();
+        return hr;
+    };
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_11_0, 0xffffffff), S_OK, 'the standard pattern');
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_10_1, 0xfffffffe), S_OK, 'the centre pattern');
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_10_0, 0xffffffff), E_INVALIDARG, 'not at 10.0');
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_11_0, 7), E_INVALIDARG,
+        'a level past the ones it has');
+});
+
 test('the compressed, packed and typeless formats report what this device does with them', ()=>{
     // After Wine's d3d10core test_format_support and its display format list.
     const device = createDevice();

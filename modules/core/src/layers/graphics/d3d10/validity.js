@@ -269,6 +269,12 @@ export function resourceAccessResult(usage, bindFlags, cpuAccessFlags, rules = N
 /** @type {CreateRules} */
 export const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_LEVEL.LEVEL_10_0 });
 
+/**
+ * D3D11_CENTER_MULTISAMPLE_PATTERN; D3D11_STANDARD_MULTISAMPLE_PATTERN is the
+ * one above it, 0xffffffff.
+ */
+const MULTISAMPLE_PATTERN_CENTER = 0xfffffffe;
+
 /** The bind flags that only a buffer may carry. */
 export const BUFFER_ONLY_BIND_FLAGS =
     D3D10_BIND.VERTEX_BUFFER | D3D10_BIND.INDEX_BUFFER | D3D10_BIND.CONSTANT_BUFFER;
@@ -569,7 +575,12 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
     if (sample.Count > 1 || sample.Quality > 0)
     {
         const levels = caps.multisampleQualityLevels(desc.Format, sample.Count);
-        if (levels === 0 || sample.Quality >= levels)
+        // From feature level 10.1 a quality may name a fixed pattern instead,
+        // D3D11_STANDARD_MULTISAMPLE_PATTERN or _CENTER_, at any count the
+        // format multisamples at (Wine's test_standard_pattern).
+        const pattern = (sample.Quality >>> 0) >= MULTISAMPLE_PATTERN_CENTER
+            && rules.featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1;
+        if (levels === 0 || (sample.Quality >= levels && !pattern))
         {
             return E_INVALIDARG;
         }
