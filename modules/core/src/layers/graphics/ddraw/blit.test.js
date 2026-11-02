@@ -15,7 +15,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_KEYDEST, DDBLT_KEYSRC,
-    DDBLT_WAIT, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT, DDERR_UNSUPPORTED,
+    DDBLT_WAIT, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DDBLT_ROP, DDBLT_DDFX,
+    DDBLTFX_MIRRORLEFTRIGHT, DDBLTFX_MIRRORUPDOWN, DDERR_NORASTEROPHW, ROP,
 } from './constants.js';
 import { blt, bltFast, readPixel, writePixel } from './blit.js';
 
@@ -395,3 +396,45 @@ test('a fill, a copy and a source-keyed copy with nothing clipped land as the cl
         }
     }
 });
+
+test('a raster operation: BLACKNESS and WHITENESS fill without a source, SRCCOPY copies, '
+    + 'any other is refused', ()=>{
+    const memory = ram();
+    const dest = surface(BASE, 2, 2, 2);
+    number(memory, dest);
+    assert.equal(blt({ memory, dest, flags: DDBLT_ROP, fx: { rop: ROP.WHITENESS } }), 0);
+    assert.deepEqual(grid(memory, dest), [[0xffff, 0xffff], [0xffff, 0xffff]]);
+    assert.equal(blt({ memory, dest, flags: DDBLT_ROP, fx: { rop: ROP.BLACKNESS },
+        destRect: { left: 1, top: 0, right: 2, bottom: 2 } }), 0);
+    assert.deepEqual(grid(memory, dest), [[0xffff, 0], [0xffff, 0]]);
+    const src = surface(BASE + 0x40, 2, 2, 2);
+    number(memory, src);
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx: { rop: ROP.SRCCOPY } }), 0);
+    assert.deepEqual(grid(memory, dest), [[1, 2], [3, 4]]);
+    // SRCINVERT, which nothing here makes.
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx: { rop: 0x00660046 } }),
+        DDERR_NORASTEROPHW);
+    assert.deepEqual(grid(memory, dest), [[1, 2], [3, 4]], 'and nothing is written');
+});
+
+test('the effects a blit makes: mirrored either way or both, stretched too; any other is refused',
+    ()=>{
+        const memory = ram();
+        const src = surface(BASE, 3, 2, 1);
+        number(memory, src);
+        const dest = surface(BASE + 0x40, 3, 2, 1);
+        const mirrored = (/** @type {number} */ ddfx, /** @type {any} */ to = dest)=>{
+            assert.equal(blt({ memory, dest: to, src, flags: DDBLT_DDFX, fx: { ddfx } }), 0);
+            return grid(memory, to);
+        };
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORLEFTRIGHT), [[3, 2, 1], [6, 5, 4]]);
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORUPDOWN), [[4, 5, 6], [1, 2, 3]]);
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORLEFTRIGHT | DDBLTFX_MIRRORUPDOWN),
+            [[6, 5, 4], [3, 2, 1]]);
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORLEFTRIGHT, surface(BASE + 0x80, 6, 2, 1)),
+            [[3, 3, 2, 2, 1, 1], [6, 6, 5, 5, 4, 4]], 'stretched and mirrored');
+        assert.deepEqual(mirrored(0), [[1, 2, 3], [4, 5, 6]], 'no effect is a copy');
+        // DDBLTFX_ROTATE90.
+        assert.equal(blt({ memory, dest, src, flags: DDBLT_DDFX, fx: { ddfx: 0x00000200 } }),
+            DDERR_UNSUPPORTED);
+    });

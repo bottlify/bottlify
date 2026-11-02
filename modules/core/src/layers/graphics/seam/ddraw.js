@@ -69,6 +69,7 @@ import {
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
     DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
     DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT,
+    DDFXCAPS_BLTMIRRORLEFTRIGHT, DDFXCAPS_BLTMIRRORUPDOWN, ROP,
     DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
     DDERR_NOTAOVERLAYSURFACE, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
     DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT,
@@ -933,6 +934,8 @@ export function createDirectDrawSeam(
                     fx: {
                         fillColor: fill,
                         fillDepth: fill,
+                        rop: (fx >>> 0) === 0 ? 0 : fields.readU32((fx >>> 0) + DDBLTFX.dwROP),
+                        ddfx: (fx >>> 0) === 0 ? 0 : fields.readU32((fx >>> 0) + DDBLTFX.dwDDFX),
                         srcColorKey: from
                             ? keyFor(from, DDCKEY_SRCBLT,
                                 (flags & DDBLT_KEYSRCOVERRIDE) !== 0, fx, DDBLTFX.ddckSrcColorkey)
@@ -1422,6 +1425,8 @@ export function createDirectDrawSeam(
             dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED
                 | (gamma?.applies() ? DDCAPS2_PRIMARYGAMMA : 0),
             dwCKeyCaps: DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT,
+            // Blt's effects and raster operations, as ddraw/blit.js makes them.
+            dwFXCaps: DDFXCAPS_BLTMIRRORLEFTRIGHT | DDFXCAPS_BLTMIRRORUPDOWN,
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
             dwZBufferBitDepths: DDBD_16 | DDBD_32,
             dwVidMemTotal: videoMemory?.() ?? VIDEO_MEMORY,
@@ -1431,6 +1436,13 @@ export function createDirectDrawSeam(
         if (size >= DDCAPS.SIZE)
         {
             fields.writeU32(at + DDCAPS.ddsCaps, SURFACE_CAPS);
+        }
+        // dwRops: a bit for each raster operation, by its index (the ROP's third byte).
+        for (const rop of [ROP.BLACKNESS, ROP.WHITENESS, ROP.SRCCOPY])
+        {
+            const index = (rop >>> 16) & 0xff;
+            const word = at + DDCAPS.dwRops + 4 * (index >>> 5);
+            fields.writeU32(word, (fields.readU32(word) | 1 << (index & 31)) >>> 0);
         }
         return DD_OK;
     };

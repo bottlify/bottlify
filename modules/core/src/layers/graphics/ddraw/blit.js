@@ -25,9 +25,10 @@
  */
 
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL, DDBLT_KEYDEST,
-    DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDERR_INVALIDPARAMS,
-    DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DD_OK,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLTFX_MIRRORLEFTRIGHT, DDBLTFX_MIRRORUPDOWN,
+    DDBLT_COLORFILL, DDBLT_DDFX, DDBLT_DEPTHFILL, DDBLT_KEYDEST, DDBLT_KEYDESTOVERRIDE,
+    DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDBLT_ROP, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT,
+    DDERR_NORASTEROPHW, DDERR_UNSUPPORTED, DD_OK, ROP,
 } from './constants.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 
@@ -243,11 +244,13 @@ export function writePixel(memory, surface, x, y, value){
  * @param {ColorKey} [job.srcColorKey]
  * @param {ColorKey} [job.destColorKey]
  * @param {Rect[]} [job.clipList]
+ * @param {number} [job.mirror]  DDBLTFX_MIRRORLEFTRIGHT and DDBLTFX_MIRRORUPDOWN, of the source
  */
 function transfer(job){
     const { memory, dest, destRect, src, srcColorKey, destColorKey, clipList } = job;
+    const mirror = job.mirror ?? 0;
     if (destColorKey === undefined && (clipList === undefined || clipList.length === 0)
-        && transferWhole(job))
+        && mirror === 0 && transferWhole(job))
     {
         return;
     }
@@ -265,16 +268,17 @@ function transfer(job){
     {
         const y = destRect.top + r;
         const from = r * dest.pitch;
-        const sampledRow = srcHeight === height ? r : Math.floor((r * srcHeight) / height);
+        const across = srcHeight === height ? r : Math.floor((r * srcHeight) / height);
+        const sampledRow = (mirror & DDBLTFX_MIRRORUPDOWN) !== 0 ? srcHeight - 1 - across : across;
         for (let column = 0; column < width; column++)
         {
             const at = from + column * bpp;
             let value = job.fill;
             if (src)
             {
-                const sampledColumn = srcWidth === width
-                    ? column
-                    : Math.floor((column * srcWidth) / width);
+                const along = srcWidth === width ? column : Math.floor((column * srcWidth) / width);
+                const sampledColumn = (mirror & DDBLTFX_MIRRORLEFTRIGHT) !== 0
+                    ? srcWidth - 1 - along : along;
                 value = pixelAt(held, (sampledRow * srcWidth + sampledColumn) * bpp, bpp);
             }
             value = (value & mask) >>> 0;
@@ -559,7 +563,7 @@ function depthFill(memory, dest, rect, value, clipList){
  * @param {Rect | null} [request.srcRect]
  * @param {number} request.flags   DDBLT
  * @param {{ fillColor?: number, fillDepth?: number, srcColorKey?: ColorKey,
- *            destColorKey?: ColorKey }} [request.fx]
+ *            destColorKey?: ColorKey, rop?: number, ddfx?: number }} [request.fx]
  * @param {Rect[]} [request.clipList]
  * @returns {number} HRESULT
  */
@@ -583,6 +587,32 @@ export function blt(request){
         ? fx.destColorKey
         : undefined;
     const common = { memory, dest, destRect, destColorKey, clipList: request.clipList };
+
+    // A raster operation: the two fills it names need no source, a copy is
+    // the copy below, and any other is one this device does not make.
+    if ((flags & DDBLT_ROP) !== 0 && (flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL)) === 0)
+    {
+        const rop = (fx.rop ?? ROP.SRCCOPY) >>> 0;
+        if (rop === ROP.BLACKNESS || rop === ROP.WHITENESS)
+        {
+            if (dest.depth)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            transfer({ ...common, fill: rop === ROP.BLACKNESS ? 0 : 0xffffffff });
+            return DD_OK;
+        }
+        if (rop !== ROP.SRCCOPY)
+        {
+            return DDERR_NORASTEROPHW;
+        }
+    }
+    // The effects: mirroring, which the copy below makes; any other is not made.
+    const ddfx = (flags & DDBLT_DDFX) !== 0 ? (fx.ddfx ?? 0) >>> 0 : 0;
+    if ((ddfx & ~(DDBLTFX_MIRRORLEFTRIGHT | DDBLTFX_MIRRORUPDOWN)) !== 0)
+    {
+        return DDERR_UNSUPPORTED;
+    }
 
     if ((flags & DDBLT_DEPTHFILL) !== 0)
     {
@@ -620,7 +650,7 @@ export function blt(request){
         {
             return DDERR_INVALIDPARAMS;
         }
-        transfer({ ...common, fill: 0, src, srcRect: whole });
+        transfer({ ...common, fill: 0, src, srcRect: whole, mirror: ddfx });
         return DD_OK;
     }
     const conversion = converts(src, dest);
@@ -643,7 +673,7 @@ export function blt(request){
         convertSnapshot(src, dest,
             (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top));
     }
-    transfer({ ...common, fill: 0, src, srcRect, srcColorKey });
+    transfer({ ...common, fill: 0, src, srcRect, srcColorKey, mirror: ddfx });
     return DD_OK;
 }
 

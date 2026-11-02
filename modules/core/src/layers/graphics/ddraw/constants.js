@@ -77,6 +77,20 @@ export const DDBLT_KEYSRCOVERRIDE = 0x00010000;
 export const DDBLT_COLORFILL = 0x00000400;
 export const DDBLT_DEPTHFILL = 0x02000000;
 export const DDBLT_WAIT = 0x01000000;
+/** DDBLT_ROP and DDBLT_DDFX: a raster operation and effects from the DDBLTFX. */
+export const DDBLT_ROP = 0x00020000;
+export const DDBLT_DDFX = 0x00000800;
+/** DDBLTFX_MIRRORLEFTRIGHT and DDBLTFX_MIRRORUPDOWN, the effects a blit makes. */
+export const DDBLTFX_MIRRORLEFTRIGHT = 0x00000002;
+export const DDBLTFX_MIRRORUPDOWN = 0x00000004;
+/** The raster operations a blit makes: BLACKNESS, WHITENESS and SRCCOPY. */
+export const ROP = Object.freeze({ BLACKNESS: 0x00000042, WHITENESS: 0x00ff0062,
+    SRCCOPY: 0x00cc0020 });
+/** DDFXCAPS_BLTMIRRORLEFTRIGHT and DDFXCAPS_BLTMIRRORUPDOWN. */
+export const DDFXCAPS_BLTMIRRORLEFTRIGHT = 0x00000020;
+export const DDFXCAPS_BLTMIRRORUPDOWN = 0x00000040;
+/** DDERR_NORASTEROPHW: a raster operation the device does not make. */
+export const DDERR_NORASTEROPHW = dderr(280);
 
 /** BltFast flags. */
 export const DDBLTFAST_NOCOLORKEY = 0x00000000;
