@@ -139,6 +139,23 @@ function blockRowBytes(format, width){
     return Math.max(1, Math.ceil(width / 4)) * (code === 0x31545844 ? 8 : 16);
 }
 
+/**
+ * An uncompressed surface's row: whole bytes a pixel, or, for pixels of 1, 2
+ * or 4 bits, the bytes they share -- the pitch a lock hands out and a program
+ * writes its rows by. A format of no bit count is a byte a pixel.
+ *
+ * @param {import('./structs.js').PixelFormatFields} format @param {number} width
+ * @param {number} bpp  its bytes a pixel, 0 for none
+ */
+function rowBytes(format, width, bpp){
+    const bits = format.bitCount >>> 0;
+    if (bits > 0 && bits < 8)
+    {
+        return Math.ceil((width * bits) / 8);
+    }
+    return width * (bpp > 0 ? bpp : 1);
+}
+
 /** The four IDirectDraw generations, in the order they were introduced. */
 const DDRAW_INTERFACES = Object.freeze(
     ['IDirectDraw', 'IDirectDraw2', 'IDirectDraw4', 'IDirectDraw7']);
@@ -942,7 +959,7 @@ export function createDirectDraw(options = {}){
         let height = spec.height;
         let pixelFormat = spec.pixelFormat;
         let bpp = bytesPerPixel(pixelFormat);
-        let pitch = blockRowBytes(pixelFormat, width) ?? width * (bpp > 0 ? bpp : 1);
+        let pitch = blockRowBytes(pixelFormat, width) ?? rowBytes(pixelFormat, width, bpp);
         let buffer = allocate(pitch * height);
 
         /** @type {Surface | null} */

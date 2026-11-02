@@ -279,7 +279,7 @@ function seamed(build = {}){
         /**
          * @param {number} ddraw
          * @param {{ caps: number, caps2?: number, width?: number, height?: number,
-         *   backBufferCount?: number, mipMapCount?: number }} desc
+         *   backBufferCount?: number, mipMapCount?: number, pixelFormat?: any }} desc
          */
         createSurface7(ddraw, desc){
             const at = 0x5000;
@@ -296,8 +296,9 @@ function seamed(build = {}){
                 mipMapCount: desc.mipMapCount ?? 0,
                 caps: desc.caps,
                 caps2: desc.caps2 ?? 0,
-                pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 32,
-                    redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff, alphaMask: 0 },
+                pixelFormat: desc.pixelFormat ?? { size: 0x20, flags: DDPF_RGB, fourCC: 0,
+                    bitCount: 32, redMask: 0xff0000, greenMask: 0xff00, blueMask: 0xff,
+                    alphaMask: 0 },
             });
             const hr = box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'), [at, 0x5100, 0]);
             assert.equal(hr, DD_OK, 'the fixture surface is created');
@@ -2465,3 +2466,21 @@ test('a clipper given a window clips to its client area on the screen; BltFast w
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('a blit of a surface whose pixels share bytes is refused, not moved a byte a pixel', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    // DDPF_PALETTEINDEXED4.
+    const nibbles = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 4,
+        pixelFormat: { size: 0x20, flags: 0x8, fourCC: 0, bitCount: 4, redMask: 0,
+            greenMask: 0, blueMask: 0, alphaMask: 0 } });
+    const other = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 4,
+        pixelFormat: { size: 0x20, flags: 0x8, fourCC: 0, bitCount: 4, redMask: 0,
+            greenMask: 0, blueMask: 0, alphaMask: 0 } });
+    assert.equal(h.surface7(nibbles, 'Blt', [0, other, 0, 0, 0]), DDERR_UNSUPPORTED);
+    assert.equal(h.surface7(nibbles, 'BltFast', [0, 0, other, 0, 0]), DDERR_UNSUPPORTED);
+    assert.equal(h.release(other), 0);
+    assert.equal(h.release(nibbles), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});

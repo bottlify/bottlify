@@ -1647,3 +1647,23 @@ test('a new palette on the primary, or a new entry in it, is on the screen at on
     assert.equal(spare.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
+
+test('a surface of 1, 2 or 4 bits a pixel has the pitch its pixels share bytes by', ()=>{
+    const ddraw = withLevel();
+    // DDPF_PALETTEINDEXED1, 2, 4 and 8.
+    for (const [bits, flag, width, pitch] of [[1, 0x800, 9, 2], [2, 0x1000, 5, 2], [4, 0x8, 5, 3],
+        [8, 0x20, 5, 5]])
+    {
+        const made = ddraw.createSurface({
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+            caps: DDSCAPS_OFFSCREENPLAIN, width, height: 2,
+            pixelFormat: { size: 0x20, flags: flag, fourCC: 0,
+                bitCount: bits, redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 },
+        });
+        assert.equal(made.hr, DD_OK);
+        const surface = /** @type {any} */ (made.surface);
+        assert.equal(surface.pitch, pitch, `${bits} bits by ${width}`);
+        surface.release();
+    }
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});

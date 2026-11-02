@@ -864,6 +864,13 @@ export function createDirectDrawSeam(
             {
                 return DDERR_UNSUPPORTED;
             }
+            // Pixels of 1, 2 or 4 bits share their bytes: the blitter moves
+            // whole bytes a pixel, and is not asked to move them wrong.
+            const bits = surface.pixelFormat?.bitCount ?? 8;
+            if (bits > 0 && bits < 8)
+            {
+                return DDERR_UNSUPPORTED;
+            }
         }
         return DD_OK;
     };
