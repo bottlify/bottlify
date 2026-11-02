@@ -1246,6 +1246,13 @@ test('the caps say what this build can do, and refuse a structure of an unknown 
     // depths the z-buffer formats Direct3D enumerates have (16 and 32).
     const threeD = 0x00000001 | 0x10000000; // DDCAPS_3D | DDCAPS_BLTDEPTHFILL
     assert.equal(h.box.memory.readU32(caps + DDCAPS.dwCaps) & threeD, threeD);
+    // The FOURCC formats a surface may be made in: DXT1 to DXT5, counted first.
+    h.box.memory.writeU32(0x6100, 0);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetFourCCCodes'), [0x6100, 0]), DD_OK);
+    assert.equal(h.box.memory.readU32(0x6100), 5);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetFourCCCodes'), [0x6100, 0x6200]),
+        DD_OK);
+    assert.deepEqual([0, 4].map(at=>h.box.memory.readU32(0x6200 + at)), [0x31545844, 0x32545844]);
     // What Blt makes beside its copies: mirroring, and three raster operations
     // by the bit of their index (BLACKNESS 0x00, SRCCOPY 0xcc, WHITENESS 0xff).
     assert.equal(h.box.memory.readU32(caps + DDCAPS.dwFXCaps), 0x20 | 0x40);

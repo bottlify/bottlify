@@ -183,6 +183,9 @@ export const DDSD_DEPTH = 0x00800000;
 export const DDPF_ALPHAPIXELS = 0x00000001;
 export const DDPF_ALPHA = 0x00000002;
 export const DDPF_FOURCC = 0x00000004;
+/** The compressed formats a surface may be, by FOURCC: DXT1 to DXT5, 'DXT1' little-endian. */
+export const DXT_CODES = Object.freeze([0x31545844, 0x32545844, 0x33545844, 0x34545844,
+    0x35545844]);
 export const DDPF_PALETTEINDEXED4 = 0x00000008;
 export const DDPF_PALETTEINDEXEDTO8 = 0x00000010;
 export const DDPF_PALETTEINDEXED8 = 0x00000020;

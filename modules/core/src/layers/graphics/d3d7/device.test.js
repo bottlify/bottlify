@@ -30,7 +30,7 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_RGB, DDPF_STENCILBUFFER, DDSCAPS_3DDEVICE,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDPF_STENCILBUFFER, DDSCAPS_3DDEVICE,
     DDSCAPS_COMPLEX,
     DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
@@ -637,8 +637,9 @@ test('the material, clip status and clip planes read back as copies', ()=>{
 /**
  * A device over the recording GPU, with guest memory the test owns.
  *
- * @param {{ writable?: boolean, driverRules?: 'legacy' | 'current' }} [options]
- *     Whether the device may write guest memory, and the renderer's rules.
+ * @param {{ writable?: boolean, driverRules?: 'legacy' | 'current',
+ *     divergence?: (api: string, detail: string, severity?: 'loss') => any }} [options]
+ *     Whether the device may write guest memory, the renderer's rules, where it diverges.
  */
 function recorded(options = {}){
     const gpu = createFakeDevice();
@@ -670,6 +671,7 @@ function recorded(options = {}){
             : {}),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         ...(options.driverRules ? { driverRules: options.driverRules } : {}),
+        ...(options.divergence ? { divergence: options.divergence } : {}),
         presenter: {
             claim: buffer=>claimed.push(buffer),
             release: buffer=>released.push(buffer),
@@ -1209,6 +1211,51 @@ test('recorded: a stencil test the caps claim is drawn, over the depth format wi
         assert.deepEqual(gpu.errors, []);
         assert.equal(target.deleteAttachedSurface(depth), D3D_OK);
         assert.equal(depth.release(), 0);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+    });
+
+test('recorded: a DXT1 texture is drawn; a palettised one is drawn without, said as a loss',
+    async()=>{
+        /** @type {string[]} */
+        const losses = [];
+        /** @param {string} api @param {string} detail @param {string} [severity] */
+        const divergence = (api, detail, severity)=>(severity === 'loss' ? losses.push(detail) : 0);
+        const f = recorded({ divergence });
+        const { device, gpu, root, target } = f;
+        const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+        const drawWith = async(/** @type {any} */ texture)=>{
+            assert.equal(device.SetTexture(0, texture), D3D_OK);
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+            device.present(target.buffer);
+            await device.idle();
+        };
+        // 'DXT1', a 4 by 4 level of one block.
+        const dxt = surface(root, { caps: DDSCAPS_TEXTURE, width: 4, height: 4,
+            pixelFormat: { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x31545844, bitCount: 0,
+                redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 } });
+        await drawWith(dxt);
+        assert.equal(gpu.count('draw'), 1);
+        assert.ok(gpu.count('writeTexture') >= 1, 'its level went up');
+        assert.deepEqual(losses, []);
+        assert.deepEqual(gpu.errors, []);
+
+        const indexed = surface(root, { caps: DDSCAPS_TEXTURE, width: 4, height: 4,
+            pixelFormat: { size: 0x20, flags: 0x20 /* DDPF_PALETTEINDEXED8 */, fourCC: 0,
+                bitCount: 8, redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 } });
+        await drawWith(indexed);
+        assert.equal(gpu.count('draw'), 2, 'the draw goes on');
+        // Said each time the draw looks for it; the journal counts the repeats.
+        assert.ok(losses.length > 0);
+        assert.ok(losses.every(detail=>detail === losses[0]));
+        assert.match(losses[0], /flags 0x20, 8 bits is drawn as no texture/);
+
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        assert.equal(dxt.release(), 0);
+        assert.equal(indexed.release(), 0);
         assert.equal(device.release(), 0);
         assert.equal(target.release(), 0);
         assert.equal(root.release('IDirectDraw7'), 0);

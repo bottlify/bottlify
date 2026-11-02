@@ -75,7 +75,7 @@ import {
     DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDERR_BLTFASTCANTCLIP, DDPCAPS_1BIT, DDPCAPS_2BIT,
     DDPCAPS_4BIT,
     DDPCAPS_8BIT, DDPCAPS_ALLOW256,
-    DDPCAPS_PRIMARYSURFACE, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDSCAPS_3DDEVICE,
+    DDPCAPS_PRIMARYSURFACE, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDSCAPS_3DDEVICE, DXT_CODES,
     DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
@@ -1745,12 +1745,19 @@ export function createDirectDrawSeam(
         },
 
         /** @param {any} root @param {number[]} args */
-        GetFourCCCodes: (root, [count])=>{
+        // The compressed formats a surface may be made in: DXT1 to DXT5. With
+        // no list, or one too short, the count is what a list needs.
+        GetFourCCCodes: (root, [count, codes])=>{
             if ((count >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(count >>> 0, 0);
+            const room = fields.readU32(count >>> 0);
+            fields.writeU32(count >>> 0, DXT_CODES.length);
+            if ((codes >>> 0) !== 0 && room >= DXT_CODES.length)
+            {
+                DXT_CODES.forEach((code, index)=>fields.writeU32((codes >>> 0) + 4 * index, code));
+            }
             return DD_OK;
         },
 

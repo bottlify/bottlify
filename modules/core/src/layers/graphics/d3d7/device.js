@@ -58,7 +58,8 @@ import { validateDeviceTarget } from '../ddraw/caps.js';
 import { validateStages } from '../d3d8/validity.js';
 import { writePixels } from '../d3d9/resources.js';
 import {
-    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER, DDSCAPS_ZBUFFER,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DXT_CODES, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER,
+    DDSCAPS_ZBUFFER,
 } from '../ddraw/constants.js';
 
 /**
@@ -147,6 +148,12 @@ export function d3dFormatOf(format){
         // z-buffer of another depth is held in the nearest a driver has.
         return format.redMask === 8 ? D3DFMT.D24S8
             : format.bitCount > 16 ? D3DFMT.D24X8 : D3DFMT.D16;
+    }
+    if ((format.flags & DDPF_FOURCC) !== 0)
+    {
+        // DXT1 to DXT5, whose blocks the renderer takes as Direct3D 8 and 9
+        // do: their D3DFMT is their FOURCC.
+        return DXT_CODES.includes(format.fourCC >>> 0) ? format.fourCC >>> 0 : null;
     }
     if ((format.flags & DDPF_PALETTEINDEXED_ANY) !== 0)
     {
@@ -627,6 +634,15 @@ export function createDirect3D7(ddraw, services = {}){
                 return existing;
             }
             const format = d3dFormatOf(surface.pixelFormat);
+            if (format === null && renderer)
+            {
+                // A palettised, 24-bit or 8-bit colour texture the renderer has
+                // no upload for: the draw goes on without it, said as lost.
+                const { flags, bitCount, fourCC } = surface.pixelFormat;
+                services.divergence?.('Direct3D 7', `lost: a texture of pixel format flags 0x${
+                    (flags >>> 0).toString(16)}, ${bitCount} bits${fourCC ? `, FOURCC 0x${
+                    (fourCC >>> 0).toString(16)}` : ''} is drawn as no texture`, 'loss');
+            }
             if (format === null || !renderer)
             {
                 return null;
