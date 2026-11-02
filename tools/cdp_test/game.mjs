@@ -67,8 +67,6 @@ import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/sha
 import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
-import { clientFilesCached } from '../steam-client.mjs';
-import { ownershipTickets, steamAppOf, ticketsFromArgv } from '../steam-tickets.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -1846,10 +1844,21 @@ export async function game(options){
     writeFileSync(join(entryDirectory, 'entry.exe'), executable);
     process.on('exit', ()=>rmSync(entryDirectory, { recursive: true, force: true }));
 
-    const steamClient = options.steamAccount ? await clientFilesCached() : null;
-    const tickets = { ...ticketsFromArgv(process.argv.slice(2)),
+    // Steam's tools are GameHub's, in the launcher's checkout beside this one;
+    // only a run that asks for Steam loads them.
+    const steaming = options.steamAccount || process.argv.includes('--steam-ticket');
+    /** @type {any} */
+    const steam = steaming ? {
+        ...await import('../../../bottlify-ui/gamehub/tools/steam-client.mjs'),
+        ...await import('../../../bottlify-ui/gamehub/tools/steam-tickets.mjs'),
+    } : null;
+    /** @param {any} of */
+    const steamAppOf = of=>(steam ? steam.steamAppOf(of) : undefined);
+    const steamClient = options.steamAccount ? await steam.clientFilesCached() : null;
+    const tickets = steam ? { ...steam.ticketsFromArgv(process.argv.slice(2)),
         ...options.steamAccount && options.steamSession && steamAppOf(manifest)
-            ? await ownershipTickets(options.steamSession, [steamAppOf(manifest)]) : {} };
+            ? await steam.ownershipTickets(options.steamSession, [steamAppOf(manifest)]) : {} }
+        : {};
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
