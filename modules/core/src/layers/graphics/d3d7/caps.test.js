@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DPRASTERCAPS_FOGRANGE,
-    D3DPRASTERCAPS_ZTEST, D3DPTFILTERCAPS_MIPFLINEAR, D3DPTFILTERCAPS_MIPFPOINT, D3DTOP,
+    D3DPRASTERCAPS_FOGTABLE, D3DPRASTERCAPS_FOGVERTEX, D3DPRASTERCAPS_WFOG, D3DPRASTERCAPS_ZBIAS,
+    D3DPRASTERCAPS_ZFOG, D3DPRASTERCAPS_ZTEST, D3DPTFILTERCAPS_MIPFLINEAR, D3DPTFILTERCAPS_MIPFPOINT, D3DTOP,
     DEVICE_IDS, textureOpCaps,
 } from './constants.js';
 
@@ -30,12 +31,16 @@ test('the three devices differ only in where the work is said to happen', ()=>{
 });
 
 test('a capability claimed is one the renderer draws', ()=>{
-    // No stencil, no lighting, no bump mapping: nothing draws them yet.
+    // The shared renderer draws the stencil test (device.test.js draws one),
+    // every fog and the depth bias; no bump mapping, and no user clip planes in
+    // a draw, so neither is claimed.
     const caps = DEVICE_DESCRIPTIONS[2].caps;
-    assert.equal(caps.stencilCaps, 0);
+    assert.equal(caps.stencilCaps, 0xff);
     assert.equal(caps.vertexProcessingCaps, 0);
-    assert.equal(caps.triCaps.rasterCaps, D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGRANGE,
-        'the depth test and range fog');
+    assert.equal(caps.maxUserClipPlanes, 0);
+    assert.equal(caps.triCaps.rasterCaps, D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGRANGE
+        | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_WFOG
+        | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_ZBIAS, 'the depth test, every fog, the depth bias');
     assert.equal(caps.lineCaps.rasterCaps, caps.triCaps.rasterCaps);
     const mipFilters = D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR;
     assert.equal(caps.triCaps.textureFilterCaps & mipFilters, mipFilters,

@@ -81,6 +81,7 @@ import {
     DDPF_FOURCC,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
+    DDPF_STENCILBUFFER,
     DDPF_ZBUFFER,
     DDSCAPS2_D3DTEXTUREMANAGE,
     DDSCAPS2_MIPMAPSUBLEVEL,
@@ -207,7 +208,9 @@ export function depthFormatForDepth(bitDepth){
     const stencil = bitDepth === 32 ? 8 : 0;
     return {
         size: 0x20,
-        flags: DDPF_ZBUFFER,
+        // A format with stencil says so: a program picks its depth buffer by
+        // the flag, and without it found no stencil to use.
+        flags: DDPF_ZBUFFER | (stencil === 0 ? 0 : DDPF_STENCILBUFFER),
         fourCC: 0,
         bitCount: bitDepth,
         redMask: stencil,

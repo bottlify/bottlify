@@ -13,9 +13,11 @@
  * of the claim would have sent it down a slow path to a right one. So the
  * lists below are what the shader generator and pipeline actually implement
  * today -- the cull modes, the depth compares, the blend factors, the stage
- * operations, the filters and address modes, range fog, eight lights -- and
- * grow as the renderer grows, not ahead of it. No stencil, no bump mapping,
- * no cube maps, no W-buffer, because none of those draws yet.
+ * operations, the filters and address modes, vertex, table, range and W fog,
+ * the depth bias, the stencil test, the colour key, eight lights -- and grow
+ * as the renderer grows, not ahead of it. No bump mapping, no cube maps, no
+ * W-buffer and no user clip planes in a draw (`SetClipPlane` is kept for
+ * ComputeSphereVisibility alone), because none of those draws yet.
  *
  * Three devices are offered, in the order DirectX 7 offers them with a
  * transform-and-lighting card present: RGB emulation, HAL, and T&L HAL. All
@@ -30,8 +32,10 @@ import {
     D3DDEVCAPS_TEXTURESYSTEMMEMORY, D3DDEVCAPS_TEXTUREVIDEOMEMORY, D3DDEVCAPS_TLVERTEXSYSTEMMEMORY,
     D3DDEVCAPS_TLVERTEXVIDEOMEMORY, D3DPBLENDCAPS_ALL_BUT_BOTH, D3DPCMPCAPS_ALL,
     D3DPMISCCAPS_CULLCCW, D3DPMISCCAPS_CULLCW, D3DPMISCCAPS_CULLNONE, D3DPRASTERCAPS_FOGRANGE,
-    D3DPRASTERCAPS_ZTEST, D3DPSHADECAPS_ALPHAGOURAUDBLEND, D3DPSHADECAPS_COLORGOURAUDRGB,
-    D3DPTADDRESSCAPS_CLAMP, D3DPTADDRESSCAPS_INDEPENDENTUV, D3DPTADDRESSCAPS_MIRROR,
+    D3DPRASTERCAPS_FOGTABLE, D3DPRASTERCAPS_FOGVERTEX, D3DPRASTERCAPS_WFOG, D3DPRASTERCAPS_ZBIAS,
+    D3DPRASTERCAPS_ZFOG, D3DPRASTERCAPS_ZTEST, D3DPSHADECAPS_ALPHAGOURAUDBLEND,
+    D3DPSHADECAPS_COLORGOURAUDRGB, D3DPSHADECAPS_FOGGOURAUD, D3DPSHADECAPS_SPECULARGOURAUDRGB,
+    D3DPTADDRESSCAPS_BORDER, D3DPTADDRESSCAPS_CLAMP, D3DPTEXTURECAPS_TRANSPARENCY, D3DSTENCILCAPS_ALL, D3DPTADDRESSCAPS_INDEPENDENTUV, D3DPTADDRESSCAPS_MIRROR,
     D3DPTADDRESSCAPS_WRAP, D3DPTBLENDCAPS_ADD, D3DPTBLENDCAPS_COPY, D3DPTBLENDCAPS_DECAL,
     D3DPTBLENDCAPS_DECALALPHA, D3DPTBLENDCAPS_MODULATE, D3DPTBLENDCAPS_MODULATEALPHA,
     D3DPTEXTURECAPS_ALPHA, D3DPTEXTURECAPS_PERSPECTIVE, D3DPTFILTERCAPS_LINEAR,
@@ -100,13 +104,17 @@ const OPERATIONS = Object.freeze([
 function primitiveCaps(){
     return {
         miscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW,
-        rasterCaps: D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGRANGE,
+        rasterCaps: D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGRANGE | D3DPRASTERCAPS_FOGVERTEX
+            | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG
+            | D3DPRASTERCAPS_ZBIAS,
         zCmpCaps: D3DPCMPCAPS_ALL,
         srcBlendCaps: D3DPBLENDCAPS_ALL_BUT_BOTH,
         destBlendCaps: D3DPBLENDCAPS_ALL_BUT_BOTH,
         alphaCmpCaps: D3DPCMPCAPS_ALL,
-        shadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_ALPHAGOURAUDBLEND,
-        textureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA,
+        shadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_ALPHAGOURAUDBLEND
+            | D3DPSHADECAPS_SPECULARGOURAUDRGB | D3DPSHADECAPS_FOGGOURAUD,
+        textureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA
+            | D3DPTEXTURECAPS_TRANSPARENCY,
         textureFilterCaps: D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR
             | D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR
             | D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR
@@ -115,7 +123,7 @@ function primitiveCaps(){
             | D3DPTBLENDCAPS_DECALALPHA | D3DPTBLENDCAPS_MODULATEALPHA | D3DPTBLENDCAPS_COPY
             | D3DPTBLENDCAPS_ADD,
         textureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR
-            | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_INDEPENDENTUV,
+            | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_BORDER | D3DPTADDRESSCAPS_INDEPENDENTUV,
         stippleWidth: 0,
         stippleHeight: 0,
     };
@@ -155,7 +163,7 @@ function description(deviceGuid, devCaps){
         guardBandRight: 0,
         guardBandBottom: 0,
         extentsAdjust: 0,
-        stencilCaps: 0,
+        stencilCaps: D3DSTENCILCAPS_ALL,
         fvfCaps: 8,
         textureOpCaps: textureOpCaps(OPERATIONS),
         maxTextureBlendStages: 8,

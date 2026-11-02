@@ -30,7 +30,7 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
+    DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_RGB, DDPF_STENCILBUFFER, DDSCAPS_3DDEVICE, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
     DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
@@ -1181,3 +1181,33 @@ test('a fresh device has a white material, not a black one', ()=>{
 
     releaseAll(f);
 });
+
+test('recorded: a stencil test the caps claim is drawn, over the depth format with stencil',
+    async()=>{
+        const f = recorded();
+        const { device, gpu, root, target } = f;
+        const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 32 });
+        assert.equal(depth.pixelFormat.flags & DDPF_STENCILBUFFER, DDPF_STENCILBUFFER,
+            'a depth format with stencil says so, as a program picks one by the flag');
+        assert.equal(target.addAttachedSurface(depth), D3D_OK);
+        // STENCILENABLE, STENCILFUNC EQUAL, STENCILPASS REPLACE.
+        assert.equal(device.SetRenderState(52, 1), D3D_OK);
+        assert.equal(device.SetRenderState(56, 3), D3D_OK);
+        assert.equal(device.SetRenderState(55, 3), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL,
+            vertices([[0, 0], [8, 0], [0, 8], [8, 8]], false), 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const [pipeline] = gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        assert.equal(pipeline.depthStencil.format, 'depth24plus-stencil8');
+        assert.equal(pipeline.depthStencil.stencilFront.compare, 'equal');
+        assert.equal(pipeline.depthStencil.stencilFront.passOp, 'replace');
+        assert.deepEqual(gpu.errors, []);
+        assert.equal(target.deleteAttachedSurface(depth), D3D_OK);
+        assert.equal(depth.release(), 0);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+    });
