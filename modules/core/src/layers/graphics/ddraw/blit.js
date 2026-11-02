@@ -575,11 +575,44 @@ export function blt(request){
     }
     const flags = request.flags >>> 0;
     const fx = request.fx ?? {};
-    const destRect = wholeOf(request.destRect, dest);
-    if (!rectFits(destRect, dest))
+    const asked = wholeOf(request.destRect, dest);
+    // A rectangle past the surface is refused, unless a clipper is there to
+    // cut it: then the part on the surface is drawn, and the source's part
+    // that maps onto it (`clipped`).
+    const clipped = rectFits(asked, dest) ? null : request.clipList ? {
+        left: Math.max(0, asked.left), top: Math.max(0, asked.top),
+        right: Math.min(dest.width, asked.right), bottom: Math.min(dest.height, asked.bottom),
+    } : undefined;
+    if (clipped === undefined || (asked.left > asked.right || asked.top > asked.bottom))
     {
         return DDERR_INVALIDRECT;
     }
+    if (clipped && (clipped.left >= clipped.right || clipped.top >= clipped.bottom))
+    {
+        return DD_OK;
+    }
+    const destRect = clipped ?? asked;
+    /**
+     * The part of a source rectangle that lands on the destination once the
+     * clipper has cut it, in the source's own scale.
+     *
+     * @param {Rect} whole
+     * @returns {Rect}
+     */
+    const cutSource = whole=>{
+        if (!clipped)
+        {
+            return whole;
+        }
+        const sx = (whole.right - whole.left) / (asked.right - asked.left);
+        const sy = (whole.bottom - whole.top) / (asked.bottom - asked.top);
+        return {
+            left: whole.left + Math.floor((clipped.left - asked.left) * sx),
+            top: whole.top + Math.floor((clipped.top - asked.top) * sy),
+            right: whole.right - Math.floor((asked.right - clipped.right) * sx),
+            bottom: whole.bottom - Math.floor((asked.bottom - clipped.bottom) * sy),
+        };
+    };
     const srcColorKey = (flags & (DDBLT_KEYSRC | DDBLT_KEYSRCOVERRIDE)) !== 0
         ? fx.srcColorKey
         : undefined;
@@ -637,7 +670,7 @@ export function blt(request){
     }
     if (src.compressed !== undefined)
     {
-        const whole = wholeOf(request.srcRect, src);
+        const whole = cutSource(wholeOf(request.srcRect, src));
         if (dest.channels === undefined || srcColorKey !== undefined)
         {
             return DDERR_UNSUPPORTED;
@@ -662,7 +695,7 @@ export function blt(request){
     {
         return DDERR_UNSUPPORTED;
     }
-    const srcRect = wholeOf(request.srcRect, src);
+    const srcRect = cutSource(wholeOf(request.srcRect, src));
     if (!rectFits(srcRect, src))
     {
         return DDERR_INVALIDRECT;

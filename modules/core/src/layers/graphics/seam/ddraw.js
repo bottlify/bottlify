@@ -72,7 +72,8 @@ import {
     DDFXCAPS_BLTMIRRORLEFTRIGHT, DDFXCAPS_BLTMIRRORUPDOWN, ROP,
     DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
     DDERR_NOTAOVERLAYSURFACE, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
-    DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT,
+    DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDERR_BLTFASTCANTCLIP, DDPCAPS_1BIT, DDPCAPS_2BIT,
+    DDPCAPS_4BIT,
     DDPCAPS_8BIT, DDPCAPS_ALLOW256,
     DDPCAPS_PRIMARYSURFACE, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDSCAPS_3DDEVICE,
     DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
@@ -318,6 +319,9 @@ const S3TC_OF_FOURCC = Object.freeze({
  *        video memory each time.
  * @param {(width: number, height: number,
  *     where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ * @param {(hwnd: number) => { left: number, top: number, right: number, bottom: number }
+ *     | null} [deps.windowClient]  a window's client area on the screen, which a clipper
+ *     given the window clips to
  * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
@@ -331,7 +335,7 @@ export function createDirectDrawSeam(
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
-        aroundCall },
+        aroundCall, windowClient },
 )
 {
     const fields = createFields(memory);
@@ -470,11 +474,17 @@ export function createDirectDrawSeam(
 
     /**
      * A RECT at an address. Typed loosely on purpose: the field reader answers
-     * a record of dwords, and the four names are the rectangle.
+     * a record of dwords, and the four names are the rectangle. Its fields are
+     * LONGs: a rectangle off the screen's left or top edge, as a window there
+     * blits, has them negative.
      *
      * @param {number} address @returns {any}
      */
-    const rectAt = address=>fields.readStruct(address >>> 0, RECT);
+    const rectAt = address=>{
+        const rect = fields.readStruct(address >>> 0, RECT);
+        return { left: rect.left | 0, top: rect.top | 0, right: rect.right | 0,
+            bottom: rect.bottom | 0 };
+    };
 
     /** @param {number} pointer @returns {import('../ddraw/objects.js').Rect | null} */
     const readRect = pointer=>((pointer >>> 0) === 0 ? null : rectAt(pointer));
@@ -600,6 +610,30 @@ export function createDirectDrawSeam(
     // Windows' clipper checks the pointer it is called through, and Wine's
     // tests call it through a released one and through 0xdeadbeef: its counts
     // stay in the host, where an unknown pointer is refused, not followed.
+    /**
+     * What a clipper clips to: the list it was given, or, given a window, the
+     * window's client area on the screen as far as the screen goes -- what
+     * Windows' window clipper keeps of a blit to the primary.
+     *
+     * @param {any} clipper
+     * @returns {{ left: number, top: number, right: number, bottom: number }[]}
+     */
+    const clipRectsOf = clipper=>{
+        if (clipper.window === 0)
+        {
+            return clipper.clipList;
+        }
+        const client = windowClient?.(clipper.window >>> 0) ?? null;
+        const { width, height } = screen();
+        if (!client)
+        {
+            return [];
+        }
+        const visible = { left: Math.max(0, client.left), top: Math.max(0, client.top),
+            right: Math.min(width, client.right), bottom: Math.min(height, client.bottom) };
+        return visible.left < visible.right && visible.top < visible.bottom ? [visible] : [];
+    };
+
     const clipperMethods = describe(IID_IDirectDrawClipper, IDIRECTDRAWCLIPPER_SLOTS, {
         /**
          * A null region buffer asks how large one has to be; a size too small
@@ -613,11 +647,12 @@ export function createDirectDrawSeam(
                 return DDERR_INVALIDPARAMS;
             }
             const bounds = readRect(rect);
+            const listed = clipRectsOf(clipper);
             const rects = bounds
-                ? clipper.clipList.filter((/** @type {any} */ item)=>
+                ? listed.filter((/** @type {any} */ item)=>
                     item.left < bounds.right && item.right > bounds.left
                         && item.top < bounds.bottom && item.bottom > bounds.top)
-                : clipper.clipList;
+                : listed;
             const needed = RGNDATAHEADER.SIZE + rects.length * RECT.SIZE;
             if ((region >>> 0) === 0 || fields.readU32(size >>> 0) < needed)
             {
@@ -851,9 +886,8 @@ export function createDirectDrawSeam(
     /** @param {any} surface @returns {import('../ddraw/objects.js').Rect[] | undefined} */
     const clipListOf = surface=>{
         const clipper = surface.clipper;
-        return clipper && clipper.window === 0 && clipper.clipList.length > 0
-            ? clipper.clipList
-            : undefined;
+        const rects = clipper ? clipRectsOf(clipper) : [];
+        return rects.length > 0 ? rects : undefined;
     };
 
     /**
@@ -982,6 +1016,11 @@ export function createDirectDrawSeam(
                 if (!from)
                 {
                     return DDERR_INVALIDPARAMS;
+                }
+                // BltFast does not clip: to a surface with a clipper it is refused.
+                if (surface.clipper)
+                {
+                    return DDERR_BLTFASTCANTCLIP;
                 }
                 const hr = blitPreconditions(surface, from);
                 if (hr !== DD_OK)

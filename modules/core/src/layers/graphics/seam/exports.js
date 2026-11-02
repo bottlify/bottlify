@@ -196,7 +196,8 @@ export function createGraphicsLibraries(
         free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil, presented,
+        windowClient, gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
+        presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
         guestTraps = [], pointerSize = 4, floatResult,
         schedule = (ms, run)=>{
@@ -394,6 +395,7 @@ export function createGraphicsLibraries(
         deactivated,
         deactivations,
         resolution,
+        windowClient,
     }));
 
     /** What a program has actually asked us to make, for a report. */

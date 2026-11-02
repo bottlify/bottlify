@@ -38,7 +38,7 @@ import { createDirectDraw } from '../ddraw/objects.js';
 import {
     DDBLT_COLORFILL, DDCAPS2_PRIMARYGAMMA, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
     DDGDI_GETHOSTIDENTIFIER, DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
-    DDERR_NOTONMIPMAPSUBLEVEL, DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB,
+    DDERR_NOTONMIPMAPSUBLEVEL, DDERR_SURFACEBUSY, DDPCAPS_8BIT, DDPF_RGB, DDERR_BLTFASTCANTCLIP,
     DDSCAPS2_MIPMAPSUBLEVEL, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP,
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE, DDSCAPS_TEXTURE, DDSCL_EXCLUSIVE,
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
@@ -168,7 +168,7 @@ function machine(){
  *
  * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean,
  *     deactivations?: () => number, flipQueued?: () => Promise<void> | null,
- *     resolution?: (...args: any[]) => void }} [build]
+ *     resolution?: (...args: any[]) => void, windowClient?: (hwnd: number) => any }} [build]
  *     What the build says the hardware is, where a primary's gamma ramp is
  *     shown, whether (and how often) the application has been deactivated,
  *     and what a flip waits on.
@@ -222,6 +222,7 @@ function seamed(build = {}){
         },
         present: surface=>presented.push(surface),
         flipQueued: build.flipQueued,
+        windowClient: build.windowClient,
         gamma: build.gamma,
         deactivated: build.deactivated,
         deactivations: build.deactivations,
@@ -2409,6 +2410,51 @@ test('a DXT5 surface reports its size whole, and a copy into an RGB texture deco
             'nothing compresses');
         assert.equal(h.release(dxt5), 0);
         assert.equal(h.release(argb4444), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });
+
+test('a clipper given a window clips to its client area on the screen; BltFast will not clip',
+    ()=>{
+        // The window's client area runs off the screen's left edge (16 by 16).
+        const h = seamed({ windowClient: (/** @type {number} */ hwnd)=>(hwnd === HWND
+            ? { left: -4, top: 2, right: 10, bottom: 12 } : null) });
+        const ddraw = h.create7();
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateClipper'), [0, 0x5900, 0]),
+            DD_OK);
+        const clipper = h.box.memory.readU32(0x5900);
+        assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'), [0, HWND]),
+            DD_OK);
+        const size = 0x5e00;
+        h.box.memory.writeU32(size, 0x100);
+        assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetClipList'),
+            [0, 0x5f00, size]), DD_OK);
+        assert.equal(h.box.memory.readU32(0x5f00 + 8), 1, 'one rectangle');
+        assert.deepEqual(h.fields.readStruct(0x5f00 + 32, RECT),
+            { left: 0, top: 2, right: 10, bottom: 12 }, 'the client area, as far as the screen');
+
+        const primary = h.createSurface7(ddraw, { caps: DDSCAPS_PRIMARYSURFACE });
+        const primaryModel = h.publisher.objectAt(primary);
+        assert.equal(h.surface7(primary, 'SetClipper', [clipper]), DD_OK);
+        const fx = 0x5700;
+        h.box.memory.writeU32(fx + DDBLTFX.dwSize, DDBLTFX.SIZE);
+        h.box.memory.writeU32(fx + DDBLTFX.dwFillColor, 0x00ff00ff);
+        // A rectangle off the screen's left edge, as a window there draws.
+        const rect = 0x5800;
+        h.fields.writeStruct(rect, RECT, { left: -4, top: 2, right: 2, bottom: 4 });
+        assert.equal(h.surface7(primary, 'Blt', [rect, 0, 0, DDBLT_COLORFILL, fx]), DD_OK,
+            'cut by the clipper, not refused');
+        const at = (/** @type {number} */ x, /** @type {number} */ y)=>
+            h.box.memory.readU32(primaryModel.buffer + y * primaryModel.pitch + x * 4);
+        assert.deepEqual([at(0, 2), at(1, 3), at(2, 2), at(0, 1)], [0x00ff00ff, 0x00ff00ff, 0, 0]);
+
+        const sprite = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 2,
+            height: 2 });
+        assert.equal(h.surface7(primary, 'BltFast', [3, 3, sprite, 0, 0]), DDERR_BLTFASTCANTCLIP);
+        assert.equal(h.surface7(primary, 'SetClipper', [0]), DD_OK);
+        assert.equal(h.release(sprite), 0);
+        assert.equal(h.release(primary), 0);
+        assert.equal(h.release(clipper), 0);
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });

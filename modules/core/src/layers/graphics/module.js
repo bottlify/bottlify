@@ -1179,6 +1179,10 @@ export function createGraphicsModule(){
                 // asked for as zero by zero takes. Only the layer that owns the
                 // windows can measure one, and only here is it asked for.
                 windowClientSize: config?.windowClientSize,
+                // A window's client area on the screen, which a DirectDraw
+                // clipper given the window clips to; null for no such window.
+                windowClient: (/** @type {number} */ hwnd)=>(win32.windows?.() ?? [])
+                    .find((/** @type {any} */ each)=>Number(each.hwnd) === hwnd)?.client ?? null,
                 // Absent in a build with no bridge behind it -- a test, an
                 // inspection -- which then gets tables that refuse rather than
                 // tables that publish into nowhere.

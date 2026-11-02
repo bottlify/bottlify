@@ -91,6 +91,8 @@ export const DDFXCAPS_BLTMIRRORLEFTRIGHT = 0x00000020;
 export const DDFXCAPS_BLTMIRRORUPDOWN = 0x00000040;
 /** DDERR_NORASTEROPHW: a raster operation the device does not make. */
 export const DDERR_NORASTEROPHW = dderr(280);
+/** DDERR_BLTFASTCANTCLIP: BltFast to a surface with a clipper. */
+export const DDERR_BLTFASTCANTCLIP = dderr(574);
 
 /** BltFast flags. */
 export const DDBLTFAST_NOCOLORKEY = 0x00000000;

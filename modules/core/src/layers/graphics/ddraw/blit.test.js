@@ -438,3 +438,19 @@ test('the effects a blit makes: mirrored either way or both, stretched too; any 
         assert.equal(blt({ memory, dest, src, flags: DDBLT_DDFX, fx: { ddfx: 0x00000200 } }),
             DDERR_UNSUPPORTED);
     });
+
+test('a rectangle past the surface is cut by a clipper, the source with it; without one refused',
+    ()=>{
+        const memory = ram();
+        const src = surface(BASE, 4, 2, 1);
+        number(memory, src);
+        const dest = surface(BASE + 0x40, 4, 2, 1);
+        const destRect = { left: -2, top: 0, right: 2, bottom: 2 };
+        assert.equal(blt({ memory, dest, src, flags: 0, destRect }), DDERR_INVALIDRECT);
+        const clipList = [{ left: 0, top: 0, right: 4, bottom: 2 }];
+        assert.equal(blt({ memory, dest, src, flags: 0, destRect, clipList }), 0);
+        assert.deepEqual(grid(memory, dest), [[3, 4, 0, 0], [7, 8, 0, 0]],
+            'the source columns that land on the surface');
+        assert.equal(blt({ memory, dest, src, flags: 0, clipList,
+            destRect: { left: 8, top: 0, right: 12, bottom: 2 } }), 0, 'wholly off: nothing');
+    });
