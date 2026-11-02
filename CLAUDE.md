@@ -74,6 +74,12 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   (its conformance tests say what real Windows answers), never of code.
 - **Someone else's work** — a component, an algorithm, a snippet — gets a `THIRD-PARTY-NOTICES.md`
   entry in the commit that brings it in.
+- **Nothing fails quietly.** A call accepted and not all of it done is a `divergence` (a
+  warning, said once); something the program made that did not happen at all - a draw, a frame,
+  an object the GPU refused, data not written - is a loss: `divergence(api, detail, 'loss')`, an
+  error in the journal, counted and kept in `report()`, and the program goes on. A counter alone
+  is not saying it. A departure from the specification made on purpose is an entry in
+  `roadmap/decisions.md`; anything else is a bug to fix.
 - **Comments say why**, not what; no changelog comments, no tombstones, no claims about titles we
   did not measure, no earlier projects or local paths in anything committed.
 - **A dash is a single hyphen** (` - `) in comments, commit messages and docs; never a double

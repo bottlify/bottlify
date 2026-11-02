@@ -1,7 +1,9 @@
 # Limits
 
 What is missing, and where the engine answers differently from Windows. A call that answers
-differently raises a `divergence` event naming the API.
+differently raises a `divergence` event naming the API, a warning in the journal; one whose work
+did not happen at all -- a draw or a frame lost, an object the GPU refused -- raises a `loss`
+event, an error. Neither stops the program.
 
 ## Programs
 
