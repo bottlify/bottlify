@@ -2601,10 +2601,13 @@ function depthBiasOf(model, depthFormat, topology){
  * @param {boolean} [shape.clipDistances]  Whether the device clips by distances.
  * @param {boolean} [shape.clipsBehindEye]  Whether a pre-transformed vertex
  *     with a negative RHW is clipped behind the eye (decisions.md A45).
+ * @param {(detail: string) => void} [shape.diverge]  told of a state's value
+ *     Direct3D does not define, drawn as the state's default
  * @returns {import('../webgpu/internal/pipeline.js').PipelineState}
  */
 export function pipelineStateOf(model, shape){
-    const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    const known = knownStates(shape.diverge);
+    const rs = (/** @type {string} */ name)=>known(name, model.renderStates.get(D3DRS[name]) ?? 0);
     const rs9 = (/** @type {number} */ state)=>model.renderStates.get(state) ?? 0;
     let srcBlend = rs('SRCBLEND');
     let destBlend = rs('DESTBLEND');
@@ -2644,9 +2647,9 @@ export function pipelineStateOf(model, shape){
         // Direct3D 9's states; a Direct3D 8 model never sets them.
         ...(rs9(D3DRS9.SEPARATEALPHABLENDENABLE) !== 0
             ? {
-                srcBlendAlpha: rs9(D3DRS9.SRCBLENDALPHA),
-                destBlendAlpha: rs9(D3DRS9.DESTBLENDALPHA),
-                blendOpAlpha: rs9(D3DRS9.BLENDOPALPHA),
+                srcBlendAlpha: known('SRCBLEND', rs9(D3DRS9.SRCBLENDALPHA)),
+                destBlendAlpha: known('DESTBLEND', rs9(D3DRS9.DESTBLENDALPHA)),
+                blendOpAlpha: known('BLENDOP', rs9(D3DRS9.BLENDOPALPHA)),
             }
             : {}),
         // A target whose format has no alpha channel must not be written with
@@ -2679,7 +2682,7 @@ export function pipelineStateOf(model, shape){
         ...(shape.clipsBehindEye ? { clipsBehindEye: true } : {}),
         ...(shape.depthFormat !== undefined && hasStencil(shape.depthFormat)
             && (model.renderStates.get(STENCIL_RS.ENABLE) ?? 0) !== 0
-            ? { stencil: stencilOf(model) } : {}),
+            ? { stencil: stencilOf(model, shape.diverge) } : {}),
         ...blendConstantOf(model),
     };
 }
@@ -2734,26 +2737,71 @@ const STENCIL_RS = Object.freeze({
 });
 
 /**
+ * The values each state that names a WebGPU enum may take, and the default a
+ * value outside them is drawn as -- what a driver does with a value it does
+ * not know, rather than a pipeline that cannot be built and a draw lost.
+ * BOTHSRCALPHA and BOTHINVSRCALPHA (12, 13) are expanded before this.
+ *
+ * @type {Readonly<Record<string, { valid: (value: number) => boolean, fallback: number }>>}
+ */
+const STATE_DOMAINS = Object.freeze({
+    SRCBLEND: { valid: v=>(v >= 1 && v <= 11) || v === 14 || v === 15, fallback: 2 },
+    DESTBLEND: { valid: v=>(v >= 1 && v <= 11) || v === 14 || v === 15, fallback: 1 },
+    BLENDOP: { valid: v=>v >= 1 && v <= 5, fallback: 1 },
+    CULLMODE: { valid: v=>v >= 1 && v <= 3, fallback: 3 },
+    ZFUNC: { valid: v=>v >= 1 && v <= 8, fallback: 4 },
+    ALPHAFUNC: { valid: v=>v >= 1 && v <= 8, fallback: 8 },
+    STENCILFUNC: { valid: v=>v >= 1 && v <= 8, fallback: 8 },
+    STENCILOP: { valid: v=>v >= 1 && v <= 8, fallback: 1 },
+});
+
+/**
+ * A reader of states by their domain: a value outside it is its default, and
+ * said (`diverge`).
+ *
+ * @param {((detail: string) => void) | undefined} diverge
+ * @returns {(name: string, value: number) => number}
+ */
+function knownStates(diverge){
+    return (name, value)=>{
+        const domain = STATE_DOMAINS[name];
+        if (!domain || domain.valid(value >>> 0) || ((name === 'SRCBLEND') && (value === 12
+            || value === 13)))
+        {
+            return value;
+        }
+        diverge?.(`a ${name} of ${value >>> 0} is not one this device draws: drawn as ${
+            domain.fallback}, the state's default`);
+        return domain.fallback;
+    };
+}
+
+/**
  * The stencil test the render states ask for. Unset states read as their
- * defaults: KEEP, ALWAYS, masks of all ones and a reference of zero.
+ * defaults: KEEP, ALWAYS, masks of all ones and a reference of zero. A
+ * function or operation outside Direct3D's is its default, and said.
  *
  * @param {RenderModel} model
+ * @param {(detail: string) => void} [diverge]
  * @returns {import('../webgpu/internal/pipeline.js').StencilState}
  */
-export function stencilOf(model){
+export function stencilOf(model, diverge){
+    const known = knownStates(diverge);
     /** @param {number} state @param {number} fallback */
     const rs = (state, fallback)=>(model.renderStates.get(state) ?? fallback) >>> 0;
-    const func = rs(STENCIL_RS.FUNC, 8);
-    const fail = rs(STENCIL_RS.FAIL, 1);
-    const zfail = rs(STENCIL_RS.ZFAIL, 1);
-    const pass = rs(STENCIL_RS.PASS, 1);
+    /** @param {number} state */
+    const func = state=>known('STENCILFUNC', rs(state, 8));
+    /** @param {number} state */
+    const op = state=>known('STENCILOP', rs(state, 1));
     const twoSided = rs(STENCIL_RS.TWOSIDED, 0) !== 0;
+    const front = { func: func(STENCIL_RS.FUNC), fail: op(STENCIL_RS.FAIL),
+        zfail: op(STENCIL_RS.ZFAIL), pass: op(STENCIL_RS.PASS) };
     return {
-        func, fail, zfail, pass,
-        ccwFunc: twoSided ? rs(STENCIL_RS.CCW_FUNC, 8) : func,
-        ccwFail: twoSided ? rs(STENCIL_RS.CCW_FAIL, 1) : fail,
-        ccwZfail: twoSided ? rs(STENCIL_RS.CCW_ZFAIL, 1) : zfail,
-        ccwPass: twoSided ? rs(STENCIL_RS.CCW_PASS, 1) : pass,
+        ...front,
+        ccwFunc: twoSided ? func(STENCIL_RS.CCW_FUNC) : front.func,
+        ccwFail: twoSided ? op(STENCIL_RS.CCW_FAIL) : front.fail,
+        ccwZfail: twoSided ? op(STENCIL_RS.CCW_ZFAIL) : front.zfail,
+        ccwPass: twoSided ? op(STENCIL_RS.CCW_PASS) : front.pass,
         readMask: rs(STENCIL_RS.MASK, 0xffffffff),
         writeMask: rs(STENCIL_RS.WRITEMASK, 0xffffffff),
         ref: rs(STENCIL_RS.REF, 0) & 0xff,
@@ -5208,6 +5256,9 @@ export function createRenderer(options){
         }
     };
 
+    /** A state's value Direct3D does not define, drawn as its default (`knownStates`). @param {string} detail */
+    const stateDiverge = detail=>divergence?.('Direct3D', detail);
+
     /**
      * Says that a draw asked for cylindrical wrapping (D3DRS_WRAP0..15),
      * which is accepted and not done: a coordinate is interpolated straight
@@ -7069,6 +7120,7 @@ export function createRenderer(options){
         ];
         const state = {
             ...pipelineStateOf(model, {
+                diverge: stateDiverge,
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
                 fog: fogApplied, clipping: !transformed, clipDistances,
             }),
@@ -7287,6 +7339,7 @@ export function createRenderer(options){
         }, { shaderCoordinates: true, onesOf: onesOfTexture });
         const state = {
             ...pipelineStateOf(model, {
+                diverge: stateDiverge,
                 fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
                 fog: fogApplied, clipDistances,
             }),
@@ -9188,6 +9241,7 @@ export function createRenderer(options){
         reportWrap(model);
         counters.prepared.built++;
         const state = pipelineStateOf(model, {
+            diverge: stateDiverge,
             fvf: processing.fvf,
             ...(vertexLayoutKey === undefined ? {} : { vertexLayout: layout, vertexLayoutKey }),
             topology,
@@ -10244,6 +10298,7 @@ export function createRenderer(options){
             const frame = ensureViewport(model);
             const state = {
                 ...pipelineStateOf(model, {
+                    diverge: stateDiverge,
                     fvf: CLEAR_FVF,
                     topology: 'triangle-list',
                     ...formatsOf(model),

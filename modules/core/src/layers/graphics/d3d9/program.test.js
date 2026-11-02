@@ -2228,3 +2228,27 @@ test('cylindrical wrapping, accepted and not done, is said', async()=>{
     h.vb.release();
     assert.equal(h.device.release(), 0);
 });
+
+test('a blend, compare or cull value outside Direct3D\'s draws as its default, said', async()=>{
+    // A driver ignores a value it does not know; WebGPU has no pipeline for
+    // one, and the draw was lost (`lookUp` threw).
+    for (const [state, value] of [[D3DRS9.SRCBLEND, 0], [D3DRS9.SRCBLEND, 16],
+        [D3DRS9.BLENDOP, 0], [D3DRS9.ZFUNC, 0], [D3DRS9.CULLMODE, 0]])
+    {
+        const h = harness();
+        assert.equal(h.device.SetRenderState(D3DRS9.ALPHABLENDENABLE, 1), D3D_OK);
+        assert.equal(h.device.SetRenderState(state, value), D3D_OK);
+        await h.draw();
+        assert.equal(h.gpu.count('draw'), 1, `state ${state} at ${value}: drawn`);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        assert.deepEqual(h.losses, []);
+        assert.ok(h.reports.some(detail=>/is not one this device draws/.test(detail)),
+            JSON.stringify(h.reports));
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    }
+});
