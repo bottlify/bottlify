@@ -112,12 +112,14 @@ import { isDriven } from './drive.js';
  * @property {number} calls        Calls made to it.
  * @property {number} sampledMs    Host ms the timed ones of them took, each standing for
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
+ * @property {number} sampledCalls  How many of them were timed.
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
  *     null when every slot is one dword.
  * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
  * @property {number} [windowMs]     `sampledMs` when it began.
+ * @property {number} [windowSampled]  `sampledCalls` when it began.
  */
 
 /**
@@ -249,6 +251,18 @@ const HOOK_AREA = 'call.hook';
 
 /** How many calls one timed crossing stands for, on average (`sampleInterval`). */
 const TRAP_SAMPLE = 32;
+
+/**
+ * The host ms a function's `calls` stand for, from the `timed` of them, which
+ * took `ms`: each timed call weighed by the calls made per timed one of this
+ * function, not by TRAP_SAMPLE. A function called a few times a second is
+ * timed once in a while, and that once weighed by 32 read a 7 ms call as
+ * 239 ms of the second. Null when none was timed: not measured, not zero.
+ *
+ * @param {number} ms @param {number} timed @param {number} calls
+ * @returns {number | null}
+ */
+const estimatedMs = (ms, timed, calls)=>(timed === 0 ? null : ms * calls / timed);
 /** How many return addresses each function's sampled crossings are counted at. */
 const CALLERS_KEPT = 64;
 
@@ -1727,6 +1741,7 @@ class Dispatcher {
             sinkOn: true,
             calls: 0,
             sampledMs: 0,
+            sampledCalls: 0,
         };
         if (hook)
         {
@@ -1819,6 +1834,7 @@ class Dispatcher {
             if (entry !== undefined)
             {
                 entry.sampledMs += performance.now() - began;
+                entry.sampledCalls++;
             }
             this.innerWeight = outer;
             profiler?.end('trap', TRAP_WEIGHT);
@@ -1887,9 +1903,11 @@ class Dispatcher {
                 continue;
             }
             const calls = entry.calls - (entry.windowCalls ?? 0);
-            const ms = (entry.sampledMs - (entry.windowMs ?? 0)) * TRAP_SAMPLE;
+            const ms = estimatedMs(entry.sampledMs - (entry.windowMs ?? 0),
+                entry.sampledCalls - (entry.windowSampled ?? 0), calls) ?? 0;
             entry.windowCalls = entry.calls;
             entry.windowMs = entry.sampledMs;
+            entry.windowSampled = entry.sampledCalls;
             const perSecond = calls * 1000 / elapsed;
             const msPerSecond = ms * 1000 / elapsed;
             if (perSecond >= CHATTY_CALLS_PER_SECOND || msPerSecond >= CHATTY_MS_PER_SECOND)
@@ -1937,10 +1955,13 @@ class Dispatcher {
                 * TRAP_SAMPLE),
             byFunction: entries
                 .filter(entry=>entry.calls > 0)
-                .sort((left, right)=>right.sampledMs - left.sampledMs || right.calls - left.calls)
+                .map(entry=>({ entry, ms: estimatedMs(entry.sampledMs, entry.sampledCalls,
+                    entry.calls) }))
+                .sort((left, right)=>(right.ms ?? 0) - (left.ms ?? 0)
+                    || right.entry.calls - left.entry.calls)
                 .slice(0, BY_FUNCTION_KEPT)
-                .map(entry=>`${entry.name} ${entry.calls} ${
-                    Math.round(entry.sampledMs * TRAP_SAMPLE)}ms${entry.callers
+                .map(({ entry, ms })=>`${entry.name} ${entry.calls} ${
+                    ms === null ? 'untimed' : `${Math.round(ms)}ms`}${entry.callers
                     ? ` from ${[...entry.callers].sort((a, b)=>b[1] - a[1]).slice(0, 3)
                         .map(([from, count])=>`0x${(from >>> 0).toString(16)}x${count}`)
                         .join(',')}` : ''}${entry.chains

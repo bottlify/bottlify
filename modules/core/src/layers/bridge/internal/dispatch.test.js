@@ -1787,6 +1787,39 @@ test('the report counts every call by function and charges each the host time sa
     assert.ok(report.hostMs >= 0);
 });
 
+test('a function\'s host time is its timed calls weighed by its own calls, not the sampling rate',
+    ()=>{
+        // Every call timed: three of 2 ms are 6 ms, where a weight of
+        // TRAP_SAMPLE read them as 192 -- what made a call a few times a
+        // second look like a fifth of the second.
+        const m = machine();
+        m.dispatcher.sampleInterval = ()=>1;
+        m.dispatcher.untilSample = 1;
+        const spin = ()=>{
+            const until = performance.now() + 2;
+            while (performance.now() < until)
+            {
+                // The handler's own time.
+            }
+            return 0;
+        };
+        m.dispatcher.register(1, { name: 'X!Busy', ...STDCALL, argBytes: 0, handler: spin });
+        m.dispatcher.register(2, { name: 'X!Never', ...STDCALL, argBytes: 0, handler: ()=>0 });
+        for (let call = 0; call < 3; call++)
+        {
+            m.dispatcher.dispatch(1);
+        }
+        const busy = m.dispatcher.diagnostics().byFunction
+            .find((/** @type {string} */ row)=>row.startsWith('X!Busy '));
+        const ms = Number(/ (\d+)ms/.exec(String(busy))?.[1]);
+        assert.ok(ms >= 6 && ms < 40, String(busy));
+        // One never timed is not measured, rather than none.
+        m.dispatcher.sampleInterval = ()=>1000;
+        m.dispatcher.untilSample = 1000;
+        m.dispatcher.dispatch(2);
+        assert.ok(m.dispatcher.diagnostics().byFunction.includes('X!Never 1 untimed'));
+    });
+
 test('a function called too often a second is named, in the report and once in the journal', ()=>{
     // A program that starts going to the host for ever -- polling a query
     // that will not answer, spinning on a message -- shows as it starts.
