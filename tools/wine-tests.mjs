@@ -46,11 +46,21 @@
  *     --out <dir>         where report.json and report.md go
  *     --baseline <json>   an earlier report to compare against, before -> after
  *     --cork-config <json>  the translator's settings, over the ones used here
+ *     --browser           run each test in a headless browser on WebGPU, through
+ *                         tools/cdp_test/game.mjs: what a test draws is drawn and
+ *                         read back, where in node every read-back is zero, so the
+ *                         visual tests (d3d9:visual, ddraw:ddraw7, d3d11) answer
+ *                         only here. The program is packed alone as the local
+ *                         bundle wine-<dll>. One test at a time unless --jobs says
+ *                         otherwise: each run is a browser of its own
+ *     --gpu-adapter <a>   with --browser: swiftshader (default), the adapter the
+ *                         pictures are judged on, or hardware
  */
 
-import { fork } from 'node:child_process';
-import { availableParallelism } from 'node:os';
-import { existsSync } from 'node:fs';
+import { execFileSync, fork, spawn } from 'node:child_process';
+import { availableParallelism, tmpdir } from 'node:os';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -309,10 +319,12 @@ export function classify(result, parsed){
 
 /**
  * @param {string} module @param {string} test @param {ChildResult} result
+ * @param {number | null} [mainProcess]  the test's process, null where not known: a run in
+ *     a browser numbers its processes as the page does, and is read without one
  * @returns {TestReport}
  */
-export function summarise(module, test, result){
-    const parsed = parseOutput(result.output, test, MAIN_PROCESS);
+export function summarise(module, test, result, mainProcess = MAIN_PROCESS){
+    const parsed = parseOutput(result.output, test, mainProcess ?? undefined);
     const status = classify(result, parsed);
     return {
         module,
@@ -531,6 +543,90 @@ function runInChild(exePath, test, settings){
     });
 }
 
+/**
+ * Packs a test program alone as the bundle `wine-<module>`, which game.mjs
+ * starts. Bundles are local, as winetest is.
+ *
+ * @param {string} module @param {string} exePath
+ * @returns {string} the bundle's id
+ */
+function packTest(module, exePath){
+    const id = `wine-${module}`;
+    const directory = mkdtempSync(join(tmpdir(), `${id}-`));
+    try
+    {
+        copyFileSync(exePath, join(directory, `${module}_test.exe`));
+        execFileSync(process.execPath, [fileURLToPath(new URL('tools/make-btl.mjs', ROOT)), 'pack',
+            directory, id, `--entry=${module}_test.exe`], { cwd: fileURLToPath(ROOT),
+            stdio: 'ignore' });
+    }
+    finally
+    {
+        rmSync(directory, { recursive: true, force: true });
+    }
+    return id;
+}
+
+/**
+ * One test in a headless browser, through game.mjs: the program's output as it
+ * printed it, and the run's end read off the report's `stopped:` line.
+ *
+ * @param {string} bundle @param {string} module @param {string} test
+ * @param {{ timeout: number, adapter: string }} settings
+ * @returns {Promise<ChildResult>}
+ */
+function runInBrowser(bundle, module, test, settings){
+    return new Promise(resolve=>{
+        const began = performance.now();
+        const output = join(tmpdir(), `${bundle}-${test || 'all'}-${process.pid}-`
+            + `${Math.round(began)}.txt`);
+        const child = spawn(process.execPath, [
+            fileURLToPath(new URL('tools/cdp_test/game.mjs', ROOT)), bundle,
+            '--entry', `${module}_test.exe`,
+            '--command-line', `"C:\\App\\${module}_test.exe" ${test}`.trimEnd(),
+            '--wait', String(settings.timeout), '--output', output,
+            ...settings.adapter === 'hardware' ? []
+                : ['--chrome-flag', '--use-webgpu-adapter=swiftshader'],
+        ], { cwd: fileURLToPath(ROOT), stdio: ['ignore', 'pipe', 'pipe'] });
+        let printed = '';
+        child.stdout.on('data', chunk=>{
+            printed = (printed + chunk).slice(-20000);
+        });
+        child.stderr.on('data', chunk=>{
+            printed = (printed + chunk).slice(-20000);
+        });
+        let killed = false;
+        const timer = setTimeout(()=>{
+            killed = true;
+            child.kill('SIGKILL');
+        }, (settings.timeout + 120) * 1000);
+        child.on('exit', (code, signal)=>{
+            clearTimeout(timer);
+            const reportPath = /^report:\s+(.+\.txt)\s*$/m.exec(printed)?.[1];
+            const report = reportPath && existsSync(reportPath)
+                ? readFileSync(reportPath, 'latin1') : '';
+            const stopped = /^stopped: (.*)$/m.exec(report)?.[1] ?? null;
+            const exited = stopped ? /^exited with (\d+)$/.exec(stopped) : null;
+            const text = existsSync(output) ? readFileSync(output, 'latin1') : '';
+            rmSync(output, { force: true });
+            resolve({
+                output: text,
+                exitCode: exited ? Number(exited[1]) | 0 : null,
+                error: stopped && !exited
+                    ? { reason: 'host', message: `${stopped} (${reportPath})` } : null,
+                killed,
+                died: report ? null : `game.mjs exited ${signal ?? code} with no report: `
+                    + printed.trim().split('\n').slice(-8).join('\n'),
+                wallMs: performance.now() - began,
+                unimplemented: [],
+                divergences: [],
+                missing: [],
+                unresolved: [],
+            });
+        });
+    });
+}
+
 /** @param {string[]} argv */
 function parseArgs(argv){
     /** @param {string} flag @param {string | undefined} [fallback] */
@@ -539,7 +635,7 @@ function parseArgs(argv){
         return at === -1 ? fallback : argv[at + 1];
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
-        '--baseline', '--cork-config', '--winetest-url']);
+        '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -559,7 +655,10 @@ function parseArgs(argv){
         winetestUrl: value('--winetest-url', WINETEST_URL),
         preset: value('--preset'),
         timeout: Number(value('--timeout', '120')),
-        jobs: Number(value('--jobs', String(Math.max(1, Math.floor(availableParallelism() / 2))))),
+        browser: argv.includes('--browser'),
+        adapter: value('--gpu-adapter', 'swiftshader') ?? 'swiftshader',
+        jobs: Number(value('--jobs', argv.includes('--browser') ? '1'
+            : String(Math.max(1, Math.floor(availableParallelism() / 2))))),
         failures: Number(value('--failures', '20')),
         out: value('--out'),
         baseline: value('--baseline'),
@@ -859,9 +958,13 @@ async function main(){
     const build = await buildId(winetest);
     const extracted = new URL('extracted/', LOCAL);
     await mkdir(extracted, { recursive: true });
-    const settings = { timeout: options.timeout, corkConfig: options.corkConfig };
+    const settings = { timeout: options.timeout, corkConfig: options.corkConfig,
+        adapter: options.adapter };
+    /** @type {Map<string, string>} module -> its bundle, for --browser */
+    const bundles = new Map();
     console.log(`winetest build ${build ?? 'unknown'}, ${options.jobs} at a time,`
-        + ` ${options.timeout} s each`);
+        + ` ${options.timeout} s each`
+        + (options.browser ? `, in a browser on ${options.adapter}` : ''));
 
     /** @type {{ module: string, test: string, exePath: string }[]} */
     const plan = [];
@@ -877,6 +980,10 @@ async function main(){
         }
         const exePath = fileURLToPath(new URL(`${module}_test.exe`, extracted));
         await writeFile(exePath, exe);
+        if (options.browser)
+        {
+            bundles.set(module, packTest(module, exePath));
+        }
         let names = tests;
         if (!names)
         {
@@ -899,8 +1006,12 @@ async function main(){
 
     const started = new Date();
     const results = await pool(plan.map(({ module, test, exePath })=>async()=>{
-        const result = await runInChild(exePath, test, settings);
-        const report = summarise(module, test, result);
+        const result = options.browser
+            ? await runInBrowser(/** @type {string} */ (bundles.get(module)), module, test,
+                settings)
+            : await runInChild(exePath, test, settings);
+        const report = summarise(module, test, result,
+            options.browser ? null : MAIN_PROCESS);
         console.log(`  ${`${module}:${test}`.padEnd(28)} ${report.status.padEnd(15)}`
             + ` executed ${String(report.executed ?? '-').padStart(6)}`
             + ` failures ${String(report.failures).padStart(5)}`

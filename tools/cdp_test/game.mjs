@@ -304,6 +304,10 @@ function parse(argv){
         // Keep what the program wrote as the bytes it wrote, whole, rather
         // than as text: a file meant to be fed back in must survive the trip.
         saveFiles: argv.includes('--save-files'),
+        // `--output FILE`: what the program printed, as it printed it - each
+        // write whole, the streams together - for a reader that parses it
+        // (tools/wine-tests.mjs --browser); the report has it a write a line.
+        outputFile: argv.includes('--output') ? argv[argv.indexOf('--output') + 1] : null,
         // A browser profile of the caller's own, kept after shutdown rather
         // than a fresh temporary one thrown away with it: the OPFS block
         // store `--store local` asks for lives in the profile, and a warm run
@@ -2611,6 +2615,11 @@ the run as it stands: ${path}`;
                 + ` ${JSON.stringify(options.corkConfig ?? {})}`,
         }, options.calls, symbols);
         writeFileSync(reportPath, text);
+        if (options.outputFile)
+        {
+            writeFileSync(options.outputFile, (result.output ?? [])
+                .map((/** @type {string} */ line)=>line.replace(/^\[\d+\] /, '')).join(''));
+        }
         // The store's keys put and missed (`traceStore` in --cork-config), for
         // comparing a cold run's keys with a warm run's.
         if (result.cork?.storeTrace)
