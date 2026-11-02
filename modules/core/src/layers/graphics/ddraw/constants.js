@@ -93,6 +93,8 @@ export const DDFXCAPS_BLTMIRRORUPDOWN = 0x00000040;
 export const DDERR_NORASTEROPHW = dderr(280);
 /** DDERR_BLTFASTCANTCLIP: BltFast to a surface with a clipper. */
 export const DDERR_BLTFASTCANTCLIP = dderr(574);
+/** DDERR_INVALIDPIXELFORMAT: a format the device does not make surfaces of. */
+export const DDERR_INVALIDPIXELFORMAT = dderr(145);
 
 /** BltFast flags. */
 export const DDBLTFAST_NOCOLORKEY = 0x00000000;

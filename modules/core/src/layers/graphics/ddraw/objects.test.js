@@ -1667,3 +1667,17 @@ test('a surface of 1, 2 or 4 bits a pixel has the pitch its pixels share bytes b
     }
     assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
+
+test('a surface of a FOURCC the device does not name is refused', ()=>{
+    const ddraw = withLevel();
+    // 'YUY2'.
+    const made = ddraw.createSurface({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8,
+        pixelFormat: { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x32595559, bitCount: 0,
+            redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 },
+    });
+    assert.equal(made.hr >>> 0, 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(made.surface, null);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});

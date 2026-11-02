@@ -55,6 +55,7 @@ import {
     DDERR_EXCLUSIVEMODEALREADYSET,
     DDERR_WRONGMODE,
     DDERR_INVALIDCAPS,
+    DDERR_INVALIDPIXELFORMAT,
     DDERR_INVALIDMODE,
     DDERR_INVALIDOBJECT,
     DDERR_INVALIDPARAMS,
@@ -79,6 +80,7 @@ import {
     DDPCAPS_4BIT,
     DDPCAPS_PRIMARYSURFACE,
     DDPF_FOURCC,
+    DXT_CODES,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
     DDPF_STENCILBUFFER,
@@ -131,8 +133,10 @@ function blockRowBytes(format, width){
     {
         return null;
     }
+    // By name: the codes are four letters, and a range of their numbers
+    // takes in others -- 'YUY2' lies between 'DXT1' and 'DXT5'.
     const code = format.fourCC >>> 0;
-    if (code < 0x31545844 || code > 0x35545844)
+    if (!DXT_CODES.includes(code))
     {
         return null;
     }
@@ -1904,6 +1908,12 @@ export function createDirectDraw(options = {}){
             || (blockRowBytes(pixelFormat, width) !== null && ((width | height) & 3) !== 0))
         {
             return { hr: DDERR_INVALIDPARAMS, surface: null };
+        }
+        // A FOURCC this device does not name (GetFourCCCodes lists DXT1 to
+        // DXT5) is one it makes no surface of: its rows have no width here.
+        if ((pixelFormat.flags & DDPF_FOURCC) !== 0 && blockRowBytes(pixelFormat, width) === null)
+        {
+            return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
         }
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)
