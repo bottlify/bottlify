@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FVF, decodeFvf } from './vertexformat.js';
+import { pipelineRefusal } from './fake-device.js';
 
 /** Two texture coordinate sets, both the default two floats. */
 const twoSets = 2 << FVF.TEXCOUNT_SHIFT;
@@ -92,6 +93,11 @@ test('blend weights come from the position field and follow the position', ()=>{
         assert.equal(layout.attributes[1].name, 'blendWeight');
         assert.equal(layout.attributes[1].offset, 12, 'immediately after the position');
         assert.equal(layout.stride, 12 + weights * 4);
+        // A format WebGPU has: five weights are a float32x4 and one stepped over.
+        assert.equal(layout.attributes[1].format, weights === 1 ? 'float32'
+            : `float32x${Math.min(4, weights)}`);
+        assert.equal(pipelineRefusal({ vertex: { buffers: [{ arrayStride: layout.stride,
+            attributes: layout.attributes }] } }, new Set()), null);
     }
 });
 

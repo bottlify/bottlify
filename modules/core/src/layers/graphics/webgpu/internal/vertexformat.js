@@ -115,7 +115,11 @@ export function decodeFvf(fvf){
         : 0;
     if (blendWeights > 0)
     {
-        add('blendWeight', floatFormat(blendWeights), blendWeights * 4);
+        // WebGPU's widest float format is four: a fifth weight (XYZB5, the
+        // indexed-skinning format) is stepped over, not declared -- a
+        // float32x5 made the whole pipeline invalid. Nothing draws by them;
+        // ProcessVertices reads them by the attribute's offset.
+        add('blendWeight', floatFormat(Math.min(4, blendWeights)), blendWeights * 4);
     }
 
     if ((fvf & FVF.NORMAL) !== 0)
