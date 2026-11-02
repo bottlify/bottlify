@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createFakeDevice, fillWith } from './fake-device.js';
+import { createFakeDevice, fillWith, pipelineRefusal, textureRefusal } from './fake-device.js';
 
 /** The fill a pixel at a time, as the clear was written first. */
 function slowFill(/** @type {Uint8Array} */ bytes, /** @type {number[]} */ pixel){
@@ -56,4 +56,44 @@ test('a render pass that clears a kept texture fills it at submit, in each kept 
         slowFill(want, pixel);
         assert.deepEqual(texture.bytes, want, format);
     }
+});
+
+test('the double refuses what WebGPU refuses: formats, blends, stencil, limits', ()=>{
+    const none = new Set();
+    const tier1 = new Set(['texture-formats-tier1']);
+    const target = (/** @type {any} */ fields)=>({ fragment: { targets: [fields] } });
+    assert.match(String(pipelineRefusal({ vertex: { buffers: [{ arrayStride: 36,
+        attributes: [{ format: 'float32x5', offset: 0 }] }] } }, none)), /float32x5/);
+    assert.match(String(pipelineRefusal({ vertex: { buffers: [{ arrayStride: 12,
+        attributes: [{ format: 'float32x4', offset: 0 }] }] } }, none)), /past a stride/);
+    assert.equal(pipelineRefusal({ vertex: { buffers: [{ arrayStride: 16,
+        attributes: [{ format: 'float32x4', offset: 0 }] }] } }, none), null);
+    assert.match(String(pipelineRefusal({ vertex: { buffers: Array.from({ length: 9 },
+        ()=>({ arrayStride: 4, attributes: [] })) } }, none)), /9 vertex buffers/);
+    assert.match(String(pipelineRefusal(target({ format: 'bgra8unorm',
+        blend: { color: { operation: 'max', srcFactor: 'src-alpha', dstFactor: 'one' },
+            alpha: {} } }), none)), /max blend/);
+    assert.equal(pipelineRefusal(target({ format: 'bgra8unorm',
+        blend: { color: { operation: 'max', srcFactor: 'one', dstFactor: 'one' },
+            alpha: { operation: 'add' } } }), none), null);
+    assert.match(String(pipelineRefusal(target({ format: 'r32float', blend: { color: {},
+        alpha: {} } }), none)), /not blendable/);
+    assert.equal(pipelineRefusal(target({ format: 'r32float', blend: { color: {}, alpha: {} } }),
+        new Set(['float32-blendable'])), null);
+    assert.match(String(pipelineRefusal(target({ format: 'rg11b10ufloat' }), none)),
+        /not a renderable/);
+    assert.equal(pipelineRefusal(target({ format: 'rg11b10ufloat' }),
+        new Set(['rg11b10ufloat-renderable'])), null);
+    assert.match(String(pipelineRefusal({ depthStencil: { format: 'depth32float',
+        stencilFront: { compare: 'equal' } } }, none)), /no stencil/);
+    assert.equal(pipelineRefusal({ depthStencil: { format: 'depth24plus-stencil8',
+        stencilFront: { compare: 'equal' } } }, none), null);
+    assert.match(String(textureRefusal({ format: 'rgba16unorm', usage: 4 }, none)), /tier1/);
+    assert.equal(textureRefusal({ format: 'rgba16unorm', usage: 0x10 }, tier1), null);
+    assert.match(String(textureRefusal({ format: 'rgba8snorm', usage: 0x10 }, none)),
+        /not a renderable/);
+    // And the device says so, as a validation error, when one is made.
+    const gpu = createFakeDevice();
+    gpu.device.createRenderPipeline(target({ format: 'rg11b10ufloat' }));
+    assert.match(gpu.errors[0], /createRenderPipeline: rg11b10ufloat/);
 });

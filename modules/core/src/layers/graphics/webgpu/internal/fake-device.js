@@ -61,6 +61,179 @@ export function fillWith(bytes, pixel){
 }
 
 /**
+ * WebGPU's validation of what a renderer makes, kept here so that what a real
+ * device refuses -- and with a pipeline refused, every frame it is set in --
+ * a test refuses too. Each rule is one a program's Direct3D or OpenGL state
+ * reached and lost frames on a GPU before this double knew it: a min or max
+ * blend with factors not one, a stencil test over a format with no stencil,
+ * a vertex format WebGPU has not, a target it does not render into.
+ * From the WebGPU specification (vertex formats; texture format capabilities;
+ * createRenderPipeline's validation) and its default limits.
+ */
+const VERTEX_FORMATS = new Set(['uint8', 'uint8x2', 'uint8x4', 'sint8', 'sint8x2', 'sint8x4',
+    'unorm8', 'unorm8x2', 'unorm8x4', 'snorm8', 'snorm8x2', 'snorm8x4', 'uint16', 'uint16x2',
+    'uint16x4', 'sint16', 'sint16x2', 'sint16x4', 'unorm16', 'unorm16x2', 'unorm16x4', 'snorm16',
+    'snorm16x2', 'snorm16x4', 'float16', 'float16x2', 'float16x4', 'float32', 'float32x2',
+    'float32x3', 'float32x4', 'uint32', 'uint32x2', 'uint32x3', 'uint32x4', 'sint32', 'sint32x2',
+    'sint32x3', 'sint32x4', 'unorm10-10-10-2', 'unorm8x4-bgra']);
+
+/** @param {string} format a vertex format @returns {number} its bytes */
+const vertexBytes = format=>{
+    if (format === 'unorm10-10-10-2' || format === 'unorm8x4-bgra')
+    {
+        return 4;
+    }
+    const [, bits, count] = /(\d+)(?:x(\d))?$/.exec(format) ?? [];
+    return Number(bits) / 8 * Number(count ?? 1);
+};
+
+/** Colour formats core WebGPU renders into. */
+const RENDERABLE = new Set(['r8unorm', 'r8uint', 'r8sint', 'rg8unorm', 'rg8uint', 'rg8sint',
+    'rgba8unorm', 'rgba8unorm-srgb', 'rgba8uint', 'rgba8sint', 'bgra8unorm', 'bgra8unorm-srgb',
+    'r16uint', 'r16sint', 'r16float', 'rg16uint', 'rg16sint', 'rg16float', 'rgba16uint',
+    'rgba16sint', 'rgba16float', 'r32uint', 'r32sint', 'r32float', 'rg32uint', 'rg32sint',
+    'rg32float', 'rgba32uint', 'rgba32sint', 'rgba32float', 'rgb10a2uint', 'rgb10a2unorm']);
+/** Those it renders into only with `texture-formats-tier1`, rg11b10ufloat with its own feature too. */
+const TIER1_RENDERABLE = new Set(['r8snorm', 'rg8snorm', 'rgba8snorm', 'r16unorm', 'rg16unorm',
+    'rgba16unorm', 'r16snorm', 'rg16snorm', 'rgba16snorm', 'rg11b10ufloat']);
+/** Formats a device has only with `texture-formats-tier1`. */
+const TIER1_FORMATS = new Set(['r16unorm', 'rg16unorm', 'rgba16unorm', 'r16snorm', 'rg16snorm',
+    'rgba16snorm']);
+/** Colour formats blended into: core, and the 32-bit floats with `float32-blendable`. */
+const BLENDED = new Set(['r8unorm', 'rg8unorm', 'rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm',
+    'bgra8unorm-srgb', 'r16float', 'rg16float', 'rgba16float', 'rgb10a2unorm']);
+const TIER1_BLENDED = new Set(['r8snorm', 'rg8snorm', 'rgba8snorm', 'r16unorm', 'rg16unorm',
+    'rgba16unorm', 'r16snorm', 'rg16snorm', 'rgba16snorm', 'rg11b10ufloat']);
+const FLOAT32 = new Set(['r32float', 'rg32float', 'rgba32float']);
+const STENCIL_FORMATS = new Set(['stencil8', 'depth24plus-stencil8', 'depth32float-stencil8']);
+/** GPUTextureUsage.RENDER_ATTACHMENT. */
+const RENDER_ATTACHMENT = 0x10;
+
+/**
+ * Why WebGPU refuses a colour format as a render target on a device with
+ * `features`, or null.
+ *
+ * @param {string} format @param {Set<string>} features
+ */
+const unrenderable = (format, features)=>{
+    if (RENDERABLE.has(format))
+    {
+        return null;
+    }
+    const tier1 = features.has('texture-formats-tier1');
+    if (TIER1_RENDERABLE.has(format) && (tier1 || (format === 'rg11b10ufloat'
+        && features.has('rg11b10ufloat-renderable'))))
+    {
+        return null;
+    }
+    return `${format} is not a renderable format on this device`;
+};
+
+/**
+ * Why WebGPU refuses a texture descriptor, or null.
+ *
+ * @param {any} descriptor @param {Set<string>} features
+ */
+export function textureRefusal(descriptor, features){
+    const { format } = descriptor;
+    if (TIER1_FORMATS.has(format) && !features.has('texture-formats-tier1'))
+    {
+        return `${format} needs texture-formats-tier1`;
+    }
+    if (((descriptor.usage ?? 0) & RENDER_ATTACHMENT) !== 0 && !/depth|stencil/.test(format))
+    {
+        return unrenderable(format, features);
+    }
+    return null;
+}
+
+/**
+ * Why WebGPU refuses a render pipeline descriptor, or null.
+ *
+ * @param {any} descriptor @param {Set<string>} features
+ */
+export function pipelineRefusal(descriptor, features){
+    const buffers = (descriptor.vertex?.buffers ?? []).filter(Boolean);
+    if (buffers.length > 8)
+    {
+        return `${buffers.length} vertex buffers, past the limit of 8`;
+    }
+    let attributes = 0;
+    for (const buffer of buffers)
+    {
+        const stride = buffer.arrayStride ?? 0;
+        if (stride % 4 !== 0 || stride > 2048)
+        {
+            return `a vertex buffer stride of ${stride}`;
+        }
+        for (const attribute of buffer.attributes ?? [])
+        {
+            attributes++;
+            if (!VERTEX_FORMATS.has(attribute.format))
+            {
+                return `vertex format ${attribute.format} does not exist`;
+            }
+            if (stride > 0 && attribute.offset + vertexBytes(attribute.format) > stride)
+            {
+                return `a ${attribute.format} at ${attribute.offset} past a stride of ${stride}`;
+            }
+        }
+    }
+    if (attributes > 16)
+    {
+        return `${attributes} vertex attributes, past the limit of 16`;
+    }
+    const targets = (descriptor.fragment?.targets ?? []).filter(Boolean);
+    if (targets.length > 8)
+    {
+        return `${targets.length} colour targets, past the limit of 8`;
+    }
+    for (const target of targets)
+    {
+        const refused = unrenderable(target.format, features);
+        if (refused)
+        {
+            return refused;
+        }
+        const blend = target.blend;
+        if (!blend)
+        {
+            continue;
+        }
+        const blended = BLENDED.has(target.format)
+            || (TIER1_BLENDED.has(target.format) && features.has('texture-formats-tier1'))
+            || (FLOAT32.has(target.format) && features.has('float32-blendable'));
+        if (!blended)
+        {
+            return `${target.format} is not blendable on this device`;
+        }
+        for (const part of [blend.color, blend.alpha])
+        {
+            if ((part?.operation === 'min' || part?.operation === 'max')
+                && ((part.srcFactor ?? 'one') !== 'one' || (part.dstFactor ?? 'zero') !== 'one'))
+            {
+                return `a ${part.operation} blend with factors ${part.srcFactor},`
+                    + ` ${part.dstFactor}`;
+            }
+        }
+    }
+    const depth = descriptor.depthStencil;
+    if (depth && !STENCIL_FORMATS.has(depth.format))
+    {
+        for (const face of [depth.stencilFront, depth.stencilBack])
+        {
+            if (face && ((face.compare ?? 'always') !== 'always'
+                || [face.failOp, face.depthFailOp, face.passOp]
+                    .some(op=>(op ?? 'keep') !== 'keep')))
+            {
+                return `a stencil test over ${depth.format}, which has no stencil`;
+            }
+        }
+    }
+    return null;
+}
+
+/**
  * @param {{ compilationMessages?: Record<string, any[]>,
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
  *           occlusionSamples?: (index: number) => number,
@@ -121,6 +294,8 @@ export function createFakeDevice(options = {}){
         }
     };
     let nextId = 0;
+    /** The optional features the device was made with. */
+    const features = new Set(options.features ?? []);
 
     /** @param {string} kind @param {any} extra @returns {any} */
     const object = (kind, extra = {})=>({ kind, id: `${kind}-${nextId++}`, ...extra });
@@ -137,6 +312,11 @@ export function createFakeDevice(options = {}){
 
     /** @param {any} descriptor */
     const createTexture = descriptor=>{
+        const textureRefused = textureRefusal(descriptor, features);
+        if (textureRefused)
+        {
+            refuse(`createTexture: ${textureRefused}`);
+        }
         // What a GPUTexture says of itself, read by whoever decides how to use one.
         const texture = object('texture', { descriptor, usage: descriptor.usage ?? 0,
             format: descriptor.format, sampleCount: descriptor.sampleCount ?? 1 });
@@ -524,7 +704,7 @@ export function createFakeDevice(options = {}){
 
     const device = {
         calls,
-        features: new Set(options.features ?? []),
+        features,
         /** @param {string} type @param {(event: any) => void} listener */
         addEventListener(type, listener){
             if (type === 'uncapturederror')
@@ -573,7 +753,15 @@ export function createFakeDevice(options = {}){
             calls.push({ op: 'createBindGroup', createBindGroup: group, descriptor });
             return group;
         },
-        createRenderPipeline: recorder('createRenderPipeline'),
+        /** @param {any} descriptor */
+        createRenderPipeline: descriptor=>{
+            const refused = pipelineRefusal(descriptor, features);
+            if (refused)
+            {
+                refuse(`createRenderPipeline: ${refused}`);
+            }
+            return recorder('createRenderPipeline')(descriptor);
+        },
         /** @param {any} descriptor */
         createComputePipelineAsync: async descriptor=>{
             const made = object('createComputePipeline', { descriptor });
@@ -587,7 +775,8 @@ export function createFakeDevice(options = {}){
         // compiles the pipeline's shaders does.
         /** @param {any} descriptor */
         createRenderPipelineAsync: descriptor=>{
-            const refused = options.refusePipeline?.(descriptor);
+            const refused = options.refusePipeline?.(descriptor)
+                ?? pipelineRefusal(descriptor, features);
             if (refused)
             {
                 return Promise.reject(new Error(refused));
