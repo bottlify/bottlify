@@ -183,6 +183,18 @@ test('a call for an object of the multithreaded apartment runs on a thread of th
     assert.equal(workers(), 1, 'one worker for the process, started with the first call');
 });
 
+test('a type description another apartment of the process asks for is handed over as itself',
+    async()=>{
+        // An InstallScript engine's IDispatch, served from its own apartment:
+        // its caller asks GetTypeInfo on another thread and is given the
+        // ITypeInfo, which holds no apartment's state, where it was refused.
+        const IID_ITYPEINFO = '{00020401-0000-0000-C000-000000000046}';
+        const { remoting, OBJECT } = channel({ exporter: 'sta' });
+        const reference = await remoting.exportReference(OBJECT, IID_ITYPEINFO, 'sta');
+        assert.equal(await remoting.importReference(reference, IID_ITYPEINFO, 'main'), OBJECT,
+            'the object itself, not a proxy');
+    });
+
 test('a single-threaded apartment\'s object is called on its own thread, never the worker\'s',
     async()=>{
         const { remoting, table, calls, reported, OBJECT, workers } = channel({ exporter: 'sta' });

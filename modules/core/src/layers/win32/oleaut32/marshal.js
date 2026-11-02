@@ -46,6 +46,7 @@ import { readToTerminator } from '../common/scan-windows.js';
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
 export const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
+export const IID_ITYPEINFO = '{00020401-0000-0000-C000-000000000046}';
 
 /** The proxy/stub classes whose interfaces a type library describes. */
 const PSOAINTERFACE = '{00020424-0000-0000-C000-000000000046}';
@@ -415,7 +416,9 @@ const UNKNOWN_SLOTS = 3;
 
 /**
  * IDispatch's four, as oleaut32's own proxy sends them. GetTypeInfo's
- * ITypeInfo has a proxy of its own and no type library, so it does not cross.
+ * ITypeInfo is handed over within a process (`remote.js`, an agile type
+ * object); between processes it has a proxy of its own, which this build
+ * does not make, and the caller is given none.
  *
  * @type {MethodDescription[]}
  */
@@ -423,8 +426,11 @@ const DISPATCH_METHODS = [
     { name: 'GetTypeInfoCount', slot: 3, unsupported: null, parameters: [
         { name: 'pctinfo', flags: PARAMFLAG_FOUT, type: pointer(word(4)) },
     ] },
-    { name: 'GetTypeInfo', slot: 4, unsupported: 'ITypeInfo crosses through its own proxy',
-        parameters: [] },
+    { name: 'GetTypeInfo', slot: 4, unsupported: null, parameters: [
+        { name: 'iTInfo', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'lcid', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'ppTInfo', flags: PARAMFLAG_FOUT, type: pointer(iface(IID_ITYPEINFO)) },
+    ] },
     { name: 'GetIDsOfNames', slot: 5, unsupported: null, parameters: [
         { name: 'riid', flags: PARAMFLAG_FIN, type: REFGUID },
         { name: 'rgszNames', flags: PARAMFLAG_FIN,

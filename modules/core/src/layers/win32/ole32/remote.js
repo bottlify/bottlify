@@ -48,7 +48,7 @@
 import { formatGuid, parseGuid } from './guid.js';
 import { IUNKNOWN_METHODS } from './objects.js';
 import {
-    IID_ICLASSFACTORY, IID_IUNKNOWN, argumentBytes, createInterfaceCatalog,
+    IID_ICLASSFACTORY, IID_ITYPEINFO, IID_IUNKNOWN, argumentBytes, createInterfaceCatalog,
     marshalReply, marshalRequest, unmarshalReply, unmarshalRequest,
 } from '../oleaut32/marshal.js';
 
@@ -1447,7 +1447,12 @@ export function createRemoting(host){
         // thread is the nearest to it.
         const here = host.apartmentOf?.(thread) ?? null;
         const home = entry ? host.apartmentOf?.(entry.thread) ?? null : null;
-        if (entry && (home === here || /** @type {any} */ (home)?.multithreaded))
+        // A type description holds no apartment's state, and within a process
+        // is handed over as itself: IDispatch::GetTypeInfo from another
+        // apartment (an InstallScript engine's object, asked on its caller's
+        // thread) answers the same ITypeInfo.
+        if (entry && (home === here || /** @type {any} */ (home)?.multithreaded
+            || iid === IID_ITYPEINFO))
         {
             let pointer = entry.interfaces.get(iid) ?? 0;
             if (pointer === 0)
