@@ -1545,6 +1545,44 @@ test('a typeless depth buffer is kept as depth, drawn through one view and read 
     assert.deepEqual(h.divergences, []);
 });
 
+test('a depth buffer read through a float view is read, as a depth texture', async()=>{
+    // A shadow map or a depth read back: the shader declares a float texture,
+    // which binds no depth texture in WebGPU; it was read as an empty one.
+    const h = harness();
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Width: 8, Height: 8, Format: DXGI_FORMAT.R24G8_TYPELESS,
+        BindFlags: D3D10_BIND.DEPTH_STENCIL | D3D10_BIND.SHADER_RESOURCE,
+    }, null, depth), S_OK);
+    /** @type {{ view?: any }} */
+    const srv = {};
+    assert.equal(device.CreateShaderResourceView(depth.resource,
+        { Format: DXGI_FORMAT.R24_UNORM_X8_TYPELESS, ViewDimension: 4, MostDetailedMip: 0,
+            MipLevels: 1 }, srv), S_OK);
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)), ld(o(0), r(0), t(0)), ret(),
+        ],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    device.PSSetShaderResources(0, [srv.view]);
+    device.Draw(3, 0);
+    await h.present();
+    assert.deepEqual(h.divergences.filter(detail=>/empty texture/.test(detail)), []);
+    assert.ok(h.gpu.of('createShaderModule').some(call=>
+        /var t0: texture_depth_2d;/.test(call.descriptor.code)), 'declared as a depth texture');
+    assert.deepEqual(h.gpu.errors, []);
+    assert.equal(h.gpu.count('draw'), 1);
+});
+
 test('a view of a typeless texture is cast where WebGPU allows it and said otherwise',
     async()=>{
         const h = harness();

@@ -63,7 +63,15 @@ import {
 } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
-import { RESOURCE_DIMENSION } from './sm4.js';
+import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
+
+/**
+ * The shapes WGSL has a depth texture of, which a float texture over a depth
+ * buffer is declared as (`variantOf`): two-dimensional, an array of them, a
+ * cube and an array of cubes.
+ */
+const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSION.TEXTURE2DARRAY,
+    RESOURCE_DIMENSION.TEXTURECUBE, RESOURCE_DIMENSION.TEXTURECUBEARRAY]);
 
 /**
  * @typedef {Object} RenderServices
@@ -433,8 +441,8 @@ export function createRenderer(services){
     const samplers = new WeakMap();
     /** @type {WeakMap<object, any>} shader -> translation */
     const translations = new WeakMap();
-    /** @type {WeakMap<object, Map<string, any>>} shader -> its multisampled variants */
-    const multisampledTranslations = new WeakMap();
+    /** @type {WeakMap<object, Map<string, any>>} shader -> its variants, by `variantOf` */
+    const variantTranslations = new WeakMap();
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
     /** @type {Map<string, any>} */
@@ -1424,29 +1432,32 @@ export function createRenderer(services){
     /**
      * @param {any} shader a shader object holding a parsed container, or null
      *     for the pixel stage of a draw that binds none
-     * @param {string} [multisampled]  The slots read by sample, as a key.
+     * @param {string} [variant]  What the textures bound make of it (`variantOf`).
      */
-    const translationOf = (shader, multisampled = '')=>{
+    const translationOf = (shader, variant = '')=>{
         if (!shader)
         {
             return NO_PIXEL_SHADER;
         }
-        if (multisampled)
+        if (variant)
         {
-            let variants = multisampledTranslations.get(shader);
+            let variants = variantTranslations.get(shader);
             if (!variants)
             {
                 variants = new Map();
-                multisampledTranslations.set(shader, variants);
+                variantTranslations.set(shader, variants);
             }
-            let variant = variants.get(multisampled);
-            if (!variant)
+            let made = variants.get(variant);
+            if (!made)
             {
-                variant = translateShader(shader.container,
-                    { multisampled: multisampled.split(',').map(Number) });
-                variants.set(multisampled, variant);
+                const [multisampled, depth] = variant.split('|');
+                /** @param {string} slots */
+                const list = slots=>(slots ? slots.split(',').map(Number) : []);
+                made = translateShader(shader.container,
+                    { multisampled: list(multisampled), depth: list(depth) });
+                variants.set(variant, made);
             }
-            return variant;
+            return made;
         }
         let translation = translations.get(shader);
         if (!translation)
@@ -1458,31 +1469,48 @@ export function createRenderer(services){
     };
 
     /**
-     * The slots, as a key, where a stage's shader declares a multisampled
-     * texture and the view bound there is of one with several samples: what
-     * its translation has to read by sample. Empty for nearly every draw, and
-     * found from the few textures the shader declares.
+     * What the views a stage binds make of its shader's translation, as a
+     * key: the slots where it declares a multisampled texture and the view is
+     * of one with several samples, read by sample; and, after a bar, the
+     * slots where it declares a float texture and the view is of a depth
+     * buffer, declared as a depth texture -- a shadow map, a depth read back
+     * -- which a float texture's binding does not take. Empty for nearly
+     * every draw, and found from the few textures the shader declares.
      *
      * @param {any} stage
      * @returns {string}
      */
-    const multisampledSlotsOf = stage=>{
+    const variantOf = stage=>{
         if (!stage.shader)
         {
             return '';
         }
-        let slots = '';
+        /** @type {number[]} */
+        const multisampled = [];
+        /** @type {number[]} */
+        const depth = [];
         for (const texture of translationOf(stage.shader).textures)
         {
-            const view = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
-                ? stage.shaderResources[texture.slot]
-                : null;
-            if (view && viewOf(view)?.multisampled)
+            const view = stage.shaderResources[texture.slot];
+            const gpu = view ? viewOf(view) : null;
+            if (!gpu)
             {
-                slots += `${slots ? ',' : ''}${texture.slot}`;
+                continue;
+            }
+            if (texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS && gpu.multisampled)
+            {
+                multisampled.push(texture.slot);
+            }
+            else if (gpu.sampleType === 'depth' && !gpu.multisampled
+                && texture.returnType !== RETURN_TYPE.UINT
+                && texture.returnType !== RETURN_TYPE.SINT
+                && DEPTH_DIMENSIONS.has(texture.dimension))
+            {
+                depth.push(texture.slot);
             }
         }
-        return slots;
+        return multisampled.length === 0 && depth.length === 0 ? ''
+            : `${multisampled.join(',')}|${depth.join(',')}`;
     };
 
     /** @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries @param {string} label */
@@ -1584,9 +1612,9 @@ export function createRenderer(services){
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
         ].join('|');
-        // Only a draw that reads a multisampled texture by sample says so.
-        return state.vsMultisampled || state.psMultisampled
-            ? `${key}|ms:${state.vsMultisampled}/${state.psMultisampled}`
+        // Only a draw whose views make a variant of a shader says so.
+        return state.vsVariant || state.psVariant
+            ? `${key}|v:${state.vsVariant}/${state.psVariant}`
             : key;
     };
 
@@ -1647,8 +1675,8 @@ export function createRenderer(services){
      * @returns {Promise<any>}
      */
     const buildPipeline = async state=>{
-        const vs = translationOf(state.vertexShader, state.vsMultisampled);
-        const ps = translationOf(state.pixelShader, state.psMultisampled);
+        const vs = translationOf(state.vertexShader, state.vsVariant);
+        const ps = translationOf(state.pixelShader, state.psVariant);
         /** @type {(string | null)[]} */
         const formats = state.targetFormats;
         const bound = formats.flatMap((format, index)=>(format ? [index] : []));
@@ -3440,8 +3468,8 @@ export function createRenderer(services){
                 sampleCount: sizing.sampleCount,
                 strides: pipeline.vertexStrides.slice(),
                 indexFormat: draw.indexCount === undefined ? null : indexFormat,
-                vsMultisampled: multisampledSlotsOf(pipeline.stages.vs),
-                psMultisampled: multisampledSlotsOf(pipeline.stages.ps),
+                vsVariant: variantOf(pipeline.stages.vs),
+                psVariant: variantOf(pipeline.stages.ps),
             };
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
@@ -3460,8 +3488,8 @@ export function createRenderer(services){
                         bottom: Math.min(scissor.bottom, bottom) }
                     : { left: 0, top: 0, right, bottom };
             }
-            const program = linkProgram(translationOf(state.vertexShader, state.vsMultisampled),
-                translationOf(state.pixelShader, state.psMultisampled));
+            const program = linkProgram(translationOf(state.vertexShader, state.vsVariant),
+                translationOf(state.pixelShader, state.psVariant));
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
                 const backing = buffer ? backingOf(buffer) : null;
                 if (!backing || !backing.gpu)

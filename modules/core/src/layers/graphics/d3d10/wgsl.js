@@ -280,6 +280,8 @@ export const HELPERS = Object.freeze({
  * @property {number} returnType   A RETURN_TYPE.
  * @property {boolean} comparison  Read by a compare-sample, so declared as depth.
  * @property {boolean} [multisampled]  A TEXTURE2DMS bound to a texture of several samples.
+ * @property {boolean} [depth]  A float texture bound to a depth buffer: declared as a depth
+ *     texture, each read of it one float, made (d, 0, 0, 1) as Direct3D reads such a view.
  * @property {'raw' | 'structured'} [structure]  A buffer read by bytes or by structures.
  * @property {number} [stride]    Bytes a structure.
  */
@@ -389,12 +391,19 @@ const u32Literal = dword=>`${dword >>> 0}u`;
  * slot: the view bound there is of a texture with more samples than one, and
  * WebGPU binds that only as a multisampled texture, read by sample.
  *
+ * A float texture whose slot `depth` names is bound to a depth buffer -- a
+ * shadow map read as R32_FLOAT, a depth read back as R24_UNORM_X8 -- which
+ * WebGPU binds only as a depth texture: it is declared as one, and each read
+ * of it answers (d, 0, 0, 1), as Direct3D answers a view of one channel. A
+ * depth texture has no sample with a bias or gradients: those read at the
+ * level the plain sample would, or the top one.
+ *
  * A typed view a shader writes a texture through is a storage texture of
  * the bound view's format, which `uavFormats` names by slot.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
- * @param {{ multisampled?: readonly number[], uavFormats?: Readonly<Record<number, string>> }}
- *     [options]
+ * @param {{ multisampled?: readonly number[], depth?: readonly number[],
+ *     uavFormats?: Readonly<Record<number, string>> }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
@@ -662,6 +671,15 @@ export function translateShader(container, options = {}){
                 return null;
         }
     };
+
+    /**
+     * A read of a depth texture, one float, as the four Direct3D answers of a
+     * view of one channel; any other read as it is.
+     *
+     * @param {TextureDecl} texture @param {string} read
+     */
+    const depthRead = (texture, read)=>(texture.depth
+        ? `vec4<f32>(${read}, 0.0, 0.0, 1.0)` : read);
 
     /**
      * A sampled result, as the register file holds it: the texture's swizzle
@@ -1046,6 +1064,8 @@ export function translateShader(container, options = {}){
                         && (options.multisampled ?? []).includes(dest.indices[0].value)
                         ? { multisampled: true }
                         : {}),
+                    ...((options.depth ?? []).includes(dest.indices[0].value)
+                        ? { depth: true } : {}),
                 });
                 if ((instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -1446,15 +1466,17 @@ export function translateShader(container, options = {}){
                     unsupported('sample outside a pixel shader');
                     break;
                 }
-                sampleWith(instruction, (texture, shaped, sampler)=>
+                sampleWith(instruction, (texture, shaped, sampler)=>depthRead(texture,
                     `textureSample(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`);
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`));
                 break;
             case OPCODE.SAMPLE_L:
-                sampleWith(instruction, (texture, shaped, sampler)=>
+                // A depth texture's level is a whole number.
+                sampleWith(instruction, (texture, shaped, sampler)=>depthRead(texture,
                     `textureSampleLevel(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x)`);
+                    + `, ${texture.depth ? `i32(round(${f(instruction.operands[4])}.x))`
+                        : `${f(instruction.operands[4])}.x`})`));
                 break;
             case OPCODE.SAMPLE_B:
                 if (!isPixel)
@@ -1462,13 +1484,22 @@ export function translateShader(container, options = {}){
                     unsupported('sample_b outside a pixel shader');
                     break;
                 }
-                sampleWith(instruction, (texture, shaped, sampler)=>
-                    `textureSampleBias(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                sampleWith(instruction, (texture, shaped, sampler)=>(texture.depth
+                    ? depthRead(texture, `textureSample(t${texture.slot}, ${sampler}`
+                        + `, ${shaped.coordinate}`
+                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`)
+                    : `textureSampleBias(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x)`);
+                    + `, ${f(instruction.operands[4])}.x)`));
                 break;
             case OPCODE.SAMPLE_D:
                 sampleWith(instruction, (texture, shaped, sampler)=>{
+                    if (texture.depth)
+                    {
+                        return depthRead(texture, `textureSampleLevel(t${texture.slot}`
+                            + `, ${sampler}, ${shaped.coordinate}`
+                            + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, 0)`);
+                    }
                     /** @param {import('./sm4.js').Operand} operand */
                     const gradient = operand=>(shaped.row
                         ? `vec2<f32>(${f(operand)}.x, 0.0)`
@@ -1536,9 +1567,9 @@ export function translateShader(container, options = {}){
                 const multisample = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY;
                 const level = multisample ? '0' : `${i(address)}.w`;
-                const loaded = sampledBits(texture, resource,
+                const loaded = sampledBits(texture, resource, depthRead(texture,
                     `textureLoad(t${texture.slot}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, ${level})`);
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, ${level})`));
                 store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
                     ? `select(${loaded}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
                     : loaded);
@@ -1609,8 +1640,10 @@ export function translateShader(container, options = {}){
                 }
                 // The four texels' first components, in the order WGSL and
                 // Direct3D agree on.
+                // A depth texture gathers its one channel, named by no component.
                 sampleWith(instruction, (texture, shaped, sampler)=>
-                    `textureGather(0, t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                    `textureGather(${texture.depth ? '' : '0, '}t${texture.slot}, ${sampler}`
+                    + `, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`);
                 break;
             }
@@ -1947,7 +1980,7 @@ function textureType(texture){
             multisampled: true,
         };
     }
-    if (texture.comparison)
+    if (texture.comparison || texture.depth)
     {
         return {
             type: `texture_depth_${shape[0]}`, sampleType: 'depth', viewDimension: shape[1],

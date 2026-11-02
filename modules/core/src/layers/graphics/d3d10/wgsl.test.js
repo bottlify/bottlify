@@ -49,6 +49,7 @@ import {
  * @param {(import('./shader-fixtures.js').AsmInstruction | { customData: number[] })[]}
  *        [more.declarations]
  * @param {number} [more.kind]
+ * @param {Parameters<typeof translateShader>[1]} [more.options]  the translation's
  */
 function translate(body, more = {}){
     const parsed = parseDxbc(assemble({
@@ -63,7 +64,7 @@ function translate(body, more = {}){
         ],
     }));
     assert.ok(parsed);
-    return translateShader(parsed);
+    return translateShader(parsed, more.options);
 }
 
 /**
@@ -479,6 +480,31 @@ test('a compare sample marks its texture as depth and splats the one float', ()=
     assert.match(linked.fragment, /var t0: texture_depth_2d;/);
     assert.deepEqual(linked.groups[1][0].texture, { sampleType: 'depth', viewDimension: '2d' });
 });
+
+test('a float texture bound to a depth buffer is declared as depth and read as (d, 0, 0, 1)',
+    ()=>{
+        // A shadow map read as R32_FLOAT, a depth read back as R24_UNORM_X8:
+        // a float binding does not take a depth texture, and the read was
+        // of an empty one. Direct3D answers a one-channel view as (r, 0, 0, 1).
+        const options = { depth: [0] };
+        const sampled = translate([sample(r(0), v(0, 'xy'), t(0), s(0))],
+            { declarations: TEXTURE, options });
+        assert.equal(sampled.textures[0].depth, true);
+        assert.equal(bodyOf(sampled), `r0 = ${U}((vec4<f32>(textureSample(t0, s0, `
+            + `${F}(v0.xyyy).xy), 0.0, 0.0, 1.0)).xyzw);`);
+        const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+        const linked = linkProgram(vs, sampled);
+        assert.match(linked.fragment, /var t0: texture_depth_2d;/);
+        assert.deepEqual(linked.groups[1][0].texture, { sampleType: 'depth', viewDimension: '2d' });
+        const level = translate([sampleL(r(0), v(0, 'xy'), t(0), s(0), l(2))],
+            { declarations: TEXTURE, options });
+        assert.match(bodyOf(level), /textureSampleLevel\(t0, s0, .*, i32\(round\(/,
+            'a depth texture\'s level is a whole number');
+        const loaded = translate([ld(r(0), r(1), t(0))], { declarations: TEXTURE, options });
+        assert.match(bodyOf(loaded), /vec4<f32>\(textureLoad\(t0, .*\), 0\.0, 0\.0, 1\.0\)/);
+        const plain = translate([sample(r(0), v(0, 'xy'), t(0), s(0))], { declarations: TEXTURE });
+        assert.equal(plain.textures[0].depth, undefined, 'only where a depth buffer is bound');
+    });
 
 test('ld fetches a texel by integer address with the level in w', ()=>{
     const translated = translate([ld(r(0), r(1), t(0))], {
