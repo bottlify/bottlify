@@ -182,7 +182,7 @@ function createPointer(size, type){
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function installArrayCalls(context, kernel){
-    const { enter, setError, record, setState, diverge } = kernel;
+    const { enter, setError, record, setState, lose } = kernel;
 
     /** @type {Record<string, import('./arrays.js').ArrayPointer>} */
     const pointers = {
@@ -598,7 +598,7 @@ export function installArrayCalls(context, kernel){
         }
         if (!readerFor(pointers.vertex))
         {
-            diverge(`${name} was called with no way to read the vertex array, and drew nothing`);
+            lose(`${name} was called with no way to read the vertex array, and drew nothing`);
             return;
         }
         const vertices = [];
@@ -1023,7 +1023,7 @@ export function installArrayCalls(context, kernel){
             const list = readIndices(count, type, indices);
             if (!list)
             {
-                diverge('glDrawElements was called with no way to read its indices, and drew'
+                lose('glDrawElements was called with no way to read its indices, and drew'
                     + ' nothing');
                 return;
             }
@@ -1320,7 +1320,7 @@ export function installArrayCalls(context, kernel){
             const address = memory?.allocate ? memory.allocate(Math.max(1, buffer.size)) : 0;
             if (address === 0)
             {
-                diverge('glMapBuffer could not map a buffer into guest memory: a program that'
+                lose('glMapBuffer could not map a buffer into guest memory: a program that'
                     + ' fills its buffers by mapping gets null and draws nothing from them');
                 setError(GL.OUT_OF_MEMORY);
                 return 0;

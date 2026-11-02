@@ -1657,12 +1657,12 @@ test('an indexed draw is instanced by stream zero\'s count, a stream stepping by
             .map(call=>call.offset), [4], 'the instance stream at its own offset');
 
         // A stream stepping every second instance is not what a vertex
-        // buffer can do: the draw is not drawn, and that is said.
+        // buffer can do: the draw is not drawn, and that is said as lost.
         assert.equal(h.device.SetStreamSourceFreq(1, (0x80000000 | 2) >>> 0), D3D_OK);
         await draw();
         assert.equal(h.gpu.of('drawIndexed').length, 1);
         assert.equal(h.device.diagnostics().skipped.instancing, 1);
-        assert.equal(h.reports.length, 1);
+        assert.equal(h.losses.length, 1, 'said as a loss');
 
         h.device.SetStreamSourceFreq(0, 1);
         h.device.SetStreamSourceFreq(1, 1);

@@ -5147,18 +5147,12 @@ export function createRenderer(options){
     const NO_STREAM_BINDINGS = Object.freeze(
         /** @type {{ slot: number, gpu: any, offset: number }[]} */ ([]));
 
-    let layoutReported = false;
-    let instancingReported = false;
-    /** Says once that fixed-function draws were dropped for want of a format. */
+    /** A fixed-function draw dropped for want of a format: a loss, each time. */
     const reportLayout = ()=>{
-        if (divergence && !layoutReported)
-        {
-            layoutReported = true;
-            divergence('Direct3D 8',
-                'a fixed-function draw over a vertex declaration the fixed-function stage'
-                + ' cannot read (blend weights, a colour that is not a D3DCOLOR, or a member'
-                + ' past the vertex) is not drawn');
-        }
+        divergence?.('Direct3D 8',
+            'lost: a fixed-function draw over a vertex declaration the fixed-function stage'
+            + ' cannot read (blend weights, a colour that is not a D3DCOLOR, or a member'
+            + ' past the vertex) is not drawn', 'loss');
     };
 
     /**
@@ -7991,12 +7985,9 @@ export function createRenderer(options){
         if (instances === 0)
         {
             skip('instancing');
-            if (divergence && !instancingReported)
-            {
-                instancingReported = true;
-                divergence('Direct3D 9', 'an instanced draw with a stream stepping once every'
-                    + ' several instances is not drawn: a vertex buffer steps every instance');
-            }
+            divergence?.('Direct3D 9', 'lost: an instanced draw with a stream stepping once'
+                + ' every several instances is not drawn: a vertex buffer steps every instance',
+            'loss');
             return;
         }
         kept++;
@@ -8153,16 +8144,12 @@ export function createRenderer(options){
             }
             safe[index] = { ...bindings[index], record: null, placeholder: true,
                 view: placeholderView(textureDimensionOf(bindings[index].texture)) };
-            if (divergence && !targetSampledReported)
-            {
-                targetSampledReported = true;
-                divergence('Direct3D', 'a draw samples the texture it draws into: the stage'
-                    + ' reads the placeholder, as WebGPU draws nothing that does both');
-            }
+            divergence?.('Direct3D', 'lost: a draw samples the texture it draws into, a level'
+                + ' of several or a depth buffer: the stage reads the placeholder, as WebGPU'
+                + ' draws nothing that does both', 'loss');
         }
         return safe;
     };
-    let targetSampledReported = false;
     /** One snapshot texture a size and format, reused by every such draw. @type {Map<string, any>} */
     const snapshots = new Map();
     /**

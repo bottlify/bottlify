@@ -34,6 +34,8 @@
  * @property {(query: number) => import('./state.js').StateRecord} record
  * @property {(query: number, values: number[]) => void} setState
  * @property {(detail: string) => void} diverge
+ * @property {(detail: string) => void} lose  what a program made that did not happen -- a draw,
+ *     data -- said as a loss each time
  * @property {() => import('./objects.js').ShareGroup} shareGroup
  * @property {() => ContextMemory | null} memory
  * @property {() => import('./raster.js').Framebuffer} framebuffer

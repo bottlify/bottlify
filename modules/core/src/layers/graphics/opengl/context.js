@@ -318,6 +318,8 @@ export function createGlContext(options = {}){
             options.divergence?.(detail);
         }
     };
+    /** @param {string} detail */
+    const lose = detail=>options.divergence?.(`lost: ${detail}`, 'loss');
 
     /**
      * The one place that decides whether a call runs, is recorded, or is
@@ -359,6 +361,7 @@ export function createGlContext(options = {}){
         record,
         setState,
         diverge,
+        lose,
         shareGroup: ()=>shareGroup,
         memory: ()=>memory,
         framebuffer: ()=>framebuffer,
@@ -1960,7 +1963,7 @@ export function createGlContext(options = {}){
         {
             // The processor rasteriser is the fixed pipeline; a program stage
             // exists only as a shader, so there is nothing here to run it.
-            diverge('a program was enabled and bound, and the processor path draws nothing'
+            lose('a program was enabled and bound, and the processor path draws nothing'
                 + ' under it: the program stages run only on a device');
             return;
         }

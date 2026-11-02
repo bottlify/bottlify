@@ -1583,7 +1583,8 @@ export function createDevice(options = {}){
         },
 
         DrawAuto(){
-            diverge('DrawAuto draws nothing: there is no stream-output buffer to count');
+            options.divergence?.('Direct3D 10', 'lost: DrawAuto draws nothing: there is no'
+                + ' stream-output buffer to count', 'loss');
         },
 
         /**

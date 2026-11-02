@@ -415,6 +415,13 @@ export function createRenderer(services){
         reported.add(detail);
         divergence('Direct3D 10', detail);
     };
+    /**
+     * What a program made that is not drawn, uploaded or made: a loss, said
+     * each time (the journal counts the repeats).
+     *
+     * @param {string} detail
+     */
+    const lose = detail=>divergence?.('Direct3D 10', `lost: ${detail}`, 'loss');
 
     /** @type {WeakMap<object, any>} resource -> backing */
     const backings = new WeakMap();
@@ -953,7 +960,7 @@ export function createRenderer(services){
         }
         if (backing.sampleCount > 1)
         {
-            diverge('bytes a program gives a multisampled texture are kept but not uploaded:'
+            lose('bytes a program gives a multisampled texture are kept but not uploaded:'
                 + ' WebGPU writes one only by drawing');
             return;
         }
@@ -962,7 +969,7 @@ export function createRenderer(services){
             // WebGPU copies into no depth format with a stencil, and a depth
             // texture is written by drawing: bytes a program hands one stay on
             // the host.
-            diverge('bytes a program gives a depth texture are kept but not uploaded: the'
+            lose('bytes a program gives a depth texture are kept but not uploaded: the'
                 + ' GPU copy of a depth texture is written only by drawing and clearing');
             return;
         }
@@ -1025,7 +1032,7 @@ export function createRenderer(services){
             });
         }
         catch (e){
-            diverge(`a ${backing.layout.format} texture is not uploaded:`
+            lose(`a ${backing.layout.format} texture is not uploaded:`
                 + ` ${e && /** @type {any} */ (e).message || e}`);
         }
     };
@@ -3337,7 +3344,7 @@ export function createRenderer(services){
                 : entry));
             if (colour.some((entry, index)=>entry !== bound[index]))
             {
-                diverge('a render target of another size than the first is not drawn into:'
+                lose('a render target of another size than the first is not drawn into:'
                     + ' the targets of a pass are one size');
             }
             while (colour.length > 0 && !colour[colour.length - 1])
@@ -3364,7 +3371,7 @@ export function createRenderer(services){
                 }
                 else if (first.sampleCount > 1)
                 {
-                    diverge('a multisampled draw with a depth buffer of another size than its'
+                    lose('a multisampled draw with a depth buffer of another size than its'
                         + ' targets is skipped');
                     return;
                 }
@@ -3398,7 +3405,7 @@ export function createRenderer(services){
             if (absent)
             {
                 counters.skipped.stage++;
-                diverge(`a draw with a ${absent[1]} shader bound is skipped: WebGPU has no such`
+                lose(`a draw with a ${absent[1]} shader bound is skipped: WebGPU has no such`
                     + ' stage, and none is emulated');
                 return;
             }
@@ -3610,7 +3617,7 @@ export function createRenderer(services){
             if (!read.format || read.reinterpreted || written.reinterpreted
                 || read.format !== written.format || !resolvable(read.format))
             {
-                diverge(`a resolve in format ${format} is not made: the GPU views the two`
+                lose(`a resolve in format ${format} is not made: the GPU views the two`
                     + ` textures as ${read.format ?? read.aspect} and`
                     + ` ${written.format ?? written.aspect}`);
                 return;
@@ -4076,7 +4083,7 @@ export function createRenderer(services){
                 {
                     if (!command.indexBuffer)
                     {
-                        diverge('an indexed draw with no index buffer is skipped');
+                        lose('an indexed draw with no index buffer is skipped');
                         continue;
                     }
                     current.setIndexBuffer(command.indexBuffer.gpu, command.indexBuffer.format,
