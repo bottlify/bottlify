@@ -221,6 +221,40 @@ export function createPipelineState(services){
         }
     };
 
+    /**
+     * The resources bound as targets: the render targets' and the depth
+     * view's. A resource is not read by a shader while it is one -- the
+     * runtime unbinds it from every stage's shader resources, with a warning,
+     * and WebGPU refuses a pass that samples what it renders into, and with it
+     * the frame.
+     *
+     * @returns {Set<any>}
+     */
+    const targetResources = ()=>new Set([...pipeline.renderTargets, pipeline.depthStencilView]
+        .filter(Boolean).map(view=>view.resource).filter(Boolean));
+
+    /** Every stage's shader resources over a target, unbound, and said once. */
+    const unbindTargetsFromStages = ()=>{
+        const targets = targetResources();
+        if (targets.size === 0)
+        {
+            return;
+        }
+        for (const stage of STAGES)
+        {
+            const slots = pipeline.stages[stage].shaderResources;
+            for (let slot = 0; slot < slots.length; slot++)
+            {
+                if (slots[slot] && targets.has(slots[slot].resource))
+                {
+                    slots[slot] = swap(slots[slot], null);
+                    diverge('a shader resource bound as a target is unbound from the shader'
+                        + ' stages, as the runtime does');
+                }
+            }
+        }
+    };
+
     /** @param {typeof STAGES[number]} stage @param {string} prefix */
     const stageMethods = (stage, prefix)=>({
         /** @param {any} shader */
@@ -241,7 +275,19 @@ export function createPipelineState(services){
         },
         /** @param {number} startSlot @param {readonly any[]} views */
         [`${prefix}SetShaderResources`](startSlot, views){
-            writeSlots(pipeline.stages[stage].shaderResources, startSlot, views);
+            // A view of a resource bound as a target is set as none, as the
+            // runtime forces it to.
+            const targets = targetResources();
+            writeSlots(pipeline.stages[stage].shaderResources, startSlot,
+                (views ?? []).map(view=>{
+                    if (view && targets.has(view.resource))
+                    {
+                        diverge('a shader resource of a resource bound as a target is set as'
+                            + ' none, as the runtime forces it to');
+                        return null;
+                    }
+                    return view;
+                }));
         },
         /** @param {number} startSlot @param {number} count @param {{ views?: any[] }} out */
         [`${prefix}GetShaderResources`](startSlot, count, out){
@@ -368,6 +414,7 @@ export function createPipelineState(services){
                 emptySlots(D3D10_LIMITS.SIMULTANEOUS_RENDER_TARGETS));
             writeSlots(pipeline.renderTargets, 0, renderTargetViews ?? []);
             pipeline.depthStencilView = swap(pipeline.depthStencilView, depthStencilView ?? null);
+            unbindTargetsFromStages();
         },
         /** @param {number} count @param {{ views?: any[], depthStencilView?: any }} out */
         OMGetRenderTargets(count, out){
@@ -405,6 +452,7 @@ export function createPipelineState(services){
                 writeSlots(pipeline.renderTargets, 0, renderTargetViews ?? []);
                 pipeline.depthStencilView = swap(pipeline.depthStencilView,
                     depthStencilView ?? null);
+                unbindTargetsFromStages();
             }
             if (!keepViews)
             {
