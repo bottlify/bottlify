@@ -5866,6 +5866,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * BOOL LockSetForegroundWindow(UINT uLockCode)
+         *
+         * Keeps other processes from taking the foreground (LSFW_LOCK), or
+         * lets them again (LSFW_UNLOCK). Nothing here takes it from a program,
+         * so the lock holds nothing to hold; any other code is refused.
+         */
+        LockSetForegroundWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>{
+                if ((code >>> 0) !== 1 && (code >>> 0) !== 2)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
          * BOOL AnimateWindow(HWND hWnd, DWORD dwTime, DWORD dwFlags)
          *
          * The effect is not played: the window reaches the state the

@@ -282,6 +282,27 @@ test('QueryFullProcessImageName answers this process\'s image and a child\'s', (
     assert.equal(fns.QueryFullProcessImageNameW.argBytes, 16);
 });
 
+test('GetProcessImageFileName answers the image by its volume\'s device', ()=>{
+    // Wine's psapi test_GetProcessImageFileName.
+    const ERROR_INSUFFICIENT_BUFFER = 122;
+    const host = /** @type {any} */ (fakeHost());
+    host.nativePath = (/** @type {string} */ path)=>`\\Device\\HarddiskVolume1${path.slice(2)}`;
+    const fns = /** @type {Record<string, any>} */ (createSpawnFunctions(host));
+    const native = '\\Device\\HarddiskVolume1\\App\\launcher.exe';
+    assert.equal(fns.K32GetProcessImageFileNameA.argBytes, 12);
+    assert.equal(fns.K32GetProcessImageFileNameA.handler([CURRENT_PROCESS, 0x400, 260]),
+        native.length, 'the characters, without the terminator');
+    assert.equal(new TextDecoder().decode(host.bytes.subarray(0x400, 0x400 + native.length + 1)),
+        `${native}\0`);
+    assert.equal(fns.K32GetProcessImageFileNameW.handler([CURRENT_PROCESS, 0x600, 260]),
+        native.length);
+    assert.equal(host.bytes[0x600], 0x5c, 'an NT path');
+    assert.equal(fns.K32GetProcessImageFileNameW.handler([CURRENT_PROCESS, 0, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(fns.K32GetProcessImageFileNameA.handler([0, 0x400, 260]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
 test('PROCESS_NAME_NATIVE names the image by its volume\'s device, as the drives say', ()=>{
     // Wine's kernel32 test_QueryFullProcessImageNameA/W, with the native flag.
     const host = /** @type {any} */ (fakeHost());

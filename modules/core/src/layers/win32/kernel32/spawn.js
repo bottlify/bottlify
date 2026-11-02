@@ -637,6 +637,52 @@ export function createSpawnFunctions(host){
         : processOf(handle)?.imagePath ?? null);
 
     /**
+     * GetProcessImageFileName in either width.
+     *
+     * @param {boolean} wide
+     */
+    const imageFileName = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([handle, buffer, size])=>{
+            const named = imagePathOf(handle);
+            if (named === null)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const path = host.nativePath?.(named) ?? null;
+            if (path === null)
+            {
+                host.divergence?.('GetProcessImageFileName', 'the native path is not answered');
+                host.setLastError(ERROR_NOT_SUPPORTED);
+                return 0;
+            }
+            if ((size >>> 0) < path.length + 1)
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            const text = `${path}\0`;
+            if (wide)
+            {
+                const bytes = new Uint8Array(text.length * 2);
+                for (let i = 0; i < text.length; i++)
+                {
+                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
+                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+            }
+            else
+            {
+                host.writeMemory(buffer >>> 0, encodeAnsi(text));
+            }
+            return path.length;
+        },
+    });
+
+    /**
      * QueryFullProcessImageName in either width. The size is the room in
      * characters going in and the length without its terminator coming out;
      * a buffer too small for the path and its terminator leaves both the
@@ -1167,5 +1213,17 @@ export function createSpawnFunctions(host){
          */
         QueryFullProcessImageNameA: queryImageName(false),
         QueryFullProcessImageNameW: queryImageName(true),
+
+        /**
+         * DWORD K32GetProcessImageFileNameA/W(HANDLE hProcess,
+         *     LPSTR/LPWSTR lpImageFileName, DWORD nSize)
+         *
+         * psapi's: the image's path in the object manager's terms
+         * (`\Device\HarddiskVolumeN\...`), the characters written without the
+         * terminator; a buffer too small for both is refused with
+         * ERROR_INSUFFICIENT_BUFFER (Wine's psapi test_GetProcessImageFileName).
+         */
+        K32GetProcessImageFileNameA: imageFileName(false),
+        K32GetProcessImageFileNameW: imageFileName(true),
     };
 }

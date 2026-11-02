@@ -286,6 +286,11 @@ const d3dx10Libraries = (d3dx9, host)=>{
  * The list is Wine's own default (`loader/wine.inf.in`, the `[KnownDLLs]`
  * registry entries), which is the same set Windows installs.
  */
+/** AVRT's answer to a registration: a handle no other call names. */
+const AVRT_TASK_HANDLE = 0x41565254;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
+
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
     'difxapi.dll', 'gdi32.dll', 'gdiplus.dll', 'imagehlp.dll', 'imm32.dll',
@@ -3215,6 +3220,12 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'].K32GetProcessMemoryInfo.handler(args) },
                     GetPerformanceInfo: { argBytes: 8, handler: (/** @type {number[]} */ args)=>
                         libraries['KERNEL32.dll'].K32GetPerformanceInfo.handler(args) },
+                    ...Object.fromEntries(['GetProcessImageFileNameA',
+                        'GetProcessImageFileNameW'].map(name=>[name, {
+                        argBytes: 12,
+                        handler: (/** @type {number[]} */ args)=>
+                            libraries['KERNEL32.dll'][`K32${name}`].handler(args),
+                    }])),
                     ...Object.fromEntries(['EnumProcessModules', 'GetModuleFileNameExA',
                         'GetModuleFileNameExW', 'GetModuleBaseNameA', 'GetModuleBaseNameW',
                         'GetModuleInformation'].map(name=>[name, {
@@ -3675,6 +3686,29 @@ export function createWin32Module(){
                 // manager's attributes: one 96-DPI display, composition on.
                 'SHCORE.dll': createShcoreFunctions(displayHost),
                 'dwmapi.dll': createDwmapiFunctions(displayHost),
+                // The multimedia class scheduler (Vista on): a thread asks to be
+                // scheduled as audio or playback. The engine schedules its
+                // threads by itself, so a registration is taken and holds
+                // nothing; the task index it writes is the first task's.
+                'AVRT.dll': Object.fromEntries([
+                    ...['AvSetMmThreadCharacteristicsA', 'AvSetMmThreadCharacteristicsW']
+                        .map(name=>[name, { argBytes: 8,
+                            handler: (/** @type {number[]} */ [task, index])=>{
+                                if ((task >>> 0) === 0 || (index >>> 0) === 0)
+                                {
+                                    setError(ERROR_INVALID_PARAMETER);
+                                    return 0;
+                                }
+                                writeMemory(index >>> 0, Uint8Array.of(1, 0, 0, 0));
+                                return AVRT_TASK_HANDLE;
+                            } }]),
+                    ['AvRevertMmThreadCharacteristics', { argBytes: 4,
+                        handler: (/** @type {number[]} */ [handle])=>((handle >>> 0) === 0
+                            ? (setError(ERROR_INVALID_HANDLE), 0) : 1) }],
+                    ['AvSetMmThreadPriority', { argBytes: 8,
+                        handler: (/** @type {number[]} */ [handle])=>((handle >>> 0) === 0
+                            ? (setError(ERROR_INVALID_HANDLE), 0) : 1) }],
+                ]),
                 'DWrite.dll': createDwriteFunctions({ ...displayHost,
                     divergence: config?.divergence }),
                 // The Steam client's side of a game's Steamworks calls, for the

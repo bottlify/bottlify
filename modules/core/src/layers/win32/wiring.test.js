@@ -163,6 +163,26 @@ test('DirectX 8.1\'s NAT helper is one of the machine\'s libraries, so it loads'
     await win32Module.dispose();
 });
 
+test('AVRT takes a thread\'s registration and writes its task index; PSAPI names the image',
+    async()=>{
+        // 3DMark 11's workloads link both and register their render thread.
+        const thread = { id: 1 };
+        const { view, libraries, lastError } = await build({
+            kernel: { currentThread: ()=>thread },
+        });
+        const avrt = libraries['AVRT.dll'];
+        const handle = avrt.AvSetMmThreadCharacteristicsA.handler([0x1000, 0x2000]);
+        assert.notEqual(handle, 0);
+        assert.equal(view.getUint32(0x2000, true), 1, 'the task index');
+        assert.equal(avrt.AvSetMmThreadCharacteristicsW.handler([0x1000, 0]), 0);
+        assert.equal(lastError(), 87, 'ERROR_INVALID_PARAMETER for no index');
+        assert.equal(avrt.AvRevertMmThreadCharacteristics.handler([handle]), 1);
+        assert.equal(avrt.AvRevertMmThreadCharacteristics.handler([0]), 0);
+        assert.equal(typeof libraries['PSAPI.DLL'].GetProcessImageFileNameA.handler, 'function');
+        assert.equal(libraries['PSAPI.DLL'].GetProcessImageFileNameW.argBytes, 12);
+        await win32Module.dispose();
+    });
+
 test('ADVPACK answers IsNTAdmin from the same token the advapi32 calls read', async()=>{
     const { libraries } = await build();
     assert.equal(libraries['ADVPACK.dll'].IsNTAdmin.handler(), 1);

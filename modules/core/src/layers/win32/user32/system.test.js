@@ -3605,6 +3605,15 @@ test('AnimateWindow refuses another thread\'s window and leaves the last error c
     assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_BLEND]), 1, 'its own thread may');
 });
 
+test('LockSetForegroundWindow takes a lock and an unlock, and nothing else', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.LockSetForegroundWindow.argBytes, 4);
+    assert.equal(fns.LockSetForegroundWindow.handler([1]), 1, 'LSFW_LOCK');
+    assert.equal(fns.LockSetForegroundWindow.handler([2]), 1, 'LSFW_UNLOCK');
+    assert.equal(fns.LockSetForegroundWindow.handler([3]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+});
+
 test('AllowSetForegroundWindow lends a right every caller has, to a process that exists', ()=>{
     const ASFW_ANY = 0xffffffff;
     const live = new Set([0x2000]);
