@@ -241,6 +241,18 @@ export function createDeferredContext(services, flags){
         Flush(){
         },
         /**
+         * A deferred context keeps no context state to swap: it is left as it
+         * is and answers none before (Wine's test_deferred_context_swap_state).
+         *
+         * @param {any} next @param {{ previous?: any } | null} out
+         */
+        SwapDeviceContextState(next, out){
+            if (out)
+            {
+                out.previous = null;
+            }
+        },
+        /**
          * A query begun and ended in a list is begun and ended where it plays.
          *
          * @param {any} query

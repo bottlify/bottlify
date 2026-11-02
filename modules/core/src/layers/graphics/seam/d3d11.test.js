@@ -292,6 +292,28 @@ test('a context state swapped on holds the pipeline the context had, and gives i
     assert.equal(s.memory.readU32(got), sampler, 'the bindings come back with their state');
 });
 
+test('a deferred context swaps no context state and answers none before it', ()=>{
+    // Wine's test_deferred_context_swap_state; the call threw in the host.
+    const s = seamed();
+    const { device } = s.create();
+    const deferredOut = s.place([0]);
+    assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateDeferredContext'),
+        [0, deferredOut]), S_OK);
+    const deferred = s.query(s.memory.readU32(deferredOut), IID.ID3D11DeviceContext1);
+    const stateAt = s.place([0]);
+    const device1 = s.query(device, IID.ID3D11Device1);
+    const base = ID3D11DEVICE_SLOTS.length + 3;
+    assert.equal(s.call(device1, base + 4, [0, s.place([0xb000]), 1, 7, placeGuidOf(s,
+        IID.ID3D11Device1), 0, stateAt]), S_OK);
+    const swap = ID3D11DEVICECONTEXT_SLOTS.length + 3 + 16;
+    const previousAt = s.place([0xdeadbeef]);
+    s.call(deferred, swap, [0, previousAt]);
+    assert.equal(s.memory.readU32(previousAt), 0, 'none, swapped for none');
+    s.memory.writeU32(previousAt, 0xdeadbeef);
+    s.call(deferred, swap, [s.memory.readU32(stateAt), previousAt]);
+    assert.equal(s.memory.readU32(previousAt), 0, 'none, swapped for a state');
+});
+
 /** @param {ReturnType<typeof seamed>} s @param {string} iid */
 function placeGuidOf(s, iid){
     const hex = iid.replace(/[{}-]/g, '');
