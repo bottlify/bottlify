@@ -14,7 +14,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FC, POINTER, RPC_STATUS, RpcException, STUB_MESSAGE, createNdr } from './ndr.js';
+import { FC, POINTER, RPC_STATUS, RpcException, STUB_DESC, STUB_MESSAGE, createNdr }
+    from './ndr.js';
 
 const MESSAGE = 0x100;
 const FORMAT = 0x400;
@@ -36,11 +37,13 @@ const le32 = value=>[value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, 
 /**
  * A stub message, a buffer, a heap and an OBJREF maker in one small memory.
  * `end` is where an allocation ends and nothing may lie past it: memory
- * refuses a read across it.
+ * refuses a read across it. `routines` are the program's routines a
+ * user-marshal type calls, by address.
  *
- * @param {{ client?: boolean, end?: number }} [options]
+ * @param {{ client?: boolean, end?: number,
+ *     routines?: (routine: number, args: number[]) => number }} [options]
  */
-function harness({ client = true, end = 0 } = {}){
+function harness({ client = true, end = 0, routines = undefined } = {}){
     const memory = new Uint8Array(0x20000);
     const view = new DataView(memory.buffer);
     let top = HEAP;
@@ -83,6 +86,8 @@ function harness({ client = true, end = 0 } = {}){
         releaseInterface: (_call, pointer)=>{
             released.push(pointer);
         },
+        ...routines ? { callRoutine: (/** @type {any} */ _call, /** @type {number} */ routine,
+            /** @type {number[]} */ args)=>routines(routine, args) } : {},
         interfaceBytes: 8,
         divergence: detail=>{
             said.push(detail);
@@ -638,9 +643,67 @@ test('what is not implemented says so and fails as RPC_S_CANNOT_SUPPORT', async(
     await raises(h.marshalled(DATA, callback), RPC_STATUS.S_CANNOT_SUPPORT);
     assert.equal(h.said.length, 2);
 
+    // A user-marshal type whose stub descriptor names no routines.
     const userMarshal = h.place(FORMAT + 0x20, [0xb4, 0x83, 0, 0, 4, 0, 0, 0, 0, 0]);
     await raises(h.marshalled(DATA, userMarshal), RPC_STATUS.S_CANNOT_SUPPORT);
-    assert.match(h.said[2], /0xb4/);
+    assert.match(h.said[2], /user-marshal/);
+});
+
+test('a user-marshal type crosses through the four routines its stub descriptor names', async()=>{
+    // FC_USER_MARSHAL: the program's own routines size, write, read and free
+    // the wire form, each handed a USER_MARSHAL_CB; a BSTR or a VARIANT in an
+    // interface a MIDL proxy marshals crosses this way.
+    const DESCRIPTOR = 0x200;
+    const TABLE = 0x300;
+    /** @type {{ kind: number, signature: number, format: number, args: number[] }[]} */
+    const seen = [];
+    /** @type {any} */
+    let h = null;
+    const routines = (/** @type {number} */ routine, /** @type {number[]} */ [block, ...rest])=>{
+        seen.push({ kind: h.u32(block + 16), signature: h.u32(block + 12),
+            format: h.u32(block + 20), args: rest });
+        switch (routine)
+        {
+            case 0x9000: // BufferSize(cb, start, object): the value and its complement
+                return ((rest[0] + 3) & ~3) + 8;
+            case 0x9004: { // Marshal(cb, buffer, object)
+                const value = h.u32(rest[1]);
+                h.w32(rest[0], value);
+                h.w32(rest[0] + 4, ~value);
+                return rest[0] + 8;
+            }
+            case 0x9008: // Unmarshal(cb, buffer, object)
+                h.w32(rest[1], h.u32(rest[0]));
+                return rest[0] + 8;
+            default: // Free(cb, object)
+                return 0;
+        }
+    };
+    h = harness({ routines });
+    h.w32(TABLE, 0x9000);
+    h.w32(TABLE + 4, 0x9004);
+    h.w32(TABLE + 8, 0x9008);
+    h.w32(TABLE + 12, 0x900c);
+    h.w32(DESCRIPTOR + STUB_DESC.USER_MARSHAL_QUADRUPLES, TABLE);
+    h.setField(STUB_MESSAGE.STUB_DESC, DESCRIPTOR);
+    // FC_USER_MARSHAL, four-aligned, routines 0, four bytes in memory, eight on
+    // the wire, the transmitted type two bytes past its offset.
+    const format = h.place(FORMAT, [FC.USER_MARSHAL, 0x03, 0, 0, 4, 0, 8, 0, 2, 0, FC.LONG]);
+    h.w32(DATA, 0x12345678);
+    const { length, bytes } = await h.marshalled(DATA, format, 1);
+    assert.equal(length, 12, 'padded from 1 to 4, then the routine\'s eight');
+    assert.deepEqual(bytes, [0, 0, 0, ...le32(0x12345678), ...le32(~0x12345678 >>> 0)]);
+    assert.deepEqual(seen.map(one=>one.kind), [0, 1], 'BUFFER_SIZE, then MARSHALL');
+    assert.ok(seen.every(one=>one.signature === 0x55535243 && one.format === format),
+        'each handed a USER_MARSHAL_CB with its signature and the type\'s format');
+
+    h.w32(DATA + 8, 0);
+    assert.equal(await h.unmarshalled([...le32(0xcafe), ...le32(0)], DATA + 8, format, true), 8);
+    const made = h.u32(DATA + 8);
+    assert.equal(h.u32(made), 0xcafe, 'read into memory of the type\'s size, made for it');
+    await h.ndr.free(h.call, made, format);
+    assert.deepEqual(seen.slice(2).map(one=>one.kind), [2, 3], 'UNMARSHALL, then FREE');
+    assert.equal(h.ndr.memorySize(format), 4);
 });
 
 test('an unmarshal that runs past the buffer fails as bad stub data', async()=>{

@@ -232,6 +232,7 @@ export function createRuntime(host){
             return made.pointer;
         },
         releaseInterface: (call, pointer)=>callSlot(pointer, SLOT.RELEASE, [], call.thread),
+        callRoutine: (call, routine, args)=>host.call(routine, args, call.thread),
         interfaceBytes: OBJREF_BYTES,
         divergence: report,
     });

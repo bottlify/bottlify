@@ -101,9 +101,35 @@ export const FC = Object.freeze({
     CONSTANT_IID: 0x5a,
     END: 0x5b,
     PAD: 0x5c,
+    USER_MARSHAL: 0xb4,
     INT3264: 0xb8,
     UINT3264: 0xb9,
 });
+
+/** A user-marshal type's flags, the high nibble of its second byte. */
+const USER_MARSHAL_POINTER = 0xc0;
+
+/**
+ * What a user-marshal type's wire form starts with when its flags say it is a
+ * pointer: the four bytes of "User", where a referent ID would stand.
+ */
+const USER_MARSHAL_MARKER = 0x72657355;
+
+/** USER_MARSHAL_CB, 32-bit: what a user-marshal routine's first argument points at. */
+const USER_MARSHAL_CB = Object.freeze({
+    FLAGS: 0, STUB_MESSAGE: 4, RESERVE: 8, SIGNATURE: 12, TYPE: 16, FORMAT: 20, TYPE_FORMAT: 24,
+    SIZE: 28,
+});
+
+/** USER_MARSHAL_CB's signature, "USRC". */
+const USER_MARSHAL_CB_SIGNATURE = 0x55535243;
+
+/** USER_MARSHAL_CB_TYPE: which of the four routines the block is for. */
+const USER_MARSHAL_CB_TYPE = Object.freeze({ BUFFER_SIZE: 0, MARSHALL: 1, UNMARSHALL: 2,
+    FREE: 3 });
+
+/** NDR_LOCAL_DATA_REPRESENTATION: little-endian, ASCII, IEEE floats. */
+const LOCAL_DATA_REPRESENTATION = 0x10;
 
 /** A pointer's attribute byte. */
 export const POINTER = Object.freeze({
@@ -174,6 +200,7 @@ export const STUB_DESC = Object.freeze({
     FREE: 8,
     FORMAT_TYPES: 32,
     VERSION: 40,
+    USER_MARSHAL_QUADRUPLES: 56,
 });
 
 /** Little-endian integers, ASCII characters and IEEE floats. */
@@ -240,6 +267,9 @@ export class RpcException extends Error {
  *           unmarshalInterface  A pointer of this process holding one reference,
  *           for the interface the OBJREF carries when `iid` is null.
  * @property {(call: NdrCall, pointer: number) => unknown} releaseInterface
+ * @property {(call: NdrCall, routine: number, args: number[]) => number | Promise<number>}
+ *           [callRoutine]  A routine of the program's (or of a library's) called on the call's
+ *           thread: a user-marshal type's four.
  * @property {number} interfaceBytes  The most an OBJREF takes.
  * @property {(detail: string) => void} [divergence]
  */
@@ -1063,6 +1093,81 @@ export function createNdr(host){
         return host.readMemory(at, 16).slice();
     };
 
+    // --- user-marshal types ---------------------------------------------------
+
+    /**
+     * A user-marshal type (FC_USER_MARSHAL): the flags and alignment, the
+     * index of its routines in the stub descriptor's aUserMarshalQuadruple,
+     * and its size in memory. Its wire form is the routines' own.
+     *
+     * @param {NdrCall} call @param {number} format
+     */
+    const userType = (call, format)=>{
+        const flags = u8(format + 1);
+        const table = u32(field(call, STUB_MESSAGE.STUB_DESC) + STUB_DESC.USER_MARSHAL_QUADRUPLES);
+        if (table === 0 || !host.callRoutine)
+        {
+            throw unsupported('a user-marshal type with no routines to call');
+        }
+        const at = table + u16(format + 2) * 16;
+        return {
+            pointer: (flags & USER_MARSHAL_POINTER) !== 0,
+            alignment: (flags & 0x0f) + 1,
+            memoryBytes: u16(format + 4),
+            routines: [u32(at), u32(at + 4), u32(at + 8), u32(at + 12)],
+        };
+    };
+
+    /**
+     * Calls one of a user-marshal type's routines with the USER_MARSHAL_CB
+     * its first argument points at: the marshaling context (the stub message's
+     * destination context) with the data representation, the stub message,
+     * which routine it is, and the type's format and its transmitted type's.
+     *
+     * @param {NdrCall} call @param {number} format @param {number} kind
+     * @param {number} routine @param {number[]} rest  the arguments past the first
+     */
+    const callUser = async(call, format, kind, routine, rest)=>{
+        const block = await allocate(call, USER_MARSHAL_CB.SIZE);
+        const offset = u16(format + 8);
+        const transmitted = format + 8 + (offset >= 0x8000 ? offset - 0x10000 : offset);
+        const words = [
+            [USER_MARSHAL_CB.FLAGS, (field(call, STUB_MESSAGE.DEST_CONTEXT) & 0xffff)
+                | LOCAL_DATA_REPRESENTATION << 16],
+            [USER_MARSHAL_CB.STUB_MESSAGE, call.message], [USER_MARSHAL_CB.RESERVE, 0],
+            [USER_MARSHAL_CB.SIGNATURE, USER_MARSHAL_CB_SIGNATURE], [USER_MARSHAL_CB.TYPE, kind],
+            [USER_MARSHAL_CB.FORMAT, format], [USER_MARSHAL_CB.TYPE_FORMAT, transmitted],
+        ];
+        for (const [at, value] of words)
+        {
+            w32(block + at, value);
+        }
+        try
+        {
+            return (await /** @type {NonNullable<NdrHost['callRoutine']>} */ (host.callRoutine)(
+                call, routine, [block, ...rest])) >>> 0;
+        }
+        finally
+        {
+            await host.free(call, block);
+        }
+    };
+
+    /**
+     * A user-marshal routine's answer of where it stopped in the buffer, held
+     * to the buffer it was given.
+     *
+     * @param {NdrCall} call @param {number} from @param {number} to
+     */
+    const userBufferEnd = (call, from, to)=>{
+        if (to < from || to > field(call, STUB_MESSAGE.BUFFER_END))
+        {
+            throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
+                'a user-marshal routine went past the buffer');
+        }
+        setField(call, STUB_MESSAGE.BUFFER, to);
+    };
+
     // --- the four passes --------------------------------------------------------
 
     /**
@@ -1127,6 +1232,18 @@ export function createNdr(host){
                     grow(call, 4, 8 + host.interfaceBytes);
                 }
                 return;
+            case FC.USER_MARSHAL: {
+                const user = userType(call, format);
+                if (user.pointer)
+                {
+                    grow(call, 4, 4);
+                }
+                grow(call, user.alignment, 0);
+                const start = field(call, STUB_MESSAGE.BUFFER_LENGTH);
+                setField(call, STUB_MESSAGE.BUFFER_LENGTH, await callUser(call, format,
+                    USER_MARSHAL_CB_TYPE.BUFFER_SIZE, user.routines[0], [start, memory]));
+                return;
+            }
             default:
                 throw unknownType(format);
         }
@@ -1219,6 +1336,17 @@ export function createNdr(host){
                 w32(header, objref.length);
                 w32(header + 4, objref.length);
                 host.writeMemory(put(call, 1, objref.length), objref);
+                return;
+            }
+            case FC.USER_MARSHAL: {
+                const user = userType(call, format);
+                if (user.pointer)
+                {
+                    w32(put(call, 4, 4), USER_MARSHAL_MARKER);
+                }
+                const from = put(call, user.alignment, 0);
+                userBufferEnd(call, from, await callUser(call, format,
+                    USER_MARSHAL_CB_TYPE.MARSHALL, user.routines[1], [from, memory]));
                 return;
             }
             default:
@@ -1368,6 +1496,25 @@ export function createNdr(host){
                 w32(ppMemory, pointer);
                 return;
             }
+            case FC.USER_MARSHAL: {
+                const user = userType(call, format);
+                if (user.pointer)
+                {
+                    take(call, 4, 4);
+                }
+                const from = take(call, user.alignment, 0);
+                // What the routine reads into starts empty when it is new: one
+                // that frees what the slot held (a BSTR's) finds nothing to free.
+                const fresh = u32(ppMemory) === 0 || mustAlloc;
+                const memory = await destination(call, ppMemory, mustAlloc, user.memoryBytes);
+                if (fresh)
+                {
+                    host.writeMemory(memory, new Uint8Array(user.memoryBytes));
+                }
+                userBufferEnd(call, from, await callUser(call, format,
+                    USER_MARSHAL_CB_TYPE.UNMARSHALL, user.routines[2], [from, memory]));
+                return;
+            }
             default:
                 throw unknownType(format);
         }
@@ -1422,6 +1569,13 @@ export function createNdr(host){
                     await host.releaseInterface(call, memory);
                 }
                 return;
+            case FC.USER_MARSHAL:
+                if (memory !== 0)
+                {
+                    await callUser(call, format, USER_MARSHAL_CB_TYPE.FREE,
+                        userType(call, format).routines[3], [memory]);
+                }
+                return;
             default:
                 throw unknownType(format);
         }
@@ -1452,6 +1606,8 @@ export function createNdr(host){
                 return u16(format + 2);
             case FC.LGFARRAY:
                 return u32(format + 2);
+            case FC.USER_MARSHAL:
+                return u16(format + 4);
             default:
                 return 0;
         }
