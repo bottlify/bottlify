@@ -1057,7 +1057,8 @@ export const UNIFORM_AT = Object.freeze({
     eye: 68,
     alphaRef: 72,
     // Three scalars in the padding after alphaRef: the sampler state of the
-    // first three stages, packed as the shader unpacks it.
+    // first three stages, packed as the shader unpacks it; the other five
+    // stages' in two rows of their own (`stagesHigh`).
     stage0: 73,
     stage1: 74,
     stage2: 75,
@@ -1079,11 +1080,17 @@ export const UNIFORM_AT = Object.freeze({
     // it falls off with the distance by, and the viewport height it is scaled in.
     point: 252,
     pointScale: 256,
-    lights: 260,
+    // The sampler state of stages 3 to 7, a word each, in two rows of four.
+    stagesHigh: 260,
+    lights: 268,
 });
 
-/** How many stages the block carries sampler state for. */
-export const SAMPLED_STAGES = 3;
+/**
+ * How many stages the block carries sampler state for: every one. With three,
+ * a fourth stage and on sampled with WRAP, linear and its top level only,
+ * whatever it was set to.
+ */
+export const SAMPLED_STAGES = STAGE_COUNT;
 
 /** How many stages the block carries a texture transform for: every one. */
 export const TRANSFORM_STAGES = STAGE_COUNT;
@@ -1314,9 +1321,10 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const stages = values.stages ?? [];
     const words = wordsOver(block.buffer);
     const first = block.byteOffset / 4 + at.stage0;
+    const high = block.byteOffset / 4 + at.stagesHigh;
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
-        words[first + index] = (stages[index] ?? 0) >>> 0;
+        words[index < 3 ? first + index : high + index - 3] = (stages[index] ?? 0) >>> 0;
     }
     const transforms = values.textureTransforms ?? [];
     for (let index = 0; index < TRANSFORM_STAGES; index++)

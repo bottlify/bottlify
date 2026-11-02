@@ -3337,14 +3337,16 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
     // The shader reads array<vec4f, 32> at float 76 -- byte 304, sixteen-aligned
     // after the three sampler words, a matrix per stage for all eight --
     // then the world-view matrix at byte 816, the normal matrix at byte 880,
-    // the camera-space normal matrix at byte 944 and the lights from byte
-    // 1008. A row at the wrong index is read as another stage's, or as a light.
+    // the camera-space normal matrix at byte 944, the sampler words of stages
+    // 3 to 7 at byte 1040 and the lights from byte 1072. A row at the wrong
+    // index is read as another stage's, or as a light.
     assert.equal(UNIFORM_AT.textureTransforms, 76);
     assert.equal(UNIFORM_AT.worldView, 204);
     assert.equal(UNIFORM_AT.normalMatrix, 220);
     assert.equal(UNIFORM_AT.cameraNormalMatrix, 236);
-    assert.equal(UNIFORM_AT.lights, 260);
-    assert.equal(UNIFORM_FLOATS, 260);
+    assert.equal(UNIFORM_AT.stagesHigh, 260);
+    assert.equal(UNIFORM_AT.lights, 268);
+    assert.equal(UNIFORM_FLOATS, 268);
     const columns = Array.from({ length: 16 }, (_, at)=>at + 2);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,
@@ -4779,3 +4781,23 @@ test('a dump asked for a texture\'s stats reads its top level as the guest left 
     assert.match(line, /least 0 most 8 mean 2\.5000 zero 50\.0%/);
     assert.ok(dumped.includes('texture t999: not known'));
 });
+
+test('every stage\'s sampler state is in the block, the fourth to the eighth in rows of their own',
+    ()=>{
+        // With three, a fourth stage and on sampled with WRAP, linear and its
+        // top level only, whatever it was set to.
+        const stages = [11, 12, 13, 14, 15, 16, 17, 18];
+        const block = uniformBlock({
+            worldViewProjection: IDENTITY,
+            viewport: viewportState({ x: 0, y: 0, width: 1, height: 1 }),
+            textureFactor: 0,
+            fogColor: 0,
+            alphaRef: 0,
+            stages,
+        });
+        const words = new Uint32Array(block.buffer, block.byteOffset, block.length);
+        assert.deepEqual([...words.subarray(UNIFORM_AT.stage0, UNIFORM_AT.stage0 + 3)],
+            [11, 12, 13]);
+        assert.deepEqual([...words.subarray(UNIFORM_AT.stagesHigh, UNIFORM_AT.stagesHigh + 5)],
+            [14, 15, 16, 17, 18]);
+    });

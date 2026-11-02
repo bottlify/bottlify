@@ -1063,7 +1063,8 @@ function uniformStruct(lightCount, tail = { stageConstants: false }){
     normalMatrix: mat4x4f,
     cameraNormalMatrix: mat4x4f,
     point: vec4f,
-    pointScale: vec4f,${lightCount === 0 ? '' : `
+    pointScale: vec4f,
+    stagesHigh: array<vec4<u32>, 2>,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}${tail.stageConstants ? `
     stageConstant: array<vec4f, 8>,` : ''}${tail.bump ? `
     bumpEnv: array<vec4f, 16>,` : ''}${planes === 0 ? '' : `
@@ -1492,7 +1493,10 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
     const lines = [ADDRESS_FUNCTION];
     for (let index = 0; index < count; index++)
     {
-        const flags = index < 3 ? `uniforms.stage${index}` : '0u';
+        // The first three stages' state rides in the padding after alphaRef,
+        // the other five in rows of their own.
+        const flags = index < 3 ? `uniforms.stage${index}`
+            : `uniforms.stagesHigh[${(index - 3) >> 2}][${(index - 3) & 3}]`;
         const dimension = dimensions[index] ?? '2d';
         const lod = levelOfDetail(stages[index]?.lodBias);
         if (dimension !== '2d')
