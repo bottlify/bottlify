@@ -698,6 +698,21 @@ const TEXEL_EXPANSION = Object.freeze({
     [D3DFMT.X4R4G4B4]: sixteenBit(word=>[
         four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf), 0xff,
     ]),
+    // Ten bits a colour channel and two of alpha, kept at eight bits a channel
+    // (said where the surface is made, `narrowed`).
+    [D3DFMT.A2R10G10B10]: (pixels, count)=>{
+        const words = new Uint32Array(pixels.buffer, pixels.byteOffset, count);
+        const out = new Uint8Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            const word = words[index];
+            out[index * 4] = (word & 0x3ff) >>> 2;
+            out[index * 4 + 1] = ((word >>> 10) & 0x3ff) >>> 2;
+            out[index * 4 + 2] = ((word >>> 20) & 0x3ff) >>> 2;
+            out[index * 4 + 3] = (word >>> 30) * 85;
+        }
+        return out;
+    },
     [D3DFMT.A8]: (pixels, count)=>{
         const out = new Uint8Array(count * 4);
         for (let index = 0; index < count; index++)
@@ -3302,6 +3317,12 @@ export function createRenderer(options){
      * @returns {{}}
      */
     const narrowed = format=>{
+        if (format === D3DFMT.A2R10G10B10)
+        {
+            divergence?.('Direct3D', 'a surface of A2R10G10B10 is kept at eight bits a colour'
+                + ' channel: two of every ten are lost');
+            return {};
+        }
         const wide = FORMAT_INFO[format]?.wide;
         if (!wide || !divergence || (float32 && wide.stored === 'float'))
         {

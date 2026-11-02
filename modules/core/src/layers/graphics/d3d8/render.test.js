@@ -655,7 +655,13 @@ test('byte-exact: sixteen-bit texels expand to eight with the top bits replicate
     assert.deepEqual([...expandTexels(D3DFMT.X4R4G4B4, Uint8Array.from([0x34, 0x12]), 1)],
         [0x44, 0x33, 0x22, 255], 'an X4 texel has no alpha to sample, whatever the nibble held');
 
-    assert.throws(()=>expandTexels(D3DFMT.A2R10G10B10, new Uint8Array(4), 1), /cannot be uploaded/);
+    // A2R10G10B10, offered as a texture and a target: blue in the low ten bits,
+    // alpha in the top two, each channel kept at its top eight bits.
+    const word = Uint32Array.of(((3 << 30) | (0x3ff << 20) | (0x200 << 10) | 4) >>> 0);
+    assert.deepEqual([...expandTexels(D3DFMT.A2R10G10B10, new Uint8Array(word.buffer), 1)],
+        [1, 0x80, 0xff, 255]);
+    assert.throws(()=>expandTexels(D3DFMT.UYVY, new Uint8Array(4), 1), /cannot be uploaded/,
+        'a format with no upload still says so');
 });
 
 test('a texture with four bits of alpha is created rather than refused', ()=>{
