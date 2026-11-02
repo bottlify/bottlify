@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CR0, storeMachineStatus } from './machine-status.js';
+import { CR0, privilegedAt, storeMachineStatus } from './machine-status.js';
 import { createSeh } from './seh.js';
 
 /** @param {number[]} code */
@@ -50,3 +50,38 @@ test('an invalid-opcode fault on SMSW goes on after it without a handler', async
     assert.equal(result.registers?.eax, CR0 >>> 0);
     assert.equal(result.registers?.eip, 0x401003);
 });
+
+test('port I/O, CLI, STI, HLT and the system loads are privileged; the machine stores are not',
+    ()=>{
+        const privileged = (/** @type {number[]} */ code)=>privilegedAt(at(code), 0x401000);
+        // PECompact2's stub runs into "PECompact2" when its write to address
+        // 0 does not fault: OUTSD, which Windows reports as privileged.
+        assert.equal(privileged([0x6f]), true, 'outsd');
+        assert.equal(privileged([0xf3, 0x6e]), true, 'rep outsb');
+        assert.equal(privileged([0xec]), true, 'in al, dx');
+        assert.equal(privileged([0xfa]), true, 'cli');
+        assert.equal(privileged([0xf4]), true, 'hlt');
+        assert.equal(privileged([0x0f, 0x20, 0xc0]), true, 'mov eax, cr0');
+        assert.equal(privileged([0x0f, 0x32]), true, 'rdmsr');
+        assert.equal(privileged([0x0f, 0x01, 0x10]), true, 'lgdt [eax]');
+        assert.equal(privileged([0x0f, 0x01, 0xf0]), true, 'lmsw ax');
+        assert.equal(privileged([0x0f, 0x01, 0xe0]), false, 'smsw eax');
+        assert.equal(privileged([0x0f, 0x01, 0x00]), false, 'sgdt [eax]');
+        assert.equal(privileged([0x0f, 0x01, 0xf9]), false, 'rdtscp');
+        assert.equal(privileged([0x0f, 0x0b]), false, 'ud2');
+        assert.equal(privileged([0x90]), false, 'nop');
+    });
+
+test('a fault on a privileged instruction is STATUS_PRIVILEGED_INSTRUCTION, not an illegal one',
+    async()=>{
+        /** @type {string[]} */
+        const said = [];
+        const seh = createSeh(/** @type {any} */ ({
+            readMemory: at([0x6f]), writeMemory: ()=>{}, isMapped: ()=>true, teb: ()=>0,
+            registers: ()=>({ ...registers }), answerWith: (/** @type {number} */ value)=>value,
+            callGuest: async()=>assert.fail('no handler runs'),
+            trace: (/** @type {string} */ text)=>said.push(text),
+        }));
+        await seh.onFault({ vector: 6, eip: 0x401000, errorCode: null }, registers);
+        assert.ok(said.some(line=>line.startsWith('exception 0xc0000096')), said.join(' / '));
+    });

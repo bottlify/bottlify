@@ -37,7 +37,7 @@
  *   handler run backwards. The context keeps the flags the fault had.
  */
 
-import { storeMachineStatus } from './machine-status.js';
+import { privilegedAt, storeMachineStatus } from './machine-status.js';
 
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
 export const RECORD = Object.freeze({
@@ -849,8 +849,13 @@ export function createSeh(host){
                     return { handled: true, registers: answered };
                 }
             }
-            const code =VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */
-                (fault.vector)];
+            // An instruction ring 3 may not run is a privileged one to the
+            // program, whichever fault the processor model raised for it.
+            const privileged = (fault.vector === 6 || fault.vector === 13)
+                && host.isMapped(registers.eip >>> 0)
+                && privilegedAt(host.readMemory, registers.eip >>> 0);
+            const code = privileged ? STATUS.PRIVILEGED_INSTRUCTION
+                : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (fault.vector)];
             if (code === undefined)
             {
                 return { handled: false };
