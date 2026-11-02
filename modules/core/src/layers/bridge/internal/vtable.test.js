@@ -781,3 +781,36 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
     assert.deepEqual([words.get(0x8000), words.get(0x8004)], [pointer, 0],
         'QueryInterface writes the pointer whole');
 });
+
+test('a method with a slot and no implementation answers E_NOTIMPL, and is said', ()=>{
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    /** @type {string[]} */
+    const said = [];
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>void [address, value],
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+        unimplemented: label=>said.push(label),
+    });
+    const methods = [...METHODS.slice(0, 3), { name: 'SetLOD', argBytes: 8 }];
+    const lodded = { interfaceFor: (/** @type {string} */ id)=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2, release: ()=>0 };
+    const pointer = table.publish(lodded, IID);
+    assert.equal(handlers.get(`${IID}::SetLOD`).handler([pointer, 1]) >>> 0, 0x80004001);
+    assert.deepEqual(said, [`${IID}::SetLOD`]);
+});

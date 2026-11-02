@@ -379,6 +379,25 @@ export function createBridgeModule(){
              */
             const live = ()=>!state.disposed;
 
+            /** Calls made to COM methods with no implementation, by method. */
+            const comMissing = new Map();
+            /**
+             * A COM method an interface has a slot for and no implementation of,
+             * called: a warning, as a missing import is, the first time and every
+             * 256th with its count -- a program may call one every frame.
+             *
+             * @param {string} label  the interface's IID and the method's name
+             */
+            const comUnimplemented = label=>{
+                const count = (comMissing.get(label) ?? 0) + 1;
+                comMissing.set(label, count);
+                if (count === 1 || count % 256 === 0)
+                {
+                    /** @type {any} */ (host.requireApi('log')).write('warn', 'unimplemented',
+                        '{0} answered E_NOTIMPL, call {1}', label, count);
+                }
+            };
+
             // Claimed here rather than by whoever assembles the process: a trap that
             // reached anything but the bridge would be a call nobody marshalled.
             cpu.onTrap((/** @type {number} */ id)=>{
@@ -910,6 +929,7 @@ export function createBridgeModule(){
                     state.vtables = createVtables({
                         memory,
                         heap,
+                        unimplemented: comUnimplemented,
                         long: ()=>cpu.bits?.() === 64,
                         register: (/** @type {string} */ name, /** @type {any} */ fn)=>
                             this.register(name, fn),

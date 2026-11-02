@@ -125,8 +125,10 @@ const COUNT_CODE = {
  * @param {() => boolean} [deps.long]  Whether the process is a 64-bit one, asked
  *        when a table is laid out: its slots are eight bytes, and the methods
  *        and counts that run in the guest, which are i386 code, are traps there.
+ * @param {(label: string) => void} [deps.unimplemented]  told of a call to a method an
+ *        interface has a slot for and no implementation of, which answers E_NOTIMPL
  */
-export function createVtables({ memory, register, heap, long = ()=>false }){
+export function createVtables({ memory, register, heap, long = ()=>false, unimplemented }){
     /** A pointer's width now, and a pointer written at it. */
     const wordSize = ()=>(long() ? LONG_WORD : WORD);
     /** @param {number} at @param {number} value */
@@ -522,7 +524,9 @@ export function createVtables({ memory, register, heap, long = ()=>false }){
                 if (!method.invoke)
                 {
                     // E_NOTIMPL: a method that exists in the table and does
-                    // nothing is better than a hole a program jumps into.
+                    // nothing is better than a hole a program jumps into, and
+                    // the call is said, as a missing import is.
+                    unimplemented?.(`${interfaceId}::${method.name}`);
                     return 0x80004001;
                 }
                 // A method that has to call back into guest code answers with a
