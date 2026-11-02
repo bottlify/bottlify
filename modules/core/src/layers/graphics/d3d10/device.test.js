@@ -16,7 +16,7 @@ import {
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, IID, S_FALSE, S_OK,
 } from './constants.js';
-import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from './device.js';
+import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import {
     assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret, solidPixelShader, utof,
@@ -1899,6 +1899,37 @@ test('a GPU without texture-formats-tier1 is claimed no snorm target and no 16-b
             TEXTURE2D | RENDER_TARGET, `${format}`);
     }
     assertFullyReleased(tier1);
+});
+
+test('a level 11 device answers support for a format as Wine test_format_support sees Windows'
+    + ' do: no format is E_FAIL with none written, and snorm blends from 10.1', ()=>{
+    /** @param {number} level */
+    const device11 = level=>{
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: false };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        return out.device;
+    };
+    /** @param {any} device @param {number} format */
+    const asked = (device, format)=>device.CheckFeatureSupport(2,
+        new Uint8Array(Uint32Array.of(format, 0xdeadbeef).buffer));
+    const BLENDABLE = 0x8000;
+    const ten = device11(D3D_FEATURE_LEVEL.LEVEL_10_0);
+    const none = asked(ten, 0xffffffff);
+    assert.equal(none.hr, E_FAIL);
+    assert.equal(new Uint32Array(none.data.buffer)[1], 0, 'none written as none');
+    const rgba = asked(ten, DXGI_FORMAT.R8G8B8A8_UNORM);
+    assert.equal(rgba.hr, S_OK);
+    /** @type {{ support?: number }} */
+    const held = {};
+    ten.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_UNORM, held);
+    assert.equal(new Uint32Array(rgba.data.buffer)[1], held.support,
+        'the same as CheckFormatSupport');
+    ten.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_SNORM, held);
+    assert.equal(/** @type {number} */ (held.support) & BLENDABLE, 0, 'not blended at 10.0');
+    const eleven = device11(D3D_FEATURE_LEVEL.LEVEL_11_0);
+    eleven.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_SNORM, held);
+    assert.ok(/** @type {number} */ (held.support) & BLENDABLE, 'blended at 11.0');
 });
 
 test('the compressed, packed and typeless formats report what this device does with them', ()=>{

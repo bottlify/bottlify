@@ -1527,8 +1527,12 @@ export function createDevice(options = {}){
                 if (info.renderable && (!kept.conversion || kept.conversion === 'a8')
                     && gpuRenderable(kept.format, textureOptions))
                 {
+                    // A normalised signed target is blended from feature
+                    // level 10.1 (Wine's test_format_support sees 10.0 refuse it).
+                    const blended = filterable && (!/snorm/.test(kept.format)
+                        || featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1);
                     support |= FORMAT_SUPPORT.RENDER_TARGET
-                        | (filterable ? FORMAT_SUPPORT.BLENDABLE : 0);
+                        | (blended ? FORMAT_SUPPORT.BLENDABLE : 0);
                 }
                 if (MIPS_GENERATED.test(kept.format) && !kept.conversion)
                 {
@@ -1750,6 +1754,17 @@ export function createDevice(options = {}){
          * @returns {{ hr: number, data?: Uint8Array }}
          */
         CheckFeatureSupport(feature, data){
+            // A format with no support is E_FAIL with none written, as
+            // CheckFormatSupport answers it (Wine's test_format_support).
+            if (feature === 2 && data?.length === 8)
+            {
+                const format = new DataView(data.buffer, data.byteOffset).getUint32(0, true);
+                /** @type {{ support?: number }} */
+                const held = {};
+                const hr = this.CheckFormatSupport(format, held);
+                return { hr: hr === S_OK ? S_OK : E_FAIL,
+                    data: new Uint8Array(Uint32Array.of(format, held.support ?? 0).buffer) };
+            }
             const answer = data ? featureSupport(feature, data, featureLevel, this) : null;
             return answer && answer.length === data?.length ? { hr: S_OK, data: answer }
                 : { hr: E_INVALIDARG };

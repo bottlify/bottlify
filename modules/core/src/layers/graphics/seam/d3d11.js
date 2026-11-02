@@ -753,7 +753,8 @@ export function createDirect3D11Seam(describe, kit, guests){
             }
             const answer = device.CheckFeatureSupport(feature >>> 0,
                 k().memory.readMemory(data >>> 0, size >>> 0));
-            if (answer.hr === S_OK && answer.data)
+            // A failure that names its answer (a format with no support) writes it too.
+            if (answer.data)
             {
                 k().memory.writeMemory(data >>> 0, answer.data);
             }
