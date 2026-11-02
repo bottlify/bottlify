@@ -3054,6 +3054,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         root,
         floatResult,
         diverge: detail=>divergence?.('Direct3D 11', detail),
+        lose: detail=>divergence?.('Direct3D 11', `lost: ${detail}`, 'loss'),
+        allocate,
+        free,
         lists: {
             device: deviceInterfaces, buffer: bufferInterfaces,
             srv: shaderResourceViewInterfaces, rtv: renderTargetViewInterfaces,

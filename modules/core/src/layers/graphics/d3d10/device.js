@@ -1795,6 +1795,21 @@ export function createDevice(options = {}){
             renderer.updateSubresource(resource, subresource, box, data, rowPitch, depthPitch);
         },
 
+        /**
+         * What a program wrote into a buffer mapped on a deferred context, put
+         * where its command list plays: the whole buffer, whatever its usage,
+         * as an immediate map's unmap puts it.
+         *
+         * @param {any} resource @param {Uint8Array} data
+         */
+        WriteMapped(resource, data){
+            if (!resource || !data)
+            {
+                return;
+            }
+            renderer.updateSubresource(resource, 0, null, data, data.length, data.length);
+        },
+
         /** @param {any} destination @param {any} source */
         CopyResource(destination, source){
             if (!copyable(destination, source, 'CopyResource'))

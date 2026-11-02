@@ -24,7 +24,8 @@
  */
 
 import {
-    D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL, IID, S_FALSE, S_OK,
+    D3D10_MAP, D3D10_RESOURCE_DIMENSION, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, E_NOTIMPL,
+    E_OUTOFMEMORY, IID, S_FALSE, S_OK,
 } from '../d3d10/constants.js';
 import { VIEW_UNION, readViewDesc, writeViewDesc } from '../d3d10/structs.js';
 import { readGuid } from './ddraw.js';
@@ -301,6 +302,9 @@ const STAGE_SHADERS = Object.freeze({
  * @property {() => any} root
  * @property {(value: number) => void} [floatResult]
  * @property {(detail: string) => void} diverge
+ * @property {(detail: string) => void} lose  what a program made that did not happen, said as lost
+ * @property {((bytes: number) => number) | undefined} allocate  guest memory, for a deferred map
+ * @property {((address: number) => void) | undefined} free
  * @property {Record<string, any[]>} lists  the published interface lists, by kind
  * @property {(resource: any) => any[]} resourceInterfaces
  */
@@ -967,8 +971,64 @@ export function createDirect3D11Seam(describe, kit, guests){
     const deferred = target=>target.GetType() !== 0;
 
     /**
+     * A deferred context's maps, by context and then resource: the guest
+     * memory a buffer's WRITE_DISCARD was handed, which a WRITE_NO_OVERWRITE
+     * after it on the same context is handed again.
+     *
+     * @type {WeakMap<object, Map<object, { address: number, bytes: number }>>}
+     */
+    const deferredMaps = new WeakMap();
+
+    /**
+     * A buffer mapped on a deferred context, as Direct3D 11 allows it: with
+     * WRITE_DISCARD, guest memory of its own, or with WRITE_NO_OVERWRITE the
+     * same as its last discard on that context. What the program writes there
+     * is recorded at Unmap, as an UpdateSubresource of the whole buffer the
+     * command list plays where it plays. A texture's map on a deferred context
+     * is not made here, and said as lost.
+     *
+     * @param {any} target @param {any} resource @param {number} type @param {number} out
+     */
+    const mapDeferred = (target, resource, type, out)=>{
+        if (resource.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER)
+        {
+            k().lose('a texture mapped on a deferred context is not mapped: only buffers are');
+            return E_INVALIDARG;
+        }
+        const held = deferredMaps.get(target) ?? new Map();
+        deferredMaps.set(target, held);
+        const last = held.get(resource);
+        if (type !== D3D10_MAP.WRITE_DISCARD
+            && !(type === D3D10_MAP.WRITE_NO_OVERWRITE && last))
+        {
+            return E_INVALIDARG;
+        }
+        const bytes = resource.desc.ByteWidth >>> 0;
+        if (type === D3D10_MAP.WRITE_DISCARD)
+        {
+            const address = k().allocate?.(Math.max(bytes, 4)) ?? 0;
+            if (address === 0)
+            {
+                k().lose('a buffer mapped on a deferred context had no guest memory to map into');
+                return E_OUTOFMEMORY;
+            }
+            if (last)
+            {
+                k().free?.(last.address);
+            }
+            held.set(resource, { address, bytes });
+        }
+        const mapped = /** @type {{ address: number }} */ (held.get(resource));
+        k().fields.writeU32(out, mapped.address);
+        k().fields.writeU32(out + 4, bytes);
+        k().fields.writeU32(out + 8, bytes);
+        return S_OK;
+    };
+
+    /**
      * A map on the immediate context: the resource's own, made as Direct3D
-     * 10's is, the address and the pitches written into the structure.
+     * 10's is, the address and the pitches written into the structure. On a
+     * deferred context, `mapDeferred`.
      *
      * @param {any} target @param {number[]} args
      */
@@ -980,7 +1040,7 @@ export function createDirect3D11Seam(describe, kit, guests){
         }
         if (deferred(target))
         {
-            return target.Map(resource, subresource >>> 0, type >>> 0, flags >>> 0, out);
+            return mapDeferred(target, resource, type >>> 0, out >>> 0);
         }
         return k().whenMappable(resource, flags & MAP_DO_NOT_WAIT, ()=>{
             if (resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)
@@ -1014,7 +1074,12 @@ export function createDirect3D11Seam(describe, kit, guests){
         }
         if (deferred(target))
         {
-            target.Unmap(resource, subresource >>> 0);
+            // What the program wrote, recorded for where the list plays.
+            const mapped = deferredMaps.get(target)?.get(resource);
+            if (mapped)
+            {
+                target.WriteMapped(resource, k().memory.readMemory(mapped.address, mapped.bytes));
+            }
             return;
         }
         // A map the guest made, unmapped here when its ring had no room.

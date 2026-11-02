@@ -338,3 +338,50 @@ for (const elsewhere of [false, true])
         assert.equal(s.memory.readU32(mappedAt + 4), 16, 'four texels a row');
     });
 }
+
+test('a buffer mapped on a deferred context is written where its command list plays', async()=>{
+    // WRITE_DISCARD then WRITE_NO_OVERWRITE on a deferred context, the
+    // documented way to fill a dynamic buffer there; it threw in the host.
+    const s = seamed();
+    const { device, context } = s.create();
+    /** @param {number} usage @param {number} bind @param {number} cpu */
+    const createBuffer = (usage, bind, cpu)=>{
+        const out = s.place([0]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateBuffer'),
+            [s.place([16, usage, bind, cpu, 0, 0]), 0, out]), S_OK);
+        return s.memory.readU32(out);
+    };
+    // DYNAMIC, a vertex buffer, CPU write; and a STAGING copy to read it back.
+    const dynamic = createBuffer(D3D10_USAGE.DYNAMIC, D3D10_BIND.VERTEX_BUFFER, 0x10000);
+    const staging = createBuffer(D3D10_USAGE.STAGING, 0, 0x20000);
+    const deferredOut = s.place([0]);
+    assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateDeferredContext'),
+        [0, deferredOut]), S_OK);
+    const deferred = s.memory.readU32(deferredOut);
+    const mapSlot = slot(ID3D11DEVICECONTEXT_SLOTS, 'Map');
+    const unmapSlot = slot(ID3D11DEVICECONTEXT_SLOTS, 'Unmap');
+    const mapped = s.place([0, 0, 0]);
+    assert.equal(s.call(deferred, mapSlot, [dynamic, 0, 4, 0, mapped]), S_OK, 'WRITE_DISCARD');
+    const data = s.memory.readU32(mapped);
+    assert.notEqual(data, 0);
+    assert.equal(s.memory.readU32(mapped + 4), 16, 'the row pitch, the buffer\'s width');
+    [1, 2, 3, 4].forEach((word, index)=>s.memory.writeU32(data + 4 * index, word));
+    s.call(deferred, unmapSlot, [dynamic, 0]);
+    assert.equal(s.call(deferred, mapSlot, [dynamic, 0, 5, 0, mapped]), S_OK, 'NO_OVERWRITE');
+    assert.equal(s.memory.readU32(mapped), data, 'the same memory as the discard');
+    s.memory.writeU32(data + 12, 9);
+    s.call(deferred, unmapSlot, [dynamic, 0]);
+    assert.equal(s.call(deferred, mapSlot, [dynamic, 0, 1, 0, mapped]), E_INVALIDARG,
+        'READ is not a deferred map');
+
+    const listOut = s.place([0]);
+    assert.equal(s.call(deferred, slot(ID3D11DEVICECONTEXT_SLOTS, 'FinishCommandList'),
+        [0, listOut]), S_OK);
+    const list = s.memory.readU32(listOut);
+    s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'ExecuteCommandList'), [list, 0]);
+    s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'CopyResource'), [staging, dynamic]);
+    assert.equal(await s.answer(context, mapSlot, [staging, 0, 1, 0, mapped]) >>> 0, S_OK);
+    const read = s.memory.readU32(mapped);
+    assert.deepEqual([0, 1, 2, 3].map(index=>s.memory.readU32(read + 4 * index)), [1, 2, 3, 9]);
+    s.call(context, unmapSlot, [staging, 0]);
+});

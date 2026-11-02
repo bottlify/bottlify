@@ -41,6 +41,9 @@ export const CONTEXT_COMMANDS = Object.freeze([
     'ClearRenderTargetView', 'ClearUnorderedAccessViewUint', 'ClearUnorderedAccessViewFloat',
     'ClearDepthStencilView', 'GenerateMips', 'SetResourceMinLOD', 'ResolveSubresource',
     'ClearState', 'Flush', 'ExecuteCommandList',
+    // Not Direct3D's: what a buffer mapped on a deferred context was written
+    // with, recorded at its Unmap for where the list plays (seam/d3d11.js).
+    'WriteMapped',
 ]);
 
 /** The pipeline's methods, by name: setters and getters both. */
