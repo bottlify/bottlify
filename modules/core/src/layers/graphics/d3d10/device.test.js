@@ -1874,6 +1874,33 @@ test('a format reports what it can be used for, and an unknown one fails', ()=>{
     assertFullyReleased(device);
 });
 
+test('a GPU without texture-formats-tier1 is claimed no snorm target and no 16-bit normalised'
+    + ' texture; with it, both', ()=>{
+    /** @param {any} device @param {number} format */
+    const support = (device, format)=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), S_OK);
+        return /** @type {number} */ (out.support);
+    };
+    const [TEXTURE2D, RENDER_TARGET] = [0x20, 0x4000];
+    const core = createDevice({ formatsTier1: false, rg11b10Renderable: false });
+    assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & TEXTURE2D, 'sampled still');
+    assert.equal(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & RENDER_TARGET, 0);
+    assert.equal(support(core, DXGI_FORMAT.R16G16B16A16_UNORM) & TEXTURE2D, 0);
+    assert.equal(support(core, DXGI_FORMAT.R11G11B10_FLOAT) & RENDER_TARGET, 0);
+    assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_UNORM) & RENDER_TARGET);
+    assertFullyReleased(core);
+    const tier1 = createDevice({ formatsTier1: true });
+    for (const format of [DXGI_FORMAT.R8G8B8A8_SNORM, DXGI_FORMAT.R16G16B16A16_UNORM,
+        DXGI_FORMAT.R16G16B16A16_SNORM, DXGI_FORMAT.R11G11B10_FLOAT])
+    {
+        assert.equal(support(tier1, format) & (TEXTURE2D | RENDER_TARGET),
+            TEXTURE2D | RENDER_TARGET, `${format}`);
+    }
+    assertFullyReleased(tier1);
+});
+
 test('the compressed, packed and typeless formats report what this device does with them', ()=>{
     // After Wine's d3d10core test_format_support and its display format list.
     const device = createDevice();

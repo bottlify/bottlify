@@ -1462,6 +1462,29 @@ test('a render target of another size than the first is not drawn into, and says
         assert.equal(pass.descriptor.colorAttachments.length, 1);
     });
 
+test('a target in a format this GPU does not draw into is lost alone, not with the frame',
+    async()=>{
+        // R8G8B8A8_SNORM is a render target at feature level 10.0; WebGPU draws
+        // into rgba8snorm only with texture-formats-tier1, and refused the
+        // texture, and every pass into it, without.
+        const h = harness();
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        const snorm = renderTarget(h, 8, DXGI_FORMAT.R8G8B8A8_SNORM);
+        assert.equal(snorm.made.descriptor.usage & 0x10, 0, 'made without RENDER_ATTACHMENT');
+        device.OMSetRenderTargets([h.renderTargetView, snorm.view], null);
+        device.Draw(3, 0);
+        await h.present();
+        assert.ok(diverged(h, 'lost: a draw into a rgba8snorm target'));
+        const [pass] = h.gpu.of('beginRenderPass');
+        assert.equal(pass.descriptor.colorAttachments.filter(Boolean).length, 1);
+        assert.deepEqual(h.gpu.errors, [], 'the GPU took the frame');
+
+        const tier1 = harness({ fake: { features: ['texture-formats-tier1'] } });
+        const drawn = renderTarget(tier1, 8, DXGI_FORMAT.R8G8B8A8_SNORM);
+        assert.ok(drawn.made.descriptor.usage & 0x10, 'with tier1, a target');
+    });
+
 test('a float target\'s slice past the first is read back through a staging copy', async()=>{
     const h = harness();
     const { device } = h;

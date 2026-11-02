@@ -811,6 +811,14 @@ export function createGraphicsModule(){
                     // Only a device made with the feature can leave depth
                     // unclipped, which is what DepthClipEnable = FALSE asks.
                     depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
+                    // What CheckFormatSupport may claim of the formats a GPU
+                    // has or draws into only with a feature; with no GPU, all
+                    // Direct3D has, as nothing is drawn.
+                    formatsTier1: device?.device
+                        ? device.device.features?.has('texture-formats-tier1') === true : undefined,
+                    rg11b10Renderable: device?.device
+                        ? device.device.features?.has('rg11b10ufloat-renderable') === true
+                        : undefined,
                     frameQueued,
                     // What a program maps lives in its own memory, so a map
                     // hands out an address and an unmap reads what it wrote

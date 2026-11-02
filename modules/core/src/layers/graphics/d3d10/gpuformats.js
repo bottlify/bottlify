@@ -31,6 +31,7 @@ export const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R32G32B32A32_SINT]: 'rgba32sint',
     [DXGI_FORMAT.R16G16B16A16_FLOAT]: 'rgba16float',
     [DXGI_FORMAT.R16G16B16A16_UNORM]: 'rgba16unorm',
+    [DXGI_FORMAT.R16G16B16A16_SNORM]: 'rgba16snorm',
     [DXGI_FORMAT.R16G16B16A16_UINT]: 'rgba16uint',
     [DXGI_FORMAT.R16G16B16A16_SINT]: 'rgba16sint',
     [DXGI_FORMAT.R32G32_FLOAT]: 'rg32float',
@@ -62,6 +63,7 @@ export const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R16_FLOAT]: 'r16float',
     [DXGI_FORMAT.D16_UNORM]: 'depth16unorm',
     [DXGI_FORMAT.R16_UNORM]: 'r16unorm',
+    [DXGI_FORMAT.R16_SNORM]: 'r16snorm',
     [DXGI_FORMAT.R16_UINT]: 'r16uint',
     [DXGI_FORMAT.R16_SINT]: 'r16sint',
     [DXGI_FORMAT.R8_UNORM]: 'r8unorm',
@@ -112,6 +114,7 @@ export const TEXEL_BYTES = Object.freeze({
     rgba32sint: 16,
     rgba16float: 8,
     rgba16unorm: 8,
+    rgba16snorm: 8,
     rgba16uint: 8,
     rgba16sint: 8,
     rg32float: 8,
@@ -144,6 +147,7 @@ export const TEXEL_BYTES = Object.freeze({
     r16float: 2,
     depth16unorm: 2,
     r16unorm: 2,
+    r16snorm: 2,
     r16uint: 2,
     r16sint: 2,
     r8unorm: 1,
@@ -234,6 +238,47 @@ function srgbTwin(format){
 }
 
 /**
+ * What a device's features let a texture be: whether it samples BC blocks,
+ * keeps a 32-bit depth with stencil, has texture-formats-tier1 (the 16-bit
+ * normalised formats exist, and the snorm ones are drawn into) and draws into
+ * R11G11B10_FLOAT. A field left out is taken as the device having it.
+ *
+ * @typedef {object} GpuFormatOptions
+ * @property {boolean} [compressed]
+ * @property {boolean} [depth32Stencil]
+ * @property {boolean} [formatsTier1]
+ * @property {boolean} [rg11b10Renderable]
+ */
+
+/** The formats WebGPU has only with texture-formats-tier1. */
+const SIXTEEN_BIT_NORMALISED = new Set(['r16unorm', 'rg16unorm', 'rgba16unorm',
+    'r16snorm', 'rg16snorm', 'rgba16snorm']);
+
+/** The formats WebGPU draws into only with texture-formats-tier1. */
+const TIER1_TARGETS = new Set([...SIXTEEN_BIT_NORMALISED, 'r8snorm', 'rg8snorm', 'rgba8snorm']);
+
+/**
+ * Whether the GPU draws into a texture of this WebGPU format: the snorm and
+ * 16-bit normalised ones only with texture-formats-tier1, R11G11B10_FLOAT
+ * only with rg11b10ufloat-renderable (which tier1 brings).
+ *
+ * @param {string} format
+ * @param {GpuFormatOptions} [options]
+ * @returns {boolean}
+ */
+export function gpuRenderable(format, options = {}){
+    if (TIER1_TARGETS.has(format))
+    {
+        return options.formatsTier1 !== false;
+    }
+    if (format === 'rg11b10ufloat')
+    {
+        return options.rg11b10Renderable !== false || options.formatsTier1 === true;
+    }
+    return true;
+}
+
+/**
  * What a resource of this format is kept in on the GPU.
  *
  * A typed format is kept as itself. A typeless one is kept as the member of
@@ -245,8 +290,7 @@ function srgbTwin(format){
  *
  * @param {number} dxgiFormat
  * @param {number} bindFlags
- * @param {{ compressed?: boolean, depth32Stencil?: boolean }} [options]  Whether the GPU
- *     samples BC blocks, and whether it keeps a 32-bit depth with stencil.
+ * @param {GpuFormatOptions} [options]
  * @returns {TextureStorage | null} null for a format the GPU has no way to hold
  */
 export function textureStorage(dxgiFormat, bindFlags, options = {}){
@@ -280,6 +324,10 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
             : kept(compressed.decoded, compressed.conversion);
     }
     const format = TEXTURE_FORMAT[typed];
+    if (SIXTEEN_BIT_NORMALISED.has(format) && options.formatsTier1 === false)
+    {
+        return null;
+    }
     // A 32-bit depth with stencil needs a device feature; without it the
     // depth keeps 24 bits.
     if (format === 'depth32float-stencil8' && options.depth32Stencil === false)
@@ -310,7 +358,7 @@ export function copyCompatible(a, b){
  *
  * @param {TextureStorage} storage
  * @param {number} viewFormat  The DXGI format the view names.
- * @param {{ compressed?: boolean, depth32Stencil?: boolean }} [options]
+ * @param {GpuFormatOptions} [options]
  * @returns {{ format?: string, aspect?: string, reinterpreted: boolean }}
  */
 export function viewFormatOf(storage, viewFormat, options = {}){

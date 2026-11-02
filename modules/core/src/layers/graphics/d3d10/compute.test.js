@@ -294,19 +294,19 @@ test('DispatchIndirect from a buffer a shader writes reads its grid on the GPU',
 test('a texture the device refuses on the spot is kept in memory and said, and the device goes'
     + ' on', ()=>{
     const h = harness((descriptor, made)=>{
-        if (descriptor.format === 'rg16unorm')
+        if (descriptor.format === 'rg16float')
         {
-            throw new TypeError('rg16unorm needs texture-formats-tier1');
+            throw new TypeError('rg16float refused');
         }
         return made(descriptor);
     });
     /** @type {{ resource?: any }} */
     const texture = {};
     assert.equal(h.device.CreateTexture2D({
-        Width: 4, Height: 4, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT.R16G16_UNORM,
+        Width: 4, Height: 4, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT.R16G16_FLOAT,
         SampleDesc: { Count: 1, Quality: 0 }, Usage: D3D10_USAGE.DEFAULT,
         BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: 0,
     }, null, texture), S_OK);
-    assert.ok(h.divergences.some(line=>line.includes('rg16unorm texture cannot be made')),
+    assert.ok(h.divergences.some(line=>line.includes('lost: a rg16float texture cannot be made')),
         h.divergences.join(' / '));
 });

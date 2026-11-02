@@ -47,7 +47,7 @@ import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.
 import { createFactory } from './dxgi.js';
 import {
     INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
-    multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
+    gpuRenderable, multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
 import { D3D10_COMMANDS } from './commands.js';
@@ -131,6 +131,9 @@ const PREDICATE_QUERIES = new Set([
  *     without it a block-compressed texture is decoded on the processor.
  * @property {boolean} [depthClipControl]  Whether the GPU device can leave depth
  *     unclipped, as a rasterizer state with DepthClipEnable FALSE asks.
+ * @property {boolean} [formatsTier1]  Whether the GPU has texture-formats-tier1: the
+ *     16-bit normalised formats, and the snorm ones as targets. Absent, taken as so.
+ * @property {boolean} [rg11b10Renderable]  Whether it draws into R11G11B10_FLOAT.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a swap chain's present queues; what it answers is
  *     what the present waits on before it answers the program.
@@ -611,7 +614,8 @@ export function createDevice(options = {}){
     // With a backend the renderer draws; without one it still keeps every
     // resource's bytes, so a map, a copy and an update mean the same thing in
     // a headless build as under a GPU.
-    const textureOptions = { compressed: options.compressedTextures ?? false };
+    const textureOptions = { compressed: options.compressedTextures ?? false,
+        formatsTier1: options.formatsTier1, rg11b10Renderable: options.rg11b10Renderable };
     const renderer = createRenderer({
         backend: options.backend ?? null,
         createSampler: options.createSampler ?? (()=>null),
@@ -619,6 +623,8 @@ export function createDevice(options = {}){
         divergence: options.divergence,
         compressedTextures: textureOptions.compressed,
         depthClipControl: options.depthClipControl ?? false,
+        formatsTier1: options.formatsTier1,
+        rg11b10Renderable: options.rg11b10Renderable,
         guest: options.guest,
     });
     const statistics = createDrawStatistics();
@@ -1516,8 +1522,10 @@ export function createDevice(options = {}){
                     support |= FORMAT_SUPPORT.SHADER_SAMPLE;
                 }
                 // A8_UNORM is drawn into as the alpha of an eight-bit texture;
-                // its conversion is for the bytes a program uploads.
-                if (info.renderable && (!kept.conversion || kept.conversion === 'a8'))
+                // its conversion is for the bytes a program uploads. A target is also
+                // one only of a format the GPU draws into.
+                if (info.renderable && (!kept.conversion || kept.conversion === 'a8')
+                    && gpuRenderable(kept.format, textureOptions))
                 {
                     support |= FORMAT_SUPPORT.RENDER_TARGET
                         | (filterable ? FORMAT_SUPPORT.BLENDABLE : 0);

@@ -53,7 +53,7 @@ const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
     INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
-    MIPS_GENERATED, isDepthFormat, resolvable, textureStorage, viewFormatOf,
+    MIPS_GENERATED, gpuRenderable, isDepthFormat, resolvable, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
@@ -84,6 +84,9 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  *                                          without it they are decoded on the processor.
  * @property {boolean} [depthClipControl]  Whether the GPU device was made with
  *     depth-clip-control, which leaving depth unclipped needs.
+ * @property {boolean} [formatsTier1]  Without a backend: whether the GPU behind the
+ *     device has texture-formats-tier1 (with one, the backend says).
+ * @property {boolean} [rg11b10Renderable]  Likewise, rg11b10ufloat-renderable.
  * @property {GuestStorage} [guest]  Where a resource the program maps keeps the bytes a
  *     map hands out: guest memory, so a map is an address and no copy.
  */
@@ -410,7 +413,11 @@ export function createRenderer(services){
     const compressed = services.compressedTextures ?? false;
     /** What a texture's GPU format is chosen with: the device's block and depth features. */
     const formatOptions = { compressed,
-        depth32Stencil: backend ? backend.hasFeature?.('depth32float-stencil8') === true : true };
+        depth32Stencil: backend ? backend.hasFeature?.('depth32float-stencil8') === true : true,
+        formatsTier1: backend ? backend.hasFeature?.('texture-formats-tier1') === true
+            : services.formatsTier1 ?? true,
+        rg11b10Renderable: backend ? backend.hasFeature?.('rg11b10ufloat-renderable') === true
+            : services.rg11b10Renderable ?? true };
 
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
@@ -721,7 +728,7 @@ export function createRenderer(services){
             return createTexture(descriptor);
         }
         catch (e){
-            diverge(`a ${descriptor.format} texture cannot be made on this device: ${
+            lose(`a ${descriptor.format} texture cannot be made on this device: ${
                 /** @type {any} */ (e)?.message ?? e}; it is kept in memory and never drawn with`);
             return null;
         }
@@ -766,8 +773,11 @@ export function createRenderer(services){
             let usage = TextureUsage.COPY_DST | TextureUsage.COPY_SRC;
             // WebGPU makes a multisampled texture only as something to draw
             // into, whatever else the program binds it as.
-            if ((desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
-                || backing.sampleCount > 1)
+            // A format this GPU does not draw into is made without it, so it can
+            // still be sampled and copied, and a draw into it is lost.
+            backing.drawable = gpuRenderable(layout.format, formatOptions);
+            if (((desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
+                || backing.sampleCount > 1) && backing.drawable)
             {
                 usage |= TextureUsage.RENDER_ATTACHMENT;
             }
@@ -826,7 +836,7 @@ export function createRenderer(services){
         }
         else if (desc.Usage !== D3D10_USAGE.STAGING)
         {
-            diverge(`a texture in format ${desc.Format} cannot be backed on this device;`
+            lose(`a texture in format ${desc.Format} cannot be backed on this device;`
                 + ' it is kept in memory and never drawn with');
         }
         backings.set(resource, backing);
@@ -1876,6 +1886,12 @@ export function createRenderer(services){
         const backing = backingOf(held.resource);
         if (!backing.texture)
         {
+            return null;
+        }
+        if (!backing.drawable)
+        {
+            lose(`a draw into a ${backing.layout.format} target: this GPU draws into none`
+                + ' (texture-formats-tier1 or rg11b10ufloat-renderable missing)');
             return null;
         }
         /** @type {{ desc?: any }} */
