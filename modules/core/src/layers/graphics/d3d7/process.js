@@ -21,7 +21,7 @@
  */
 
 import { D3D_OK, DDERR_INVALIDPARAMS } from './constants.js';
-import { D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS } from '../d3d8/constants.js';
+import { D3DFOG, D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS, dwordToFloat } from '../d3d8/constants.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 
 /** D3DVOP: what ProcessVertices is asked to do. */
@@ -280,6 +280,28 @@ export function processVertices(request){
             view).slice(0, 3),
     })) : [];
     const specularOn = state.renderState(D3DRS.SPECULARENABLE) !== 0;
+    // The vertex fog factor, which Direct3D writes as the specular colour's
+    // alpha, by the camera-space depth -- or the distance, with range fog --
+    // under the vertex fog mode; the table mode plays no part (Wine's
+    // test_fog_process_vertices). Without vertex fog the alpha is the
+    // material's.
+    const fogMode = state.renderState(D3DRS.FOGENABLE) !== 0
+        ? state.renderState(D3DRS.FOGVERTEXMODE) : D3DFOG.NONE;
+    const fogStart = dwordToFloat(state.renderState(D3DRS.FOGSTART));
+    const fogEnd = dwordToFloat(state.renderState(D3DRS.FOGEND));
+    const fogDensity = dwordToFloat(state.renderState(D3DRS.FOGDENSITY));
+    const rangeFog = state.renderState(D3DRS.RANGEFOGENABLE) !== 0;
+    /** @param {number} x @param {number} y @param {number} z @returns {number} 0 to 1 */
+    const fogOf = (x, y, z)=>{
+        const d = rangeFog ? Math.hypot(x, y, z) : z;
+        const f = fogMode === D3DFOG.LINEAR
+            ? (fogEnd === fogStart ? (d < fogEnd ? 1 : 0) : (fogEnd - d) / (fogEnd - fogStart))
+            : fogMode === D3DFOG.EXP ? Math.exp(-fogDensity * d)
+                : Math.exp(-((fogDensity * d) ** 2));
+        return Math.min(1, Math.max(0, f));
+    };
+    const vertexFog = fogMode === D3DFOG.LINEAR || fogMode === D3DFOG.EXP
+        || fogMode === D3DFOG.EXP2;
     const normalize = state.renderState(D3DRS.NORMALIZENORMALS) !== 0;
     const localViewer = state.renderState(D3DRS.LOCALVIEWER) !== 0;
     const colorVertex = state.renderState(D3DRS.COLORVERTEX) !== 0;
@@ -472,7 +494,8 @@ export function processVertices(request){
             {
                 const high = channels.map((channel, index)=>cs[channel] * specular[index]);
                 written.setUint32(at + destSpecular.offset,
-                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2], a: 0 }) : 0, true);
+                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2],
+                        a: vertexFog ? fogOf(c0, c1, c2) : cs.a }) : 0, true);
             }
         }
         else if (copying)

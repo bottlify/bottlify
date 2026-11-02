@@ -239,3 +239,46 @@ test('what is refused, and what DONOTCOPYDATA leaves alone', ()=>{
     assert.equal(s.float(dest.base + 20), 0.25, 'nor were the coordinates, until now');
     assert.equal(s.float(dest.base + 28 + 24), 0.5);
 });
+
+test('the specular alpha is the vertex fog factor, or the material\'s without vertex fog', ()=>{
+    // Wine's ddraw7 test_fog_process_vertices: one lit vertex, its fog by the
+    // camera-space depth 0.375, or the distance 0.625 with range fog, under
+    // the default start 0, end 1 and density 1; the table mode plays no part.
+    const s = space();
+    const light = {
+        Type: D3DLIGHTTYPE.DIRECTIONAL, Diffuse: { r: 0, g: 0, b: 0, a: 0 },
+        Specular: { r: 1, g: 1, b: 1, a: 0 }, Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Position: { x: 0, y: 0, z: 0 }, Direction: { x: 0, y: 0, z: 1 },
+        Range: 0, Falloff: 0, Attenuation0: 0, Attenuation1: 0, Attenuation2: 0, Theta: 0, Phi: 0,
+    };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    const material = { Diffuse: black, Ambient: black, Specular: { r: 0, g: 1, b: 0, a: 0.5 },
+        Emissive: black, Power: 5 };
+    const src = s.buffer(FVF.XYZ | FVF.NORMAL, 1);
+    s.fill(src, [[0.5, 0, 1, 0, 0, -1]]);
+    const dest = s.buffer(FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, 1);
+    const [NONE, EXP, EXP2, LINEAR] = [0, 1, 2, 3];
+    for (const [vertexMode, tableMode, range, alpha] of [
+        [NONE, NONE, 0, 0x80], [NONE, LINEAR, 0, 0x80], [EXP, NONE, 0, 0xaf],
+        [EXP2, NONE, 0, 0xde], [LINEAR, NONE, 0, 0x9f], [LINEAR, LINEAR, 0, 0x9f],
+        [NONE, NONE, 1, 0x80], [EXP, NONE, 1, 0x88], [EXP2, NONE, 1, 0xad],
+        [LINEAR, NONE, 1, 0x60], [LINEAR, EXP, 1, 0x60], [EXP, LINEAR, 1, 0x88],
+    ])
+    {
+        const state = device({
+            transforms: { [D3DTS.WORLD]: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.75, 0, 0, 0, 0, 1],
+                [D3DTS.VIEW]: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 1] },
+            lights: [light], material,
+            states: { [D3DRS.SPECULARENABLE]: 1, [D3DRS.FOGENABLE]: 1,
+                [D3DRS.FOGVERTEXMODE]: vertexMode, [D3DRS.FOGTABLEMODE]: tableMode,
+                [D3DRS.RANGEFOGENABLE]: range, [D3DRS.FOGSTART]: 0,
+                [D3DRS.FOGEND]: 0x3f800000, [D3DRS.FOGDENSITY]: 0x3f800000 },
+        });
+        assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
+            dest, destIndex: 0, count: 1, source: s.source(src), state, flags: 0 }), D3D_OK);
+        const got = s.dword(dest.base + 20) >>> 24;
+        assert.ok(Math.abs(got - alpha) <= 1,
+            `vertex fog ${vertexMode}, table ${tableMode}, range ${range}:`
+            + ` alpha ${got} against ${alpha}`);
+    }
+});
