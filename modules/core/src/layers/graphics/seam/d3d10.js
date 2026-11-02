@@ -501,7 +501,7 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *     The entry points every factory and device comes from (`d3d10/root.js`), made with
  *     what a device draws with -- here, or recorded for the graphics worker -- when a
  *     program first asks for one rather than before.
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {import('../d3d10/dxgi.js').FactoryOptions} [factoryOptions]
  * @property {() => { width: number, height: number, displayWidth?: number,
  *                     displayHeight?: number }} [screen]

@@ -110,7 +110,7 @@ const LOCAL = 0xffff0000;
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>
  *     } [callGuest]  How a program's callback is called.
  * @property {() => any} [currentThread]
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  */
 
 /**

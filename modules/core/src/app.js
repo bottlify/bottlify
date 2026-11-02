@@ -3789,12 +3789,69 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
  * library that could not be found is the warning that explains a program's
  * next decision. Everything else is what happened, at info.
  */
+/** A loss repeated is said again once in this many times, with its count. */
+const LOSS_EVERY = 256;
+
+/**
+ * Says that a call succeeded but did not do all of what it promises
+ * (`'divergence'`, a warning) or did not happen at all (`'loss'`, an error).
+ *
+ * A divergence is not a failure: a program is entitled to make the call, and
+ * refusing it changes what the program does -- usually by stopping it. But
+ * accepting a state and not honouring it is the defect class that produces a
+ * picture rather than an error, and the only thing separating it from correct
+ * behaviour is somebody saying so. A layer notices one where it happens, which
+ * for a graphics state is every draw, so each is said once: a short list of
+ * what this build does differently.
+ *
+ * A loss is worse: something the program made or asked for did not happen --
+ * a draw or a frame dropped, an object WebGPU refused, data not written. It is
+ * said the first time and then every LOSS_EVERY times with its count, so one
+ * that repeats every frame stays in the journal as it goes on.
+ *
+ * @param {(name: 'divergence' | 'loss', payload: { api: string, detail: string,
+ *     seen?: number }) => void} emit
+ * @returns {((api: string, detail: string, severity?: 'loss') => void)
+ *     & { divergences: Set<string>, losses: Map<string, number> }}  the reporter, with
+ *     what it has heard: every divergence, and every loss with how many times it came
+ */
+export function divergenceReporter(emit){
+    /** @type {Set<string>} */
+    const divergences = new Set();
+    /** @type {Map<string, number>} */
+    const losses = new Map();
+    /** @param {string} api @param {string} detail @param {'loss'} [severity] */
+    const report = (api, detail, severity)=>{
+        const key = `${api}: ${detail}`;
+        if (severity === 'loss')
+        {
+            const seen = (losses.get(key) ?? 0) + 1;
+            losses.set(key, seen);
+            if (seen === 1 || seen % LOSS_EVERY === 0)
+            {
+                emit('loss', { api, detail, ...(seen > 1 ? { seen } : {}) });
+            }
+            return;
+        }
+        if (divergences.has(key))
+        {
+            return;
+        }
+        divergences.add(key);
+        emit('divergence', { api, detail });
+    };
+    return Object.assign(report, { divergences, losses });
+}
+
+
 const SEVERITY = /** @type {Record<string, string>} */ ({
     error: 'error',
     'bundle-unavailable': 'error',
     'library-missing': 'warn',
     'libraries-missing': 'warn',
     divergence: 'warn',
+    // Something the program made did not happen: a draw, a frame, data.
+    loss: 'error',
     // The program's own words about why it is stopping. It is not our
     // failure, but it is never good news.
     'message-box': 'warn',
@@ -4230,39 +4287,7 @@ async function buildApp(options){
     const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height,
         ...((shownAtMost ?? 0) > 0 ? { refresh: shownAtMost } : {}) };
 
-    /**
-     * Divergences already reported, so each is said once.
-     *
-     * A layer notices a divergence where it happens, which for a graphics state
-     * is every draw. Reported per call it would fill a frame's journal with one
-     * repeated line and bury everything else; reported once it is a short list
-     * of what this build does differently, which is what a reader wants.
-     *
-     * @type {Set<string>}
-     */
-    const divergences = new Set();
-
-    /**
-     * Says that a call succeeded but did not do all of what it promises.
-     *
-     * Not a failure: a program is entitled to make the call, and refusing it
-     * changes what the program does -- usually by stopping it. But accepting a
-     * state and not honouring it is the defect class that produces a picture
-     * rather than an error, and the only thing separating it from correct
-     * behaviour is somebody saying so.
-     *
-     * @param {string} api      Which surface diverged, as a program names it.
-     * @param {string} detail   What was accepted and not acted on.
-     */
-    const reportDivergence = (api, detail)=>{
-        const key = `${api}: ${detail}`;
-        if (divergences.has(key))
-        {
-            return;
-        }
-        divergences.add(key);
-        events.emit('divergence', { api, detail });
-    };
+    const reportDivergence = divergenceReporter((name, payload)=>events.emit(name, payload));
 
     // A call site is made thousands of times in a run and its name never
     // changes, so the area string is built once per name rather than on
@@ -8677,7 +8702,12 @@ async function buildApp(options){
                     // consumer that listened for none has no other record of
                     // what this build accepted and did not do, and the journal
                     // has long since let go of a line said once.
-                    divergences: [...divergences].slice(0, DIVERGENCES_KEPT),
+                    divergences: [...reportDivergence.divergences].slice(0, DIVERGENCES_KEPT),
+                    // And every loss -- a draw, a frame, data that did not
+                    // happen -- with how many times it came: an error the
+                    // journal let go of is still here.
+                    losses: Object.fromEntries([...reportDivergence.losses]
+                        .slice(0, DIVERGENCES_KEPT)),
                     // The system exports a 64-bit process has no x86-64 of.
                     leftOutAt64,
                     // The guest-to-guest calls a watch was put in front of, by label.

@@ -115,8 +115,8 @@ const FILTER_NUMBERING = Object.freeze({
  *     asking (app.debug.dumpFrames), as Direct3D 8 and 9 devices take it
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
- * @property {(api: string, detail: string) => void} [divergence]  told of a call the
- *     guest made in the command ring that the device refused
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]  told
+ *     of a call the guest made in the command ring that the device refused
  *     Makes the Direct3D 7 object in this one's place, whose devices draw
  *     elsewhere (`remote/d3d7.js`).
  */

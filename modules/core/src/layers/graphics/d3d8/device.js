@@ -288,7 +288,7 @@ function isTransformType(type){
  *     down as `dumpDraws` writes them; counts down as they are.
  * @property {number} [maxDraws]
  *     Cut every frame short after this many draws. Negative keeps all of them.
- * @property {(api: string, detail: string)=>void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss')=>void} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {string} [skipTexture]
  *     Drop every draw that samples the texture with this dump id.

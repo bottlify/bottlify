@@ -29,7 +29,7 @@
  *                                                      (`FrameLatencyState`)
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
- *                      { type: 'divergence', api, detail }
+ *                      { type: 'divergence', api, detail, severity? }
  *                      { type: 'lost' }                its GPU went away
  *                      { type: 'failed', message }     a call could not be played
  */
@@ -122,7 +122,7 @@ export function crossable(value, depth = 0){
  *     guest memory the played side wrote outside a call: a read-back's pixels
  * @property {(address: number, length: number) => void} [adopted]
  *     the same, written by the played side into shared guest memory itself
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {() => void} [lost]
  * @property {(message: string) => void} [failed]
  */
@@ -449,7 +449,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     }
                     break;
                 case 'divergence':
-                    on.divergence?.(message.api, message.detail);
+                    on.divergence?.(message.api, message.detail, message.severity);
                     break;
                 case 'lost':
                     on.lost?.();

@@ -71,7 +71,7 @@ import { RESOURCE_DIMENSION } from './sm4.js';
  *                          every resource's bytes without a GPU behind them.
  * @property {(descriptor: object) => any} createSampler
  * @property {(descriptor: object) => any} createTexture
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;
  *                                          without it they are decoded on the processor.
  * @property {boolean} [depthClipControl]  Whether the GPU device was made with
@@ -3783,7 +3783,8 @@ export function createRenderer(services){
         const cut = backend.markPresent();
         chain = chain.then(()=>replay(recorded, surface, cut)).catch(failure=>{
             counters.failures.push(String(failure && failure.message || failure));
-            diverge(`a frame could not be replayed: ${failure && failure.message || failure}`);
+            divergence?.('Direct3D 10', `lost a frame: ${failure && failure.message || failure}`,
+                'loss');
             for (const counter of counting)
             {
                 counter.failed = true;

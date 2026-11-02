@@ -237,7 +237,7 @@ export function guidBytes(guid){
  *     setters' code.
  * @property {Set<string>} [traps]  Guest routines kept as traps, by name or group
  *     (`getters`, `ring`).
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {number} [ringBytes]  A device's command ring's size (`shadow.js`).
  */
 

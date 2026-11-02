@@ -173,7 +173,7 @@ const ASTC_FORMATS = Object.freeze({
  * @typedef {Object} GpuServices
  * @property {any} backend
  * @property {(descriptor: any) => any} createSampler
- * @property {(detail: string) => void} [divergence]
+ * @property {(detail: string, severity?: 'loss') => void} [divergence]
  * @property {boolean} [dumpDraws]  describe every draw of the last frame
  * @property {number} [maxDraws]    stop a frame after this many draws
  * @property {string | null} [skipTexture]  drop draws sampling these ids
@@ -3040,6 +3040,19 @@ export function createGpuRenderer(services){
     let newest = null;
     /** @type {string[]} */
     const failures = [];
+    /**
+     * What failed and is lost -- a draw, a frame, what was to be shown: kept
+     * for the diagnostics and said as a loss.
+     *
+     * @param {string} message
+     */
+    const lose = message=>{
+        if (failures.length < 16)
+        {
+            failures.push(message);
+        }
+        services.divergence?.(`lost: ${message}`, 'loss');
+    };
 
     /**
      * @param {Recording} recording
@@ -3154,10 +3167,7 @@ export function createGpuRenderer(services){
                 const outcome = built[command.pipeline];
                 if (outcome.status === 'rejected')
                 {
-                    if (failures.length < 16)
-                    {
-                        failures.push(String(outcome.reason?.message ?? outcome.reason));
-                    }
+                    lose(String(outcome.reason?.message ?? outcome.reason));
                     continue;
                 }
                 const pipeline = outcome.value;
@@ -3263,9 +3273,9 @@ export function createGpuRenderer(services){
                 pass.draw(3, 1, 0);
                 frame.present(shown);
             }
-            else if (failures.length < 16)
+            else
             {
-                failures.push(String(shownBy.reason?.message ?? shownBy.reason));
+                lose(String(shownBy.reason?.message ?? shownBy.reason));
             }
         }
         finally
@@ -3407,10 +3417,7 @@ export function createGpuRenderer(services){
                 .then(()=>replay(recording, target, shown, cut))
                 .catch(error=>{
                     unflushed.delete(recording.id);
-                    if (failures.length < 16)
-                    {
-                        failures.push(error instanceof Error ? error.message : String(error));
-                    }
+                    lose(error instanceof Error ? error.message : String(error));
                 });
             return { width: target.width, height: target.height };
         },

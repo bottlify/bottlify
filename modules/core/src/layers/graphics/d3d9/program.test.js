@@ -103,6 +103,8 @@ function harness(options = {}){
         features: options.features });
     /** @type {string[]} */
     const reports = [];
+    /** What was said as lost. @type {string[]} */
+    const losses = [];
     const backend = createBackend({
         device: gpu.device,
         queue: gpu.queue,
@@ -122,7 +124,8 @@ function harness(options = {}){
             next += bytes + 0x100;
             return address;
         },
-        divergence: (_api, detail)=>reports.push(detail),
+        divergence: (_api, detail, severity)=>(severity === 'loss' ? losses : reports)
+            .push(detail),
         dumpDraws: options.dumpDraws ?? false,
         ...(options.driverRules ? { driverRules: options.driverRules } : {}),
     });
@@ -173,7 +176,7 @@ function harness(options = {}){
     assert.equal(texture.texture.UnlockRect(0), D3D_OK);
 
     return {
-        gpu, device, reports, vb: vb.buffer, declaration: declaration.declaration,
+        gpu, device, reports, losses, vb: vb.buffer, declaration: declaration.declaration,
         texture: texture.texture, vertexBytes: new Uint8Array(vertices.buffer),
         async draw(){
             assert.equal(device.BeginScene(), D3D_OK);
@@ -1501,6 +1504,8 @@ test('a pipeline the GPU refuses loses its draw and names the reason; the frame 
             ['Fragment input at location 2 has no vertex output']);
         assert.equal(h.gpu.count('submit'), 1, 'the frame is still submitted');
         assert.equal(h.gpu.count('draw'), 0, 'without the draw');
+        assert.deepEqual(h.losses, ['lost: Fragment input at location 2 has no vertex output'],
+            'said as a loss, an error in the journal');
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);

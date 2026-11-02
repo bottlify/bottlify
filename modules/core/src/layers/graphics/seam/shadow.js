@@ -3589,7 +3589,7 @@ export function settledAfter(shadow, call){
  *     handed for a surface and the word its count is kept in, zeros for one it
  *     was not handed or whose count the host keeps: the targets the guest's
  *     getters answer with (`SHADOW.TARGETS`)
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {string} [name]  The device interface a refusal names.
  * @property {ShadowCommands} [commands]  The methods the device's command
  *     ring carries (`commandCode`), and how the host makes one: a device

@@ -222,7 +222,7 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {ReturnType<typeof createShareGroup>} [shareGroup]
  * @property {readonly string[]} [extensions]  what glGetString(GL_EXTENSIONS) reports
  * @property {ContextMemory} [memory]
- * @property {(detail: string) => void} [divergence]
+ * @property {(detail: string, severity?: 'loss') => void} [divergence]
  *           Told, once per distinct message, when a call was accepted but
  *           its effect is not what the real API would have had.
  * @property {ReturnType<typeof import('./gpu.js').createGpuRenderer>} [gpu]

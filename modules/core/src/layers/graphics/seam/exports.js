@@ -124,7 +124,7 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll'];
  * @param {(name: string) => number} [deps.exportAddress]
  *        The guest address of one of OPENGL32's own exports, which is what
  *        wglGetProcAddress answers for a core name.
- * @param {(api: string, detail: string) => void} [deps.divergence]
+ * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  * @param {(width: number, height: number,
  *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },

@@ -463,7 +463,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     reads back exactly what it wrote there. Cleared unless `cleared` is
  *     false, for bytes nobody reads before they are written (`storageFor`).
  * @property {(address: number)=>void} [free]
- * @property {(api: string, detail: string)=>void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss')=>void} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {boolean} [dumpDraws]
  * @property {number} [dumpEvery]

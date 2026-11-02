@@ -175,7 +175,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {any} deps.publisher   From createPublisher.
  * @param {any} deps.memory      readMemory/writeMemory.
  * @param {() => any} deps.screen  The display this build is configured for.
- * @param {(api: string, detail: string) => void} [deps.divergence]
+ * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  *     Where the program's cursor goes; without a taker the call is refused.
  * @param {(width: number, height: number,

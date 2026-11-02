@@ -124,7 +124,7 @@ const PREDICATE_QUERIES = new Set([
  * @property {any} [backend]   The GPU backend; absent, the device keeps state and never draws.
  * @property {(descriptor: object) => any} [createSampler]
  * @property {(descriptor: object) => any} [createTexture]
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  *     Where a call that succeeded without doing all it promises is reported.
  * @property {() => number} [now]  Milliseconds, for a timestamp query.
  * @property {boolean} [compressedTextures]  Whether the GPU samples BC blocks as they are;

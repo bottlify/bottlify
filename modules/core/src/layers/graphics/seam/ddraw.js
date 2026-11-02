@@ -317,7 +317,7 @@ const S3TC_OF_FOURCC = Object.freeze({
  *        video memory each time.
  * @param {(width: number, height: number,
  *     where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
- * @param {(api: string, detail: string) => void} [deps.divergence]
+ * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
  * @param {<T>(call: () => T) => T} [deps.aroundCall]  runs each method of a surface or

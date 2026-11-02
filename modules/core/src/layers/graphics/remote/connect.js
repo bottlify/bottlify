@@ -347,7 +347,7 @@ function join(worker, connection){
  *     than copied to it; on unless false
  * @param {number} [options.maxFrameLatency]  the frames a root's presents may leave the
  *     worker's GPU drawing (`graphics.maxFrameLatency`); absent, Direct3D's three, 0 no bound
- * @param {(api: string, detail: string) => void} [options.divergence]
+ * @param {(api: string, detail: string, severity?: 'loss') => void} [options.divergence]
  * @param {() => void} [options.lost]    the worker's GPU went away
  * @param {(message: string) => void} [options.failed]  a root's calls could not be played
  * @returns {GraphicsWorkerEnd}
@@ -480,7 +480,7 @@ export function connectGraphicsWorker(options){
         },
         lost: ()=>lost?.(),
         refused: (message, seen)=>divergence?.('graphics', `the GPU refused a frame: ${message}`
-            + (seen > 1 ? ` (x${seen})` : '')),
+            + (seen > 1 ? ` (x${seen})` : ''), 'loss'),
     };
     const leave = join(worker, connection);
 

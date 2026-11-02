@@ -553,8 +553,9 @@ export function serveGraphics(scope, deps){
                 depthClipControl: options.depthClipControl === true
                     && device.features?.has?.('depth-clip-control') === true,
                 writeMemory: wrote,
-                divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
-                    post({ type: 'divergence', api: name, detail }),
+                divergence: (/** @type {string} */ name, /** @type {string} */ detail,
+                    /** @type {'loss' | undefined} */ severity)=>
+                    post({ type: 'divergence', api: name, detail, severity }),
                 frameQueued,
             });
         }
@@ -571,8 +572,8 @@ export function serveGraphics(scope, deps){
                 astcTextures: options.astcTextures === true
                     && device.features?.has?.('texture-compression-astc') === true,
                 writeMemory: wrote,
-                divergence: (/** @type {string} */ detail)=>
-                    post({ type: 'divergence', api: 'OpenGL', detail }),
+                divergence: (/** @type {string} */ detail, /** @type {'loss' | undefined} */ severity)=>
+                    post({ type: 'divergence', api: 'OpenGL', detail, severity }),
                 frameQueued,
             });
         }
@@ -588,8 +589,9 @@ export function serveGraphics(scope, deps){
                 borrow: memory && lending ? createBorrower({ ...lending, memory }) : undefined,
                 writeMemory: wrote,
                 storeCount,
-                divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
-                    post({ type: 'divergence', api: name, detail }),
+                divergence: (/** @type {string} */ name, /** @type {string} */ detail,
+                    /** @type {'loss' | undefined} */ severity)=>
+                    post({ type: 'divergence', api: name, detail, severity }),
                 onDeviceLost: (/** @type {() => void} */ watcher)=>{
                     if (lost)
                     {

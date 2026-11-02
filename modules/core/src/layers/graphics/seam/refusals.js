@@ -28,7 +28,7 @@ export const hresultName = hr=>HRESULT_NAMES.get(hr >>> 0) ?? `0x${(hr >>> 0).to
  * A reporter for one API's device methods.
  *
  * @param {string} api   'Direct3D 9'
- * @param {((api: string, detail: string) => void) | undefined} divergence
+ * @param {((api: string, detail: string, severity?: 'loss') => void) | undefined} divergence
  * @returns {(name: string, answer: any) => any}  the answer, passed through, a promise too
  */
 export function loudRefusals(api, divergence){

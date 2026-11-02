@@ -3065,8 +3065,9 @@ const CLEAR_STRIDE = 20;
  * @property {(block: number, measurement: number, count: number) => void} [storeCount]
  *     writes a count into its query's block in guest memory, as soon as the GPU has it
  * @property {() => void} [occlusionCounted]  told whenever an occlusion count has come back
- * @property {((api: string, detail: string)=>void) | null} [divergence]
- *     Where "this call succeeded and did not do all of what it promises" goes.
+ * @property {((api: string, detail: string, severity?: 'loss')=>void) | null} [divergence]
+ *     Where "this call succeeded and did not do all of what it promises" goes;
+ *     with 'loss', what did not happen at all (a draw dropped).
  * @property {boolean} [fog]
  *     Whether fog is applied at all; on by default. Off, every draw runs the
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
@@ -5218,12 +5219,19 @@ export function createRenderer(options){
         counters.skipped[/** @type {keyof typeof counters.skipped} */ (reason)]++;
     };
 
-    /** @param {any} error */
+    /**
+     * A draw, or a frame's work, that failed and is lost: kept for the
+     * diagnostics and said as a loss.
+     *
+     * @param {any} error
+     */
     const failure = error=>{
+        const message = String(error && error.message ? error.message : error);
         if (counters.failures.length < 16)
         {
-            counters.failures.push(String(error && error.message ? error.message : error));
+            counters.failures.push(message);
         }
+        divergence?.('Direct3D', `lost: ${message}`, 'loss');
     };
 
     /**

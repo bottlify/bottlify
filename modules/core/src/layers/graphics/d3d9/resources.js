@@ -632,7 +632,7 @@ const DC_FORMATS = Object.freeze({
  *           the earlier accepted it and programs relied on that, so which
  *           applies is the device's to say.
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
- * @property {((api: string, detail: string) => void) | null} [divergence]
+ * @property {((api: string, detail: string, severity?: 'loss') => void) | null} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes. A render target lives on the GPU; without `pixels` its bytes
  *           are not read back into the guest's copy, so a lock of one hands out

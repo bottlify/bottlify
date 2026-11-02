@@ -15,7 +15,7 @@ import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden,
     withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
     resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
-    pathDirectories,
+    pathDirectories, divergenceReporter,
     pagePacing,
     PAGE_YIELD_MS,
     PENDING_YIELD_MS,
@@ -2106,3 +2106,24 @@ test('a whole file larger than the heap\'s pool of fetched blocks is read whole,
         assert.ok(WHOLE_READ_BYTES * 2 <= HEAP_POOLS.blockCache,
             'a piece and the read-ahead beside it fit the pool');
     });
+
+test('a divergence is said once, a loss the first time and every 256th with its count', ()=>{
+    /** @type {[string, any][]} */
+    const said = [];
+    const report = divergenceReporter((name, payload)=>said.push([name, payload]));
+    report('Direct3D', 'a state accepted and not drawn');
+    report('Direct3D', 'a state accepted and not drawn');
+    for (let time = 0; time < 512; time++)
+    {
+        report('Direct3D', 'lost: a draw', 'loss');
+    }
+    assert.deepEqual(said, [
+        ['divergence', { api: 'Direct3D', detail: 'a state accepted and not drawn' }],
+        ['loss', { api: 'Direct3D', detail: 'lost: a draw' }],
+        ['loss', { api: 'Direct3D', detail: 'lost: a draw', seen: 256 }],
+        ['loss', { api: 'Direct3D', detail: 'lost: a draw', seen: 512 }],
+    ]);
+    // And kept, for the diagnostics, after the journal has let them go.
+    assert.deepEqual([...report.losses], [['Direct3D: lost: a draw', 512]]);
+    assert.deepEqual([...report.divergences], ['Direct3D: a state accepted and not drawn']);
+});

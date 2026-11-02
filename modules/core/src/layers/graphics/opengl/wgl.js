@@ -87,7 +87,7 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  *              allocate?: (bytes: number) => number }} [memory]
  *           DescribePixelFormat writes through it when given an address, and
  *           every context made here reads its pixels and arrays through it.
- * @property {(detail: string) => void} [divergence]
+ * @property {(detail: string, severity?: 'loss') => void} [divergence]
  *           Handed to every context, for the calls it accepts and cannot honour.
  * @property {ReturnType<typeof import('./gpu.js').createGpuRenderer>} [gpu]
  *           Handed to every context: where its draws go when this build has a

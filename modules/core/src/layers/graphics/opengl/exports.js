@@ -448,7 +448,7 @@ const LIST_TYPES = new Map([
  *           what wglGetProcAddress answers with, and without it no extension
  *           is advertised: a name in the extension string whose entry point
  *           cannot be handed out is a crash a program cannot see coming.
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  *           Where a call that was accepted but not honoured is reported.
  * @property {() => any} [backend]
  *           The rendering backend, reached when the first context is made.
@@ -551,7 +551,7 @@ export function createOpengl(services){
         backend: services.backend,
         createSampler: services.createSampler,
         frameQueued: services.frameQueued,
-        divergence: detail=>services.divergence?.('OpenGL', detail),
+        divergence: (detail, severity)=>services.divergence?.('OpenGL', detail, severity),
         raster: services.raster,
         compressedTextures: services.compressedTextures,
         astcTextures: services.astcTextures,
@@ -583,7 +583,8 @@ export function createOpengl(services){
         // No way to hand out an address, no extension: the string and the
         // lookup are one promise, and both are kept or neither is.
         extensions: exportAddress ? { ...GL_EXTENSIONS, ...GL_VERSIONS, ...WGL_EXTENSIONS } : {},
-        divergence: detail=>services.divergence?.('OpenGL', detail),
+        divergence: (/** @type {string} */ detail, /** @type {'loss' | undefined} */ severity)=>
+            services.divergence?.('OpenGL', detail, severity),
         createContext: options=>{
             madeContext = true;
             return root.CreateContext(options);

@@ -28,7 +28,7 @@ import { createModelRenderer } from './gpu-model.js';
  * @property {(descriptor: any) => any} [createSampler]
  * @property {boolean} [model]  the renderer only keeps state: a twin elsewhere draws
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
- * @property {(detail: string) => void} [divergence]
+ * @property {(detail: string, severity?: 'loss') => void} [divergence]
  * @property {boolean} [raster]
  * @property {boolean} [keepPrimitives]
  * @property {boolean} [compressedTextures]

@@ -292,7 +292,7 @@ const S_FALSE = 1;
  *        Pages of their own for the guest code this seam writes, where a store
  *        into the state beside it cannot invalidate it, and which no slice ends
  *        inside unless `unbroken` is false; `allocate` without it.
- * @param {(api: string, detail: string) => void} [deps.divergence]
+ * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
  * @param {(width: number, height: number,
