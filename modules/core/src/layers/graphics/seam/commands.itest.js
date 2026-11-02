@@ -403,6 +403,60 @@ test('the viewport and the sampler states a program sets in the guest are what i
         assert.equal(run(GET_SAMPLER, [2, 5, OUT]), 'trap');
     });
 
+test('a state set to what the block holds writes no record, unless a state block may have moved it',
+    ()=>{
+        const host = createCorkHost({
+            memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+            initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
+        });
+        const SET_SAMPLER = VIEWPORT;
+        const SET_RENDER = CONSTANTS;
+        host.writePhysical(SET_SAMPLER, commandCode(SET_SAMPLER, TRAP,
+            shape('SetSamplerState', { mirror: SAMPLER_STATE_MIRROR })));
+        host.writePhysical(SET_RENDER, commandCode(SET_RENDER, TRAP,
+            shape('SetRenderState', { mirror: RENDER_STATE_MIRROR })));
+        host.writePhysical(TRAP, new Uint8Array([0xf4]));
+        host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+        host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+        host.writePhysical(BLOCK + SHADOW.COMMANDS,
+            new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+        host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, new Uint8Array([0xff]));
+        host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+        /** @param {number} at */
+        const read = at=>{
+            const bytes = host.readPhysical(at, 4);
+            return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        };
+        /** The ring's head after the call, which answered D3D_OK in the guest. */
+        const run = (/** @type {number} */ target, /** @type {number[]} */ args)=>{
+            const code = call(PROGRAM, target, OBJECT, args);
+            host.writePhysical(PROGRAM, new Uint8Array(code));
+            host.writeReg32('eip', PROGRAM);
+            host.writeReg32('esp', STACK);
+            runToHalt(host, 1000);
+            assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+            assert.equal(host.readReg32('esp'), STACK);
+            assert.equal(host.readReg32('eax'), 0);
+            assert.equal(read(BLOCK + SHADOW.HELD), 0, 'the device\'s lock let go');
+            return read(BLOCK + SHADOW.COMMAND_HEAD);
+        };
+
+        const first = run(SET_SAMPLER, [2, 5, 3]);
+        assert.ok(first > 0, 'a new value is a record');
+        assert.equal(run(SET_SAMPLER, [2, 5, 3]), first, 'the same again is none');
+        const other = run(SET_SAMPLER, [2, 5, 4]);
+        assert.ok(other > first, 'another value is one');
+        // Zero is what the block holds of a state nothing set: the device's, mirrored.
+        assert.equal(run(SET_RENDER, [3, 0]), other, 'a render state as the block holds it');
+        const render = run(SET_RENDER, [3, 7]);
+        assert.ok(render > other);
+        host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_STALE)));
+        const stale = run(SET_SAMPLER, [2, 5, 4]);
+        assert.ok(stale > render,
+            'after a state block applied in the ring the block may be behind: a record');
+        assert.ok(run(SET_RENDER, [3, 7]) > stale);
+    });
+
 test('a state block\'s Apply in the ring names the block and sends the getters to the host', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,

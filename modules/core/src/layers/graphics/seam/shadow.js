@@ -2959,6 +2959,13 @@ export function commandCode(at, trap, shape){
         ...(thread ? [] : [letHeldGo(ECX),                       // mov dword [ecx+HELD], 0
             countLeft(ECX, SHADOW.LEFT_CHECKS)]),                // lock inc dword [ecx+LEFT_CHECKS]
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        // A mirror that found the call changes nothing (`storeState`): no record.
+        ...(mirror.some(part=>'to' in part && part.to === 'same') ? [
+            { label: 'same' },
+            letHeldGo(ECX),                                      // lock and dword [ecx+HELD], 0
+            [0x31, 0xc0],                                        // xor eax, eax
+            [0xc2, entry - 4 + 4 * popped, 0x00],                // ret 4*args (+4 for this)
+        ] : []),
         { label: 'take' },
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
         [0x89, 0xcb],                                            // mov ebx, ecx
@@ -3047,6 +3054,32 @@ export function commandCode(at, trap, shape){
 }
 
 /**
+ * A state's value, EDX, into its slot at `[ecx+eax*4+disp]` -- or, when the
+ * slot holds it already and no state block applied in the ring may have left
+ * the slot behind the device (`FLAG_STALE`), no record at all (`same`): the
+ * call changes nothing, as a device that is not pure drops it. An Unreal
+ * Engine 3 title set the same sampler and render states again before every
+ * draw, three records in four, each one the host played.
+ *
+ *     test dword [ecx], FLAG_STALE
+ *     jnz changed
+ *     cmp [ecx+eax*4+disp], edx
+ *     je same
+ *   changed:
+ *     mov [ecx+eax*4+disp], edx
+ *
+ * @param {number} disp
+ */
+const storeState = disp=>[
+    [0xf7, 0x01, ...dword(FLAG_STALE)],                          // test dword [ecx], 2
+    { jcc: 0x75, to: 'changed' },                                // jnz changed
+    [0x39, 0x94, 0x81, ...dword(disp)],                          // cmp [ecx+eax*4+disp], edx
+    { jcc: 0x74, to: 'same', near: true },                       // je same
+    { label: 'changed' },
+    [0x89, 0x94, 0x81, ...dword(disp)],                          // mov [ecx+eax*4+disp], edx
+];
+
+/**
  * What a command routine for SetRenderState keeps in the block for
  * GetRenderState in the guest: the value, for a state the block holds; any
  * other state is the host's.
@@ -3058,7 +3091,7 @@ export const RENDER_STATE_MIRROR = Object.freeze([
     [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)],     // bt [ecx+disp], eax
     { jcc: 0x73, to: 'out', near: true },                        // jnc out: one the device refuses
     [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
-    [0x89, 0x94, 0x81, ...dword(SHADOW.RENDER_STATES)],          // mov [ecx+eax*4+disp], edx
+    ...storeState(SHADOW.RENDER_STATES),
 ]);
 
 /** The same for SetTransform: the matrix into its type's slot. */
@@ -3279,7 +3312,7 @@ export const SAMPLER_STATE_MIRROR = Object.freeze([
     [0xc1, 0xe0, 0x04],                                          // shl eax, 4
     [0x01, 0xd0],                                                // add eax, edx
     [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
-    [0x89, 0x94, 0x81, ...dword(SHADOW.SAMPLER_STATES)],         // mov [ecx+eax*4+disp], edx
+    ...storeState(SHADOW.SAMPLER_STATES),
 ]);
 
 /**
@@ -3426,7 +3459,7 @@ export const stageStateMirror = types=>[
     [0xc1, 0xe0, 0x05],                                          // shl eax, 5
     [0x03, 0x44, 0x24, 0x0c],                                    // add eax, [esp+12]
     [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
-    [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],           // mov [ecx+eax*4+disp], edx
+    ...storeState(SHADOW.STAGE_STATES),
 ];
 
 /**
@@ -5307,10 +5340,25 @@ export function guestWords(memory){
 /**
  * A mirror as the host keeps it (`HOST_MIRRORS`): the x86 one's work on the
  * block, from the call's arguments (`this` not among them); false where the
- * x86 one goes to the host.
+ * x86 one goes to the host, 'same' where it answers with no record (`storeState`).
  *
- * @typedef {(memory: GuestWords, block: number, args: number[]) => boolean} HostMirror
+ * @typedef {(memory: GuestWords, block: number, args: number[]) => boolean | 'same'} HostMirror
  */
+
+/**
+ * `storeState` as the host keeps it.
+ *
+ * @param {GuestWords} m @param {number} block @param {number} at @param {number} value
+ * @returns {true | 'same'}
+ */
+const storeStateWord = (m, block, at, value)=>{
+    if ((m.u32(block + SHADOW.FLAGS) & FLAG_STALE) === 0 && m.u32(at) === value)
+    {
+        return 'same';
+    }
+    m.setU32(at, value);
+    return true;
+};
 
 /**
  * Whether bit `index` of the bit string at `at` is set, as `bt` reads one.
@@ -5340,8 +5388,7 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.setU32(block + SHADOW.RENDER_STATES + 4 * state, value);
-        return true;
+        return storeStateWord(m, block, block + SHADOW.RENDER_STATES + 4 * state, value);
     },
     /** @type {HostMirror} */
     transform: (m, block, [type, matrix])=>{
@@ -5441,8 +5488,8 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.setU32(block + SHADOW.SAMPLER_STATES + 4 * ((sampler << 4) + type), value);
-        return true;
+        return storeStateWord(m, block, block + SHADOW.SAMPLER_STATES + 4 * ((sampler << 4) + type),
+            value);
     },
     /** @param {number} types @returns {HostMirror} */
     stageState: types=>(m, block, [stage, type, value])=>{
@@ -5451,8 +5498,8 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.setU32(block + SHADOW.STAGE_STATES + 4 * ((stage << 5) + type), value);
-        return true;
+        return storeStateWord(m, block, block + SHADOW.STAGE_STATES + 4 * ((stage << 5) + type),
+            value);
     },
     /** @type {HostMirror} */
     beginScene: (m, block)=>{
@@ -5807,9 +5854,15 @@ function recordCommand(m, shape, mirror, block, a){
         }
     }
     const size = copiedBytes(shape, a, pointer, bytes);
-    if (size === null || (mirror && !mirror(m, block, a)))
+    if (size === null)
     {
         return undefined;
+    }
+    const mirrored = mirror?.(m, block, a) ?? true;
+    if (mirrored !== true)
+    {
+        // A call the mirror found changes nothing is answered with no record.
+        return mirrored === 'same' ? 0 : undefined;
     }
     const header = COMMAND.ARGS + 4 * args;
     const length = count !== undefined && count.shift < 2 ? (size + header + 3) & ~3

@@ -100,6 +100,14 @@ function machine(){
         host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, valid);
     };
     /**
+     * A word of the block as the seam's host writes it: what the device holds,
+     * at the start and after each of the host's own calls (`remirror`).
+     *
+     * @param {number} offset @param {number} value
+     */
+    const mirror = (offset, value)=>host.writePhysical(BLOCK + offset,
+        new Uint8Array(u32(value >>> 0)));
+    /**
      * Runs `routine` on the device with `args`: true for a call it wrote into
      * the ring and answered D3D_OK, false for one it left to the trap.
      *
@@ -136,7 +144,7 @@ function machine(){
         host.writePhysical(BLOCK + SHADOW.COMMAND_HEAD, new Uint8Array(4));
         return records;
     };
-    return { host, start, call, take };
+    return { host, start, mirror, call, take };
 }
 
 /**
@@ -255,7 +263,7 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
     const routines = Object.fromEntries(Object.entries(LEGACY_DEVICE_COMMANDS)
         .map(([name, shape])=>[name, commandCode(ROUTINE, TRAP, shape)]));
     const triangle = new Uint8Array(3 * 20);
-    const recorded = { ring: 0, host: 0 };
+    const recorded = { ring: 0, host: 0, same: 0 };
     for (let round = 0; round < 120; round++)
     {
         const host = side();
@@ -272,6 +280,52 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
             }
         }
         run.start(valid);
+        // What the device holds, as the seam's host mirrors it into the block.
+        /** The block's word a state of `kind` is mirrored in, or -1 for one it does not hold. */
+        const slotOf = (/** @type {string} */ kind, /** @type {number[]} */ args)=>{
+            if (kind === 'SetRenderState')
+            {
+                return args[0] < SHADOW.RENDER_STATE_COUNT
+                    && ((valid[args[0] >>> 3] >>> (args[0] & 7)) & 1) === 1
+                    ? SHADOW.RENDER_STATES + 4 * args[0] : -1;
+            }
+            return args[0] < SHADOW.STAGE_COUNT && args[1] < SHADOW.STAGE_STATE_STRIDE
+                ? SHADOW.STAGE_STATES + 4 * ((args[0] << 5) + args[1]) : -1;
+        };
+        /**
+         * What a side's device holds of a state, by its kind.
+         *
+         * @param {ReturnType<typeof side>} one @param {string} kind @param {number[]} args
+         */
+        const heldBy = (one, kind, args)=>{
+            /** @type {{ value?: number }} */
+            const out = {};
+            const hr = kind === 'SetRenderState' ? one.device.inner.GetRenderState(args[0], out)
+                : one.device.inner.GetTextureStageState(args[0], args[1], out);
+            return hr === D3D_OK ? (out.value ?? 0) >>> 0 : null;
+        };
+        const remirror = (/** @type {string} */ kind, /** @type {number[]} */ args)=>{
+            const slot = slotOf(kind, args);
+            const value = slot < 0 ? null : heldBy(guest, kind, args);
+            if (value !== null)
+            {
+                run.mirror(slot, value);
+            }
+        };
+        for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
+        {
+            remirror('SetRenderState', [state]);
+        }
+        const remirrorStages = ()=>{
+            for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
+            {
+                for (let type = 0; type < SHADOW.STAGE_STATE_STRIDE; type++)
+                {
+                    remirror('SetTextureStageState', [stage, type]);
+                }
+            }
+        };
+        remirrorStages();
         /** The ring made on the guest's device as the seam's take makes it. */
         const settle = ()=>{
             const records = run.take();
@@ -334,11 +388,23 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
                 made = (device, one)=>device.setTexture(stage, which === 3 ? null
                     : one.textures[which]);
             }
+            // A state set to what the device holds already: the guest's routine
+            // drops it, as a device that is not pure does, and the device is made
+            // nothing of it.
+            const state = kind === 'SetRenderState' || kind === 'SetTextureStageState';
+            const unchanged = state && slotOf(kind, args) >= 0
+                && heldBy(host, kind, args) === args[args.length - 1] >>> 0;
+            const logged = host.log.length;
             const answer = made(host.device, host);
             const what = `round ${round} step ${step}: ${kind}(${args.join(', ')})`;
             if (run.call(routines[kind], args))
             {
                 recorded.ring++;
+                if (unchanged)
+                {
+                    recorded.same++;
+                    host.log.length = logged;
+                }
                 assert.equal(answer, D3D_OK, `${what} answered D3D_OK in the guest, the host`
                     + ` refuses it`);
             }
@@ -347,6 +413,16 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
                 recorded.host++;
                 settle();
                 assert.equal(made(guest.device, guest), answer, what);
+                if (state)
+                {
+                    // As the seam's host does: a render state the legacy device
+                    // answers for may have set stage states under it.
+                    remirror(kind, args);
+                    if (kind === 'SetRenderState')
+                    {
+                        remirrorStages();
+                    }
+                }
             }
         }
         settle();
@@ -354,5 +430,6 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
         assert.deepEqual(stateOf(guest), stateOf(host), `round ${round}: the states read back`);
     }
     // Both ways were taken, and often.
-    assert.ok(recorded.ring > 1000 && recorded.host > 300, JSON.stringify(recorded));
+    assert.ok(recorded.ring > 1000 && recorded.host > 300 && recorded.same > 50,
+        JSON.stringify(recorded));
 });

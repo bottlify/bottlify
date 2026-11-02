@@ -265,6 +265,8 @@ export function createDirect3D7Seam(
      * @type {Set<ReturnType<typeof createShadow>>}
      */
     const madeShadows = new Set();
+    /** The blocks of legacy devices (`shade`). @type {WeakSet<object>} */
+    const legacyShadows = new WeakSet();
     /** @param {any} device */
     const shadowOf = device=>(device ? shadows.get(device) : undefined);
     /**
@@ -441,7 +443,11 @@ export function createDirect3D7Seam(
      *     hr: number) => void>}
      */
     const MIRRORED = {
-        SetRenderState: (shadow, [state])=>shadow.remirror({ renderStates: [state >>> 0] }),
+        // A legacy device's own render states (TEXTUREMAPBLEND, TEXTUREHANDLE...)
+        // set stage states of the device under it: those are the device's again
+        // too, or a routine would find a stage state set already and drop it.
+        SetRenderState: (shadow, [state])=>shadow.remirror({ renderStates: [state >>> 0],
+            ...(legacyShadows.has(shadow) ? { stageStates: true } : {}) }),
         SetTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
         MultiplyTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
         SetTextureStageState: (shadow, [stage, type])=>shadow.remirror({
@@ -547,6 +553,10 @@ export function createDirect3D7Seam(
         });
         shadows.set(device, shadow);
         madeShadows.add(shadow);
+        if (legacy)
+        {
+            legacyShadows.add(shadow);
+        }
         device.guestState = ()=>shadow.address();
         device.settleGuestRefs = ()=>shadow.sync();
         return shadow;
