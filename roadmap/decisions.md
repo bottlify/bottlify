@@ -5,8 +5,8 @@ standing rules that came out of measuring a real title rather than reading code.
 no obligation to match any particular reimplementation of Windows: what a program observes is the
 contract, and where no published expectation exists, or a different answer serves this engine
 better, that is a choice, defended here on its merits, revisited when something argues against
-it. A bug is not a decision; a bug goes in the code and gets fixed, and an open one is tracked in
-`roadmap/00-TODO-list.md`.
+it. A bug is not a decision; a bug goes in the code and gets fixed, and an open one is tracked on
+the project's task board.
 
 Each entry is dated to the commit that made the call (or, where a later commit corrected it, both).
 Nothing here is rewritten to say something different than what was actually decided; a decision

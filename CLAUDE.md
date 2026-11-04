@@ -37,10 +37,11 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 - `roadmap/README.md` — the index of the plans: `x64.md`, `direct3d.md` (Direct3D 11 and 12),
   `opengl.md` (OpenGL 2.0 to 4.x), and `decisions.md` (behaviour chosen rather than derived from a
   specification).
-- `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these): the TODO
-  index, per-area open work and **pitfalls** (read the area's pitfalls before touching the kernel,
-  bridge, graphics or audio layers), plans and reports. Everything else in `roadmap/` ships with
-  the repo and is written for a reader who is not you.
+- `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):
+  per-area notes and **pitfalls** (read the area's pitfalls before touching the kernel,
+  bridge, graphics or audio layers), plans and reports. Open work is tracked on the owner's task
+  board, outside the repository. Everything else in `roadmap/` ships with the repo and is written
+  for a reader who is not you.
 
 ## Code
 
