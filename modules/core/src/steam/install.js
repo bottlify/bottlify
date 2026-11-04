@@ -35,16 +35,17 @@ import { installSteamRedistributables } from './redist.js';
  * A depot's manifest from the first content server that gives it.
  *
  * @param {ContentServer[]} servers @param {DepotOpening} opening
+ * @param {import('./depot.js').Get} [get]  How a server is asked.
  * @returns {Promise<Manifest>}
  */
-export async function depotManifest(servers, opening){
+export async function depotManifest(servers, opening, get){
     /** @type {unknown} */
     let last = new Error('steam: no content server to ask');
     for (const server of servers.slice(0, 4))
     {
         try
         {
-            return await manifest(server, opening);
+            return await manifest(server, opening, get);
         }
         catch (e){
             last = e;
@@ -297,6 +298,7 @@ export function wrongChunks(files, at, handle, which = ()=>true){
  * @param {InstallProgress | null} [options.resume]
  * @param {(progress: InstallProgress) => unknown} [options.onSave]
  * @param {Parameters<typeof downloadFiles>[0]['decode']} [options.decode]
+ * @param {import('./depot.js').Get} [options.fetch]  How a server is asked for a manifest.
  * @param {number} [options.jobs]
  * @param {AbortSignal} [options.signal]
  * @param {(progress: { stage: 'downloading' | 'finishing', done: number, total: number })
@@ -305,13 +307,13 @@ export function wrongChunks(files, at, handle, which = ()=>true){
  *     entry: Uint8Array | null, said: string[] }>}
  */
 export async function installBundle({ handle, depots, servers, installscript, executable,
-    resume = null, onSave, decode, jobs, signal, onProgress })
+    resume = null, onSave, decode, fetch: get, jobs, signal, onProgress })
 {
     const listed = [];
     for (const opening of depots)
     {
         signal?.throwIfAborted();
-        listed.push({ opening, manifest: await depotManifest(servers, opening) });
+        listed.push({ opening, manifest: await depotManifest(servers, opening, get) });
     }
     const { files, directories } = installedFiles(
         listed.map(({ opening, manifest: one })=>({ manifest: one, key: opening.key })));

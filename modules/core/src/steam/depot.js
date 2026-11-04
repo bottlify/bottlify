@@ -201,12 +201,22 @@ export async function decompressChunk(data, size){
 }
 
 /**
+ * How a content server is asked: the platform's fetch, or one a page hands
+ * in where the content servers are reached through something else (GameHub's
+ * extension, which Safari lets read them where the page may not).
+ *
+ * @typedef {(url: string) => Promise<{ ok: boolean, status: number,
+ *     arrayBuffer: () => Promise<ArrayBuffer> }>} Get
+ */
+
+/**
  * @param {ContentServer} server @param {string} path
  * @param {string} [shown]  The path as a failure names it: a manifest's without its code.
+ * @param {Get} [get]
  * @returns {Promise<Uint8Array>}
  */
-async function fetchFrom(server, path, shown = path){
-    const answer = await fetch(`https://${server.vhost}${path}`);
+async function fetchFrom(server, path, shown = path, get = url=>fetch(url)){
+    const answer = await get(`https://${server.vhost}${path}`);
     if (!answer.ok)
     {
         throw new Error(`steam: ${server.vhost}${shown} answered ${answer.status}`);
@@ -219,11 +229,12 @@ async function fetchFrom(server, path, shown = path){
  *
  * @param {ContentServer} server
  * @param {{ depot: number, gid: bigint, code: bigint, key: Uint8Array }} what
+ * @param {Get} [get]  How the server is asked.
  * @returns {Promise<Manifest>}
  */
-export async function manifest(server, { depot, gid, code, key }){
+export async function manifest(server, { depot, gid, code, key }, get){
     const bytes = await unzipOne(await fetchFrom(server, `/depot/${depot}/manifest/${gid}/5/${code}`,
-        `/depot/${depot}/manifest/${gid}`));
+        `/depot/${depot}/manifest/${gid}`, get));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /** @type {Record<string, any> | null} */
     let payload = null;
@@ -299,11 +310,12 @@ const hex = bytes=>[...bytes].map(byte=>byte.toString(16).padStart(2, '0')).join
  * One chunk's bytes, checked against the manifest's Adler-32 and length.
  *
  * @param {ContentServer} server @param {number} depot @param {ManifestChunk} chunk
- * @param {Uint8Array} key
+ * @param {Uint8Array} key @param {Get} [get]  How the server is asked.
  * @returns {Promise<Uint8Array>}
  */
-export async function downloadChunk(server, depot, chunk, key){
-    const encrypted = await fetchFrom(server, `/depot/${depot}/chunk/${hex(chunk.sha)}`);
+export async function downloadChunk(server, depot, chunk, key, get){
+    const path = `/depot/${depot}/chunk/${hex(chunk.sha)}`;
+    const encrypted = await fetchFrom(server, path, path, get);
     const bytes = await decompressChunk(await symmetricDecrypt(encrypted, key), chunk.size);
     if (bytes.length !== chunk.size || adler32(bytes) !== chunk.crc)
     {
