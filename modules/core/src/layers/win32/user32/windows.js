@@ -1117,6 +1117,8 @@ export function createWindowFunctions(host){
         return true;
     };
     let toldCaption = false;
+    /** UpdateLayeredWindow's alpha and key, drawn opaque: said once. */
+    let layeredBlendSaid = false;
 
     /**
      * SendMessage, to a live window: its procedure runs before this returns,
@@ -8255,6 +8257,67 @@ export function createWindowFunctions(host){
                     host.writeMemory(flags >>> 0, bytes);
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL UpdateLayeredWindow(HWND hWnd, HDC hdcDst, POINT *pptDst, SIZE *psize,
+         *     HDC hdcSrc, POINT *pptSrc, COLORREF crKey, BLENDFUNCTION *pblend,
+         *     DWORD dwFlags)
+         *
+         * A layered window placed at the point and the size given (each left
+         * as it is when null), and its picture taken from the source context
+         * at pptSrc (its corner when null). A window that is not layered is
+         * refused with ERROR_INVALID_PARAMETER. The window's own surface has
+         * no transparency to show: ULW_ALPHA's per-pixel and constant alpha
+         * and ULW_COLORKEY's key are drawn opaque, said once.
+         */
+        UpdateLayeredWindow: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([hwnd, , at, size, source, from, , , flags])=>{
+                const [ULW_COLORKEY, ULW_ALPHA] = [0x1, 0x2];
+                const [SWP_NOSIZE, SWP_NOMOVE] = [0x1, 0x2];
+                const [SWP_NOZORDER, SWP_NOACTIVATE] = [0x4, 0x10];
+                const record = live(hwnd);
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((flags & (ULW_ALPHA | ULW_COLORKEY)) !== 0 && !layeredBlendSaid)
+                {
+                    layeredBlendSaid = true;
+                    host.divergence?.('UpdateLayeredWindow', 'a layered window\'s alpha and colour'
+                        + ' key are drawn opaque: its surface shows nothing behind it');
+                }
+                const [x, y] = (at >>> 0) === 0 ? [0, 0]
+                    : [readU32(host, at) | 0, readU32(host, at + 4) | 0];
+                const [width, height] = (size >>> 0) === 0 ? [0, 0]
+                    : [readU32(host, size) | 0, readU32(host, size + 4) | 0];
+                const keep = ((at >>> 0) === 0 ? SWP_NOMOVE : 0)
+                    | ((size >>> 0) === 0 ? SWP_NOSIZE : 0);
+                const placed = keep === (SWP_NOMOVE | SWP_NOSIZE) ? 1 : /** @type {any} */ (table)
+                    .SetWindowPos.handler([hwnd, 0, x, y, width, height,
+                        keep | SWP_NOZORDER | SWP_NOACTIVATE]);
+                return andThen(placed, ()=>{
+                    if ((source >>> 0) === 0)
+                    {
+                        return 1;
+                    }
+                    const [sx, sy] = (from >>> 0) === 0 ? [0, 0]
+                        : [readU32(host, from) | 0, readU32(host, from + 4) | 0];
+                    const box = geometry.windowRect(record);
+                    const t = /** @type {any} */ (table);
+                    const hdc = t.GetWindowDC.handler([hwnd]);
+                    const drawn = hdc !== 0 && host.draw?.copy?.(hdc, 0, 0, box.right - box.left,
+                        box.bottom - box.top, source, sx, sy) === true;
+                    if (hdc !== 0)
+                    {
+                        t.ReleaseDC.handler([hwnd, hdc]);
+                    }
+                    return drawn ? 1 : 0;
+                });
             },
         },
 

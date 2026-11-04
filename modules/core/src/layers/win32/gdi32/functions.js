@@ -5598,6 +5598,19 @@ export function createGdiFunctions(host){
                     === true,
 
             /**
+             * A rectangle of one context copied into another, as BitBlt
+             * copies it with SRCCOPY: a layered window's picture from the
+             * context UpdateLayeredWindow is handed.
+             *
+             * @param {number} hdc @param {number} x @param {number} y
+             * @param {number} width @param {number} height
+             * @param {number} source @param {number} sourceX @param {number} sourceY
+             */
+            copy: (hdc, x, y, width, height, source, sourceX, sourceY)=>table.BitBlt.handler(
+                [hdc >>> 0, x | 0, y | 0, width | 0, height | 0, source >>> 0, sourceX | 0,
+                    sourceY | 0, SRCCOPY]) !== 0,
+
+            /**
              * A bitmap the program owns, drawn at a point -- stretched to a
              * size when one is given -- or nothing when it has no pixels this
              * layer can reach.

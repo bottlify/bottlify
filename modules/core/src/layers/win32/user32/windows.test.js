@@ -1123,6 +1123,31 @@ test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads b
         fns.GetLayeredWindowAttributes.argBytes], [16, 16]);
 });
 
+test('UpdateLayeredWindow places a layered window and refuses one that is not', ()=>{
+    const { fns, memory, hwnd, errors, divergences } = withWindow();
+    const WS_EX_LAYERED = 0x00080000;
+    const [AT, SIZE, ULW_ALPHA] = [0x5100, 0x5108, 0x2];
+    memory.putU32s(AT, [40, 50]);
+    memory.putU32s(SIZE, [120, 90]);
+    assert.equal(fns.UpdateLayeredWindow.handler([hwnd, 0, AT, SIZE, 0, 0, 0, 0, ULW_ALPHA]), 0,
+        'a window made without WS_EX_LAYERED');
+    assert.equal(errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+
+    memory.putString(TITLE, 'Splash');
+    const layered = fns.CreateWindowExA.handler([WS_EX_LAYERED, CLASS_NAME, TITLE, 0, 0, 0, 10, 10,
+        0, 0, HINSTANCE, 0]);
+    assert.equal(fns.UpdateLayeredWindow.handler([layered, 0, AT, SIZE, 0, 0, 0, 0, ULW_ALPHA]),
+        1);
+    fns.GetWindowRect.handler([layered, RECT_BUFFER]);
+    assert.deepEqual([RECT.left, RECT.top, RECT.right, RECT.bottom]
+        .map(field=>memory.u32(RECT_BUFFER + field)), [40, 50, 160, 140], 'moved and sized');
+    assert.equal(divergences.filter(one=>one.startsWith('UpdateLayeredWindow')).length, 1,
+        'its alpha, drawn opaque, said');
+    assert.equal(fns.UpdateLayeredWindow.handler([layered, 0, 0, 0, 0, 0, 0, 0, 0]), 1,
+        'nothing given: left as it is');
+    assert.equal(fns.UpdateLayeredWindow.argBytes, 36);
+});
+
 test('the extra bytes a class asked for are the window\'s own storage', ()=>{
     const { fns, memory } = withWindow({ windowExtra: 8 });
     const first = createWindow(fns, memory);
