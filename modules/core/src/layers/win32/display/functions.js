@@ -38,6 +38,10 @@ const WTS_CONNECT_STATE = 8;
 const WTS_CLIENT_PROTOCOL_TYPE = 16;
 const WTS_ACTIVE = 0;
 const WTS_CURRENT_SESSION = 0xffffffff;
+const WTS_DISCONNECTED = 4;
+/** WTS_SESSION_INFO: SessionId, pWinStationName, State. */
+const WTS_SESSION_INFO_SIZE = 12;
+const ERROR_NO_TOKEN = 1008;
 const ERROR_INVALID_PARAMETER = 87;
 
 /**
@@ -228,58 +232,156 @@ export function createDwmapiFunctions(host){
     };
 }
 
-/** @param {DisplayHost} host */
+/**
+ * The sessions of WTSAPI32: the one user's console, session 1, active, and
+ * session 0 beside it, the services', disconnected, as Windows from Vista has
+ * them.
+ *
+ * @param {DisplayHost & { userToken?: (out: number) => boolean }} host
+ *     `userToken` writes the one user's token into `out` (OpenProcessToken's).
+ */
 export function createSessionInformationFunctions(host){
+    /** @param {string} text @param {boolean} wide */
+    const textBytes = (text, wide)=>{
+        const data = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
+        [...text].forEach((ch, i)=>{
+            if (wide)
+            {
+                data[i * 2] = ch.charCodeAt(0) & 0xff;
+                data[i * 2 + 1] = ch.charCodeAt(0) >>> 8;
+            }
+            else
+            {
+                data[i] = ch.charCodeAt(0) & 0xff;
+            }
+        });
+        return data;
+    };
+
+    /**
+     * WTSQuerySessionInformation in either width.
+     *
+     * @param {boolean} wide
+     */
+    const querySession = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([, session, kind, out, returned])=>{
+            if ((out >>> 0) === 0 || (returned >>> 0) === 0
+                || ((session >>> 0) !== WTS_CURRENT_SESSION && (session >>> 0) !== 1))
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            /** @type {Uint8Array} */
+            let bytes;
+            switch (kind >>> 0)
+            {
+                case WTS_SESSION_ID: bytes = dword(1); break;
+                case WTS_CONNECT_STATE: bytes = dword(WTS_ACTIVE); break;
+                case WTS_CLIENT_PROTOCOL_TYPE: bytes = Uint8Array.of(0, 0); break;
+                case WTS_USER_NAME: bytes = textBytes(host.userName, wide); break;
+                case WTS_WINSTATION_NAME: bytes = textBytes('Console', wide); break;
+                case WTS_DOMAIN_NAME: bytes = textBytes(host.computerName, wide); break;
+                default:
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+            }
+            const block = host.allocate(bytes.length);
+            if (block === 0)
+            {
+                return 0;
+            }
+            host.writeMemory(block, bytes);
+            host.writeMemory(out >>> 0, dword(block));
+            host.writeMemory(returned >>> 0, dword(bytes.length));
+            return 1;
+        },
+    });
+
+    /**
+     * WTSEnumerateSessions in either width: WTS_SESSION_INFO for the services'
+     * session and the console's, their names after the array, all one block
+     * WTSFreeMemory gives back.
+     *
+     * @param {boolean} wide
+     */
+    const enumerateSessions = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([, reserved, version, out, count])=>{
+            if ((reserved >>> 0) !== 0 || (version >>> 0) !== 1 || (out >>> 0) === 0
+                || (count >>> 0) === 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const sessions = [{ id: 0, name: 'Services', state: WTS_DISCONNECTED },
+                { id: 1, name: 'Console', state: WTS_ACTIVE }];
+            const names = sessions.map(one=>textBytes(one.name, wide));
+            const size = sessions.length * WTS_SESSION_INFO_SIZE
+                + names.reduce((sum, one)=>sum + one.length, 0);
+            const block = host.allocate(size);
+            if (block === 0)
+            {
+                return 0;
+            }
+            let text = block + sessions.length * WTS_SESSION_INFO_SIZE;
+            sessions.forEach((one, at)=>{
+                const entry = block + at * WTS_SESSION_INFO_SIZE;
+                host.writeMemory(entry, dword(one.id));
+                host.writeMemory(entry + 4, dword(text));
+                host.writeMemory(entry + 8, dword(one.state));
+                host.writeMemory(text, names[at]);
+                text += names[at].length;
+            });
+            host.writeMemory(out >>> 0, dword(block));
+            host.writeMemory(count >>> 0, dword(sessions.length));
+            return 1;
+        },
+    });
+
     return {
         /**
-         * BOOL WTSQuerySessionInformationW(HANDLE hServer, DWORD SessionId,
-         *     WTS_INFO_CLASS WTSInfoClass, LPWSTR *ppBuffer, DWORD *pBytesReturned)
+         * BOOL WTSQuerySessionInformation(HANDLE hServer, DWORD SessionId,
+         *     WTS_INFO_CLASS WTSInfoClass, LPTSTR *ppBuffer, DWORD *pBytesReturned)
          *
          * The console session, 1, active, the machine's one user's; the
          * buffer is WTSFreeMemory's to give back.
          */
-        WTSQuerySessionInformationW: {
-            argBytes: 20,
+        WTSQuerySessionInformationA: querySession(false),
+        WTSQuerySessionInformationW: querySession(true),
+
+        /**
+         * BOOL WTSEnumerateSessions(HANDLE hServer, DWORD Reserved, DWORD Version,
+         *     PWTS_SESSION_INFO *ppSessionInfo, DWORD *pCount)
+         */
+        WTSEnumerateSessionsA: enumerateSessions(false),
+        WTSEnumerateSessionsW: enumerateSessions(true),
+
+        /**
+         * BOOL WTSQueryUserToken(ULONG SessionId, PHANDLE phToken)
+         *
+         * The token of the user signed in to the session: the console's, which
+         * is the machine's one user, whose token every process has. A service
+         * asks it to start a program as that user. Another session has no user:
+         * ERROR_NO_TOKEN.
+         */
+        WTSQueryUserToken: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, session, kind, out, returned])=>{
-                if ((out >>> 0) === 0 || (returned >>> 0) === 0
-                    || ((session >>> 0) !== WTS_CURRENT_SESSION && (session >>> 0) !== 1))
+            handler: ([session, out])=>{
+                if ((out >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                /** @type {Uint8Array} */
-                let bytes;
-                /** @param {string} text */
-                const wide = text=>{
-                    const data = new Uint8Array((text.length + 1) * 2);
-                    [...text].forEach((ch, i)=>{
-                        data[i * 2] = ch.charCodeAt(0) & 0xff;
-                        data[i * 2 + 1] = ch.charCodeAt(0) >>> 8;
-                    });
-                    return data;
-                };
-                switch (kind >>> 0)
+                if ((session >>> 0) !== 1 || !host.userToken)
                 {
-                    case WTS_SESSION_ID: bytes = dword(1); break;
-                    case WTS_CONNECT_STATE: bytes = dword(WTS_ACTIVE); break;
-                    case WTS_CLIENT_PROTOCOL_TYPE: bytes = Uint8Array.of(0, 0); break;
-                    case WTS_USER_NAME: bytes = wide(host.userName); break;
-                    case WTS_WINSTATION_NAME: bytes = wide('Console'); break;
-                    case WTS_DOMAIN_NAME: bytes = wide(host.computerName); break;
-                    default:
-                        host.setLastError(ERROR_INVALID_PARAMETER);
-                        return 0;
-                }
-                const block = host.allocate(bytes.length);
-                if (block === 0)
-                {
+                    host.setLastError(ERROR_NO_TOKEN);
                     return 0;
                 }
-                host.writeMemory(block, bytes);
-                host.writeMemory(out >>> 0, dword(block));
-                host.writeMemory(returned >>> 0, dword(bytes.length));
-                return 1;
+                return host.userToken(out >>> 0) ? 1 : 0;
             },
         },
 

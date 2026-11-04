@@ -305,6 +305,10 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_NOACCESS = 998;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_NOT_SUPPORTED = 0xc00000bb;
+/** The one display adapter's kernel-mode handle and LUID (D3DKMTOpenAdapterFromDeviceName). */
+const KMT_ADAPTER = 0x40000001;
+const KMT_ADAPTER_LUID = 0x00001001;
 
 /** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
 /** ExtCreatePen's style word: the line style, and whether the pen is geometric. */
@@ -2004,6 +2008,8 @@ export function createGdiFunctions(host){
 
     /** @type {number} */
     let stockBitmap = 0;
+    /** D3DKMTQueryAdapterInfo's refusal, said once. */
+    let kmtInfoSaid = false;
     /**
      * The 1-by-1 monochrome bitmap: what CreateBitmap and CreateCompatibleBitmap
      * answer for a zero width or height, and what every memory DC has selected
@@ -2506,6 +2512,59 @@ export function createGdiFunctions(host){
                 writeU32s(host, desc + 28, [dc.hdc, bitmap]);
                 return 0;
             },
+        },
+
+        /**
+         * NTSTATUS D3DKMTOpenAdapterFromDeviceName(D3DKMT_OPENADAPTERFROMDEVICENAME *desc)
+         *
+         * The one display adapter, by any device name: pDeviceName in,
+         * hAdapter and AdapterLuid out. What a kernel-mode adapter answers
+         * of itself is not kept here (D3DKMTQueryAdapterInfo).
+         */
+        D3DKMTOpenAdapterFromDeviceName: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if ((desc >>> 0) === 0 || readU32s(host, desc, 1)[0] === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                writeU32s(host, desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0]);
+                return 0;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTQueryAdapterInfo(const D3DKMT_QUERYADAPTERINFO *desc)
+         *
+         * What the display driver's kernel half says of the adapter, which no
+         * driver here has: STATUS_NOT_SUPPORTED, said once. A program asking
+         * is told what a driver that keeps none of it tells.
+         */
+        D3DKMTQueryAdapterInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if ((desc >>> 0) === 0 || readU32s(host, desc, 1)[0] !== KMT_ADAPTER)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if (!kmtInfoSaid)
+                {
+                    kmtInfoSaid = true;
+                    host.divergence?.('D3DKMTQueryAdapterInfo', 'the adapter\'s kernel-mode'
+                        + ' information is not kept here: STATUS_NOT_SUPPORTED');
+                }
+                return STATUS_NOT_SUPPORTED;
+            },
+        },
+
+        /** NTSTATUS D3DKMTCloseAdapter(const D3DKMT_CLOSEADAPTER *desc) */
+        D3DKMTCloseAdapter: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>((desc >>> 0) !== 0 && readU32s(host, desc, 1)[0] === KMT_ADAPTER
+                ? 0 : STATUS_INVALID_PARAMETER),
         },
 
         /** NTSTATUS D3DKMTDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *desc) */

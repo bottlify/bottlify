@@ -2411,6 +2411,22 @@ test('GetObjectType names each kind of GDI object, a context by whether it is in
     assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
 });
 
+test('D3DKMT opens the one adapter by name, closes it, and keeps no kernel information', ()=>{
+    const { fns, memory } = setup();
+    const view = new DataView(memory.bytes.buffer);
+    const DESC = 0x2000;
+    assert.equal(fns.D3DKMTOpenAdapterFromDeviceName.handler([DESC]), 0xc000000d, 'no name');
+    view.setUint32(DESC, 0x2100, true);
+    assert.equal(fns.D3DKMTOpenAdapterFromDeviceName.handler([DESC]), 0);
+    const adapter = view.getUint32(DESC + 4, true);
+    assert.notEqual(adapter, 0);
+    view.setUint32(0x2200, adapter, true);
+    assert.equal(fns.D3DKMTQueryAdapterInfo.handler([0x2200]), 0xc00000bb, 'STATUS_NOT_SUPPORTED');
+    assert.equal(fns.D3DKMTCloseAdapter.handler([0x2200]), 0);
+    view.setUint32(0x2200, 7, true);
+    assert.equal(fns.D3DKMTCloseAdapter.handler([0x2200]), 0xc000000d, 'not an adapter');
+});
+
 test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels', ()=>{
     const context = setup();
     const { fns, memory } = context;

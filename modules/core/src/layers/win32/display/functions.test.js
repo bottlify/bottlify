@@ -76,6 +76,32 @@ test('the console session, active, the machine\'s user\'s', ()=>{
     assert.equal(fns.WTSQuerySessionInformationW.handler([0, 7, 8, 0x100, 0x104]), 0);
 });
 
+test('the sessions, the services\' and the console\'s, and the user\'s token', ()=>{
+    const { memory, view, host, errors } = setup();
+    /** @type {number[]} */
+    const asked = [];
+    const fns = createSessionInformationFunctions({ ...host, userToken: out=>{
+        asked.push(out);
+        view.setUint32(out, 0x44, true);
+        return true;
+    } });
+    assert.equal(fns.WTSEnumerateSessionsA.handler([0, 0, 1, 0x100, 0x104]), 1);
+    const block = view.getUint32(0x100, true);
+    assert.equal(view.getUint32(0x104, true), 2);
+    /** @param {number} at */
+    const ansi = at=>String.fromCharCode(...memory.subarray(at, memory.indexOf(0, at)));
+    assert.deepEqual([0, 1].map(i=>[view.getUint32(block + i * 12, true),
+        ansi(view.getUint32(block + i * 12 + 4, true)), view.getUint32(block + i * 12 + 8, true)]),
+    [[0, 'Services', 4], [1, 'Console', 0]], 'disconnected, and active');
+    assert.equal(fns.WTSEnumerateSessionsA.handler([0, 0, 2, 0x100, 0x104]), 0, 'version 1 alone');
+    assert.equal(fns.WTSQuerySessionInformationA.handler([0, 1, 5, 0x100, 0x104]), 1);
+    assert.equal(ansi(view.getUint32(0x100, true)), 'User');
+    assert.equal(fns.WTSQueryUserToken.handler([1, 0x200]), 1);
+    assert.deepEqual([asked, view.getUint32(0x200, true)], [[0x200], 0x44]);
+    assert.equal(fns.WTSQueryUserToken.handler([0, 0x200]), 0, 'session 0 has no user');
+    assert.equal(errors.at(-1), 1008, 'ERROR_NO_TOKEN');
+});
+
 test('DirectWrite is refused as a system without it, its factory cleared', async()=>{
     const { createDwriteFunctions } = await import('./functions.js');
     const memory = new Uint8Array(0x100);
