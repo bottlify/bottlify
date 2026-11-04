@@ -41,7 +41,7 @@ const GONE = Object.freeze({ hr: RPC_E_DISCONNECTED, disconnected: true });
  * @param {Object} side
  * @param {(method: string, args: any[]) => Promise<any>} side.call
  *     a call to the process, which does not block
- * @param {((request: { command: string, clsid: string }) =>
+ * @param {((request: { command: string, clsid: string, service?: string }) =>
  *     { exited: Promise<unknown> } | null) | null} [side.launch]
  *     starts a server the process asked for in a worker of its own, or says
  *     there is no room
@@ -119,7 +119,7 @@ export function comHandlers(table, side){
              * Starts a server, and names it by a number to wait on: 0 when the
              * run has no room for one.
              *
-             * @param {{ command: string, clsid: string }} request
+             * @param {{ command: string, clsid: string, service?: string }} request
              */
             launch(request){
                 const started = side.launch?.(request) ?? null;
@@ -180,7 +180,8 @@ export function remoteClassTable(link, hooks = {}){
     return {
         hooks: {
             /**
-             * @param {{ command: string, clsid: string }} request @param {unknown} process
+             * @param {{ command: string, clsid: string, service?: string }} request
+             * @param {unknown} process
              */
             launch(request, process){
                 const number = link.ask('launch', [request]);

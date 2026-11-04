@@ -3916,6 +3916,7 @@ function journalEvents(events, into){
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
+ *     service?: string,
  * }} options
  * @returns {Promise<any>} an AppController
  */
@@ -5299,6 +5300,8 @@ async function buildApp(options){
                 },
             },
             commandLine: options.commandLine,
+            // The service the manager started this process for (a class's LocalService).
+            ...options.service ? { service: options.service } : {},
             // Every child a program asks for, while the stack that asked is
             // still standing. Kept by the caller above this, because honouring
             // one of these tears the machine down and takes the logs with it.
@@ -10307,7 +10310,7 @@ export async function createApp(options){
      * drives the server while it stands, as it does a child run beside its
      * parent.
      *
-     * @param {any} parent @param {{ command: string, clsid: string }} request
+     * @param {any} parent @param {{ command: string, clsid: string, service?: string }} request
      * @returns {Promise<number>} its exit code
      */
     const startServer = async(parent, request)=>{
@@ -10322,7 +10325,10 @@ export async function createApp(options){
         const server = await build({
             executable: found.image,
             imagePath: found.path,
-            commandLine: `${request.command.trim()} -Embedding`,
+            // A service is started as the manager starts it, on its image's line alone.
+            commandLine: request.service ? request.command.trim()
+                : `${request.command.trim()} -Embedding`,
+            ...request.service ? { service: request.service } : {},
             ...newProcessIds(),
             audio: sound.options,
         });
@@ -10728,6 +10734,7 @@ export async function createApp(options){
                         executable: image,
                         imagePath: request.imagePath,
                         commandLine: request.commandLine,
+                        ...request.service ? { service: request.service } : {},
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
@@ -10875,7 +10882,7 @@ export async function createApp(options){
      * `-Embedding` as COM starts one; null when there is no room, and the
      * process starts it beside itself.
      *
-     * @param {{ command: string, clsid: string }} request
+     * @param {{ command: string, clsid: string, service?: string }} request
      * @returns {{ exited: Promise<number> } | null}
      */
     const serverAcross = request=>{
@@ -10897,8 +10904,10 @@ export async function createApp(options){
             return new Promise(resolve=>{
                 startAcross({ readImage: path=>current.readImage(path),
                     sound: ()=>lendSound(current) },
-                { imagePath: found.path, commandLine: `${request.command.trim()} -Embedding`,
-                    id: processId, threadId: mainThreadId }, null, ended=>{
+                { imagePath: found.path, commandLine: request.service ? request.command.trim()
+                    : `${request.command.trim()} -Embedding`,
+                ...request.service ? { service: request.service } : {},
+                id: processId, threadId: mainThreadId }, null, ended=>{
                     events.emit('process-server-exit', { image: found.path, code: ended.code });
                     resolve(ended.code);
                 });

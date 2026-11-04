@@ -31,7 +31,7 @@ import {
     GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, canonicalGuid, formatGuid, parseGuid, readGuid,
     writeGuid,
 } from './guid.js';
-import { HKEY_CLASSES_ROOT, REG_EXPAND_SZ } from '../advapi32/registry.js';
+import { HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
@@ -1019,12 +1019,38 @@ export function createOleFunctions(host){
     };
 
     /**
-     * The command line that starts the class's local server, or null.
+     * What starts the class's local server, or null: its LocalServer32 (or
+     * LocalServer) command line, or else the service its AppID names as its
+     * LocalService, started by the manager on the service's own image path.
      *
      * @param {string} clsid
+     * @returns {string | { command: string, service: string } | null}
      */
     const localServer = clsid=>classKeyValue(clsid, 'LocalServer32')
-        ?? classKeyValue(clsid, 'LocalServer');
+        ?? classKeyValue(clsid, 'LocalServer') ?? localService(clsid);
+
+    /** A registry value as text, its terminator and what follows it left out. @param {any} value */
+    const textOfValue = value=>(value
+        ? String.fromCharCode(...value.data).replace(/\0[\s\S]*$/, '') : '');
+
+    /**
+     * The service a class's AppID names as its LocalService, and its image path.
+     *
+     * @param {string} clsid
+     * @returns {{ command: string, service: string } | null}
+     */
+    const localService = clsid=>{
+        const classes = host.hive?.root(HKEY_CLASSES_ROOT);
+        const key = classes ? host.hive?.open(classes, `CLSID\\${clsid}`) : null;
+        const appId = textOfValue(key ? host.hive?.getValue(key, 'AppID') : null);
+        const app = appId && classes ? host.hive?.open(classes, `AppID\\${appId}`) : null;
+        const service = textOfValue(app ? host.hive?.getValue(app, 'LocalService') : null);
+        const machine = host.hive?.root(HKEY_LOCAL_MACHINE);
+        const entry = service && machine ? host.hive?.open(machine,
+            `SYSTEM\\CurrentControlSet\\Services\\${service}`) : null;
+        const command = textOfValue(entry ? host.hive?.getValue(entry, 'ImagePath') : null);
+        return command ? { command, service } : null;
+    };
 
     /** The classes already said to be made in process rather than in a surrogate. */
     const toldSurrogate = new Set();

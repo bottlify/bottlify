@@ -139,9 +139,10 @@ const MSHCTX_LOCAL = 0;
 
 /**
  * @typedef {Object} ClassTableHooks
- * @property {(request: { command: string, clsid: string }, process: unknown)
- *     => { exited: Promise<unknown> } | null} [launch]
- *     Starts a server as a process beside the caller's, or says it cannot.
+ * @property {(request: { command: string, clsid: string, service?: string },
+ *     process: unknown) => { exited: Promise<unknown> } | null} [launch]
+ *     Starts a server as a process beside the caller's, or says it cannot: a
+ *     service (`service`, a class's LocalService) as the manager starts it.
  */
 
 /**
@@ -1904,7 +1905,8 @@ export function createRemoting(host){
          * or started with `command` and waited for.
          *
          * @param {string} clsid @param {string} iid @param {number} out
-         * @param {string | null} command  The server's command line, or null.
+         * @param {string | { command: string, service: string } | null} command  The
+         *        server's command line, or the service that serves it; null for none.
          * @param {'activate' | 'classobject'} kind
          *        An instance, or the class object itself.
          * @returns {Promise<number>}
@@ -1918,11 +1920,12 @@ export function createRemoting(host){
                 {
                     return REGDB_E_CLASSNOTREG;
                 }
-                const launched = host.table.hooks.launch?.({ command, clsid }, host.process)
-                    ?? null;
+                const request = typeof command === 'string' ? { command, clsid }
+                    : { ...command, clsid };
+                const launched = host.table.hooks.launch?.(request, host.process) ?? null;
                 if (!launched)
                 {
-                    report(`the server of ${clsid} (${command}) cannot be started here`);
+                    report(`the server of ${clsid} (${request.command}) cannot be started here`);
                     return CO_E_SERVER_EXEC_FAILURE;
                 }
                 if (!await host.table.whenRegistered(clsid, launched.exited))

@@ -18,10 +18,12 @@
  * and creating one writes exactly the values the real manager writes, so a
  * program that reads its own service back through the registry finds it.
  *
- * What is not here is a process to run a service in. Starting one fails the
- * way a service that never reported back fails, and controlling one fails
- * the way a stopped service does; both are results a program is written to
- * handle, and both are reported as a divergence.
+ * A process the manager starts for a service -- COM starting a class's
+ * LocalService -- connects its dispatcher and runs the service's ServiceMain.
+ * StartService itself starts no process yet: it fails the way a service that
+ * never reported back fails, and controlling one fails the way a stopped
+ * service does; both are results a program is written to handle, and both
+ * are reported as a divergence.
  */
 
 import {
@@ -55,6 +57,8 @@ const ERROR_SERVICE_EXISTS = 1073;
 const ERROR_SERVICE_NEVER_STARTED = 1077;
 const ERROR_DUPLICATE_SERVICE_NAME = 1078;
 const ERROR_SERVICE_NOT_IN_EXE = 1083;
+/** The one status handle a service of this process is given. */
+const STATUS_HANDLE = 0x5e770001;
 const ERROR_INVALID_SERVICE_LOCK = 1071;
 const RPC_S_SERVER_UNAVAILABLE = 1722;
 
@@ -83,6 +87,7 @@ const SERVICE_ERROR_CRITICAL = 0x03;
 const SERVICE_ACTIVE = 1;
 const SERVICE_STATE_ALL = 3;
 const SERVICE_STOPPED = 1;
+const SERVICE_START_PENDING = 2;
 /** QueryServiceConfig2's levels: the description, failure actions, preshutdown. */
 const SERVICE_CONFIG_DESCRIPTION = 1;
 const SERVICE_CONFIG_FAILURE_ACTIONS = 2;
@@ -182,6 +187,10 @@ const HANDLE_STRIDE = 4;
  *           Whether a service's image is on the volume, which a start looks
  *           for first. Absent, every image is taken as there.
  * @property {string} [computerName]  This machine's name, which a program may pass for it.
+ * @property {string | null} [service]  The service this process was started to run, by
+ *           the manager (COM starts a class's LocalService so): its dispatcher connects.
+ * @property {(entry: number, args: number[]) => unknown} [call]
+ *           The program's own code called, as a ServiceMain is.
  */
 
 /**
@@ -803,9 +812,87 @@ export function createServiceFunctions(host){
         const view = new DataView(bytes.buffer);
         view.setUint32(0, key ? numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
             : SERVICE_WIN32_OWN_PROCESS, true);
-        view.setUint32(4, SERVICE_STOPPED, true);
-        view.setUint32(12, ERROR_SERVICE_NEVER_STARTED, true);
+        const ours = running !== null && running.name.toLowerCase() === name.toLowerCase();
+        view.setUint32(4, ours ? running?.state ?? SERVICE_STOPPED : SERVICE_STOPPED, true);
+        view.setUint32(12, ours ? 0 : ERROR_SERVICE_NEVER_STARTED, true);
         return bytes;
+    };
+
+    /**
+     * The service this process was started to run, once its dispatcher has
+     * connected: its name, and the state it last reported.
+     *
+     * @type {{ name: string, state: number } | null}
+     */
+    let running = null;
+
+    /**
+     * StartServiceCtrlDispatcher in either width.
+     *
+     * @param {boolean} wide
+     */
+    const dispatcher = wide=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([table])=>{
+            const name = host.service ?? null;
+            if (name === null || !host.call || !host.readMemory || !host.allocate)
+            {
+                return fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT);
+            }
+            if ((table >>> 0) === 0 || running !== null)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            /** @type {{ name: string, main: number }[]} */
+            const entries = [];
+            for (let at = table >>> 0; entries.length < 64; at += 8)
+            {
+                const view = new DataView(Uint8Array.from(host.readMemory(at, 8)).buffer);
+                const [text, main] = [view.getUint32(0, true), view.getUint32(4, true)];
+                if (text === 0)
+                {
+                    break;
+                }
+                entries.push({ name: (wide ? wideAt(text, 256) : ansiAt(text, 256)) ?? '', main });
+            }
+            const key = serviceKey(name);
+            const own = (key ? numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
+                : SERVICE_WIN32_OWN_PROCESS) & SERVICE_WIN32_OWN_PROCESS;
+            const entry = entries.find(one=>one.name.toLowerCase() === name.toLowerCase())
+                ?? (own ? entries[0] : undefined);
+            if (!entry || entry.main === 0)
+            {
+                return fail(ERROR_SERVICE_NOT_IN_EXE);
+            }
+            running = { name, state: SERVICE_START_PENDING };
+            // argv: the service's name and nothing after it, as the manager
+            // hands a service started without arguments.
+            const text = wide ? wideBytes(name) : sz(name);
+            const argv = host.allocate(8 + text.length) >>> 0;
+            const words = new Uint8Array(8);
+            new DataView(words.buffer).setUint32(0, argv + 8, true);
+            host.writeMemory?.(argv, words);
+            host.writeMemory?.(argv + 8, text);
+            return Promise.resolve(host.call(entry.main, [1, argv])).then(()=>1);
+        },
+    });
+
+    /**
+     * A control handler's registration, in either width.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const register = (address, wide)=>{
+        const name = (wide ? wideAt(address, 256) : ansiAt(address, 256)) ?? '';
+        const key = running ? serviceKey(running.name) : null;
+        const own = key && (numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
+            & SERVICE_WIN32_OWN_PROCESS) !== 0;
+        if (!running || (name.toLowerCase() !== running.name.toLowerCase() && !own))
+        {
+            return fail(ERROR_SERVICE_NOT_IN_EXE);
+        }
+        return STATUS_HANDLE;
     };
 
     /**
@@ -1550,54 +1637,69 @@ export function createServiceFunctions(host){
         },
 
         // The other side of the manager: what a program calls to run as a
-        // service. None here is started by one, so these answer as they do to
-        // any program that was started from a shell -- which is what a game
-        // that carries a service mode finds when it tries it and falls back to
-        // running as an ordinary program.
+        // service. A process the manager started for a service (`host.service`,
+        // as COM starts a class's LocalService) connects and runs it; any
+        // other answers as a program started from a shell does -- which is
+        // what a game that carries a service mode finds when it tries it and
+        // falls back to running as an ordinary program.
         /**
          * BOOL StartServiceCtrlDispatcher(const SERVICE_TABLE_ENTRY *lpServiceStartTable)
          *
-         * Connects the process to the manager that started it. A process the
-         * manager did not start has nothing to connect to: FALSE, and
+         * In the process the manager started for a service: that service's
+         * ServiceMain, from the table's entry of its name (an own-process
+         * service's first entry, whatever its name), called with its name as
+         * its one argument, and TRUE once it returns. In any other process
+         * there is no manager to connect to: FALSE,
          * ERROR_FAILED_SERVICE_CONTROLLER_CONNECT.
+         *
+         * ponytail: ServiceMain runs on the dispatcher's thread and no control
+         * request is ever sent to its handler; a ServiceMain that returns
+         * before it stops ends the dispatcher. A thread of its own and the
+         * controls come when a program needs StopService or ControlService.
          */
-        StartServiceCtrlDispatcherA: {
-            argBytes: 4,
-            handler: ()=>fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT),
-        },
-        StartServiceCtrlDispatcherW: {
-            argBytes: 4,
-            handler: ()=>fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT),
-        },
+        StartServiceCtrlDispatcherA: dispatcher(false),
+        StartServiceCtrlDispatcherW: dispatcher(true),
         /**
          * SERVICE_STATUS_HANDLE RegisterServiceCtrlHandler(LPCTSTR lpServiceName,
          *   LPHANDLER_FUNCTION lpHandlerProc)
          * SERVICE_STATUS_HANDLE RegisterServiceCtrlHandlerEx(LPCTSTR, LPHANDLER_FUNCTION_EX,
          *   LPVOID lpContext)
          *
-         * Names a handler for a service of this process. The process runs none,
-         * so the name is not one of its services: NULL, ERROR_SERVICE_NOT_IN_EXE.
+         * Names a handler for a service of this process: the service it was
+         * started for, whose status handle is answered; any other name is not
+         * one of its services: NULL, ERROR_SERVICE_NOT_IN_EXE.
          */
-        RegisterServiceCtrlHandlerA: { argBytes: 8, handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE) },
-        RegisterServiceCtrlHandlerW: { argBytes: 8, handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE) },
+        RegisterServiceCtrlHandlerA: { argBytes: 8,
+            handler: (/** @type {number[]} */ [name])=>register(name, false) },
+        RegisterServiceCtrlHandlerW: { argBytes: 8,
+            handler: (/** @type {number[]} */ [name])=>register(name, true) },
         RegisterServiceCtrlHandlerExA: {
             argBytes: 12,
-            handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
+            handler: (/** @type {number[]} */ [name])=>register(name, false),
         },
         RegisterServiceCtrlHandlerExW: {
             argBytes: 12,
-            handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
+            handler: (/** @type {number[]} */ [name])=>register(name, true),
         },
         /**
          * BOOL SetServiceStatus(SERVICE_STATUS_HANDLE hServiceStatus,
          *                       LPSERVICE_STATUS lpServiceStatus)
          *
-         * Reports a state to the manager through the handle the registration
-         * gave. None was given, so whatever is passed is not one.
+         * Reports a state through the handle the registration gave, which is
+         * kept as the service's; any other handle is not one.
          */
         SetServiceStatus: {
             argBytes: 8,
-            handler: ()=>fail(ERROR_INVALID_HANDLE),
+            handler: (/** @type {number[]} */ [handle, status])=>{
+                if ((handle >>> 0) !== STATUS_HANDLE || running === null || (status >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                running.state = new DataView(Uint8Array.from(
+                    host.readMemory?.(status >>> 0, SERVICE_STATUS_SIZE) ?? []).buffer)
+                    .getUint32(4, true);
+                return 1;
+            },
         },
     };
 }

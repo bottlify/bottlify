@@ -290,6 +290,8 @@ const d3dx10Libraries = (d3dx9, host)=>{
 const AVRT_TASK_HANDLE = 0x41565254;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+/** Every right a token has, which a service asks of the user's token for its programs. */
+const TOKEN_ALL_ACCESS = 0x000f01ff;
 
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
@@ -3681,7 +3683,10 @@ export function createWin32Module(){
                 'NETAPI32.dll': createNetbiosFunctions({ readMemory, writeMemory }),
                 'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
                 'WTSAPI32.dll': { ...createSessionNotificationFunctions(),
-                    ...createSessionInformationFunctions(displayHost) },
+                    ...createSessionInformationFunctions({ ...displayHost,
+                        // The one user's token: the process's own, which every process has.
+                        userToken: out=>libraries['ADVAPI32.dll'].OpenProcessToken
+                            .handler([0xffffffff, TOKEN_ALL_ACCESS, out]) !== 0 }) },
                 // A monitor's DPI and the process's awareness, and the window
                 // manager's attributes: one 96-DPI display, composition on.
                 'SHCORE.dll': createShcoreFunctions(displayHost),
@@ -4118,6 +4123,10 @@ export function createWin32Module(){
                         system: (library, name, args)=>libraries[library]?.[name]?.handler(args),
                         fileExists: path=>volume.stat(path)?.exists === true,
                         computerName: COMPUTER_NAME,
+                        // The service the manager started this process for: COM's LocalService.
+                        service: config?.service ?? null,
+                        call: (entry, args)=>bridge.callGuest({ entry, args,
+                            thread: bridge.callerThread() }),
                     }),
                     ...createCryptoFunctions({
                         readMemory,
