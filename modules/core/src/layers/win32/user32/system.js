@@ -2338,6 +2338,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return next(0);
     };
 
+    /**
+     * LookupIconIdFromDirectory(Ex): the group directory read from guest
+     * memory, its header first for how many entries follow.
+     *
+     * @param {number} bits @param {number} icon @param {number} width  0 for the system's size
+     */
+    const lookupIconId = (bits, icon, width)=>{
+        if ((bits >>> 0) === 0)
+        {
+            return 0;
+        }
+        const header = host.readMemory(bits >>> 0, 6);
+        const count = header[4] | header[5] << 8;
+        const cursor = (icon >>> 0) === 0;
+        const SM_CXICON = 11;
+        const size = width > 0 ? width : metric(cursor ? SM_CXCURSOR : SM_CXICON);
+        return groupImageId(host.readMemory(bits >>> 0, 6 + count * 14).slice(), cursor, size)
+            ?? 0;
+    };
+
     /** @param {number} index */
     const metric = index=>{
         switch (index | 0){
@@ -5863,6 +5883,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
                 return 1;
             },
+        },
+
+        /**
+         * int LookupIconIdFromDirectory(PBYTE presbits, BOOL fIcon) and
+         * int LookupIconIdFromDirectoryEx(PBYTE presbits, BOOL fIcon,
+         *     int cxDesired, int cyDesired, UINT Flags)
+         *
+         * The id of the image an RT_GROUP_ICON or RT_GROUP_CURSOR directory
+         * offers at the size asked for (the system's icon or cursor size for
+         * zero), the deepest of those; its first image where none is that
+         * size, as LoadIcon chooses (`groupImageId`). Zero for no directory.
+         */
+        LookupIconIdFromDirectory: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([bits, icon])=>lookupIconId(bits, icon, 0),
+        },
+        LookupIconIdFromDirectoryEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([bits, icon, width])=>lookupIconId(bits, icon, width | 0),
         },
 
         /**

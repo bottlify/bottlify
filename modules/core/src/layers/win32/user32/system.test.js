@@ -3605,6 +3605,22 @@ test('AnimateWindow refuses another thread\'s window and leaves the last error c
     assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_BLEND]), 1, 'its own thread may');
 });
 
+test('LookupIconIdFromDirectory names the group\'s image at the system\'s icon size', ()=>{
+    // 3DMark Vantage's unpacker imports it and leaves, as code 0, when it is
+    // not there.
+    const { fns, memory } = setup();
+    const GROUP = 0x9000;
+    /** @param {number} side @param {number} depth @param {number} id */
+    const entry = (side, depth, id)=>[side, side, 0, 0, 1, 0, depth, 0, 0, 0, 0, 0, id, 0];
+    memory.writeMemory(GROUP, Uint8Array.from([0, 0, 1, 0, 2, 0,
+        ...entry(16, 32, 7), ...entry(32, 32, 9)]));
+    assert.equal(fns.LookupIconIdFromDirectory.argBytes, 8);
+    assert.equal(fns.LookupIconIdFromDirectory.handler([GROUP, 1]), 9, 'SM_CXICON, 32');
+    assert.equal(fns.LookupIconIdFromDirectoryEx.handler([GROUP, 1, 16, 16, 0]), 7);
+    assert.equal(fns.LookupIconIdFromDirectoryEx.argBytes, 20);
+    assert.equal(fns.LookupIconIdFromDirectory.handler([0, 1]), 0, 'no directory');
+});
+
 test('LockSetForegroundWindow takes a lock and an unlock, and nothing else', ()=>{
     const { fns, errors } = setup();
     assert.equal(fns.LockSetForegroundWindow.argBytes, 4);
