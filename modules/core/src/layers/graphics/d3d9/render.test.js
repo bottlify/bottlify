@@ -1701,6 +1701,30 @@ test('StretchRect scales one target over another on the GPU, filtered as asked',
         && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
 });
 
+test('StretchRect takes a render-target texture\'s level as its source, on the GPU', async()=>{
+    // D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES, which the caps claim: a
+    // texture drawn into is stretched as a target surface is.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ texture?: any }} */
+    const made = {};
+    assert.equal(device.CreateTexture(4, 4, 1, D3DUSAGE.RENDERTARGET, D3DFMT.A8R8G8B8,
+        D3DPOOL.DEFAULT, made), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const level = {};
+    assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    assert.equal(device.StretchRect(level.surface, null, back.surface, null, D3DTEXF.LINEAR),
+        D3D_OK);
+    await h.present();
+    const stretch = h.device.diagnostics().lastFrame
+        .find((/** @type {any} */ command)=>command.kind === 'stretch');
+    assert.ok(stretch, 'the stretch from the texture was drawn');
+    assert.deepEqual(h.gpu.errors, []);
+});
+
 test('a texture left bound while it is the target samples a copy of it taken before the draw,'
     + ' and the frame is drawn', async()=>{
     // Direct3D draws a stage bound to the texture being rendered into, and a

@@ -29,6 +29,7 @@ const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
 const D3DCAPS2_CANAUTOGENMIPMAP = 0x40000000;
 const D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD = 0x00000020;
 const D3DDEVCAPS2_STREAMOFFSET = 0x00000001;
+const D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES = 0x00000010;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
@@ -261,7 +262,9 @@ export function capabilityWords(caps, identity = {}){
         PixelShaderVersion: shaderVersion(D3DPS_VERSION_MARK, ps),
         PixelShader1xMaxValue: runsPixelShaders ? 1.0 : 0,
         // A stream reads from the offset SetStreamSource gives it.
-        DevCaps2: D3DDEVCAPS2_STREAMOFFSET,
+        // A render-target texture's level is a StretchRect source as a target surface is,
+        // drawn on the GPU; a program that finds no such stretch refuses to run at all.
+        DevCaps2: D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES,
         MaxNpatchTessellationLevel: 0,
         Reserved5: 0,
         MasterAdapterOrdinal: 0,
