@@ -1105,7 +1105,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // instruction through, so a slice always moves (the progress guarantee).
     let forcedSteps = 0;
     /** Forced steps by address, for the first `FORCED_KEPT` addresses met.
-     * @type {Map<number, { count: number, top: number, why: string }>} */
+     * @type {Map<number, { count: number, top: number, why: string, registers: string }>} */
     const forcedAt = new Map();
     // The counter word folded the way the layer folds it: exact as long as
     // reads come less than 2^32 instructions apart.
@@ -5415,13 +5415,17 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         },
         /** One turn the host forced an interpreted instruction through, for
          * the progress guarantee's diagnostics: where, at what x87 top, and why,
-         * kept for the busiest addresses (`forcedAt`).
-         * @param {number} [at] @param {number} [top] @param {string} [why] */
-        forcedStep(at, top, why){
+         * kept for the busiest addresses (`forcedAt`), with the registers the first one
+         * met there, which with the instruction say what it reached.
+         * @param {number} [at] @param {number} [top] @param {string} [why]
+         * @param {() => number[]} [registers] */
+        forcedStep(at, top, why, registers){
             forcedSteps++;
             if (at !== undefined && (forcedAt.size < FORCED_KEPT || forcedAt.has(at)))
             {
-                const one = forcedAt.get(at) ?? { count: 0, top: top ?? -1, why: why ?? '' };
+                const one = forcedAt.get(at) ?? { count: 0, top: top ?? -1, why: why ?? '',
+                    registers: registers?.().map(value=>(value >>> 0).toString(16)).join(' ')
+                        ?? '' };
                 one.count++;
                 forcedAt.set(at, one);
             }
@@ -5615,7 +5619,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // The addresses most forced, busiest first, as "0x401000 x5000 top 3 why".
                 forcedAt: [...forcedAt].sort((a, b)=>b[1].count - a[1].count).slice(0, 10)
                     .map(([at, one])=>`0x${at.toString(16)} x${one.count}`
-                        + ` top ${one.top} ${one.why}`),
+                        + ` top ${one.top} ${one.why}`
+                        + (one.registers ? ` [${one.registers}]` : '')),
                 worker: translatorReady() ? 'ready' : translatorLoading() ? 'loading' : 'none',
                 translators: translators.length,
                 translatorsReady: translators.filter(one=>one.ready).length,
