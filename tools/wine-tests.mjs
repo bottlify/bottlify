@@ -45,6 +45,9 @@
  *     --failures <n>      failed checks listed per test in the markdown (default 20)
  *     --out <dir>         where report.json and report.md go
  *     --baseline <json>   an earlier report to compare against, before -> after
+ *     --gate              with --baseline: exit 1 when a test got worse than the
+ *                         baseline says (`regressions`): its status, or a check
+ *                         failing that held there
  *     --cork-config <json>  the translator's settings, over the ones used here
  *     --browser           run each test in a headless browser on WebGPU, through
  *                         tools/cdp_test/game.mjs: what a test draws is drawn and
@@ -662,6 +665,7 @@ function parseArgs(argv){
         failures: Number(value('--failures', '20')),
         out: value('--out'),
         baseline: value('--baseline'),
+        gate: argv.includes('--gate'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
         specs,
     };
@@ -733,6 +737,58 @@ function compared(now, before){
     }
     const status = before.status === now.status ? now.status : `${before.status} -> ${now.status}`;
     return `${status}, ${before.failures} -> ${now.failures}`;
+}
+
+/** How a test ended, best first: a pass, failed checks, then a run that did not finish. */
+const STATUS_RANK = { pass: 0, fail: 1 };
+
+/**
+ * A failed check as it is told from another across runs and Wine builds: its
+ * file and message, the numbers in the message (addresses, counts, values that
+ * move run to run) taken out; the line moves with Wine's tree.
+ *
+ * @param {FailedCheck} check
+ */
+const checkKey = check=>`${check.file}: ${check.message.replace(/0x[0-9a-f]+|\d+/gi, '#')}`;
+
+/**
+ * What got worse since `baseline`, one line each: a test whose run ended
+ * worse (a pass that fails, a test that ran to its end and now does not), and
+ * a test with a failed check the baseline's run did not have. A test the
+ * baseline did not run is new, not worse; fewer failures are not reported.
+ *
+ * @param {{ tests: TestReport[] }} report @param {{ tests: TestReport[] }} baseline
+ * @returns {string[]}
+ */
+export function regressions(report, baseline){
+    /** @param {TestReport} t */
+    const key = t=>`${t.module}:${t.test}`;
+    /** @param {string} status */
+    const rank = status=>STATUS_RANK[/** @type {keyof STATUS_RANK} */ (status)] ?? 2;
+    const before = new Map(baseline.tests.map(t=>[key(t), t]));
+    /** @type {string[]} */
+    const worse = [];
+    for (const test of report.tests)
+    {
+        const was = before.get(key(test));
+        if (!was)
+        {
+            continue;
+        }
+        if (rank(test.status) > rank(was.status))
+        {
+            worse.push(`${key(test)}: ${was.status} -> ${test.status}`);
+        }
+        const held = new Set(was.failed.map(checkKey));
+        const fresh = test.failed.filter(check=>!held.has(checkKey(check)));
+        if (fresh.length > 0)
+        {
+            const [first] = fresh;
+            worse.push(`${key(test)}: ${fresh.length} failed check(s) the baseline did not have,`
+                + ` first ${first.file}:${first.line}: ${first.message}`);
+        }
+    }
+    return worse;
 }
 
 /**
@@ -1037,6 +1093,17 @@ async function main(){
     await writeFile(new URL('report.md', out),
         markdown(report, { failures: options.failures, baseline }));
     console.log(`\nreport: ${fileURLToPath(new URL('report.md', out))}`);
+    if (options.gate)
+    {
+        if (!baseline)
+        {
+            throw new Error('wine-tests: --gate compares with a --baseline report');
+        }
+        const worse = regressions(report, baseline);
+        console.log(worse.length === 0 ? 'gate: nothing got worse than the baseline'
+            : `gate: ${worse.length} worse than the baseline\n${worse.join('\n')}`);
+        process.exitCode = worse.length === 0 ? 0 : 1;
+    }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)

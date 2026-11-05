@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, markdown, parseOutput, summarise } from './wine-tests.mjs';
+import { classify, markdown, parseOutput, regressions, summarise } from './wine-tests.mjs';
 
 /** @param {Partial<import('./wine-tests.mjs').ChildResult>} [extra] */
 const result = (extra = {})=>({
@@ -117,4 +117,30 @@ test('the names a test asked for and did not get are listed, but for the Wine pr
     const text = markdown({ build: 'b', started: 's', tests: [report] },
         { failures: 20, baseline: null });
     assert.match(text, /## Asked for by name and not found\n\n- lib:t: msvcrt\.dll!_get_environ\n/);
+});
+
+test('the gate finds a test that ended worse and a check failing that held, numbers aside', ()=>{
+    /** @param {string} name @param {string} output @param {any} [ended] */
+    const run = (name, output, ended = {})=>summarise('lib', name, result({ output, ...ended }));
+    const summary = (/** @type {number} */ n)=>
+        `1000:t: 9 tests executed (0 marked as todo, 0 as flaky, ${n} failures), 0 skipped.`;
+    const baseline = { tests: [
+        run('same', `a.c:5: Test failed: got 0x1234, n=1\n${summary(1)}`),
+        run('fixed', `a.c:7: Test failed: x\n${summary(1)}`),
+        run('broke', summary(0)),
+        run('newcheck', `a.c:1: Test failed: old\n${summary(1)}`),
+    ] };
+    const report = { tests: [
+        // The same check at another line of another build, its numbers moved.
+        run('same', `a.c:6: Test failed: got 0x9999, n=2\n${summary(1)}`),
+        run('fixed', summary(0)),
+        run('broke', '', { error: { reason: 'runaway', message: 'program did not finish' } }),
+        run('newcheck', `a.c:1: Test failed: old\na.c:3: Test failed: new one\n${summary(2)}`),
+        run('unseen', `a.c:2: Test failed: y\n${summary(1)}`),
+    ] };
+    assert.deepEqual(regressions(report, baseline), [
+        'lib:broke: pass -> timeout',
+        'lib:newcheck: 1 failed check(s) the baseline did not have, first a.c:3: new one',
+    ]);
+    assert.deepEqual(regressions(baseline, baseline), [], 'a run against itself');
 });
