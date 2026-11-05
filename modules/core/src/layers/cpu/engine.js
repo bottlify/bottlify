@@ -158,6 +158,10 @@ export function engineContractProblem(engineModule, url){
  *     protected PAGE_NOACCESS -- faults with its address, as on Windows, and those pages are
  *     closed (`pageAccess`). Default false: a translated read is wrapped into RAM, and every
  *     page reads.
+ * @property {boolean} [zeroPage]        The guest's first page is the RAM's zeros, which nothing
+ *     writes and a store to faults (`zeroReadsBelow` over it): a tested read inside it reads
+ *     them in translated code rather than leaving to the host. The cpu layer sets it where
+ *     that holds. Default false.
  * @property {boolean} [atomic]          Locked instructions (`lock`-prefixed read-modify-writes,
  *     `xchg` with memory) as wasm atomics, each indivisible on the shared memory: for a process
  *     whose threads run on more than one executor. Default false.
@@ -522,6 +526,7 @@ export function engineContractProblem(engineModule, url){
  * @property {Record<string, number>} [relaxedFlagReads]  Opcode → translated instructions that
  *     read a flag an instruction before them in their block left undefined, which without
  *     `precise` holds whatever the cheapest code left there.
+ * @property {string[]} [forcedAt]   The addresses most forced, busiest first: count, x87 top, why.
  * @property {number} forcedSteps      Turns that retired nothing and were forced to interpret one
  *     instruction, so no slice of translated-plus-interpreted code stops moving.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven
@@ -577,8 +582,9 @@ export function engineContractProblem(engineModule, url){
  * @property {(address: number, x87Top?: number, held?: boolean) => void} missAt  One
  *     untranslated exit to an address at an x87 top; it becomes a candidate once enough land
  *     there at that top -- unless the region left it to the host on purpose (`held`).
- * @property {() => void} forcedStep  Records one turn the host forced an interpreted instruction
- *     through, for the progress guarantee's `forcedSteps`.
+ * @property {(at?: number, top?: number, why?: string) => void} forcedStep  Records one turn
+ *     the host forced an interpreted instruction through, for the progress guarantee's
+ *     `forcedSteps`, where, at what x87 top and why (`forcedAt`).
  * @property {() => Promise<number>} translatePending
  *     Regions published; resolves when the batch is instantiated.
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory

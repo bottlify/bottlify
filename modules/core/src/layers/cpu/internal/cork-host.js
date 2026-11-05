@@ -698,7 +698,14 @@ export function createCorkHost(config){
         // translated twice, never once per executor.
         ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
             ? { sharedLayout: engine.sharedLayout(own) } : {}),
-        config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
+        // The guest's first page is the RAM's own, zeros the engine's state starts past and
+        // nothing writes (its stores fault), where reads below the bound answer zeros:
+        // a tested read inside it reads them in place (`zeroPage`).
+        config: { ...(trapPort === undefined ? {} : { trapPort }),
+            ...(zeroReadsBelow >= 0x1000 && closedBelow >= 0x1000 && own.ramBase === 0
+                && (enginePages.to <= enginePages.from || enginePages.from >= 0x1000)
+                ? { zeroPage: true } : {}),
+            ...corkConfig,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
@@ -1518,7 +1525,8 @@ export function createCorkHost(config){
                     // Force one interpreted instruction so the turn moves
                     // rather than spinning on the same entry.
                     const forced = interpretRange(at, remaining, true);
-                    runtime.forcedStep();
+                    runtime.forcedStep(at, x87Top(),
+                        `region ran nothing (${exit.kind} ${exit.vector})`);
                     remaining -= forced;
                     ran += forced;
                     if (forced === 0 && eip() === at)
@@ -1541,7 +1549,7 @@ export function createCorkHost(config){
                 // A budget of zero, or a first instruction that retired
                 // nothing: force one instruction rather than spinning on it.
                 const forced = interpretRange(at, remaining, true);
-                runtime.forcedStep();
+                runtime.forcedStep(at, x87Top(), 'interpreter retired nothing');
                 remaining -= forced;
                 ran += forced;
                 if (forced === 0 && eip() === at)

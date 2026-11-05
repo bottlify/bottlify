@@ -345,6 +345,8 @@ const recordFieldsOf = layout=>{
  * @property {boolean} [ordered]  with atomic, a load or store of an integer operand not
  *     through esp as a wasm atomic where its address allows (`readOp`, `writeOp`)
  * @property {boolean} [checkReads]  an instruction that only reads tests its pages too
+ * @property {boolean} [zeroPage]  the guest's first page is the RAM's, zeros nothing writes
+ *     (its stores fault): a tested window of reads that lies in it reads them there
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
  *     keeps them, the flags an instruction leaves undefined keeping the values the
@@ -397,6 +399,7 @@ const recordFieldsOf = layout=>{
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
+ *     zeroPage?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
@@ -430,7 +433,8 @@ export function prepareModule(m, layout, features, memory = {},
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
         linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
-        checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
+        checkReads = false, zeroPage = false, expansion = null, markBlocks = false,
+        crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
 {
     const width = widthOf(layout);
@@ -545,6 +549,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (checkReads)
     {
         context.checkReads = true;
+    }
+    if (zeroPage)
+    {
+        context.zeroPage = true;
     }
     if (atomic && width.bits === 32)
     {
