@@ -851,7 +851,7 @@ export function createRenderer(services){
             // A depth texture is read by a shader to be read back
             // (`depthReadback`): WebGPU copies none with stencil out.
             if ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0
-                || (layout.storage.depth && backing.sampleCount === 1))
+                || (layout.storage?.depth && backing.sampleCount === 1))
             {
                 usage |= TextureUsage.TEXTURE_BINDING;
             }
