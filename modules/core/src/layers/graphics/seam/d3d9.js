@@ -2930,7 +2930,8 @@ export function createDirect3D9Seam(
      */
     const synced = methods=>Object.fromEntries(Object.entries(methods)
         .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
-            return refusedLoudly(name, settledAfter(shadowOf(device), ()=>method(device, args)));
+            return refusedLoudly(name, settledAfter(shadowOf(device), ()=>method(device, args)),
+                args);
         }]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
