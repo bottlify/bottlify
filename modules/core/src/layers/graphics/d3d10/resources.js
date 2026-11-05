@@ -709,7 +709,8 @@ function resolveBufferViewDesc(resource, desc, dimensions){
         ElementWidth: width,
         FirstElement: offset,
         NumElements: width,
-        ...(extended ? { Flags: flags } : {}),
+        // 10.1's extended view and 11's unordered-access view carry flags.
+        ...(extended || desc.Flags !== undefined ? { Flags: flags } : {}),
         elementBytes: size,
     };
 }

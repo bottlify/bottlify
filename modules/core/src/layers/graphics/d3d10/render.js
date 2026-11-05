@@ -36,7 +36,7 @@ import {
     D3D10_APPEND_ALIGNED_ELEMENT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BUFFER_UAV_FLAG,
     D3D11_DSV_FLAG, D3D11_RESOURCE_MISC, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
-import { clearElement, clearTexel } from './uavclear.js';
+import { channelsOf, clearElement, clearTexel } from './uavclear.js';
 import { SO_NO_RASTERIZED_STREAM } from './streamout.js';
 
 /** The most bytes a constant buffer has: 4096 registers of sixteen. */
@@ -892,8 +892,12 @@ export function createRenderer(services){
             // A format this GPU does not draw into is made without it, so it can
             // still be sampled and copied, and a draw into it is lost.
             backing.drawable = gpuRenderable(layout.format, formatOptions);
+            // A view written through that WebGPU cannot store into is cleared
+            // by drawing.
+            const unstorable = (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) !== 0
+                && !storableFormats().has(layout.format);
             if (((desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
-                || backing.sampleCount > 1) && backing.drawable)
+                || backing.sampleCount > 1 || unstorable) && backing.drawable)
             {
                 usage |= TextureUsage.RENDER_ATTACHMENT;
             }
@@ -2046,6 +2050,28 @@ export function createRenderer(services){
         const held = {};
         view.GetResource(held);
         held.resource.release();
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view.GetDesc(described);
+        target = layerTarget(held.resource, described.desc, view.range.mip, view.range.first);
+        if (target)
+        {
+            targets.set(view, target);
+        }
+        return target;
+    };
+
+    /**
+     * One level and slice of a texture as a surface a pass draws into, by
+     * the format a view names: a render target's or depth stencil view's,
+     * or a slice an unordered-access clear draws its value into.
+     *
+     * @param {any} resource @param {any} desc  the view's description
+     * @param {number} mip @param {number} layer
+     * @returns {any | null}
+     */
+    const layerTarget = (resource, desc, mip, layer)=>{
+        const held = { resource };
         const backing = backingOf(held.resource);
         if (!backing.texture)
         {
@@ -2057,12 +2083,6 @@ export function createRenderer(services){
                 + ' (texture-formats-tier1 or rg11b10ufloat-renderable missing)');
             return null;
         }
-        /** @type {{ desc?: any }} */
-        const described = {};
-        view.GetDesc(described);
-        const desc = described.desc;
-        const mip = view.range.mip;
-        const layer = view.range.first;
         if (held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
         {
             diverge('a view into a slice of a 3D texture draws into its first slice');
@@ -2073,7 +2093,7 @@ export function createRenderer(services){
         const height = held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
             ? 1
             : levelExtent(held.resource.desc.Height, mip);
-        target = {
+        return {
             key: `${backing.id}:${mip}:${held.resource.dimension
                 === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer}`,
             layer: held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
@@ -2105,8 +2125,6 @@ export function createRenderer(services){
                 label: `d3d10:${format}`,
             },
         };
-        targets.set(view, target);
-        return target;
     };
 
     /** @type {ReturnType<typeof createGeometry> | null} */
@@ -2347,11 +2365,29 @@ export function createRenderer(services){
         }
         // A staging resource: the level comes back whole, and the box is
         // placed where the program asked.
-        if (destination.desc.Usage !== D3D10_USAGE.STAGING || !readable(from) || is3D)
+        if (destination.desc.Usage !== D3D10_USAGE.STAGING || !readable(from))
         {
             return false;
         }
         const texel = TEXEL_BYTES[from.layout.storage.format];
+        // A volume comes back a depth slice at a time.
+        if (is3D)
+        {
+            for (let z = 0; z < size.depthOrArrayLayers; z++)
+            {
+                record({
+                    kind: 'readback',
+                    sourceId: from.id,
+                    surface: {
+                        texture: from.texture, mipLevel: src.level, layer: region.front + z,
+                        width: fromLevel.width, height: fromLevel.height, bytesPerTexel: texel,
+                    },
+                    deliver: stagingDelivery(destination, destinationSubresource, at, region,
+                        size, texel, at.z + z),
+                });
+            }
+            return true;
+        }
         record({
             kind: 'readback',
             sourceId: from.id,
@@ -2375,7 +2411,9 @@ export function createRenderer(services){
      * @param {{ width: number, height: number }} size @param {number} texel
      * @returns {(image: { width: number, height: number, data: Uint8Array } | null) => void}
      */
-    const stagingDelivery = (destination, destinationSubresource, at, region, size, texel)=>{
+    const stagingDelivery = (destination, destinationSubresource, at, region, size, texel,
+        slice = 0)=>
+    {
         const to = backingOf(destination);
         /** @type {(value?: any) => void} */
         let resolve = ()=>{};
@@ -2398,7 +2436,7 @@ export function createRenderer(services){
                 {
                     const start = ((region.top + row) * image.width + region.left) * texel;
                     into.bytes.set(image.data.subarray(start, start + size.width * texel),
-                        (at.y + row) * into.rowPitch + at.x * texel);
+                        slice * into.depthPitch + (at.y + row) * into.rowPitch + at.x * texel);
                 }
             }
             else
@@ -3764,6 +3802,62 @@ export function createRenderer(services){
                 return;
             }
             const texel = clearTexel(desc.Format, values, float);
+            if (texel && backing.texture && !backing.storable && backing.drawable
+                && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D)
+            {
+                // Cleared as a render target is: each slice by a pass's clear,
+                // the value as the texel's floats or integers.
+                const type = channelsOf(desc.Format)?.type;
+                const integer = type === 'UINT' || type === 'SINT';
+                const colour = [...texel].map(bits=>(integer ? bits | 0
+                    : new Float32Array(new Uint32Array([bits]).buffer)[0]));
+                for (let layer = view.range.first; layer < view.range.first + view.range.count;
+                    layer++)
+                {
+                    const target = layerTarget(resource, desc, view.range.mip, layer);
+                    if (target)
+                    {
+                        backing.gpuDirty = true;
+                        record({ kind: 'clear', target, color: colour });
+                    }
+                }
+                return;
+            }
+            // Neither stored into nor drawn into here: the texel's bytes copied
+            // into each slice, in their turn.
+            const element = clearElement(desc.Format, values, float);
+            if (element && backing.texture && !backing.storable
+                && !backing.layout.storage?.conversion
+                && element.length === TEXEL_BYTES[backing.layout.format])
+            {
+                const level = backing.layout.levels[view.range.mip];
+                const bytesPerRow = roundUp(level.width * element.length, 256);
+                const size = bytesPerRow * level.height;
+                const staged = backend.createDynamicBuffer({ label: 'd3d10:uav-clear-texels',
+                    size, usage: BufferUsage.COPY_SRC | BufferUsage.COPY_DST, keep: false });
+                const lock = staged.lock(0, size, LockFlags.DISCARD);
+                for (let row = 0; row < level.height; row++)
+                {
+                    for (let x = 0; x < level.width; x++)
+                    {
+                        lock.data.set(element, row * bytesPerRow + x * element.length);
+                    }
+                }
+                staged.unlock(lock);
+                staged.markRead();
+                backing.gpuDirty = true;
+                const last = view.range.first + view.range.count - 1;
+                for (let layer = view.range.first; layer <= last; layer++)
+                {
+                    record({ kind: 'copyBufferToTexture', ids: [backing.id],
+                        source: { buffer: staged.gpu, bytesPerRow, rowsPerImage: level.height },
+                        destination: { texture: backing.texture, mipLevel: view.range.mip,
+                            origin: { x: 0, y: 0, z: layer } },
+                        size: { width: level.width, height: level.height, depthOrArrayLayers: 1 },
+                        ...(layer === last ? { release: staged } : {}) });
+                }
+                return;
+            }
             if (!texel || !backing.texture || !clearStorage(view, resource, backing, texel))
             {
                 diverge(`a ${float ? 'Float' : 'Uint'} clear of a texture view in format`
@@ -4562,6 +4656,12 @@ export function createRenderer(services){
                 {
                     closePass();
                     readers.push({ read: frame.copyOut(command.ranges), command });
+                    continue;
+                }
+                if (command.kind === 'copyBufferToTexture')
+                {
+                    command.ids.forEach(settleClears);
+                    frame.encodeCopy(command.source, command.destination, command.size);
                     continue;
                 }
                 if (command.kind === 'copyBuffer')

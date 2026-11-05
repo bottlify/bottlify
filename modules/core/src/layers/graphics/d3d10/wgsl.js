@@ -612,7 +612,9 @@ export function translateShader(container, options = {}){
         {
             return;
         }
-        if (dest.type === OPERAND.OUTPUT_DEPTH)
+        // A depth written with a promise of its direction is a depth written.
+        if (dest.type === OPERAND.OUTPUT_DEPTH || dest.type === OPERAND.OUTPUT_DEPTH_GREATER_EQUAL
+            || dest.type === OPERAND.OUTPUT_DEPTH_LESS_EQUAL)
         {
             result.writesDepth = true;
             emit(`oDepth = bitcast<f32>((${value}).x);`);
@@ -754,28 +756,43 @@ export function translateShader(container, options = {}){
     };
 
     /**
+     * A texture read through a sampler. `shaped.offset` is the instruction's
+     * immediate texel offset as the last argument WGSL takes it (a cube has
+     * none), or nothing.
+     *
      * @param {import('./sm4.js').Instruction} instruction
      * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null,
-     *          width: number, row: boolean }, sampler: string, bias: string | null) => string}
-     *     call  `bias` the sampler's MipLODBias as a WGSL float, null for none
+     *          width: number, row: boolean, offset: string }, sampler: string,
+     *          bias: string | null) => string} call  `bias` the sampler's MipLODBias as a
+     *     WGSL float, null for none
+     * @param {{ resource: number, sampler: number }} [at]  where the resource and
+     *     sampler operands are
      */
-    const sampleWith = (instruction, call)=>{
-        const [dest, coordinate, resource, sampler] = instruction.operands;
+    const sampleWith = (instruction, call, at = { resource: 2, sampler: 3 })=>{
+        const [dest, coordinate] = instruction.operands;
+        const resource = instruction.operands[at.resource];
+        const sampler = instruction.operands[at.sampler];
         const bias = sampler ? options.samplerBias?.[sampler.indices[0].value] ?? 0 : 0;
         const texture = textureOf(resource.indices[0].value);
-        const shaped = texture ? coordinateFor(texture, f(coordinate)) : null;
-        if (!texture || !shaped)
+        const found = texture ? coordinateFor(texture, f(coordinate)) : null;
+        if (!texture || !found)
         {
             result.unsupported.push(`${instruction.name} on an undeclared or unsupported texture`);
             return;
         }
+        const offset = instruction.offset;
+        const cube = texture.dimension === RESOURCE_DIMENSION.TEXTURECUBE
+            || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBEARRAY;
+        const shaped = { ...found, offset: !offset || cube ? ''
+            : found.width === 3 ? `, vec3<i32>(${offset[0]}, ${offset[1]}, ${offset[2]})`
+                : `, vec2<i32>(${offset[0]}, ${found.row ? 0 : offset[1]})` };
         if (shaped.layer !== null)
         {
             shaped.layer = `i32(${shaped.layer})`;
         }
         const samplerName = sampler ? `s${sampler.indices[0].value}` : '';
-        store(dest, sampledBits(texture, resource, call(texture, shaped, samplerName,
-            bias ? floatLiteral(bias) : null)));
+        const read = call(texture, shaped, samplerName, bias ? floatLiteral(bias) : null);
+        store(dest, sampledBits(texture, resource, read));
     };
 
     /** @param {string} name */
@@ -1546,7 +1563,7 @@ export function translateShader(container, options = {}){
                     `${bias && !texture.depth ? 'textureSampleBias' : 'textureSample'}`
                     + `(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `${bias && !texture.depth ? `, ${bias}` : ''})`));
+                    + `${bias && !texture.depth ? `, ${bias}` : ''}${shaped.offset})`));
                 break;
             case OPCODE.SAMPLE_L:
                 // A depth texture's level is a whole number.
@@ -1555,7 +1572,7 @@ export function translateShader(container, options = {}){
                     return depthRead(texture,
                         `textureSampleLevel(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                        + `, ${texture.depth ? `i32(round(${lod}))` : lod})`);
+                        + `, ${texture.depth ? `i32(round(${lod}))` : lod}${shaped.offset})`);
                 });
                 break;
             case OPCODE.SAMPLE_B:
@@ -1567,10 +1584,11 @@ export function translateShader(container, options = {}){
                 sampleWith(instruction, (texture, shaped, sampler, bias)=>(texture.depth
                     ? depthRead(texture, `textureSample(t${texture.slot}, ${sampler}`
                         + `, ${shaped.coordinate}`
-                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`)
+                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`}${shaped.offset})`)
                     : `textureSampleBias(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x${bias ? ` + ${bias}` : ''})`));
+                    + `, ${f(instruction.operands[4])}.x${bias ? ` + ${bias}` : ''}`
+                    + `${shaped.offset})`));
                 break;
             case OPCODE.SAMPLE_D:
                 sampleWith(instruction, (texture, shaped, sampler, bias)=>{
@@ -1578,7 +1596,8 @@ export function translateShader(container, options = {}){
                     {
                         return depthRead(texture, `textureSampleLevel(t${texture.slot}`
                             + `, ${sampler}, ${shaped.coordinate}`
-                            + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, 0)`);
+                            + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, 0`
+                            + `${shaped.offset})`);
                     }
                     /** @param {import('./sm4.js').Operand} operand */
                     // A bias of b is gradients 2^b as long.
@@ -1588,7 +1607,7 @@ export function translateShader(container, options = {}){
                     return `textureSampleGrad(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
                         + `, ${gradient(instruction.operands[4])}`
-                        + `, ${gradient(instruction.operands[5])})`;
+                        + `, ${gradient(instruction.operands[5])}${shaped.offset})`;
                 });
                 break;
             case OPCODE.SAMPLE_C:
@@ -1610,7 +1629,7 @@ export function translateShader(container, options = {}){
                     `vec4<f32>(${level ? 'textureSampleCompareLevel' : 'textureSampleCompare'}`
                     + `(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x))`);
+                    + `, ${f(instruction.operands[4])}.x${shaped.offset}))`);
                 break;
             }
             case OPCODE.LD:
@@ -1653,7 +1672,12 @@ export function translateShader(container, options = {}){
                 const name = `t${texture.slot}`;
                 const at = held();
                 const mip = held();
-                emit(`let ${at} = ${shaped.coordinate};`);
+                // An immediate offset moves the texel read, before the range test.
+                const offset = instruction.offset;
+                const stepped = !offset ? '' : shaped.width === 3
+                    ? ` + vec3<i32>(${offset[0]}, ${offset[1]}, ${offset[2]})`
+                    : ` + vec2<i32>(${offset[0]}, ${shaped.row ? 0 : offset[1]})`;
+                emit(`let ${at} = ${shaped.coordinate}${stepped};`);
                 emit(`let ${mip} = ${level};`);
                 const layer = shaped.layer === null ? null : held();
                 if (layer)
@@ -1723,24 +1747,59 @@ export function translateShader(container, options = {}){
                 store(target, `(${value}).${swizzleText(resource.swizzle)}`);
                 break;
             }
-            case OPCODE.GATHER4: {
-                const gathered = textureOf(instruction.operands[2].indices[0].value);
+            case OPCODE.GATHER4:
+            case OPCODE.GATHER4_C:
+            case OPCODE.GATHER4_PO:
+            case OPCODE.GATHER4_PO_C: {
+                // gather4_po and gather4_po_c take a register's offset after the
+                // address; the _c forms a reference after the sampler.
+                const programmed = instruction.opcode === OPCODE.GATHER4_PO
+                    || instruction.opcode === OPCODE.GATHER4_PO_C;
+                const compared = instruction.opcode === OPCODE.GATHER4_C
+                    || instruction.opcode === OPCODE.GATHER4_PO_C;
+                const at = { resource: programmed ? 3 : 2, sampler: programmed ? 4 : 3 };
+                const resource = instruction.operands[at.resource];
+                const gathered = textureOf(resource.indices[0].value);
                 if (gathered && (gathered.returnType === RETURN_TYPE.UINT
                     || gathered.returnType === RETURN_TYPE.SINT
                     || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1D
                     || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1DARRAY
                     || gathered.dimension === RESOURCE_DIMENSION.TEXTURE3D))
                 {
-                    unsupported('gather4 on an integer, one- or three-dimensional texture');
+                    unsupported(`${instruction.name} on an integer, one- or three-dimensional`
+                        + ' texture');
                     break;
                 }
-                // The four texels' first components, in the order WGSL and
-                // Direct3D agree on.
-                // A depth texture gathers its one channel, named by no component.
-                sampleWith(instruction, (texture, shaped, sampler)=>
-                    `textureGather(${texture.depth ? '' : '0, '}t${texture.slot}, ${sampler}`
-                    + `, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`);
+                if (compared && gathered)
+                {
+                    gathered.comparison = true;
+                }
+                // WGSL's offset is a constant: a register's moves the address
+                // by that many texels of level 0, which a gather reads.
+                const shift = programmed ? held() : null;
+                if (shift && gathered)
+                {
+                    emit(`let ${shift} = vec2<f32>(${i(instruction.operands[2])}.xy)`
+                        + ` / vec2<f32>(textureDimensions(t${gathered.slot}, 0).xy);`);
+                }
+                // The sampler's selected component is the channel gathered; the
+                // resource's swizzle orders the four texels, as for any read.
+                const channel = instruction.operands[at.sampler].swizzle?.[0] ?? 0;
+                const reference = compared ? f(instruction.operands[at.sampler + 1]) : null;
+                // The four texels in the order WGSL and Direct3D agree on; a
+                // depth texture gathers its one channel, named by no component.
+                sampleWith(instruction, (texture, shaped, sampler)=>{
+                    const coordinate = shift ? `(${shaped.coordinate} + ${shift})`
+                        : shaped.coordinate;
+                    const layer = shaped.layer === null ? '' : `, ${shaped.layer}`;
+                    if (reference)
+                    {
+                        return `textureGatherCompare(t${texture.slot}, ${sampler}, ${coordinate}`
+                            + `${layer}, ${reference}.x${shaped.offset})`;
+                    }
+                    return `textureGather(${texture.depth ? '' : `${channel}, `}t${texture.slot}`
+                        + `, ${sampler}, ${coordinate}${layer}${shaped.offset})`;
+                }, at);
                 break;
             }
 
@@ -2694,8 +2753,16 @@ export function linkProgram(vs, ps, options = {}){
     const psReturn = [];
     /** @type {number[]} */
     const targets = [];
-    for (const element of ps.outputs)
+    // A compiler writes the depth outputs' signature with no system value,
+    // only their names and no register: they are named here.
+    const DEPTH_NAMES = /** @type {Record<string, number>} */ ({ SV_DEPTH: SYSTEM_VALUE.DEPTH,
+        SV_DEPTHGREATEREQUAL: SYSTEM_VALUE.DEPTH_GREATER_EQUAL,
+        SV_DEPTHLESSEQUAL: SYSTEM_VALUE.DEPTH_LESS_EQUAL });
+    for (const output of ps.outputs)
     {
+        const element = output.systemValue === SYSTEM_VALUE.UNDEFINED
+            && DEPTH_NAMES[output.name.toUpperCase()] !== undefined
+            ? { ...output, systemValue: DEPTH_NAMES[output.name.toUpperCase()] } : output;
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
@@ -2720,6 +2787,22 @@ export function linkProgram(vs, ps, options = {}){
         {
             psOut.push('    @builtin(frag_depth) depth: f32,');
             psReturn.push('oDepth');
+            continue;
+        }
+        // A depth written with a promise of its direction keeps it: the
+        // hardware takes the nearer of it and the rasterized depth.
+        if (element.systemValue === SYSTEM_VALUE.DEPTH_GREATER_EQUAL
+            || element.systemValue === SYSTEM_VALUE.DEPTH_LESS_EQUAL)
+        {
+            const named = psIn.find(line=>line.includes('@builtin(position)'));
+            const member = named ? /\) (\w+):/.exec(named)?.[1] : 'depthPosition';
+            if (!named)
+            {
+                psIn.push('    @builtin(position) depthPosition: vec4<f32>,');
+            }
+            psOut.push('    @builtin(frag_depth) depth: f32,');
+            psReturn.push(`${element.systemValue === SYSTEM_VALUE.DEPTH_GREATER_EQUAL ? 'max'
+                : 'min'}(oDepth, in.${member}.z)`);
             continue;
         }
         unsupported.push(`pixel output system value ${element.systemValue}`);

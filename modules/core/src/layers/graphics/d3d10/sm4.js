@@ -358,6 +358,8 @@ export const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
  * @property {number[]} extra       Dwords after the operands: a system value, a
  *                                  return type, a constant count.
  * @property {number[]} [customData] The payload of a customdata block.
+ * @property {number[]} [offset]   A sample's immediate texel offset (`aoffimmi`), u, v
+ *                                  and w, from its extended token; absent for none.
  * @property {number} length        In dwords, this instruction and its operands.
  */
 
@@ -554,11 +556,18 @@ export function decodeSm4(tokens){
         let extended = (token & 0x80000000) !== 0;
         /** @type {number[]} */
         const extendedTokens = [];
+        /** @type {number[] | undefined} */
+        let offset;
         while (extended && next < end)
         {
             const extra = tokens[next++];
             extendedTokens.push(extra);
             extended = (extra & 0x80000000) !== 0;
+            // Sample controls: three signed four-bit texel offsets.
+            if ((extra & 0x3f) === 1)
+            {
+                offset = [9, 13, 17].map(shift=>((extra >>> shift) & 0xf) << 28 >> 28);
+            }
         }
 
         const wanted = OPERAND_COUNT[opcode] ?? Infinity;
@@ -580,6 +589,7 @@ export function decodeSm4(tokens){
             operands,
             extra: [...extendedTokens, ...Array.from(tokens.subarray(next, end))],
             length: end - at,
+            ...(offset && offset.some(Boolean) ? { offset } : {}),
         });
         at = end;
     }

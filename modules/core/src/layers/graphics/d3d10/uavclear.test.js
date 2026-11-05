@@ -16,8 +16,21 @@ test('a format is read as its channels in memory order', ()=>{
         [2, 1, 0, 3]);
     assert.deepEqual(channelsOf(DXGI_FORMAT.R10G10B10A2_UINT)?.channels.map(c=>c.bits),
         [10, 10, 10, 2]);
-    assert.equal(channelsOf(DXGI_FORMAT.R11G11B10_FLOAT), null);
+    assert.deepEqual(channelsOf(DXGI_FORMAT.R11G11B10_FLOAT)?.channels.map(c=>c.bits),
+        [11, 11, 10]);
     assert.equal(channelsOf(DXGI_FORMAT.BC1_UNORM), null);
+});
+
+test('R11G11B10_FLOAT: a Uint clear packs the low bits, a Float clear the unsigned floats'
+    + ' (test_clear_image_unordered_access_view, d3d11.c:17127)', ()=>{
+    /** @param {Uint8Array | null} bytes */
+    const word = bytes=>new DataView(/** @type {Uint8Array} */ (bytes).buffer).getUint32(0, true);
+    assert.equal(word(clearElement(DXGI_FORMAT.R11G11B10_FLOAT, [1, 2, 3, 4], false)),
+        0x00c01001);
+    assert.equal(word(clearElement(DXGI_FORMAT.R11G11B10_FLOAT, [0.5, 0, -1, 1], true)),
+        0x00000380);
+    assert.deepEqual([...clearTexel(DXGI_FORMAT.R11G11B10_FLOAT, [0.5, 2, 0, 1], true)
+        ?? []].slice(0, 3), [bitsOf(0.5), bitsOf(2), 0]);
 });
 
 test('a Uint clear copies the low bits, a Float clear converts, and on integers does nothing', ()=>{

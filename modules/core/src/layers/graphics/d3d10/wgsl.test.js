@@ -30,7 +30,7 @@ import {
     dclConstantBuffer, dclIndexableTemp, dclInput, dclInputPs, dclInputPsSiv, dclInputSiv,
     dclOutput, dclOutputSiv, dclResource, dclSampler, dclTemps, discardNz, div, dp3, dp4,
     elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, gather4, ge, iadd, ieq, ifNz, ifZ, ige,
-    ilt, imad, ldMs, resinfoRcp, sampleD,
+    ilt, imad, ldMs, resinfoRcp, sampleD, gather4C, gather4Po,
     imul,
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
@@ -681,6 +681,33 @@ test('gather4 gathers the first component of four texels', ()=>{
         ['gather4 on an integer, one- or three-dimensional texture']);
 });
 
+test('a gather takes the channel its sampler selects, an immediate offset as WGSL\'s, a'
+    + ' register\'s by moving the address, and a reference as a compare (test_gather,'
+    + ' test_gather_c, d3d11.c:28200)', ()=>{
+    const declarations = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+        dclSampler(0)];
+    const green = translate([{ ...gather4(r(0), v(0), t(0), { ...s(0), swizzle: 'yyyy' }),
+        offset: [1, -1, 0] }], { declarations });
+    assert.equal(bodyOf(green), `r0 = ${U}((textureGather(1, t0, s0, ${F}(v0.xyzw).xy`
+        + ', vec2<i32>(1, -1))).xyzw);');
+    const programmed = bodyOf(translate([gather4Po(r(0), v(0), r(1), t(0), s(0))],
+        { declarations }));
+    assert.match(programmed, /vec2<f32>\(bitcast<vec4<i32>>\(r1\.xyzw\)\.xy\) \/ vec2<f32>\(textureDimensions\(t0, 0\)\.xy\)/);
+    const compared = translate([gather4C(r(0), v(0), t(0), s(0), r(2, 'x'))],
+        { declarations });
+    assert.match(bodyOf(compared), /textureGatherCompare\(t0, s0, [^;]*, bitcast<vec4<f32>>\(r2\.xxxx\)\.x\)/);
+    assert.equal(compared.textures[0].comparison, true);
+});
+
+test('a sample and a load move by their immediate offset (test_texture, d3d11.c)', ()=>{
+    const declarations = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+        dclSampler(0)];
+    assert.match(bodyOf(translate([{ ...sample(r(0), v(0), t(0), s(0)), offset: [-2, 3, 0] }],
+        { declarations })), /textureSample\(t0, s0, [^;]*\.xy, vec2<i32>\(-2, 3\)\)/);
+    assert.match(bodyOf(translate([{ ...ld(r(0), v(0), t(0)), offset: [1, 0, 0] }],
+        { declarations })), /\.xy \+ vec2<i32>\(1, 0\);/);
+});
+
 test('an instruction with no translation is named, and nothing plausible is emitted', ()=>{
     const translated = translate([{ opcode: 108, operands: [r(0), r(1), t(0), s(0)] }],
         { declarations: TEXTURE });
@@ -832,6 +859,29 @@ test('the system values a stage can read arrive as builtins', ()=>{
     assert.match(linked.fragment, /oDepth = bitcast<f32>\(\(v1.xxxx\).x\);/);
     assert.match(linked.fragment, /return FragmentOut\(bitcast<vec4<f32>>\(o0\), oDepth\);/);
     assert.deepEqual(linked.attributes, [], 'a builtin is not a vertex attribute');
+});
+
+test('a depth written with a promise of its direction is the nearer of it and the rasterized'
+    + ' depth (test_conservative_depth_output, d3d11.c:29380)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    /** @param {string} name @param {number} systemValue @param {number} type */
+    const promising = (name, systemValue, type)=>translateShader(/** @type {any} */ (parseDxbc(
+        assemble({
+            kind: SHADER_KIND.PIXEL,
+            outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 },
+                { name, systemValue, register: 0xffffffff }],
+            instructions: [dclOutput(o(0)), mov(o(0), l(0, 1, 0, 1)),
+                mov({ type, indices: [], mask: 1, swizzle: 'x' }, l(0.25)), ret()],
+        }))));
+    const greater = linkProgram(vs, promising('SV_DepthGreaterEqual',
+        SYSTEM_VALUE.DEPTH_GREATER_EQUAL, 38));
+    assert.deepEqual(greater.unsupported, []);
+    assert.match(greater.fragment, /@builtin\(position\) depthPosition: vec4<f32>,/);
+    assert.match(greater.fragment, /max\(oDepth, in\.depthPosition\.z\)\);/);
+    // As a compiler writes the signature: by name alone, no system value.
+    const less = linkProgram(vs, promising('SV_DepthLessEqual', 0, 39));
+    assert.match(less.fragment, /min\(oDepth, in\.depthPosition\.z\)\);/);
+    assert.doesNotMatch(less.fragment, /@location\(4294967295\)/);
 });
 
 test('a vertex shader that writes no position cannot be linked', ()=>{

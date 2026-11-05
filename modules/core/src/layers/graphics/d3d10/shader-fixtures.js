@@ -138,6 +138,12 @@ function encodeOperand(operand, destination){
         const count = /** @type {number[]} */ (operand.immediate).length;
         token |= count === 1 ? 1 : 2;
     }
+    else if (operand.type === OPERAND.SAMPLER && operand.swizzle)
+    {
+        // A gather's sampler selects the channel it gathers.
+        token |= 2 | (SELECTION.SELECT1 << 2)
+            | (COMPONENT_INDEX[/** @type {'x'|'y'|'z'|'w'} */ (operand.swizzle[0])] << 4);
+    }
     else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER
         || operand.type === OPERAND.LABEL)
     {
@@ -211,6 +217,7 @@ function encodeOperand(operand, destination){
  * @property {boolean} [saturate]
  * @property {boolean} [nonZero]
  * @property {number} [destinations]   How many leading operands are destinations; one by default.
+ * @property {number[]} [offset]       An immediate texel offset (`aoffimmi`), u, v, w.
  */
 
 /**
@@ -236,8 +243,17 @@ function encodeInstruction(instruction){
     {
         token |= 0x40000;
     }
-    token |= (words.length + 1) << 24;
-    return [token >>> 0, ...words];
+    // An immediate texel offset is an extended token of sample controls.
+    const extended = instruction.offset
+        ? [(1 | ((instruction.offset[0] & 0xf) << 9) | ((instruction.offset[1] & 0xf) << 13)
+            | ((instruction.offset[2] & 0xf) << 17)) >>> 0]
+        : [];
+    if (extended.length > 0)
+    {
+        token |= 0x80000000;
+    }
+    token |= (words.length + extended.length + 1) << 24;
+    return [token >>> 0, ...extended, ...words];
 }
 
 // --- the instructions, as a test spells them ---
@@ -343,6 +359,18 @@ export const sampleD = (dest, coordinate, texture, sampler, ddx, ddy)=>
  */
 export const gather4 = (dest, coordinate, texture, sampler)=>
     op(OPCODE.GATHER4, [dest, coordinate, texture, sampler]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler @param {AsmOperand} reference
+ */
+export const gather4C = (dest, coordinate, texture, sampler, reference)=>
+    op(OPCODE.GATHER4_C, [dest, coordinate, texture, sampler, reference]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} offset
+ * @param {AsmOperand} texture @param {AsmOperand} sampler
+ */
+export const gather4Po = (dest, coordinate, offset, texture, sampler)=>
+    op(OPCODE.GATHER4_PO, [dest, coordinate, offset, texture, sampler]);
 /** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture */
 export const ld = (dest, address, texture)=>op(OPCODE.LD, [dest, address, texture]);
 /**
