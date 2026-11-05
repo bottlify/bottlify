@@ -961,3 +961,13 @@ test('a dword the host writes or reads is whole to a thread on the same memory',
         await worker.terminate();
     }
 });
+
+test('interpretedSteps counts what the interpreters retired, not zero', ()=>{
+    const h = host();
+    // mov eax, 0; inc eax; inc eax; inc eax; hlt -- five instructions, new code, interpreted.
+    load(h, 0x11000, [0xb8, 0, 0, 0, 0, 0x40, 0x40, 0x40, 0xf4]);
+    assert.equal(h.interpretedSteps(), 0);
+    h.runSlice(100);
+    assert.ok(h.interpretedSteps() > 0, 'a frame can tell code met for the first time');
+    assert.ok(h.interpretedSteps() <= h.instructionCount());
+});
