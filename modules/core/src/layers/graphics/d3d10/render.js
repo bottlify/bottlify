@@ -404,6 +404,68 @@ const CANVAS_FORMAT = Object.freeze({
 const roundUp = (a, b)=>Math.ceil(a / b) * b;
 
 /**
+ * The depth formats read back by a compute pass (`depthReadback`), and
+ * whether each keeps a stencil beside its depth.
+ *
+ * @type {Readonly<Record<string, { stencil: boolean }>>}
+ */
+const DEPTH_READBACK = Object.freeze({
+    depth32float: { stencil: false },
+    depth16unorm: { stencil: false },
+    'depth24plus-stencil8': { stencil: true },
+    'depth32float-stencil8': { stencil: true },
+});
+
+/**
+ * The pass that writes a depth texture's texels as the words Direct3D keeps
+ * them in, one invocation a word: D32_FLOAT the float; D16_UNORM two texels
+ * of 16 bits; D24_UNORM_S8_UINT the depth in the low 24 bits and the stencil
+ * in the high 8; D32_FLOAT_S8X24_UINT the float, then the stencil in the
+ * next word's low 8 bits.
+ *
+ * @param {string} format
+ * @returns {string}
+ */
+const depthReadbackShader = format=>{
+    const stencil = DEPTH_READBACK[format]?.stencil === true;
+    const word = {
+        depth32float: 'words[w] = bitcast<u32>(depthAt(w));',
+        depth16unorm: ['let low = u32(round(depthAt(2u * w) * 65535.0));',
+            'var high = 0u;',
+            'if (2u * w + 1u < texels) { high = u32(round(depthAt(2u * w + 1u) * 65535.0)); }',
+            'words[w] = low | (high << 16u);'].join('\n    '),
+        'depth24plus-stencil8': 'words[w] = (u32(round(depthAt(w) * 16777215.0)) & 0xffffffu)'
+            + ' | (stencilAt(w) << 24u);',
+        'depth32float-stencil8': 'words[w] = select(bitcast<u32>(depthAt(w / 2u)),'
+            + ' stencilAt(w / 2u), (w & 1u) == 1u);',
+    }[format];
+    return [
+        '@group(0) @binding(0) var depthTexture: texture_depth_2d;',
+        ...(stencil ? ['@group(0) @binding(1) var stencilTexture: texture_2d<u32>;'] : []),
+        '@group(0) @binding(2) var<storage, read_write> words: array<u32>;',
+        'fn depthAt(i: u32) -> f32 {',
+        '    let size = textureDimensions(depthTexture);',
+        '    return textureLoad(depthTexture, vec2u(i % size.x, i / size.x), 0);',
+        '}',
+        ...(stencil ? ['fn stencilAt(i: u32) -> u32 {',
+            '    let size = textureDimensions(stencilTexture);',
+            '    return textureLoad(stencilTexture, vec2u(i % size.x, i / size.x), 0).x & 0xffu;',
+            '}'] : []),
+        '@compute @workgroup_size(64)',
+        'fn computeMain(@builtin(global_invocation_id) id: vec3u) {',
+        '    let size = textureDimensions(depthTexture);',
+        '    let texels = size.x * size.y;',
+        '    let w = id.x;',
+        '    if (w >= arrayLength(&words)) { return; }',
+        `    let bound = ${format === 'depth16unorm' ? '2u * w' : format === 'depth32float-stencil8'
+            ? 'w / 2u' : 'w'};`,
+        '    if (bound >= texels) { return; }',
+        `    ${word}`,
+        '}',
+    ].join('\n');
+};
+
+/**
  * @param {RenderServices} services
  */
 export function createRenderer(services){
@@ -786,7 +848,10 @@ export function createRenderer(services){
             {
                 usage |= TextureUsage.RENDER_ATTACHMENT;
             }
-            if ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0)
+            // A depth texture is read by a shader to be read back
+            // (`depthReadback`): WebGPU copies none with stencil out.
+            if ((desc.BindFlags & D3D10_BIND.SHADER_RESOURCE) !== 0
+                || (layout.storage.depth && backing.sampleCount === 1))
             {
                 usage |= TextureUsage.TEXTURE_BINDING;
             }
@@ -2101,6 +2166,13 @@ export function createRenderer(services){
         {
             return gpuBufferCopy(destination, to, at.x, from, box);
         }
+        if (from.texture && from.layout.storage.depth && from.sampleCount === 1
+            && destination.desc.Usage === D3D10_USAGE.STAGING
+            && source.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D)
+        {
+            return depthReadback(destination, destinationSubresource, at, source,
+                sourceSubresource, box);
+        }
         // A multisampled texture is copied only whole, into another of its
         // sample count: there is no reading one back.
         if (!from.texture || from.layout.storage.depth
@@ -2161,13 +2233,6 @@ export function createRenderer(services){
             return false;
         }
         const texel = TEXEL_BYTES[from.layout.storage.format];
-        /** @type {(value?: any) => void} */
-        let resolve = ()=>{};
-        const promise = new Promise(done=>{
-            resolve = done;
-        });
-        const waiting = { promise, sequence: recordedCount + 1 };
-        let delivered = false;
         record({
             kind: 'readback',
             sourceId: from.id,
@@ -2175,40 +2240,141 @@ export function createRenderer(services){
                 texture: from.texture, mipLevel: src.level, layer: src.slice,
                 width: fromLevel.width, height: fromLevel.height, bytesPerTexel: texel,
             },
-            /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
-            deliver(image){
-                if (delivered)
+            deliver: stagingDelivery(destination, destinationSubresource, at, region, size,
+                texel),
+        });
+        return true;
+    };
+
+    /**
+     * What a read back into a staging resource does when its image arrives:
+     * the box placed where the program asked, and a map that waits for it
+     * let go.
+     *
+     * @param {any} destination @param {number} destinationSubresource
+     * @param {{ x: number, y: number }} at @param {{ left: number, top: number }} region
+     * @param {{ width: number, height: number }} size @param {number} texel
+     * @returns {(image: { width: number, height: number, data: Uint8Array } | null) => void}
+     */
+    const stagingDelivery = (destination, destinationSubresource, at, region, size, texel)=>{
+        const to = backingOf(destination);
+        /** @type {(value?: any) => void} */
+        let resolve = ()=>{};
+        const promise = new Promise(done=>{
+            resolve = done;
+        });
+        const waiting = { promise, sequence: recordedCount + 1 };
+        let delivered = false;
+        to.readback = waiting;
+        return image=>{
+            if (delivered)
+            {
+                return;
+            }
+            delivered = true;
+            if (image)
+            {
+                const into = subresourceBytes(destination, destinationSubresource);
+                for (let row = 0; row < size.height; row++)
                 {
-                    return;
+                    const start = ((region.top + row) * image.width + region.left) * texel;
+                    into.bytes.set(image.data.subarray(start, start + size.width * texel),
+                        (at.y + row) * into.rowPitch + at.x * texel);
                 }
-                delivered = true;
-                if (image)
-                {
-                    const into = subresourceBytes(destination, destinationSubresource);
-                    for (let row = 0; row < size.height; row++)
-                    {
-                        const start = ((region.top + row) * image.width + region.left) * texel;
-                        into.bytes.set(image.data.subarray(start, start + size.width * texel),
-                            (at.y + row) * into.rowPitch + at.x * texel);
-                    }
-                }
-                else
-                {
-                    diverge('a read back that did not arrive leaves the staging resource as it'
-                        + ' was');
-                }
-                if (to.guest)
-                {
-                    to.hostNewer = true;
-                }
-                if (to.readback === waiting)
-                {
-                    to.readback = null;
-                }
-                resolve();
+            }
+            else
+            {
+                diverge('a read back that did not arrive leaves the staging resource as it'
+                    + ' was');
+            }
+            if (to.guest)
+            {
+                to.hostNewer = true;
+            }
+            if (to.readback === waiting)
+            {
+                to.readback = null;
+            }
+            resolve();
+        };
+    };
+
+    /**
+     * A depth texture's level and slice read back into a staging resource:
+     * WebGPU copies no depth with stencil, and no 24-bit depth, out of a
+     * texture, so a compute pass loads every texel and writes the words
+     * Direct3D keeps for its format (`DEPTH_READBACK`), which come back as a
+     * read back's image does.
+     *
+     * @param {any} destination @param {number} destinationSubresource
+     * @param {{ x: number, y: number, z: number }} at
+     * @param {any} source @param {number} sourceSubresource @param {Box | null} box
+     * @returns {boolean}
+     */
+    const depthReadback = (destination, destinationSubresource, at, source,
+        sourceSubresource, box)=>
+    {
+        const from = backingOf(source);
+        const format = from.layout.storage.format;
+        const shape = DEPTH_READBACK[format];
+        if (!shape)
+        {
+            return false;
+        }
+        const src = subresourceOf(source, sourceSubresource);
+        const dst = subresourceOf(destination, destinationSubresource);
+        const level = from.layout.levels[src.level];
+        const toLevel = backingOf(destination).layout.levels[dst.level];
+        const region = box ?? { left: 0, top: 0, right: level.width, bottom: level.height };
+        const size = {
+            width: Math.min(Math.min(region.right, level.width) - region.left,
+                toLevel.width - at.x),
+            height: Math.min(Math.min(region.bottom, level.height) - region.top,
+                toLevel.height - at.y),
+        };
+        if (size.width <= 0 || size.height <= 0)
+        {
+            return true;
+        }
+        const texel = TEXEL_BYTES[format];
+        const bytes = Math.ceil((level.width * level.height * texel) / 4) * 4;
+        const out = backend.createDynamicBuffer({ label: 'd3d10:depth-readback',
+            size: Math.max(16, bytes),
+            usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC, keep: false, gpuOnly: true });
+        out.markRead();
+        /** @param {string} aspect */
+        const view = aspect=>from.texture.createView({ label: `d3d10:depth-readback:${aspect}`,
+            dimension: '2d', aspect, baseMipLevel: src.level, mipLevelCount: 1,
+            baseArrayLayer: src.slice, arrayLayerCount: 1 });
+        const entries = [{ binding: 0, resource: view('depth-only') },
+            ...(shape.stencil ? [{ binding: 1, resource: view('stencil-only') }] : []),
+            { binding: 2, resource: { buffer: out.gpu, offset: 0, size: Math.max(16, bytes) } }];
+        record({
+            kind: 'dispatch',
+            what: 'a depth texture\'s read back was skipped',
+            ids: [from.id],
+            pipeline: computePipelineFor(`depth-readback:${format}`, depthReadbackShader(format),
+                [{ binding: 0, visibility: STAGE.COMPUTE,
+                    texture: { sampleType: 'depth', viewDimension: '2d' } },
+                ...(shape.stencil ? [{ binding: 1, visibility: STAGE.COMPUTE,
+                    texture: { sampleType: 'uint', viewDimension: '2d' } }] : []),
+                { binding: 2, visibility: STAGE.COMPUTE, buffer: { type: 'storage' } }],
+                'd3d10:depth-readback'),
+            entries,
+            grid: [Math.ceil(bytes / 4 / 64), 1, 1],
+        });
+        const deliver = stagingDelivery(destination, destinationSubresource, at, region, size,
+            texel);
+        record({
+            kind: 'readbackBuffer',
+            ranges: [{ buffer: out.gpu, offset: 0, size: bytes }],
+            /** @param {Uint8Array[] | null} results */
+            deliver(results){
+                deliver(results ? { width: level.width, height: level.height,
+                    data: results[0] } : null);
             },
         });
-        to.readback = waiting;
+        backend.releaseDynamicBuffer(out);
         return true;
     };
 
@@ -4043,10 +4209,11 @@ export function createRenderer(services){
         const settleClears = id=>{
             for (const [key, clear] of [...pendingClears])
             {
-                if (clear.color && key.startsWith(`${id}:`))
+                if (key.startsWith(`${id}:`) && clear.target)
                 {
+                    // A depth clear is made by a pass over the depth alone.
                     closePass();
-                    passFor([clear.target], null);
+                    passFor(clear.color ? [clear.target] : [], clear.color ? null : clear.target);
                 }
             }
             closePass();
@@ -4141,6 +4308,7 @@ export function createRenderer(services){
                     // Two clears of one half each add up; a later clear of a
                     // half replaces the earlier value of that half.
                     pendingClears.set(command.target.key, {
+                        target: command.target,
                         flags: (previous ? previous.flags : 0) | command.flags,
                         depth: (command.flags & D3D10_CLEAR.DEPTH)
                             ? command.depth

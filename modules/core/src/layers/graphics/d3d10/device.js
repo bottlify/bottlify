@@ -340,6 +340,8 @@ const D3D11_DRIVER_TYPE = Object.freeze({
 });
 
 /** D3D11_CREATE_DEVICE_* : every bit a program may pass. */
+/** D3D11_CREATE_DEVICE_VIDEO_SUPPORT. */
+const D3D11_CREATE_DEVICE_VIDEO_SUPPORT = 0x800;
 const D3D11_CREATE_DEVICE_MASK = 0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x800;
 
 /**
@@ -403,6 +405,12 @@ export function D3D11CreateDevice(adapter, driverType, software, flags, levels, 
         || (flags & ~D3D11_CREATE_DEVICE_MASK) !== 0)
     {
         return E_INVALIDARG;
+    }
+    // No video device stands behind a device yet (decision A80, temporary): a
+    // program that asks for one decodes its video another way.
+    if ((flags & D3D11_CREATE_DEVICE_VIDEO_SUPPORT) !== 0)
+    {
+        return DXGI_ERROR_UNSUPPORTED;
     }
     const asked = levels && levels.length > 0 ? levels : DEFAULT_LEVELS_11;
     if (asked.some(level=>!KNOWN_LEVELS.has(level)))

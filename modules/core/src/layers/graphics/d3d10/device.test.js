@@ -2426,3 +2426,19 @@ test('a Direct3D 10 device keeps the rasterizer state it binds past the last rel
     device.ClearState();
     assertFullyReleased(device);
 });
+
+test('a device asked for video support is refused as one without it: no video device stands'
+    + ' behind it yet (decision A80, temporary; test_video_support, d3d11.c:37722)', ()=>{
+    for (const [adapter, driverType] of /** @type {[any, number][]} */ ([[null, 1], [{}, 0]]))
+    {
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: true };
+        assert.equal(D3D11CreateDevice(adapter, driverType, null, 0x800, null, out, {}),
+            0x887a0004);
+        assert.equal(out.device, null);
+    }
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, {}), 0x80070057,
+        'an unknown driver with no adapter is a bad argument before anything else');
+});
