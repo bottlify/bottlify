@@ -4159,6 +4159,7 @@ async function buildApp(options){
     let retiredAtFrameStart = 0;
     let interpretedAtFrameStart = 0;
     let translateAtFrameStart = 0;
+    let exitsAtFrameStart = 0;
     let writtenAtFrameStart = 0;
     let heapAtFrameStart = 0;
     /** The JS heap, where the runtime will say; a frame's growth is what the host allocated. */
@@ -4797,6 +4798,8 @@ async function buildApp(options){
                                 // Translating on this thread, inside the guest's slices.
                                 journal.note('translateMs',
                                     Math.round(cpu.translateMs() - translateAtFrameStart));
+                                // Translated code leaving for the runtime, each a dispatch.
+                                journal.note('exits', cpu.translatedExits() - exitsAtFrameStart);
                                 journal.note('hostWrittenBytes',
                                     cpu.hostWrittenBytes() - writtenAtFrameStart);
                                 // Only where the heap can be read: a worker has no
@@ -4830,6 +4833,7 @@ async function buildApp(options){
                             retiredAtFrameStart = cpu.instructionCount();
                             interpretedAtFrameStart = cpu.interpretedSteps();
                             translateAtFrameStart = cpu.translateMs();
+                            exitsAtFrameStart = cpu.translatedExits();
                             writtenAtFrameStart = cpu.hostWrittenBytes();
                             heapAtFrameStart = heapUsed();
                         }

@@ -948,6 +948,7 @@ export function keepFrames(app, state){
             notes: { interpreted: frame.notes?.interpreted ?? 0,
                 instructions: frame.notes?.instructions ?? 0,
                 translateMs: frame.notes?.translateMs ?? 0,
+                exits: frame.notes?.exits ?? 0,
                 // Absent where the heap cannot be read, which the drops say.
                 heapDelta: frame.notes?.heapDelta },
             longest: frame.longest });

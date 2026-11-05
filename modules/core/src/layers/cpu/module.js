@@ -1465,6 +1465,15 @@ export function createCpuModule(){
                  * time. 0 with no translator.
                  */
                 translateMs: ()=>state.cork?.counters?.().translateMs ?? 0,
+                /**
+                 * Times translated code has left for the runtime, all told: at a
+                 * target it had no translation for, or out of budget. 0 with no
+                 * translator.
+                 */
+                translatedExits: ()=>{
+                    const exits = state.cork?.counters?.().exits;
+                    return exits ? exits.untranslated + exits.budget : 0;
+                },
                 hostWrittenBytes: ()=>started().hostWrittenBytes(),
                 /**
                  * An engine's own account of where the guest ran, by address and
