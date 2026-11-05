@@ -2587,3 +2587,18 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   the baseline tier's slower first runs: the frames fell to half.
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
 - **Decision.** V8's defaults stay.
+
+
+### 2026-11-05: the translator's longest hold on the engine thread (holdMs 1 against 4), and a correction
+
+- **Idea.** A dropped frame on new code held about 3 ms of translating, near `holdMs` (4 ms at a
+  stretch); a hold of 1 ms would cut the share of it any one frame takes.
+- **Workload.** As the holdShare entry above, `--cork '{"holdMs":H}'`, alternated, two runs each.
+- **Values.** Car Chase low, fps / 1% low / drops: 4: 79.6 / 5.5 / 428 and 141.7 / 11.0 / 185;
+  1: 127.4 / 8.1 / 207 and 105.2 / 7.6 / 283.
+- **Why.** Not measured: two runs of the same arm differ by more than the arms do (79.6 and 141.7
+  fps). Two runs an arm on this VM cannot tell an effect of this size, and the holdShare entry
+  above, measured so, is as inconclusive rather than refuted.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** `holdMs` stays 4. Changes to the translator's pacing are judged on a node bench
+  of new code met mid-frame, not on these runs.
