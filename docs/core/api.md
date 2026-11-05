@@ -198,7 +198,7 @@ counts the frames that went so.
 | `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, guest time by module, and the guest code around its most-sampled addresses (`hotCode`, 4 KiB pages as base64). The app layer's table lists the divergences reported so far (`divergences`, the first 128) and every loss with its count (`losses`), so an error the journal has let go of is still there. Devices drawing in the graphics worker are asked for their counters and awaited for up to a second, so the graphics table includes them. A request, not for polling. |
 | `translationPool()` | The run's pool of translation workers as it stands: how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and a journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
 | `trace()`, `traffic()` | The last host calls as text; messages counted by kind. |
-| `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
+| `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `drops` (the frame rate, the slowest 1% and 0.1% as rates, and each frame over twice the median named by what grew in it), `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
 | `guestProfile.*` | Where the guest ran, by address (`available`, `start`, `read`, `stop`). |
 
 ## Events

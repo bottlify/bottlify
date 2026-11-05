@@ -33,6 +33,7 @@ import { serveStatic } from './server.mjs';
 import { frameSpread } from './frame-window.mjs';
 import { summariseAllocations } from './profile.mjs';
 import { openBundle } from '../btl.mjs';
+import { frameDrops } from '../../modules/core/src/frame-drops.js';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 
@@ -346,6 +347,26 @@ function describe(before, after, windowMs){
         say('');
     }
 
+    const report = after.drops;
+    if (report && report.frames > 0)
+    {
+        say(`how evenly the ${report.frames} frames came: ${report.fps.toFixed(1)} fps on average,`
+            + ` 1% low ${report.low1.toFixed(1)}, 0.1% low ${report.low01.toFixed(1)};`
+            + ` median ${asMs(report.medianMs)}, worst ${report.worstMs.map(asMs).join(' ')}`);
+        say(`  ${report.drops.length} drop(s) over twice the median, by what grew`
+            + ` (GPU time ${report.gpu}):`);
+        for (const [cause, count] of Object.entries(report.byCause)
+            .sort((one, two)=>Number(two[1]) - Number(one[1])))
+        {
+            say(`    ${String(count).padStart(5)}  ${cause}`);
+        }
+    }
+    else
+    {
+        say('how evenly the frames came: not measured (no frame read in the window)');
+    }
+    say('');
+
     say('the slowest frames, and what they were made of:');
     for (const frame of after.worstFrames.slice(0, 8))
     {
@@ -522,8 +543,26 @@ try
     const before = await read();
     const startedAt = Date.now();
     console.log(`watching for ${options.seconds}s`);
-    await sleep(options.seconds * 1000);
-    const after = await read();
+    // The engine keeps its last few seconds of frames; read every two
+    // seconds, each frame kept once by its number, the window's frames are
+    // all here for the drops and the slowest frames' rates.
+    /** @type {Map<number, any>} */
+    const watched = new Map();
+    const from = Math.max(-1, ...before.recentFrames.map((/** @type {any} */ one)=>one.index));
+    let after = before;
+    while (Date.now() - startedAt < options.seconds * 1000)
+    {
+        await sleep(Math.min(2000, Math.max(0, options.seconds * 1000 - (Date.now() - startedAt))));
+        after = await read();
+        for (const one of after.recentFrames)
+        {
+            if (one.index > from)
+            {
+                watched.set(one.index, one);
+            }
+        }
+    }
+    after.drops = frameDrops([...watched.values()].sort((one, two)=>one.index - two.index));
     if (options.allocations)
     {
         const { profile } = await cdp.send('HeapProfiler.stopSampling', {}, sessionId);

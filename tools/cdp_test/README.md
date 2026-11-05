@@ -202,6 +202,15 @@ ones need the graphics worker.
 | `processes()`, `diagnosticsOf(id)` | every process standing; one process's diagnostics |
 | `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
 
+One more is on `app.log` rather than `app.debug`, since it reads the profiler's frames:
+`app.log.drops(n)` (default 1000; the engine keeps the last 240, about four seconds) answers
+the mean frame rate, the slowest 1% and 0.1% as rates, the worst frames, and every frame over
+twice the median named by the part that grew past an ordinary frame's: `translation` (more
+modules instantiated or more interpreted), `guest work` (more instructions), `guest slower` (the
+same work, slower), `host <phase>`, `fetch` or `waiting` (parked), `outside the engine` (wall
+time no phase accounts for: `garbage collection` when the heap shrank). GPU time is not in the
+frame record yet and is said to be not measured (`modules/core/src/frame-drops.js`).
+
 #### A wrong picture in a running game, step by step
 
 The person at the game holds the pause; nothing here presses resume or reloads the tab.
@@ -296,7 +305,9 @@ The whole-run scenario is the wrong question for a frame rate: a run is
 dominated by starting up. This one lets the title settle, watches for a fixed
 window, and reports per frame: how much was ours and how much the guest's,
 which phases made it up, and how the slow frames differ from the ordinary ones.
-A frame is counted where the engine presents.
+A frame is counted where the engine presents. The window's frames are read every two seconds and
+kept once each, so the report also says how evenly they came (mean, 1% low, 0.1% low, worst)
+and how many drops each cause made, as `app.log.drops` names them.
 
 | flag | default | what it does |
 |---|---|---|

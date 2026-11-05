@@ -31,6 +31,7 @@
 import { createDomInput } from '../layers/input/dom.js';
 import { serveKeeper, MIRROR_MS, MIRROR_LIMIT, MIRROR_CAPACITY } from './keeper.js';
 import { createRingMemory } from '../system/ring.js';
+import { frameDrops } from '../frame-drops.js';
 import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
 
 /**
@@ -608,6 +609,14 @@ export async function createRemoteApp(wiring){
             /** @param {number} [count] */
             frames: count=>started.log ? ask('frames', [count])
                 : request('log.frames', [count]),
+            /**
+             * The last `count` frames' drops, each told why, and the rates of
+             * the slowest frames (`frame-drops.js`), read on this thread.
+             *
+             * @param {number} [count]
+             */
+            drops: async count=>frameDrops(await (started.log ? ask('frames', [count ?? 1000])
+                : request('log.frames', [count ?? 1000]))),
             /** @param {string} layer */
             counters: layer=>started.log ? ask('counters', [layer])
                 : request('log.counters', [layer]),

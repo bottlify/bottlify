@@ -20,13 +20,15 @@
  * And how evenly the span's frames came: the gaps between its presents at the
  * median, the 95th and 99th percentile and the worst, and how many were a
  * hitch -- over twice the median, or over 100 ms. A mean that holds while
- * these move is a run that stutters at the same frame rate. `--frames 0` runs
+ * these move is a run that stutters at the same frame rate; the slowest 1% and
+ * 0.1% of the gaps, as rates ("1% low"), say it in a player's numbers. `--frames 0` runs
  * the span to the last present. `--seconds A-B` takes the presents from A to B
  * seconds after the first instead, as the report's frame series counts them:
  * for a program whose load ends in frames of their own (a film).
  */
 
 import { readFileSync } from 'node:fs';
+import { frameDrops } from '../modules/core/src/frame-drops.js';
 
 const args = process.argv.slice(2);
 const flag = (/** @type {string} */ name, /** @type {number} */ fallback)=>(
@@ -83,4 +85,7 @@ for (const file of files)
     console.log(`  gaps ms: median ${median.toFixed(1)}, p95 ${at(0.95).toFixed(1)},`
         + ` p99 ${at(0.99).toFixed(1)}, max ${at(1).toFixed(1)}; hitches: ${over(2 * median)}`
         + ` over twice the median, ${over(100)} over 100 ms, of ${gaps.length}`);
+    const rates = frameDrops(gaps.map(gap=>({ ms: gap, byKind: {} })));
+    console.log(`  fps: ${rates.fps.toFixed(1)} on average, 1% low ${rates.low1.toFixed(1)},`
+        + ` 0.1% low ${rates.low01.toFixed(1)}`);
 }
