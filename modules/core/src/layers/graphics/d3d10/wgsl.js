@@ -2920,8 +2920,7 @@ export function linkProgram(vs, ps, options = {}){
     // Direct3D takes them from its leading one. WebGPU draws a pass into one
     // layer through one viewport, so a draw that routes primitives is drawn
     // once a layer or viewport (`layerPass`, `viewportPass`), keeping the
-    // fragments routed there: those of an index past the views' range go
-    // to the first, as Direct3D sends them.
+    // fragments routed there.
     for (const [name, value] of routes)
     {
         const location = byRegister.size + cutIn.length;
@@ -2935,8 +2934,12 @@ export function linkProgram(vs, ps, options = {}){
     {
         if (pass && routes.has(name))
         {
-            cutLoad.push(`    if (in.${name} != ${pass.index}u && (${pass.index}u != 0u`
-                + ` || in.${name} < ${pass.count}u)) { discard; }`);
+            // A layer past the views' goes to the first; a viewport past the
+            // viewports set to none (test_multiple_viewports).
+            cutLoad.push(name === 'rtLayer'
+                ? `    if (in.${name} != ${pass.index}u && (${pass.index}u != 0u`
+                    + ` || in.${name} < ${pass.count}u)) { discard; }`
+                : `    if (in.${name} != ${pass.index}u) { discard; }`);
         }
     }
 

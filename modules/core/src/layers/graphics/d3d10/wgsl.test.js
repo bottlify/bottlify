@@ -1129,3 +1129,23 @@ test('alpha to coverage on one sample keeps a fragment where the first target\'s
         /\{ if \(bitcast<f32>\(o0\.w\) < 0\.5\) \{ discard; \} return FragmentOut\(/);
     assert.doesNotMatch(linkProgram(vs, ps).fragment, /discard/);
 });
+
+test('a primitive\'s viewport index travels flat, and a drawing through one viewport keeps the'
+    + ' fragments routed there (test_multiple_viewports, d3d11.c:31295)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_ViewportArrayIndex', systemValue: SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX,
+                register: 1, mask: 0x1, componentType: COMPONENT_TYPE.UINT }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'x'), SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX),
+            mov(o(0), v(0)), mov(o(1, 'x'), v(0, 'x')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const second = linkProgram(vs, ps, { viewportPass: { index: 1, count: 2 } });
+    assert.deepEqual(second.unsupported, []);
+    assert.match(second.vertex, /@interpolate\(flat\) rtViewport: u32,/);
+    assert.match(second.fragment,
+        /if \(in\.rtViewport != 1u\) \{ discard; \}/);
+});

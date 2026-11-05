@@ -2002,7 +2002,7 @@ export function createRenderer(services){
             state.depthFormat ?? '-', state.depthReadOnly ?? 0,
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
-            state.indirect ? 'indirect' : '', state.layerPass ?? '',
+            state.indirect ? 'indirect' : '', state.layerPass ?? '', state.viewportPass ?? '',
         ].join('|');
         const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}`
             : state.geometry ? `${key}|gs:${idOf(state.geometry.shader)}:${state.geometry.stream}`
@@ -2095,6 +2095,8 @@ export function createRenderer(services){
                 && state.sampleCount === 1,
             clipDistances: backend.hasFeature?.('clip-distances') === true,
             ...(state.layerPass ? { layerPass: { index: layerIndex, count: layerCount } } : {}),
+            ...(state.viewportPass ? { viewportPass: { index: Number(state.viewportPass
+                .split('/')[0]), count: Number(state.viewportPass.split('/')[1]) } } : {}),
             ...(pulling ? { vertexPull: pulling.pull } : {}) };
         const program = state.hullShader
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
@@ -4458,9 +4460,13 @@ export function createRenderer(services){
              * The draw into the targets' layer `layerPass` names, or into
              * their first where its primitives name none.
              *
+             * Through the viewport `viewportPass` names where its primitives
+             * name one, keeping theirs.
+             *
              * @param {{ index: number, count: number } | null} layerPass
+             * @param {{ index: number, count: number } | null} [viewportPass]
              */
-            const rasterize = layerPass=>{
+            const rasterize = (layerPass, viewportPass = null)=>{
                 // Every bound render target, by slot, and the depth target: the
                 // first of them sizes the pass, and a draw with a depth target and
                 // no colour one draws depth alone.
@@ -4527,7 +4533,7 @@ export function createRenderer(services){
                     }
                 }
                 const target = (standIns ?? colour).find(entry=>entry) ?? null;
-                const viewport = pipeline.viewports[0];
+                const viewport = pipeline.viewports[viewportPass?.index ?? 0];
                 if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
                 {
                     counters.skipped.noViewport++;
@@ -4581,6 +4587,8 @@ export function createRenderer(services){
                     indexFormat: draw.indexCount === undefined || tessellated || drawnGeometry
                         ? null : indexFormat,
                     layerPass: layerPass ? `${layerPass.index}/${layerPass.count}` : '',
+                    viewportPass: viewportPass
+                        ? `${viewportPass.index}/${viewportPass.count}` : '',
                     // An indirect draw's first instance is on the GPU: its
                     // per-instance streams are read by the vertex stage from there.
                     indirect: !!draw.indirect && !tessellated && !drawnGeometry,
@@ -4592,9 +4600,13 @@ export function createRenderer(services){
                 const rasterizer = pipeline.rasterizerState
                     ? stateDesc(pipeline.rasterizerState)
                     : DEFAULT_RASTERIZER;
-                let scissor = rasterizer.ScissorEnable && pipeline.scissorRects[0]
-                    ? pipeline.scissorRects[0]
-                    : null;
+                const scissorRect = pipeline.scissorRects[viewportPass?.index ?? 0];
+                // A viewport past the scissor rectangles set has an empty one.
+                if (rasterizer.ScissorEnable && viewportPass && !scissorRect)
+                {
+                    return;
+                }
+                let scissor = rasterizer.ScissorEnable && scissorRect ? scissorRect : null;
                 if (standIns && first && depth)
                 {
                     // Nothing is drawn past the overlap, which is what is copied back.
@@ -4746,14 +4758,17 @@ export function createRenderer(services){
                 ?? pipeline.stages.vs.shader)?.container?.outputs ?? [];
             const layers = rasterOutputs.some((/** @type {any} */ element)=>element.systemValue
                 === SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX) ? layersOf(pipeline) : 1;
-            if (layers <= 1)
+            // And those it sends to viewports, once a viewport.
+            const routed = rasterOutputs.some((/** @type {any} */ element)=>
+                element.systemValue === SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX);
+            const viewports = routed ? Math.max(1, pipeline.viewports.length) : 1;
+            for (let layer = 0; layer < layers; layer++)
             {
-                rasterize(null);
-                return;
-            }
-            for (let index = 0; index < layers; index++)
-            {
-                rasterize({ index, count: layers });
+                for (let index = 0; index < viewports; index++)
+                {
+                    rasterize(layers > 1 ? { index: layer, count: layers } : null,
+                        routed ? { index, count: viewports } : null);
+                }
             }
         },
 
