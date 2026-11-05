@@ -27,7 +27,11 @@ import { serveStatic } from './server.mjs';
 import { PATCH_BYTES, TESSELLATOR_BINDINGS, TESSELLATOR_WGSL }
     from '../../modules/core/src/layers/graphics/d3d10/tessellator-wgsl.js';
 import { parseDxbc } from '../../modules/core/src/layers/graphics/d3d10/dxbc.js';
-import { forkPhaseHullShader } from '../../modules/core/src/layers/graphics/d3d10/shader-fixtures.js';
+import {
+    colouredPixelShader, forkPhaseHullShader, passThroughVertexShader, quadDomainShader,
+    quadHullShader,
+} from '../../modules/core/src/layers/graphics/d3d10/shader-fixtures.js';
+import { drawCase, drawPageRunner, fetchCases, scanCases } from './tess-draw.mjs';
 import { HULL_BINDING, linkHull } from '../../modules/core/src/layers/graphics/d3d10/wgsl.js';
 import { tessellate } from '../../modules/core/src/layers/graphics/d3d10/tessellator.js';
 
@@ -332,7 +336,9 @@ async function hullCase(cdp, sessionId){
 
 async function main(){
     const corpus = JSON.parse(gunzipSync(readFileSync(CORPUS)).toString());
-    const server = await serveStatic({ sandboxDir: TOOL_ROOT, srcDir: TOOL_ROOT });
+    // The core's sources at /src/: the draw case runs the engine's own device.
+    const server = await serveStatic({ sandboxDir: TOOL_ROOT,
+        srcDir: resolve(TOOL_ROOT, '../../modules/core/src') });
     const extraFlags = process.argv.flatMap((arg, at)=>(arg === '--chrome-flag'
         ? [process.argv[at + 1]] : []));
     const browser = await launchWithGpu({ headed: process.argv.includes('--headed'), extraFlags });
@@ -365,8 +371,8 @@ async function main(){
             }
             await new Promise(done=>setTimeout(done, 100));
         }
-        await cdp.send('Runtime.evaluate', { expression: `(${pageRunner.toString()})(); null` },
-            sessionId);
+        await cdp.send('Runtime.evaluate', { expression: `(${pageRunner.toString()})();`
+            + ` (${drawPageRunner.toString()})(); null` }, sessionId);
         let adapter = null;
         for (let from = 0; from < corpus.cases.length; from += BATCH)
         {
@@ -413,6 +419,13 @@ async function main(){
         console.log(`${corpus.cases.length - failed}/${corpus.cases.length} patches as the`
             + ` reference, ${points} points; adapter ${JSON.stringify(adapter)}`);
         failed += await hullCase(cdp, sessionId);
+        failed += await scanCases(cdp, sessionId);
+        failed += await fetchCases(cdp, sessionId);
+        failed += await drawCase(cdp, sessionId, { vs: passThroughVertexShader(),
+            // Fractional odd at 4: five segments a side, two of them thin.
+            hs: quadHullShader({ factor: 4, partitioning: 3,
+                corners: [[0, 0], [0, 2], [1, 0], [1, 2]] }),
+            ds: quadDomainShader(), ps: colouredPixelShader() });
     }
     finally
     {

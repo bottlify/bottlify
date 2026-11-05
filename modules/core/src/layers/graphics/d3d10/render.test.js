@@ -39,7 +39,8 @@ import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInputPs,
     dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, l, ld, ldMs, lu, mov, o,
-    passThroughVertexShader, r, ret, s, sample, solidPixelShader, t, utof, v,
+    passThroughVertexShader, quadDomainShader, quadHullShader, r, ret, s, sample,
+    solidPixelShader, t, utof, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -2314,6 +2315,114 @@ test('a geometry shader is made, and a draw with it bound is skipped and counted
     // What is not a geometry shader is the bad argument Windows answers.
     assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
     assert.equal(device.CreateGeometryShader(null, out), 0x80070057);
+});
+
+// --- tessellation ---
+
+/**
+ * A Direct3D 11 device and its context with a triangle's state, a quad hull
+ * shader and its domain shader bound, and the topology a list of one-point
+ * patches.
+ */
+function quadPatches(){
+    const gpu = createFakeDevice();
+    /** @type {string[]} */
+    const divergences = [];
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        presentTo: ()=>{}, now: ()=>0 });
+    /** @type {any} */
+    const out = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out, {
+        backend, createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        createTexture: gpu.device.createTexture,
+        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+    }), S_OK);
+    const { device, context } = out;
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 8, Height: 8,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, BindFlags: D3D10_BIND.RENDER_TARGET }, null, made),
+    S_OK);
+    assert.equal(device.CreateRenderTargetView(made.resource, null, made), S_OK);
+    context.OMSetRenderTargets([made.view], null);
+    assert.equal(device.CreateBuffer({ ByteWidth: 48, Usage: D3D10_USAGE.IMMUTABLE,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    { pSysMem: floatBytes(TRIANGLE.flat()) }, made), S_OK);
+    context.IASetVertexBuffers(0, [made.resource], [16], [0]);
+    assert.equal(device.CreateInputLayout([POSITION_ELEMENT], passThroughVertexShader(), made),
+        S_OK);
+    context.IASetInputLayout(made.layout);
+    /** @type {any} */
+    const shaders = {};
+    for (const [stage, create, bytes] of /** @type {const} */ ([
+        ['vs', 'CreateVertexShader', passThroughVertexShader()],
+        ['hs', 'CreateHullShader', quadHullShader({ factor: 3 })],
+        ['ds', 'CreateDomainShader', quadDomainShader()],
+        ['ps', 'CreatePixelShader', colouredPixelShader()]]))
+    {
+        assert.equal(device[create](bytes, made), S_OK, create);
+        shaders[stage] = made.shader;
+    }
+    context.VSSetShader(shaders.vs);
+    context.HSSetShader(shaders.hs);
+    context.DSSetShader(shaders.ds);
+    context.PSSetShader(shaders.ps);
+    context.IASetPrimitiveTopology(33);
+    context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0,
+        MaxDepth: 1 }]);
+    return { gpu, device, context, shaders, divergences };
+}
+
+test('a draw through the tessellator is five compute passes and a draw of the domain shader'
+    + ' over what they made, its count on the GPU', async()=>{
+    const { gpu, device, context, divergences } = quadPatches();
+    context.Draw(3, 0);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(divergences, []);
+    assert.deepEqual(gpu.errors, [], 'the GPU took the frame');
+    const passes = gpu.of('dispatchWorkgroups');
+    assert.deepEqual(passes.map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.replace(/#\d+$/, '')),
+    ['d3d11:vs-patches', 'd3d11:hs', 'd3d11:tessellator', 'd3d11:tessellator-scan',
+        'd3d11:tessellator'], 'in the order they run');
+    assert.deepEqual(passes.map((/** @type {any} */ call)=>call.grid),
+        [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]],
+        'three points, three patches: a group each pass');
+    assert.deepEqual(passes.map((/** @type {any} */ call)=>call.groups.length),
+        [2, 2, 1, 1, 1], 'the shaders\' own resources, then the stage\'s');
+    assert.equal(gpu.count('draw'), 0, 'no draw with a count of its own');
+    assert.equal(gpu.count('drawIndirect'), 1);
+    const pipeline = gpu.of('createRenderPipeline').at(-1).descriptor;
+    assert.equal(pipeline.primitive.topology, 'triangle-list');
+    assert.deepEqual(pipeline.vertex.buffers, [], 'the domain shader reads storage, no stream');
+    const vertex = gpu.of('createShaderModule').find((/** @type {any} */ call)=>
+        call.module === pipeline.vertex.module).descriptor.code;
+    assert.match(vertex, /@builtin\(vertex_index\) dsVertex: u32/);
+    assert.match(vertex, /dsDomain = /);
+    assert.equal(device.diagnostics().tessellation.draws, 1);
+    assert.equal(device.diagnostics().tessellation.patches, 3);
+});
+
+test('a draw through the tessellator Direct3D would not draw is skipped and said: one of the'
+    + ' two stages, patches of another size, no patches', async()=>{
+    const { gpu, device, context, shaders, divergences } = quadPatches();
+    context.DSSetShader(null);
+    context.Draw(3, 0);
+    context.DSSetShader(shaders.ds);
+    context.IASetPrimitiveTopology(35);
+    context.Draw(3, 0);
+    context.IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY.TRIANGLELIST);
+    context.Draw(3, 0);
+    context.Flush();
+    await device.idle();
+    assert.equal(gpu.count('dispatchWorkgroups'), 0);
+    assert.equal(gpu.count('drawIndirect') + gpu.count('draw'), 0);
+    assert.equal(device.diagnostics().skipped.stage, 3);
+    const said = divergences.join('\n');
+    assert.match(said, /a hull shader and no domain shader/);
+    assert.match(said, /3-point patches through a hull shader that takes 1/);
+    assert.match(said, /no patches through a hull shader that takes 1/);
 });
 
 // --- multisampling ---

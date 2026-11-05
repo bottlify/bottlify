@@ -128,6 +128,9 @@ let nextDynamicId = 1;
  * @param {boolean} [options.keep]  False for a buffer whose draws read only
  *     what was written since its last DISCARD -- a renderer's own scratch
  *     ring: a rename then carries nothing over and resends nothing.
+ * @param {boolean} [options.gpuOnly]  For a buffer only the GPU writes (a
+ *     renderer's buffer between compute passes): no copy is kept on the
+ *     processor, and it is never locked.
  * @param {{ presents: number, submits: number }} [options.frames]  The frames
  *     presented and submitted, counted once for every buffer of a backend; without
  *     it the buffer counts its own `markPresent` and `endFrame` calls.
@@ -144,7 +147,7 @@ export function createDynamicBuffer(options){
     // The shadow copy is padded so an outward-aligned upload of the tail cannot
     // run past the allocation.
     const capacity = Math.ceil(options.size / alignment) * alignment;
-    const shadow = new Uint8Array(capacity);
+    const shadow = new Uint8Array(options.gpuOnly ? 0 : capacity);
 
     /** @type {any[]} */
     const available = [];

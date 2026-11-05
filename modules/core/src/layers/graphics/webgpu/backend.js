@@ -1085,12 +1085,14 @@ export function createBackend(options){
                 /**
                  * A compute shader run over a grid of thread groups, in a
                  * compute pass of its own between the frame's render passes,
-                 * its one group bound as the shader declared it.
+                 * its one group bound as the shader declared it, or its
+                 * groups (`groups`, numbered by their places).
                  *
                  * The grid is three numbers, or the buffer and offset the GPU
                  * reads three words of it from.
                  *
-                 * @param {{ pipeline: any, layout: any, entries: any[], label?: string,
+                 * @param {{ pipeline: any, layout?: any, entries?: any[], label?: string,
+                 *     groups?: { layout: any, entries: any[] }[],
                  *     grid: number[] | { buffer: any, offset: number } }} work
                  */
                 dispatch(work){
@@ -1098,7 +1100,9 @@ export function createBackend(options){
                     const pass = /** @type {any} */ (encoder)
                         .beginComputePass({ label: work.label ?? 'dispatch' });
                     pass.setPipeline(work.pipeline);
-                    pass.setBindGroup(0, cache.get(work.layout, work.entries, work.label));
+                    (work.groups ?? [{ layout: work.layout, entries: work.entries ?? [] }])
+                        .forEach((group, slot)=>pass.setBindGroup(slot,
+                            cache.get(group.layout, group.entries, work.label)));
                     if (Array.isArray(work.grid))
                     {
                         pass.dispatchWorkgroups(work.grid[0], work.grid[1], work.grid[2]);

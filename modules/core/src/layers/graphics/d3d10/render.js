@@ -59,8 +59,9 @@ import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, STORAGE_TEXTURE_FORMAT, linkCompute,
-    linkProgram, translateShader,
+    linkDomain, linkProgram, translateShader,
 } from './wgsl.js';
+import { DOMAIN_ENTRIES, FIRST_PATCH_LIST, createTessellation } from './tessellation.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
@@ -514,7 +515,10 @@ export function createRenderer(services){
             noShader: 0,
             untranslatable: 0,
             pipeline: 0,
-            /** A draw with a geometry, hull or domain shader bound. */
+            /**
+             * A draw with a geometry shader bound, or one through the
+             * tessellator Direct3D would not draw or that cannot be drawn.
+             */
             stage: 0,
         },
         /** @type {string[]} */
@@ -708,9 +712,10 @@ export function createRenderer(services){
      */
     const bufferUsageOf = desc=>{
         const usage = /** @type {any} */ (BufferUsage);
+        // Storage for every buffer: a draw through the tessellator reads its
+        // vertex and index buffers as words, in a compute pass.
         return usage.VERTEX | usage.INDEX | usage.UNIFORM | usage.COPY_DST | usage.COPY_SRC
-            | ((desc.BindFlags & (D3D10_BIND.SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS)) !== 0
-                ? usage.STORAGE : 0)
+            | usage.STORAGE
             | ((desc.MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS ? usage.INDIRECT
                 : 0);
     };
@@ -1622,10 +1627,11 @@ export function createRenderer(services){
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
         ].join('|');
+        const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}` : key;
         // Only a draw whose views make a variant of a shader says so.
         return state.vsVariant || state.psVariant
-            ? `${key}|v:${state.vsVariant}/${state.psVariant}`
-            : key;
+            ? `${keyed}|v:${state.vsVariant}/${state.psVariant}`
+            : keyed;
     };
 
     /** @type {WeakMap<object, number>} */
@@ -1690,13 +1696,18 @@ export function createRenderer(services){
         /** @type {(string | null)[]} */
         const formats = state.targetFormats;
         const bound = formats.flatMap((format, index)=>(format ? [index] : []));
-        const program = linkProgram(vs, ps, { targets: bound });
+        const program = state.hullShader
+            ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
+                tessellationOf().hullOf(state.hullShader).stage, { targets: bound })
+            : linkProgram(vs, ps, { targets: bound });
         if (program.unsupported.length > 0)
         {
             throw Object.assign(new Error('the shaders cannot be translated:'
                 + ` ${program.unsupported.join('; ')}`), { untranslatable: true });
         }
-        const layout = vertexLayouts(state.inputLayout, program, state.strides);
+        // A domain shader's vertices come from storage, not from buffers.
+        const layout = state.hullShader ? { buffers: [], slots: [] }
+            : vertexLayouts(state.inputLayout, program, state.strides);
         if (typeof layout === 'string')
         {
             throw new Error(layout);
@@ -1775,8 +1786,9 @@ export function createRenderer(services){
             backend.createShaderModule({ code: program.vertex, label: `d3d10:vs#${idOf(vs)}` }),
             backend.createShaderModule({ code: program.fragment, label: `d3d10:ps#${idOf(ps)}` }),
         ]);
-        const groupLayouts = program.groups.map((entries, index)=>
-            layoutFor(entries, `d3d10:${index === 0 ? 'vs' : 'ps'}`));
+        const groupLayouts = [...program.groups,
+            ...(state.hullShader ? [/** @type {any[]} */(DOMAIN_ENTRIES)] : [])]
+            .map((entries, index)=>layoutFor(entries, `d3d10:${['vs', 'ps', 'ds'][index]}`));
         const pipelineLayout = backend.createPipelineLayout({
             label: 'd3d10', bindGroupLayouts: groupLayouts,
         });
@@ -1949,6 +1961,22 @@ export function createRenderer(services){
         };
         targets.set(view, target);
         return target;
+    };
+
+    /** @type {ReturnType<typeof createTessellation> | null} */
+    let tessellation = null;
+    /** What draws through the tessellator are recorded with, made at the first. */
+    const tessellationOf = ()=>{
+        tessellation ??= createTessellation({
+            backend, BufferUsage, lose, layoutFor, idOf, translationOf,
+            bindingsFor: (stage, entries, uavs)=>bindingsFor(stage, entries, uavs),
+            vertexLayouts: (inputLayout, program, strides)=>
+                vertexLayouts(inputLayout, program, strides),
+            backingOf: resource=>backingOf(resource),
+            pipelines,
+            placeholder: ()=>placeholdersOf().storage,
+        });
+        return tessellation;
     };
 
     /**
@@ -3449,15 +3477,12 @@ export function createRenderer(services){
             {
                 return;
             }
-            // WebGPU has no geometry stage and no tessellator: a draw through
-            // one is skipped, never drawn as if the stage were not there.
-            const absent = [['gs', 'geometry'], ['hs', 'hull'], ['ds', 'domain']]
-                .find(([stage])=>pipeline.stages[/** @type {'gs' | 'hs' | 'ds'} */ (stage)]
-                    ?.shader && !(stage === 'gs' && streaming));
-            if (absent)
+            // WebGPU has no geometry stage: a draw through one is skipped,
+            // never drawn as if the stage were not there.
+            if (pipeline.stages.gs?.shader && !streaming)
             {
                 counters.skipped.stage++;
-                lose(`a draw with a ${absent[1]} shader bound is skipped: WebGPU has no such`
+                lose('a draw with a geometry shader bound is skipped: WebGPU has no such'
                     + ' stage, and none is emulated');
                 return;
             }
@@ -3468,7 +3493,17 @@ export function createRenderer(services){
                 counters.skipped.noShader++;
                 return;
             }
-            const topology = TOPOLOGY[pipeline.topology];
+            // Through the tessellator: compute passes, then a draw of the
+            // domain shader over what they made (`tessellation.js`).
+            const tessellating = pipeline.stages.hs?.shader || pipeline.stages.ds?.shader
+                || pipeline.topology >= FIRST_PATCH_LIST;
+            const tessellated = tessellating ? tessellationOf().prepare(pipeline, draw) : null;
+            if (tessellating && !tessellated)
+            {
+                counters.skipped.stage++;
+                return;
+            }
+            const topology = tessellated ? tessellated.topology : TOPOLOGY[pipeline.topology];
             if (!topology)
             {
                 diverge(`primitive topology ${pipeline.topology} cannot be drawn`);
@@ -3476,11 +3511,13 @@ export function createRenderer(services){
             }
             const indexFormat = INDEX_FORMAT[pipeline.indexFormat] ?? null;
             const state = {
-                vertexShader: pipeline.stages.vs.shader,
+                vertexShader: tessellated ? pipeline.stages.ds.shader : pipeline.stages.vs.shader,
+                hullShader: tessellated ? pipeline.stages.hs.shader : null,
                 pixelShader: pipeline.stages.ps.shader,
                 // No layout feeds no attribute: the draw runs on what the
                 // vertex shader makes of its system values alone.
-                inputLayout: pipeline.inputLayout ?? NO_INPUT_LAYOUT,
+                inputLayout: tessellated ? NO_INPUT_LAYOUT
+                    : pipeline.inputLayout ?? NO_INPUT_LAYOUT,
                 blendState: pipeline.blendState,
                 depthStencilState: pipeline.depthStencilState,
                 rasterizerState: pipeline.rasterizerState,
@@ -3491,9 +3528,9 @@ export function createRenderer(services){
                 depthReadOnly: depth ? depth.readOnly : 0,
                 sampleMask: pipeline.sampleMask,
                 sampleCount: sizing.sampleCount,
-                strides: pipeline.vertexStrides.slice(),
-                indexFormat: draw.indexCount === undefined ? null : indexFormat,
-                vsVariant: variantOf(pipeline.stages.vs),
+                strides: tessellated ? [] : pipeline.vertexStrides.slice(),
+                indexFormat: draw.indexCount === undefined || tessellated ? null : indexFormat,
+                vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
                 psVariant: variantOf(pipeline.stages.ps),
             };
             const rasterizer = pipeline.rasterizerState
@@ -3513,8 +3550,12 @@ export function createRenderer(services){
                         bottom: Math.min(scissor.bottom, bottom) }
                     : { left: 0, top: 0, right, bottom };
             }
-            const program = linkProgram(translationOf(state.vertexShader, state.vsVariant),
-                translationOf(state.pixelShader, state.psVariant));
+            const program = tessellated
+                ? linkDomain(translationOf(state.vertexShader, state.vsVariant),
+                    state.vertexShader.container, translationOf(state.pixelShader, state.psVariant),
+                    pipeline.stages.hs.shader.container, tessellated.hull.stage)
+                : linkProgram(translationOf(state.vertexShader, state.vsVariant),
+                    translationOf(state.pixelShader, state.psVariant));
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
                 const backing = buffer ? backingOf(buffer) : null;
                 if (!backing || !backing.gpu)
@@ -3551,16 +3592,23 @@ export function createRenderer(services){
             }
             const copiedOut = standIns ? standInsIn(colour, standIns,
                 /** @type {any} */ (depth)) : null;
+            tessellated?.commands.forEach(record);
+            const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
             record({
                 kind: 'draw',
-                pipeline: pipelineFor(state),
+                // Not drawn when a pass before it could not be built: its
+                // arguments would be whatever the buffer last held.
+                pipeline: tessellated
+                    ? Promise.all([pipelineFor(state), ...tessellated.waits]).then(([one])=>one)
+                    : pipelineFor(state),
                 target,
                 targets: standIns ?? colour,
                 depth,
                 groups: [
-                    bindingsFor(pipeline.stages.vs, program.groups[0]),
+                    bindingsFor(drawStage, program.groups[0]),
                     bindingsFor(pipeline.stages.ps, program.groups[1],
                         pipeline.pixelViews ?? NO_VIEWS),
+                    ...(tessellated ? [tessellated.group] : []),
                 ],
                 vertexBuffers,
                 indexBuffer: indexBacking && indexBacking.gpu && indexFormat
@@ -3581,17 +3629,17 @@ export function createRenderer(services){
                         height: scissor.bottom - scissor.top }
                     : null,
                 topology,
-                vertexCount: draw.vertexCount,
-                startVertex: draw.startVertex,
-                instanceCount: draw.instanceCount ?? 1,
-                startInstance: draw.startInstance ?? 0,
+                vertexCount: tessellated ? 0 : draw.vertexCount,
+                startVertex: tessellated ? 0 : draw.startVertex,
+                instanceCount: tessellated ? 1 : draw.instanceCount ?? 1,
+                startInstance: tessellated ? 0 : draw.startInstance ?? 0,
                 stencilRef: pipeline.stencilRef,
                 blendFactor: [...pipeline.blendFactor],
                 occlusion: occluding.size > 0 ? [...occluding] : null,
-                indexCount: draw.indexCount ?? null,
+                indexCount: tessellated ? null : draw.indexCount ?? null,
                 startIndex: draw.startIndex ?? 0,
                 baseVertex: draw.baseVertex ?? 0,
-                indirect,
+                indirect: tessellated ? tessellated.args : indirect,
             });
             if (copiedOut)
             {
@@ -3613,6 +3661,11 @@ export function createRenderer(services){
                 return chain;
             }
             counters.frames++;
+            const room = tessellation?.endFrame();
+            if (room)
+            {
+                record(room);
+            }
             const backing = backingOf(backBuffer);
             const own = backing.layout.format;
             const shown = CANVAS_FORMAT[own] ?? own;
@@ -3824,6 +3877,7 @@ export function createRenderer(services){
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
+                tessellation: tessellation ? tessellation.diagnostics() : null,
             }, 'lastFrame', { value: lastFrame });
         },
     };
@@ -4038,6 +4092,9 @@ export function createRenderer(services){
                 if (command.kind === 'dispatch')
                 {
                     command.ids.forEach(settleClears);
+                    // The backend ends the open render pass for the compute
+                    // one: the next draw opens another.
+                    closePass();
                     const built = pipelinesNeeded[position];
                     if (built.status === 'rejected')
                     {
@@ -4047,8 +4104,13 @@ export function createRenderer(services){
                             || built.reason}`);
                         continue;
                     }
-                    frame.dispatch({ pipeline: built.value.gpu, layout: built.value.layout,
-                        entries: command.entries, grid: command.grid, label: 'd3d10:cs' });
+                    frame.dispatch(command.groups
+                        ? { pipeline: built.value.gpu, grid: command.grid, label: command.label,
+                            groups: built.value.layouts.map((/** @type {any} */ layout,
+                                /** @type {number} */ index)=>({ layout,
+                                entries: command.groups[index] })) }
+                        : { pipeline: built.value.gpu, layout: built.value.layout,
+                            entries: command.entries, grid: command.grid, label: 'd3d10:cs' });
                     continue;
                 }
                 if (command.kind === 'blit')
@@ -4110,7 +4172,7 @@ export function createRenderer(services){
                 pipeline.groupLayouts.forEach(
                     (/** @type {any} */ layout, /** @type {number} */ index)=>{
                         current.setBindings(index, layout, command.groups[index],
-                            `d3d10:${index === 0 ? 'vs' : 'ps'}`);
+                            `d3d10:${['vs', 'ps', 'ds'][index]}`);
                     });
                 if (passStencil !== command.stencilRef)
                 {

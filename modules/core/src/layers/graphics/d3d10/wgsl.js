@@ -2431,8 +2431,10 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  *
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
- * @param {{ targets?: readonly number[] }} [options]  The locations with a
- *     target bound; every location the shader writes when absent.
+ * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad }} [options]  `targets`:
+ *     the locations with a target bound; every location the shader writes when
+ *     absent. `vertexLoad`: how the vertex stage fills its registers when they do not
+ *     come from vertex buffers (a domain shader's, `linkDomain`).
  * @returns {LinkedProgram}
  */
 export function linkProgram(vs, ps, options = {}){
@@ -2453,7 +2455,8 @@ export function linkProgram(vs, ps, options = {}){
     {
         vsLoad.push(`    var v${index}: ${REG} = ${REG}(0u);`);
     }
-    for (const element of vs.inputs)
+    vsLoad.push(...options.vertexLoad?.load ?? []);
+    for (const element of options.vertexLoad ? [] : vs.inputs)
     {
         if (element.register >= vs.inputRegisters)
         {
@@ -2646,11 +2649,13 @@ export function linkProgram(vs, ps, options = {}){
     // WGSL has no empty struct, so a stage that reads nothing takes nothing.
     const vertex = [
         ...vsDecl.text,
+        ...options.vertexLoad?.text ?? [],
         ...(vsIn.length > 0 ? ['struct VertexIn {', ...vsIn, '};'] : []),
         'struct VertexOut {',
         ...vsOut,
         '};',
-        `@vertex fn vertexMain(${vsIn.length > 0 ? 'in: VertexIn' : ''}) -> VertexOut {`,
+        `@vertex fn vertexMain(${options.vertexLoad?.params
+            ?? (vsIn.length > 0 ? 'in: VertexIn' : '')}) -> VertexOut {`,
         ...vsLoad,
         ...registerDeclarations(vs),
         ...bodyText(vs, `VertexOut(${vsReturn.join(', ')})`),
@@ -2692,7 +2697,8 @@ const HULL_DOMAIN = Object.freeze({ 1: 'isoline', 2: 'tri', 3: 'quad' });
 
 /**
  * @typedef {Object} LinkedHull
- * @property {string} code           WGSL, entry point `hullMain`: one invocation a patch.
+ * @property {string} code           WGSL, entry point `hullMain`: one invocation a patch,
+ *     `hsParams` x the patches, y the patches an instance draws.
  * @property {BindGroupLayoutEntry[]} entries  Group 0, the shader's own resources; group 1
  *     is the stage's (`HULL_BINDING`).
  * @property {{ domain: 'isoline' | 'tri' | 'quad', partitioning: number, output: number,
@@ -2923,7 +2929,9 @@ export function linkHull(container){
         'fn hullMain(@builtin(global_invocation_id) id: vec3<u32>) {',
         '    if (id.x >= hsParams.x) { return; }',
         '    let hsPatch = id.x;',
-        '    primitiveId = hsPatch;',
+        // Patches of every instance in a row: SV_PrimitiveID counts each
+        // instance's from zero.
+        '    primitiveId = hsPatch % max(1u, hsParams.y);',
         `    for (var cp = 0u; cp < ${inputPoints}u; cp++) {`,
         `        for (var reg = 0u; reg < ${inputRegisters}u; reg++) {`,
         `            vicp[cp][reg] = hsIn[(hsPatch * ${inputPoints}u + cp) * ${inputRegisters}u`
@@ -2953,4 +2961,339 @@ export function linkHull(container){
             constantRegisters },
         unsupported: [...new Set(unsupported)],
     };
+}
+
+/**
+ * @typedef {Object} VertexLoad
+ * @property {string[]} text    Module-scope declarations the load reads.
+ * @property {string} params    The vertex entry point's parameters.
+ * @property {string[]} load    Statements filling the stage's registers.
+ */
+
+/** @param {number} mask @returns {number} */
+const firstComponent = mask=>[0, 1, 2, 3].find(c=>(mask & (1 << c)) !== 0) ?? 0;
+
+/**
+ * Statements copying what one stage wrote into the registers the next reads,
+ * element by element as their signatures name them: the same semantic may sit
+ * in another register, or at other components of it, on either side. An
+ * element the writer has no counterpart for is left as it was (zero).
+ *
+ * @param {import('./dxbc.js').SignatureElement[]} from
+ * @param {import('./dxbc.js').SignatureElement[]} to
+ * @param {(register: number) => string} read
+ * @param {(register: number) => string} write
+ * @returns {string[]}
+ */
+function copyBySemantic(from, to, read, write){
+    /** @type {string[]} */
+    const lines = [];
+    for (const element of to)
+    {
+        const source = from.find(candidate=>semanticKey(candidate) === semanticKey(element));
+        if (!source)
+        {
+            continue;
+        }
+        const toFirst = firstComponent(element.mask);
+        const fromFirst = firstComponent(source.mask);
+        for (let c = toFirst; c < 4; c++)
+        {
+            const fc = fromFirst + c - toFirst;
+            if ((element.mask & (1 << c)) !== 0 && fc < 4)
+            {
+                lines.push(`${write(element.register)}.${COMPONENT[c]} = `
+                    + `${read(source.register)}.${COMPONENT[fc]};`);
+            }
+        }
+    }
+    return lines;
+}
+
+/** A float's bits, as a register keeps them. @param {string} value */
+const floatBits = value=>`bitcast<u32>(${value})`;
+
+/**
+ * How a vertex format is read out of a buffer's words: how many bytes an
+ * element takes and the register it makes of the words that hold it, the
+ * components it lacks filled as a vertex fetch fills them (0, 0, 0, 1).
+ *
+ * @param {string} format  A WebGPU vertex format (`gpuformats.js`'s `VERTEX_FORMAT`).
+ * @returns {{ bytes: number, register: (words: string[]) => string } | null}
+ */
+export function vertexFetch(format){
+    if (format === 'unorm10-10-10-2')
+    {
+        return {
+            bytes: 4,
+            register: ([word])=>`${REG}(${[0, 10, 20].map(shift=>
+                floatBits(`f32(extractBits(${word}, ${shift}u, 10u)) / 1023.0`)).join(', ')}, `
+                + `${floatBits(`f32(extractBits(${word}, 30u, 2u)) / 3.0`)})`,
+        };
+    }
+    const bgra = format === 'unorm8x4-bgra';
+    const match = /^(float|uint|sint|unorm|snorm)(8|16|32)(?:x(\d))?$/
+        .exec(bgra ? 'unorm8x4' : format);
+    if (!match)
+    {
+        return null;
+    }
+    const kind = match[1];
+    const bits = Number(match[2]);
+    const count = Number(match[3] ?? 1);
+    const integer = kind === 'uint' || kind === 'sint';
+    const one = integer ? '1u' : '0x3f800000u';
+    return {
+        bytes: (bits * count) / 8,
+        register: words=>{
+            /** @type {string[]} */
+            const components = [];
+            for (let c = 0; c < 4; c++)
+            {
+                if (c >= count)
+                {
+                    components.push(c === 3 ? one : '0u');
+                    continue;
+                }
+                const word = words[Math.floor((c * bits) / 32)];
+                const shift = (c * bits) % 32;
+                const raw = bits === 32 ? word : `extractBits(${word}, ${shift}u, ${bits}u)`;
+                const signed = bits === 32 ? `bitcast<i32>(${word})`
+                    : `extractBits(bitcast<i32>(${word}), ${shift}u, ${bits}u)`;
+                const max = 2 ** (bits - 1) - 1;
+                components.push({
+                    float: bits === 16 ? floatBits(`unpack2x16float(${raw}).x`) : raw,
+                    uint: raw,
+                    sint: `bitcast<u32>(${signed})`,
+                    unorm: floatBits(`f32(${raw}) / ${2 ** bits - 1}.0`),
+                    snorm: floatBits(`max(f32(${signed}) / ${max}.0, -1.0)`),
+                }[kind] ?? raw);
+            }
+            if (bgra)
+            {
+                [components[0], components[2]] = [components[2], components[0]];
+            }
+            return `${REG}(${components.join(', ')})`;
+        },
+    };
+}
+
+/** Group 1 of a vertex shader run as compute (`linkVertexPatches`): what it reads and writes. */
+export const VERTEX_PATCH_BINDING = Object.freeze({
+    indices: 0, out: 1, params: 2, streams: 3,
+});
+
+/**
+ * A vertex shader as one compute program, one invocation a control point of
+ * a draw through the tessellator: the point's vertex found as the draw finds
+ * it (`vsIndices`, the index buffer's words, or the first vertex counted on),
+ * its elements read out of the vertex buffers' words (`vsStream<n>`, one a
+ * buffer the input layout reads, `streams` as `render.js`'s `vertexLayouts`
+ * gives them) and decoded as a vertex fetch decodes them, the shader's body
+ * run, and what it wrote stored (`vsOut`) at the registers the hull shader
+ * reads it from, matched by semantic. An element past the end of its buffer
+ * reads zero.
+ *
+ * `vsParams`: the points, the points an instance draws, the index size in
+ * bytes (0 for a draw without indices), the index buffer's byte offset, the
+ * first index or vertex, the base vertex, the first instance; then, a buffer
+ * each, its byte offset and stride.
+ *
+ * @param {TranslatedShader} vs
+ * @param {import('./dxbc.js').SignatureElement[]} inputs  The hull shader's control point inputs.
+ * @param {number} registers  The hull shader's input registers a point (`LinkedHull.stage`).
+ * @param {{ stepMode: string, attributes: { shaderLocation: number, offset: number,
+ *     format: string }[] }[]} streams
+ * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
+ */
+export function linkVertexPatches(vs, inputs, registers, streams){
+    const declared = declarations(vs, 0, STAGE.COMPUTE);
+    /** @type {string[]} */
+    const unsupported = [...vs.unsupported, ...declared.unsupported];
+    /** @type {string[]} */
+    const fetch = [];
+    streams.forEach((stream, k)=>{
+        const element = stream.stepMode === 'instance'
+            ? 'vsParams.startInstance + vsInstance' : 'vsVertex';
+        // An element far past the buffer's end (an index plus a negative base
+        // vertex wraps to one) reads zero, its address never wrapped back in.
+        fetch.push(`    let vsIn${k} = vsParams.streams[${k}].y == 0u || (${element})`
+            + ` <= arrayLength(&vsStream${k}) * 4u / vsParams.streams[${k}].y;`);
+        fetch.push(`    let vsAt${k} = vsParams.streams[${k}].x + (${element})`
+            + ` * vsParams.streams[${k}].y;`);
+        for (const attribute of stream.attributes)
+        {
+            const decoder = vertexFetch(attribute.format);
+            if (!decoder)
+            {
+                unsupported.push(`vertex format ${attribute.format}`);
+                continue;
+            }
+            const at = `vsAt${k} + ${attribute.offset}u`;
+            const words = Array.from({ length: Math.ceil(decoder.bytes / 4) },
+                (_, index)=>`vsWord${k}(${at} + ${index * 4}u)`);
+            const within = `vsIn${k} && ${at} + ${decoder.bytes}u`
+                + ` <= arrayLength(&vsStream${k}) * 4u`;
+            fetch.push(`    if (${within}) {`,
+                `        v${attribute.shaderLocation} = ${decoder.register(words)};`, '    }');
+        }
+    });
+    for (const element of vs.inputs)
+    {
+        if (element.systemValue === SYSTEM_VALUE.VERTEX_ID)
+        {
+            fetch.push(`    v${element.register}.x = vsVertex;`);
+        }
+        else if (element.systemValue === SYSTEM_VALUE.INSTANCE_ID)
+        {
+            fetch.push(`    v${element.register}.x = vsInstance;`);
+        }
+        else if (element.systemValue !== SYSTEM_VALUE.UNDEFINED)
+        {
+            unsupported.push(`vertex input system value ${element.systemValue}`);
+        }
+    }
+    const out = Math.max(1, registers);
+    const code = [
+        ...declared.text,
+        'struct VsParams { count: u32, perInstance: u32, indexBytes: u32, indexOffset: u32,',
+        '    first: u32, baseVertex: i32, startInstance: u32, pad: u32,',
+        `    streams: array<${REG}, ${Math.max(1, streams.length)}>, }`,
+        `@group(1) @binding(${VERTEX_PATCH_BINDING.indices}) var<storage, read> vsIndices: `
+            + 'array<u32>;',
+        `@group(1) @binding(${VERTEX_PATCH_BINDING.out}) var<storage, read_write> vsOut: `
+            + `array<${REG}>;`,
+        `@group(1) @binding(${VERTEX_PATCH_BINDING.params}) var<uniform> vsParams: VsParams;`,
+        ...streams.map((_, k)=>`@group(1) @binding(${VERTEX_PATCH_BINDING.streams + k})`
+            + ` var<storage, read> vsStream${k}: array<u32>;`),
+        ...Array.from({ length: vs.inputRegisters }, (_, index)=>
+            `var<private> v${index}: ${REG};`),
+        ...Array.from({ length: vs.outputRegisters }, (_, index)=>
+            `var<private> o${index}: ${REG};`),
+        ...streams.map((_, k)=>[
+            `fn vsWord${k}(b: u32) -> u32 {`,
+            `    let w = b >> 2u;`,
+            `    let n = arrayLength(&vsStream${k});`,
+            '    if (w >= n) { return 0u; }',
+            '    let s = (b & 3u) * 8u;',
+            `    let lo = vsStream${k}[w];`,
+            '    if (s == 0u) { return lo; }',
+            `    let hi = select(0u, vsStream${k}[min(w + 1u, n - 1u)], w + 1u < n);`,
+            '    return (lo >> s) | (hi << (32u - s));',
+            '}'].join('\n')),
+        'fn vsIndex(i: u32) -> u32 {',
+        '    let b = vsParams.indexOffset + i * vsParams.indexBytes;',
+        '    if ((b >> 2u) >= arrayLength(&vsIndices)) { return 0u; }',
+        '    let word = vsIndices[b >> 2u];',
+        '    if (vsParams.indexBytes == 2u) { return extractBits(word, (b & 2u) * 8u, 16u); }',
+        '    return word;',
+        '}',
+        'fn vsBody() {',
+        ...Array.from({ length: vs.temps }, (_, index)=>`    var r${index}: ${REG};`),
+        ...vs.indexableTemps.map(temp=>`    var x${temp.index}: array<${REG}, ${temp.size}>;`),
+        ...bodyText(vs, null),
+        '}',
+        '@compute @workgroup_size(64)',
+        'fn vertexPatches(@builtin(global_invocation_id) id: vec3<u32>) {',
+        '    if (id.x >= vsParams.count) { return; }',
+        '    let vsInstance = id.x / max(1u, vsParams.perInstance);',
+        '    let vsPoint = id.x % max(1u, vsParams.perInstance);',
+        '    var vsVertex = vsParams.first + vsPoint;',
+        '    if (vsParams.indexBytes != 0u) {',
+        '        vsVertex = bitcast<u32>(bitcast<i32>(vsIndex(vsParams.first + vsPoint))'
+            + ' + vsParams.baseVertex);',
+        '    }',
+        ...fetch,
+        '    vsBody();',
+        `    var hs: array<${REG}, ${out}>;`,
+        ...copyBySemantic(vs.outputs.filter(element=>element.register < vs.outputRegisters),
+            inputs, register=>`o${register}`, register=>`    hs[${register}]`),
+        `    for (var reg = 0u; reg < ${out}u; reg++) {`,
+        `        vsOut[id.x * ${out}u + reg] = hs[reg];`,
+        '    }',
+        '}',
+    ].join('\n');
+    return { code, entries: declared.entries, unsupported: [...new Set(unsupported)] };
+}
+
+/** Group 2 of a domain shader drawn as the vertex stage (`linkDomain`). */
+export const DOMAIN_BINDING = Object.freeze({
+    points: 0, constants: 1, domain: 2, indices: 3, offsets: 4, params: 5,
+});
+
+/**
+ * A domain shader and a pixel shader as the two stages of a draw over what the
+ * tessellator made, the domain shader as the vertex stage: a vertex is an
+ * index the tessellator wrote (`dsIndices`), drawn in order without an index
+ * buffer; its patch is found among the patches' first indices (`dsOffsets`,
+ * the tessellator's offsets), its domain point (`dsDomain`) where the patch's
+ * points start, and its control points and patch constants are what the hull
+ * program wrote for that patch (`dsPoints`, `dsConstants`), read into the
+ * registers the domain shader names for each semantic. `dsParams`: x the
+ * patches, y the patches an instance draws.
+ *
+ * @param {TranslatedShader} ds
+ * @param {import('./dxbc.js').DxbcContainer} dsContainer
+ * @param {TranslatedShader} ps
+ * @param {import('./dxbc.js').DxbcContainer} hull
+ * @param {LinkedHull['stage']} stage
+ * @param {{ targets?: readonly number[] }} [options]
+ * @returns {LinkedProgram}
+ */
+export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
+    /** @param {import('./dxbc.js').DxbcContainer} container */
+    const constantsOf = container=>(container.chunks.has('PCSG')
+        ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : []);
+    /** @param {import('./dxbc.js').SignatureElement[]} elements */
+    const registersOf = elements=>Math.max(1, ...elements.map(element=>element.register + 1));
+    const inputs = registersOf(ds.inputs);
+    const constants = constantsOf(dsContainer);
+    const points = stage.outputPoints;
+    const third = stage.domain === 'tri' ? '1.0 - dsAt.x - dsAt.y' : '0.0';
+    const linked = linkProgram(ds, ps, { ...options, vertexLoad: {
+        text: [
+            `@group(2) @binding(${DOMAIN_BINDING.points}) var<storage, read> dsPoints: `
+                + `array<${REG}>;`,
+            `@group(2) @binding(${DOMAIN_BINDING.constants}) var<storage, read> dsConstants: `
+                + `array<${REG}>;`,
+            `@group(2) @binding(${DOMAIN_BINDING.domain}) var<storage, read> dsUv: `
+                + 'array<vec2<f32>>;',
+            `@group(2) @binding(${DOMAIN_BINDING.indices}) var<storage, read> dsIndices: `
+                + 'array<u32>;',
+            `@group(2) @binding(${DOMAIN_BINDING.offsets}) var<storage, read> dsOffsets: `
+                + 'array<vec2<u32>>;',
+            `@group(2) @binding(${DOMAIN_BINDING.params}) var<uniform> dsParams: vec4<u32>;`,
+            `var<private> vicp: array<array<${REG}, ${inputs}>, ${points}>;`,
+            `var<private> vpc: array<${REG}, ${registersOf(constants)}>;`,
+            `var<private> dsDomain: ${REG};`,
+            'var<private> primitiveId: u32;',
+        ],
+        params: '@builtin(vertex_index) dsVertex: u32',
+        load: [
+            // The last patch whose indices start at or before this one: a
+            // patch that made none starts where the next one does.
+            '    var dsLow = 0u;',
+            '    var dsHigh = max(dsParams.x, 1u) - 1u;',
+            '    loop {',
+            '        if (dsLow >= dsHigh) { break; }',
+            '        let dsMid = (dsLow + dsHigh + 1u) / 2u;',
+            '        if (dsOffsets[dsMid].y <= dsVertex) { dsLow = dsMid; }'
+                + ' else { dsHigh = dsMid - 1u; }',
+            '    }',
+            '    let dsPatch = dsLow;',
+            '    let dsAt = dsUv[dsOffsets[dsPatch].x + dsIndices[dsVertex]];',
+            `    dsDomain = bitcast<${REG}>(vec4<f32>(dsAt.x, dsAt.y, ${third}, 0.0));`,
+            '    primitiveId = dsPatch % max(1u, dsParams.y);',
+            `    for (var cp = 0u; cp < ${points}u; cp++) {`,
+            ...copyBySemantic(hull.outputs, ds.inputs,
+                register=>`dsPoints[(dsPatch * ${points}u + cp) * ${stage.outputRegisters}u`
+                    + ` + ${register}u]`,
+                register=>`        vicp[cp][${register}]`),
+            '    }',
+            ...copyBySemantic(constantsOf(hull), constants,
+                register=>`dsConstants[dsPatch * ${stage.constantRegisters}u + ${register}u]`,
+                register=>`    vpc[${register}]`),
+        ],
+    } });
+    return linked;
 }

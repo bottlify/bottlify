@@ -189,8 +189,14 @@ event, an error. Neither stops the program.
   renderbuffers draw with one sample; `glBlitFramebuffer` copies colour only; occlusion queries
   answer the viewport's area; 3D textures are accepted and kept nowhere, and a GLSL program that
   samples one does not link.
-- Direct3D 10 and 11 have no geometry, hull or domain stage and no stream output: WebGPU has none
-  and none is emulated. The shaders are made, and a draw with one bound is skipped and counted
+- Direct3D 11 tessellation runs as compute passes before the draw: the vertex shader over the
+  control points, the hull shader a patch an invocation, the fixed-function tessellator (Microsoft's
+  reference, bit for bit), and the domain shader as the vertex stage of an indirect draw. An
+  indirect draw through the tessellator is not drawn (its patch count is on the GPU, and the passes
+  are sized by it), and the patches of a frame past the room its buffers have (grown, up to 8 M
+  points and 16 M indices, after the first frame that needs more) are not drawn and said.
+- Direct3D 10 and 11 have no geometry stage and no stream output: WebGPU has neither and neither is
+  emulated. A geometry shader is made, and a draw with one bound is skipped and counted
   (`roadmap/decisions.md`, A75). `CreateGeometryShaderWithStreamOutput` takes or refuses the
   declaration as Windows does and streams nothing out; one made of a vertex shader's bytecode is
   no stage, and its draws go on (or rasterize nothing, with no stream rasterized).

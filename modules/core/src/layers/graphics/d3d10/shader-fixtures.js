@@ -19,7 +19,7 @@
  */
 
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
-import { OPCODE, OPERAND, SELECTION } from './sm4.js';
+import { MODIFIER, OPCODE, OPERAND, SELECTION } from './sm4.js';
 
 const COMPONENT_INDEX = { x: 0, y: 1, z: 2, w: 3 };
 
@@ -79,6 +79,8 @@ export const vForkInstanceID = components=>
     register(OPERAND.INPUT_FORK_INSTANCE_ID, [], components);
 /** @param {string} [components] */
 export const vDomain = components=>register(OPERAND.INPUT_DOMAIN_POINT, [], components);
+/** @param {string} [components] */
+export const vPrim = components=>register(OPERAND.INPUT_PRIMITIVE_ID, [], components);
 /** @param {number} slot @param {number} index @param {string} [components] */
 export const cb = (slot, index, components)=>
     register(OPERAND.CONSTANT_BUFFER, [slot, index], components);
@@ -1036,6 +1038,89 @@ export function forkPhaseHullShader(){
             add(r(0, 'xyz'), r(0, 'xyz'), vocp(2, 0, 'xyz')),
             add(r(0, 'xyz'), r(0, 'xyz'), vocp(3, 0, 'xyz')),
             mul(o(6, 'xyz'), r(0, 'xyz'), l(0.25, 0.25, 0.25, 0.25)),
+            ret(),
+        ],
+    });
+}
+
+/** A quad's tess factors, as a quad hull shader writes them and its domain shader reads them. */
+const QUAD_FACTORS = Object.freeze([
+    ...[0, 1, 2, 3].map(index=>({ name: 'SV_TessFactor', index,
+        systemValue: SYSTEM_VALUE.QUAD_EDGE_TESSFACTOR, register: index, mask: 1 })),
+    ...[0, 1].map(index=>({ name: 'SV_InsideTessFactor', index,
+        systemValue: SYSTEM_VALUE.QUAD_INSIDE_TESSFACTOR, register: 4 + index, mask: 1 })),
+]);
+
+/**
+ * A hull shader that makes a quad patch of one input point: four corners at
+ * the point plus `corners` (in the order of the domain's u, v: (0, 0),
+ * (0, 1), (1, 0), (1, 1)), every factor `factor`, the given partitioning and
+ * output primitive as the declarations number them (one past Direct3D's).
+ *
+ * @param {{ factor?: number, partitioning?: number, output?: number,
+ *     corners?: number[][] }} [options]
+ */
+export function quadHullShader(options = {}){
+    const corners = (options.corners ?? [[0, 0], [0, 2], [2, 0], [2, 2]])
+        .map(([x, y])=>[x, y, 0, 0].map(floatBits));
+    return assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        instructions: [
+            hsDecls(),
+            dclInputControlPointCount(1),
+            dclOutputControlPointCount(4),
+            dclTessDomain(3),
+            dclTessPartitioning(options.partitioning ?? 1),
+            dclTessOutputPrimitive(options.output ?? 3),
+            hsControlPointPhase(),
+            dclOutput(o(0)),
+            dclTemps(1),
+            immediateConstantBuffer(corners),
+            mov(r(0, 'x'), vOutputControlPointID('x')),
+            add(o(0), vicp(0, 0), icbAt(r(0, 'x'))),
+            ret(),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(6),
+            dclTemps(1),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(0, 'x'), r(0, 'x')), l(options.factor ?? 1)),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A domain shader over `quadHullShader`'s patches: the position the domain
+ * point makes of the corners (point 0, plus u along point 2, plus v along
+ * point 1), and a colour of u, v, the primitive's id and 1.
+ */
+export function quadDomainShader(){
+    return assemble({
+        kind: SHADER_KIND.DOMAIN,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        outputs: [
+            { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'COLOR', register: 1 },
+        ],
+        instructions: [
+            dclTessDomain(3),
+            dclInput(vDomain('xy')),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutput(o(1)),
+            dclTemps(1),
+            add(r(0, 'x'), vicp(2, 0, 'x'), modified(vicp(0, 0, 'x'), MODIFIER.NEG)),
+            add(r(0, 'y'), vicp(1, 0, 'y'), modified(vicp(0, 0, 'y'), MODIFIER.NEG)),
+            mad(o(0, 'xy'), r(0, 'xy'), vDomain('xy'), vicp(0, 0, 'xy')),
+            mov(o(0, 'zw'), l(0, 0, 0, 1)),
+            mov(o(1, 'xy'), vDomain('xy')),
+            utof(o(1, 'z'), vPrim('x')),
+            mov(o(1, 'w'), l(1)),
             ret(),
         ],
     });

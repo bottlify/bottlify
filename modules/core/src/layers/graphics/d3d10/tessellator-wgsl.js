@@ -1041,3 +1041,93 @@ fn tessellatePatches(@builtin(global_invocation_id) id: vec3u) {
     }
 }
 `;
+
+/** The bindings of `TESS_SCAN_WGSL`, group 0. */
+export const TESS_SCAN_BINDINGS = Object.freeze({
+    counts: 0, offsets: 1, patches: 2, args: 3, params: 4,
+});
+
+/**
+ * Words of `args` past the draw's four: the points and the indices every
+ * patch together asked for, kept or not, for the renderer to read back and
+ * size its buffers by.
+ */
+export const TESS_ARGS_WORDS = 8;
+
+/**
+ * Between the counting pass and the writing pass: each patch's offsets, the
+ * running sums of the counts (one workgroup, each invocation a run of
+ * patches), and the arguments of the draw over what is written. A patch past
+ * the room the buffers have (`params` z points, w indices; x the patches) is culled where
+ * the writing pass reads it (its first factor made 0), so the patches kept
+ * are a prefix and the draw covers exactly their indices; `args` 4 and 5 say
+ * how much room every patch would have needed.
+ */
+export const TESS_SCAN_WGSL = /* wgsl */ `
+struct Patch {
+    kind: vec4u,
+    f0: vec4f,
+    f1: vec4f,
+}
+
+@group(0) @binding(0) var<storage, read> counts: array<vec2u>;
+@group(0) @binding(1) var<storage, read_write> offsets: array<vec2u>;
+@group(0) @binding(2) var<storage, read_write> patches: array<Patch>;
+@group(0) @binding(3) var<storage, read_write> args: array<u32>;
+@group(0) @binding(4) var<uniform> params: vec4u;
+
+var<workgroup> sums: array<vec2u, 256>;
+var<workgroup> kept: array<u32, 256>;
+
+@compute @workgroup_size(256)
+fn scanPatches(@builtin(local_invocation_index) t: u32) {
+    let n = params.x;
+    let per = (n + 255u) / 256u;
+    let first = min(t * per, n);
+    let last = min(first + per, n);
+    var sum = vec2u(0u);
+    for (var i = first; i < last; i++) {
+        sum += counts[i];
+    }
+    sums[t] = sum;
+    workgroupBarrier();
+    for (var d = 1u; d < 256u; d <<= 1u) {
+        var add = vec2u(0u);
+        if (t >= d) {
+            add = sums[t - d];
+        }
+        workgroupBarrier();
+        sums[t] += add;
+        workgroupBarrier();
+    }
+    var run = vec2u(0u);
+    if (t > 0u) {
+        run = sums[t - 1u];
+    }
+    var end = 0u;
+    for (var i = first; i < last; i++) {
+        let next = run + counts[i];
+        offsets[i] = run;
+        if (next.x > params.z || next.y > params.w) {
+            patches[i].f0 = vec4f(0.0);
+        } else {
+            end = next.y;
+        }
+        run = next;
+    }
+    kept[t] = end;
+    workgroupBarrier();
+    if (t == 0u) {
+        var drawn = 0u;
+        for (var i = 0u; i < 256u; i++) {
+            drawn = max(drawn, kept[i]);
+        }
+        args[0] = drawn;
+        args[1] = 1u;
+        args[2] = 0u;
+        args[3] = 0u;
+        args[4] = sums[255].x;
+        args[5] = sums[255].y;
+    }
+}
+`;
