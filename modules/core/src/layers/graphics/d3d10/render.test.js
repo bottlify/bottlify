@@ -2848,3 +2848,16 @@ async()=>{
         call.descriptor.code).filter((/** @type {string} */ code)=>code.includes('rtLayer != '));
     assert.equal(fragments.length, 3, 'one pipeline a layer, each keeping its own');
 });
+
+test('a multisampled render target can be read by the shader that resolves it, whatever the'
+    + ' program binds it as (test_multisample_resolve, d3d11.c:31565)', ()=>{
+    const h = harness();
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(h.device.CreateTexture2D({ ...TEXTURE_2X2, Width: 8, Height: 8,
+        SampleDesc: { Count: 4, Quality: 0 }, BindFlags: D3D10_BIND.RENDER_TARGET }, null,
+    texture), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    assert.equal(made.descriptor.sampleCount, 4);
+    assert.ok((made.descriptor.usage & 0x04) !== 0, 'TEXTURE_BINDING');
+});
