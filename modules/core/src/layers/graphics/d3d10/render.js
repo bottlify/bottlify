@@ -2090,7 +2090,7 @@ export function createRenderer(services){
         const pulling = state.hullShader || state.geometry ? null
             : vertexPullOf(state.inputLayout, state.strides, state.indirect, state.vertexShader);
         const [layerIndex, layerCount] = (state.layerPass || '').split('/').map(Number);
-        const linking = { targets: bound, depthBias: emulatedBias,
+        const linking = { targets: bound, depthBias: emulatedBias, sampleCount: state.sampleCount,
             alphaCoverage: !!blendTargetsOf(state.blendState).alphaToCoverage
                 && state.sampleCount === 1,
             clipDistances: backend.hasFeature?.('clip-distances') === true,

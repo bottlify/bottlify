@@ -267,6 +267,16 @@ const arithmetic = opcode=>
         op(opcode, [dest, ...sources]);
 
 export const mov = arithmetic(OPCODE.MOV);
+/** The rasterizer, which `sampleinfo` and `samplepos` read the sample count of. */
+export const rasterizer = ()=>register(OPERAND.RASTERIZER, [], 'xyzw');
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} resource  a texture or the rasterizer
+ * @param {boolean} [integer]  `_uint`
+ */
+export const sampleInfo = (dest, resource, integer = false)=>
+    op(OPCODE.SAMPLE_INFO, [dest, resource], integer ? { control: 1 } : {});
+/** @param {AsmOperand} dest @param {AsmOperand} resource @param {AsmOperand} index */
+export const samplePos = (dest, resource, index)=>op(OPCODE.SAMPLE_POS, [dest, resource, index]);
 export const movc = arithmetic(OPCODE.MOVC);
 export const add = arithmetic(OPCODE.ADD);
 export const mul = arithmetic(OPCODE.MUL);
@@ -436,6 +446,9 @@ export const dclInputPs = (input, interpolation = 2)=>
 /** @param {AsmOperand} input @param {number} systemValue */
 export const dclInputPsSiv = (input, systemValue)=>
     op(OPCODE.DCL_INPUT_PS_SIV, [input], { control: 2, extra: [systemValue] });
+/** @param {AsmOperand} input @param {number} systemValue */
+export const dclInputPsSgv = (input, systemValue)=>
+    op(OPCODE.DCL_INPUT_PS_SGV, [input], { extra: [systemValue] });
 /** @param {AsmOperand} output */
 export const dclOutput = output=>op(OPCODE.DCL_OUTPUT, [output]);
 /** @param {AsmOperand} output @param {number} systemValue */

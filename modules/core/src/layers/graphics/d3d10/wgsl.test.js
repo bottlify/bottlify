@@ -34,6 +34,7 @@ import {
     imul,
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
+    rasterizer, sampleInfo, samplePos, dclInputPsSgv,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
     atomicIadd, dclThreadGroup, dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
@@ -1148,4 +1149,44 @@ test('a primitive\'s viewport index travels flat, and a drawing through one view
     assert.match(second.vertex, /@interpolate\(flat\) rtViewport: u32,/);
     assert.match(second.fragment,
         /if \(in\.rtViewport != 1u\) \{ discard; \}/);
+});
+
+test('sampleinfo and samplepos read the rasterizer\'s sample count, fixed at link, or the'
+    + ' texture\'s, and the standard positions (test_sampleinfo_instruction, d3d11.c:24561)',
+()=>{
+    const MS = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT)];
+    const info = translate([sampleInfo(r(0), rasterizer()), sampleInfo(r(1), t(0), true)],
+        { declarations: MS, options: { multisampled: [0] } });
+    assert.equal(info.rasterizerSamples, true);
+    assert.match(bodyOf(info), /r0 = vec4<u32>\(bitcast<u32>\(f32\(rasterSamples\)\), 0u, 0u, 0u\)/);
+    assert.match(bodyOf(info), /r1 = vec4<u32>\(textureNumSamples\(t0\), 0u, 0u, 0u\)/);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    assert.match(linkProgram(vs, info, { sampleCount: 4 }).fragment,
+        /const rasterSamples: u32 = 4u;/);
+    const position = translate([samplePos(r(0), rasterizer(), l(1, 1, 1, 1))]);
+    assert.ok(position.helpers.includes('samplePosition'));
+    assert.match(bodyOf(position), /samplePosition\(rasterSamples, /);
+});
+
+test('a pixel input is interpolated as declared, at its centroid or each sample, with or without'
+    + ' perspective, both stages alike; SV_SampleIndex is the sample shaded'
+    + ' (test_sample_shading, d3d11.c:31751)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(colouredVertexShader())));
+    /** @param {number} mode */
+    const linked = mode=>linkProgram(vs, translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'COLOR', register: 1 }, { name: 'SV_SampleIndex', systemValue:
+            SYSTEM_VALUE.SAMPLE_INDEX, register: 2, mask: 0x1, componentType:
+            COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPs(v(1), mode), dclInputPsSgv(v(2, 'x'), SYSTEM_VALUE.SAMPLE_INDEX),
+            dclOutput(o(0)), mov(o(0), v(1)), ret()],
+    })))));
+    const sampled = linked(6);
+    assert.deepEqual(sampled.unsupported, []);
+    assert.match(sampled.vertex, /@location\(0\) @interpolate\(perspective, sample\) o1/);
+    assert.match(sampled.fragment, /@location\(0\) @interpolate\(perspective, sample\) v1/);
+    assert.match(sampled.fragment, /@builtin\(sample_index\) v2: u32,/);
+    assert.match(linked(5).fragment, /@interpolate\(linear, centroid\) v1/);
+    assert.match(linked(2).fragment, /@location\(0\) v1: vec4<f32>/);
 });

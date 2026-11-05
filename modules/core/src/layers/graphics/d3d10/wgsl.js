@@ -239,6 +239,33 @@ export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
  * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
  */
 export const HELPERS = Object.freeze({
+    // Direct3D's standard sample positions, in sixteenths of a pixel from
+    // its centre; an index past the count is at the centre.
+    samplePosition: {
+        needs: [],
+        text: [
+            'fn samplePosition(count: u32, index: u32) -> vec2<f32> {',
+            '    if (index >= count) { return vec2<f32>(0.0); }',
+            '    var two = array<vec2<i32>, 2>(vec2<i32>(4, 4), vec2<i32>(-4, -4));',
+            '    var four = array<vec2<i32>, 4>(vec2<i32>(-2, -6), vec2<i32>(6, -2),'
+                + ' vec2<i32>(-6, 2), vec2<i32>(2, 6));',
+            '    var eight = array<vec2<i32>, 8>(vec2<i32>(1, -3), vec2<i32>(-1, 3),'
+                + ' vec2<i32>(5, 1), vec2<i32>(-3, -5), vec2<i32>(-5, 5), vec2<i32>(-7, -1),'
+                + ' vec2<i32>(3, 7), vec2<i32>(7, -7));',
+            '    var sixteen = array<vec2<i32>, 16>(vec2<i32>(1, 1), vec2<i32>(-1, -3),'
+                + ' vec2<i32>(-3, 2), vec2<i32>(4, -1), vec2<i32>(-5, -2), vec2<i32>(2, 5),'
+                + ' vec2<i32>(5, 3), vec2<i32>(3, -5), vec2<i32>(-2, 6), vec2<i32>(0, -7),'
+                + ' vec2<i32>(-4, -6), vec2<i32>(-6, 4), vec2<i32>(-8, 0), vec2<i32>(7, -4),'
+                + ' vec2<i32>(6, 7), vec2<i32>(-7, -8));',
+            '    var at = vec2<i32>(0, 0);',
+            '    if (count == 2u) { at = two[index]; }',
+            '    else if (count == 4u) { at = four[index]; }',
+            '    else if (count == 8u) { at = eight[index]; }',
+            '    else if (count == 16u) { at = sixteen[index]; }',
+            '    return vec2<f32>(at) / 16.0;',
+            '}',
+        ],
+    },
     umulhi: {
         needs: [],
         text: [
@@ -316,6 +343,10 @@ export const HELPERS = Object.freeze({
  * @property {number} inputRegisters               How many `v` registers the body reads.
  * @property {number} outputRegisters              How many `o` registers the body writes.
  * @property {boolean} writesDepth
+ * @property {Record<number, number>} [interpolation]  A pixel shader's interpolation mode
+ *     by input register, as its declarations give it (D3D10_SB_INTERPOLATION_MODE).
+ * @property {boolean} [rasterizerSamples]  Whether the body reads the rasterizer's sample
+ *     count (`sampleinfo`, `samplepos` of the rasterizer), `rasterSamples` at link.
  * @property {string[]} unsupported                Opcode names with no translation.
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
  * @property {number[]} threadGroup                A compute shader's group, x by y by z.
@@ -1194,6 +1225,11 @@ export function translateShader(container, options = {}){
                 {
                     result.inputRegisters = Math.max(result.inputRegisters,
                         dest.indices[isGeometry && dest.indices.length > 1 ? 1 : 0].value + 1);
+                    if (instruction.opcode !== OPCODE.DCL_INPUT_PS_SGV)
+                    {
+                        result.interpolation = { ...result.interpolation,
+                            [dest.indices[0].value]: instruction.control & 0xf };
+                    }
                 }
                 break;
             case OPCODE.DCL_OUTPUT:
@@ -1714,6 +1750,30 @@ export function translateShader(container, options = {}){
                 store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
                     ? `select(${kept}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
                     : kept);
+                break;
+            }
+            case OPCODE.SAMPLE_INFO:
+            case OPCODE.SAMPLE_POS: {
+                const [target, resource, index] = instruction.operands;
+                // The rasterizer's sample count, or the texture's: one for a
+                // texture of one sample, none where none is declared.
+                const rasterizer = resource.type === OPERAND.RASTERIZER;
+                const texture = rasterizer ? null : textureOf(resource.indices[0].value);
+                const count = rasterizer ? 'rasterSamples' : !texture ? '0u'
+                    : texture.multisampled ? `textureNumSamples(t${texture.slot})` : '1u';
+                result.rasterizerSamples ||= rasterizer;
+                if (instruction.opcode === OPCODE.SAMPLE_INFO)
+                {
+                    // The count as a float, or as an integer with _uint.
+                    const value = (instruction.control & 1) !== 0 ? count
+                        : `bitcast<u32>(f32(${count}))`;
+                    store(target,
+                        `vec4<u32>(${value}, 0u, 0u, 0u).${swizzleText(resource.swizzle)}`);
+                    break;
+                }
+                need('samplePosition');
+                store(target, `bitcast<vec4<u32>>(vec4<f32>(samplePosition(${count},`
+                    + ` ${u(index)}.x), 0.0, 0.0)).${swizzleText(resource.swizzle)}`);
                 break;
             }
             case OPCODE.RESINFO: {
@@ -2588,6 +2648,20 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  * @property {string[]} unsupported Why the pair cannot be built, if it cannot.
  */
 
+/**
+ * WGSL's interpolation of a float varying, by Direct3D's interpolation mode:
+ * constant, linear, its centroid, without perspective, its centroid, at each
+ * sample, without perspective at each sample.
+ */
+const INTERPOLATION = Object.freeze(/** @type {Record<number, string>} */ ({
+    1: ' @interpolate(flat)',
+    3: ' @interpolate(perspective, centroid)',
+    4: ' @interpolate(linear)',
+    5: ' @interpolate(linear, centroid)',
+    6: ' @interpolate(perspective, sample)',
+    7: ' @interpolate(linear, sample)',
+}));
+
 /** The members a primitive's render target array index and viewport index travel as. */
 const ROUTES = Object.freeze(/** @type {Record<number, string>} */ ({
     [SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX]: 'rtLayer',
@@ -2704,7 +2778,7 @@ function vertexPullOf(pull, inputs, registers){
  * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad, clipDistances?: boolean,
  *     depthBias?: { units: number, slope: number, clamp: number },
  *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
- *     alphaCoverage?: boolean,
+ *     alphaCoverage?: boolean, sampleCount?: number,
  *     viewportPass?: { index: number, count: number } }} [options]  `layerPass`,
  *     `viewportPass`: the one of `count` layers or viewports this drawing of a draw
  *     whose primitives say which goes to; their other fragments are discarded.
@@ -2798,13 +2872,16 @@ export function linkProgram(vs, ps, options = {}){
     }
 
     // --- the interface between the stages, numbered by the vertex outputs ---
-    /** @type {Map<string, { location: number, scalar: string }>} */
+    /** @type {Map<string, { location: number, scalar: string, interpolate: string }>} */
     const varyings = new Map();
+    /** The pixel shader's interpolation mode of each input, by semantic. */
+    const psModes = new Map(ps.inputs.map(element=>[semanticKey(element),
+        ps.interpolation?.[element.register] ?? 0]));
     /**
      * The varying each output register is passed as: two semantics packed
      * into one register (TEXCOORD0 in .xy, TEXCOORD1 in .zw) are one varying.
      *
-     * @type {Map<number, { location: number, scalar: string }>}
+     * @type {Map<number, { location: number, scalar: string, interpolate: string }>}
      */
     const byRegister = new Map();
     /** @type {string[]} */
@@ -2869,12 +2946,14 @@ export function linkProgram(vs, ps, options = {}){
         }
         const scalar = scalarOf(element.componentType);
         const location = byRegister.size;
-        const varying = { location, scalar };
+        // An integer varying cannot be interpolated and WGSL says so; a
+        // float one is interpolated as the pixel shader declares the input
+        // it arrives as, both stages saying it alike as WebGPU requires.
+        const interpolate = scalar === 'f32' ? INTERPOLATION[psModes.get(key) ?? 0] ?? ''
+            : ' @interpolate(flat)';
+        const varying = { location, scalar, interpolate };
         varyings.set(key, varying);
         byRegister.set(element.register, varying);
-        // An integer varying cannot be interpolated and WGSL says so; a
-        // float one is interpolated the way the rasteriser always did.
-        const interpolate = scalar === 'f32' ? '' : ' @interpolate(flat)';
         vsOut.push(`    @location(${location})${interpolate} ${register}: vec4<${scalar}>,`);
         vsReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
     }
@@ -2973,6 +3052,13 @@ export function linkProgram(vs, ps, options = {}){
             psLoad.push(`    ${name}.x = select(0u, 0xffffffffu, in.${name});`);
             continue;
         }
+        // Reading it runs the shader once a sample, in WebGPU as in Direct3D.
+        if (element.systemValue === SYSTEM_VALUE.SAMPLE_INDEX)
+        {
+            psIn.push(`    @builtin(sample_index) ${name}: u32,`);
+            psLoad.push(`    ${name}.${COMPONENT[firstComponent(element.mask)]} = in.${name};`);
+            continue;
+        }
         const route = ROUTES[element.systemValue];
         if (route)
         {
@@ -3004,7 +3090,7 @@ export function linkProgram(vs, ps, options = {}){
         if (!arrived.has(varying.location))
         {
             arrived.set(varying.location, name);
-            const interpolate = varying.scalar === 'f32' ? '' : ' @interpolate(flat)';
+            const interpolate = varying.interpolate;
             psIn.push(`    @location(${varying.location})${interpolate} ${name}: `
                 + `vec4<${varying.scalar}>,`);
         }
@@ -3134,6 +3220,8 @@ export function linkProgram(vs, ps, options = {}){
     const writes = psOut.length > 0;
     const fragment = [
         'diagnostic(off, derivative_uniformity);',
+        ...(ps.rasterizerSamples ? [`const rasterSamples: u32 = ${options.sampleCount ?? 1}u;`]
+            : []),
         ...psDecl.text,
         ...(psIn.length > 0 ? ['struct FragmentIn {', ...psIn, '};'] : []),
         ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
