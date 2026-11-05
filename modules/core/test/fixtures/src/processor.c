@@ -74,6 +74,8 @@ int mainCRTStartup(void)
     unsigned eax, ebx, ecx, edx;
     __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
     unsigned family = eax >> 8 & 15, model = eax >> 4 & 15, stepping = eax & 15;
+    /* Families 6 and 15 put the extended model above the model (Intel's CPUID). */
+    if (family == 6 || family == 15) model |= eax >> 12 & 0xf0;
 
     say("cpuid ");
     hex(eax);

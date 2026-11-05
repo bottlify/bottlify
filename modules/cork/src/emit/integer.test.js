@@ -551,9 +551,9 @@ test('cpuid answers the leaves cpuid.js lists and zero for the rest', ()=>{
     const one = createTestMachine();
     one.write(CODE, [0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // mov eax, 1; cpuid; hlt
     assert.equal(one.runProgram(CODE).kind, 3);
-    assert.equal(one.reg('eax'), 0x00000f65);
+    assert.equal(one.reg('eax'), 0x000106a5);
     assert.equal(one.reg('ebx'), 0x00010800);
-    assert.equal(one.reg('ecx'), 0x00002001);
+    assert.equal(one.reg('ecx'), 0x00982201);
     assert.equal(one.reg('edx'), 0x0788a979);
     const vendor = createTestMachine();
     vendor.write(CODE, [0x31, 0xc0, 0x0f, 0xa2, 0xf4]); // xor eax, eax; cpuid; hlt
@@ -580,10 +580,12 @@ test('cpuid reads its subleaf from ecx where a leaf has them', ()=>{
         assert.equal(m.runProgram(CODE).kind, 3);
         return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
     };
-    assert.deepEqual(ask(4, 0), [0x121, 0x01c0003f, 0x1f, 1]);
-    assert.deepEqual(ask(4, 1), [0x143, 0x01c0003f, 0xfff, 1]);
-    assert.deepEqual(ask(4, 2), [0, 0, 0, 0], 'a subleaf the leaf does not list');
-    assert.deepEqual(ask(0x80000006, 9), [0, 0, 0x08006040, 0], 'a plain leaf ignores ecx');
+    assert.deepEqual(ask(4, 0), [0x121, 0x01c0003f, 0x3f, 0]);
+    assert.deepEqual(ask(4, 1), [0x122, 0x00c0003f, 0x7f, 0]);
+    assert.deepEqual(ask(4, 2), [0x143, 0x01c0003f, 0x1ff, 0]);
+    assert.deepEqual(ask(4, 3), [0x163, 0x03c0003f, 0x1fff, 2], 'the level 3, inclusive');
+    assert.deepEqual(ask(4, 4), [0, 0, 0, 0], 'a subleaf the leaf does not list');
+    assert.deepEqual(ask(0x80000006, 9), [0, 0, 0x01006040, 0], 'a plain leaf ignores ecx');
     assert.deepEqual(ask(0x80000000, 0), [0x80000008, 0, 0, 0]);
     assert.deepEqual(ask(0x80000001, 0), [0, 0, 1, 0x20100000], 'LAHF, NX and long mode');
     const brand = [0x80000002, 0x80000003, 0x80000004].flatMap(leaf=>ask(leaf, 0))
@@ -602,15 +604,15 @@ test('cpuid describes the executors as processors: their count, the asking one\'
         assert.equal(m.runProgram(CODE).kind, 3);
         return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
     };
-    assert.deepEqual(ask(1, 0, 1), [0xf65, 0x00010800, 0x00002001, 0x0788a979],
+    assert.deepEqual(ask(1, 0, 1), [0x106a5, 0x00010800, 0x00982201, 0x0788a979],
         'one processor: the table as it stands');
-    assert.deepEqual(ask(4, 0, 1), [0xf65, 0x00040800, 0x00002001, 0x1788a979],
+    assert.deepEqual(ask(4, 0, 1), [0x106a5, 0x00040800, 0x00982201, 0x1788a979],
         'four: the count in EBX[23:16], HTT in EDX');
-    assert.deepEqual(ask(4, 3, 1), [0xf65, 0x03040800, 0x00002001, 0x1788a979],
+    assert.deepEqual(ask(4, 3, 1), [0x106a5, 0x03040800, 0x00982201, 0x1788a979],
         'the fourth executor: APIC id 3 in EBX[31:24]');
-    assert.deepEqual(ask(4, 2, 4, 0), [0x0c000121, 0x01c0003f, 0x1f, 1],
+    assert.deepEqual(ask(4, 2, 4, 0), [0x0c000121, 0x01c0003f, 0x3f, 0],
         'leaf 4: three more cores in the package, no cache shared');
-    assert.deepEqual(ask(4, 2, 4, 1), [0x0c000143, 0x01c0003f, 0xfff, 1]);
+    assert.deepEqual(ask(4, 2, 4, 1), [0x0c000122, 0x00c0003f, 0x7f, 0]);
     assert.deepEqual(ask(4, 1, 0), ask(1, 0, 0), 'the vendor leaf does not move');
 });
 

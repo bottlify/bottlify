@@ -33,18 +33,21 @@ const [BRAND_0, BRAND_1, BRAND_2] = brandLeaves();
  *
  * It is a processor of the class whose instructions the engine executes, so
  * a program that picks its code by what CPUID says picks code that runs: an
- * Intel family 15 (Pentium 4 and Pentium D, 90 and 65 nm), the one line with
- * SSE3 and x86-64 and neither SSSE3 nor SSE4. Leaf 0 the vendor and the
- * highest standard leaf; 1 the signature (family 15, model 6, stepping 5), a
- * 64-byte CLFLUSH line, and the features: x87, TSC, CX8, SYSENTER, CMOV, MMX,
- * FXSR, SSE, SSE2, CLFLUSH, SSE3 and CMPXCHG16B (the 64-bit process's); 2 the
- * descriptors of that class's caches (a 12K-uop trace cache, a 16 KiB 8-way
- * data cache, a 2 MiB 8-way level 2); 4 the same caches by subleaf; 0x15 (a
- * 1 GHz crystal times 3/1) and 0x16 (base and maximum), which state the 3000
- * MHz cork's host counts rdtsc at (`CORK_TSC_MHZ`) for a program that reads
- * its clock from them. The extended leaves: 0x80000001 LAHF/SAHF in 64-bit
- * mode, execute-disable and long mode; the brand (`BRAND`); 0x80000006 the
- * level 2 cache again; 0x80000008 36 physical and 48 linear address bits.
+ * Intel family 6 model 26 (Nehalem, the first Core i7), the one line with
+ * SSSE3, SSE4.1, SSE4.2 and POPCNT and without AVX or MOVBE. Leaf 0 the vendor
+ * and the highest standard leaf; 1 the signature (family 6, model 0x1A,
+ * stepping 5), a 64-byte CLFLUSH line, and the features: x87, TSC, CX8,
+ * SYSENTER, CMOV, MMX, FXSR, SSE, SSE2, CLFLUSH, SSE3, SSSE3, CMPXCHG16B,
+ * SSE4.1, SSE4.2 and POPCNT; 2 one descriptor, 0xFF, which sends a program to
+ * leaf 4 for the caches; 4 that class's caches by subleaf (a 32 KiB 8-way level
+ * 1 data cache, a 32 KiB 4-way level 1 instruction cache, a 256 KiB 8-way
+ * level 2, an 8 MiB 16-way inclusive level 3); 0x15 (a 1 GHz crystal times 3/1)
+ * and 0x16 (base and maximum), which state the 3000 MHz cork's host counts rdtsc
+ * at (`CORK_TSC_MHZ`) for a program that reads its clock from them. The
+ * extended leaves: 0x80000001 LAHF/SAHF in 64-bit mode, execute-disable and
+ * long mode; the brand (`BRAND`); 0x80000006 the level 2 cache again;
+ * 0x80000008 36 physical and 48 linear address bits. MOVBE and RDRAND execute
+ * but are not announced, as no processor of the class had them.
  *
  * Nothing says it is virtual: no hypervisor bit, no hypervisor leaves. Copy
  * protection of the programs' time refuses to run under a hypervisor it finds.
@@ -63,11 +66,13 @@ const [BRAND_0, BRAND_1, BRAND_2] = brandLeaves();
  */
 export const CPUID_LEAVES = Object.freeze({
     0x00000000: { eax: 0x16, ebx: 0x756e6547, ecx: 0x6c65746e, edx: 0x49656e69 },
-    0x00000001: { eax: 0x00000f65, ebx: 0x00010800, ecx: 0x00002001, edx: 0x0788a979 },
-    0x00000002: { eax: 0x605b5001, ebx: 0, ecx: 0, edx: 0x007d7040 },
+    0x00000001: { eax: 0x000106a5, ebx: 0x00010800, ecx: 0x00982201, edx: 0x0788a979 },
+    0x00000002: { eax: 0x0000ff01, ebx: 0, ecx: 0, edx: 0 },
     0x00000004: Object.freeze({
-        0: { eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000001f, edx: 0x00000001 },
-        1: { eax: 0x00000143, ebx: 0x01c0003f, ecx: 0x00000fff, edx: 0x00000001 },
+        0: { eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000003f, edx: 0 },
+        1: { eax: 0x00000122, ebx: 0x00c0003f, ecx: 0x0000007f, edx: 0 },
+        2: { eax: 0x00000143, ebx: 0x01c0003f, ecx: 0x000001ff, edx: 0 },
+        3: { eax: 0x00000163, ebx: 0x03c0003f, ecx: 0x00001fff, edx: 0x00000002 },
     }),
     0x00000015: { eax: 0x00000001, ebx: 0x00000003, ecx: 0x3b9aca00, edx: 0 },
     0x00000016: { eax: 0x00000bb8, ebx: 0x00000bb8, ecx: 0x0000000a, edx: 0 },
@@ -76,7 +81,7 @@ export const CPUID_LEAVES = Object.freeze({
     0x80000002: BRAND_0,
     0x80000003: BRAND_1,
     0x80000004: BRAND_2,
-    0x80000006: { eax: 0, ebx: 0, ecx: 0x08006040, edx: 0 },
+    0x80000006: { eax: 0, ebx: 0, ecx: 0x01006040, edx: 0 },
     0x80000008: { eax: 0x00003024, ebx: 0, ecx: 0, edx: 0 },
 });
 

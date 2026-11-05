@@ -23,7 +23,8 @@ and in Node.
 ## What it runs
 
 - 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2, SSE3, SSSE3, SSE4.1 and
-  SSE4.2 (the string compares and CRC32 among them), with POPCNT, MOVBE and RDRAND.
+  SSE4.2 (the string compares and CRC32 among them), with POPCNT, MOVBE and RDRAND: the set
+  cork reports through `cpuid`, MOVBE and RDRAND aside, which run unannounced.
 - 64-bit user-mode x86-64, the same set with the sixteen 64-bit registers, by the same
   translator and runtime at a 64-bit width, its memory a 4 GiB window: an address at or past
   4 GiB faults, except where an access goes untested -- outside precise mode a read, and while

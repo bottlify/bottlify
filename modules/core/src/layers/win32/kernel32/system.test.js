@@ -99,8 +99,9 @@ test('the machine reported is one a program of the era knows what to do with', (
     assert.equal(host.view.getUint32(0x210, true), 1, 'one processor in the mask');
     assert.equal(host.view.getUint32(0x214, true), 1, 'and one processor');
     assert.equal(host.view.getUint32(0x21c, true), 0x10000, 'allocation granularity');
-    assert.equal(host.view.getUint16(0x220, true), 15, 'the level is CPUID\'s family');
-    assert.equal(host.view.getUint16(0x222, true), 0x0605, 'the revision its model and stepping');
+    assert.equal(host.view.getUint16(0x220, true), 6, 'the level is CPUID\'s family');
+    assert.equal(host.view.getUint16(0x222, true), 0x1a05,
+        'the revision its model, the extended model above it, and stepping');
 });
 
 test('GetSystemInfo counts a processor for each the kernel has, and masks all of them', ()=>{
@@ -145,7 +146,7 @@ test('GetLogicalProcessorInformation lists a core and its caches for each proces
         const host = fakeHost();
         const fns = createSystemFunctions({ ...host,
             processors: createProcessors({ processors: ()=>count }) });
-        const needed = (count * 3 + 2) * 24;
+        const needed = (count * 5 + 2) * 24;
         host.view.setUint32(LENGTH, 0x400, true);
         assert.equal(fns.GetLogicalProcessorInformation.handler([BUFFER, LENGTH]), 1);
         assert.equal(host.view.getUint32(LENGTH, true), needed, 'what was written');
@@ -154,16 +155,18 @@ test('GetLogicalProcessorInformation lists a core and its caches for each proces
         for (let index = 0; index < count; index++)
         {
             const mask = 1 << index;
-            assert.deepEqual(entries.slice(index * 3, index * 3 + 3).map(entry=>
+            assert.deepEqual(entries.slice(index * 5, index * 5 + 5).map(entry=>
                 [entry.mask, entry.relationship, entry.relationship === 2 ? entry.cache
                     : entry.word]), [
                 [mask, 0, 0],
-                // Level, associativity, line, size, type: data 2, unified 0.
-                [mask, 2, [1, 8, 64, 16 << 10, 2]],
-                [mask, 2, [2, 8, 64, 2 << 20, 0]],
+                // Level, associativity, line, size, type: data 2, instruction 1, unified 0.
+                [mask, 2, [1, 8, 64, 32 << 10, 2]],
+                [mask, 2, [1, 4, 64, 32 << 10, 1]],
+                [mask, 2, [2, 8, 64, 256 << 10, 0]],
+                [mask, 2, [3, 16, 64, 8 << 20, 0]],
             ], `processor ${index} of ${count}`);
         }
-        assert.deepEqual(entries.slice(count * 3).map(entry=>
+        assert.deepEqual(entries.slice(count * 5).map(entry=>
             [entry.mask, entry.relationship, entry.word]), [[all, 3, 0], [all, 1, 0]],
         'one package and node 0, holding all of them');
     }
@@ -220,11 +223,11 @@ test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
         processors: createProcessors({ processors: ()=>4 }) });
     host.view.setUint32(LENGTH, 0, true);
     assert.equal(fns.GetLogicalProcessorInformation.handler([0, LENGTH]), 0);
-    assert.equal(host.view.getUint32(LENGTH, true), 14 * 24);
-    host.view.setUint32(LENGTH, 13 * 24, true);
+    assert.equal(host.view.getUint32(LENGTH, true), 22 * 24);
+    host.view.setUint32(LENGTH, 21 * 24, true);
     host.bytes.fill(0xcc, 0x200, 0x400);
     assert.equal(fns.GetLogicalProcessorInformation.handler([0x200, LENGTH]), 0);
-    assert.equal(host.view.getUint32(LENGTH, true), 14 * 24);
+    assert.equal(host.view.getUint32(LENGTH, true), 22 * 24);
     assert.ok(host.bytes.subarray(0x200, 0x400).every(byte=>byte === 0xcc), 'nothing written');
     assert.equal(fns.GetLogicalProcessorInformation.handler([0x200, 0]), 0);
     assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INSUFFICIENT_BUFFER,

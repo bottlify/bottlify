@@ -32,7 +32,8 @@ const EDX = Object.freeze({
 });
 
 /** And its ECX bits. */
-const ECX = Object.freeze({ SSE3: 1 << 0, CX16: 1 << 13, POPCNT: 1 << 23, RDRAND: 1 << 30 });
+const ECX = Object.freeze({ SSE3: 1 << 0, SSSE3: 1 << 9, CX16: 1 << 13, SSE4_1: 1 << 19,
+    SSE4_2: 1 << 20, POPCNT: 1 << 23, RDRAND: 1 << 30 });
 
 /**
  * What the emulated processor answers to CPUID, leaf 0, leaf 1 and leaf 4, as
@@ -41,19 +42,21 @@ const ECX = Object.freeze({ SSE3: 1 << 0, CX16: 1 << 13, POPCNT: 1 << 23, RDRAND
  */
 export const CPUID = Object.freeze({
     vendor: 'GenuineIntel',
-    signature: 0x00000f65,
+    signature: 0x000106a5,
     edx: 0x0788a979,
-    ecx: 0x00002001,
+    ecx: 0x00982201,
     /**
      * Leaf 4's subleaves, EAX, EBX and ECX, one per cache: a level 1 data
-     * cache of 16 KiB, then a unified level 2 of 2 MiB (the class's level 1
-     * instructions are a trace cache, which leaf 4 does not list). More
-     * processors change only EAX[31:26], the cores in the package less one,
-     * which nothing here reads: no two processors share a cache.
+     * cache of 32 KiB, a level 1 instruction cache of 32 KiB, a unified level 2
+     * of 256 KiB and a unified level 3 of 8 MiB. More processors change only
+     * EAX[31:26], the cores in the package less one, which nothing here reads:
+     * no two processors share a cache.
      */
     caches: Object.freeze([
-        Object.freeze({ eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000001f }),
-        Object.freeze({ eax: 0x00000143, ebx: 0x01c0003f, ecx: 0x00000fff }),
+        Object.freeze({ eax: 0x00000121, ebx: 0x01c0003f, ecx: 0x0000003f }),
+        Object.freeze({ eax: 0x00000122, ebx: 0x00c0003f, ecx: 0x0000007f }),
+        Object.freeze({ eax: 0x00000143, ebx: 0x01c0003f, ecx: 0x000001ff }),
+        Object.freeze({ eax: 0x00000163, ebx: 0x03c0003f, ecx: 0x00001fff }),
     ]),
 });
 
@@ -61,7 +64,10 @@ export const CPUID = Object.freeze({
 export const PROCESSOR = Object.freeze({
     vendor: CPUID.vendor,
     family: CPUID.signature >>> 8 & 0xf,
-    model: CPUID.signature >>> 4 & 0xf,
+    // The model as Intel says to read it for families 6 and 15: the extended
+    // model above the model (0x1A for Nehalem's 0xA and 1).
+    model: CPUID.signature >>> 4 & 0xf | ((CPUID.signature >>> 8 & 0xf) === 6
+        || (CPUID.signature >>> 8 & 0xf) === 15 ? CPUID.signature >>> 12 & 0xf0 : 0),
     stepping: CPUID.signature & 0xf,
     /**
      * The speed Windows measures at boot and writes for the processor where
@@ -270,4 +276,7 @@ export const PROCESSOR_FEATURES = new Map([
     [13, hasEcx(ECX.SSE3)],      // PF_SSE3_INSTRUCTIONS_AVAILABLE
     [14, hasEcx(ECX.CX16)],      // PF_COMPARE_EXCHANGE128
     [28, hasEcx(ECX.RDRAND)],    // PF_RDRAND_INSTRUCTION_AVAILABLE
+    [36, hasEcx(ECX.SSSE3)],     // PF_SSSE3_INSTRUCTIONS_AVAILABLE
+    [37, hasEcx(ECX.SSE4_1)],    // PF_SSE4_1_INSTRUCTIONS_AVAILABLE
+    [38, hasEcx(ECX.SSE4_2)],    // PF_SSE4_2_INSTRUCTIONS_AVAILABLE
 ]);

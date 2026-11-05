@@ -723,6 +723,11 @@ signature claiming SSE2, SSE3, POPCNT and RDRAND, a VMware hypervisor, and a hig
 leaf of 5, so no brand and no long mode): a program named the machine by its signature. POPCNT
 and RDRAND still execute; they are not announced, since no processor of the class had them. When
 the engine executes SSSE3 and SSE4, the class moves with it. *2026-10-31.*
+The engine now executes SSSE3, SSE4.1 and SSE4.2, and the class moved with it: Intel family 6,
+model 0x1A, stepping 5 (Nehalem, the first Core i7), the line with SSSE3, SSE4.1, SSE4.2 and POPCNT
+and without AVX or MOVBE, its caches that class's (32 KiB level 1 data and instruction caches, a
+256 KiB level 2, an 8 MiB inclusive level 3, each processor its own), leaf 2 sending a program to
+leaf 4. The brand string stays. MOVBE and RDRAND execute and are not announced. *2026-11-05.*
 
 **A74. A Direct3D 10 dynamic buffer's bytes are undefined after a WRITE_DISCARD map.** The
 documentation says so, and a driver hands out renamed memory that holds whatever it held. The
