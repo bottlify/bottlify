@@ -816,6 +816,15 @@ test('a pixel input the vertex shader never writes is reported', ()=>{
     const ps = translateShader(/** @type {any} */ (parseDxbc(colouredPixelShader())));
     assert.deepEqual(linkProgram(vs, ps).unsupported,
         ['pixel input COLOR0 has no vertex output']);
+    // One the pixel shader declares and never reads needs none
+    // (test_input_assembler, d3d11.c:19498).
+    const unread = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'COLOR', register: 0, readWriteMask: 0 }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclOutput(o(0)), mov(o(0), l(1, 1, 1, 1)), ret()],
+    }))));
+    assert.deepEqual(linkProgram(vs, unread).unsupported, []);
 });
 
 test('integer varyings are flat, and integer attributes keep their type', ()=>{
@@ -1091,4 +1100,22 @@ test('a primitive\'s render target array index travels flat to the pixel stage, 
     const unwritten = linkProgram(translateShader(/** @type {any} */ (parseDxbc(
         passThroughVertexShader()))), ps);
     assert.match(unwritten.fragment, /v0\.x = 0u;/, 'an index no vertex wrote reads zero');
+});
+
+test('the vertex ID counts neither the first vertex nor the base vertex: the vertex stage takes'
+    + ' the draw\'s off its vertex index (test_vertex_id, d3d11.c:13910)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VertexID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            mask: 0x1, componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0, 'x'), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0, 'xxxx')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const linked = linkProgram(vs, ps, { vertexPull: { streams: [], attributes: [],
+        vertexBase: true } });
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.vertex, /v0\.x = in\.vsVertexIndex - vsPulls\[0\]\.x;/);
+    assert.ok(linked.groups[0].some(entry=>entry.binding === BINDING.VERTEX_PULL_PARAMS));
 });

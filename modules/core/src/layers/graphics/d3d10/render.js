@@ -1856,10 +1856,16 @@ export function createRenderer(services){
      * first instance only the GPU knows. Null where every stream is a vertex
      * buffer.
      *
+     * A vertex shader that reads its vertex ID reads the draw's first or
+     * base vertex beside them (`vertexBase`).
+     *
      * @param {any} inputLayout @param {number[]} strides @param {boolean} indirect
+     * @param {any} shader  the vertex shader
      * @returns {{ pull: import('./wgsl.js').VertexPull, slots: number[] } | null}
      */
-    const vertexPullOf = (inputLayout, strides, indirect)=>{
+    const vertexPullOf = (inputLayout, strides, indirect, shader)=>{
+        const vertexBase = (shader?.container?.inputs ?? []).some((/** @type {any} */ element)=>
+            element.systemValue === SYSTEM_VALUE.VERTEX_ID);
         /** @type {Map<number, number>} */
         const cursor = new Map();
         const placed = inputLayout.elements.map((/** @type {any} */ element)=>{
@@ -1885,7 +1891,7 @@ export function createRenderer(services){
                 slots.push(slot);
             }
         }
-        if (slots.length === 0)
+        if (slots.length === 0 && !vertexBase)
         {
             return null;
         }
@@ -1899,7 +1905,7 @@ export function createRenderer(services){
             .map((/** @type {any} */ one)=>({ semantic: one.element.SemanticName,
                 index: one.element.SemanticIndex ?? 0, stream: slots.indexOf(one.slot),
                 offset: one.offset, format: one.format }));
-        return { pull: { streams, attributes }, slots };
+        return { pull: { streams, attributes, ...(vertexBase ? { vertexBase } : {}) }, slots };
     };
 
     /**
@@ -2079,7 +2085,7 @@ export function createRenderer(services){
                 slope: rasterizer.SlopeScaledDepthBias, clamp: rasterizer.DepthBiasClamp }
             : undefined;
         const pulling = state.hullShader || state.geometry ? null
-            : vertexPullOf(state.inputLayout, state.strides, state.indirect);
+            : vertexPullOf(state.inputLayout, state.strides, state.indirect, state.vertexShader);
         const [layerIndex, layerCount] = (state.layerPass || '').split('/').map(Number);
         const linking = { targets: bound, depthBias: emulatedBias,
             clipDistances: backend.hasFeature?.('clip-distances') === true,
@@ -2469,8 +2475,9 @@ export function createRenderer(services){
     /** Where each stream a vertex stage reads itself starts, by draw. @type {any} */
     let pullParams = null;
     /**
-     * The words of the last draw's pulled per-instance streams its first
-     * instance goes into. @type {{ buffer: any, offset: number }[]}
+     * The words of the last draw's stream parameters an indirect draw's
+     * arguments go into, and the byte of the arguments each takes.
+     * @type {{ buffer: any, offset: number, from: number }[]}
      */
     let pulledFirst = [];
     /** @type {{ args: any, zero: any } | null} */
@@ -2503,7 +2510,7 @@ export function createRenderer(services){
         for (const word of pulledFirst)
         {
             record({ kind: 'copyBuffer', source: indirect.gpu,
-                sourceOffset: indirect.offset + first, destination: word.buffer,
+                sourceOffset: indirect.offset + word.from, destination: word.buffer,
                 destinationOffset: word.offset, size: 4 });
         }
         return { gpu: args, offset: 0 };
@@ -2519,7 +2526,8 @@ export function createRenderer(services){
      * @returns {object[]}
      */
     const pulledBindings = (pulling, pipeline, draw)=>{
-        const bytes = 16 * Math.max(1, pulling.slots.length);
+        const streams = pulling.slots.length;
+        const bytes = 16 * Math.max(1, streams + (pulling.pull.vertexBase ? 1 : 0));
         pullParams ??= backend.createDynamicBuffer({ label: 'd3d10:vertex-pull',
             size: 16 * 32, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, keep: false });
         const lock = pullParams.lock(0, bytes, LockFlags.DISCARD);
@@ -2543,11 +2551,21 @@ export function createRenderer(services){
                 resource.desc.ByteWidth, draw.indirect ? 0 : draw.startInstance ?? 0], k * 4);
             entries.push({ binding, resource: { buffer: backing.gpu.gpu } });
         });
+        const indexed = draw.indexCount !== undefined;
+        if (pulling.pull.vertexBase && !draw.indirect)
+        {
+            words[streams * 4] = (indexed ? draw.baseVertex ?? 0 : draw.startVertex ?? 0) >>> 0;
+        }
         lock.data.set(new Uint8Array(words.buffer));
         pullParams.unlock(lock);
         pullParams.markRead();
-        pulledFirst = pulling.pull.streams.flatMap((stream, k)=>(stream.stepMode === 'instance'
-            ? [{ buffer: pullParams.gpu, offset: k * 16 + 12 }] : []));
+        // What an indirect draw's arguments put there: each per-instance
+        // stream's first instance, and the first or base vertex.
+        const first = indexed ? 16 : 12;
+        pulledFirst = [...pulling.pull.streams.flatMap((stream, k)=>(stream.stepMode
+            === 'instance' ? [{ buffer: pullParams.gpu, offset: k * 16 + 12, from: first }] : [])),
+        ...(pulling.pull.vertexBase ? [{ buffer: pullParams.gpu, offset: streams * 16,
+            from: indexed ? 12 : 8 }] : [])];
         entries.push({ binding: BINDING.VERTEX_PULL_PARAMS,
             resource: { buffer: pullParams.gpu, offset: 0, size: bytes } });
         return entries;
@@ -4582,7 +4600,8 @@ export function createRenderer(services){
                         : { left: 0, top: 0, right, bottom };
                 }
                 const pulling = tessellated || drawnGeometry ? null
-                    : vertexPullOf(state.inputLayout, state.strides, state.indirect);
+                    : vertexPullOf(state.inputLayout, state.strides, state.indirect,
+                        state.vertexShader);
                 const program = tessellated
                     ? linkDomain(translationOf(state.vertexShader, state.vsVariant),
                         state.vertexShader.container,

@@ -2606,6 +2606,9 @@ const ROUTES = Object.freeze(/** @type {Record<number, string>} */ ({
  *     `rate`: the instances each per-instance element serves; 0 serves them all.
  * @property {{ semantic: string, index: number, stream: number, offset: number,
  *     format: string }[]} attributes
+ * @property {boolean} [vertexBase]  The vertex ID is the vertex index less the vec4 past
+ *     the streams' x: the draw's first vertex, or its base vertex where it has indices -
+ *     Direct3D's ID counts neither, WebGPU's index both.
  */
 
 /**
@@ -2621,7 +2624,7 @@ const ROUTES = Object.freeze(/** @type {Record<number, string>} */ ({
 function vertexPullOf(pull, inputs, registers){
     /** @type {string[]} */
     const unsupported = [];
-    const count = Math.max(1, pull.streams.length);
+    const count = Math.max(1, pull.streams.length + (pull.vertexBase ? 1 : 0));
     const text = [
         `@group(0) @binding(${BINDING.VERTEX_PULL_PARAMS}) var<uniform> vsPulls:`
             + ` array<${REG}, ${count}>;`,
@@ -2733,8 +2736,8 @@ export function linkProgram(vs, ps, options = {}){
         vsLoad.push(`    var v${index}: ${REG} = ${REG}(0u);`);
     }
     vsLoad.push(...options.vertexLoad?.load ?? []);
-    const pull = options.vertexPull && options.vertexPull.streams.length > 0
-        && !options.vertexLoad
+    const pull = options.vertexPull && (options.vertexPull.streams.length > 0
+        || options.vertexPull.vertexBase) && !options.vertexLoad
         ? vertexPullOf(options.vertexPull, vs.inputs, vs.inputRegisters) : null;
     if (pull)
     {
@@ -2758,8 +2761,10 @@ export function linkProgram(vs, ps, options = {}){
             {
                 vsIn.push(`    @builtin(vertex_index) v${element.register}: u32,`);
             }
-            vsLoad.push(`    v${element.register}.x = in.${pull ? 'vsVertexIndex'
-                : `v${element.register}`};`);
+            vsLoad.push(`    v${element.register}.x = ${pull ? `in.vsVertexIndex${
+                options.vertexPull?.vertexBase
+                    ? ` - vsPulls[${options.vertexPull.streams.length}].x` : ''}`
+                : `in.v${element.register}`};`);
         }
         else if (element.systemValue === SYSTEM_VALUE.INSTANCE_ID)
         {
@@ -2978,10 +2983,14 @@ export function linkProgram(vs, ps, options = {}){
         const varying = varyings.get(semanticKey(element));
         if (!varying)
         {
-            // The vertex shader wrote nothing under this name, which Direct3D
-            // refuses at draw time; here the register reads as zero and the
-            // pair says why.
-            unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
+            // An input the shader never reads (its signature's read mask
+            // empty) needs no output; one it reads under a name the vertex
+            // shader did not write Direct3D refuses at draw time; here the
+            // register reads as zero and the pair says why.
+            if (element.readWriteMask !== 0)
+            {
+                unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
+            }
             continue;
         }
         // A register two semantics share comes in once, as the first named it.
@@ -3865,7 +3874,7 @@ export function linkVertexPatches(vs, inputs, registers, streams){
     {
         if (element.systemValue === SYSTEM_VALUE.VERTEX_ID)
         {
-            fetch.push(`    v${element.register}.x = vsVertex;`);
+            fetch.push(`    v${element.register}.x = vsVertexId;`);
         }
         else if (element.systemValue === SYSTEM_VALUE.INSTANCE_ID)
         {
@@ -3922,9 +3931,13 @@ export function linkVertexPatches(vs, inputs, registers, streams){
         '    let vsInstance = id.x / max(1u, vsParams.perInstance);',
         '    let vsPoint = id.x % max(1u, vsParams.perInstance);',
         '    var vsVertex = vsParams.first + vsPoint;',
+        // Direct3D's vertex ID counts from zero in a draw without indices
+        // and is the index itself in one with them: neither the first
+        // vertex nor the base vertex is in it (test_vertex_id).
+        '    var vsVertexId = vsPoint;',
         '    if (vsParams.indexBytes != 0u) {',
-        '        vsVertex = bitcast<u32>(bitcast<i32>(vsIndex(vsParams.first + vsPoint))'
-            + ' + vsParams.baseVertex);',
+        '        vsVertexId = vsIndex(vsParams.first + vsPoint);',
+        '        vsVertex = bitcast<u32>(bitcast<i32>(vsVertexId) + vsParams.baseVertex);',
         '    }',
         ...fetch,
         '    vsBody();',
