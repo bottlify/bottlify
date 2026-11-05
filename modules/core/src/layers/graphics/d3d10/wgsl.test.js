@@ -37,7 +37,8 @@ import {
     rasterizer, sampleInfo, samplePos, dclInputPsSgv,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
-    atomicIadd, dclThreadGroup, dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
+    atomicIadd, dclGlobalFlags, dclUavTyped, ldUavTyped, storeUavTyped, dclThreadGroup,
+    dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
     storeRaw, storeStructured, sync, u, vThreadID, vThreadIDInGroupFlattened,
 } from './shader-fixtures.js';
 
@@ -1028,6 +1029,49 @@ test('a compute shader is a module of its own: its group\'s size, its thread ids
         [BINDING.UAV + 1, STAGE.COMPUTE, 'storage'],
         [BINDING.UAV_VIEW + 1, STAGE.COMPUTE, 'uniform'],
     ]);
+});
+
+test('a typed texture view an atomic touches is the words of its texels in a buffer, every'
+    + ' access to it through them; early depth tests are the fragment\'s own', ()=>{
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        major: 5,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclGlobalFlags(1 | 4),
+            dclUavTyped(1, RESOURCE_DIMENSION.TEXTURE2DARRAY, RETURN_TYPE.SINT),
+            dclUavTyped(2, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)),
+            dclTemps(1),
+            atomicIadd(u(1, 'x'), lu(3, 4, 5, 0), lu(1)),
+            ldUavTyped(r(0, 'x'), lu(1, 2, 0, 0), u(1, 'xxxx')),
+            storeUavTyped(u(1, 'xyzw'), lu(6, 7, 8, 0), r(0, 'xxxx')),
+            storeUavTyped(u(2, 'xyzw'), lu(0, 0, 0, 0), r(0, 'xxxx')),
+            mov(o(0), l(1, 1, 1, 1)),
+            ret(),
+        ],
+    }))), { uavFormats: { 2: 'r32float' } });
+    assert.deepEqual(ps.unsupported, []);
+    assert.equal(ps.earlyDepth, true);
+    assert.deepEqual(ps.uavs.map(uav=>!!uav.words), [true, false], 'only the one atomics touch');
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, ps, { earlyDepth: { compare: '<=', multisampled: false } });
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.fragment, /var<storage, read_write> u1: array<atomic<u32>>;/);
+    assert.match(linked.fragment, /var u2: texture_storage_2d<r32float, write>;/);
+    // Words a row, rows a layer, width, layers: layer z, row y, texel x.
+    assert.match(linked.fragment, /return \(c\.z \* u1view\.y \+ c\.y\) \* u1view\.x \+ c\.x;/);
+    assert.match(linked.fragment, /u1_atomic_iadd\(u1_index\(vec4<u32>\(vec4<u32>\(3u, 4u, 5u, 0u\)\.xyz,/);
+    assert.match(linked.fragment, /if \(i >= arrayLength\(&u1\)\) \{ return 0u; \}/);
+    assert.match(linked.fragment, /u1_load\(u1_index\(/);
+    assert.match(linked.fragment, /u1_store\(u1_index\(/);
+    assert.doesNotMatch(linked.fragment, /textureLoad\(u1|textureStore\(u1/);
+    assert.match(linked.fragment, /var earlyDepth: texture_depth_2d;/);
+    assert.match(linked.fragment, /if \(!\(in\.\w+\.z <= textureLoad\(earlyDepth,/);
+    assert.deepEqual(linked.groups[1].filter(entry=>entry.binding === BINDING.EARLY_DEPTH
+        || entry.binding === BINDING.UAV + 1 || entry.binding === BINDING.UAV_VIEW + 1)
+        .map(entry=>entry.texture?.sampleType ?? entry.buffer?.type),
+    ['storage', 'uniform', 'depth']);
 });
 
 test('a sampler\'s MipLODBias is added to every level the shader samples by: WebGPU\'s samplers'

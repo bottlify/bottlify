@@ -130,6 +130,16 @@ const COMPARE = Object.freeze({
     [D3D10_COMPARISON.ALWAYS]: 'always',
 });
 
+/** The WGSL operator a fragment's depth passes a test by, against the buffer's. */
+const COMPARE_OPERATOR = Object.freeze(/** @type {Record<number, string>} */ ({
+    [D3D10_COMPARISON.LESS]: '<',
+    [D3D10_COMPARISON.EQUAL]: '==',
+    [D3D10_COMPARISON.LESS_EQUAL]: '<=',
+    [D3D10_COMPARISON.GREATER]: '>',
+    [D3D10_COMPARISON.NOT_EQUAL]: '!=',
+    [D3D10_COMPARISON.GREATER_EQUAL]: '>=',
+}));
+
 /** @type {Readonly<Record<number, string>>} */
 const STENCIL_OP = Object.freeze({
     [D3D10_STENCIL_OP.KEEP]: 'keep',
@@ -1067,6 +1077,22 @@ export function createRenderer(services){
                 continue;
             }
             const { backing, twin } = use;
+            if (twin.words)
+            {
+                const level = backing.layout.levels[use.mip];
+                record({ kind: 'texelWords', ids: [backing.id], toBuffer: !back,
+                    texture: { texture: backing.texture, mipLevel: use.mip,
+                        origin: { x: 0, y: 0, z: use.first } },
+                    buffer: { buffer: twin.words.gpu, bytesPerRow: twin.rowWords * 4,
+                        rowsPerImage: level.height },
+                    size: { width: level.width, height: level.height,
+                        depthOrArrayLayers: use.count } });
+                if (back)
+                {
+                    backing.gpuDirty = true;
+                }
+                continue;
+            }
             for (let mip = use.mip; mip < use.mip + use.levels; mip++)
             {
                 const level = backing.layout.levels[mip];
@@ -2003,6 +2029,7 @@ export function createRenderer(services){
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
             state.indirect ? 'indirect' : '', state.layerPass ?? '', state.viewportPass ?? '',
+            state.earlyDepth ?? '',
         ].join('|');
         const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}`
             : state.geometry ? `${key}|gs:${idOf(state.geometry.shader)}:${state.geometry.stream}`
@@ -2097,7 +2124,10 @@ export function createRenderer(services){
             ...(state.layerPass ? { layerPass: { index: layerIndex, count: layerCount } } : {}),
             ...(state.viewportPass ? { viewportPass: { index: Number(state.viewportPass
                 .split('/')[0]), count: Number(state.viewportPass.split('/')[1]) } } : {}),
-            ...(pulling ? { vertexPull: pulling.pull } : {}) };
+            ...(pulling ? { vertexPull: pulling.pull } : {}),
+            ...(state.earlyDepth ? { earlyDepth: {
+                compare: state.earlyDepth.split(':')[0],
+                multisampled: state.earlyDepth.endsWith(':ms') } } : {}) };
         const program = state.hullShader
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
                 tessellationOf().hullOf(state.hullShader).stage, linking)
@@ -2445,6 +2475,49 @@ export function createRenderer(services){
                 label: `d3d10:${format}`,
             },
         };
+    };
+
+    /**
+     * Early depth tests for a draw whose pixel shader asks for them and writes
+     * through views (`[earlydepthstencil]`): WebGPU has none to ask for and
+     * runs the shader before tests it may make after, so the shader tests
+     * itself against the depth buffer, attached read-only and bound to it
+     * (`earlyDepth` in `linkProgram`). Exact while the draw writes no depth,
+     * which is how a pass that collects fragments draws; one that writes
+     * depth tests after the shader. Null where the shader tests nothing.
+     *
+     * @param {any} state @param {any} depth @param {PipelineSnapshot} pipeline
+     * @returns {{ target: any, view: any, key: string } | null}
+     */
+    const earlyDepthOf = (state, depth, pipeline)=>{
+        const ps = state.pixelShader ? translationOf(state.pixelShader, state.psVariant) : null;
+        if (!ps?.earlyDepth || ps.uavs.length === 0)
+        {
+            return null;
+        }
+        const tests = pipeline.depthStencilState ? stateDesc(pipeline.depthStencilState)
+            : DEFAULT_DEPTH_STENCIL;
+        const compare = COMPARE_OPERATOR[tests.DepthFunc];
+        if (!tests.DepthEnable || !compare)
+        {
+            return null;
+        }
+        const sampled = depth.texture && (depth.texture.usage === undefined
+            || (depth.texture.usage & TextureUsage.TEXTURE_BINDING) !== 0);
+        if (tests.DepthWriteMask !== 0 && (depth.readOnly & D3D11_DSV_FLAG.READ_ONLY_DEPTH) === 0
+            || !sampled)
+        {
+            diverge('a pixel shader that asks for early depth tests is tested after it runs:'
+                + ' what it writes through views is written by fragments the test rejects');
+            return null;
+        }
+        depth.early ??= {
+            target: { ...depth, readOnly: depth.readOnly | D3D11_DSV_FLAG.READ_ONLY_DEPTH },
+            view: depth.texture.createView({ label: 'd3d10:early-depth', aspect: 'depth-only',
+                dimension: '2d', baseMipLevel: depth.mipLevel, mipLevelCount: 1,
+                baseArrayLayer: depth.layer, arrayLayerCount: 1 }),
+        };
+        return { ...depth.early, key: `${compare}:${depth.sampleCount > 1 ? 'ms' : '1'}` };
     };
 
     /** @type {Map<string, any>} extent -> a target nothing reads */
@@ -3666,6 +3739,51 @@ export function createRenderer(services){
         return counter.gpu;
     };
 
+    /**
+     * A typed texture view a shader makes atomics on, as the words of its
+     * texels in a buffer, rows padded as a copy lays them out (`words` in the
+     * translator: WebGPU has no atomics on a storage texture). It is a twin:
+     * given the texels before the operation and giving them back after.
+     * Null where a texel is not one word.
+     *
+     * @param {any} view
+     * @returns {{ words: any, uniform: any, rowWords: number } | null}
+     */
+    const wordsOf = view=>{
+        const backing = backingOf(resourceOf(view));
+        const level = backing.layout.levels[view.range.mip];
+        if (!backing.texture || backing.sampleCount !== 1 || !level
+            || TEXEL_BYTES[backing.layout.format] !== 4 || backing.layout.storage?.conversion)
+        {
+            return null;
+        }
+        const { mip, first, count } = view.range;
+        backing.mirrors ??= new Map();
+        const key = `${mip}:${first}:${count}`;
+        let mirror = backing.mirrors.get(key);
+        if (!mirror)
+        {
+            const rowWords = Math.ceil(level.width / 64) * 64;
+            const words = backend.createDynamicBuffer({ label: 'd3d10:uav-words',
+                size: rowWords * 4 * level.height * count,
+                usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST });
+            const uniform = backend.createDynamicBuffer({ label: 'd3d10:uav-words-view', size: 16,
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
+            const lock = uniform.lock(0, 16, LockFlags.DISCARD);
+            lock.data.set(new Uint8Array(new Uint32Array([rowWords, level.height, level.width,
+                count]).buffer));
+            uniform.unlock(lock);
+            mirror = { id: nextBacking++, words, uniform, rowWords };
+            backing.mirrors.set(key, mirror);
+        }
+        useTwin(backing, mirror, { mip, levels: 1, first, count }, true);
+        mirror.words.markRead();
+        mirror.uniform.markRead();
+        backing.gpuDirty = true;
+        writes.add(backing.id);
+        return mirror;
+    };
+
     /** The backings the bindings being made write, by id. @type {Set<number>} */
     let writes = new Set();
     /**
@@ -3693,9 +3811,11 @@ export function createRenderer(services){
         if (entry.binding >= BINDING.UAV_VIEW)
         {
             const view = bound[entry.binding - BINDING.UAV_VIEW];
+            const mirror = view && view.dimensionName !== 'BUFFER' ? wordsOf(view) : null;
             return { binding: entry.binding, resource: view?.dimensionName === 'BUFFER'
                 ? { buffer: viewUniformOf(view, stateDesc(view)), offset: 0, size: 16 }
-                : { buffer: fallback.buffer.gpu, offset: 0, size: 16 } };
+                : { buffer: mirror ? mirror.uniform.gpu : fallback.buffer.gpu, offset: 0,
+                    size: 16 } };
         }
         const view = bound[entry.binding - BINDING.UAV] ?? null;
         if (entry.storageTexture)
@@ -3715,6 +3835,12 @@ export function createRenderer(services){
             }
             return { binding: entry.binding,
                 resource: made ? made.gpu : fallback.storageTexture(entry.storageTexture) };
+        }
+        const mirror = view && view.dimensionName !== 'BUFFER' ? wordsOf(view) : null;
+        if (mirror)
+        {
+            return { binding: entry.binding, resource: { buffer: mirror.words.gpu, offset: 0,
+                size: mirror.words.size } };
         }
         const resource = view?.dimensionName === 'BUFFER' ? resourceOf(view) : null;
         const backing = resource ? backingOf(resource) : null;
@@ -4601,7 +4727,16 @@ export function createRenderer(services){
                         stage: geometry.stage, stream: drawnGeometry.stream } : null,
                     vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
                     psVariant: variantOf(pipeline.stages.ps, pipeline.pixelViews ?? NO_VIEWS),
+                    earlyDepth: '',
                 };
+                const early = !tessellated && !drawnGeometry && depth
+                    ? earlyDepthOf(state, depth, pipeline) : null;
+                if (early)
+                {
+                    depth = early.target;
+                    state.depthReadOnly = early.target.readOnly;
+                    state.earlyDepth = early.key;
+                }
                 const rasterizer = pipeline.rasterizerState
                     ? stateDesc(pipeline.rasterizerState)
                     : DEFAULT_RASTERIZER;
@@ -4689,8 +4824,9 @@ export function createRenderer(services){
                             entry.binding < BINDING.VERTEX_PULL)),
                         ...pulledBindings(pulling, pipeline, draw)]
                         : bindingsFor(drawStage, program.groups[0]),
-                    bindingsFor(pipeline.stages.ps, program.groups[1],
+                    [...bindingsFor(pipeline.stages.ps, program.groups[1],
                         pipeline.pixelViews ?? NO_VIEWS),
+                    ...(early ? [{ binding: BINDING.EARLY_DEPTH, resource: early.view }] : [])],
                     ...(tessellated ? [tessellated.group] : []),
                     ...(drawnGeometry ? [drawnGeometry.group] : []),
                 ];
@@ -5157,6 +5293,15 @@ export function createRenderer(services){
             {
                 return pass;
             }
+            // A clear still waiting for a depth buffer this pass attaches
+            // read-only is made first, by a pass of the depth buffer alone.
+            const waiting = depth?.readOnly ? pendingClears.get(depth.key) : undefined;
+            if (waiting?.target && !waiting.color && !waiting.target.readOnly)
+            {
+                closePass();
+                passFor([], waiting.target);
+                closePass();
+            }
             const clearValues = targetList.map(entry=>{
                 const clear = entry ? pendingClears.get(entry.key) ?? null : null;
                 if (!clear || !clear.color)
@@ -5278,6 +5423,19 @@ export function createRenderer(services){
                     command.ids.forEach(settleClears);
                     frame.copyThroughBuffer(command.source, command.destination, command.size,
                         command.texelBytes);
+                    continue;
+                }
+                if (command.kind === 'texelWords')
+                {
+                    command.ids.forEach(settleClears);
+                    if (command.toBuffer)
+                    {
+                        frame.copyTextureToBuffer(command.texture, command.buffer, command.size);
+                    }
+                    else
+                    {
+                        frame.encodeCopy(command.buffer, command.texture, command.size);
+                    }
                     continue;
                 }
                 if (command.kind === 'copyBufferToTexture')

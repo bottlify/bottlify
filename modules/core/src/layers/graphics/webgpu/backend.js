@@ -1072,6 +1072,16 @@ export function createBackend(options){
                 },
 
                 /**
+                 * A texture's texels into a buffer, outside any pass.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 */
+                copyTextureToBuffer(source, destination, size){
+                    closeCurrentPass();
+                    encoder.copyTextureToBuffer(source, destination, size);
+                },
+
+                /**
                  * A region of one texture into another, outside any pass.
                  * The two must share a format; the copy is what a program
                  * that reads its own render target back into a texture asks

@@ -468,7 +468,8 @@ export const dclResource = (slot, dimension, returnType)=>op(OPCODE.DCL_RESOURCE
 });
 /** @param {number} slot @param {number} [mode] */
 export const dclSampler = (slot, mode = 0)=>op(OPCODE.DCL_SAMPLER, [s(slot)], { control: mode });
-export const dclGlobalFlags = ()=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: 1 });
+/** @param {number} [flags]  D3D10_SB_GLOBAL_FLAGS: 1 refactoring allowed, 4 early depth tests. */
+export const dclGlobalFlags = (flags = 1)=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: flags });
 
 /** @param {number[][]} rows */
 export const immediateConstantBuffer = rows=>({ customData: rows.flat() });

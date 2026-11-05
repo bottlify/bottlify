@@ -64,7 +64,13 @@ export const BINDING = Object.freeze({
     // its buffer, and where each stream starts, its stride and its length.
     VERTEX_PULL: 480,
     VERTEX_PULL_PARAMS: 512,
+    // The depth buffer a pixel shader that asks for early depth tests itself
+    // against (`earlyDepth` in `linkProgram`).
+    EARLY_DEPTH: 544,
 });
+
+/** The global flags a shader declares, in its declaration's control bits. */
+const GLOBAL_FLAG = Object.freeze({ FORCE_EARLY_DEPTH_STENCIL: 0x4 });
 
 /** WebGPU's `GPUShaderStage` bits, spelled out so nothing here reads a global. */
 export const STAGE = Object.freeze({ VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 });
@@ -343,6 +349,9 @@ export const HELPERS = Object.freeze({
  * @property {number} inputRegisters               How many `v` registers the body reads.
  * @property {number} outputRegisters              How many `o` registers the body writes.
  * @property {boolean} writesDepth
+ * @property {boolean} [earlyDepth]  The shader asks for the depth and stencil
+ *     tests before it runs (`[earlydepthstencil]`), so that what it writes
+ *     through views is not written by a fragment the tests reject.
  * @property {Record<number, number>} [interpolation]  A pixel shader's interpolation mode
  *     by input register, as its declarations give it (D3D10_SB_INTERPOLATION_MODE).
  * @property {boolean} [rasterizerSamples]  Whether the body reads the rasterizer's sample
@@ -365,6 +374,8 @@ export const HELPERS = Object.freeze({
  * @property {boolean} atomic     Whether the shader adds, swaps or compares in it.
  * @property {boolean} loaded     Whether the shader reads it as well as writes it.
  * @property {string} [format]    A typed texture's storage format (`uavFormats`).
+ * @property {boolean} [words]    A typed texture view held as its texels' words
+ *     in a buffer, for the atomics made on it.
  * @property {Set<string>} [atomicOps]  The atomic operations made on it.
  * @property {boolean} [counted]  Whether its append counter is used.
  */
@@ -498,6 +509,18 @@ export function translateShader(container, options = {}){
         uavs: [],
         sharedMemory: [],
     };
+    // WebGPU has no atomics on a storage texture: a typed texture view an
+    // atomic touches is bound as the words of its texels in a buffer, rows
+    // padded as a copy lays them out, and every access to it, plain loads
+    // and stores too, goes through them (`words`, the device's word mirror).
+    const atomicViews = new Set(instructions.filter(instruction=>
+        instruction.opcode >= OPCODE.ATOMIC_AND && instruction.opcode <= OPCODE.IMM_ATOMIC_UMIN
+        && instruction.opcode !== OPCODE.IMM_ATOMIC_ALLOC
+        && instruction.opcode !== OPCODE.IMM_ATOMIC_CONSUME)
+        .map(instruction=>instruction.operands[instruction.opcode >= OPCODE.IMM_ATOMIC_IADD
+            ? 1 : 0])
+        .filter(operand=>operand?.type === OPERAND.UNORDERED_ACCESS_VIEW)
+        .map(operand=>operand.indices[0]?.value));
     let nextTemp = 0;
     let depth = 1;
     // Not `t`: that is a texture's name, and a `let` of the same name would
@@ -1125,6 +1148,21 @@ export function translateShader(container, options = {}){
         }
     };
 
+    /**
+     * The word of a typed texture view held as words (`words`) an address
+     * names: its texel, layer or slice; out of the view, an index past them.
+     *
+     * @param {string} name @param {UavDecl} uav @param {string} address
+     */
+    const wordIndex = (name, uav, address)=>{
+        const at = /** @type {Record<number, string>} */ ({
+            [RESOURCE_DIMENSION.TEXTURE1D]: `${address}.x, 0u, 0u`,
+            [RESOURCE_DIMENSION.TEXTURE1DARRAY]: `${address}.x, 0u, ${address}.y`,
+            [RESOURCE_DIMENSION.TEXTURE2D]: `${address}.xy, 0u`,
+        })[uav.dimension] ?? `${address}.xyz`;
+        return `${name}_index(${REG}(${at}, 0u))`;
+    };
+
     /** The scalar a storage format's texels are. @param {string} format */
     const storageScalar = format=>(/uint$/.test(format) ? 'u32'
         : /sint$/.test(format) ? 'i32' : 'f32');
@@ -1162,6 +1200,11 @@ export function translateShader(container, options = {}){
             // The tessellation stages' declarations (what the stage is, which
             // the hull linker reads from the stream itself) and the global flags.
             case OPCODE.DCL_GLOBAL_FLAGS:
+                if ((instruction.control & GLOBAL_FLAG.FORCE_EARLY_DEPTH_STENCIL) !== 0)
+                {
+                    result.earlyDepth = true;
+                }
+                break;
             case OPCODE.HS_DECLS:
             case OPCODE.HS_CONTROL_POINT_PHASE:
             case OPCODE.HS_FORK_PHASE:
@@ -1256,6 +1299,8 @@ export function translateShader(container, options = {}){
                 const slot = dest.indices[0].value;
                 const isTyped = instruction.opcode === OPCODE.DCL_UAV_TYPED;
                 const format = isTyped ? options.uavFormats?.[slot] : undefined;
+                const words = isTyped && (instruction.control & 0x1f) !== RESOURCE_DIMENSION.BUFFER
+                    && atomicViews.has(slot);
                 result.uavs.push({
                     slot,
                     structure: isTyped ? 'typed'
@@ -1269,6 +1314,7 @@ export function translateShader(container, options = {}){
                     atomic: false,
                     loaded: false,
                     ...(format ? { format } : {}),
+                    ...(words ? { words } : {}),
                 });
                 if (isTyped && (instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -1955,6 +2001,12 @@ export function translateShader(container, options = {}){
                     store(dest, `${memory.name}_element(${u(a)}.x).${swizzleText(b.swizzle)}`);
                     break;
                 }
+                if (uav.words)
+                {
+                    store(dest, `${REG}(${memory.name}_load(${wordIndex(memory.name, uav, u(a))}),`
+                        + ` 0u, 0u, 1u).${swizzleText(b.swizzle)}`);
+                    break;
+                }
                 const at = storageCoordinate(uav, u(a));
                 if (!at || !uav.format || !/^r32/.test(uav.format))
                 {
@@ -1978,6 +2030,11 @@ export function translateShader(container, options = {}){
                 if (uav.dimension === RESOURCE_DIMENSION.BUFFER)
                 {
                     emit(`${memory.name}_storeElement(${u(a)}.x, ${u(b)});`);
+                    break;
+                }
+                if (uav.words)
+                {
+                    emit(`${memory.name}_store(${wordIndex(memory.name, uav, u(a))}, ${u(b)}.x);`);
                     break;
                 }
                 const at = storageCoordinate(uav, u(a));
@@ -2025,10 +2082,12 @@ export function translateShader(container, options = {}){
                 const address = rest[0];
                 const structured = memory.stride > 0;
                 const typedView = memory.uav?.structure === 'typed';
-                // A typed view's address is an element: a dword, its format one
-                // channel of 32 bits.
-                const word = typedView ? `${u(address)}.x`
-                    : wordOf(memory, `${u(address)}.x`, structured ? `${u(address)}.y` : null);
+                // A typed buffer view's address is an element: a dword, its
+                // format one channel of 32 bits; a typed texture's, a texel.
+                const element = typedView ? `${u(address)}.x` : null;
+                const word = memory.uav?.words ? wordIndex(memory.name, memory.uav, u(address))
+                    : element ?? wordOf(memory, `${u(address)}.x`,
+                        structured ? `${u(address)}.y` : null);
                 const compare = op === 'cmp_exch' ? `${u(rest[1])}.x` : '0u';
                 const value = `${u(rest[op === 'cmp_exch' ? 2 : 1])}.x`;
                 const old = atomicOn(memory, op, word, value, compare);
@@ -2402,6 +2461,31 @@ function declarations(shader, group, visibility){
     {
         const name = `u${uav.slot}`;
         const binding = BINDING.UAV + uav.slot;
+        if (uav.words)
+        {
+            // Its view uniform: words a row, rows a layer, width, layers.
+            text.push(`@group(${group}) @binding(${binding}) var<storage, read_write> ${name}: `
+                + 'array<atomic<u32>>;',
+            `@group(${group}) @binding(${BINDING.UAV_VIEW + uav.slot}) var<uniform> ${name}view:`
+                + ` ${REG};`,
+            `fn ${name}_index(c: ${REG}) -> u32 {`,
+            `    if (c.x >= ${name}view.z || c.y >= ${name}view.y || c.z >= ${name}view.w)`
+                + ' { return 0xffffffffu; }',
+            `    return (c.z * ${name}view.y + c.y) * ${name}view.x + c.x;`,
+            '}',
+            `fn ${name}_load(i: u32) -> u32 {`,
+            `    if (i >= arrayLength(&${name})) { return 0u; }`,
+            `    return atomicLoad(&${name}[i]);`,
+            '}',
+            `fn ${name}_store(i: u32, value: u32) {`,
+            `    if (i < arrayLength(&${name})) { atomicStore(&${name}[i], value); }`,
+            '}',
+            ...[...uav.atomicOps ?? []].flatMap(op=>atomicAccessor(name, op, true, null, -1)));
+            entries.push({ binding, visibility, buffer: { type: 'storage' } });
+            entries.push({ binding: BINDING.UAV_VIEW + uav.slot, visibility,
+                buffer: { type: 'uniform' } });
+            continue;
+        }
         if (uav.dimension !== RESOURCE_DIMENSION.BUFFER)
         {
             const shape = /** @type {Record<number, string[]>} */ (STORAGE_SHAPE)[uav.dimension];
@@ -2530,13 +2614,14 @@ function wordAccessors(name, atomic, view, words = 0){
  * either swapped or found another value.
  *
  * @param {string} name @param {string} op @param {boolean} atomic
- * @param {string | null} view @param {number} [words]
+ * @param {string | null} view @param {number} [words]  negative: the array's length
  * @returns {string[]}
  */
 function atomicAccessor(name, op, atomic, view, words = 0){
     void atomic;
     const bounds = view === null
-        ? [`    if (i >= ${words}u) { return 0u; }`, '    let at = i;']
+        ? [`    if (i >= ${words < 0 ? `arrayLength(&${name})` : `${words}u`}) { return 0u; }`,
+            '    let at = i;']
         : [`    if (i >= (${view}.z * ${view}.w) / 4u) { return 0u; }`,
             `    let at = (${view}.y * ${view}.w) / 4u + i;`,
             `    if (at >= arrayLength(&${name})) { return 0u; }`];
@@ -2798,7 +2883,12 @@ function vertexPullOf(pull, inputs, registers){
  *     depthBias?: { units: number, slope: number, clamp: number },
  *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
  *     alphaCoverage?: boolean, sampleCount?: number,
- *     viewportPass?: { index: number, count: number } }} [options]  `layerPass`,
+ *     earlyDepth?: { compare: string, multisampled: boolean },
+ *     viewportPass?: { index: number, count: number } }} [options]  `earlyDepth`: the
+ *     fragment tests itself against the depth buffer, bound read-only at
+ *     `BINDING.EARLY_DEPTH`, before the shader runs (`compare` the operator a
+ *     fragment's depth passes by, against what the buffer holds), so a rejected
+ *     one writes nothing through views. `layerPass`,
  *     `viewportPass`: the one of `count` layers or viewports this drawing of a draw
  *     whose primitives say which goes to; their other fragments are discarded.
  *     `vertexPull`: the streams the vertex stage
@@ -3237,6 +3327,25 @@ export function linkProgram(vs, ps, options = {}){
     // A fragment stage with nothing to write -- depth alone, no target bound
     // -- still runs, for what it discards, and returns nothing.
     const writes = psOut.length > 0;
+    /** @type {string[]} */
+    const early = [];
+    if (options.earlyDepth)
+    {
+        const named = psIn.find(line=>line.includes('@builtin(position)'));
+        const member = named ? /\) (\w+):/.exec(named)?.[1] : 'earlyPosition';
+        if (!named)
+        {
+            psIn.push('    @builtin(position) earlyPosition: vec4<f32>,');
+        }
+        const { compare, multisampled } = options.earlyDepth;
+        psDecl.text.push(`@group(1) @binding(${BINDING.EARLY_DEPTH}) var earlyDepth: `
+            + `texture_depth${multisampled ? '_multisampled' : ''}_2d;`);
+        psDecl.entries.push({ binding: BINDING.EARLY_DEPTH, visibility: STAGE.FRAGMENT,
+            texture: { sampleType: 'depth', viewDimension: '2d',
+                ...(multisampled ? { multisampled: true } : {}) } });
+        early.push(`    if (!(in.${member}.z ${compare} textureLoad(earlyDepth,`
+            + ` vec2<i32>(in.${member}.xy), 0))) { discard; }`);
+    }
     const fragment = [
         'diagnostic(off, derivative_uniformity);',
         ...(ps.rasterizerSamples ? [`const rasterSamples: u32 = ${options.sampleCount ?? 1}u;`]
@@ -3246,6 +3355,7 @@ export function linkProgram(vs, ps, options = {}){
         ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
         `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''})`
             + `${writes ? ' -> FragmentOut' : ''} {`,
+        ...early,
         ...cutLoad,
         ...biasLoad,
         ...psLoad,
