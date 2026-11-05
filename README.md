@@ -57,3 +57,7 @@ their own, [`bottlify-ui`](https://github.com/bottlify/bottlify-ui).
 
 Bottlify is licensed under the MPL-2.0. Components and code from others are listed in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+
+## Contact
+
+Partnerships and collaboration: [partners@bottlify.app](mailto:partners@bottlify.app).

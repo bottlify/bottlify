@@ -57,3 +57,7 @@ npm run cdp:probe   # boots the engine in a real headless Chrome
 
 Bottlify распространяется по лицензии MPL-2.0. Чужие компоненты и код перечислены в
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+
+## Связь
+
+Партнёрство и сотрудничество: [partners@bottlify.app](mailto:partners@bottlify.app).
