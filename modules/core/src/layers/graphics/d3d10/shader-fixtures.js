@@ -60,6 +60,25 @@ export const r = (index, components)=>register(OPERAND.TEMP, [index], components
 export const v = (index, components)=>register(OPERAND.INPUT, [index], components);
 /** @param {number} index @param {string} [components] */
 export const o = (index, components)=>register(OPERAND.OUTPUT, [index], components);
+/** A hull or domain shader's input control point. @param {number} point @param {number} index
+ *  @param {string} [components] */
+export const vicp = (point, index, components)=>
+    register(OPERAND.INPUT_CONTROL_POINT, [point, index], components);
+/** A hull shader's output control point, as a later phase reads it.
+ *  @param {number} point @param {number} index @param {string} [components] */
+export const vocp = (point, index, components)=>
+    register(OPERAND.OUTPUT_CONTROL_POINT, [point, index], components);
+/** A patch constant, as a join phase or a domain shader reads it.
+ *  @param {number} index @param {string} [components] */
+export const vpc = (index, components)=>register(OPERAND.INPUT_PATCH_CONSTANT, [index], components);
+/** @param {string} [components] */
+export const vOutputControlPointID = components=>
+    register(OPERAND.OUTPUT_CONTROL_POINT_ID, [], components);
+/** @param {string} [components] */
+export const vForkInstanceID = components=>
+    register(OPERAND.INPUT_FORK_INSTANCE_ID, [], components);
+/** @param {string} [components] */
+export const vDomain = components=>register(OPERAND.INPUT_DOMAIN_POINT, [], components);
 /** @param {number} slot @param {number} index @param {string} [components] */
 export const cb = (slot, index, components)=>
     register(OPERAND.CONSTANT_BUFFER, [slot, index], components);
@@ -421,6 +440,31 @@ export const vThreadIDInGroupFlattened = components=>
     register(OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED, [], components);
 /** @param {number} x @param {number} y @param {number} z */
 export const dclThreadGroup = (x, y, z)=>op(OPCODE.DCL_THREAD_GROUP, [], { extra: [x, y, z] });
+// A hull shader's phases and what it declares of the stage: the counts and
+// the tessellator's domain (1 isoline, 2 tri, 3 quad), partitioning (1
+// integer, 2 pow2, 3 fractional odd, 4 fractional even) and output (1 point,
+// 2 line, 3 triangle cw, 4 triangle ccw), as the token numbers them.
+export const hsDecls = ()=>op(OPCODE.HS_DECLS, []);
+export const hsControlPointPhase = ()=>op(OPCODE.HS_CONTROL_POINT_PHASE, []);
+export const hsForkPhase = ()=>op(OPCODE.HS_FORK_PHASE, []);
+export const hsJoinPhase = ()=>op(OPCODE.HS_JOIN_PHASE, []);
+/** @param {number} count */
+export const dclInputControlPointCount = count=>
+    op(OPCODE.DCL_INPUT_CONTROL_POINT_COUNT, [], { control: count });
+/** @param {number} count */
+export const dclOutputControlPointCount = count=>
+    op(OPCODE.DCL_OUTPUT_CONTROL_POINT_COUNT, [], { control: count });
+/** @param {number} domain */
+export const dclTessDomain = domain=>op(OPCODE.DCL_TESS_DOMAIN, [], { control: domain });
+/** @param {number} partitioning */
+export const dclTessPartitioning = partitioning=>
+    op(OPCODE.DCL_TESS_PARTITIONING, [], { control: partitioning });
+/** @param {number} output */
+export const dclTessOutputPrimitive = output=>
+    op(OPCODE.DCL_TESS_OUTPUT_PRIMITIVE, [], { control: output });
+/** @param {number} count */
+export const dclHsForkPhaseInstanceCount = count=>
+    op(OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT, [], { extra: [count] });
 /** @param {number} slot */
 export const dclUavRaw = slot=>op(OPCODE.DCL_UAV_RAW, [u(slot)]);
 /** @param {number} slot @param {number} stride @param {boolean} [counter] */
@@ -592,6 +636,7 @@ export function container(chunks){
  * @property {number} kind
  * @property {AsmSignatureElement[]} [inputs]
  * @property {AsmSignatureElement[]} [outputs]
+ * @property {AsmSignatureElement[]} [patchConstants]  A hull or domain shader's PCSG.
  * @property {(AsmInstruction | { customData: number[] })[]} instructions
  * @property {number} [major]  The shader model: 4, or 5 for what only 5 has.
  */
@@ -604,6 +649,8 @@ export function assemble(shader){
     return container([
         { name: 'ISGN', bytes: encodeSignature(shader.inputs ?? [], 0xf) },
         { name: 'OSGN', bytes: encodeSignature(shader.outputs ?? [], 0) },
+        ...(shader.patchConstants
+            ? [{ name: 'PCSG', bytes: encodeSignature(shader.patchConstants, 0) }] : []),
         { name: shader.major === 5 ? 'SHEX' : 'SHDR',
             bytes: encodeProgram(shader.kind, shader.instructions, shader.major) },
     ]);
@@ -919,3 +966,77 @@ export const constantBufferShader = ()=>withChunks(solidPixelShader([0, 0, 0, 1]
         target: 0xffff0400, flags: 0x100, buffers: wineConstantBuffers(),
     }),
 }]);
+
+/**
+ * A row of the immediate constant buffer, indexed by a register's component.
+ *
+ * @param {AsmOperand} relative  one component selected
+ * @param {string} [components]
+ * @returns {AsmOperand}
+ */
+export const icbAt = (relative, components)=>({
+    ...register(OPERAND.IMMEDIATE_CONSTANT_BUFFER, [0], components), relative });
+
+/**
+ * A hull shader of a quad domain, written as fxc writes the one of Wine's
+ * and vkd3d's tessellation tests whose patch-constant function loops: one
+ * input control point; a control point phase that places four output points
+ * about it from an immediate constant buffer, by vOutputControlPointID; two
+ * instanced fork phases that write the edge and inside factors (1.0) through
+ * a register index; and a fork phase that writes the four output points'
+ * mean (CENTER) from the output control points. Integer partitioning,
+ * clockwise triangles.
+ *
+ * @returns {Uint8Array}
+ */
+export function forkPhaseHullShader(){
+    const corners = [[0, 0, 0, 1], [0, 2, 0, 1], [2, 0, 0, 1], [2, 2, 0, 1]]
+        .map(row=>row.map(floatBits));
+    return assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [
+            ...[0, 1, 2, 3].map(index=>({ name: 'SV_TessFactor', index,
+                systemValue: SYSTEM_VALUE.QUAD_EDGE_TESSFACTOR, register: index, mask: 1 })),
+            ...[0, 1].map(index=>({ name: 'SV_InsideTessFactor', index,
+                systemValue: SYSTEM_VALUE.QUAD_INSIDE_TESSFACTOR, register: 4 + index, mask: 1 })),
+            { name: 'CENTER', register: 6, mask: 7 },
+        ],
+        instructions: [
+            hsDecls(),
+            dclInputControlPointCount(1),
+            dclOutputControlPointCount(4),
+            dclTessDomain(3),
+            dclTessPartitioning(1),
+            dclTessOutputPrimitive(3),
+            hsControlPointPhase(),
+            dclOutput(o(0)),
+            dclTemps(1),
+            immediateConstantBuffer(corners),
+            mov(r(0, 'x'), vOutputControlPointID('x')),
+            add(o(0), vicp(0, 0), icbAt(r(0, 'x'))),
+            ret(),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(4),
+            dclTemps(1),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(0, 'x'), r(0, 'x')), l(1)),
+            ret(),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(2),
+            dclTemps(1),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(4, 'x'), r(0, 'x')), l(1)),
+            ret(),
+            hsForkPhase(),
+            dclTemps(1),
+            add(r(0, 'xyz'), vocp(0, 0, 'xyz'), vocp(1, 0, 'xyz')),
+            add(r(0, 'xyz'), r(0, 'xyz'), vocp(2, 0, 'xyz')),
+            add(r(0, 'xyz'), r(0, 'xyz'), vocp(3, 0, 'xyz')),
+            mul(o(6, 'xyz'), r(0, 'xyz'), l(0.25, 0.25, 0.25, 0.25)),
+            ret(),
+        ],
+    });
+}

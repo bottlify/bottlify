@@ -59,6 +59,13 @@ export const SYSTEM_VALUE = Object.freeze({
     INSTANCE_ID: 8,
     IS_FRONT_FACE: 9,
     SAMPLE_INDEX: 10,
+    // A hull shader's patch constants the tessellator reads.
+    QUAD_EDGE_TESSFACTOR: 11,
+    QUAD_INSIDE_TESSFACTOR: 12,
+    TRI_EDGE_TESSFACTOR: 13,
+    TRI_INSIDE_TESSFACTOR: 14,
+    LINE_DETAIL_TESSFACTOR: 15,
+    LINE_DENSITY_TESSFACTOR: 16,
     TARGET: 64,
     DEPTH: 65,
 });

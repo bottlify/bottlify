@@ -35,7 +35,7 @@
  */
 
 import { DXGI_FORMAT } from './constants.js';
-import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseSignature } from './dxbc.js';
 import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
     SYNC_FLAG, decodeSm4,
@@ -402,15 +402,26 @@ const u32Literal = dword=>`${dword >>> 0}u`;
  * the bound view's format, which `uavFormats` names by slot.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
+ * A hull shader is translated a phase at a time (`hull.js`): `tokens` is the
+ * stream of one phase, its declarations before it, and `outputName` the array
+ * its outputs are written into.
+ *
+ * @param {import('./dxbc.js').DxbcContainer} container
  * @param {{ multisampled?: readonly number[], depth?: readonly number[],
- *     uavFormats?: Readonly<Record<number, string>> }} [options]
+ *     uavFormats?: Readonly<Record<number, string>>, tokens?: Uint32Array,
+ *     outputName?: string }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
     const program = /** @type {import('./dxbc.js').ShaderProgram} */ (container.shader);
-    const instructions = decodeSm4(program.tokens);
+    const instructions = decodeSm4(options.tokens ?? program.tokens);
     const isPixel = program.kind === SHADER_KIND.PIXEL;
     const isCompute = program.kind === SHADER_KIND.COMPUTE;
+    // A hull shader's phases write their outputs as an array a register may
+    // be indexed into (a fork phase's instances write o[vForkInstanceID + n]),
+    // the one its linker names (`hull.js`).
+    const isHull = program.kind === SHADER_KIND.HULL;
+    const outputArray = options.outputName ?? 'o';
 
     /** @type {TranslatedShader} */
     const result = {
@@ -482,7 +493,30 @@ export function translateShader(container, options = {}){
             case OPERAND.INPUT:
                 return `v${operand.indices[0].value}.${swizzle}`;
             case OPERAND.OUTPUT:
-                return `o${operand.indices[0].value}.${swizzle}`;
+                return isHull ? `${outputArray}[${indexExpression(operand, 0)}].${swizzle}`
+                    : `o${operand.indices[0].value}.${swizzle}`;
+            case OPERAND.INPUT_CONTROL_POINT:
+                return `vicp[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
+                    + `.${swizzle}`;
+            case OPERAND.OUTPUT_CONTROL_POINT:
+                return `vocp[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
+                    + `.${swizzle}`;
+            case OPERAND.INPUT_PATCH_CONSTANT:
+                return `vpc[${indexExpression(operand, 0)}].${swizzle}`;
+            case OPERAND.OUTPUT_CONTROL_POINT_ID:
+                return `${REG}(hsControlPoint).${swizzle}`;
+            case OPERAND.INPUT_FORK_INSTANCE_ID:
+            case OPERAND.INPUT_JOIN_INSTANCE_ID:
+                return `${REG}(hsInstance).${swizzle}`;
+            case OPERAND.INPUT_PRIMITIVE_ID:
+                if (isHull || program.kind === SHADER_KIND.DOMAIN)
+                {
+                    return `${REG}(primitiveId).${swizzle}`;
+                }
+                result.unsupported.push(`operand type ${operand.type}`);
+                return `${REG}(0u)`;
+            case OPERAND.INPUT_DOMAIN_POINT:
+                return `dsDomain.${swizzle}`;
             case OPERAND.INDEXABLE_TEMP:
                 return `x${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.CONSTANT_BUFFER:
@@ -1028,7 +1062,21 @@ export function translateShader(container, options = {}){
         switch (instruction.opcode)
         {
             // --- declarations ---
+            // The tessellation stages' declarations (what the stage is, which
+            // the hull linker reads from the stream itself) and the global flags.
             case OPCODE.DCL_GLOBAL_FLAGS:
+            case OPCODE.HS_DECLS:
+            case OPCODE.HS_CONTROL_POINT_PHASE:
+            case OPCODE.HS_FORK_PHASE:
+            case OPCODE.HS_JOIN_PHASE:
+            case OPCODE.DCL_INPUT_CONTROL_POINT_COUNT:
+            case OPCODE.DCL_OUTPUT_CONTROL_POINT_COUNT:
+            case OPCODE.DCL_TESS_DOMAIN:
+            case OPCODE.DCL_TESS_PARTITIONING:
+            case OPCODE.DCL_TESS_OUTPUT_PRIMITIVE:
+            case OPCODE.DCL_HS_MAX_TESSFACTOR:
+            case OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT:
+            case OPCODE.DCL_HS_JOIN_PHASE_INSTANCE_COUNT:
             case OPCODE.DCL_INPUT_SGV:
             case OPCODE.DCL_INPUT_PS_SGV:
             case OPCODE.DCL_OUTPUT_SGV:
@@ -1926,6 +1974,16 @@ export function translateShader(container, options = {}){
                 store(dest, fromFloat(`dpdyFine(${f(a)})`, sat));
                 break;
 
+            // A range of registers indexed into: a hull shader's outputs are an
+            // array already; anywhere else a relative input or output is not
+            // carried, and is refused here rather than read at its base.
+            case OPCODE.DCL_INDEX_RANGE:
+                if (!isHull)
+                {
+                    unsupported(instruction.name);
+                }
+                break;
+
             default:
                 unsupported(instruction.name);
                 break;
@@ -2626,5 +2684,273 @@ export function linkProgram(vs, ps, options = {}){
         attributes,
         targets,
         unsupported,
+    };
+}
+
+/** The tessellator's domains, partitionings and outputs as a hull shader declares them. */
+const HULL_DOMAIN = Object.freeze({ 1: 'isoline', 2: 'tri', 3: 'quad' });
+
+/**
+ * @typedef {Object} LinkedHull
+ * @property {string} code           WGSL, entry point `hullMain`: one invocation a patch.
+ * @property {BindGroupLayoutEntry[]} entries  Group 0, the shader's own resources; group 1
+ *     is the stage's (`HULL_BINDING`).
+ * @property {{ domain: 'isoline' | 'tri' | 'quad', partitioning: number, output: number,
+ *     inputPoints: number, outputPoints: number, inputRegisters: number,
+ *     outputRegisters: number, constantRegisters: number }} stage
+ *     What the tessellator is told and how big each record is: partitioning and
+ *     output as `tessellator.js` numbers them.
+ * @property {string[]} unsupported
+ */
+
+/** Group 1 of a hull program: what it reads and writes per patch. */
+export const HULL_BINDING = Object.freeze({
+    inputs: 0, points: 1, constants: 2, patches: 3, params: 4,
+});
+
+/**
+ * A hull shader as one compute program, one invocation a patch: the patch's
+ * input control points (`inputs`, the vertex stage's outputs by the hull's
+ * input registers), the control point phase run once for each output control
+ * point (or, without one, the input points passed through), every fork phase
+ * and then every join phase run once for each of its instances, and then the
+ * output control points, the patch constants and the tessellator's record of
+ * the patch (`tessellator-wgsl.js`'s `Patch`: the declared domain,
+ * partitioning and output, the tess factors from the patch constants the PCSG
+ * signature names) written out.
+ *
+ * Each phase is translated as a shader of its own, the declarations before
+ * the first phase in front of it, into a function over the stage's private
+ * registers: `vicp`, `vocp`, `vpc`, and the outputs it writes, an output
+ * control point's (`cpo`) or the patch constants (`pc`).
+ *
+ * @param {import('./dxbc.js').DxbcContainer} container
+ * @returns {LinkedHull}
+ */
+export function linkHull(container){
+    const program = /** @type {import('./dxbc.js').ShaderProgram} */ (container.shader);
+    const instructions = decodeSm4(program.tokens);
+    /** @type {string[]} */
+    const unsupported = [];
+    /** @type {{ kind: number, from: number, to: number }[]} */
+    const phases = [];
+    let globalsEnd = program.tokens.length;
+    let at = 0;
+    const stage = { domain: /** @type {'isoline' | 'tri' | 'quad'} */ ('tri'), partitioning: 0,
+        output: 0, inputPoints: 0, outputPoints: 0 };
+    for (const instruction of instructions)
+    {
+        const control = instruction.control;
+        switch (instruction.opcode)
+        {
+            case OPCODE.HS_CONTROL_POINT_PHASE:
+            case OPCODE.HS_FORK_PHASE:
+            case OPCODE.HS_JOIN_PHASE:
+                if (phases.length === 0)
+                {
+                    globalsEnd = at;
+                }
+                else
+                {
+                    phases[phases.length - 1].to = at;
+                }
+                phases.push({ kind: instruction.opcode, from: at + instruction.length,
+                    to: program.tokens.length });
+                break;
+            case OPCODE.DCL_INPUT_CONTROL_POINT_COUNT:
+                stage.inputPoints = control & 0x3f;
+                break;
+            case OPCODE.DCL_OUTPUT_CONTROL_POINT_COUNT:
+                stage.outputPoints = control & 0x3f;
+                break;
+            case OPCODE.DCL_TESS_DOMAIN:
+                stage.domain = HULL_DOMAIN[/** @type {1 | 2 | 3} */ (control & 3)] ?? 'tri';
+                break;
+            case OPCODE.DCL_TESS_PARTITIONING:
+                // The token's are one past Direct3D's (0 is "undefined").
+                stage.partitioning = Math.max(0, (control & 7) - 1);
+                break;
+            case OPCODE.DCL_TESS_OUTPUT_PRIMITIVE:
+                stage.output = Math.max(0, (control & 7) - 1);
+                break;
+            default:
+                break;
+        }
+        at += instruction.length;
+    }
+    const globals = program.tokens.subarray(0, globalsEnd);
+    /** @param {import('./dxbc.js').SignatureElement[]} elements */
+    const registersOf = elements=>Math.max(1, ...elements.map(element=>element.register + 1));
+    const patchConstants = container.chunks.has('PCSG')
+        ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : [];
+    const inputRegisters = registersOf(container.inputs);
+    const outputRegisters = registersOf(container.outputs);
+    const constantRegisters = registersOf(patchConstants);
+    const inputPoints = Math.max(1, stage.inputPoints);
+    const outputPoints = Math.max(1, stage.outputPoints);
+
+    /** @type {string[]} */
+    const functions = [];
+    /** @type {string[]} */
+    const calls = [];
+    /** @type {TranslatedShader[]} */
+    const translated = [];
+    let hasControlPointPhase = false;
+    let joinStarted = false;
+    phases.forEach((phase, index)=>{
+        const tokens = new Uint32Array(globals.length + phase.to - phase.from);
+        tokens.set(globals);
+        tokens.set(program.tokens.subarray(phase.from, phase.to), globals.length);
+        const isControlPoint = phase.kind === OPCODE.HS_CONTROL_POINT_PHASE;
+        const shader = translateShader(container, { tokens,
+            outputName: isControlPoint ? 'cpo' : 'pc' });
+        translated.push(shader);
+        unsupported.push(...shader.unsupported);
+        const icb = `icb_p${index}`;
+        const lines = [`fn hsPhase${index}() {`];
+        if (shader.immediateConstants.length > 0)
+        {
+            const rows = shader.immediateConstants
+                .map(row=>`${REG}(${row.map(u32Literal).join(', ')})`);
+            functions.push(`const ${icb} = array<${REG}, ${rows.length}>(${rows.join(', ')});`);
+        }
+        for (let temp = 0; temp < shader.temps; temp++)
+        {
+            lines.push(`    var r${temp}: ${REG};`);
+        }
+        for (const temp of shader.indexableTemps)
+        {
+            lines.push(`    var x${temp.index}: array<${REG}, ${temp.size}>;`);
+        }
+        lines.push(...bodyText(shader, null).map(line=>line.replace(/\bicb\[/g, `${icb}[`)));
+        lines.push('}');
+        functions.push(lines.join('\n'));
+        const instances = decodeSm4(program.tokens.subarray(phase.from, phase.to))
+            .find(one=>one.opcode === OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT
+                || one.opcode === OPCODE.DCL_HS_JOIN_PHASE_INSTANCE_COUNT)?.extra[0] ?? 1;
+        if (isControlPoint)
+        {
+            hasControlPointPhase = true;
+            calls.push(`    for (var cp = 0u; cp < ${outputPoints}u; cp++) {`,
+                `        hsControlPoint = cp;`,
+                `        cpo = array<${REG}, ${outputRegisters}>();`,
+                `        hsPhase${index}();`,
+                `        vocp[cp] = cpo;`,
+                '    }');
+            return;
+        }
+        if (phase.kind === OPCODE.HS_JOIN_PHASE && !joinStarted)
+        {
+            joinStarted = true;
+            calls.push('    vpc = pc;');
+        }
+        calls.push(`    for (var i = 0u; i < ${instances}u; i++) {`,
+            '        hsInstance = i;', `        hsPhase${index}();`, '    }');
+    });
+    if (!hasControlPointPhase)
+    {
+        // Without a control point phase the input points go on as they came.
+        calls.unshift(`    for (var cp = 0u; cp < ${Math.min(inputPoints, outputPoints)}u; cp++) {`,
+            `        for (var reg = 0u; reg < ${Math.min(inputRegisters, outputRegisters)}u;`
+                + ' reg++) {',
+            '            vocp[cp][reg] = vicp[cp][reg];', '        }', '    }');
+    }
+
+    // The tess factors, in the order the tessellator takes them.
+    /** @type {string[]} */
+    const factors = ['0.0', '0.0', '0.0', '0.0', '0.0', '0.0'];
+    for (const element of patchConstants)
+    {
+        const component = [0, 1, 2, 3].find(c=>(element.mask & (1 << c)) !== 0) ?? 0;
+        const value = `bitcast<f32>(pc[${element.register}].${COMPONENT[component]})`;
+        const slot = {
+            [SYSTEM_VALUE.QUAD_EDGE_TESSFACTOR]: element.index,
+            [SYSTEM_VALUE.QUAD_INSIDE_TESSFACTOR]: 4 + element.index,
+            [SYSTEM_VALUE.TRI_EDGE_TESSFACTOR]: element.index,
+            [SYSTEM_VALUE.TRI_INSIDE_TESSFACTOR]: 3,
+            [SYSTEM_VALUE.LINE_DENSITY_TESSFACTOR]: 0,
+            [SYSTEM_VALUE.LINE_DETAIL_TESSFACTOR]: 1,
+        }[element.systemValue];
+        if (slot !== undefined && slot < 6)
+        {
+            factors[slot] = value;
+        }
+    }
+
+    // Every phase's resources, declared once.
+    /** @type {TranslatedShader} */
+    const merged = { ...translated[0] ?? translateShader(container, { tokens: globals,
+        outputName: 'pc' }), immediateConstants: [], body: [] };
+    for (const shader of translated.slice(1))
+    {
+        for (const key of /** @type {const} */ (['constantBuffers', 'textures', 'samplers',
+            'uavs']))
+        {
+            for (const item of shader[key])
+            {
+                if (!merged[key].some((/** @type {any} */ other)=>other.slot === item.slot))
+                {
+                    /** @type {any[]} */ (merged[key]).push(item);
+                }
+            }
+        }
+        merged.helpers = [...new Set([...merged.helpers, ...shader.helpers])];
+    }
+    const declared = declarations(merged, 0, STAGE.COMPUTE);
+    unsupported.push(...declared.unsupported);
+    const domainNumber = { isoline: 0, tri: 1, quad: 2 }[stage.domain];
+    const code = [
+        ...declared.text,
+        'struct TessPatch { kind: vec4<u32>, f0: vec4<f32>, f1: vec4<f32>, }',
+        `@group(1) @binding(${HULL_BINDING.inputs}) var<storage, read> hsIn: array<${REG}>;`,
+        `@group(1) @binding(${HULL_BINDING.points}) var<storage, read_write> hsOutPoints: `
+            + `array<${REG}>;`,
+        `@group(1) @binding(${HULL_BINDING.constants}) var<storage, read_write> hsOutConstants: `
+            + `array<${REG}>;`,
+        `@group(1) @binding(${HULL_BINDING.patches}) var<storage, read_write> hsPatches: `
+            + 'array<TessPatch>;',
+        `@group(1) @binding(${HULL_BINDING.params}) var<uniform> hsParams: vec4<u32>;`,
+        `var<private> vicp: array<array<${REG}, ${inputRegisters}>, ${inputPoints}>;`,
+        `var<private> vocp: array<array<${REG}, ${outputRegisters}>, ${outputPoints}>;`,
+        `var<private> cpo: array<${REG}, ${outputRegisters}>;`,
+        `var<private> pc: array<${REG}, ${constantRegisters}>;`,
+        `var<private> vpc: array<${REG}, ${constantRegisters}>;`,
+        'var<private> hsControlPoint: u32;',
+        'var<private> hsInstance: u32;',
+        'var<private> primitiveId: u32;',
+        ...functions,
+        '@compute @workgroup_size(64)',
+        'fn hullMain(@builtin(global_invocation_id) id: vec3<u32>) {',
+        '    if (id.x >= hsParams.x) { return; }',
+        '    let hsPatch = id.x;',
+        '    primitiveId = hsPatch;',
+        `    for (var cp = 0u; cp < ${inputPoints}u; cp++) {`,
+        `        for (var reg = 0u; reg < ${inputRegisters}u; reg++) {`,
+        `            vicp[cp][reg] = hsIn[(hsPatch * ${inputPoints}u + cp) * ${inputRegisters}u`
+            + ' + reg];',
+        '        }',
+        '    }',
+        ...calls,
+        `    for (var cp = 0u; cp < ${outputPoints}u; cp++) {`,
+        `        for (var reg = 0u; reg < ${outputRegisters}u; reg++) {`,
+        `            hsOutPoints[(hsPatch * ${outputPoints}u + cp) * ${outputRegisters}u + reg] `
+            + '= vocp[cp][reg];',
+        '        }',
+        '    }',
+        `    for (var reg = 0u; reg < ${constantRegisters}u; reg++) {`,
+        `        hsOutConstants[hsPatch * ${constantRegisters}u + reg] = pc[reg];`,
+        '    }',
+        `    hsPatches[hsPatch] = TessPatch(vec4<u32>(${domainNumber}u, ${stage.partitioning}u, `
+            + `${stage.output}u, 0u),`,
+        `        vec4<f32>(${factors.slice(0, 4).join(', ')}), `
+            + `vec4<f32>(${factors[4]}, ${factors[5]}, 0.0, 0.0));`,
+        '}',
+    ].join('\n');
+    return {
+        code,
+        entries: declared.entries,
+        stage: { ...stage, inputPoints, outputPoints, inputRegisters, outputRegisters,
+            constantRegisters },
+        unsupported: [...new Set(unsupported)],
     };
 }
