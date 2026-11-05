@@ -358,6 +358,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // the guest did not run, its sound late -- where the translation is
         // the one to wait.
         holdMs: 4,
+        // The share of the engine thread's time over a while the translator's work
+        // may take (`holdMs` refills at it): what a frame gives up to new code.
+        holdShare: 0.5,
         // Indirect-call prediction (`callTargets`): samples of a call before its
         // callees are looked at, and the window a call's samples are counted in
         // (`PREDICT_AFTER`, `CALL_WINDOW`).
@@ -1896,7 +1899,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     const holding = ()=>settings.holdMs > 0 && workerUrl !== null;
     /** The share of the engine thread's time over a while the translator's work may take. */
-    const HOLD_SHARE = 0.5;
+    const HOLD_SHARE = settings.holdShare;
     /** The engine thread's time forming may take now (`holdMs`), refilled at
      * `HOLD_SHARE` of the time that passes, and when it was last brought up to date. */
     let credit = settings.holdMs;
@@ -5417,6 +5420,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 invalidations: counts.invalidations,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,
                 retired: corkRetired,
+                // Whether the milliseconds below were measured (`timings`): 0 otherwise.
+                timed: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
                 translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
                     + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
                 exits,

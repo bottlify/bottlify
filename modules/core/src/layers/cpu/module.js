@@ -1462,9 +1462,13 @@ export function createCpuModule(){
                  * Milliseconds the translator has spent on this thread, all told:
                  * forming, lookup, emitting, encoding, storing, instantiating and
                  * publishing regions, which a slice pays for inside the guest's
-                 * time. 0 with no translator.
+                 * time. Null where it is not measured: no translator, or its
+                 * `timings` off, whose clock then reads zero.
                  */
-                translateMs: ()=>state.cork?.counters?.().translateMs ?? 0,
+                translateMs: ()=>{
+                    const counters = state.cork?.counters?.();
+                    return counters?.timed ? counters.translateMs : null;
+                },
                 /**
                  * Times translated code has left for the runtime, all told: at a
                  * target it had no translation for, or out of budget. 0 with no

@@ -77,6 +77,7 @@ default is the product's.
 | `maxQueued` | 8192 | Candidates waiting; past it the coldest is dropped. |
 | `batchRegions`, `maxBatchRegions` | 32, 256 | Regions per wasm module, and the most a deep queue's batch takes. |
 | `holdMs` | 4 | The engine thread's time the translator's work may take at a stretch where a worker is wanted (0: a batch formed and published whole in one call). |
+| `holdShare` | 0.5 | The share of the engine thread's time over a while that `holdMs` refills at: what a frame gives up to new code. |
 | `inFlightMs` | 10000 | How long a batch may be with a worker before it is given up. |
 | `volatileAfter`, `volatileWindowMs`, `volatileHoldMs` | 8, 100, 2000 | Writes dropping a page's code within the window before the page is interpreted, and for how long. |
 | `maxRegionBlocks` | 128 | Blocks of the largest region. |

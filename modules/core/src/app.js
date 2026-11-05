@@ -4795,9 +4795,14 @@ async function buildApp(options){
                                     cpu.instructionCount() - retiredAtFrameStart);
                                 journal.note('interpreted',
                                     cpu.interpretedSteps() - interpretedAtFrameStart);
-                                // Translating on this thread, inside the guest's slices.
-                                journal.note('translateMs',
-                                    Math.round(cpu.translateMs() - translateAtFrameStart));
+                                // Translating on this thread, inside the guest's slices:
+                                // only where it is measured (the translator's `timings`).
+                                const translated = cpu.translateMs();
+                                if (translated !== null)
+                                {
+                                    journal.note('translateMs',
+                                        Math.round(translated - translateAtFrameStart));
+                                }
                                 // Translated code leaving for the runtime, each a dispatch.
                                 journal.note('exits', cpu.translatedExits() - exitsAtFrameStart);
                                 journal.note('hostWrittenBytes',
@@ -4832,7 +4837,7 @@ async function buildApp(options){
                         {
                             retiredAtFrameStart = cpu.instructionCount();
                             interpretedAtFrameStart = cpu.interpretedSteps();
-                            translateAtFrameStart = cpu.translateMs();
+                            translateAtFrameStart = cpu.translateMs() ?? 0;
                             exitsAtFrameStart = cpu.translatedExits();
                             writtenAtFrameStart = cpu.hostWrittenBytes();
                             heapAtFrameStart = heapUsed();
