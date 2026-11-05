@@ -2777,16 +2777,18 @@ export function createRenderer(services){
      *
      * @param {any} resource
      * @param {any} backing
+     * @param {{ mip: number, levels: number, first: number, count: number }} range  the
+     *     view's levels and slices
      */
-    const recordMips = (resource, backing)=>{
+    const recordMips = (resource, backing, range)=>{
         mipSampler = mipSampler ?? createSampler({
             label: 'd3d10:mips', magFilter: 'linear', minFilter: 'linear',
         });
         const format = backing.layout.format;
         const steps = [];
-        for (let slice = 0; slice < backing.layout.slices; slice++)
+        for (let slice = range.first; slice < range.first + range.count; slice++)
         {
-            for (let level = 1; level < backing.layout.levels.length; level++)
+            for (let level = range.mip + 1; level < range.mip + range.levels; level++)
             {
                 /** @param {number} mip @param {string} label */
                 const view = (mip, label)=>backing.texture.createView({
@@ -3613,17 +3615,22 @@ export function createRenderer(services){
          * are four bytes of eight bits each.
          *
          * @param {any} resource
+         * @param {{ mip: number, levels: number, first: number, count: number } | null}
+         *     [range]  the view's levels and slices; the whole resource for none
          * @returns {boolean} whether the levels were generated
          */
-        generateMips(resource){
+        generateMips(resource, range = null){
             const backing = backingOf(resource);
+            // The view's levels and slices: from its most detailed level down.
+            const span = range ?? { mip: 0, levels: backing.layout.levels.length, first: 0,
+                count: backing.layout.slices };
             const format = backing.layout.format ?? '';
             if (backend && backing.texture && gpuWritten(resource)
                 && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE1D
                 && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 && MIPS_GENERATED.test(format) && backing.sampleCount === 1)
             {
-                recordMips(resource, backing);
+                recordMips(resource, backing, span);
                 return true;
             }
             if (backing.layout.texelBytes !== 4 || backing.layout.storage?.conversion
@@ -3633,32 +3640,47 @@ export function createRenderer(services){
                     + ' only eight-bit four-channel formats are filtered');
                 return false;
             }
-            if (gpuWritten(resource))
+            // What the host holds is what the GPU holds until a draw or a copy
+            // there has written the resource.
+            if (gpuWritten(resource) && backing.gpuDirty)
             {
                 diverge('GenerateMips filters the bytes the program last wrote into level zero,'
                     + ' not what the GPU drew there');
             }
-            for (let slice = 0; slice < backing.layout.slices; slice++)
+            for (let slice = span.first; slice < span.first + span.count; slice++)
             {
-                for (let level = 1; level < backing.layout.levels.length; level++)
+                for (let level = span.mip + 1; level < span.mip + span.levels; level++)
                 {
                     const first = slice * resource.desc.MipLevels;
                     const upper = subresourceBytes(resource, first + level - 1);
                     const lower = subresourceBytes(resource, first + level);
-                    for (let y = 0; y < lower.level.height; y++)
+                    // A volume's level halves its depth as well: a 2x2x2 box.
+                    const deep = (upper.level.depth ?? 1) > 1;
+                    const corners = deep
+                        ? [0, 1].flatMap(dz=>[[0, 0, dz], [1, 0, dz], [0, 1, dz], [1, 1, dz]])
+                        : [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]];
+                    for (let z = 0; z < (lower.level.depth ?? 1); z++)
                     {
-                        for (let x = 0; x < lower.level.width; x++)
+                        for (let y = 0; y < lower.level.height; y++)
                         {
-                            for (let channel = 0; channel < 4; channel++)
+                            for (let x = 0; x < lower.level.width; x++)
                             {
-                                let sum = 0;
-                                for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]])
+                                for (let channel = 0; channel < 4; channel++)
                                 {
-                                    const sx = Math.min(upper.level.width - 1, x * 2 + dx);
-                                    const sy = Math.min(upper.level.height - 1, y * 2 + dy);
-                                    sum += upper.bytes[sy * upper.rowPitch + sx * 4 + channel];
+                                    let sum = 0;
+                                    for (const [dx, dy, dz] of corners)
+                                    {
+                                        const sx = Math.min(upper.level.width - 1, x * 2 + dx);
+                                        const sy = Math.min(upper.level.height - 1, y * 2 + dy);
+                                        const sz = Math.min((upper.level.depth ?? 1) - 1,
+                                            z * 2 + dz);
+                                        sum += upper.bytes[sz * upper.depthPitch
+                                            + sy * upper.rowPitch + sx * 4 + channel];
+                                    }
+                                    lower.bytes[z * lower.depthPitch + y * lower.rowPitch + x * 4
+                                        + channel] = Math.floor((sum + corners.length / 2)
+                                        / corners.length);
                                 }
-                                lower.bytes[y * lower.rowPitch + x * 4 + channel] = (sum + 2) >> 2;
                             }
                         }
                     }
@@ -3684,6 +3706,7 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
+            target.backing.gpuDirty = true;
             record({ kind: 'clear', target, color: [...color] });
         },
 
@@ -3705,6 +3728,7 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
+            target.backing.gpuDirty = true;
             record({ kind: 'clearDepth', target, flags, depth, stencil });
         },
 
@@ -4113,6 +4137,14 @@ export function createRenderer(services){
             }
             const copiedOut = standIns ? standInsIn(colour, standIns,
                 /** @type {any} */ (depth)) : null;
+            // What the GPU draws into is newer there than the host's bytes.
+            for (const drawn of [...colour, depth])
+            {
+                if (drawn?.backing)
+                {
+                    drawn.backing.gpuDirty = true;
+                }
+            }
             tessellated?.commands.forEach(record);
             const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
             record({

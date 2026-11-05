@@ -81,6 +81,7 @@ const UNCOMPRESSED_PIXEL_BYTES = {
     'bgra8unorm-srgb': 4,
     rgb10a2unorm: 4,
     rg11b10ufloat: 4,
+    rgb9e5ufloat: 4,
     rg32float: 8,
     rg32uint: 8,
     rg32sint: 8,

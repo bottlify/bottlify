@@ -396,7 +396,8 @@ export function levelExtent(size, level){
  * @returns {number} S_OK or E_INVALIDARG
  */
 export function bufferCreateResult(desc, hasInitialData, rules = NO_RULES){
-    if (desc.ByteWidth === 0)
+    // A buffer has no levels to generate (test_generate_mips).
+    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.GENERATE_MIPS) !== 0)
     {
         return E_INVALIDARG;
     }

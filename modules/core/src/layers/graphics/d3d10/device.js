@@ -1962,7 +1962,7 @@ export function createDevice(options = {}){
             {
                 return;
             }
-            renderer.generateMips(resource);
+            renderer.generateMips(resource, view.range ?? null);
         },
 
         /**
