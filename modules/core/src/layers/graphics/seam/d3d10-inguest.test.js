@@ -188,7 +188,7 @@ test('a deferred context\'s map and unmap are the host\'s (test_deferred_context
     const memory = new Uint8Array(0x100);
     const words = new DataView(memory.buffer);
     let handed = 0;
-    const guest = {
+    const guest = /** @type {any} */ ({
         u32: (/** @type {number} */ at)=>words.getUint32(at, true),
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>{
             words.setUint32(at, value, true);
@@ -198,7 +198,7 @@ test('a deferred context\'s map and unmap are the host\'s (test_deferred_context
             handed++;
             return 0;
         },
-    };
+    });
     // The context at 0x10, its word past the pointer zero; a resource at 0x40.
     sources.ContextMap(guest, 0x10, 0x40, 0, 4, 0, 0x80);
     sources.ContextUnmap(guest, 0x10, 0x40, 0);
