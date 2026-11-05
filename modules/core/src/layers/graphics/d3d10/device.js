@@ -994,7 +994,11 @@ export function createDevice(options = {}){
      * @returns {boolean}
      */
     const copyable = (destination, source, call)=>{
-        if (!destination || !source || destination === source)
+        // One subresource of a texture copies into another of it; a resource
+        // whole never into itself.
+        if (!destination || !source || (destination === source
+            && (call !== 'CopySubresourceRegion'
+                || destination.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)))
         {
             diverge(`${call} between a resource and itself, or with a null resource, is ignored`);
             return false;
@@ -1925,6 +1929,11 @@ export function createDevice(options = {}){
         {
             if (!copyable(destination, source, 'CopySubresourceRegion'))
             {
+                return;
+            }
+            if (destination === source && destinationSubresource === sourceSubresource)
+            {
+                diverge('CopySubresourceRegion of a subresource into itself is ignored');
                 return;
             }
             if (box && (box.right <= box.left || box.bottom <= box.top || box.back <= box.front))

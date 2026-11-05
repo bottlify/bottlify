@@ -14,7 +14,7 @@ import {
     D3D10_MAP, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_SRV_DIMENSION, D3D10_STENCIL_OP,
     D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
-    E_INVALIDARG, IID, S_FALSE, S_OK,
+    E_INVALIDARG, IID, S_FALSE, S_OK, D3D11_DSV_FLAG,
 } from './constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
@@ -2490,5 +2490,80 @@ test('from level 10.1 a copy moves compressed blocks into texels as big, and bac
     for (const resource of [blocks, plain, back, narrow])
     {
         resource.release();
+    }
+});
+
+test('a shader resource view over a subresource bound as a target is set as none and unbound'
+    + ' when the target is bound; another level of the texture, or a depth aspect the depth view'
+    + ' keeps read-only, stays (test_sample_attached_rtv, d3d11.c:32684)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    const { device, context } = out;
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 2, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    const texture = made.resource;
+    assert.equal(device.CreateRenderTargetView(texture, { Format: DXGI_FORMAT.R8G8B8A8_UNORM,
+        ViewDimension: 4, MipSlice: 0 }, made), S_OK);
+    const target = made.view;
+    /** @param {number} mip */
+    const levelView = mip=>{
+        assert.equal(device.CreateShaderResourceView(texture, { Format:
+            DXGI_FORMAT.R8G8B8A8_UNORM, ViewDimension: 4, MostDetailedMip: mip, MipLevels: 1 },
+        made), S_OK);
+        return made.view;
+    };
+    const top = levelView(0);
+    const second = levelView(1);
+    /** @returns {any[]} */
+    const bound = ()=>{
+        /** @type {any} */
+        const got = {};
+        context.PSGetShaderResources(0, 2, got);
+        const views = got.views;
+        views.forEach((/** @type {any} */ view)=>view?.Release?.());
+        return views;
+    };
+    context.PSSetShaderResources(0, [top, second]);
+    context.OMSetRenderTargets([target], null);
+    assert.deepEqual(bound(), [null, second], 'level 0 unbound with its target; level 1 kept');
+    context.PSSetShaderResources(0, [top, second]);
+    assert.deepEqual(bound(), [null, second], 'set while a target, set as none');
+    context.OMSetRenderTargets([], null);
+    context.PSSetShaderResources(0, [top]);
+    assert.deepEqual(bound(), [top, second]);
+
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R24G8_TYPELESS, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.DEPTH_STENCIL, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    const depthTexture = made.resource;
+    /** @param {number} format */
+    const aspectView = format=>{
+        assert.equal(device.CreateShaderResourceView(depthTexture, { Format: format,
+            ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 }, made), S_OK);
+        return made.view;
+    };
+    const depthRead = aspectView(DXGI_FORMAT.R24_UNORM_X8_TYPELESS);
+    const stencilRead = aspectView(DXGI_FORMAT.X24_TYPELESS_G8_UINT);
+    for (const [flags, kept] of /** @type {[number, any[]][]} */ ([
+        [0, [null, null]],
+        [D3D11_DSV_FLAG.READ_ONLY_DEPTH, [depthRead, null]],
+        [D3D11_DSV_FLAG.READ_ONLY_STENCIL, [null, stencilRead]],
+        [D3D11_DSV_FLAG.READ_ONLY_DEPTH | D3D11_DSV_FLAG.READ_ONLY_STENCIL,
+            [depthRead, stencilRead]],
+    ]))
+    {
+        assert.equal(device.CreateDepthStencilView(depthTexture, { Format:
+            DXGI_FORMAT.D24_UNORM_S8_UINT, ViewDimension: 3, Flags: flags, MipSlice: 0 },
+        made), S_OK);
+        context.OMSetRenderTargets([], null);
+        context.PSSetShaderResources(0, [depthRead, stencilRead]);
+        context.OMSetRenderTargets([], made.view);
+        assert.deepEqual(bound(), kept, `flags ${flags}`);
     }
 });

@@ -737,6 +737,8 @@ export function createView(options){
     return attachCom({
         dimensionName: options.dimensionName,
         range: options.range,
+        /** What it views, for the runtime's own bookkeeping: no reference is taken. */
+        resource: options.resource,
         /** An append or counter view's hidden count, as a binding last set it. */
         counter: 0,
         /** Whether that count is newer than the one the GPU holds. */
