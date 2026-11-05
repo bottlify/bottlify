@@ -568,6 +568,17 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
     {
         return E_INVALIDARG;
     }
+    // A texture GDI draws into is a default render target of BGRA's eight bits
+    // with alpha (test_getdc).
+    if ((desc.MiscFlags & D3D10_RESOURCE_MISC.GDI_COMPATIBLE) !== 0
+        && ((desc.Usage ?? D3D10_USAGE.DEFAULT) !== D3D10_USAGE.DEFAULT
+            || (desc.BindFlags & D3D10_BIND.RENDER_TARGET) === 0
+            || !(/** @type {number[]} */ ([DXGI_FORMAT.B8G8R8A8_UNORM,
+                DXGI_FORMAT.B8G8R8A8_TYPELESS, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB]))
+                .includes(desc.Format)))
+    {
+        return E_INVALIDARG;
+    }
     const shared = D3D10_RESOURCE_MISC.SHARED | D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX;
     if ((desc.MiscFlags & shared) === shared)
     {

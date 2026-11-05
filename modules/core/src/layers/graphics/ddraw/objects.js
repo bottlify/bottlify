@@ -494,6 +494,9 @@ function sameRect(a, b){
  * @property {'565' | '555'} format
  *           Which 16-bit layout the surface's masks describe; meaningless at
  *           other depths.
+ * @property {number} [sizeImage]
+ *           What the DC's bitmap reports as `biSizeImage`; the rows' bytes when
+ *           absent. A Direct3D 10/11 surface's DC reports 0.
  */
 
 /**

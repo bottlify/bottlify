@@ -1538,7 +1538,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 const handle = address === 0 ? 0 : gdi.createSurfaceDc({
                     width: texture.desc.Width, height: texture.desc.Height,
                     pitch: /** @type {number} */ (opened.rowPitch), bitCount: 32,
-                    bits: address, palette: null, format: '555',
+                    bits: address, palette: null, format: '555', sizeImage: 0,
                 });
                 if (handle === 0)
                 {

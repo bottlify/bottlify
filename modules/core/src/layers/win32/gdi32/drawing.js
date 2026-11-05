@@ -5008,7 +5008,9 @@ function describeBitmap(attributes, asSection, long = false){
     view.setUint16(DIBSECTION_.dsBmih + BITMAPINFOHEADER.biPlanes, 1, true);
     view.setUint16(DIBSECTION_.dsBmih + BITMAPINFOHEADER.biBitCount, bitCount, true);
     header(BITMAPINFOHEADER.biCompression, attributes.compression ?? BI_RGB);
-    header(BITMAPINFOHEADER.biSizeImage, stride * height);
+    // A section the caller described says the size it was given (a DXGI
+    // surface's DC says 0, test_getdc).
+    header(BITMAPINFOHEADER.biSizeImage, attributes.sizeImage ?? stride * height);
     header(BITMAPINFOHEADER.biXPelsPerMeter, attributes.pelsPerMeter?.[0] ?? 0);
     header(BITMAPINFOHEADER.biYPelsPerMeter, attributes.pelsPerMeter?.[1] ?? 0);
     header(BITMAPINFOHEADER.biClrUsed, attributes.palette?.length ?? 0);

@@ -2138,6 +2138,35 @@ export function createRenderer(services){
         };
     };
 
+    /** @type {Map<string, any>} extent -> a target nothing reads */
+    const blindTargets = new Map();
+    /**
+     * A target for a draw that has none: Direct3D rasterizes a pass with no
+     * render target and no depth buffer for what its pixel shader writes
+     * through views, over the viewport; WebGPU draws into at least one
+     * attachment, so it draws into this one, written by no channel.
+     *
+     * @param {number} width @param {number} height
+     */
+    const blindTarget = (width, height)=>{
+        const key = `${width}x${height}`;
+        let target = blindTargets.get(key);
+        if (!target)
+        {
+            const texture = createTexture({ label: `d3d10:blind:${key}`,
+                size: { width, height, depthOrArrayLayers: 1 }, format: 'r8unorm',
+                usage: TextureUsage.RENDER_ATTACHMENT });
+            target = {
+                key: `blind:${key}`, layer: 0, texture, format: 'r8unorm', sampleCount: 1,
+                writeMask: 0, readOnly: 0,
+                surface: { texture, view: texture.createView({ label: 'd3d10:blind' }),
+                    width, height, format: 'r8unorm', mipLevel: 0, label: 'd3d10:blind' },
+            };
+            blindTargets.set(key, target);
+        }
+        return target;
+    };
+
     /** @type {ReturnType<typeof createGeometry> | null} */
     let geometryPasses = null;
     /** What draws through a geometry shader and stream output are recorded with. */
@@ -3969,6 +3998,15 @@ export function createRenderer(services){
             // no colour one draws depth alone.
             let depth = targetOf(pipeline.depthStencilView);
             const bound = pipeline.renderTargets.map(view=>targetOf(view));
+            // With neither, a pixel shader that writes through views draws over
+            // the viewport alone.
+            const field = pipeline.viewports[0];
+            if (!bound.some(entry=>entry) && !depth && field && field.Width > 0
+                && field.Height > 0 && (pipeline.pixelViews ?? []).some(view=>view))
+            {
+                bound[0] = blindTarget(Math.min(16384, Math.ceil(field.TopLeftX + field.Width)),
+                    Math.min(16384, Math.ceil(field.TopLeftY + field.Height)));
+            }
             const sizing = bound.find(entry=>entry) ?? depth;
             if (!sizing)
             {
