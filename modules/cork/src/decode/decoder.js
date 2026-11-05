@@ -28,7 +28,8 @@
  */
 
 import {
-    ByMod, CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, TWO_BYTE, X87, conditionReads,
+    ByMod, CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, THREE_BYTE_38, THREE_BYTE_3A,
+    TWO_BYTE, X87, conditionReads,
 } from './table.js';
 
 /** The longest an instruction may be; the processor faults past it. */
@@ -175,7 +176,7 @@ function planOf(entry){
         plan = {
             needsModrm, string: isString(entry.op),
             forms: entry.forms.map(form=>({ form, first: form[0], letter: form.slice(1),
-                x87: x87Size(form), fixed: /^[A-Z][A-Z]$|^eAX$|^1$|^Xlat$/.test(form) })),
+                x87: x87Size(form), fixed: /^[A-Z][A-Z]$|^eAX$|^1$|^Xlat$|^E[ACD]X$|^XMM0$/.test(form) })),
         };
         plans.set(entry, plan);
     }
@@ -305,6 +306,10 @@ function resolveRm(size, regKind, memoryOnly, segment, addressSize){
 const X87_TEXT = [];
 /** `0f 1f` and the like, by the second byte. @type {string[]} */
 const TWO_TEXT = [];
+/** @type {string[]} */
+const THREE_38_TEXT = [];
+/** @type {string[]} */
+const THREE_3A_TEXT = [];
 /** A group member's `81 /7`, by the opcode's text and the reg field. @type {Map<string, string[]>} */
 const GROUP_TEXT = new Map();
 
@@ -403,12 +408,27 @@ function decodeAt(eip){
     {
         const second = next();
         zReg = second & 7 | (rexByte & 1) << 3;
-        opcodeText = TWO_TEXT[second] ??= `0f ${hex(second)}`;
-        entry = TWO_BYTE[second];
+        /** `crc32` and `movbe` (0F 38 F0, F1), whose 66 is an operand size. */
+        let sized = false;
+        if (second === 0x38 || second === 0x3a)
+        {
+            const third = next();
+            zReg = third & 7 | (rexByte & 1) << 3;
+            opcodeText = (second === 0x38 ? THREE_38_TEXT : THREE_3A_TEXT)[third]
+                ??= `0f ${hex(second)} ${hex(third)}`;
+            entry = (second === 0x38 ? THREE_BYTE_38 : THREE_BYTE_3A)[third];
+            sized = second === 0x38 && (third === 0xf0 || third === 0xf1);
+        }
+        else
+        {
+            opcodeText = TWO_TEXT[second] ??= `0f ${hex(second)}`;
+            entry = TWO_BYTE[second];
+        }
         if (entry instanceof Prefixed)
         {
             // A mandatory prefix is not a repeat or an operand size here.
-            const key = prefixes.rep ? 'f3' : prefixes.repne ? 'f2' : prefixes.operand ? '66' : '';
+            const key = sized ? (prefixes.repne ? 'f2' : prefixes.rep ? 'f3' : '')
+                : prefixes.rep ? 'f3' : prefixes.repne ? 'f2' : prefixes.operand ? '66' : '';
             const variant = entry.variants[key];
             if (variant === undefined)
             {
@@ -418,10 +438,18 @@ function decodeAt(eip){
             {
                 prefixes.rep = false;
                 prefixes.repne = false;
-                prefixes.operand = false;
+                if (!sized)
+                {
+                    prefixes.operand = false;
+                }
                 opcodeText = `${key} ${opcodeText}`;
             }
             entry = variant;
+            if (sized && prefixes.operand)
+            {
+                // The operand size takes the 66: a word.
+                operandSize = 2;
+            }
         }
     }
     else
@@ -737,6 +765,8 @@ function gpSize(letter, operandSize){
 function simdSize(letter){
     switch (letter)
     {
+        case 'b': return 1;
+        case 'w': return 2;
         case 'ss': case 'd': return 4;
         case 'sd': case 'q': return 8;
         case 'ps': case 'pd': case 'dq': case 'x': return 16;
@@ -999,6 +1029,10 @@ function fixedOperand(form, operandSize, segmentOverride, addressSize){
         case 'AX': return register('reg', 0, 2);
         case 'DX': return register('reg', 2, 2);
         case 'eAX': return register('reg', 0, operandSize);
+        case 'EAX': return register('reg', 0, 4);
+        case 'ECX': return register('reg', 1, 4);
+        case 'EDX': return register('reg', 2, 4);
+        case 'XMM0': return register('xmm', 0, 16);
         case '1': return { kind: 'imm', size: 1, value: 1 };
         case 'ES': case 'CS': case 'SS': case 'DS': case 'FS': case 'GS':
             return { kind: 'seg', size: 2, reg: SEGMENTS.indexOf(form.toLowerCase()) };

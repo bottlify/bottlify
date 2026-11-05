@@ -982,6 +982,11 @@ function emitForm(e, instruction, flagsLive){
             return true;
         case 'pextrw':
         {
+            if (dst.kind === 'mem')
+            {
+                // SSE4.1's form into memory (0F 3A 15).
+                return emitExtension(e, instruction, flagsLive);
+            }
             const lane = /** @type {number} */ (imm.value) & (isMm ? 3 : 7);
             if (isMm)
             {
@@ -1055,7 +1060,663 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         default:
+            return emitExtension(e, instruction, flagsLive);
+    }
+}
+
+/** The byte shuffle that moves lanes of `size` bytes: lane i from `pick(i)` (0.. first, n.. second). */
+const laneShuffle = (/** @type {number} */ size, /** @type {(i: number) => number} */ pick)=>
+    Array.from({ length: 16 }, (_, at)=>pick(Math.floor(at / size)) * size + at % size);
+
+/**
+ * SSSE3, SSE4.1 and SSE4.2 (the three-byte maps): each the wasm SIMD the SDM's
+ * operation comes to, as `ir-simd.js` models it. MMX's SSSE3 forms run in the
+ * low lane, as every MMX form here does (`packedBinary`).
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ * @returns {boolean}
+ */
+function emitExtension(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands } = instruction;
+    const [dst, src, imm] = operands;
+    /** @param {number} opcode */
+    const simd = opcode=>b.simd(opcode);
+    /** @param {number[]} bytes */
+    const shuffle = bytes=>b.op(0xfd, [SIMD.shuffle, ...bytes]);
+    /** @param {number} opcode @param {number} lane */
+    const laneOp = (opcode, lane)=>b.op(0xfd, [opcode, lane]);
+    const isMm = dst?.kind === 'mm' || src?.kind === 'mm';
+    const t0 = vecTemp(e);
+    const t1 = vecTemp2(e);
+    const t2 = e.vecTempLocal(2);
+    /** The two operands in t0 (the destination) and t1 (the source), as packedBinary hands them. */
+    const take = ()=>{
+        b.localSet(t1);
+        b.localSet(t0);
+    };
+    switch (op)
+    {
+        case 'pshufb':
+            packedBinary(e, dst, src, isMm, ()=>{
+                // An index with its top bit set is a zero; wasm's swizzle gives one
+                // for any index past 15. MMX's index takes its low three bits.
+                b.v128const(new Array(16).fill(isMm ? 0x87 : 0x8f));
+                simd(SIMD.and);
+                simd(SIMD.swizzle);
+            });
+            return true;
+        case 'phaddw': case 'phaddd': case 'phaddsw': case 'phsubw': case 'phsubd': case 'phsubsw':
+        {
+            const dword = op.endsWith('d');
+            const size = dword ? 4 : 2;
+            const lanes = (isMm ? 8 : 16) / size;
+            // The destination's pairs then the source's: their first elements
+            // against their second ones.
+            const second = isMm ? 16 / size : lanes;
+            const firsts = Array.from({ length: 16 / size }, (_, i)=>(i < lanes / 2 ? 2 * i
+                : second + 2 * (i - lanes / 2)) % (32 / size));
+            packedBinary(e, dst, src, isMm, ()=>{
+                take();
+                b.localGet(t0).localGet(t1);
+                shuffle(laneShuffle(size, i=>firsts[i]));
+                b.localGet(t0).localGet(t1);
+                shuffle(laneShuffle(size, i=>firsts[i] + 1));
+                const subtract = op.startsWith('phsub');
+                simd(dword ? (subtract ? SIMD.i32x4Sub : SIMD.i32x4Add)
+                    : op.endsWith('sw') ? (subtract ? SIMD.i16x8SubSatS : SIMD.i16x8AddSatS)
+                        : subtract ? SIMD.i16x8Sub : SIMD.i16x8Add);
+            });
+            return true;
+        }
+        case 'pmaddubsw':
+            packedBinary(e, dst, src, isMm, ()=>{
+                // Unsigned bytes of the destination by signed bytes of the source,
+                // each pair of products summed with signed saturation.
+                take();
+                b.localGet(t0).v128const(new Array(8).fill([0xff, 0]).flat());
+                simd(SIMD.and);
+                b.localGet(t1).i32const(8);
+                simd(SIMD.i16x8Shl);
+                b.i32const(8);
+                simd(SIMD.i16x8ShrS);
+                simd(SIMD.i16x8Mul);
+                b.localGet(t0).i32const(8);
+                simd(SIMD.i16x8ShrU);
+                b.localGet(t1).i32const(8);
+                simd(SIMD.i16x8ShrS);
+                simd(SIMD.i16x8Mul);
+                simd(SIMD.i16x8AddSatS);
+            });
+            return true;
+        case 'psignb': case 'psignw': case 'psignd':
+        {
+            const [neg, lt, eq] = op === 'psignb' ? [SIMD.i8x16Neg, SIMD.i8x16LtS, SIMD.i8x16Eq]
+                : op === 'psignw' ? [SIMD.i16x8Neg, SIMD.i16x8LtS, SIMD.i16x8Eq]
+                    : [SIMD.i32x4Neg, SIMD.i32x4LtS, SIMD.i32x4Eq];
+            packedBinary(e, dst, src, isMm, ()=>{
+                take();
+                // Negated where the source is negative, zero where it is zero.
+                b.localGet(t0);
+                simd(neg);
+                b.localGet(t0);
+                b.localGet(t1).v128const(new Array(16).fill(0));
+                simd(lt);
+                simd(SIMD.bitselect);
+                b.localGet(t1).v128const(new Array(16).fill(0));
+                simd(eq);
+                simd(SIMD.andnot);
+            });
+            return true;
+        }
+        case 'pmulhrsw':
+            packedBinary(e, dst, src, isMm, ()=>{
+                // (a * b + 0x4000) >> 15, which wasm saturates where the processor
+                // does not: -32768 * -32768 is 0x8000 there, 0x7fff here.
+                take();
+                b.localGet(t0).localGet(t1);
+                simd(SIMD.i16x8Q15mulrSatS);
+                const minimum = new Array(8).fill([0, 0x80]).flat();
+                b.localGet(t0).v128const(minimum);
+                simd(SIMD.i16x8Eq);
+                b.localGet(t1).v128const(minimum);
+                simd(SIMD.i16x8Eq);
+                simd(SIMD.and);
+                simd(SIMD.xor);
+            });
+            return true;
+        case 'pabsb': case 'pabsw': case 'pabsd':
+        {
+            const opcode = op === 'pabsb' ? SIMD.i8x16Abs : op === 'pabsw' ? SIMD.i16x8Abs
+                : SIMD.i32x4Abs;
+            packedBinary(e, dst, src, isMm, ()=>{
+                b.localSet(t1);
+                b.drop();
+                b.localGet(t1);
+                simd(opcode);
+            });
+            return true;
+        }
+        case 'palignr':
+        {
+            // The destination above the source, shifted right by the immediate's bytes.
+            const shift = /** @type {number} */ (imm.value) & 0xff;
+            const width = isMm ? 8 : 16;
+            packedBinary(e, dst, src, isMm, ()=>{
+                take();
+                b.localGet(t1).localGet(t0);
+                const at = (/** @type {number} */ i)=>i + shift;
+                shuffle(Array.from({ length: 16 }, (_, i)=>(at(i) < width ? at(i)
+                    : at(i) < 2 * width ? 16 + at(i) - width : 0)));
+                b.v128const(Array.from({ length: 16 }, (_, i)=>(at(i) < 2 * width ? 0xff : 0)));
+                simd(SIMD.and);
+            });
+            return true;
+        }
+        case 'pblendvb': case 'blendvps': case 'blendvpd':
+            readV(e, src, 16);
+            readV(e, dst, 16);
+            readV(e, operands[2], 16);
+            if (op === 'pblendvb')
+            {
+                b.v128const(new Array(16).fill(0));
+                simd(SIMD.i8x16LtS);
+            }
+            else
+            {
+                b.i32const(op === 'blendvps' ? 31 : 63);
+                simd(op === 'blendvps' ? SIMD.i32x4ShrS : SIMD.i64x2ShrS);
+            }
+            simd(SIMD.bitselect);
+            writeV(e, dst, null);
+            return true;
+        case 'blendps': case 'blendpd': case 'pblendw':
+        {
+            const size = op === 'pblendw' ? 2 : op === 'blendpd' ? 8 : 4;
+            const selector = /** @type {number} */ (imm.value);
+            readV(e, dst, 16);
+            readV(e, src, 16);
+            shuffle(laneShuffle(size, i=>((selector >> i & 1) !== 0 ? 16 / size + i : i)));
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'ptest':
+            readV(e, dst, 16);
+            b.localSet(t0);
+            readV(e, src, 16);
+            b.localSet(t1);
+            if (!flagsLive)
+            {
+                return true;
+            }
+            e.eagerWrite(CF | PF | AF | ZF | SF | OF);
+            b.localGet(t0).localGet(t1);
+            simd(SIMD.and);
+            simd(SIMD.anyTrue);
+            b.op(I32.eqz);
+            e.orFlag(ZF);
+            b.localGet(t1).localGet(t0);
+            simd(SIMD.andnot);
+            simd(SIMD.anyTrue);
+            b.op(I32.eqz);
+            e.orFlag(CF);
+            return true;
+        case 'pmovsxbw': case 'pmovsxbd': case 'pmovsxbq': case 'pmovsxwd': case 'pmovsxwq':
+        case 'pmovsxdq': case 'pmovzxbw': case 'pmovzxbd': case 'pmovzxbq': case 'pmovzxwd':
+        case 'pmovzxwq': case 'pmovzxdq':
+        {
+            const signed = op[4] === 's';
+            const sizes = /** @type {Record<string, number>} */ ({ b: 1, w: 2, d: 4, q: 8 });
+            const from = sizes[op[6]];
+            const to = sizes[op[7]];
+            writeV(e, dst, ()=>{
+                readV(e, src, (16 / to) * from);
+                for (let width = from; width < to; width *= 2)
+                {
+                    simd(width === 1
+                        ? (signed ? SIMD.i16x8ExtendLowI8x16S : SIMD.i16x8ExtendLowI8x16U)
+                        : width === 2 ? (signed ? SIMD.i32x4ExtendLowI16x8S
+                            : SIMD.i32x4ExtendLowI16x8U)
+                            : signed ? SIMD.i64x2ExtendLowI32x4S : SIMD.i64x2ExtendLowI32x4U);
+                }
+            });
+            return true;
+        }
+        case 'pmuldq':
+            packedBinary(e, dst, src, false, ()=>{
+                take();
+                b.localGet(t0).localGet(t0);
+                shuffle(dwordShuffle([0, 2, 0, 2]));
+                b.localGet(t1).localGet(t1);
+                shuffle(dwordShuffle([0, 2, 0, 2]));
+                simd(SIMD.i64x2ExtmulLowI32x4S);
+            });
+            return true;
+        case 'pcmpeqq': case 'pcmpgtq': case 'packusdw': case 'pminsb': case 'pminsd':
+        case 'pminuw': case 'pminud': case 'pmaxsb': case 'pmaxsd': case 'pmaxuw': case 'pmaxud':
+        case 'pmulld':
+        {
+            const opcode = /** @type {Record<string, number>} */ ({
+                pcmpeqq: SIMD.i64x2Eq, pcmpgtq: SIMD.i64x2GtS, packusdw: SIMD.i16x8NarrowI32x4U,
+                pminsb: SIMD.i8x16MinS, pminsd: SIMD.i32x4MinS, pminuw: SIMD.i16x8MinU,
+                pminud: SIMD.i32x4MinU, pmaxsb: SIMD.i8x16MaxS, pmaxsd: SIMD.i32x4MaxS,
+                pmaxuw: SIMD.i16x8MaxU, pmaxud: SIMD.i32x4MaxU, pmulld: SIMD.i32x4Mul,
+            })[op];
+            packedBinary(e, dst, src, false, ()=>simd(opcode));
+            return true;
+        }
+        case 'phminposuw':
+            writeV(e, dst, ()=>{
+                // The least word by halving the vector against itself three
+                // times; its index the first lane equal to it.
+                readV(e, src, 16);
+                b.localSet(t0);
+                b.localGet(t0);
+                [[4, 5, 6, 7, 0, 1, 2, 3], [2, 3, 0, 1, 2, 3, 0, 1], [1, 0, 1, 0, 1, 0, 1, 0]]
+                    .forEach(words=>{
+                        b.localTee(t1).localGet(t1).localGet(t1);
+                        shuffle(wordShuffle(words));
+                        simd(SIMD.i16x8MinU);
+                    });
+                laneOp(SIMD.i16x8ExtractLaneU, 0);
+                b.localSet(Local.t1);
+                b.localGet(t0).localGet(Local.t1);
+                simd(SIMD.i16x8Splat);
+                simd(SIMD.i16x8Eq);
+                simd(SIMD.i16x8Bitmask);
+                b.op(0x68); // i32.ctz
+                b.i32const(16).op(I32.shl).localGet(Local.t1).op(I32.or).localSet(Local.t1);
+                b.v128const(new Array(16).fill(0)).localGet(Local.t1);
+                laneOp(SIMD.i32x4ReplaceLane, 0);
+            });
+            return true;
+        case 'movntdqa':
+            writeV(e, dst, ()=>readV(e, src, 16));
+            return true;
+        case 'roundps': case 'roundpd': case 'roundss': case 'roundsd':
+        {
+            const double = op.endsWith('pd') || op.endsWith('sd');
+            const scalar = op.endsWith('ss') || op.endsWith('sd');
+            const how = /** @type {number} */ (imm.value);
+            const ops = double ? F64X2_ROUND : F32X4_ROUND;
+            readV(e, src, scalar ? (double ? 8 : 4) : 16);
+            b.localSet(t2);
+            if ((how & 4) !== 0)
+            {
+                roundByMxcsr(e, t2, ops, true);
+            }
+            else
+            {
+                b.localGet(t2);
+                simd([ops.nearest, ops.floor, ops.ceil, ops.trunc][how & 3]);
+                b.localSet(t2);
+            }
+            if (scalar)
+            {
+                // The low lane rounded, the rest the destination's.
+                readV(e, dst, 16);
+                b.localGet(t2);
+                shuffle(double ? [16, 17, 18, 19, 20, 21, 22, 23, 8, 9, 10, 11, 12, 13, 14, 15]
+                    : [16, 17, 18, 19, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+                writeV(e, dst, null);
+                return true;
+            }
+            writeV(e, dst, ()=>b.localGet(t2));
+            return true;
+        }
+        case 'dpps': case 'dppd':
+        {
+            const double = op === 'dppd';
+            const size = double ? 8 : 4;
+            const how = /** @type {number} */ (imm.value);
+            const lanes = 16 / size;
+            /** A mask of the lanes whose bits in `bits` are set. @param {number} bits */
+            const maskOf = bits=>Array.from({ length: 16 }, (_, at)=>
+                ((bits >> Math.floor(at / size) & 1) !== 0 ? 0xff : 0));
+            writeV(e, dst, ()=>{
+                // The products the high bits pick, +0 elsewhere; each lane's sum its
+                // own reduction, as the processor's: (p[i^1] + p[i]) + (p[i^3] +
+                // p[i^2]) for single precision, p[i] + p[i^1] for double.
+                readV(e, dst, 16);
+                readV(e, src, 16);
+                simd(double ? SIMD.f64x2Mul : SIMD.f32x4Mul);
+                b.v128const(maskOf(how >> 4 & (lanes === 4 ? 0xf : 3)));
+                simd(SIMD.and);
+                b.localSet(t0);
+                if (double)
+                {
+                    b.localGet(t0).localGet(t0).localGet(t0);
+                    shuffle(laneShuffle(8, i=>i ^ 1));
+                    simd(SIMD.f64x2Add);
+                }
+                else
+                {
+                    b.localGet(t0).localGet(t0);
+                    shuffle(laneShuffle(4, i=>i ^ 1));
+                    b.localGet(t0);
+                    simd(SIMD.f32x4Add);
+                    b.localTee(t1).localGet(t1).localGet(t1);
+                    shuffle(laneShuffle(4, i=>i ^ 2));
+                    simd(SIMD.f32x4Add);
+                }
+                b.v128const(maskOf(how & (lanes === 4 ? 0xf : 3)));
+                simd(SIMD.and);
+            });
+            return true;
+        }
+        case 'mpsadbw':
+        {
+            const how = /** @type {number} */ (imm.value);
+            const from = (how >> 2 & 1) * 4;
+            const block = (how & 3) * 4;
+            /** The source's byte `at` in every word. @param {number} at */
+            const spread = at=>{
+                b.localGet(t1);
+                laneOp(SIMD.i8x16ExtractLaneU, at);
+                simd(SIMD.i16x8Splat);
+            };
+            writeV(e, dst, ()=>{
+                readV(e, dst, 16);
+                b.localSet(t0);
+                readV(e, src, 16);
+                b.localSet(t1);
+                for (let j = 0; j < 4; j++)
+                {
+                    // |d[from + i + j] - s[block + j]| in eight words, as max - min,
+                    // summed over j.
+                    b.localGet(t0).localGet(t0);
+                    shuffle(Array.from({ length: 16 }, (_, i)=>(i < 8 ? from + i + j : 0)));
+                    simd(SIMD.i16x8ExtendLowI8x16U);
+                    b.localSet(t2);
+                    b.localGet(t2);
+                    spread(block + j);
+                    simd(SIMD.i16x8MaxU);
+                    b.localGet(t2);
+                    spread(block + j);
+                    simd(SIMD.i16x8MinU);
+                    simd(SIMD.i16x8Sub);
+                    if (j > 0)
+                    {
+                        simd(SIMD.i16x8Add);
+                    }
+                }
+            });
+            return true;
+        }
+        case 'pextrb': case 'pextrw': case 'pextrd': case 'extractps':
+        {
+            const size = op === 'pextrb' ? 1 : op === 'pextrw' ? 2 : 4;
+            const lane = /** @type {number} */ (imm.value) & (16 / size - 1);
+            const extract = size === 1 ? SIMD.i8x16ExtractLaneU : size === 2
+                ? SIMD.i16x8ExtractLaneU : SIMD.i32x4ExtractLane;
+            if (dst.kind === 'reg')
+            {
+                readV(e, src, 16);
+                laneOp(extract, lane);
+                writeReg(e, /** @type {number} */ (dst.reg), 4, false);
+                return true;
+            }
+            prepareAddress(e, dst, true);
+            noteStore(e, size);
+            b.localGet(Local.addr);
+            readV(e, src, 16);
+            b.simdMem(size === 1 ? SIMD.store8Lane : size === 2 ? SIMD.store16Lane
+                : SIMD.store32Lane, { align: 0, offset: e.layout.ramBase, lane });
+            return true;
+        }
+        case 'pinsrb': case 'pinsrd':
+        {
+            const size = op === 'pinsrb' ? 1 : 4;
+            const lane = /** @type {number} */ (imm.value) & (16 / size - 1);
+            prepareAddress(e, src);
+            readV(e, dst, 16);
+            readOp(e, src);
+            laneOp(size === 1 ? SIMD.i8x16ReplaceLane : SIMD.i32x4ReplaceLane, lane);
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'insertps':
+        {
+            const how = /** @type {number} */ (imm.value);
+            readV(e, dst, 16);
+            if (src.kind === 'mem')
+            {
+                prepareAddress(e, src);
+                b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase });
+            }
+            else
+            {
+                readV(e, src, 16);
+                laneOp(SIMD.i32x4ExtractLane, how >> 6 & 3);
+            }
+            laneOp(SIMD.i32x4ReplaceLane, how >> 4 & 3);
+            if ((how & 0xf) !== 0)
+            {
+                b.v128const(Array.from({ length: 16 }, (_, at)=>((how >> (at >> 2) & 1) !== 0
+                    ? 0 : 0xff)));
+                simd(SIMD.and);
+            }
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'pcmpestri': case 'pcmpestrm': case 'pcmpistri': case 'pcmpistrm':
+            stringCompare(e, instruction, flagsLive);
+            return true;
+        default:
             return false;
+    }
+}
+
+/**
+ * The string compares (`pcmpestri` and the rest), as `ir-simd.js` models the
+ * SDM's PCMPxSTRx: the immediate is known here, so its format, aggregation,
+ * polarity and output are chosen now, and each comparison of elements is a
+ * vector compare of an element spread over a vector against the other operand,
+ * its bits gathered by a bitmask. Masks are of elements, low bit first, in i32
+ * locals: the valid elements of each operand (t0, t1), IntRes1 then IntRes2
+ * (t2).
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ */
+function stringCompare(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands } = instruction;
+    const [dst, src, imm] = operands;
+    const how = /** @type {number} */ (imm.value);
+    const words = (how & 1) !== 0;
+    const signed = (how & 2) !== 0;
+    const aggregation = how >> 2 & 3;
+    const polarity = how >> 4 & 3;
+    const n = words ? 8 : 16;
+    const all = (1 << n) - 1;
+    const left = vecTemp(e);
+    const right = vecTemp2(e);
+    /** @param {number} opcode */
+    const simd = opcode=>b.simd(opcode);
+    const eq = words ? SIMD.i16x8Eq : SIMD.i8x16Eq;
+    const bitmask = words ? SIMD.i16x8Bitmask : SIMD.i8x16Bitmask;
+    /** Element i of the first operand in every lane. @param {number} i */
+    const spread = i=>{
+        b.localGet(left).localGet(left);
+        b.op(0xfd, [SIMD.shuffle, ...Array.from({ length: 16 }, (_, at)=>(words
+            ? 2 * i + (at & 1) : i))]);
+    };
+    readV(e, dst, 16);
+    b.localSet(left);
+    readV(e, src, 16);
+    b.localSet(right);
+    /**
+     * An operand's valid elements, as a mask, into `into`.
+     *
+     * @param {number} vector @param {number} length  the register of its explicit length
+     * @param {number} into
+     */
+    function valid(vector, length, into){
+        if (op.startsWith('pcmpe'))
+        {
+            // |length| saturated to the element count: |INT_MIN| is past any count.
+            const reg = registerLocal(e, length);
+            b.localGet(reg).localGet(reg).i32const(31).op(I32.shrS).op(I32.xor)
+                .localGet(reg).i32const(31).op(I32.shrS).op(I32.sub).localSet(into);
+            b.localGet(into).i32const(n).localGet(into).i32const(n).op(0x4d) // i32.le_u
+                .select();
+            b.localSet(into);
+            b.i32const(1).localGet(into).op(I32.shl).i32const(1).op(I32.sub).localSet(into);
+            return;
+        }
+        // The elements below the first null: the lowest bit of the nulls' mask, or
+        // of n past them, less one.
+        b.localGet(vector).v128const(new Array(16).fill(0));
+        simd(eq);
+        simd(bitmask);
+        b.i32const(1 << n).op(I32.or).localTee(into);
+        b.i32const(0).localGet(into).op(I32.sub).op(I32.and).i32const(1).op(I32.sub)
+            .localSet(into);
+    }
+    valid(left, 0, Local.t0);
+    valid(right, 2, Local.t1);
+    /** Pushes the mask of b's elements equal to a's element i. @param {number} i */
+    const equalTo = i=>{
+        spread(i);
+        b.localGet(right);
+        simd(eq);
+        simd(bitmask);
+    };
+    /** Pushes a's bit i, from t0. @param {number} i */
+    const validA = i=>{
+        b.localGet(Local.t0).i32const(i).op(I32.shrU).i32const(1).op(I32.and);
+    };
+    if (aggregation === 0)
+    {
+        // Equal any: b's element j equal to any valid element of a.
+        b.i32const(0).localSet(Local.t2);
+        for (let i = 0; i < n; i++)
+        {
+            equalTo(i);
+            b.i32const(0);
+            validA(i);
+            b.select();
+            b.localGet(Local.t2).op(I32.or).localSet(Local.t2);
+        }
+        b.localGet(Local.t2).localGet(Local.t1).op(I32.and).localSet(Local.t2);
+    }
+    else if (aggregation === 1)
+    {
+        // Ranges: b's element j within any valid pair of a's, low <= b <= high.
+        const [ge, le] = words ? (signed ? [SIMD.i16x8GeS, SIMD.i16x8LeS]
+            : [SIMD.i16x8GeU, SIMD.i16x8LeU])
+            : signed ? [SIMD.i8x16GeS, SIMD.i8x16LeS] : [SIMD.i8x16GeU, SIMD.i8x16LeU];
+        b.i32const(0).localSet(Local.t2);
+        for (let k = 0; k < n; k += 2)
+        {
+            b.localGet(right);
+            spread(k);
+            simd(ge);
+            b.localGet(right);
+            spread(k + 1);
+            simd(le);
+            simd(SIMD.and);
+            simd(bitmask);
+            b.i32const(0);
+            b.localGet(Local.t0).i32const(k).op(I32.shrU).i32const(3).op(I32.and).i32const(3)
+                .op(I32.eq);
+            b.select();
+            b.localGet(Local.t2).op(I32.or).localSet(Local.t2);
+        }
+        b.localGet(Local.t2).localGet(Local.t1).op(I32.and).localSet(Local.t2);
+    }
+    else if (aggregation === 2)
+    {
+        // Equal each: element j against element j, both invalid counting as equal.
+        b.localGet(left).localGet(right);
+        simd(eq);
+        simd(bitmask);
+        b.localGet(Local.t0).op(I32.and).localGet(Local.t1).op(I32.and);
+        b.localGet(Local.t0).localGet(Local.t1).op(I32.or).i32const(all).op(I32.xor);
+        b.op(I32.or).localSet(Local.t2);
+    }
+    else
+    {
+        // Equal ordered: a, from its start, found in b at element j: every valid
+        // element i of a equal to b's j + i, an invalid one of a matching anything,
+        // one of b past its end matching nothing.
+        b.i32const(all).localSet(Local.t2);
+        for (let i = 0; i < n; i++)
+        {
+            equalTo(i);
+            b.localGet(Local.t1).op(I32.and);
+            if (i > 0)
+            {
+                b.i32const(i).op(I32.shrU).i32const(all & ~((1 << (n - i)) - 1)).op(I32.or);
+            }
+            b.i32const(all);
+            validA(i);
+            b.select();
+            b.localGet(Local.t2).op(I32.and).localSet(Local.t2);
+        }
+    }
+    if (polarity === 1)
+    {
+        b.localGet(Local.t2).i32const(all).op(I32.xor).localSet(Local.t2);
+    }
+    else if (polarity === 3)
+    {
+        b.localGet(Local.t2).localGet(Local.t1).op(I32.xor).localSet(Local.t2);
+    }
+    if (flagsLive)
+    {
+        // CF IntRes2 not zero, ZF b shorter than n, SF a shorter, OF IntRes2's bit 0,
+        // before the output, whose writes may take the locals.
+        e.eagerWrite(CF | PF | AF | ZF | SF | OF);
+        b.localGet(Local.t2).i32const(0).op(I32.ne);
+        e.orFlag(CF);
+        b.localGet(Local.t1).i32const(all).op(I32.ne);
+        e.orFlag(ZF);
+        b.localGet(Local.t0).i32const(all).op(I32.ne);
+        e.orFlag(SF);
+        b.localGet(Local.t2).i32const(1).op(I32.and);
+        e.orFlag(OF);
+    }
+    if (op.endsWith('i'))
+    {
+        // The index of the least significant bit set, or the most's; n for none.
+        b.i32const(n);
+        if ((how & 0x40) !== 0)
+        {
+            b.i32const(31).localGet(Local.t2).op(0x67).op(I32.sub); // i32.clz
+        }
+        else
+        {
+            b.localGet(Local.t2).op(0x68); // i32.ctz
+        }
+        b.localGet(Local.t2).op(I32.eqz);
+        b.select();
+        writeReg(e, 1, 4, false);
+    }
+    else if ((how & 0x40) !== 0)
+    {
+        // A mask of elements: each bit spread over its element.
+        const bits = words ? Array.from({ length: 8 }, (_, i)=>[1 << i, 0]).flat()
+            : Array.from({ length: 16 }, (_, i)=>1 << (i & 7));
+        b.localGet(Local.t2);
+        simd(SIMD.i16x8Splat);
+        if (!words)
+        {
+            // Bytes 0..7 from the low byte of the mask, 8..15 from the high one.
+            b.localTee(left).localGet(left);
+            b.op(0xfd, [SIMD.shuffle, ...Array.from({ length: 16 }, (_, at)=>(at < 8 ? 0 : 1))]);
+        }
+        b.v128const(bits);
+        simd(SIMD.and);
+        b.v128const(bits);
+        simd(words ? SIMD.i16x8Eq : SIMD.i8x16Eq);
+        b.localSet(e.xmmLocal(0, true));
+    }
+    else
+    {
+        b.v128const(new Array(16).fill(0)).localGet(Local.t2);
+        b.op(0xfd, [SIMD.i32x4ReplaceLane, 0]);
+        b.localSet(e.xmmLocal(0, true));
     }
 }
 
@@ -1116,6 +1777,12 @@ function readV(e, operand, width){
     else if (width === 8)
     {
         b.simdMem(SIMD.load64Zero, { align: 3, offset: e.layout.ramBase });
+    }
+    else if (width === 2)
+    {
+        // A word into a zero vector's first lane (pmovsxbq's and pmovzxbq's source).
+        b.v128const(new Array(16).fill(0));
+        b.simdMem(SIMD.load16Lane, { align: 1, offset: e.layout.ramBase, lane: 0 });
     }
     else
     {

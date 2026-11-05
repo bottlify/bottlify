@@ -22,8 +22,8 @@ and in Node.
 
 ## What it runs
 
-- 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2 and SSE3, with POPCNT and
-  RDRAND. Exactly the set cork reports through `cpuid`.
+- 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2, SSE3, SSSE3, SSE4.1 and
+  SSE4.2 (the string compares and CRC32 among them), with POPCNT, MOVBE and RDRAND.
 - 64-bit user-mode x86-64, the same set with the sixteen 64-bit registers, by the same
   translator and runtime at a 64-bit width, its memory a 4 GiB window: an address at or past
   4 GiB faults, except where an access goes untested -- outside precise mode a read, and while
@@ -44,7 +44,8 @@ and in Node.
 
 - 16-bit code, privileged instructions, segments other than the `fs` base in 32-bit code and
   the `gs` base in 64-bit code (another override adds nothing).
-- SSSE3 and anything newer: SSE4.1, SSE4.2 (POPCNT aside), AVX.
+- AVX and anything newer (the VEX and EVEX encodings), and the SHA, AES and PCLMULQDQ
+  instructions.
 - The x87's 80-bit precision. The FPU registers are plain 64-bit doubles: single and double
   precision are honoured, extended is computed as double. Sine, logarithm and the rest come from
   `Math`. Exception masks are not honoured: every x87 exception behaves as masked.

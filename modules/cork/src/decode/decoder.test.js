@@ -349,17 +349,20 @@ test('the refusals name the opcode and the reason', ()=>{
         { refused: true, eip: 0, opcode: 'ff /7', reason: 'not in table', invalid: true });
     assert.deepEqual(refused([0xea, 0, 0, 0, 0, 0, 0]).reason, 'not user mode');
     assert.equal(refused([0x0f, 0x01, 0x10]).reason, 'not user mode');
-    assert.equal(refused([0x0f, 0x38, 0x00, 0xc1]).opcode, '0f 38');
+    assert.equal(refused([0x0f, 0x38, 0xff, 0xc1]).opcode, '0f 38 ff',
+        'a three-byte slot unfilled');
+    assert.equal(refused([0x0f, 0x38, 0x10, 0xc1]).opcode, '0f 38 10',
+        'a three-byte form with no variant for its missing prefix');
     assert.equal(refused([0xf2, 0x0f, 0x28, 0xc1]).opcode, 'f2 0f 28', 'a prefix with no variant');
     assert.equal(refused([0x8d, 0xc0]).reason, 'memory form only');
     assert.equal(refused([0xf0, 0x01, 0xc0]).reason, 'lock on a register form');
     assert.equal(refused([0x8e, 0xf8]).reason, 'no such segment register');
     assert.equal(refused(new Array(16).fill(0x66)).reason, 'longer than fifteen bytes');
     // Which of them a processor rejects with #UD, as against a form this
-    // decoder does not know: an SSE4 op is an instruction, ff /7 is none.
+    // decoder does not know: a SHA op (0f 38 c8) is an instruction, ff /7 is none.
     assert.equal(refused([0xff, 0xf8]).invalid, true);
     assert.equal(refused([0x8d, 0xc0]).invalid, true, 'lea of a register');
-    assert.equal(refused([0x0f, 0x38, 0x00, 0xc1]).invalid, false);
+    assert.equal(refused([0x0f, 0x38, 0xc8, 0xc1]).invalid, false);
     assert.equal(refused([0xea, 0, 0, 0, 0, 0, 0]).invalid, false);
 });
 

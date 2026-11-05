@@ -1463,6 +1463,71 @@ export function emitInstruction(e, instruction, flagsLive){
             });
             e.close();
             return true;
+        case 'crc32':
+        {
+            // CRC-32C of the source's bytes, low first, over the destination as
+            // it stands (the SDM's CRC32), a bit at a time: the polynomial
+            // 0x82F63B78 reflected, xored in where the bit shifted out is set.
+            if (isLong(e) && (dst.size === 8 || src.size === 8))
+            {
+                return false;
+            }
+            prepare(e, src);
+            readOp(e, src);
+            b.localSet(Local.t2);
+            getReg32(e, /** @type {number} */ (dst.reg));
+            b.localSet(Local.t1);
+            for (let i = 0; i < src.size; i++)
+            {
+                b.localGet(Local.t1).localGet(Local.t2);
+                if (i > 0)
+                {
+                    b.i32const(i * 8).op(I32.shrU);
+                }
+                b.i32const(0xff).op(I32.and).op(I32.xor).localSet(Local.t1);
+                for (let bit = 0; bit < 8; bit++)
+                {
+                    b.localGet(Local.t1).i32const(1).op(I32.shrU);
+                    b.i32const(0).localGet(Local.t1).i32const(1).op(I32.and).op(I32.sub)
+                        .i32const(0x82f63b78 | 0).op(I32.and);
+                    b.op(I32.xor).localSet(Local.t1);
+                }
+            }
+            b.localGet(Local.t1);
+            writeReg(e, /** @type {number} */ (dst.reg), 4, false);
+            return true;
+        }
+        case 'movbe':
+        {
+            // A load or a store with its bytes reversed.
+            if (isLong(e) && size === 8)
+            {
+                return false;
+            }
+            prepare(e, src);
+            if (dst.kind === 'mem')
+            {
+                prepare(e, dst, { store: true });
+            }
+            writeOp(e, dst, ()=>{
+                readOp(e, src);
+                b.localSet(Local.t1);
+                if (size === 2)
+                {
+                    b.localGet(Local.t1).i32const(8).op(I32.shrU).i32const(0xff).op(I32.and);
+                    b.localGet(Local.t1).i32const(8).op(I32.shl).i32const(0xff00).op(I32.and)
+                        .op(I32.or);
+                    return;
+                }
+                b.localGet(Local.t1).i32const(24).op(I32.shrU);
+                b.localGet(Local.t1).i32const(8).op(I32.shrU).i32const(0xff00).op(I32.and)
+                    .op(I32.or);
+                b.localGet(Local.t1).i32const(8).op(I32.shl).i32const(0xff0000).op(I32.and)
+                    .op(I32.or);
+                b.localGet(Local.t1).i32const(24).op(I32.shl).op(I32.or);
+            });
+            return true;
+        }
         case 'bswap':
             if (size === 8)
             {

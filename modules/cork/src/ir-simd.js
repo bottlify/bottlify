@@ -17,7 +17,7 @@
  * after the operation.
  */
 
-import { CF, PF, ZF } from './decode/table.js';
+import { CF, OF, PF, SF, ZF } from './decode/table.js';
 
 /**
  * The SSE instructions whose operands are a general or memory one only, so the
@@ -1348,6 +1348,11 @@ export function evaluateSimd(instruction, state, address){
         }
         case 'pextrw':
         {
+            if (dst.kind === 'mem')
+            {
+                // SSE4.1's form into memory (0F 3A 15).
+                return evaluateExtensions(instruction, state, address);
+            }
             const slot = /** @type {number} */ (imm.value) & (isMm ? 3 : 7);
             const bytes = readVector(state, src, isMm ? 8 : 16, address);
             state.reg[/** @type {number} */ (dst.reg)] = u16At(bytes, slot * 2);
@@ -1419,6 +1424,593 @@ export function evaluateSimd(instruction, state, address){
             return true;
         }
 
+        default:
+            return evaluateExtensions(instruction, state, address);
+    }
+}
+
+/** A signed byte. @param {Uint8Array} bytes @param {number} at */
+const i8At = (bytes, at)=>bytes[at] << 24 >> 24;
+/** Signed saturation to a word. @param {number} value */
+const saturateWord = value=>Math.max(-32768, Math.min(32767, value));
+
+/**
+ * A float lane of a rounding to an integer value (`roundps` and the rest): by
+ * the immediate's mode, or MXCSR's when its bit 2 is set; a zero keeps its
+ * sign, a NaN goes as every SSE NaN goes (`putLane`).
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} value @param {number} imm
+ */
+function roundLane(state, value, imm){
+    if (!Number.isFinite(value))
+    {
+        return value;
+    }
+    const mode = (imm & 4) !== 0 ? state.mxcsr >>> 13 & 3 : imm & 3;
+    const rounded = mode === 1 ? Math.floor(value) : mode === 2 ? Math.ceil(value)
+        : mode === 3 ? Math.trunc(value) : roundNearest(value);
+    // -0.3 rounds to -0, as the processor answers.
+    return rounded === 0 ? (value < 0 || Object.is(value, -0) ? -0 : 0) : rounded;
+}
+
+/**
+ * The string compares' (`pcmpestri` and the rest) answer, as the SDM's
+ * PCMPxSTRx operation describes it: the elements of each operand by the
+ * immediate's format, the valid ones by the explicit lengths or the first null,
+ * the aggregation into IntRes1, the polarity into IntRes2, and the flags.
+ *
+ * @param {Uint8Array} a  the first operand, the register
+ * @param {Uint8Array} b  the second, register or memory
+ * @param {number} imm
+ * @param {number | null} lengthA  EAX, or null for the implicit length
+ * @param {number | null} lengthB  EDX, or null
+ * @returns {{ result: number, count: number, flags: number }}
+ */
+function stringCompare(a, b, imm, lengthA, lengthB){
+    const words = (imm & 1) !== 0;
+    const signed = (imm & 2) !== 0;
+    const count = words ? 8 : 16;
+    /** @param {Uint8Array} bytes @param {number} i */
+    const element = (bytes, i)=>words ? (signed ? i16At(bytes, i * 2) : u16At(bytes, i * 2))
+        : (signed ? i8At(bytes, i) : bytes[i]);
+    /** @param {Uint8Array} bytes @param {number | null} given */
+    const valid = (bytes, given)=>{
+        if (given !== null)
+        {
+            // The absolute value of the register, saturated to the element count.
+            const magnitude = given === -2147483648 ? count : Math.abs(given);
+            return Math.min(magnitude, count);
+        }
+        for (let i = 0; i < count; i++)
+        {
+            if (element(bytes, i) === 0)
+            {
+                return i;
+            }
+        }
+        return count;
+    };
+    const la = valid(a, lengthA);
+    const lb = valid(b, lengthB);
+    const aggregation = imm >> 2 & 3;
+    /** BoolRes[i][j]: element i of a against element j of b, with the invalid-element rules. */
+    const compare = (/** @type {number} */ i, /** @type {number} */ j)=>{
+        const av = i < la;
+        const bv = j < lb;
+        const x = element(a, i);
+        const y = element(b, j);
+        switch (aggregation)
+        {
+            case 0: // equal any
+                return av && bv ? x === y : false;
+            case 1: // ranges: a's even element <= b, b <= a's odd element
+                if (!av || !bv)
+                {
+                    return false;
+                }
+                return (i & 1) === 0 ? y >= x : y <= x;
+            case 2: // equal each
+                if (!av && !bv)
+                {
+                    return true;
+                }
+                return av && bv ? x === y : false;
+            default: // equal ordered
+                if (!av)
+                {
+                    return true;
+                }
+                return bv ? x === y : false;
+        }
+    };
+    let result1 = 0;
+    for (let j = 0; j < count; j++)
+    {
+        let bit = 0;
+        if (aggregation === 0)
+        {
+            for (let i = 0; i < count; i++)
+            {
+                bit |= compare(i, j) ? 1 : 0;
+            }
+        }
+        else if (aggregation === 1)
+        {
+            for (let i = 0; i < count; i += 2)
+            {
+                bit |= compare(i, j) && compare(i + 1, j) ? 1 : 0;
+            }
+        }
+        else if (aggregation === 2)
+        {
+            bit = compare(j, j) ? 1 : 0;
+        }
+        else
+        {
+            bit = 1;
+            for (let i = 0, k = j; i < count - j; i++, k++)
+            {
+                bit &= compare(i, k) ? 1 : 0;
+            }
+        }
+        result1 |= bit << j;
+    }
+    const all = (1 << count) - 1;
+    const polarity = imm >> 4 & 3;
+    const result2 = polarity === 1 ? ~result1 & all
+        : polarity === 3 ? (result1 ^ ((1 << lb) - 1)) & all : result1;
+    const flags = (result2 !== 0 ? CF : 0) | (lb < count ? ZF : 0) | (la < count ? SF : 0)
+        | ((result2 & 1) !== 0 ? OF : 0);
+    return { result: result2, count, flags };
+}
+
+/**
+ * SSSE3, SSE4.1 and SSE4.2 (the three-byte maps, `table.js`), as the SDM's
+ * operation sections describe each.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {import('./ir.js').EvalState} state
+ * @param {(operand: import('./decode/decoder.js').Operand) => number} address
+ * @returns {boolean}
+ */
+function evaluateExtensions(instruction, state, address){
+    const { op, operands } = instruction;
+    const [dst, src, imm] = operands;
+    const mm = dst?.kind === 'mm';
+    const width = mm ? 8 : 16;
+    /** The flags an instruction writes, as the table says it writes them. @param {number} flags */
+    const setFlags = flags=>{
+        const written = instruction.flagsWritten & ~instruction.flagsUndefined;
+        state.eflags = (state.eflags & ~written | flags & written) >>> 0;
+    };
+    switch (op)
+    {
+        case 'pshufb':
+        {
+            const left = readVector(state, dst, width, address);
+            const right = readVector(state, src, width, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < width; i++)
+            {
+                out[i] = (right[i] & 0x80) !== 0 ? 0 : left[right[i] & (width - 1)];
+            }
+            writeVector(state, dst, width, address, out);
+            return true;
+        }
+        case 'phaddw': case 'phaddd': case 'phaddsw': case 'phsubw': case 'phsubd': case 'phsubsw':
+        {
+            const dword = op.endsWith('d');
+            const element = dword ? 4 : 2;
+            const subtract = op.startsWith('phsub');
+            const saturate = op.endsWith('sw');
+            const left = readVector(state, dst, width, address);
+            const right = readVector(state, src, width, address);
+            const out = new Uint8Array(16);
+            const pairs = width / element / 2;
+            [left, right].forEach((bytes, half)=>{
+                for (let i = 0; i < pairs; i++)
+                {
+                    const at = i * 2 * element;
+                    const x = dword ? i32At(bytes, at) : i16At(bytes, at);
+                    const y = dword ? i32At(bytes, at + element) : i16At(bytes, at + element);
+                    const sum = subtract ? x - y : x + y;
+                    const to = (half * pairs + i) * element;
+                    if (dword)
+                    {
+                        putU32(out, to, sum);
+                    }
+                    else
+                    {
+                        putU16(out, to, saturate ? saturateWord(sum) : sum);
+                    }
+                }
+            });
+            writeVector(state, dst, width, address, out);
+            return true;
+        }
+        case 'pmaddubsw':
+        {
+            const left = readVector(state, dst, width, address);
+            const right = readVector(state, src, width, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < width; i += 2)
+            {
+                putU16(out, i, saturateWord(left[i] * i8At(right, i)
+                    + left[i + 1] * i8At(right, i + 1)));
+            }
+            writeVector(state, dst, width, address, out);
+            return true;
+        }
+        case 'psignb': case 'psignw': case 'psignd':
+        {
+            const element = op === 'psignb' ? 1 : op === 'psignw' ? 2 : 4;
+            packedOp(state, dst, src, mm, element, true,
+                (x, y)=>(y < 0 ? -x : y === 0 ? 0 : x), address);
+            return true;
+        }
+        case 'pmulhrsw':
+            packedOp(state, dst, src, mm, 2, true, (x, y)=>((x * y >> 14) + 1) >> 1, address);
+            return true;
+        case 'pabsb': case 'pabsw': case 'pabsd':
+        {
+            const element = op === 'pabsb' ? 1 : op === 'pabsw' ? 2 : 4;
+            const source = readVector(state, src, width, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < width; i += element)
+            {
+                const value = element === 1 ? i8At(source, i) : element === 2 ? i16At(source, i)
+                    : i32At(source, i);
+                const magnitude = Math.abs(value);
+                if (element === 1)
+                {
+                    out[i] = magnitude & 0xff;
+                }
+                else if (element === 2)
+                {
+                    putU16(out, i, magnitude);
+                }
+                else
+                {
+                    putU32(out, i, magnitude);
+                }
+            }
+            writeVector(state, dst, width, address, out);
+            return true;
+        }
+        case 'palignr':
+        {
+            // The destination above the source, shifted right by the immediate's bytes.
+            const shift = /** @type {number} */ (imm.value) & 0xff;
+            const left = readVector(state, dst, width, address);
+            const right = readVector(state, src, width, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < width; i++)
+            {
+                const at = i + shift;
+                out[i] = at < width ? right[at] : at < 2 * width ? left[at - width] : 0;
+            }
+            writeVector(state, dst, width, address, out);
+            return true;
+        }
+        case 'pblendvb': case 'blendvps': case 'blendvpd': case 'blendps': case 'blendpd':
+        case 'pblendw':
+        {
+            const element = op === 'pblendvb' ? 1 : op === 'pblendw' ? 2
+                : op.endsWith('pd') ? 8 : 4;
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const mask = op.includes('blendv') ? readVector(state, operands[2], 16, address) : null;
+            const selector = /** @type {number} */ (imm?.value ?? 0);
+            for (let i = 0; i < 16 / element; i++)
+            {
+                const take = mask !== null ? (mask[i * element + element - 1] & 0x80) !== 0
+                    : (selector >> i & 1) !== 0;
+                if (take)
+                {
+                    left.set(right.subarray(i * element, (i + 1) * element), i * element);
+                }
+            }
+            writeVector(state, dst, 16, address, left);
+            return true;
+        }
+        case 'ptest':
+        {
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            let and = 0;
+            let andNot = 0;
+            for (let i = 0; i < 16; i++)
+            {
+                and |= left[i] & right[i];
+                andNot |= ~left[i] & right[i] & 0xff;
+            }
+            setFlags((and === 0 ? ZF : 0) | (andNot === 0 ? CF : 0));
+            return true;
+        }
+        case 'pmovsxbw': case 'pmovsxbd': case 'pmovsxbq': case 'pmovsxwd': case 'pmovsxwq':
+        case 'pmovsxdq': case 'pmovzxbw': case 'pmovzxbd': case 'pmovzxbq': case 'pmovzxwd':
+        case 'pmovzxwq': case 'pmovzxdq':
+        {
+            const signed = op[4] === 's';
+            const sizes = { b: 1, w: 2, d: 4, q: 8 };
+            const from = sizes[/** @type {'b' | 'w' | 'd'} */ (op[6])];
+            const to = sizes[/** @type {'w' | 'd' | 'q'} */ (op[7])];
+            const lanes = 16 / to;
+            const source = readVector(state, src, lanes * from, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < lanes; i++)
+            {
+                const value = from === 1 ? (signed ? i8At(source, i) : source[i])
+                    : from === 2 ? (signed ? i16At(source, i * 2) : u16At(source, i * 2))
+                        : (signed ? i32At(source, i * 4) : u32At(source, i * 4));
+                for (let k = 0; k < to; k++)
+                {
+                    out[i * to + k] = k < 4 ? value >> (k * 8) & 0xff
+                        : (value < 0 ? 0xff : 0);
+                }
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'pmuldq':
+        {
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < 2; i++)
+            {
+                putU64(out, i * 8, BigInt(i32At(left, i * 8)) * BigInt(i32At(right, i * 8)));
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'pcmpeqq': case 'pcmpgtq':
+        {
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const out = new Uint8Array(16);
+            for (let i = 0; i < 2; i++)
+            {
+                const x = BigInt.asIntN(64, u64At(left, i * 8));
+                const y = BigInt.asIntN(64, u64At(right, i * 8));
+                if (op === 'pcmpeqq' ? x === y : x > y)
+                {
+                    out.fill(0xff, i * 8, i * 8 + 8);
+                }
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'packusdw':
+        {
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const out = new Uint8Array(16);
+            [left, right].forEach((bytes, half)=>{
+                for (let i = 0; i < 4; i++)
+                {
+                    putU16(out, (half * 4 + i) * 2, Math.max(0, Math.min(0xffff,
+                        i32At(bytes, i * 4))));
+                }
+            });
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'pminsb': case 'pmaxsb':
+            packedOp(state, dst, src, false, 1, true, op === 'pminsb' ? Math.min : Math.max,
+                address);
+            return true;
+        case 'pminsd': case 'pmaxsd':
+            packedOp(state, dst, src, false, 4, true, op === 'pminsd' ? Math.min : Math.max,
+                address);
+            return true;
+        case 'pminuw': case 'pmaxuw':
+            packedOp(state, dst, src, false, 2, false, op === 'pminuw' ? Math.min : Math.max,
+                address);
+            return true;
+        case 'pminud': case 'pmaxud':
+            packedOp(state, dst, src, false, 4, false, op === 'pminud' ? Math.min : Math.max,
+                address);
+            return true;
+        case 'pmulld':
+            packedOp(state, dst, src, false, 4, true, Math.imul, address);
+            return true;
+        case 'phminposuw':
+        {
+            const source = readVector(state, src, 16, address);
+            let at = 0;
+            for (let i = 1; i < 8; i++)
+            {
+                if (u16At(source, i * 2) < u16At(source, at * 2))
+                {
+                    at = i;
+                }
+            }
+            const out = new Uint8Array(16);
+            putU16(out, 0, u16At(source, at * 2));
+            putU16(out, 2, at);
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'movntdqa':
+            writeVector(state, dst, 16, address, readVector(state, src, 16, address));
+            return true;
+        case 'roundps': case 'roundpd': case 'roundss': case 'roundsd':
+        {
+            const double = op.endsWith('pd') || op.endsWith('sd');
+            const scalar = op.endsWith('ss') || op.endsWith('sd');
+            const size = double ? 8 : 4;
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, scalar ? size : 16, address);
+            const out = new Uint8Array(left);
+            const how = /** @type {number} */ (imm.value);
+            for (let i = 0; i < (scalar ? 1 : 16 / size); i++)
+            {
+                const value = double ? f64At(right, i * size) : f32At(right, i * size);
+                putLane(out, i * size, roundLane(state, value, how), double, [right], i * size);
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'dpps': case 'dppd':
+        {
+            const double = op === 'dppd';
+            const size = double ? 8 : 4;
+            const lanes = 16 / size;
+            const how = /** @type {number} */ (imm.value);
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            /**
+             * A product or a sum as one SSE lane computes it, NaNs and rounding included.
+             *
+             * @param {Uint8Array} x @param {Uint8Array} y
+             * @param {(p: number, q: number) => number} operation
+             */
+            function lane(x, y, operation){
+                const out = new Uint8Array(8);
+                const p = double ? f64At(x, 0) : f32At(x, 0);
+                const q = double ? f64At(y, 0) : f32At(y, 0);
+                putLane(out, 0, operation(p, q), double, [x, y], 0);
+                return out;
+            }
+            const zero = new Uint8Array(8);
+            /** @type {Uint8Array[]} */
+            const products = [];
+            for (let i = 0; i < lanes; i++)
+            {
+                products.push((how >> (4 + i) & 1) !== 0
+                    ? lane(left.subarray(i * size), right.subarray(i * size), (p, q)=>p * q)
+                    : zero);
+            }
+            const add = (/** @type {number} */ p, /** @type {number} */ q)=>p + q;
+            // Each lane's sum is its own reduction: dpps's the neighbour's product
+            // first, (p[i^1] + p[i]) + (p[i^3] + p[i^2]); dppd's its own, p[i] +
+            // p[i^1]. A sum of numbers is the same in every lane; where several
+            // products are NaNs, the processor's lanes keep different ones, and
+            // these are the ones its lanes keep (found on the hardware corpus).
+            /** @param {number} i */
+            const sumFor = i=>(double ? lane(products[i], products[i ^ 1], add)
+                : lane(lane(products[i ^ 1], products[i], add),
+                    lane(products[i ^ 3], products[i ^ 2], add), add));
+            const out = new Uint8Array(16);
+            for (let i = 0; i < lanes; i++)
+            {
+                if ((how >> i & 1) !== 0)
+                {
+                    out.set(sumFor(i).subarray(0, size), i * size);
+                }
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'mpsadbw':
+        {
+            const how = /** @type {number} */ (imm.value);
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const from = (how >> 2 & 1) * 4;
+            const block = (how & 3) * 4;
+            const out = new Uint8Array(16);
+            for (let i = 0; i < 8; i++)
+            {
+                let sum = 0;
+                for (let j = 0; j < 4; j++)
+                {
+                    sum += Math.abs(left[from + i + j] - right[block + j]);
+                }
+                putU16(out, i * 2, sum);
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'pextrb': case 'pextrw': case 'pextrd': case 'extractps':
+        {
+            const element = op === 'pextrb' ? 1 : op === 'pextrw' ? 2 : 4;
+            const source = readVector(state, src, 16, address);
+            const at = (/** @type {number} */ (imm.value) & (16 / element - 1)) * element;
+            const value = new Uint8Array(4);
+            value.set(source.subarray(at, at + element));
+            if (dst.kind === 'reg')
+            {
+                // The register whole, zero-extended.
+                writeVector(state, { ...dst, size: 4 }, 4, address, value);
+            }
+            else
+            {
+                writeVector(state, dst, element, address, value);
+            }
+            return true;
+        }
+        case 'pinsrb': case 'pinsrd':
+        {
+            const element = op === 'pinsrb' ? 1 : 4;
+            const out = readVector(state, dst, 16, address);
+            const value = readVector(state, src, element, address);
+            const at = (/** @type {number} */ (imm.value) & (16 / element - 1)) * element;
+            out.set(value.subarray(0, element), at);
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'insertps':
+        {
+            const how = /** @type {number} */ (imm.value);
+            const out = readVector(state, dst, 16, address);
+            // A register source gives the dword the immediate's bits 7:6 name; memory, its one.
+            const source = readVector(state, src, src.kind === 'mem' ? 4 : 16, address);
+            const from = src.kind === 'mem' ? 0 : (how >> 6 & 3) * 4;
+            out.set(source.subarray(from, from + 4), (how >> 4 & 3) * 4);
+            for (let i = 0; i < 4; i++)
+            {
+                if ((how >> i & 1) !== 0)
+                {
+                    out.fill(0, i * 4, i * 4 + 4);
+                }
+            }
+            writeVector(state, dst, 16, address, out);
+            return true;
+        }
+        case 'pcmpestri': case 'pcmpestrm': case 'pcmpistri': case 'pcmpistrm':
+        {
+            const explicit = op.startsWith('pcmpe');
+            const how = /** @type {number} */ (imm.value);
+            const left = readVector(state, dst, 16, address);
+            const right = readVector(state, src, 16, address);
+            const { result, count, flags } = stringCompare(left, right, how,
+                explicit ? state.reg[0] | 0 : null, explicit ? state.reg[2] | 0 : null);
+            if (op.endsWith('i'))
+            {
+                // The least significant set bit's index, or the most's; the count when none.
+                let index = count;
+                if (result !== 0)
+                {
+                    index = 31 - Math.clz32((how & 0x40) !== 0 ? result : result & -result);
+                }
+                state.reg[1] = index >>> 0;
+            }
+            else
+            {
+                const out = new Uint8Array(16);
+                if ((how & 0x40) !== 0)
+                {
+                    // A mask of elements: each set bit's element all ones.
+                    const element = count === 8 ? 2 : 1;
+                    for (let i = 0; i < count; i++)
+                    {
+                        if ((result >> i & 1) !== 0)
+                        {
+                            out.fill(0xff, i * element, (i + 1) * element);
+                        }
+                    }
+                }
+                else
+                {
+                    putU16(out, 0, result);
+                }
+                writeVector(state, { kind: 'xmm', size: 16, reg: 0 }, 16, address, out);
+            }
+            setFlags(flags);
+            return true;
+        }
         default:
             return false;
     }

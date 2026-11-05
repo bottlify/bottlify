@@ -763,6 +763,33 @@ export function evaluate(instruction, state){
             setFlags(0);
             return;
         }
+        case 'crc32':
+        {
+            // CRC-32C (the Castagnoli polynomial, reflected: 0x82F63B78) of the
+            // source's bytes, low first, into the destination as it stands: no
+            // inversion before or after (the SDM's CRC32).
+            let crc = state.reg[/** @type {number} */ (operands[0].reg)] >>> 0;
+            const value = read(operands[1]) >>> 0;
+            for (let i = 0; i < operands[1].size; i++)
+            {
+                crc ^= value >>> (i * 8) & 0xff;
+                for (let bit = 0; bit < 8; bit++)
+                {
+                    crc = (crc >>> 1 ^ (crc & 1 ? 0x82f63b78 : 0)) >>> 0;
+                }
+            }
+            write(operands[0], crc);
+            return;
+        }
+        case 'movbe':
+        {
+            // A load or a store with its bytes reversed.
+            const value = read(operands[1]) >>> 0;
+            write(operands[0], size === 2 ? (value >>> 8 & 0xff | value << 8 & 0xff00)
+                : ((value >>> 24) | (value >>> 8 & 0xff00) | (value << 8 & 0xff0000)
+                    | (value << 24)) >>> 0);
+            return;
+        }
         case 'bswap':
         {
             const value = read(operands[0]);

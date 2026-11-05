@@ -20,7 +20,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decode } from './decoder.js';
-import { Group, ONE_BYTE, Prefixed, SYS, TWO_BYTE, X87 } from './table.js';
+import { Group, ONE_BYTE, Prefixed, SYS, THREE_BYTE_38, THREE_BYTE_3A, TWO_BYTE, X87 }
+    from './table.js';
 import { Fault, Unsupported, createState, evaluate } from '../ir.js';
 import { createTestMachine } from '../testing/machine.js';
 
@@ -32,7 +33,8 @@ const PREFIX = { 66: [0x66], f3: [0xf3], f2: [0xf2], '': [] };
 /**
  * Anything a slot of the two opcode maps or the x87 maps can hold.
  *
- * @typedef {import('./table.js').Entry | Group | Prefixed | typeof SYS | null} TableEntry
+ * @typedef {import('./table.js').Entry | Group | import('./table.js').ByMod | Prefixed
+ *     | typeof SYS | null} TableEntry
  */
 
 /**
@@ -121,6 +123,15 @@ function representatives(){
     {
         entries.push(...candidates([0x0f, second], TWO_BYTE[second],
             `0f ${second.toString(16).padStart(2, '0')}`));
+    }
+    for (const [second, map] of /** @type {const} */ ([[0x38, THREE_BYTE_38],
+        [0x3a, THREE_BYTE_3A]]))
+    {
+        for (let third = 0; third < 256; third++)
+        {
+            entries.push(...candidates([0x0f, second, third], map[third],
+                `0f ${second.toString(16)} ${third.toString(16).padStart(2, '0')}`));
+        }
     }
     for (let escape = 0; escape < 8; escape++)
     {

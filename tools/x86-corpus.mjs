@@ -9,7 +9,7 @@
  * processor, with what they did, for cork's interpreters and translated code
  * to be judged by (`modules/cork/src/testing/x86-corpus.js`).
  *
- *   node tools/x86-corpus.mjs [cases] [seed] [out]
+ *   node tools/x86-corpus.mjs [cases] [seed] [out] [--only sse4] [--append]
  *
  * Each case is one to a few instructions drawn from templates written from the
  * Intel SDM for the 32-bit set cork models and its `cpuid` advertises: the
@@ -17,7 +17,9 @@
  * forms, decimal adjusts, strings with and without a repeat, the stack, flags,
  * bits, shifts, multiplies and divides (faulting ones too), conditional
  * moves, sets and jumps, loops and calls inside the case, the exchanges, x87,
- * MMX, SSE, SSE2, SSE3, and encodings that are no instruction (#UD). The
+ * MMX, SSE, SSE2, SSE3, and encodings that are no instruction (#UD); with
+ * `--only sse4` the three-byte maps' forms alone (SSSE3, SSE4.1, SSE4.2, movbe),
+ * which `--append` adds after the cases the corpus holds. The
  * state starts at random: the registers (some pointing into the case's 8 KiB
  * buffer at DATA_AT, one a small index, ESP near the buffer's end), EFLAGS,
  * the x87 stack with its tags, control and status words, the MMX and XMM
@@ -50,16 +52,24 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { arch, platform, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { decode, isX87Opcode } from '../modules/cork/src/decode/decoder.js';
 import { CF, DF, OF, ZF } from '../modules/cork/src/decode/table.js';
 import { CORPUS_LAYOUT, X87_STATUS, fillData, statusAfter } from
     '../modules/cork/src/testing/x86-corpus.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CASES = Number(process.argv[2] ?? 16000);
-const SEED = Number(process.argv[3] ?? 0x86c0de) >>> 0 || 1;
-const OUT = process.argv[4] ?? join(ROOT, 'modules/cork/src/x86-corpus.json.gz');
+const flagged = (/** @type {string} */ name)=>process.argv.includes(name)
+    ? process.argv[process.argv.indexOf(name) + 1] : undefined;
+const positional = process.argv.slice(2).filter((one, at, all)=>!one.startsWith('--')
+    && !all[at - 1]?.startsWith('--'));
+const CASES = Number(positional[0] ?? 16000);
+const SEED = Number(positional[1] ?? 0x86c0de) >>> 0 || 1;
+const OUT = positional[2] ?? join(ROOT, 'modules/cork/src/x86-corpus.json.gz');
+/** `--only sse4`: every case of that family alone, the sweep left out. */
+const ONLY = flagged('--only');
+/** `--append`: the cases go after the ones the corpus at OUT already holds. */
+const APPEND = process.argv.includes('--append');
 if (platform() !== 'linux' || arch() !== 'x64')
 {
     console.error('the corpus runs natively: an x86-64 Linux host that runs i386 code is needed');
@@ -1535,6 +1545,137 @@ function sse(o){
     return { lines, kind: 'sse', mxrc: 0 };
 }
 
+// SSSE3, SSE4.1, SSE4.2 and MOVBE ----------------------------------------------
+
+/** SSSE3's forms on MMX and XMM registers alike. */
+const SSSE3_OPS = ['pshufb', 'phaddw', 'phaddd', 'phaddsw', 'phsubw', 'phsubd', 'phsubsw',
+    'pmaddubsw', 'psignb', 'psignw', 'psignd', 'pmulhrsw', 'pabsb', 'pabsw', 'pabsd'];
+/** SSE4.1's and SSE4.2's two-operand integer forms. */
+const SSE4_OPS = ['pmuldq', 'pcmpeqq', 'packusdw', 'pminsb', 'pminsd', 'pminuw', 'pminud',
+    'pmaxsb', 'pmaxsd', 'pmaxuw', 'pmaxud', 'pmulld', 'phminposuw', 'pcmpgtq', 'ptest'];
+/** The extensions, each with the width of its memory source. */
+const EXTENSIONS = [['bw', 'qword'], ['bd', 'dword'], ['bq', 'word'], ['wd', 'qword'],
+    ['wq', 'dword'], ['dq', 'qword']];
+
+/**
+ * A case of the three-byte maps' forms: SSSE3 on MMX or on XMM registers,
+ * SSE4.1, SSE4.2's compare, string compares and crc32, and movbe.
+ *
+ * @param {Operands} o
+ * @returns {Piece}
+ */
+function sse4(o){
+    if (chance(5))
+    {
+        // SSSE3 on MMX registers.
+        /** @type {string[]} */
+        const lines = [];
+        for (let i = 1 + below(3); i > 0; i--)
+        {
+            const source = chance(3) ? `qword ptr ${o.address()}` : mm();
+            lines.push(chance(6) ? `palignr ${mm()}, ${source}, ${below(20)}`
+                : `${pick(SSSE3_OPS)} ${mm()}, ${source}`);
+        }
+        return { lines, kind: 'mmx' };
+    }
+    /** @type {string[]} */
+    const lines = [];
+    const aligned = ()=>`xmmword ptr ${o.address(16)}`;
+    const source = ()=>(chance(3) ? aligned() : xmm());
+    for (let i = 1 + below(3); i > 0; i--)
+    {
+        switch (below(16))
+        {
+            case 0: case 1: lines.push(`${pick(SSSE3_OPS)} ${xmm()}, ${source()}`); break;
+            case 2: lines.push(`palignr ${xmm()}, ${source()}, ${below(40)}`); break;
+            case 3: lines.push(`${pick(SSE4_OPS)} ${xmm()}, ${source()}`); break;
+            case 4: lines.push(chance(4) ? `movntdqa ${xmm()}, ${aligned()}`
+                : `${pick(SSE4_OPS)} ${xmm()}, ${source()}`); break;
+            case 5:
+                lines.push(`${pick(['pblendvb', 'blendvps', 'blendvpd'])} ${xmm()},`
+                    + ` ${source()}, xmm0`);
+                break;
+            case 6: lines.push(`${pick(['blendps', 'blendpd', 'pblendw'])} ${xmm()}, ${source()},`
+                + ` ${below(256)}`); break;
+            case 7:
+            {
+                const [widths, size] = pick(EXTENSIONS);
+                lines.push(`pmov${pick(['sx', 'zx'])}${widths} ${xmm()}, ${chance(3)
+                    ? `${size} ptr ${o.address()}` : xmm()}`);
+                break;
+            }
+            case 8:
+            {
+                const how = below(16);
+                const op = pick(['roundps', 'roundpd', 'roundss', 'roundsd']);
+                const at = op === 'roundss' ? `dword ptr ${o.address()}` : op === 'roundsd'
+                    ? `qword ptr ${o.address()}` : aligned();
+                const line = `${op} ${xmm()}, ${chance(3) ? at : xmm()}, ${how}`;
+                if ((how & 4) !== 0)
+                {
+                    // MXCSR's rounding, at random, for this rounding alone.
+                    return { lines: [line], kind: 'sse', mxrc: below(4) };
+                }
+                lines.push(line);
+                break;
+            }
+            case 9: lines.push(`${pick(['dpps', 'dppd'])} ${xmm()}, ${source()}, ${below(256)}`);
+                break;
+            case 10: lines.push(`mpsadbw ${xmm()}, ${source()}, ${below(8)}`); break;
+            case 11:
+            {
+                const op = pick(['pextrb', 'pextrw', 'pextrd', 'extractps']);
+                const size = op === 'pextrb' ? 'byte' : op === 'pextrw' ? 'word' : 'dword';
+                lines.push(`${op} ${chance(2) ? o.reg(4) : `${size} ptr ${o.address()}`},`
+                    + ` ${xmm()}, ${below(20)}`);
+                break;
+            }
+            case 12:
+            {
+                const op = pick(['pinsrb', 'pinsrd', 'insertps']);
+                const from = op === 'insertps' ? (chance(2) ? xmm() : `dword ptr ${o.address()}`)
+                    : chance(2) ? o.src(4) : `${op === 'pinsrb' ? 'byte' : 'dword'} ptr`
+                        + ` ${o.address()}`;
+                lines.push(`${op} ${xmm()}, ${from}, ${below(op === 'insertps' ? 256 : 20)}`);
+                break;
+            }
+            case 13:
+            {
+                // The string compares: explicit lengths in EAX and EDX, or the first null.
+                const op = pick(['pcmpestri', 'pcmpestrm', 'pcmpistri', 'pcmpistrm']);
+                const how = below(128);
+                if (op.startsWith('pcmpe'))
+                {
+                    const length = ()=>pick([below(20), -below(20), 0x7fffffff, 0x80000000]);
+                    lines.push(`mov eax, ${length()}`, `mov edx, ${length()}`,
+                        `${op} ${xmm()}, ${xmm()}, ${how}`);
+                }
+                else
+                {
+                    lines.push(`${op} ${xmm()}, ${source()}, ${how}`);
+                }
+                break;
+            }
+            case 14:
+            {
+                const size = pick([1, 2, 4]);
+                lines.push(`crc32 ${o.reg(4)}, ${chance(2) ? o.src(size)
+                    : `${['', 'byte', 'word', '', 'dword'][size]} ptr ${o.address()}`}`);
+                break;
+            }
+            default:
+            {
+                const size = pick([2, 4]);
+                const at = `${size === 2 ? 'word' : 'dword'} ptr ${o.address()}`;
+                lines.push(chance(2) ? `movbe ${o.reg(size)}, ${at}`
+                    : `movbe ${at}, ${o.reg(size)}`);
+                break;
+            }
+        }
+    }
+    return { lines, kind: 'sse', mxrc: 0 };
+}
+
 /**
  * Encodings that are no instruction: the undefined opcodes, the register forms
  * of memory-only ones and the reverse, a lock on what may not take one, the
@@ -1625,8 +1766,16 @@ function makeCase(){
     /** @type {Piece} */
     let piece;
     const family = below(100);
-    const swept = SWEEP.shift();
-    if (swept)
+    const swept = ONLY === undefined ? SWEEP.shift() : undefined;
+    if (ONLY === 'sse4')
+    {
+        piece = sse4(o);
+    }
+    else if (ONLY !== undefined)
+    {
+        throw new Error(`x86-corpus: no family "${ONLY}" (sse4 is the one --only takes)`);
+    }
+    else if (swept)
     {
         piece = swept(o);
     }
@@ -2276,10 +2425,13 @@ function tagOfStart(one){
 
 void X87_STATUS;
 void fillData;
-const document = { codeAt: CODE_AT, dataAt: DATA_AT, dataSize: DATA_SIZE, seed: SEED, cases };
+const earlier = APPEND ? JSON.parse(gunzipSync(readFileSync(OUT)).toString()).cases : [];
+const document = { codeAt: CODE_AT, dataAt: DATA_AT, dataSize: DATA_SIZE, seed: SEED,
+    cases: [...earlier, ...cases] };
 const packed = gzipSync(JSON.stringify(document), { level: 9 });
 writeFileSync(OUT, packed);
 const faults = cases.filter(one=>/** @type {any} */ (one).out.vector !== undefined).length;
-console.log(`${cases.length} cases (${faults} fault; ${drawn} drawn, ${redrawn} drawn again)`
+console.log(`${cases.length} cases${APPEND ? `, after ${earlier.length}` : ''} (${faults} fault;`
+    + ` ${drawn} drawn, ${redrawn} drawn again)`
     + ` -> ${OUT}`
     + ` (${packed.length} bytes, ${((Date.now() - started) / 1000).toFixed(1)} s)`);
