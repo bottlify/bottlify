@@ -1125,3 +1125,68 @@ export function quadDomainShader(){
         ],
     });
 }
+
+/**
+ * A hull shader that passes four input points through as a quad patch (no
+ * control point phase), its six factors `factors` (four edges, two inside),
+ * integer partitioning and the given output primitive as the declaration
+ * numbers it: 3 triangles clockwise, 4 counter-clockwise.
+ *
+ * @param {{ factors: number[], output: number }} options
+ */
+export function passQuadHullShader(options){
+    return assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        instructions: [
+            hsDecls(),
+            dclInputControlPointCount(4),
+            dclOutputControlPointCount(4),
+            dclTessDomain(3),
+            dclTessPartitioning(1),
+            dclTessOutputPrimitive(options.output),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(6),
+            dclTemps(1),
+            immediateConstantBuffer(options.factors.map(factor=>[floatBits(factor), 0, 0, 0])),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(0, 'x'), r(0, 'x')), icbAt(r(0, 'x'), 'x')),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A domain shader that places a quad's point as Wine's quad tessellation
+ * test does: lerp(lerp(p0, p1, u), lerp(p2, p3, u), v), and paints it green.
+ */
+export function lerpQuadDomainShader(){
+    return assemble({
+        kind: SHADER_KIND.DOMAIN,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        outputs: [
+            { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'COLOR', register: 1 },
+        ],
+        instructions: [
+            dclTessDomain(3),
+            dclInput(vDomain('xy')),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutput(o(1)),
+            dclTemps(2),
+            add(r(0), vicp(1, 0), modified(vicp(0, 0), MODIFIER.NEG)),
+            mad(r(0), vDomain('xxxx'), r(0), vicp(0, 0)),
+            add(r(1), vicp(3, 0), modified(vicp(2, 0), MODIFIER.NEG)),
+            mad(r(1), vDomain('xxxx'), r(1), vicp(2, 0)),
+            add(r(1), r(1), modified(r(0), MODIFIER.NEG)),
+            mad(o(0), vDomain('yyyy'), r(1), r(0)),
+            mov(o(1), l(0, 1, 0, 1)),
+            ret(),
+        ],
+    });
+}

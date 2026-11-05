@@ -28,10 +28,12 @@ import { PATCH_BYTES, TESSELLATOR_BINDINGS, TESSELLATOR_WGSL }
     from '../../modules/core/src/layers/graphics/d3d10/tessellator-wgsl.js';
 import { parseDxbc } from '../../modules/core/src/layers/graphics/d3d10/dxbc.js';
 import {
-    colouredPixelShader, forkPhaseHullShader, passThroughVertexShader, quadDomainShader,
-    quadHullShader,
+    colouredPixelShader, forkPhaseHullShader, lerpQuadDomainShader, passQuadHullShader,
+    passThroughVertexShader, quadDomainShader, quadHullShader,
 } from '../../modules/core/src/layers/graphics/d3d10/shader-fixtures.js';
-import { drawCase, drawPageRunner, fetchCases, scanCases } from './tess-draw.mjs';
+import {
+    cullCases, drawCase, drawPageRunner, fetchCases, scanCases,
+} from './tess-draw.mjs';
 import { HULL_BINDING, linkHull } from '../../modules/core/src/layers/graphics/d3d10/wgsl.js';
 import { tessellate } from '../../modules/core/src/layers/graphics/d3d10/tessellator.js';
 
@@ -426,6 +428,9 @@ async function main(){
             hs: quadHullShader({ factor: 4, partitioning: 3,
                 corners: [[0, 0], [0, 2], [1, 0], [1, 2]] }),
             ds: quadDomainShader(), ps: colouredPixelShader() });
+        failed += await cullCases(cdp, sessionId, passQuadHullShader, {
+            vs: passThroughVertexShader(), ds: lerpQuadDomainShader(),
+            ps: colouredPixelShader() });
     }
     finally
     {

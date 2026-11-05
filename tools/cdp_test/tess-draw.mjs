@@ -158,17 +158,20 @@ export function drawPageRunner(){
         const target = textures.at(-1).texture;
         check('CreateRenderTargetView', d3d.CreateRenderTargetView(made.resource, null, made));
         context.OMSetRenderTargets([made.view], null);
-        context.ClearRenderTargetView(made.view, [0, 0, 0, 0]);
+        context.ClearRenderTargetView(made.view, scene.clear ?? [0, 0, 0, 0]);
         const bytes = (/** @type {number[]} */ words, float = false)=>new Uint8Array(
             (float ? Float32Array : Uint16Array).from(words).buffer);
         check('vertex buffer', d3d.CreateBuffer({ ByteWidth: scene.vertices.length * 4,
             Usage: 0, BindFlags: 1, CPUAccessFlags: 0, MiscFlags: 0 },
         { pSysMem: bytes(scene.vertices, true) }, made));
         context.IASetVertexBuffers(0, [made.resource], [16], [0]);
-        check('index buffer', d3d.CreateBuffer({ ByteWidth: scene.indices.length * 2,
-            Usage: 0, BindFlags: 2, CPUAccessFlags: 0, MiscFlags: 0 },
-        { pSysMem: bytes(scene.indices) }, made));
-        context.IASetIndexBuffer(made.resource, 57, scene.indexOffset);
+        if (scene.indices)
+        {
+            check('index buffer', d3d.CreateBuffer({ ByteWidth: scene.indices.length * 2,
+                Usage: 0, BindFlags: 2, CPUAccessFlags: 0, MiscFlags: 0 },
+            { pSysMem: bytes(scene.indices) }, made));
+            context.IASetIndexBuffer(made.resource, 57, scene.indexOffset);
+        }
         const shader = (/** @type {number[]} */ words)=>new Uint8Array(words);
         check('CreateInputLayout', d3d.CreateInputLayout([{ SemanticName: 'POSITION',
             SemanticIndex: 0, Format: 2, InputSlot: 0, AlignedByteOffset: 0, InputSlotClass: 0,
@@ -182,15 +185,26 @@ export function drawPageRunner(){
             check(create, d3d[create](shader(words), made));
             context[set](made.shader);
         }
-        check('CreateRasterizerState', d3d.CreateRasterizerState({ FillMode: 3, CullMode: 1,
-            FrontCounterClockwise: false, DepthBias: 0, DepthBiasClamp: 0,
-            SlopeScaledDepthBias: 0, DepthClipEnable: true, ScissorEnable: false,
-            MultisampleEnable: false, AntialiasedLineEnable: false }, made));
-        context.RSSetState(made.state);
-        context.IASetPrimitiveTopology(33);
+        // Without `cull`, both faces drawn; with it, Direct3D's default state.
+        if (!scene.cull)
+        {
+            check('CreateRasterizerState', d3d.CreateRasterizerState({ FillMode: 3,
+                CullMode: 1, FrontCounterClockwise: false, DepthBias: 0, DepthBiasClamp: 0,
+                SlopeScaledDepthBias: 0, DepthClipEnable: true, ScissorEnable: false,
+                MultisampleEnable: false, AntialiasedLineEnable: false }, made));
+            context.RSSetState(made.state);
+        }
+        context.IASetPrimitiveTopology(scene.topology ?? 33);
         context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: width, Height: height,
             MinDepth: 0, MaxDepth: 1 }]);
-        context.DrawIndexed(scene.indexCount, scene.startIndex, scene.baseVertex);
+        if (scene.indices)
+        {
+            context.DrawIndexed(scene.indexCount, scene.startIndex, scene.baseVertex);
+        }
+        else
+        {
+            context.Draw(scene.vertexCount, 0);
+        }
         context.Flush();
         await d3d.idle();
         const rowBytes = Math.ceil((width * 4) / 256) * 256;
@@ -542,6 +556,56 @@ export async function scanCases(cdp, sessionId){
         }
     }
     console.log(`sums: 4 cases of 1 to 2049 patches, ${failed} differ`);
+    return failed;
+}
+
+/**
+ * What Wine's test_quad_tessellation (d3d11.c) checks of the target, without
+ * the geometry shader and stream output it reads its triangles back with: a
+ * quad patch of four points over the whole target, under Direct3D's default
+ * culling, is culled when the tessellator turns its triangles counter-
+ * clockwise, drawn when clockwise, discarded with an edge factor of zero, and
+ * drawn again with one of five.
+ *
+ * @param {any} cdp @param {string} sessionId
+ * @param {(options: { factors: number[], output: number }) => Uint8Array} hull
+ * @param {{ ds: Uint8Array, ps: Uint8Array, vs: Uint8Array }} shaders
+ * @returns {Promise<number>} how many cases differ
+ */
+export async function cullCases(cdp, sessionId, hull, shaders){
+    const WHITE = 0xffffffff;
+    const GREEN = 0xff00ff00;
+    const cases = [
+        { name: 'counter-clockwise, culled', output: 4, factors: [1, 1, 1, 1, 1, 1], want: WHITE },
+        { name: 'clockwise, drawn', output: 3, factors: [1, 1, 1, 1, 1, 1], want: GREEN },
+        { name: 'an edge factor of 0, discarded', output: 3, factors: [0, 2, 2, 2, 1, 1],
+            want: WHITE },
+        { name: 'an edge factor of 5, drawn', output: 3, factors: [5, 2, 2, 2, 1, 1],
+            want: GREEN },
+    ];
+    let failed = 0;
+    for (const one of cases)
+    {
+        const scene = {
+            vs: [...shaders.vs], hs: [...hull(one)], ds: [...shaders.ds], ps: [...shaders.ps],
+            vertices: [-1, -1, 0, 1, -1, 1, 0, 1, 1, -1, 0, 1, 1, 1, 0, 1],
+            indices: null, vertexCount: 4, topology: 36, cull: true, clear: [1, 1, 1, 1],
+        };
+        const got = await evaluate(cdp, sessionId, `tessDraw(8, 8, ${JSON.stringify(scene)})`);
+        const colours = new Set();
+        for (let at = 0; at < got.pixels.length; at += 4)
+        {
+            colours.add(((got.pixels[at + 3] << 24) | (got.pixels[at + 2] << 16)
+                | (got.pixels[at + 1] << 8) | got.pixels[at]) >>> 0);
+        }
+        const fine = colours.size === 1 && colours.has(one.want) && got.error === null
+            && got.said.length === 0;
+        failed += fine ? 0 : 1;
+        console.log(`quad tessellation, ${one.name}: ${fine ? 'as Windows draws it'
+            : `${[...colours].map(c=>c.toString(16))} against ${one.want.toString(16)}${
+                got.error ? `; GPU: ${got.error}` : ''}${got.said.length
+                ? `; said: ${got.said.join(' | ')}` : ''}`}`);
+    }
     return failed;
 }
 
