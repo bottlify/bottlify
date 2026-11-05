@@ -519,6 +519,22 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  */
 
 /**
+ * The bytes an update of `depth` slices of `packed.rows` rows reads, at the
+ * pitches given or (0) the packed ones: the last row of the last slice ends a
+ * row's bytes past its start, so a pitch shorter than a row (rows that
+ * overlap, as test_update_subresource gives them) reads no less than a row.
+ *
+ * @param {{ rowPitch: number, rows: number }} packed @param {number} depth
+ * @param {number} rowPitch @param {number} depthPitch
+ * @returns {number}
+ */
+export function updateSpan(packed, depth, rowPitch, depthPitch){
+    const pitch = rowPitch || packed.rowPitch;
+    const slicePitch = depthPitch || pitch * packed.rows;
+    return slicePitch * (depth - 1) + pitch * (packed.rows - 1) + packed.rowPitch;
+}
+
+/**
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, root: makeRoot,
@@ -2179,10 +2195,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? levelExtent(resource.desc.Depth, level)
                 : 1;
-        const packed = formatPitch(resource.desc.Format, width, height);
-        const pitch = rowPitch || packed.rowPitch;
-        const slicePitch = depthPitch || pitch * packed.rows;
-        return slicePitch * (depth - 1) + pitch * packed.rows;
+        return updateSpan(formatPitch(resource.desc.Format, width, height), depth, rowPitch,
+            depthPitch);
     };
 
     /** @param {number} address @param {number} count */

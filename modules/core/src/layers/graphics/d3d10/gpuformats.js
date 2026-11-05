@@ -101,6 +101,16 @@ export const COMPRESSED_FORMAT = Object.freeze({
     [DXGI_FORMAT.BC4_SNORM]: { format: 'bc4-r-snorm', decoded: 'r8snorm', conversion: 'bc4s' },
     [DXGI_FORMAT.BC5_UNORM]: { format: 'bc5-rg-unorm', decoded: 'rg8unorm', conversion: 'bc5u' },
     [DXGI_FORMAT.BC5_SNORM]: { format: 'bc5-rg-snorm', decoded: 'rg8snorm', conversion: 'bc5s' },
+    [DXGI_FORMAT.BC6H_UF16]: {
+        format: 'bc6h-rgb-ufloat', decoded: 'rgba16float', conversion: 'bc6hu',
+    },
+    [DXGI_FORMAT.BC6H_SF16]: {
+        format: 'bc6h-rgb-float', decoded: 'rgba16float', conversion: 'bc6hs',
+    },
+    [DXGI_FORMAT.BC7_UNORM]: { format: 'bc7-rgba-unorm', decoded: 'rgba8unorm', conversion: 'bc7' },
+    [DXGI_FORMAT.BC7_UNORM_SRGB]: {
+        format: 'bc7-rgba-unorm-srgb', decoded: 'rgba8unorm-srgb', conversion: 'bc7',
+    },
 });
 
 /**
@@ -181,6 +191,8 @@ const TYPELESS_STORAGE = Object.freeze({
     [DXGI_FORMAT.BC3_TYPELESS]: DXGI_FORMAT.BC3_UNORM,
     [DXGI_FORMAT.BC4_TYPELESS]: DXGI_FORMAT.BC4_UNORM,
     [DXGI_FORMAT.BC5_TYPELESS]: DXGI_FORMAT.BC5_UNORM,
+    [DXGI_FORMAT.BC6H_TYPELESS]: DXGI_FORMAT.BC6H_UF16,
+    [DXGI_FORMAT.BC7_TYPELESS]: DXGI_FORMAT.BC7_UNORM,
     [DXGI_FORMAT.B8G8R8A8_TYPELESS]: DXGI_FORMAT.B8G8R8A8_UNORM,
     [DXGI_FORMAT.B8G8R8X8_TYPELESS]: DXGI_FORMAT.B8G8R8X8_UNORM,
 });

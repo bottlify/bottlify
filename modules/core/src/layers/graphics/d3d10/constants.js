@@ -184,6 +184,12 @@ export const DXGI_FORMAT = Object.freeze({
     B8G8R8A8_UNORM_SRGB: 0x5b,
     B8G8R8X8_TYPELESS: 0x5c,
     B8G8R8X8_UNORM_SRGB: 0x5d,
+    BC6H_TYPELESS: 0x5e,
+    BC6H_UF16: 0x5f,
+    BC6H_SF16: 0x60,
+    BC7_TYPELESS: 0x61,
+    BC7_UNORM: 0x62,
+    BC7_UNORM_SRGB: 0x63,
 });
 
 /** What the validity tables distinguish about a format, and nothing more. */
@@ -317,6 +323,8 @@ export const FORMAT_INFO = Object.freeze(Object.fromEntries([
     ...family(F.BC3_TYPELESS, 16, { [F.BC3_UNORM]: COLOUR, [F.BC3_UNORM_SRGB]: COLOUR }, BLOCK),
     ...family(F.BC4_TYPELESS, 8, { [F.BC4_UNORM]: COLOUR, [F.BC4_SNORM]: COLOUR }, BLOCK),
     ...family(F.BC5_TYPELESS, 16, { [F.BC5_UNORM]: COLOUR, [F.BC5_SNORM]: COLOUR }, BLOCK),
+    ...family(F.BC6H_TYPELESS, 16, { [F.BC6H_UF16]: COLOUR, [F.BC6H_SF16]: COLOUR }, BLOCK),
+    ...family(F.BC7_TYPELESS, 16, { [F.BC7_UNORM]: COLOUR, [F.BC7_UNORM_SRGB]: COLOUR }, BLOCK),
     ...family(F.B8G8R8A8_TYPELESS, 4, {
         [F.B8G8R8A8_UNORM]: COLOUR, [F.B8G8R8A8_UNORM_SRGB]: COLOUR,
     }),

@@ -60,7 +60,7 @@ import { createPipelineState } from './pipeline.js';
 import { createDeferredContext, createImmediateContext } from '../d3d11/context.js';
 import { STATE_KIND, createStateStore } from './states.js';
 import {
-    DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, resolveViewFormat,
+    DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, levelHasFormat, resolveViewFormat,
     textureCreateResult,
 } from './validity.js';
 
@@ -1528,7 +1528,7 @@ export function createDevice(options = {}){
             }
             out.support = 0;
             const info = FORMAT_INFO[format];
-            if (!info)
+            if (!info || !levelHasFormat(format, featureLevel))
             {
                 return E_FAIL;
             }

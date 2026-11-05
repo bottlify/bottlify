@@ -477,6 +477,18 @@ function maxExtentFor(dimension, rules){
 }
 
 /**
+ * Whether a device of a feature level knows a format: BC6H and BC7 only from
+ * level 11 (a level 10 device has neither, as Direct3D 10's runtime did not).
+ *
+ * @param {number} format @param {number | undefined} featureLevel
+ */
+export function levelHasFormat(format, featureLevel){
+    const family = FORMAT_INFO[format]?.family;
+    return (family !== DXGI_FORMAT.BC6H_TYPELESS && family !== DXGI_FORMAT.BC7_TYPELESS)
+        || (featureLevel ?? 0) >= 0xb000;
+}
+
+/**
  * @param {TextureDesc} desc
  * @param {number} dimension  A D3D10_RESOURCE_DIMENSION.
  * @param {DeviceCaps} caps
@@ -500,6 +512,11 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
 
     if (desc.Width < 1 || height < 1 || depth < 1
         || desc.Width > limit || height > limit || depth > limit)
+    {
+        return E_INVALIDARG;
+    }
+    // BC6H and BC7 are feature level 11's (test_texture skips them below it).
+    if (!levelHasFormat(desc.Format, rules.featureLevel))
     {
         return E_INVALIDARG;
     }
