@@ -20,7 +20,8 @@ import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkCompute, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, HELPERS, NO_PIXEL_SHADER, STAGE, linkCompute, linkProgram,
+    translateShader,
 } from './wgsl.js';
 import { DXGI_FORMAT } from './constants.js';
 import {
@@ -939,4 +940,24 @@ test('a sampler\'s MipLODBias is added to every level the shader samples by: Web
         /\* exp2\(bitcast<f32>\(1073741824u\)\)/);
     assert.doesNotMatch(bodyOf(translate([sample(r(0), v(0), t(0), s(0))], { declarations: TEX })),
         /Bias/, 'none without one');
+});
+
+test('a depth bias the fragment stage applies itself writes the rasterized depth plus the clamped'
+    + ' bias, and leaves a shader-written depth alone (test_depth_bias, d3d11.c:28695)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([1, 0, 0, 1]))));
+    const bias = { units: -(2 ** -14), slope: 2, clamp: -1e-5 };
+    const linked = linkProgram(vs, ps, { depthBias: bias });
+    assert.match(linked.fragment, /@builtin\(position\) biasPosition: vec4<f32>,/);
+    assert.match(linked.fragment, /@builtin\(frag_depth\) depth: f32,/);
+    assert.match(linked.fragment, new RegExp('let biasRaw = bitcast<f32>\\(3095396352u\\) \\+ '
+        + 'bitcast<f32>\\(1073741824u\\) \\* max\\(abs\\(dpdx\\(biasZ\\)\\), '
+        + 'abs\\(dpdy\\(biasZ\\)\\)\\);'));
+    assert.match(linked.fragment, /let biasedDepth = biasZ \+ max\(biasRaw, /,
+        'a negative clamp bounds a negative bias from below');
+    assert.doesNotMatch(linkProgram(vs, ps).fragment, /frag_depth/, 'none without one');
+    // No pixel shader bound: Direct3D still biases the depth it writes.
+    const alone = linkProgram(vs, NO_PIXEL_SHADER,
+        { depthBias: { units: -1e-3, slope: 0, clamp: 0 } });
+    assert.match(alone.fragment, /return FragmentOut\(biasedDepth\);/);
 });

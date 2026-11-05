@@ -2261,7 +2261,7 @@ test('a draw with no pixel shader writes depth and no render target (test_depth_
     const fragment = h.gpu.of('createShaderModule').find((/** @type {any} */ call)=>
         call.module === pipeline.fragment.module).descriptor.code;
     assert.equal(fragment,
-        'diagnostic(off, derivative_uniformity);\n@fragment fn fragmentMain() {\n}',
+        'diagnostic(off, derivative_uniformity);\n@fragment fn fragmentMain() {\n    return;\n}',
         'a fragment stage that reads and writes nothing');
     assert.deepEqual(h.divergences, []);
 });

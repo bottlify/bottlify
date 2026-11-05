@@ -403,6 +403,11 @@ const CANVAS_FORMAT = Object.freeze({
  */
 const roundUp = (a, b)=>Math.ceil(a / b) * b;
 
+/** The normalised depth formats and their bits: a constant depth bias is steps of 2^-bits. */
+const UNORM_DEPTH_BITS = Object.freeze(/** @type {Record<string, number>} */ ({
+    depth16unorm: 16, depth24plus: 24, 'depth24plus-stencil8': 24,
+}));
+
 /**
  * The depth formats read back by a compute pass (`depthReadback`), and
  * whether each keeps a stencil beside its depth.
@@ -1818,10 +1823,23 @@ export function createRenderer(services){
         /** @type {(string | null)[]} */
         const formats = state.targetFormats;
         const bound = formats.flatMap((format, index)=>(format ? [index] : []));
+        const rasterizer = state.rasterizerState
+            ? stateDesc(state.rasterizerState)
+            : DEFAULT_RASTERIZER;
+        // A constant bias on a normalised depth is n-bit steps in Direct3D;
+        // WebGPU leaves its step to the implementation (a 24-bit depth kept as
+        // a float steps by the depth's exponent), so the fragment stage adds
+        // the whole bias itself.
+        const unormBits = UNORM_DEPTH_BITS[state.depthFormat ?? ''] ?? 0;
+        const emulatedBias = unormBits && rasterizer.DepthBias
+            ? { units: rasterizer.DepthBias * 2 ** -unormBits,
+                slope: rasterizer.SlopeScaledDepthBias, clamp: rasterizer.DepthBiasClamp }
+            : undefined;
         const program = state.hullShader
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
-                tessellationOf().hullOf(state.hullShader).stage, { targets: bound })
-            : linkProgram(vs, ps, { targets: bound });
+                tessellationOf().hullOf(state.hullShader).stage,
+                { targets: bound, depthBias: emulatedBias })
+            : linkProgram(vs, ps, { targets: bound, depthBias: emulatedBias });
         if (program.unsupported.length > 0)
         {
             throw Object.assign(new Error('the shaders cannot be translated:'
@@ -1834,9 +1852,6 @@ export function createRenderer(services){
         {
             throw new Error(layout);
         }
-        const rasterizer = state.rasterizerState
-            ? stateDesc(state.rasterizerState)
-            : DEFAULT_RASTERIZER;
         const depthStencil = state.depthStencilState
             ? stateDesc(state.depthStencilState)
             : DEFAULT_DEPTH_STENCIL;
@@ -1963,9 +1978,9 @@ export function createRenderer(services){
                                     ? 0 : depthStencil.StencilWriteMask,
                             }
                             : {}),
-                        depthBias: rasterizer.DepthBias,
-                        depthBiasSlopeScale: rasterizer.SlopeScaledDepthBias,
-                        depthBiasClamp: rasterizer.DepthBiasClamp,
+                        depthBias: emulatedBias ? 0 : rasterizer.DepthBias,
+                        depthBiasSlopeScale: emulatedBias ? 0 : rasterizer.SlopeScaledDepthBias,
+                        depthBiasClamp: emulatedBias ? 0 : rasterizer.DepthBiasClamp,
                     },
                 }
                 : {}),

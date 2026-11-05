@@ -343,7 +343,8 @@ export const HELPERS = Object.freeze({
  * rasterises such a draw -- a depth pre-pass or a shadow map is drawn this way
  * -- and writes depth and stencil, but no render target; this stage reads
  * nothing and writes nothing, so linked with any vertex shader its fragment
- * entry point is empty and every target's write mask is zero.
+ * entry point returns at once (with the depth when the link applies a bias)
+ * and every target's write mask is zero.
  *
  * @type {Readonly<TranslatedShader>}
  */
@@ -357,7 +358,8 @@ export const NO_PIXEL_SHADER = Object.freeze({
     temps: 0,
     indexableTemps: [],
     immediateConstants: [],
-    body: [],
+    // A pixel stage the link may still give outputs (a depth bias it applies).
+    body: [Object.freeze({ ret: /** @type {true} */ (true) })],
     inputRegisters: 0,
     outputRegisters: 0,
     writesDepth: false,
@@ -2462,10 +2464,15 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  *
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
- * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad }} [options]  `targets`:
+ * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad,
+ *     depthBias?: { units: number, slope: number, clamp: number } }} [options]  `targets`:
  *     the locations with a target bound; every location the shader writes when
  *     absent. `vertexLoad`: how the vertex stage fills its registers when they do not
- *     come from vertex buffers (a domain shader's, `linkDomain`).
+ *     come from vertex buffers (a domain shader's, `linkDomain`). `depthBias`: a
+ *     rasterizer's depth bias the fragment stage applies itself, writing the
+ *     fragment's depth (`units` the constant bias already in depth, `slope` the
+ *     slope scale, `clamp` the clamp, as Direct3D adds them); not where the pixel
+ *     shader writes its depth, which no bias touches.
  * @returns {LinkedProgram}
  */
 export function linkProgram(vs, ps, options = {}){
@@ -2677,6 +2684,29 @@ export function linkProgram(vs, ps, options = {}){
         unsupported.push(`pixel output system value ${element.systemValue}`);
     }
 
+    // A bias the fragment stage applies: Direct3D's, on the rasterized depth,
+    // from the depth's slope across the primitive.
+    const biased = options.depthBias && !ps.writesDepth ? options.depthBias : null;
+    /** @type {string[]} */
+    const biasLoad = [];
+    if (biased)
+    {
+        const named = psIn.find(line=>line.includes('@builtin(position)'));
+        const member = named ? /\) (\w+):/.exec(named)?.[1] : 'biasPosition';
+        if (!named)
+        {
+            psIn.push('    @builtin(position) biasPosition: vec4<f32>,');
+        }
+        const bound = biased.clamp > 0 ? `min(biasRaw, ${floatLiteral(biased.clamp)})`
+            : biased.clamp < 0 ? `max(biasRaw, ${floatLiteral(biased.clamp)})` : 'biasRaw';
+        biasLoad.push(`    let biasZ = in.${member}.z;`,
+            `    let biasRaw = ${floatLiteral(biased.units)} + ${floatLiteral(biased.slope)}`
+                + ' * max(abs(dpdx(biasZ)), abs(dpdy(biasZ)));',
+            `    let biasedDepth = biasZ + ${bound};`);
+        psOut.push('    @builtin(frag_depth) depth: f32,');
+        psReturn.push('biasedDepth');
+    }
+
     // WGSL has no empty struct, so a stage that reads nothing takes nothing.
     const vertex = [
         ...vsDecl.text,
@@ -2706,6 +2736,7 @@ export function linkProgram(vs, ps, options = {}){
         ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
         `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''})`
             + `${writes ? ' -> FragmentOut' : ''} {`,
+        ...biasLoad,
         ...psLoad,
         ...registerDeclarations(ps),
         ...(ps.writesDepth ? ['    var oDepth: f32 = 0.0;'] : []),
@@ -3268,7 +3299,8 @@ export const DOMAIN_BINDING = Object.freeze({
  * @param {TranslatedShader} ps
  * @param {import('./dxbc.js').DxbcContainer} hull
  * @param {LinkedHull['stage']} stage
- * @param {{ targets?: readonly number[] }} [options]
+ * @param {{ targets?: readonly number[],
+ *     depthBias?: { units: number, slope: number, clamp: number } }} [options]
  * @returns {LinkedProgram}
  */
 export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
