@@ -510,10 +510,19 @@ test('ld fetches a texel by integer address with the level in w', ()=>{
     const translated = translate([ld(r(0), r(1), t(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT)],
     });
-    assert.equal(bodyOf(translated),
-        `r0 = (textureLoad(t0, ${I}(r1.xyzw).xy, ${I}(r1.xyzw).w)).xyzw;`);
+    assert.equal(bodyOf(translated), [`let held0 = ${I}(r1.xyzw).xy;`,
+        `let held1 = ${I}(r1.xyzw).w;`,
+        'r0 = select(vec4<u32>(0u), (textureLoad(t0, held0, held1)).xyzw, u32(held1)'
+            + ' < textureNumLevels(t0) && all(vec2<u32>(held0) < textureDimensions(t0,'
+            + ' u32(held1))));'].join('\n'),
+    'an address past the level or the levels reads zero (test_texture, d3d11.c:9385)');
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
     assert.match(linkProgram(vs, translated).fragment, /var t0: texture_2d<u32>;/);
+    const array = translate([ld(r(0), r(1), t(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DARRAY, RETURN_TYPE.UINT)],
+    });
+    assert.match(bodyOf(array), / && u32\(held2\) < textureNumLayers\(t0\)\);$/,
+        'and a layer past the last');
 });
 
 test('a 3D texture samples with three coordinates and an array with a layer', ()=>{
@@ -582,8 +591,8 @@ test('a one-dimensional texture is read as a row of a two-dimensional one', ()=>
         `, vec2<f32>\\(bitcast<vec4<f32>>\\(r1\\.xyzw\\)\\.x, 0\\.0\\), `
         + 'vec2<f32>\\(bitcast<vec4<f32>>\\(r2\\.xyzw\\)\\.x, 0\\.0\\)\\)'));
     const loaded = translate([ld(r(0), r(1), t(0))], { declarations: ONE_D });
-    assert.equal(bodyOf(loaded), `r0 = ${U}((textureLoad(t0, vec2<i32>(${I}(r1.xyzw).x, 0), `
-        + `${I}(r1.xyzw).w)).xyzw);`);
+    assert.match(bodyOf(loaded), new RegExp('^let held0 = vec2<i32>\\(bitcast<vec4<i32>>'
+        + '\\(r1\\.xyzw\\)\\.x, 0\\);'));
     const array = translate([sample(r(0), v(0), t(0), s(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE1DARRAY, RETURN_TYPE.FLOAT),
             dclSampler(0)],
@@ -599,15 +608,15 @@ test('ld_ms reads the one sample every texture here has, and zero for any other'
     const translated = translate([ldMs(r(0), r(1), t(0), r(2, 'x'))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT)],
     });
-    assert.equal(bodyOf(translated), `r0 = select(${U}((textureLoad(t0, ${I}(r1.xyzw).xy, 0))`
-        + '.xyzw), vec4<u32>(0u), r2.xxxx.x != 0u);');
+    assert.match(bodyOf(translated), /\nlet held1 = 0;\nr0 = select\(select\(vec4<u32>\(0u\),/);
+    assert.match(bodyOf(translated), /, vec4<u32>\(0u\), r2\.xxxx\.x != 0u\);$/);
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
     assert.match(linkProgram(vs, translated).fragment, /var t0: texture_2d<f32>;/);
     const plain = translate([ld(r(0), r(1), t(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMSARRAY, RETURN_TYPE.FLOAT)],
     });
-    assert.equal(bodyOf(plain), `r0 = ${U}((textureLoad(t0, ${I}(r1.xyzw).xy, `
-        + `${I}(r1.xyzw).z, 0)).xyzw);`);
+    assert.match(bodyOf(plain), /textureLoad\(t0, held0, held2, held1\)/);
+    assert.match(bodyOf(plain), /^let held0 = bitcast<vec4<i32>>\(r1\.xyzw\)\.xy;\nlet held1 = 0;/);
 });
 
 test('ld from a buffer view reads storage, checked against the view and decoded by it', ()=>{
@@ -913,4 +922,21 @@ test('a compute shader is a module of its own: its group\'s size, its thread ids
         [BINDING.UAV + 1, STAGE.COMPUTE, 'storage'],
         [BINDING.UAV_VIEW + 1, STAGE.COMPUTE, 'uniform'],
     ]);
+});
+
+test('a sampler\'s MipLODBias is added to every level the shader samples by: WebGPU\'s samplers'
+    + ' have none (test_texture, d3d11.c:9385)', ()=>{
+    const TEX = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT), dclSampler(0)];
+    const two = 'bitcast<f32>(1073741824u)';
+    /** @param {any} instruction */
+    const biased = instruction=>bodyOf(translate([instruction], { declarations: TEX,
+        options: { samplerBias: { 0: 2 } } }));
+    assert.match(biased(sample(r(0), v(0), t(0), s(0))),
+        new RegExp(`textureSampleBias\\(t0, s0, [^;]*, ${two.replace(/[()]/g, '\\$&')}\\)`));
+    assert.match(biased(sampleL(r(0), v(0), t(0), s(0), r(1, 'x'))),
+        /textureSampleLevel\(t0, s0, [^;]*\.x \+ bitcast<f32>\(1073741824u\)\)/);
+    assert.match(biased(sampleD(r(0), v(0), t(0), s(0), r(1), r(2))),
+        /\* exp2\(bitcast<f32>\(1073741824u\)\)/);
+    assert.doesNotMatch(bodyOf(translate([sample(r(0), v(0), t(0), s(0))], { declarations: TEX })),
+        /Bias/, 'none without one');
 });

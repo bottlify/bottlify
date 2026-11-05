@@ -380,6 +380,9 @@ function swizzleText(swizzle){
 
 /** @param {number} dword @returns {string} a WGSL u32 literal */
 const u32Literal = dword=>`${dword >>> 0}u`;
+/** A float exactly, as WGSL spells one: its bits. @param {number} value */
+const floatLiteral = value=>
+    `bitcast<f32>(${new Uint32Array(new Float32Array([value]).buffer)[0]}u)`;
 
 /**
  * Translates one shader's instruction stream. The entry point is not written
@@ -407,9 +410,14 @@ const u32Literal = dword=>`${dword >>> 0}u`;
  * its outputs are written into.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
+ * `samplerBias` is the MipLODBias of the sampler bound at each slot that has
+ * one: WebGPU's samplers have none, so the shader adds it to every level it
+ * samples by.
+ *
+ * @param {import('./dxbc.js').DxbcContainer} container
  * @param {{ multisampled?: readonly number[], depth?: readonly number[],
  *     uavFormats?: Readonly<Record<number, string>>, tokens?: Uint32Array,
- *     outputName?: string }} [options]
+ *     outputName?: string, samplerBias?: Readonly<Record<number, number>> }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
@@ -736,10 +744,12 @@ export function translateShader(container, options = {}){
     /**
      * @param {import('./sm4.js').Instruction} instruction
      * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null,
-     *          width: number, row: boolean }, sampler: string) => string} call
+     *          width: number, row: boolean }, sampler: string, bias: string | null) => string}
+     *     call  `bias` the sampler's MipLODBias as a WGSL float, null for none
      */
     const sampleWith = (instruction, call)=>{
         const [dest, coordinate, resource, sampler] = instruction.operands;
+        const bias = sampler ? options.samplerBias?.[sampler.indices[0].value] ?? 0 : 0;
         const texture = textureOf(resource.indices[0].value);
         const shaped = texture ? coordinateFor(texture, f(coordinate)) : null;
         if (!texture || !shaped)
@@ -752,7 +762,8 @@ export function translateShader(container, options = {}){
             shaped.layer = `i32(${shaped.layer})`;
         }
         const samplerName = sampler ? `s${sampler.indices[0].value}` : '';
-        store(dest, sampledBits(texture, resource, call(texture, shaped, samplerName)));
+        store(dest, sampledBits(texture, resource, call(texture, shaped, samplerName,
+            bias ? floatLiteral(bias) : null)));
     };
 
     /** @param {string} name */
@@ -1514,17 +1525,21 @@ export function translateShader(container, options = {}){
                     unsupported('sample outside a pixel shader');
                     break;
                 }
-                sampleWith(instruction, (texture, shaped, sampler)=>depthRead(texture,
-                    `textureSample(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`));
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>depthRead(texture,
+                    `${bias && !texture.depth ? 'textureSampleBias' : 'textureSample'}`
+                    + `(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
+                    + `${bias && !texture.depth ? `, ${bias}` : ''})`));
                 break;
             case OPCODE.SAMPLE_L:
                 // A depth texture's level is a whole number.
-                sampleWith(instruction, (texture, shaped, sampler)=>depthRead(texture,
-                    `textureSampleLevel(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${texture.depth ? `i32(round(${f(instruction.operands[4])}.x))`
-                        : `${f(instruction.operands[4])}.x`})`));
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>{
+                    const lod = `${f(instruction.operands[4])}.x${bias ? ` + ${bias}` : ''}`;
+                    return depthRead(texture,
+                        `textureSampleLevel(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
+                        + `, ${texture.depth ? `i32(round(${lod}))` : lod})`);
+                });
                 break;
             case OPCODE.SAMPLE_B:
                 if (!isPixel)
@@ -1532,16 +1547,16 @@ export function translateShader(container, options = {}){
                     unsupported('sample_b outside a pixel shader');
                     break;
                 }
-                sampleWith(instruction, (texture, shaped, sampler)=>(texture.depth
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>(texture.depth
                     ? depthRead(texture, `textureSample(t${texture.slot}, ${sampler}`
                         + `, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`)
                     : `textureSampleBias(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x)`));
+                    + `, ${f(instruction.operands[4])}.x${bias ? ` + ${bias}` : ''})`));
                 break;
             case OPCODE.SAMPLE_D:
-                sampleWith(instruction, (texture, shaped, sampler)=>{
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>{
                     if (texture.depth)
                     {
                         return depthRead(texture, `textureSampleLevel(t${texture.slot}`
@@ -1549,9 +1564,10 @@ export function translateShader(container, options = {}){
                             + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, 0)`);
                     }
                     /** @param {import('./sm4.js').Operand} operand */
-                    const gradient = operand=>(shaped.row
+                    // A bias of b is gradients 2^b as long.
+                    const gradient = operand=>`${shaped.row
                         ? `vec2<f32>(${f(operand)}.x, 0.0)`
-                        : floats(operand, shaped.width));
+                        : floats(operand, shaped.width)}${bias ? ` * exp2(${bias})` : ''}`;
                     return `textureSampleGrad(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
                         + `, ${gradient(instruction.operands[4])}`
@@ -1615,12 +1631,27 @@ export function translateShader(container, options = {}){
                 const multisample = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY;
                 const level = multisample ? '0' : `${i(address)}.w`;
+                // An address past the level, the layers or the levels reads
+                // zero in Direct3D; WebGPU answers any texel or zero.
+                const name = `t${texture.slot}`;
+                const at = held();
+                const mip = held();
+                emit(`let ${at} = ${shaped.coordinate};`);
+                emit(`let ${mip} = ${level};`);
+                const layer = shaped.layer === null ? null : held();
+                if (layer)
+                {
+                    emit(`let ${layer} = ${shaped.layer};`);
+                }
+                const inside = [`u32(${mip}) < textureNumLevels(${name})`,
+                    `all(vec${shaped.width}<u32>(${at}) < textureDimensions(${name}, u32(${mip})))`,
+                    ...(layer ? [`u32(${layer}) < textureNumLayers(${name})`] : [])].join(' && ');
                 const loaded = sampledBits(texture, resource, depthRead(texture,
-                    `textureLoad(t${texture.slot}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, ${level})`));
+                    `textureLoad(${name}, ${at}${layer === null ? '' : `, ${layer}`}, ${mip})`));
+                const kept = `select(${REG}(0u), ${loaded}, ${inside})`;
                 store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
-                    ? `select(${loaded}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
-                    : loaded);
+                    ? `select(${kept}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
+                    : kept);
                 break;
             }
             case OPCODE.RESINFO: {

@@ -1307,8 +1307,10 @@ export function createRenderer(services){
             magFilter: linear(0x4),
             minFilter: linear(0x10),
             mipmapFilter: linear(0x1),
-            lodMinClamp: Math.max(0, desc.MinLOD),
-            lodMaxClamp: Math.min(32, desc.MaxLOD),
+            // Direct3D takes a MaxLOD under the MinLOD; WebGPU refuses it.
+            lodMinClamp: Math.min(32, Math.max(0, desc.MinLOD)),
+            lodMaxClamp: Math.max(Math.min(32, Math.max(0, desc.MinLOD)),
+                Math.min(32, desc.MaxLOD)),
             maxAnisotropy: anisotropic ? Math.max(1, desc.MaxAnisotropy) : 1,
             ...(comparison ? { compare: COMPARE[desc.ComparisonFunc] ?? 'never' } : {}),
         });
@@ -1570,11 +1572,14 @@ export function createRenderer(services){
             let made = variants.get(variant);
             if (!made)
             {
-                const [multisampled, depth] = variant.split('|');
+                const [multisampled, depth, biases] = variant.split('|');
                 /** @param {string} slots */
                 const list = slots=>(slots ? slots.split(',').map(Number) : []);
-                made = translateShader(shader.container,
-                    { multisampled: list(multisampled), depth: list(depth) });
+                made = translateShader(shader.container, {
+                    multisampled: list(multisampled), depth: list(depth),
+                    samplerBias: Object.fromEntries((biases ?? '').split(',').filter(Boolean)
+                        .map(pair=>pair.split(':').map(Number))),
+                });
                 variants.set(variant, made);
             }
             return made;
@@ -1629,8 +1634,20 @@ export function createRenderer(services){
                 depth.push(texture.slot);
             }
         }
-        return multisampled.length === 0 && depth.length === 0 ? ''
-            : `${multisampled.join(',')}|${depth.join(',')}`;
+        // A sampler with a MipLODBias: WebGPU's have none, so the shader adds it.
+        /** @type {string[]} */
+        const biases = [];
+        for (const sampler of translationOf(stage.shader).samplers)
+        {
+            const state = stage.samplers[sampler.slot];
+            const bias = state ? stateDesc(state).MipLODBias ?? 0 : 0;
+            if (bias)
+            {
+                biases.push(`${sampler.slot}:${Math.fround(bias)}`);
+            }
+        }
+        return multisampled.length === 0 && depth.length === 0 && biases.length === 0 ? ''
+            : `${multisampled.join(',')}|${depth.join(',')}|${biases.join(',')}`;
     };
 
     /** @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries @param {string} label */

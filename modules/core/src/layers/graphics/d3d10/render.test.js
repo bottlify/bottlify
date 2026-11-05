@@ -2573,7 +2573,7 @@ test('a shader reads a multisampled texture by sample only where one is bound, a
         && code.includes('t0'));
     assert.equal(fragments.length, 2, 'two translations of one shader');
     assert.match(fragments[0], /var t0: texture_2d<f32>;/);
-    assert.match(fragments[0], /textureLoad\(t0, .*, 0\)/);
+    assert.match(fragments[0], /textureLoad\(t0, held\d+, held\d+\)/);
     assert.match(fragments[1], /var t0: texture_multisampled_2d<f32>;/);
     assert.match(fragments[1], /textureLoad\(t0, [^;]*\.xy, [^;]*vec4<u32>\(2u, 2u, 2u, 2u\)\)\.x\)/,
         'sample two, by its index');

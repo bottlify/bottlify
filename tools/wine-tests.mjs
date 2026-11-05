@@ -592,8 +592,15 @@ function runInBrowser(bundle, module, test, settings){
                 : ['--chrome-flag', '--use-webgpu-adapter=swiftshader'],
         ], { cwd: fileURLToPath(ROOT), stdio: ['ignore', 'pipe', 'pipe'] });
         let printed = '';
+        // The report's path is caught as it goes by: the program's own output
+        // printed after it is often more than the tail kept.
+        let reportLine = '';
+        let partial = '';
         child.stdout.on('data', chunk=>{
             printed = (printed + chunk).slice(-20000);
+            const lines = (partial + chunk).split('\n');
+            partial = lines.pop() ?? '';
+            reportLine = lines.find(line=>/^report:\s+\S/.test(line)) ?? reportLine;
         });
         child.stderr.on('data', chunk=>{
             printed = (printed + chunk).slice(-20000);
@@ -605,7 +612,8 @@ function runInBrowser(bundle, module, test, settings){
         }, (settings.timeout + 120) * 1000);
         child.on('exit', (code, signal)=>{
             clearTimeout(timer);
-            const reportPath = /^report:\s+(.+\.txt)\s*$/m.exec(printed)?.[1];
+            const reportPath = /^report:\s+(.+\.txt)\s*$/.exec(reportLine || partial)?.[1]
+                ?? /^report:\s+(.+\.txt)\s*$/m.exec(printed)?.[1];
             const report = reportPath && existsSync(reportPath)
                 ? readFileSync(reportPath, 'latin1') : '';
             const stopped = /^stopped: (.*)$/m.exec(report)?.[1] ?? null;
