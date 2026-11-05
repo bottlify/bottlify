@@ -1024,6 +1024,15 @@ export function writePixels(surface, pixels, writeMemory){
         // Its rows lie at its pitch with nothing between them, as the read-back's do.
         // A device that keeps 32-bit floats whole reads them back as they are stored.
         const count = desc.Width * desc.Height * wide.channels;
+        if (wide.luminance)
+        {
+            // Four halves a texel on the GPU, the luminance in red.
+            const halves = new Uint16Array(pixels.slice(0, count * 8).buffer);
+            const red = Uint16Array.from({ length: count }, (_, index)=>halves[index * 4]);
+            writeMemory(surface.base,
+                halvesToStored(wide.stored, new Uint8Array(red.buffer), count));
+            return;
+        }
         writeMemory(surface.base, wide.stored === 'float' && pixels.length === count * 4
             ? pixels.subarray(0, count * 4)
             : halvesToStored(wide.stored, pixels, count));

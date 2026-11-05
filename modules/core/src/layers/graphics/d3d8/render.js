@@ -808,6 +808,17 @@ const TEXEL_EXPANSION = Object.freeze({
  */
 export function expandTexels(format, pixels, count, float32 = false){
     const wide = FORMAT_INFO[format]?.wide;
+    if (wide?.luminance)
+    {
+        const halves = new Uint16Array(storedToHalves(wide.stored, pixels, count).buffer);
+        const out = new Uint16Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            out.fill(halves[index], index * 4, index * 4 + 3);
+            out[index * 4 + 3] = HALF_ONE;
+        }
+        return new Uint8Array(out.buffer);
+    }
     if (wide)
     {
         return float32 && wide.stored === 'float'
@@ -847,6 +858,11 @@ const SIGNED_FORMAT = 'rgba8snorm';
  * @type {Readonly<Record<number, string>>}
  */
 const HALF_FORMAT = Object.freeze({ 1: 'r16float', 2: 'rg16float', 4: 'rgba16float' });
+/** 1.0 as a half float: the alpha a luminance format samples as. */
+const HALF_ONE = 0x3c00;
+
+/** @param {import('../d3d9/constants.js').WideFormat} wide @returns {number} channels on the GPU */
+const keptChannels = wide=>(wide.luminance ? 4 : wide.channels);
 /** @type {Readonly<Record<number, string>>} */
 const FLOAT_FORMAT = Object.freeze({ 1: 'r32float', 2: 'rg32float', 4: 'rgba32float' });
 
@@ -1010,7 +1026,7 @@ export function gpuFormatOf(format, width, height, compressedTextures, float32 =
     if (info.wide)
     {
         return (float32 && info.wide.stored === 'float' ? FLOAT_FORMAT : HALF_FORMAT)[
-            info.wide.channels];
+            keptChannels(info.wide)];
     }
     if (!info.depth)
     {
@@ -3352,7 +3368,7 @@ export function createRenderer(options){
             return {};
         }
         const name = Object.entries(D3DFMT).find(([, value])=>value === format)?.[0];
-        const kept = HALF_FORMAT[wide.channels];
+        const kept = HALF_FORMAT[keptChannels(wide)];
         if (wide.stored === 'float')
         {
             divergence('Direct3D', `a surface of ${name} is kept at half precision (${kept})`);

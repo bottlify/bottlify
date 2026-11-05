@@ -832,6 +832,7 @@ const WIDE_FORMATS = [
     { format: D3DFMT.G32R32F, bytesPerPixel: 8 },
     { format: D3DFMT.A16B16G16R16, bytesPerPixel: 8 },
     { format: D3DFMT.G16R16, bytesPerPixel: 4 },
+    { format: D3DFMT.L16, bytesPerPixel: 2 },
 ];
 /** D3DUSAGE_QUERY_FILTER and D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING. */
 const QUERY_FILTER = 0x00020000;
