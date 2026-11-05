@@ -1108,6 +1108,30 @@ test('CopySubresourceRegion places a box at the destination offset', ()=>{
     assert.deepEqual(upload.size, { width: 1, height: 2, depthOrArrayLayers: 1 });
 });
 
+test('a render target view of a volume\'s W slices clears each of them, through a view of the'
+    + ' volume whole', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const volume = {};
+    assert.equal(device.CreateTexture3D({ Width: 4, Height: 4, Depth: 4, MipLevels: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0, MiscFlags: 0 }, null, volume),
+    S_OK);
+    /** @type {{ view?: any }} */
+    const rtv = {};
+    assert.equal(device.CreateRenderTargetView(volume.resource, { Format: 0, ViewDimension: 8,
+        MipSlice: 0, FirstWSlice: 1, WSize: 2 }, rtv), S_OK);
+    device.ClearRenderTargetView(rtv.view, [1, 0, 0, 1]);
+    await h.present();
+    const slices = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>{
+        const [attachment] = call.descriptor.colorAttachments;
+        return [attachment.view.viewDescriptor.dimension, attachment.depthSlice];
+    });
+    assert.deepEqual(slices, [['3d', 1], ['3d', 2]], 'the slices the view names, and no others');
+    assert.deepEqual(h.divergences, []);
+});
+
 test('GenerateMips draws each level from the one above on the GPU', async()=>{
     const h = harness();
     const { device } = h;

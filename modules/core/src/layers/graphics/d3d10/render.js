@@ -2368,14 +2368,12 @@ export function createRenderer(services){
 
     /**
      * How many layers a draw's targets have to send primitives to: the
-     * most any bound array view names. A volume's view is drawn into its
-     * first slice (`layerTarget`), so counts as one.
+     * most any bound array view names; a volume's view names W slices.
      *
      * @param {PipelineSnapshot} pipeline
      */
     const layersOf = pipeline=>Math.max(1, ...[...pipeline.renderTargets,
-        pipeline.depthStencilView].map(view=>(view?.range
-        && view.dimensionName !== 'TEXTURE3D' ? view.range.count : 1)));
+        pipeline.depthStencilView].map(view=>view?.range?.count ?? 1));
 
     /**
      * One level and slice of a texture as a surface a pass draws into, by
@@ -2399,10 +2397,9 @@ export function createRenderer(services){
                 + ' (texture-formats-tier1 or rg11b10ufloat-renderable missing)');
             return null;
         }
-        if (held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
-        {
-            diverge('a view into a slice of a 3D texture draws into its first slice');
-        }
+        // A slice of a volume is drawn into through a view of the volume
+        // whole, the attachment naming the slice (WebGPU's depthSlice).
+        const volume = held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
         const chosen = viewFormatOf(backing.layout.storage, desc.Format, formatOptions);
         const twin = chosen.reinterpreted ? twinOf(backing, desc.Format) : null;
         if (twin && !twin.drawable)
@@ -2417,9 +2414,8 @@ export function createRenderer(services){
             ? 1
             : levelExtent(held.resource.desc.Height, mip);
         return {
-            key: `${twin ? twin.id : backing.id}:${mip}:${held.resource.dimension
-                === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer}`,
-            layer: held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
+            key: `${twin ? twin.id : backing.id}:${mip}:${layer}`,
+            layer,
             mipLevel: mip,
             backing,
             twin,
@@ -2436,13 +2432,12 @@ export function createRenderer(services){
                 view: texture.createView({
                     label: `d3d10:target:${format}`,
                     format,
-                    dimension: '2d',
+                    dimension: volume ? '3d' : '2d',
                     baseMipLevel: mip,
                     mipLevelCount: 1,
-                    baseArrayLayer: held.resource.dimension
-                        === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
-                    arrayLayerCount: 1,
+                    ...(volume ? {} : { baseArrayLayer: layer, arrayLayerCount: 1 }),
                 }),
+                ...(volume ? { depthSlice: layer } : {}),
                 width,
                 height,
                 format,
@@ -4167,24 +4162,35 @@ export function createRenderer(services){
                 return;
             }
             throughTwins(()=>{
-                const target = targetOf(view);
-                // A clear writes every texel of the slice it names.
-                twinUses = new Map();
-                if (target?.twin)
+                // A clear writes every texel of every slice the view names.
+                const count = view?.range?.count ?? 1;
+                const slices = [];
+                for (let layer = 0; layer < count; layer++)
                 {
-                    useTwin(target.backing, target.twin, { mip: target.mipLevel, levels: 1,
-                        first: target.layer, count: 1 }, true, true);
+                    slices.push(targetAtLayer(view, layer));
                 }
-                return target;
-            }, target=>{
-                if (!target)
+                twinUses = new Map();
+                for (const target of slices)
+                {
+                    if (target?.twin)
+                    {
+                        useTwin(target.backing, target.twin, { mip: target.mipLevel,
+                            levels: 1, first: target.layer, count: 1 }, true, true);
+                    }
+                }
+                return slices;
+            }, slices=>{
+                if (!slices[0])
                 {
                     counters.skipped.noTarget++;
                     return;
                 }
                 counters.clears++;
-                target.backing.gpuDirty = true;
-                record({ kind: 'clear', target, color: [...color] });
+                for (const target of slices)
+                {
+                    target.backing.gpuDirty = true;
+                    record({ kind: 'clear', target, color: [...color] });
+                }
             });
         },
 

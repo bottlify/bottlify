@@ -493,6 +493,8 @@ export function createBackend(options){
                     : null;
             return {
                 view: target.view,
+                // A slice of a volume is drawn into through a view of it whole.
+                ...(target.depthSlice !== undefined ? { depthSlice: target.depthSlice } : {}),
                 loadOp: clearValue ? 'clear' : 'load',
                 storeOp: 'store',
                 clearValue: clearValue ?? descriptor.clearValue ?? OPAQUE_BLACK,
