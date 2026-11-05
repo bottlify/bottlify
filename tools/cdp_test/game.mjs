@@ -344,9 +344,11 @@ function parse(argv){
         // returned -- written out with the report: how a thread's stack got
         // to where a failure found it.
         record: number('--record', 0),
-        // The machine's memory in megabytes, as the launcher's setting gives it;
-        // the engine's default without it.
-        memory: number('--memory', 0),
+        // The machine's memory in megabytes, as the launcher's setting gives it:
+        // 2048 unless said, the launcher's own default, so a run here meets the
+        // address space a player's does (the system's shared page inside RAM,
+        // the heap as large).
+        memory: number('--memory', 2048),
         watch: number('--watch', 0),
         // With --watch: the files under this directory of the volume, counted
         // at every look and listed whenever they change.
