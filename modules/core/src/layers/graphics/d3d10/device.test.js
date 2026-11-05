@@ -2442,3 +2442,53 @@ test('a device asked for video support is refused as one without it: no video de
     assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, {}), 0x80070057,
         'an unknown driver with no adapter is a bad argument before anything else');
 });
+
+test('from level 10.1 a copy moves compressed blocks into texels as big, and back, each counted'
+    + ' in its own format (test_compressed_format_compatibility, d3d11.c:29631)', ()=>{
+    /** @type {any} */
+    const made = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], made, {}), S_OK);
+    const device = made.device;
+    /**
+     * @param {number} format @param {number} width @param {number} height
+     * @param {Uint8Array} bytes
+     */
+    const texture = (format, width, height, bytes)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2D, Width: width, Height: height, Format: format,
+            Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+        }, [{ pSysMem: bytes }], out), S_OK);
+        return out.resource;
+    };
+    /** @param {any} resource */
+    const contents = resource=>{
+        /** @type {{ data?: Uint8Array | null }} */
+        const mapped = {};
+        assert.equal(resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+        const bytes = [.../** @type {Uint8Array} */ (mapped.data)];
+        resource.Unmap(0);
+        return bytes;
+    };
+    const texels = Uint8Array.from({ length: 32 }, (_, at)=>at + 1);
+    const zeros = new Uint8Array(32);
+    // 8x8 texels of BC1 are 2x2 blocks of 8 bytes, as 2x2 texels of R16G16B16A16 are.
+    const blocks = texture(DXGI_FORMAT.BC1_UNORM, 8, 8, texels);
+    const plain = texture(DXGI_FORMAT.R16G16B16A16_UINT, 2, 2, zeros);
+    device.CopyResource(plain, blocks);
+    assert.deepEqual(contents(plain), [...texels], 'the whole resource, block for texel');
+    const back = texture(DXGI_FORMAT.BC1_TYPELESS, 8, 8, zeros);
+    device.CopySubresourceRegion(back, 0, 4, 4, 0, plain, 0,
+        { left: 0, top: 0, front: 0, right: 1, bottom: 1, back: 1 });
+    assert.deepEqual(contents(back), [...zeros.subarray(0, 24), ...texels.subarray(0, 8)],
+        'one texel into the last block, at (4, 4) in the target\'s texels');
+    const narrow = texture(DXGI_FORMAT.R8G8B8A8_UINT, 4, 2, zeros);
+    device.CopyResource(narrow, blocks);
+    assert.deepEqual(contents(narrow), [...zeros], 'a texel smaller than a block takes none');
+    for (const resource of [blocks, plain, back, narrow])
+    {
+        resource.release();
+    }
+});

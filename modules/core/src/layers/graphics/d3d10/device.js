@@ -340,6 +340,43 @@ const D3D11_DRIVER_TYPE = Object.freeze({
 });
 
 /** D3D11_CREATE_DEVICE_* : every bit a program may pass. */
+/**
+ * The uncompressed families a compressed texture's blocks are copied to and
+ * from, by the bytes of one texel: the D3D 10.1 rule ("Format Conversion
+ * using Direct3D 10.1") Wine's test_compressed_format_compatibility checks.
+ */
+const BLOCK_COPY_FAMILIES = new Set(/** @type {number[]} */ ([DXGI_FORMAT.R32G32B32A32_TYPELESS,
+    DXGI_FORMAT.R16G16B16A16_TYPELESS, DXGI_FORMAT.R32G32_TYPELESS]));
+
+/**
+ * Whether a copy between two formats moves blocks into texels or back: one
+ * compressed, one uncompressed of an allowed family, a block the size of a texel.
+ *
+ * @param {number} a @param {number} b
+ */
+export function blockCopyable(a, b){
+    const one = FORMAT_INFO[a];
+    const other = FORMAT_INFO[b];
+    if (!one || !other || (one.blockEdge === 1) === (other.blockEdge === 1))
+    {
+        return false;
+    }
+    const plain = one.blockEdge === 1 ? one : other;
+    return one.bytesPerPixel === other.bytesPerPixel && BLOCK_COPY_FAMILIES.has(plain.family);
+}
+
+/**
+ * Whether a copy moves R9G9B9E5_SHAREDEXP texels into a 32-bit family's or
+ * back, which Windows makes (test_format_compatibility, d3d11.c:29476).
+ *
+ * @param {number} a @param {number} b
+ */
+function sharedExponentCopyable(a, b){
+    const R9G9B9E5 = DXGI_FORMAT.R9G9B9E5_SHAREDEXP;
+    return (a === R9G9B9E5 && FORMAT_INFO[b]?.family === DXGI_FORMAT.R32_TYPELESS)
+        || (b === R9G9B9E5 && FORMAT_INFO[a]?.family === DXGI_FORMAT.R32_TYPELESS);
+}
+
 /** D3D11_CREATE_DEVICE_VIDEO_SUPPORT. */
 const D3D11_CREATE_DEVICE_VIDEO_SUPPORT = 0x800;
 const D3D11_CREATE_DEVICE_MASK = 0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x800;
@@ -971,12 +1008,16 @@ export function createDevice(options = {}){
             diverge(`${call} into an immutable resource is ignored`);
             return false;
         }
-        // Bits move between formats of one family and no others: a copy
-        // between two families -- a compressed block and a texel among them --
-        // has no meaning and the runtime leaves the destination as it was.
+        // Bits move between formats of one family, and from level 10.1 between
+        // a compressed format and an uncompressed one whose texel is as big
+        // as its block; a copy between any other two families has no meaning
+        // and the runtime leaves the destination as it was.
         if (destination.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER
             && FORMAT_INFO[destination.desc.Format]?.family
-                !== FORMAT_INFO[source.desc.Format]?.family)
+                !== FORMAT_INFO[source.desc.Format]?.family
+            && !(featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1
+                && blockCopyable(destination.desc.Format, source.desc.Format))
+            && !sharedExponentCopyable(destination.desc.Format, source.desc.Format))
         {
             diverge(`${call} between formats of different families is ignored`);
             return false;
@@ -1847,8 +1888,15 @@ export function createDevice(options = {}){
             {
                 return;
             }
+            // A compressed resource and an uncompressed one are of one extent
+            // when they have as many blocks as the other has texels.
+            const edge = (/** @type {any} */ desc)=>FORMAT_INFO[desc.Format]?.blockEdge ?? 1;
             const extent = ['ByteWidth', 'Width', 'Height', 'Depth', 'MipLevels', 'ArraySize'];
-            if (extent.some(field=>destination.desc[field] !== source.desc[field]))
+            /** @param {any} desc @param {string} field */
+            const measure = (desc, field)=>((field === 'Width' || field === 'Height')
+                && desc[field] !== undefined ? Math.ceil(desc[field] / edge(desc)) : desc[field]);
+            if (extent.some(field=>measure(destination.desc, field)
+                !== measure(source.desc, field)))
             {
                 diverge('CopyResource between resources of different extents is ignored');
                 return;
@@ -1870,6 +1918,18 @@ export function createDevice(options = {}){
             }
             if (box && (box.right <= box.left || box.bottom <= box.top || box.back <= box.front))
             {
+                return;
+            }
+            // A depth stencil or multisampled resource is copied whole or not
+            // at all: no box, no offset (test_format_compatibility).
+            const whole = (/** @type {any} */ resource)=>resource.dimension
+                !== D3D10_RESOURCE_DIMENSION.BUFFER
+                && ((resource.desc.BindFlags & D3D10_BIND.DEPTH_STENCIL) !== 0
+                    || (resource.desc.SampleDesc?.Count ?? 1) > 1);
+            if ((whole(source) || whole(destination)) && (box || x || y || z))
+            {
+                diverge('CopySubresourceRegion of a part of a depth stencil or multisampled'
+                    + ' resource is ignored, as the runtime ignores it');
                 return;
             }
             renderer.copySubresourceRegion(destination, destinationSubresource, { x, y, z },

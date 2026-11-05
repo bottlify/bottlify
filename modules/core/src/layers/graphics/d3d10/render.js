@@ -417,6 +417,48 @@ const DEPTH_READBACK = Object.freeze({
 });
 
 /**
+ * The draw that writes a depth texture from the words Direct3D keeps for its
+ * format (the layouts `depthReadbackShader` writes), word 0 the level's
+ * width: `depthMain` writes each texel's depth, `stencilMain` (with the
+ * override `bit`) is kept where that bit of the texel's stencil is set.
+ *
+ * @param {string} format
+ * @returns {string}
+ */
+const depthWriteShader = format=>{
+    const depth = {
+        depth32float: 'bitcast<f32>(words[1u + i])',
+        depth16unorm: 'f32(extractBits(words[1u + i / 2u], (i & 1u) * 16u, 16u)) / 65535.0',
+        'depth24plus-stencil8': 'f32(words[1u + i] & 0xffffffu) / 16777215.0',
+        'depth32float-stencil8': 'bitcast<f32>(words[1u + 2u * i])',
+    }[format];
+    const stencil = {
+        'depth24plus-stencil8': 'words[1u + i] >> 24u',
+        'depth32float-stencil8': 'words[2u + 2u * i] & 0xffu',
+    }[/** @type {string} */ (format)] ?? '0u';
+    return [
+        '@group(0) @binding(0) var<storage, read> words: array<u32>;',
+        'override bit: u32 = 0u;',
+        '@vertex fn vertexMain(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32> {',
+        '    let xy = vec2<f32>(f32((v << 1u) & 2u), f32(v & 2u));',
+        '    return vec4<f32>(xy * 2.0 - 1.0, 0.0, 1.0);',
+        '}',
+        'fn texelOf(position: vec4<f32>) -> u32 {',
+        '    return u32(position.y) * words[0] + u32(position.x);',
+        '}',
+        '@fragment fn depthMain(@builtin(position) position: vec4<f32>)'
+            + ' -> @builtin(frag_depth) f32 {',
+        '    let i = texelOf(position);',
+        `    return ${depth};`,
+        '}',
+        '@fragment fn stencilMain(@builtin(position) position: vec4<f32>) {',
+        '    let i = texelOf(position);',
+        `    if (((${stencil}) & (1u << bit)) == 0u) { discard; }`,
+        '}',
+    ].join('\n');
+};
+
+/**
  * The pass that writes a depth texture's texels as the words Direct3D keeps
  * them in, one invocation a word: D32_FLOAT the float; D16_UNORM two texels
  * of 16 bits; D24_UNORM_S8_UINT the depth in the low 24 bits and the stencil
@@ -1054,11 +1096,9 @@ export function createRenderer(services){
         }
         if (backing.layout.storage.depth)
         {
-            // WebGPU copies into no depth format with a stencil, and a depth
-            // texture is written by drawing: bytes a program hands one stay on
-            // the host.
-            lose('bytes a program gives a depth texture are kept but not uploaded: the'
-                + ' GPU copy of a depth texture is written only by drawing and clearing');
+            // WebGPU copies into no depth format with a stencil, nor into a
+            // 32-bit float depth: the texture is written by drawing.
+            depthUpload(resource, subresource);
             return;
         }
         const { level, slice } = subresourceOf(resource, subresource);
@@ -2166,6 +2206,28 @@ export function createRenderer(services){
         {
             return gpuBufferCopy(destination, to, at.x, from, box);
         }
+        // One depth texture into another of its format: WebGPU copies a depth
+        // subresource whole, which is the only copy Direct3D makes of one.
+        if (from.texture && from.layout.storage.depth && to.texture
+            && to.layout.storage?.format === from.layout.storage.format
+            && to.sampleCount === from.sampleCount && !box && !at.x && !at.y && !at.z)
+        {
+            const src = subresourceOf(source, sourceSubresource);
+            const dst = subresourceOf(destination, destinationSubresource);
+            const level = from.layout.levels[src.level];
+            record({
+                kind: 'copyTexture',
+                sourceId: from.id,
+                destinationId: to.id,
+                source: { texture: from.texture, mipLevel: src.level,
+                    origin: { x: 0, y: 0, z: src.slice } },
+                destination: { texture: to.texture, mipLevel: dst.level,
+                    origin: { x: 0, y: 0, z: dst.slice } },
+                size: { width: level.width, height: level.height, depthOrArrayLayers: 1 },
+            });
+            to.gpuDirty = true;
+            return true;
+        }
         if (from.texture && from.layout.storage.depth && from.sampleCount === 1
             && destination.desc.Usage === D3D10_USAGE.STAGING
             && source.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D)
@@ -2376,6 +2438,116 @@ export function createRenderer(services){
         });
         backend.releaseDynamicBuffer(out);
         return true;
+    };
+
+    /**
+     * Bytes a program gives a depth texture's level and slice, drawn into it:
+     * a pass over the depth alone in which a triangle over the whole level
+     * writes each texel's depth from the words Direct3D keeps for the format
+     * (`depthWriteShader`), and, for a format with a stencil, eight more draws
+     * that each write one bit of the stencil where it is set, the stencil
+     * cleared to zero first. WebGPU copies into no depth with a stencil and
+     * into no 32-bit float depth.
+     *
+     * @param {any} resource @param {number} subresource
+     */
+    const depthUpload = (resource, subresource)=>{
+        const backing = backingOf(resource);
+        const format = backing.layout.storage.format;
+        if (!DEPTH_READBACK[format] || !backing.texture || backing.sampleCount !== 1)
+        {
+            lose(`bytes a program gives a ${format} texture are kept but not uploaded`);
+            return;
+        }
+        const { level, slice } = subresourceOf(resource, subresource);
+        const geometry = backing.layout.levels[level];
+        const held = subresourceBytes(resource, subresource);
+        const texel = TEXEL_BYTES[format];
+        // Word 0 is the level's width; the texels follow, packed by rows.
+        const words = new Uint32Array(1 + Math.ceil((geometry.width * geometry.height * texel)
+            / 4));
+        const packed = new Uint8Array(words.buffer, 4);
+        for (let row = 0; row < geometry.height; row++)
+        {
+            packed.set(held.bytes.subarray(row * held.rowPitch,
+                row * held.rowPitch + geometry.width * texel), row * geometry.width * texel);
+        }
+        words[0] = geometry.width;
+        const buffer = backend.createDynamicBuffer({ label: 'd3d10:depth-upload',
+            size: words.byteLength, usage: BufferUsage.STORAGE | BufferUsage.COPY_DST,
+            keep: false });
+        const lock = buffer.lock(0, words.byteLength, LockFlags.NONE);
+        lock.data.set(new Uint8Array(words.buffer));
+        buffer.unlock(lock);
+        buffer.markRead();
+        const stencil = DEPTH_READBACK[format].stencil;
+        record({
+            kind: 'depthWrite',
+            what: 'bytes a program gave a depth texture were not drawn into it',
+            ids: [backing.id],
+            pipeline: depthWritePipelines(format),
+            stencil,
+            view: backing.texture.createView({ label: 'd3d10:depth-upload', dimension: '2d',
+                baseMipLevel: level, mipLevelCount: 1, baseArrayLayer: slice,
+                arrayLayerCount: 1 }),
+            surface: { width: geometry.width, height: geometry.height, format,
+                label: 'd3d10:depth-upload' },
+            entries: [{ binding: 0, resource: { buffer: buffer.gpu, offset: 0,
+                size: words.byteLength } }],
+        });
+        backend.releaseDynamicBuffer(buffer);
+    };
+
+    /**
+     * The pipelines a depth upload draws with, built once a format: the depth
+     * one, then for a format with a stencil one for each of its eight bits.
+     *
+     * @param {string} format
+     * @returns {Promise<{ depth: any, bits: any[], layout: any }>}
+     */
+    const depthWritePipelines = format=>{
+        const key = `depth-write:${format}`;
+        let promise = pipelines.get(key);
+        if (!promise)
+        {
+            promise = (async()=>{
+                const label = `d3d10:depth-write:${format}`;
+                const module = await backend.createShaderModule({
+                    code: depthWriteShader(format), label });
+                const layout = layoutFor([{ binding: 0, visibility: STAGE.FRAGMENT,
+                    buffer: { type: 'read-only-storage' } }], label);
+                const pipelineLayout = backend.createPipelineLayout({ label,
+                    bindGroupLayouts: [layout] });
+                const stencil = DEPTH_READBACK[format].stencil;
+                const face = { compare: 'always', failOp: 'keep', depthFailOp: 'keep',
+                    passOp: 'replace' };
+                /** @param {string} entryPoint @param {number} bit -1 for the depth */
+                const make = (entryPoint, bit)=>backend.createRenderPipeline({
+                    label: `${label}:${bit}`,
+                    layout: pipelineLayout,
+                    vertex: { module, entryPoint: 'vertexMain' },
+                    fragment: { module, entryPoint, targets: [],
+                        ...(bit >= 0 ? { constants: { bit } } : {}) },
+                    primitive: { topology: 'triangle-list' },
+                    depthStencil: {
+                        format,
+                        depthWriteEnabled: bit < 0,
+                        depthCompare: 'always',
+                        ...(stencil ? { stencilFront: face, stencilBack: face,
+                            stencilReadMask: 0xff, stencilWriteMask: bit < 0 ? 0 : 1 << bit }
+                            : {}),
+                    },
+                });
+                return {
+                    depth: await make('depthMain', -1),
+                    bits: stencil ? await Promise.all(Array.from({ length: 8 },
+                        (_, bit)=>make('stencilMain', bit))) : [],
+                    layout,
+                };
+            })();
+            pipelines.set(key, promise);
+        }
+        return promise;
     };
 
     /**
@@ -3276,7 +3448,10 @@ export function createRenderer(services){
                 left: 0, top: 0, front: 0,
                 right: from.level.width, bottom: from.level.height, back: from.level.depth,
             });
-            const place = blocksOf(layout, to.level, {
+            // Blocks of a compressed format and texels of an uncompressed one
+            // as big move one for one: each side is counted in its own.
+            const toLayout = backingOf(destination).layout;
+            const place = blocksOf(toLayout, to.level, {
                 left: at.x, top: at.y, front: at.z,
                 right: to.level.width, bottom: to.level.height, back: to.level.depth,
             });
@@ -3294,11 +3469,12 @@ export function createRenderer(services){
                             + place.left);
                 }
             }
+            const edge = toLayout.blockEdge;
             upload(destination, destinationSubresource, LockFlags.NONE, {
                 left: at.x, top: at.y, front: at.z,
-                right: at.x + (box ? box.right - box.left : from.level.width),
-                bottom: at.y + (box ? box.bottom - box.top : from.level.height),
-                back: at.z + (box ? box.back - box.front : from.level.depth),
+                right: (place.left / toLayout.texelBytes + rowBytes / layout.texelBytes) * edge,
+                bottom: (place.top + rows) * edge,
+                back: at.z + depth,
             });
         },
 
@@ -4278,6 +4454,40 @@ export function createRenderer(services){
                                 entries: command.groups[index] })) }
                         : { pipeline: built.value.gpu, layout: built.value.layout,
                             entries: command.entries, grid: command.grid, label: 'd3d10:cs' });
+                    continue;
+                }
+                if (command.kind === 'depthWrite')
+                {
+                    command.ids.forEach(settleClears);
+                    const built = pipelinesNeeded[position];
+                    if (built.status === 'rejected')
+                    {
+                        lose(`${command.what}: ${built.reason && built.reason.message
+                            || built.reason}`);
+                        continue;
+                    }
+                    const drawn = frame.beginPass({ targets: [], clearValues: [],
+                        depthTarget: command.surface,
+                        depthStencilAttachment: {
+                            view: command.view, depthLoadOp: 'load', depthStoreOp: 'store',
+                            ...(command.stencil ? { stencilLoadOp: 'clear', stencilStoreOp: 'store',
+                                stencilClearValue: 0 } : {}),
+                        } });
+                    drawn.setPipeline(built.value.depth);
+                    drawn.setBindings(0, built.value.layout, command.entries, 'd3d10:depth-write');
+                    drawn.draw(3, 1, 0, 0);
+                    if (built.value.bits.length > 0)
+                    {
+                        drawn.setStencilReference(0xff);
+                        for (const pipeline of built.value.bits)
+                        {
+                            drawn.setPipeline(pipeline);
+                            drawn.setBindings(0, built.value.layout, command.entries,
+                                'd3d10:depth-write');
+                            drawn.draw(3, 1, 0, 0);
+                        }
+                    }
+                    closePass();
                     continue;
                 }
                 if (command.kind === 'blit')
