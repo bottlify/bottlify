@@ -19,7 +19,7 @@ import zlib from 'node:zlib';
 import { packBlock, writeBundle } from '../../../../bundle-node.js';
 import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
-import { blockCacheName, cachedBundle, SEGMENT_BLOCKS, storedLength } from './cache.js';
+import { blockCacheName, cachedBundle, createBlockCache, storedLength } from './cache.js';
 
 const BLOCK_SIZE = 1024;
 
@@ -482,36 +482,55 @@ test('a description written into a bundle opens with it, its files as they were'
 
 test('a bundle held whole in the block cache is written out from it alone', async()=>{
     // A game played or downloaded here is saved without fetching it again:
-    // the slots the engine filled, laid back to back under a new index.
+    // the blocks the engine put, laid back to back under a new index.
     const bundle = await open();
     const name = blockCacheName('game', bundle.fingerprint);
-    // Segments as the cache keeps them, each as long as its last block.
-    /** @type {Uint8Array[]} */
-    const segments = [];
-    for (let at = 0; at < bundle.blockCount; at++)
+    // The cache's files, put by the cache itself over a store of buffers.
+    /** @type {Map<string, Uint8Array>} */
+    const files = new Map();
+    const store = {
+        open: async(/** @type {string} */ path)=>{
+            files.set(path, files.get(path) ?? new Uint8Array(0));
+        },
+        stat: (/** @type {string} */ path)=>files.has(path)
+            ? { size: /** @type {Uint8Array} */ (files.get(path)).length } : null,
+        read: (/** @type {string} */ path, /** @type {number} */ at, /** @type {number} */ n)=>
+            (files.get(path) ?? new Uint8Array(0)).slice(at, at + n),
+        write: (/** @type {string} */ path, /** @type {number} */ at, /** @type {Uint8Array} */ b)=>{
+            const held = files.get(path) ?? new Uint8Array(0);
+            const grown = new Uint8Array(Math.max(held.length, at + b.length));
+            grown.set(held);
+            grown.set(b, at);
+            files.set(path, grown);
+        },
+        truncate: (/** @type {string} */ path, /** @type {number} */ size)=>{
+            files.set(path, new Uint8Array(size));
+        },
+        remove: (/** @type {string} */ path)=>{
+            files.delete(path);
+        },
+    };
+    const cache = await createBlockCache({ store, name, blockSize: bundle.blockSize,
+        blockCount: bundle.blockCount });
+    // Last block first, as a program packed at the end reads it.
+    for (let at = bundle.blockCount - 1; at >= 0; at--)
     {
         const block = bundle.block(at);
         const packed = bundleBytes.subarray(block.offset, block.offset + block.packed);
         // As the engine puts it: a deflate block inflated, any other as it came.
         const kept = block.codec === Codec.DEFLATE_RAW ? decodeBlock(block.codec, packed) : packed;
         assert.equal(kept.length, storedLength(block));
-        const k = Math.floor(at / SEGMENT_BLOCKS);
-        const from = (at % SEGMENT_BLOCKS) * bundle.blockSize;
-        const grown = new Uint8Array(from + kept.length);
-        grown.set(segments[k] ?? new Uint8Array(0));
-        grown.set(kept, from);
-        segments[k] = grown;
+        await cache.put(at, kept);
     }
+    await cache.persist();
     const codecs = new Set(Array.from({ length: bundle.blockCount },
         (_, at)=>bundle.block(at).codec));
     assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks kept both ways');
-    /** @param {Uint8Array} present */
-    const root = present=>({
+    /** @param {Map<string, Uint8Array>} held */
+    const root = held=>({
         // As the origin's file system answers: a file that is not there is refused.
         getFileHandle: async(/** @type {string} */ file)=>{
-            const k = file.startsWith(`${name}.blocks.`)
-                ? Number(file.slice(`${name}.blocks.`.length)) : -1;
-            const bytes = file === `${name}.held` ? present : segments[k];
+            const bytes = held.get(file);
             if (bytes === undefined)
             {
                 throw new DOMException(`no ${file}`, 'NotFoundError');
@@ -519,11 +538,7 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
             return { getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([bytes])) };
         },
     });
-    const whole = new Uint8Array(Math.ceil(bundle.blockCount / 8));
-    for (let at = 0; at < bundle.blockCount; at++)
-    {
-        whole[at >> 3] |= 1 << (at & 7);
-    }
+    const whole = files;
     const fetchRange = async(/** @type {number} */ at, /** @type {number} */ count)=>
         at === 0 || at >= bundle.block(bundle.blockCount - 1).offset
             ? bundleBytes.subarray(at, at + count)
@@ -545,14 +560,27 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
         same(source.read(path, 0, content.length), content, path);
     }
 
-    const short = whole.slice();
-    short[0] &= ~1;
+    const table = /** @type {Uint8Array} */ (files.get(`${name}.index`));
+    const short = new Map(files);
+    short.set(`${name}.index`, table.slice());
+    new DataView(/** @type {Uint8Array} */ (short.get(`${name}.index`)).buffer).setFloat64(0, 0,
+        true);
     assert.equal(await cachedBundle({ root: root(short), id: 'game', fetchRange,
         decode: decodeBlock, manifest }), null, 'a block missing from the cache: nothing to write');
 
-    const last = segments.length - 1;
-    const kept = segments[last];
-    segments[last] = kept.subarray(0, kept.length - 1);
-    assert.equal(await cachedBundle({ root: root(whole), id: 'game', fetchRange,
-        decode: decodeBlock, manifest }), null, 'a segment short of its last block: nothing');
+    const pack = /** @type {Uint8Array} */ (files.get(`${name}.pack`));
+    const cut = new Map(files);
+    cut.set(`${name}.pack`, pack.subarray(0, pack.length - 1));
+    assert.equal(await cachedBundle({ root: root(cut), id: 'game', fetchRange,
+        decode: decodeBlock, manifest }), null, 'a pack short of its last block: nothing');
+
+    const swapped = new Map(files);
+    const other = table.slice();
+    const view = new DataView(other.buffer);
+    const first = view.getFloat64(0, true);
+    view.setFloat64(0, view.getFloat64(8, true), true);
+    view.setFloat64(8, first, true);
+    swapped.set(`${name}.index`, other);
+    assert.equal(await cachedBundle({ root: root(swapped), id: 'game', fetchRange,
+        decode: decodeBlock, manifest }), null, 'a table naming another block\'s bytes: nothing');
 });

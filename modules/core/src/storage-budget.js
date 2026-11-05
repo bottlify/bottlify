@@ -9,8 +9,8 @@
  * (`navigator.storage.estimate()`, its quota, which each browser sets by the
  * system it runs on and the disk it has), less a share left for the run that
  * starts to write into. Past it, the caches go, the least recently written
- * first: a bundle's fetched blocks (`<name>.held`, `.order` and its segments
- * `.blocks.<k>` at the root, `cacheFiles` in `cache.js`) and a bundle's
+ * first: a bundle's fetched blocks (`<name>.index`, `.pack` and `.order` at the
+ * root, `cacheFiles` in `cache.js`) and a bundle's
  * translations (`cork/<name>.v<n>`). Both are made again by the next run
  * that needs them; a session -- the files a program wrote, its saved games --
  * is never touched. Neither are the caches of the
@@ -22,11 +22,15 @@ export const STORAGE_SHARE = 0.8;
 
 /**
  * A bundle's block cache's files, by the name the cache gives them -- its
- * bitmap (`.held`), its order and its segments (`.blocks.<k>`), and those of
- * the layouts it replaced, which go with them: the one-file `.blocks` with its
- * `.present` bitmap, and the reverted appended layout's `.slots` (`cache.js`).
+ * table (`.index`), its blocks (`.pack`) and its order, and those of the
+ * layouts it replaced, which go with them: the one-file `.blocks` with its
+ * `.present` bitmap, the first appended layout's `.slots`, and the segments
+ * `.blocks.<k>` with their `.held` bitmap (`cache.js`).
  */
-const BLOCK_FILE = /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|held|present|order|slots)$/;
+const BLOCK_FILE = /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|held|present|order|slots|index|pack)$/;
+
+/** The files a cache believes its blocks by, removed before the blocks they name. */
+const BELIEVED = /\.(index|held)$/;
 
 /** A session's folder and its earlier one-file form (`opfsSession`). */
 const SESSION_ENTRY = /^(.+)\.(files|session)$/;
@@ -145,10 +149,10 @@ async function scanStorage(root){
     {
         out.push({ kind: 'blocks', name: base, bottle: base.replace(FINGERPRINT, ''), bytes,
             modified, remove: async()=>{
-                // The bitmap first: a removal cut short leaves segments nothing
-                // believes, never a bitmap naming blocks no longer there.
-                for (const file of files.sort((one, other)=>Number(other.endsWith('.held'))
-                    - Number(one.endsWith('.held'))))
+                // The table first: a removal cut short leaves blocks nothing
+                // believes, never a table naming blocks no longer there.
+                for (const file of files.sort((one, other)=>Number(BELIEVED.test(other))
+                    - Number(BELIEVED.test(one))))
                 {
                     await root.removeEntry(file);
                 }
