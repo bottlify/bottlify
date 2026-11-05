@@ -43,7 +43,13 @@ async function filesOf(container){
             const at = (block.index - one.firstBlock) * bundle.blockSize;
             bytes.set(stored.subarray(from, to), at + from);
         }
-        assert.equal(createHash('sha256').update(bytes).digest('hex'), one.sha256, one.path);
+        // An install in place leaves each file's SHA-256 out of the index (the
+        // store checks what lands against its own sums); its bytes are
+        // compared below instead.
+        if (one.sha256 !== undefined)
+        {
+            assert.equal(createHash('sha256').update(bytes).digest('hex'), one.sha256, one.path);
+        }
         files.set(one.path, bytes);
     }
     return { files, directories: bundle.directories, bundle };
