@@ -1833,15 +1833,71 @@ export function createRenderer(services){
     };
 
     /**
+     * The streams of an input layout the vertex stage reads from storage
+     * itself (`VertexPull`): those WebGPU does not fetch as vertex buffers -
+     * a stride or an element offset it does not align (Direct3D steps a
+     * stream of bytes one by one), or per-instance data stepping once every
+     * several instances, or any per-instance data of an indirect draw, whose
+     * first instance only the GPU knows. Null where every stream is a vertex
+     * buffer.
+     *
+     * @param {any} inputLayout @param {number[]} strides @param {boolean} indirect
+     * @returns {{ pull: import('./wgsl.js').VertexPull, slots: number[] } | null}
+     */
+    const vertexPullOf = (inputLayout, strides, indirect)=>{
+        /** @type {Map<number, number>} */
+        const cursor = new Map();
+        const placed = inputLayout.elements.map((/** @type {any} */ element)=>{
+            const format = VERTEX_FORMAT[element.Format];
+            const slot = element.InputSlot;
+            const offset = element.AlignedByteOffset === D3D10_APPEND_ALIGNED_ELEMENT
+                ? roundUp(cursor.get(slot) ?? 0, 4)
+                : element.AlignedByteOffset;
+            cursor.set(slot, offset + (VERTEX_FORMAT_BYTES[format] ?? 0));
+            const perInstance = element.InputSlotClass
+                === D3D10_INPUT_CLASSIFICATION.PER_INSTANCE_DATA;
+            return { element, format, slot, offset, perInstance,
+                rate: perInstance ? element.InstanceDataStepRate ?? 1 : 1 };
+        });
+        /** @type {number[]} */
+        const slots = [];
+        for (const { format, slot, offset, rate, perInstance } of placed)
+        {
+            const bytes = VERTEX_FORMAT_BYTES[format] ?? 4;
+            if (format && !slots.includes(slot) && ((strides[slot] ?? 0) % 4 !== 0
+                || offset % Math.min(4, bytes) !== 0 || rate > 1 || (indirect && perInstance)))
+            {
+                slots.push(slot);
+            }
+        }
+        if (slots.length === 0)
+        {
+            return null;
+        }
+        slots.sort((a, b)=>a - b);
+        const streams = slots.map(slot=>{
+            const first = placed.find((/** @type {any} */ one)=>one.slot === slot);
+            return { stepMode: /** @type {'vertex' | 'instance'} */ (first.perInstance
+                ? 'instance' : 'vertex'), rate: first.rate };
+        });
+        const attributes = placed.filter((/** @type {any} */ one)=>slots.includes(one.slot))
+            .map((/** @type {any} */ one)=>({ semantic: one.element.SemanticName,
+                index: one.element.SemanticIndex ?? 0, stream: slots.indexOf(one.slot),
+                offset: one.offset, format: one.format }));
+        return { pull: { streams, attributes }, slots };
+    };
+
+    /**
      * The vertex buffer layouts an input layout describes at the strides a
      * draw binds, matched by semantic to the shader's attributes.
      *
      * @param {any} inputLayout
      * @param {import('./wgsl.js').LinkedProgram} program
      * @param {number[]} strides
+     * @param {readonly number[]} [pulled]  slots the vertex stage reads itself
      * @returns {{ buffers: object[], slots: number[] } | string}
      */
-    const vertexLayouts = (inputLayout, program, strides)=>{
+    const vertexLayouts = (inputLayout, program, strides, pulled = [])=>{
         /** @type {Map<number, { arrayStride: number, stepMode: string, attributes: object[] }>} */
         const bySlot = new Map();
         /** @type {Map<number, number>} the next append-aligned offset per slot */
@@ -1858,6 +1914,10 @@ export function createRenderer(services){
                 ? roundUp(cursor.get(slot) ?? 0, 4)
                 : element.AlignedByteOffset;
             cursor.set(slot, offset + VERTEX_FORMAT_BYTES[format]);
+            if (pulled.includes(slot))
+            {
+                continue;
+            }
             const attribute = program.attributes.find(candidate=>
                 candidate.semantic.toUpperCase() === element.SemanticName.toUpperCase()
                 && candidate.index === (element.SemanticIndex ?? 0));
@@ -1918,6 +1978,7 @@ export function createRenderer(services){
             state.depthFormat ?? '-', state.depthReadOnly ?? 0,
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
+            state.indirect ? 'indirect' : '',
         ].join('|');
         const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}`
             : state.geometry ? `${key}|gs:${idOf(state.geometry.shader)}:${state.geometry.stream}`
@@ -2002,8 +2063,11 @@ export function createRenderer(services){
             ? { units: rasterizer.DepthBias * 2 ** -unormBits,
                 slope: rasterizer.SlopeScaledDepthBias, clamp: rasterizer.DepthBiasClamp }
             : undefined;
+        const pulling = state.hullShader || state.geometry ? null
+            : vertexPullOf(state.inputLayout, state.strides, state.indirect);
         const linking = { targets: bound, depthBias: emulatedBias,
-            clipDistances: backend.hasFeature?.('clip-distances') === true };
+            clipDistances: backend.hasFeature?.('clip-distances') === true,
+            ...(pulling ? { vertexPull: pulling.pull } : {}) };
         const program = state.hullShader
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
                 tessellationOf().hullOf(state.hullShader).stage, linking)
@@ -2018,7 +2082,7 @@ export function createRenderer(services){
         }
         // A domain or geometry shader's vertices come from storage, not from buffers.
         const layout = state.hullShader || state.geometry ? { buffers: [], slots: [] }
-            : vertexLayouts(state.inputLayout, program, state.strides);
+            : vertexLayouts(state.inputLayout, program, state.strides, pulling?.slots);
         if (typeof layout === 'string')
         {
             throw new Error(layout);
@@ -2327,6 +2391,93 @@ export function createRenderer(services){
             blindTargets.set(key, target);
         }
         return target;
+    };
+
+    /** Where each stream a vertex stage reads itself starts, by draw. @type {any} */
+    let pullParams = null;
+    /**
+     * The words of the last draw's pulled per-instance streams its first
+     * instance goes into. @type {{ buffer: any, offset: number }[]}
+     */
+    let pulledFirst = [];
+    /** @type {{ args: any, zero: any } | null} */
+    let indirectScratch = null;
+    /**
+     * An indirect draw's arguments as WebGPU draws them: copied, the first
+     * instance zero - Direct3D's instance ID counts from zero, and a device
+     * draws from another first instance only with indirect-first-instance -
+     * and the first instance copied into the streams the vertex stage reads
+     * itself, which count from it.
+     *
+     * @param {{ gpu: any, offset: number }} indirect  the program's arguments
+     * @param {boolean} indexed
+     * @returns {{ gpu: any, offset: number }}  the arguments drawn with
+     */
+    const indirectOf = (indirect, indexed)=>{
+        indirectScratch ??= {
+            args: backend.createDynamicBuffer({ label: 'd3d10:indirect-args', size: 20,
+                usage: BufferUsage.INDIRECT | BufferUsage.COPY_DST, gpuOnly: true }),
+            zero: backend.createDynamicBuffer({ label: 'd3d10:zero-word', size: 4,
+                usage: BufferUsage.COPY_SRC | BufferUsage.COPY_DST, gpuOnly: true }),
+        };
+        const words = indexed ? 5 : 4;
+        const first = (words - 1) * 4;
+        const args = indirectScratch.args.gpu;
+        record({ kind: 'copyBuffer', source: indirect.gpu, sourceOffset: indirect.offset,
+            destination: args, destinationOffset: 0, size: words * 4 });
+        record({ kind: 'copyBuffer', source: indirectScratch.zero.gpu, sourceOffset: 0,
+            destination: args, destinationOffset: first, size: 4 });
+        for (const word of pulledFirst)
+        {
+            record({ kind: 'copyBuffer', source: indirect.gpu,
+                sourceOffset: indirect.offset + first, destination: word.buffer,
+                destinationOffset: word.offset, size: 4 });
+        }
+        return { gpu: args, offset: 0 };
+    };
+    /**
+     * The bindings of the streams a draw's vertex stage reads itself: each
+     * vertex buffer whole, and where its elements start (a per-instance
+     * stream's from the first instance, which the instance index does not
+     * count), its stride and its length.
+     *
+     * @param {{ pull: import('./wgsl.js').VertexPull, slots: number[] }} pulling
+     * @param {PipelineSnapshot} pipeline @param {any} draw
+     * @returns {object[]}
+     */
+    const pulledBindings = (pulling, pipeline, draw)=>{
+        const bytes = 16 * Math.max(1, pulling.slots.length);
+        pullParams ??= backend.createDynamicBuffer({ label: 'd3d10:vertex-pull',
+            size: 16 * 32, usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, keep: false });
+        const lock = pullParams.lock(0, bytes, LockFlags.DISCARD);
+        const words = new Uint32Array(bytes / 4);
+        /** @type {object[]} */
+        const entries = [];
+        pulling.slots.forEach((slot, k)=>{
+            const resource = pipeline.vertexBuffers[slot];
+            const backing = resource ? backingOf(resource) : null;
+            const binding = BINDING.VERTEX_PULL + k;
+            if (!backing?.gpu)
+            {
+                entries.push({ binding, resource: { buffer: placeholdersOf().storage.gpu,
+                    offset: 0, size: 16 } });
+                return;
+            }
+            backing.gpu.markRead();
+            // An indirect draw's first instance is copied in from its
+            // arguments (`indirectOf`).
+            words.set([pipeline.vertexOffsets[slot], pipeline.vertexStrides[slot] ?? 0,
+                resource.desc.ByteWidth, draw.indirect ? 0 : draw.startInstance ?? 0], k * 4);
+            entries.push({ binding, resource: { buffer: backing.gpu.gpu } });
+        });
+        lock.data.set(new Uint8Array(words.buffer));
+        pullParams.unlock(lock);
+        pullParams.markRead();
+        pulledFirst = pulling.pull.streams.flatMap((stream, k)=>(stream.stepMode === 'instance'
+            ? [{ buffer: pullParams.gpu, offset: k * 16 + 12 }] : []));
+        entries.push({ binding: BINDING.VERTEX_PULL_PARAMS,
+            resource: { buffer: pullParams.gpu, offset: 0, size: bytes } });
+        return entries;
     };
 
     /** @type {ReturnType<typeof createGeometry> | null} */
@@ -4306,6 +4457,9 @@ export function createRenderer(services){
                 strides: tessellated || drawnGeometry ? [] : pipeline.vertexStrides.slice(),
                 indexFormat: draw.indexCount === undefined || tessellated || drawnGeometry ? null
                     : indexFormat,
+                // An indirect draw's first instance is on the GPU: its
+                // per-instance streams are read by the vertex stage from there.
+                indirect: !!draw.indirect && !tessellated && !drawnGeometry,
                 geometry: drawnGeometry ? { shader: geometryShader, gs: geometry.gs,
                     stage: geometry.stage, stream: drawnGeometry.stream } : null,
                 vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
@@ -4328,6 +4482,8 @@ export function createRenderer(services){
                         bottom: Math.min(scissor.bottom, bottom) }
                     : { left: 0, top: 0, right, bottom };
             }
+            const pulling = tessellated || drawnGeometry ? null
+                : vertexPullOf(state.inputLayout, state.strides, state.indirect);
             const program = tessellated
                 ? linkDomain(translationOf(state.vertexShader, state.vsVariant),
                     state.vertexShader.container, translationOf(state.pixelShader, state.psVariant),
@@ -4336,7 +4492,8 @@ export function createRenderer(services){
                     ? linkGeometryDraw(geometry.gs, geometry.stage, drawnGeometry.stream,
                         translationOf(state.pixelShader, state.psVariant))
                     : linkProgram(translationOf(state.vertexShader, state.vsVariant),
-                        translationOf(state.pixelShader, state.psVariant));
+                        translationOf(state.pixelShader, state.psVariant),
+                        pulling ? { vertexPull: pulling.pull } : {});
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
                 const backing = buffer ? backingOf(buffer) : null;
                 if (!backing || !backing.gpu)
@@ -4359,9 +4516,9 @@ export function createRenderer(services){
             // that lets them.
             const argumentBuffer = draw.indirect ? backingOf(draw.indirect.buffer) : null;
             argumentBuffer?.gpu.markRead();
-            const indirect = argumentBuffer
+            const asked = argumentBuffer
                 ? { gpu: argumentBuffer.gpu.gpu, offset: /** @type {any} */ (draw.indirect).offset }
-                : draw.auto ?? null;
+                : null;
             counters.draws++;
             for (const counter of occluding)
             {
@@ -4383,7 +4540,11 @@ export function createRenderer(services){
             }
             const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
             const groups = [
-                bindingsFor(drawStage, program.groups[0]),
+                pulling
+                    ? [...bindingsFor(drawStage, program.groups[0].filter(entry=>
+                        entry.binding < BINDING.VERTEX_PULL)),
+                    ...pulledBindings(pulling, pipeline, draw)]
+                    : bindingsFor(drawStage, program.groups[0]),
                 bindingsFor(pipeline.stages.ps, program.groups[1],
                     pipeline.pixelViews ?? NO_VIEWS),
                 ...(tessellated ? [tessellated.group] : []),
@@ -4391,6 +4552,12 @@ export function createRenderer(services){
             ];
             syncTwins(false);
             tessellated?.commands.forEach(record);
+            if (!pulling)
+            {
+                pulledFirst = [];
+            }
+            const indirect = asked && state.indirect
+                ? indirectOf(asked, draw.indexCount !== undefined) : asked ?? draw.auto ?? null;
             record({
                 kind: 'draw',
                 // Not drawn when a pass before it could not be built: its

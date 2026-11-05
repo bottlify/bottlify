@@ -60,6 +60,10 @@ export const BINDING = Object.freeze({
     UAV: 288,
     UAV_VIEW: 352,
     UAV_COUNTER: 416,
+    // A vertex stream the vertex stage reads as words itself (`VertexPull`):
+    // its buffer, and where each stream starts, its stride and its length.
+    VERTEX_PULL: 480,
+    VERTEX_PULL_PARAMS: 512,
 });
 
 /** WebGPU's `GPUShaderStage` bits, spelled out so nothing here reads a global. */
@@ -2565,6 +2569,100 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  */
 
 /**
+ * Vertex streams the vertex stage reads from storage as words, where WebGPU
+ * cannot fetch them as vertex buffers: a stride or element offset it does
+ * not align, or per-instance data stepping once every several instances.
+ * Each stream is bound at `BINDING.VERTEX_PULL` + its index, and
+ * `BINDING.VERTEX_PULL_PARAMS` holds a vec4 a stream: the byte where element
+ * zero starts, the stride, the bytes the buffer holds, and the draw's first
+ * instance.
+ *
+ * @typedef {Object} VertexPull
+ * @property {{ stepMode: 'vertex' | 'instance', rate: number }[]} streams
+ *     `rate`: the instances each per-instance element serves; 0 serves them all.
+ * @property {{ semantic: string, index: number, stream: number, offset: number,
+ *     format: string }[]} attributes
+ */
+
+/**
+ * The declarations, loads and layout entries of the streams a vertex stage
+ * reads itself, filling the registers of the inputs they carry.
+ *
+ * @param {VertexPull} pull
+ * @param {import('./dxbc.js').SignatureElement[]} inputs
+ * @param {number} registers  the vertex shader's input registers
+ * @returns {{ text: string[], load: string[], entries: BindGroupLayoutEntry[],
+ *     pulled: Set<number>, unsupported: string[] }}
+ */
+function vertexPullOf(pull, inputs, registers){
+    /** @type {string[]} */
+    const unsupported = [];
+    const count = Math.max(1, pull.streams.length);
+    const text = [
+        `@group(0) @binding(${BINDING.VERTEX_PULL_PARAMS}) var<uniform> vsPulls:`
+            + ` array<${REG}, ${count}>;`,
+    ];
+    /** @type {BindGroupLayoutEntry[]} */
+    const entries = [{ binding: BINDING.VERTEX_PULL_PARAMS, visibility: STAGE.VERTEX,
+        buffer: { type: 'uniform' } }];
+    /** @type {string[]} */
+    const load = [];
+    pull.streams.forEach((stream, k)=>{
+        text.push(`@group(0) @binding(${BINDING.VERTEX_PULL + k}) var<storage, read> vsPull${k}:`
+            + ' array<u32>;',
+        `fn vsPullWord${k}(b: u32) -> u32 {`,
+        `    let w = b >> 2u;`,
+        `    let n = arrayLength(&vsPull${k});`,
+        '    if (w >= n) { return 0u; }',
+        '    let s = (b & 3u) * 8u;',
+        `    let lo = vsPull${k}[w];`,
+        '    if (s == 0u) { return lo; }',
+        `    let hi = select(0u, vsPull${k}[min(w + 1u, n - 1u)], w + 1u < n);`,
+        '    return (lo >> s) | (hi << (32u - s));',
+        '}');
+        entries.push({ binding: BINDING.VERTEX_PULL + k, visibility: STAGE.VERTEX,
+            buffer: { type: 'read-only-storage' } });
+        // Direct3D counts per-instance elements from the first instance
+        // (.w), which the instance index does not count.
+        const element = stream.stepMode === 'vertex' ? 'in.vsVertexIndex'
+            : stream.rate === 0 ? `vsPulls[${k}].w`
+                : `(vsPulls[${k}].w + in.vsInstanceIndex / ${stream.rate}u)`;
+        load.push(`    let vsPullAt${k} = vsPulls[${k}].x + ${element} * vsPulls[${k}].y;`);
+    });
+    /** @type {Set<number>} */
+    const pulled = new Set();
+    for (const element of inputs)
+    {
+        if (element.systemValue !== SYSTEM_VALUE.UNDEFINED || element.register >= registers)
+        {
+            continue;
+        }
+        const attribute = pull.attributes.find(candidate=>
+            candidate.semantic.toUpperCase() === element.name.toUpperCase()
+            && candidate.index === element.index);
+        if (!attribute)
+        {
+            continue;
+        }
+        pulled.add(element.register);
+        const decoder = vertexFetch(attribute.format);
+        if (!decoder)
+        {
+            unsupported.push(`vertex format ${attribute.format}`);
+            continue;
+        }
+        const k = attribute.stream;
+        const at = `vsPullAt${k} + ${attribute.offset}u`;
+        const words = Array.from({ length: Math.ceil(decoder.bytes / 4) },
+            (_, index)=>`vsPullWord${k}(${at} + ${index * 4}u)`);
+        // Past the buffer's end an element reads zeros, as Direct3D's does.
+        load.push(`    if (${at} + ${decoder.bytes}u <= vsPulls[${k}].z) {`,
+            `        v${element.register} = ${decoder.register(words)};`, '    }');
+    }
+    return { text, load, entries, pulled, unsupported };
+}
+
+/**
  * Writes the two entry points around a vertex and a pixel shader body, with the
  * interface between them numbered once for both.
  *
@@ -2575,7 +2673,9 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
  * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad, clipDistances?: boolean,
- *     depthBias?: { units: number, slope: number, clamp: number } }} [options]  `targets`:
+ *     depthBias?: { units: number, slope: number, clamp: number },
+ *     vertexPull?: VertexPull }} [options]  `vertexPull`: the streams the vertex stage
+ *     reads itself, their inputs taken from no vertex buffer. `targets`:
  *     the locations with a target bound; every location the shader writes when
  *     absent. `vertexLoad`: how the vertex stage fills its registers when they do not
  *     come from vertex buffers (a domain shader's, `linkDomain`). `depthBias`: a
@@ -2605,22 +2705,42 @@ export function linkProgram(vs, ps, options = {}){
         vsLoad.push(`    var v${index}: ${REG} = ${REG}(0u);`);
     }
     vsLoad.push(...options.vertexLoad?.load ?? []);
+    const pull = options.vertexPull && options.vertexPull.streams.length > 0
+        && !options.vertexLoad
+        ? vertexPullOf(options.vertexPull, vs.inputs, vs.inputRegisters) : null;
+    if (pull)
+    {
+        // The streams read here find their element by the vertex and
+        // instance indices, which a struct may name once each.
+        vsIn.push('    @builtin(vertex_index) vsVertexIndex: u32,',
+            '    @builtin(instance_index) vsInstanceIndex: u32,');
+        vsLoad.push(...pull.load);
+        unsupported.push(...pull.unsupported);
+    }
     for (const element of options.vertexLoad ? [] : vs.inputs)
     {
-        if (element.register >= vs.inputRegisters)
+        if (element.register >= vs.inputRegisters || pull?.pulled.has(element.register))
         {
             continue;
         }
         const scalar = scalarOf(element.componentType);
         if (element.systemValue === SYSTEM_VALUE.VERTEX_ID)
         {
-            vsIn.push(`    @builtin(vertex_index) v${element.register}: u32,`);
-            vsLoad.push(`    v${element.register}.x = in.v${element.register};`);
+            if (!pull)
+            {
+                vsIn.push(`    @builtin(vertex_index) v${element.register}: u32,`);
+            }
+            vsLoad.push(`    v${element.register}.x = in.${pull ? 'vsVertexIndex'
+                : `v${element.register}`};`);
         }
         else if (element.systemValue === SYSTEM_VALUE.INSTANCE_ID)
         {
-            vsIn.push(`    @builtin(instance_index) v${element.register}: u32,`);
-            vsLoad.push(`    v${element.register}.x = in.v${element.register};`);
+            if (!pull)
+            {
+                vsIn.push(`    @builtin(instance_index) v${element.register}: u32,`);
+            }
+            vsLoad.push(`    v${element.register}.x = in.${pull ? 'vsInstanceIndex'
+                : `v${element.register}`};`);
         }
         else if (element.systemValue === SYSTEM_VALUE.UNDEFINED)
         {
@@ -2899,6 +3019,7 @@ export function linkProgram(vs, ps, options = {}){
         ...(deviceClips ? ['enable clip_distances;'] : []),
         ...vsDecl.text,
         ...options.vertexLoad?.text ?? [],
+        ...pull?.text ?? [],
         ...(vsIn.length > 0 ? ['struct VertexIn {', ...vsIn, '};'] : []),
         'struct VertexOut {',
         ...vsOut,
@@ -2936,7 +3057,7 @@ export function linkProgram(vs, ps, options = {}){
     return {
         vertex,
         fragment,
-        groups: [vsDecl.entries, psDecl.entries],
+        groups: [pull ? [...vsDecl.entries, ...pull.entries] : vsDecl.entries, psDecl.entries],
         attributes,
         targets,
         unsupported,

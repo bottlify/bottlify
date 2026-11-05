@@ -26,6 +26,7 @@
     "cdp:shaders": "node tools/cdp_test/shader-gate.mjs",
     "cdp:tess": "node tools/cdp_test/tess-gate.mjs",
     "cdp:gs": "node tools/cdp_test/gs-gate.mjs",
+    "cdp:pull": "node tools/cdp_test/vertex-pull-gate.mjs",
     "cdp:lighting": "node tools/cdp_test/gl-lighting-gate.mjs",
     "cdp:game": "node tools/cdp_test/game.mjs",
     "cdp:frames": "node tools/cdp_test/frames.mjs",
