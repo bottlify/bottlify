@@ -149,6 +149,14 @@ export function summariseAllocations(profile){
 }
 
 /**
+ * Four milliseconds of a function named for the purpose, answering the
+ * worker's performance.now() as it begins: the profile's samples in it say
+ * where that moment is on the profile's own clock.
+ */
+export const ANCHOR = '(function __bottlifyAnchor__(){const at=performance.now();'
+    + 'while(performance.now()-at<4){}return at;})()';
+
+/**
  * Profiles every worker a page creates from now on (and the workers those
  * create), each caught at its first instruction. `stop` answers one profile
  * per worker that was still alive, labelled by its script URL.
@@ -246,7 +254,16 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
             {
                 try
                 {
+                    // A mark both clocks see: the worker's performance.now() as a
+                    // function of this name begins, and its samples in the profile.
+                    // tools/drop-profile.mjs lays the frames over the profile by it.
+                    const anchor = await cdp.send('Runtime.evaluate', { returnByValue: true,
+                        expression: ANCHOR }, worker).catch(()=>null);
                     const { profile } = await cdp.send('Profiler.stop', {}, worker);
+                    if (typeof anchor?.result?.value === 'number')
+                    {
+                        profile.bottlifyAnchor = anchor.result.value;
+                    }
                     const allocations = heap
                         ? (await cdp.send('HeapProfiler.stopSampling', {}, worker)
                             .catch(()=>({}))).profile ?? null

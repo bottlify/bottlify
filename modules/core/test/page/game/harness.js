@@ -942,7 +942,8 @@ export function keepFrames(app, state){
         {
             return;
         }
-        state.frameRecords.set(frame.index, { index: frame.index, ms: frame.ms,
+        state.frameRecords.set(frame.index, { index: frame.index, startedAt: frame.startedAt,
+            ms: frame.ms,
             byKind: frame.byKind, idleMs: frame.idleMs, waits: frame.waits,
             compiles: frame.compiles, instructions: frame.instructions,
             notes: { interpreted: frame.notes?.interpreted ?? 0,

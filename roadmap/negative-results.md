@@ -2528,3 +2528,26 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   the same records cost whenever they are played; the traps move it, not add to it.
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
 - **Decision.** Back to 4 MiB; the counters that told the two caps apart stay.
+
+
+### 2026-11-05: eager WebAssembly compilation against 3DMark2001 SE's frame drops on new code
+
+- **Idea.** V8 compiles a wasm function lazily, on its first call, on the thread that calls it
+  (`--wasm-lazy-compilation` is on by default in V8 12.4), so a region the translator worker
+  compiled would still be compiled again on the engine's thread when first entered, inside the
+  guest's slice. If that were the frames that dropped on new code, compiling eagerly would
+  remove them.
+- **Workload.** 3DMark2001 SE bundle (bundle.btl sha256 d0af85f2...), route `--press Benchmark`,
+  `game.mjs --worker --store local --prefetch --run-seconds 600` on a fresh browser profile each
+  run, hardware WebGPU adapter (adapter info empty), Chrome version not recorded; review at
+  a865ef84b. The arm: `--chrome-flag --js-flags=--no-wasm-lazy-compilation`.
+- **Values.** Drops named `translation` (the guest's time grew with translating, interpreting or
+  instantiating) in the Car Chase low scene: 105, 167 and 134 in three cold runs without the
+  flag (17-26-08, 17-41-44, 17-54-48), 150 with it (18-06-46); the scene's 1% low 7.7, 5.9, 7.5
+  without, 10.5 with. One run of the arm.
+- **Why.** Not determined by this; the drop frames retire about the instructions an ordinary
+  frame does in three times the guest's time, with seven times its exits from translated code,
+  and neither the translator's time on the thread nor the interpreter's instructions account for
+  it. The next step is a profile of the drop frames themselves (`tools/drop-profile.mjs`).
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** No change; V8's defaults stay.
