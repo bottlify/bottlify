@@ -427,15 +427,15 @@ function parse(argv){
         // what the flags here do not.
         cpuConfig: argv.includes('--cpu-config')
             ? JSON.parse(argv[argv.indexOf('--cpu-config') + 1]) : undefined,
-        // The display the program is told it has, as `WxH`. The launcher
-        // names the person's own screen, which is rarely a size a program of
-        // this era lists, so what a title does on one is a different path.
+        // The display the program is told it has, as `WxH`; by default the
+        // launcher's 1024x768. A program centres its windows on it, so a run
+        // on another size is a different picture and different click points.
         screen: argv.includes('--screen')
             ? (()=>{
                 const [width, height] = argv[argv.indexOf('--screen') + 1].split('x').map(Number);
                 return { width, height, bitsPerPixel: 32 };
             })()
-            : null,
+            : { width: 1024, height: 768, bitsPerPixel: 32 },
         // A run that reads a gigabyte of bundle over HTTP one block at a time
         // is slower than one reading a local file, and the page cannot be asked
         // how it is doing while it runs. A run timed by `--run-seconds` answers
