@@ -795,6 +795,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             hotSpot: { ...shape.hotSpot }, bgra: shape.bgra } : { shown });
     };
 
+    /** GetCaretBlinkTime's answer, which SetCaretBlinkTime changes. */
+    let caretBlinkTime = CARET_BLINK_TIME;
+
     /** GetDoubleClickTime's answer, which SetDoubleClickTime changes. */
     let doubleClickTime = DOUBLE_CLICK_TIME;
 
@@ -5092,10 +5095,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ()=>HKL_EN_US,
         },
 
-        /** UINT GetCaretBlinkTime(void): `CARET_BLINK_TIME`, which nothing here changes. */
+        /** UINT GetCaretBlinkTime(void): `CARET_BLINK_TIME` until SetCaretBlinkTime sets another. */
         GetCaretBlinkTime: {
             argBytes: 0,
-            handler: ()=>CARET_BLINK_TIME,
+            handler: ()=>caretBlinkTime,
+        },
+
+        /** BOOL SetCaretBlinkTime(UINT uMSeconds): INFINITE is a caret that does not blink. */
+        SetCaretBlinkTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([ms])=>{
+                caretBlinkTime = ms >>> 0;
+                return 1;
+            },
         },
 
         /** void SetLastErrorEx(DWORD dwErrCode, DWORD dwType): the type is ignored, as since XP. */

@@ -3922,3 +3922,12 @@ test('SetFocus of a handle that names no window is ERROR_INVALID_WINDOW_HANDLE',
     assert.equal(fns.SetFocus.handler([0xdead0]), 0);
     assert.equal(errors.at(-1), 1400);
 });
+
+test('SetCaretBlinkTime sets what GetCaretBlinkTime answers, INFINITE included', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.SetCaretBlinkTime.argBytes, 4);
+    assert.equal(fns.SetCaretBlinkTime.handler([250]), 1);
+    assert.equal(fns.GetCaretBlinkTime.handler([]), 250);
+    fns.SetCaretBlinkTime.handler([0xffffffff]);
+    assert.equal(fns.GetCaretBlinkTime.handler([]), 0xffffffff, 'a caret that does not blink');
+});

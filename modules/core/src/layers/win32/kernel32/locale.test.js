@@ -1504,3 +1504,20 @@ test('EnumSystemLocalesEx hands out names with their kind and the lParam', async
     assert.ok(seen.length > 0 && seen.every(([, kind])=>kind === 0x21), 'specific alone');
     assert.equal(fns.EnumSystemLocalesEx.handler([0, 0, 0, 0]), 0);
 });
+
+test('IsValidLanguageGroup: the one locale\'s group installed, seventeen known', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const LGRPID_INSTALLED = 1;
+    const LGRPID_SUPPORTED = 2;
+    assert.equal(fns.IsValidLanguageGroup.argBytes, 8);
+    assert.equal(fns.IsValidLanguageGroup.handler([1, LGRPID_INSTALLED]), 1, 'Western Europe');
+    assert.equal(fns.IsValidLanguageGroup.handler([10, LGRPID_INSTALLED]), 0,
+        'Simplified Chinese is known, not installed');
+    assert.equal(fns.IsValidLanguageGroup.handler([10, LGRPID_SUPPORTED]), 1);
+    assert.equal(fns.IsValidLanguageGroup.handler([17, LGRPID_SUPPORTED]), 1, 'Armenian, the last');
+    assert.equal(fns.IsValidLanguageGroup.handler([18, LGRPID_SUPPORTED]), 0);
+    assert.equal(fns.IsValidLanguageGroup.handler([0, LGRPID_SUPPORTED]), 0);
+    assert.equal(fns.IsValidLanguageGroup.handler([1, 3]), 0, 'both flags at once');
+    assert.equal(host.errors.at(-1), 1004, 'ERROR_INVALID_FLAGS');
+});

@@ -265,6 +265,33 @@ export function createWinsockFunctions(host){
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
+    /**
+     * WSAHtonl and its kin: the value swapped into network order, written
+     * where the caller asked, as a long or a short.
+     *
+     * @param {number[]} args @param {2 | 4} size
+     */
+    const orderFor = ([handle, value, out], size)=>{
+        if (!socketOf(handle))
+        {
+            return fail(WSAENOTSOCK);
+        }
+        if ((out >>> 0) === 0)
+        {
+            return fail(WSAEFAULT);
+        }
+        if (size === 4)
+        {
+            writeDword(out, swap32(value >>> 0));
+        }
+        else
+        {
+            const swapped = swap16(value & 0xffff);
+            host.writeMemory(out >>> 0, new Uint8Array([swapped & 0xff, swapped >>> 8]));
+        }
+        return ok(0);
+    };
+
     /** Terminated, in the ANSI page a name a program passes is read in. @param {string} text */
     const sz = text=>encodeAnsi(`${text}\0`);
 
@@ -2417,6 +2444,37 @@ export function createWinsockFunctions(host){
                 return connectCall(handle, name, length);
             },
         },
+
+        /**
+         * SOCKET WSAAccept(SOCKET s, struct sockaddr *addr, LPINT addrlen,
+         *   LPCONDITIONPROC lpfnCondition, DWORD_PTR dwCallbackData)
+         *
+         * accept. A condition function is not called: every connection is
+         * accepted as if it answered CF_ACCEPT, and that is said.
+         */
+        WSAAccept: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, name, lengthPointer, condition])=>{
+                if ((condition >>> 0) !== 0)
+                {
+                    host.divergence?.('WSAAccept',
+                        'the condition function is not called; the connection is accepted');
+                }
+                return table.accept.handler([handle, name, lengthPointer]);
+            },
+        },
+
+        /**
+         * int WSAHtonl(SOCKET s, u_long hostlong, u_long *lpnetlong), and its
+         * three kin: htonl and the rest for the socket's provider, which for
+         * TCP/IP is network order. The socket must be one, and the out pointer
+         * there.
+         */
+        WSAHtonl: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 4) },
+        WSANtohl: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 4) },
+        WSAHtons: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 2) },
+        WSANtohs: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 2) },
 
         /**
          * SOCKET WSASocketA(int af, int type, int protocol,

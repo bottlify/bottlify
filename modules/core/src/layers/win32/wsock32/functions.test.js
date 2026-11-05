@@ -1658,3 +1658,40 @@ test('a socket is not duplicated into another process', ()=>{
     assert.equal(fx.call('WSADuplicateSocketW', [999, 1234, OUT]), SOCKET_ERROR);
     assert.equal(fx.call('WSAGetLastError', []), WSAENOTSOCK);
 });
+
+test('WSAAccept accepts as accept does, and says a condition function goes uncalled', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const fx = fixture({ divergence: (/** @type {string} */ api)=>said.push(api) });
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+    for (const condition of [0, 0x401000])
+    {
+        const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]);
+        assert.notEqual(fx.call('WSAAccept', [server, 0, 0, condition, 0]), INVALID_SOCKET);
+    }
+    assert.deepEqual(said, ['WSAAccept'], 'only the call with a condition function');
+    assert.equal(fx.call('WSAAccept', [0x999, 0, 0, 0, 0]), INVALID_SOCKET);
+    assert.equal(fx.call('WSAGetLastError'), WSAENOTSOCK);
+});
+
+test('WSAHtonl, WSAHtons, WSANtohl and WSANtohs write network order for a socket', ()=>{
+    const fx = fixture();
+    const socket = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    assert.equal(fx.call('WSAHtonl', [socket, 0x11223344, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF), 0x44332211);
+    assert.equal(fx.call('WSANtohl', [socket, 0x44332211, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF), 0x11223344);
+    fx.setDword(WSABUF, 0xaaaaaaaa);
+    assert.equal(fx.call('WSAHtons', [socket, 0x1234, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF), 0xaaaa3412, 'a short, and nothing past it');
+    assert.equal(fx.call('WSANtohs', [socket, 0x3412, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF) & 0xffff, 0x1234);
+    assert.equal(fx.call('WSAHtonl', [0x999, 1, WSABUF]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAENOTSOCK);
+    assert.equal(fx.call('WSAHtonl', [socket, 1, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAEFAULT);
+});
