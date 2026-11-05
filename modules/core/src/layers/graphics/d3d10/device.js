@@ -960,6 +960,7 @@ export function createDevice(options = {}){
                 now: options.now ?? (()=>performance.now()),
                 diverge,
                 eleven: d3d11,
+                streams: ()=>renderer.streamStatistics(),
                 occlusion: {
                     begin: ()=>renderer.beginOcclusion(),
                     end: counter=>renderer.endOcclusion(counter),
@@ -1392,16 +1393,15 @@ export function createDevice(options = {}){
             {
                 return E_INVALIDARG;
             }
-            if (declaration)
-            {
-                diverge('a geometry shader streams nothing out: no stream-output buffer is'
-                    + ' written');
-            }
             const hr = createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, null,
                 container);
             if (out.shader)
             {
                 out.shader.rasterizedStream = rasterizedStream;
+                out.shader.streamOutput = declaration
+                    ? { entries: declaration.map(entry=>({ ...entry })),
+                        strides: strides ? [...strides] : null }
+                    : null;
             }
             return hr;
         },
@@ -1643,9 +1643,15 @@ export function createDevice(options = {}){
                 instanceCount, startInstance });
         },
 
+        /** A draw of what stream output last left in the buffer at the first vertex slot. */
         DrawAuto(){
-            options.divergence?.('Direct3D 10', 'lost: DrawAuto draws nothing: there is no'
-                + ' stream-output buffer to count', 'loss');
+            renderer.drawAuto(snapshot());
+        },
+
+        /** @param {readonly any[]} buffers @param {readonly number[]} offsets */
+        SOSetTargets(buffers, offsets){
+            state.methods.SOSetTargets(buffers, offsets);
+            renderer.streamTargets(buffers ?? [], offsets ?? []);
         },
 
         /**

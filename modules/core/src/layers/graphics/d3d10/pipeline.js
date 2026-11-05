@@ -551,10 +551,6 @@ export function createPipelineState(services){
 
         /** @param {readonly any[]} buffers @param {readonly number[]} offsets */
         SOSetTargets(buffers, offsets){
-            if (buffers && buffers.some(buffer=>buffer))
-            {
-                diverge('a stream-output target is bound and never written');
-            }
             pipeline.streamOutput = replaced(pipeline.streamOutput,
                 emptySlots(D3D10_LIMITS.SO_BUFFER_SLOTS));
             writeSlots(pipeline.streamOutput, 0, (buffers ?? []).slice(0,
@@ -629,6 +625,7 @@ export function createPipelineState(services){
                 rasterizerState: stillAlive(pipeline.rasterizerState),
                 viewports: pipeline.viewports,
                 scissorRects: pipeline.scissorRects,
+                streamOutput: live(pipeline.streamOutput),
             };
         },
         /**

@@ -464,6 +464,24 @@ export const dclTessPartitioning = partitioning=>
 /** @param {number} output */
 export const dclTessOutputPrimitive = output=>
     op(OPCODE.DCL_TESS_OUTPUT_PRIMITIVE, [], { control: output });
+// A geometry shader's: its input primitive (1 point, 2 line, 3 triangle, 6 line
+// with adjacency, 7 triangle with adjacency), output topology (1 point list, 3
+// line strip, 5 triangle strip), vertices it may emit, and its vertices.
+/** @param {number} primitive */
+export const dclGsInputPrimitive = primitive=>
+    op(OPCODE.DCL_GS_INPUT_PRIMITIVE, [], { control: primitive });
+/** @param {number} topology */
+export const dclGsOutputTopology = topology=>
+    op(OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, [], { control: topology });
+/** @param {number} count */
+export const dclMaxOutputVertexCount = count=>
+    op(OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT, [], { extra: [count] });
+/** A geometry shader's input: a register of one vertex of its primitive.
+ *  @param {number} vertex @param {number} index @param {string} [components] */
+export const vgs = (vertex, index, components)=>
+    register(OPERAND.INPUT, [vertex, index], components);
+export const emit = ()=>op(OPCODE.EMIT, []);
+export const cut = ()=>op(OPCODE.CUT, []);
 /** @param {number} count */
 export const dclHsForkPhaseInstanceCount = count=>
     op(OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT, [], { extra: [count] });
@@ -676,6 +694,31 @@ export function passThroughVertexShader(){
             dclInput(v(0)),
             dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
             mov(o(0), v(0)),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A geometry shader that passes each triangle on as a strip of its three
+ * vertices: SV_POSITION in and out.
+ */
+export function triangleGeometryShader(){
+    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    return assemble({
+        kind: SHADER_KIND.GEOMETRY,
+        inputs: [position],
+        outputs: [position],
+        instructions: [
+            dclGsInputPrimitive(3),
+            dclGsOutputTopology(5),
+            dclMaxOutputVertexCount(3),
+            dclInputSiv(vgs(3, 0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            mov(o(0), vgs(0, 0)), emit(),
+            mov(o(0), vgs(1, 0)), emit(),
+            mov(o(0), vgs(2, 0)), emit(),
+            cut(),
             ret(),
         ],
     });

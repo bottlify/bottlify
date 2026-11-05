@@ -749,8 +749,9 @@ expands, culls or routes them, so it is not drawn at all; the renderer counts it
 (`skipped.stage`) and says so once. A geometry shader with stream output is made in the same
 way, its declaration checked as Windows checks it; one made of a vertex shader's bytecode, which
 only streams out, is no stage, so its draws are drawn. *2026-10-31.* Hull and domain shaders
-are drawn since 2026-11-05 (the tessellator as compute, `d3d10/tessellation.js`): this holds for
-the geometry stage alone.
+are drawn since 2026-11-05 (the tessellator as compute, `d3d10/tessellation.js`), and geometry
+shaders and stream output since the same day (`d3d10/geometry.js`): this no longer holds for any
+stage.
 
 **A76. IDirect3DDevice7 keeps the earlier interfaces' texture filter, address and border render
 states and does not apply them.** D3DRENDERSTATE_TEXTUREMAG, TEXTUREMIN, TEXTUREADDRESS,

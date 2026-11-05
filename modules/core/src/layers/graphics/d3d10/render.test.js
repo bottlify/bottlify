@@ -40,7 +40,7 @@ import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInputPs,
     dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, l, ld, ldMs, lu, mov, o,
     passThroughVertexShader, quadDomainShader, quadHullShader, r, ret, s, sample,
-    solidPixelShader, t, utof, v,
+    solidPixelShader, t, triangleGeometryShader, utof, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -2044,11 +2044,13 @@ test('an event ended after a draw waits for the draw to be sent, and polling sen
         event.release();
     });
 
-test('the unsupported calls say what they did not do', ()=>{
+test('DrawAuto with no buffer at the first vertex slot draws nothing, and a stream-output'
+    + ' shader of no bytecode is refused', async()=>{
     const h = harness();
     const { device } = h;
     device.DrawAuto();
-    assert.ok(h.divergences.some(line=>line.includes('DrawAuto')));
+    await h.present();
+    assert.equal(h.gpu.count('draw') + h.gpu.count('drawIndirect'), 0);
     /** @type {{ shader?: any }} */
     const shader = {};
     assert.equal(device.CreateGeometryShaderWithStreamOutput(new Uint8Array(0), [], null, 0,
@@ -2057,7 +2059,7 @@ test('the unsupported calls say what they did not do', ()=>{
 });
 
 test('a vertex shader made a geometry shader to stream out is no stage: the draw goes on,'
-    + ' and says it streams nothing out', async()=>{
+    + ' and its vertices are streamed out first', async()=>{
     const h = harness();
     const { device } = h;
     bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
@@ -2070,7 +2072,11 @@ test('a vertex shader made a geometry shader to stream out is no stage: the draw
     device.Draw(3, 0);
     await h.present();
     assert.equal(h.gpu.count('draw'), 1);
-    assert.ok(diverged(h, 'streams nothing out'), h.divergences.join('\n'));
+    assert.deepEqual(h.gpu.of('dispatchWorkgroups').map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.replace(/#\d+$/, '')),
+    ['d3d11:vs-geometry', 'd3d11:gs', 'd3d11:geometry-scan', 'd3d11:geometry-list',
+        'd3d11:stream-out', 'd3d11:stream-out-done']);
+    assert.deepEqual(h.gpu.errors, []);
 });
 
 test('a shader with an instruction that has no translation refuses its draws by name',
@@ -2292,14 +2298,12 @@ test('a draw with no input layout runs on what the vertex shader makes of SV_Ver
     assert.deepEqual(h.divergences, []);
 });
 
-test('a geometry shader is made, and a draw with it bound is skipped and counted, never drawn'
-    + ' as if the stage were not there', async()=>{
+test('a draw through a geometry shader is compute passes and an indexed draw of what it made,'
+    + ' its count on the GPU', async()=>{
     const h = harness();
     const { device } = h;
     bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
-    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
-    const gs = assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
-        instructions: [ret()] });
+    const gs = triangleGeometryShader();
     /** @type {{ shader?: any }} */
     const out = { shader: 'untouched' };
     assert.equal(device.CreateGeometryShader(gs, out), S_OK);
@@ -2308,10 +2312,17 @@ test('a geometry shader is made, and a draw with it bound is skipped and counted
     device.GSSetShader(null);
     device.Draw(3, 0);
     await h.present();
-    assert.equal(h.gpu.count('draw'), 1, 'only the draw without the stage');
-    assert.equal(device.diagnostics().skipped.stage, 1);
-    assert.ok(diverged(h, 'a draw with a geometry shader bound is skipped'),
-        h.divergences.join('\n'));
+    assert.deepEqual(h.gpu.errors, []);
+    assert.deepEqual(h.divergences, []);
+    assert.deepEqual(device.diagnostics().failures, []);
+    assert.equal(h.gpu.count('draw'), 1, 'the draw without the stage');
+    assert.equal(h.gpu.count('drawIndexedIndirect'), 1, 'the one through it');
+    assert.deepEqual(h.gpu.of('dispatchWorkgroups').map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.replace(/#\d+$/, '')),
+    ['d3d11:vs-geometry', 'd3d11:gs', 'd3d11:geometry-scan', 'd3d11:geometry-list'],
+    'no stream output where none is declared');
+    assert.equal(device.diagnostics().geometry.draws, 1);
+    assert.equal(device.diagnostics().skipped.stage, 0);
     // What is not a geometry shader is the bad argument Windows answers.
     assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
     assert.equal(device.CreateGeometryShader(null, out), 0x80070057);

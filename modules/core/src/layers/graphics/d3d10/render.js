@@ -59,9 +59,10 @@ import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, STORAGE_TEXTURE_FORMAT, linkCompute,
-    linkDomain, linkProgram, translateShader,
+    linkDomain, linkGeometryDraw, linkProgram, translateShader,
 } from './wgsl.js';
 import { DOMAIN_ENTRIES, FIRST_PATCH_LIST, createTessellation } from './tessellation.js';
+import { GEOMETRY_DRAW_ENTRIES, createGeometry } from './geometry.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
@@ -301,6 +302,7 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {any} rasterizerState
  * @property {any[]} viewports
  * @property {any[]} scissorRects
+ * @property {any[]} [streamOutput]  The stream-output buffers, by slot.
  */
 
 /** A per-draw account of what the backend was asked, for a test to evaluate. */
@@ -1177,7 +1179,8 @@ export function createRenderer(services){
      * @param {any} resource
      */
     const gpuWritten = resource=>(resource.desc.BindFlags
-        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS)) !== 0
+        & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS
+            | D3D10_BIND.STREAM_OUTPUT)) !== 0
         || backingOf(resource).gpuDirty === true;
 
     /**
@@ -1754,7 +1757,9 @@ export function createRenderer(services){
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
         ].join('|');
-        const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}` : key;
+        const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}`
+            : state.geometry ? `${key}|gs:${idOf(state.geometry.shader)}:${state.geometry.stream}`
+                : key;
         // Only a draw whose views make a variant of a shader says so.
         return state.vsVariant || state.psVariant
             ? `${keyed}|v:${state.vsVariant}/${state.psVariant}`
@@ -1839,14 +1844,17 @@ export function createRenderer(services){
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
                 tessellationOf().hullOf(state.hullShader).stage,
                 { targets: bound, depthBias: emulatedBias })
-            : linkProgram(vs, ps, { targets: bound, depthBias: emulatedBias });
+            : state.geometry
+                ? linkGeometryDraw(state.geometry.gs, state.geometry.stage, state.geometry.stream,
+                    ps, { targets: bound, depthBias: emulatedBias })
+                : linkProgram(vs, ps, { targets: bound, depthBias: emulatedBias });
         if (program.unsupported.length > 0)
         {
             throw Object.assign(new Error('the shaders cannot be translated:'
                 + ` ${program.unsupported.join('; ')}`), { untranslatable: true });
         }
-        // A domain shader's vertices come from storage, not from buffers.
-        const layout = state.hullShader ? { buffers: [], slots: [] }
+        // A domain or geometry shader's vertices come from storage, not from buffers.
+        const layout = state.hullShader || state.geometry ? { buffers: [], slots: [] }
             : vertexLayouts(state.inputLayout, program, state.strides);
         if (typeof layout === 'string')
         {
@@ -1924,7 +1932,8 @@ export function createRenderer(services){
             backend.createShaderModule({ code: program.fragment, label: `d3d10:ps#${idOf(ps)}` }),
         ]);
         const groupLayouts = [...program.groups,
-            ...(state.hullShader ? [/** @type {any[]} */(DOMAIN_ENTRIES)] : [])]
+            ...(state.hullShader ? [/** @type {any[]} */(DOMAIN_ENTRIES)]
+                : state.geometry ? [/** @type {any[]} */(GEOMETRY_DRAW_ENTRIES)] : [])]
             .map((entries, index)=>layoutFor(entries, `d3d10:${['vs', 'ps', 'ds'][index]}`));
         const pipelineLayout = backend.createPipelineLayout({
             label: 'd3d10', bindGroupLayouts: groupLayouts,
@@ -2098,6 +2107,22 @@ export function createRenderer(services){
         };
         targets.set(view, target);
         return target;
+    };
+
+    /** @type {ReturnType<typeof createGeometry> | null} */
+    let geometryPasses = null;
+    /** What draws through a geometry shader and stream output are recorded with. */
+    const geometryOf = ()=>{
+        geometryPasses ??= createGeometry({
+            backend, BufferUsage, lose, layoutFor, idOf, translationOf,
+            bindingsFor: (stage, entries, uavs)=>bindingsFor(stage, entries, uavs),
+            vertexLayouts: (inputLayout, program, strides)=>
+                vertexLayouts(inputLayout, program, strides),
+            backingOf: resource=>backingOf(resource),
+            pipelines,
+            placeholder: ()=>placeholdersOf().storage,
+        });
+        return geometryPasses;
     };
 
     /** @type {ReturnType<typeof createTessellation> | null} */
@@ -3773,13 +3798,41 @@ export function createRenderer(services){
          * @param {PipelineSnapshot} pipeline
          * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
          *           indexCount?: number, startIndex?: number, baseVertex?: number,
-         *           startInstance?: number, indirect?: { buffer: any, offset: number } }} draw
+         *           startInstance?: number, indirect?: { buffer: any, offset: number },
+         *           auto?: { gpu: any, offset: number } }} draw  `auto`: the arguments
+         *     `DrawAuto` counted on the GPU
          */
         draw(pipeline, draw){
             if (!backend)
             {
                 return;
             }
+            // A geometry shader runs, and streams out, whether or not the draw
+            // then rasterizes anything (`geometry.js`); a vertex shader's
+            // bytecode made one to stream out draws as if none were bound.
+            const geometryShader = pipeline.stages.gs?.shader ?? null;
+            /** @type {any} */
+            let geometry = null;
+            if (geometryShader)
+            {
+                if (pipeline.stages.hs?.shader || pipeline.stages.ds?.shader)
+                {
+                    counters.skipped.stage++;
+                    lose('a draw through the tessellator and a geometry shader is skipped: the'
+                        + ' domain shader\'s vertices are not taken on to a geometry shader');
+                    return;
+                }
+                geometry = geometryOf().prepare(pipeline, draw);
+                geometry?.commands.forEach(record);
+                if (geometryShader.passThrough
+                    ? geometryShader.rasterizedStream === SO_NO_RASTERIZED_STREAM
+                    : !geometry?.drawn)
+                {
+                    return;
+                }
+            }
+            const drawnGeometry = geometryShader && !geometryShader.passThrough
+                ? geometry.drawn : null;
             // Every bound render target, by slot, and the depth target: the
             // first of them sizes the pass, and a draw with a depth target and
             // no colour one draws depth alone.
@@ -3842,24 +3895,6 @@ export function createRenderer(services){
                 counters.skipped.noViewport++;
                 return;
             }
-            // A vertex shader's bytecode made a geometry shader to stream out
-            // is no stage: the draw goes on without it, and rasterizes
-            // nothing where no stream is rasterized.
-            const streaming = pipeline.stages.gs?.shader?.passThrough === true;
-            if (streaming && pipeline.stages.gs.shader.rasterizedStream
-                === SO_NO_RASTERIZED_STREAM)
-            {
-                return;
-            }
-            // WebGPU has no geometry stage: a draw through one is skipped,
-            // never drawn as if the stage were not there.
-            if (pipeline.stages.gs?.shader && !streaming)
-            {
-                counters.skipped.stage++;
-                lose('a draw with a geometry shader bound is skipped: WebGPU has no such'
-                    + ' stage, and none is emulated');
-                return;
-            }
             // Without a pixel shader the draw still runs: it writes depth and
             // stencil and no render target, as a depth-only pass expects.
             if (!pipeline.stages.vs.shader)
@@ -3869,15 +3904,16 @@ export function createRenderer(services){
             }
             // Through the tessellator: compute passes, then a draw of the
             // domain shader over what they made (`tessellation.js`).
-            const tessellating = pipeline.stages.hs?.shader || pipeline.stages.ds?.shader
-                || pipeline.topology >= FIRST_PATCH_LIST;
+            const tessellating = !drawnGeometry && (pipeline.stages.hs?.shader
+                || pipeline.stages.ds?.shader || pipeline.topology >= FIRST_PATCH_LIST);
             const tessellated = tessellating ? tessellationOf().prepare(pipeline, draw) : null;
             if (tessellating && !tessellated)
             {
                 counters.skipped.stage++;
                 return;
             }
-            const topology = tessellated ? tessellated.topology : TOPOLOGY[pipeline.topology];
+            const topology = drawnGeometry ? drawnGeometry.topology
+                : tessellated ? tessellated.topology : TOPOLOGY[pipeline.topology];
             if (!topology)
             {
                 diverge(`primitive topology ${pipeline.topology} cannot be drawn`);
@@ -3890,7 +3926,7 @@ export function createRenderer(services){
                 pixelShader: pipeline.stages.ps.shader,
                 // No layout feeds no attribute: the draw runs on what the
                 // vertex shader makes of its system values alone.
-                inputLayout: tessellated ? NO_INPUT_LAYOUT
+                inputLayout: tessellated || drawnGeometry ? NO_INPUT_LAYOUT
                     : pipeline.inputLayout ?? NO_INPUT_LAYOUT,
                 blendState: pipeline.blendState,
                 depthStencilState: pipeline.depthStencilState,
@@ -3902,8 +3938,11 @@ export function createRenderer(services){
                 depthReadOnly: depth ? depth.readOnly : 0,
                 sampleMask: pipeline.sampleMask,
                 sampleCount: sizing.sampleCount,
-                strides: tessellated ? [] : pipeline.vertexStrides.slice(),
-                indexFormat: draw.indexCount === undefined || tessellated ? null : indexFormat,
+                strides: tessellated || drawnGeometry ? [] : pipeline.vertexStrides.slice(),
+                indexFormat: draw.indexCount === undefined || tessellated || drawnGeometry ? null
+                    : indexFormat,
+                geometry: drawnGeometry ? { shader: geometryShader, gs: geometry.gs,
+                    stage: geometry.stage, stream: drawnGeometry.stream } : null,
                 vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
                 psVariant: variantOf(pipeline.stages.ps),
             };
@@ -3928,8 +3967,11 @@ export function createRenderer(services){
                 ? linkDomain(translationOf(state.vertexShader, state.vsVariant),
                     state.vertexShader.container, translationOf(state.pixelShader, state.psVariant),
                     pipeline.stages.hs.shader.container, tessellated.hull.stage)
-                : linkProgram(translationOf(state.vertexShader, state.vsVariant),
-                    translationOf(state.pixelShader, state.psVariant));
+                : drawnGeometry
+                    ? linkGeometryDraw(geometry.gs, geometry.stage, drawnGeometry.stream,
+                        translationOf(state.pixelShader, state.psVariant))
+                    : linkProgram(translationOf(state.vertexShader, state.vsVariant),
+                        translationOf(state.pixelShader, state.psVariant));
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
                 const backing = buffer ? backingOf(buffer) : null;
                 if (!backing || !backing.gpu)
@@ -3954,7 +3996,7 @@ export function createRenderer(services){
             argumentBuffer?.gpu.markRead();
             const indirect = argumentBuffer
                 ? { gpu: argumentBuffer.gpu.gpu, offset: /** @type {any} */ (draw.indirect).offset }
-                : null;
+                : draw.auto ?? null;
             counters.draws++;
             for (const counter of occluding)
             {
@@ -3972,8 +4014,9 @@ export function createRenderer(services){
                 kind: 'draw',
                 // Not drawn when a pass before it could not be built: its
                 // arguments would be whatever the buffer last held.
-                pipeline: tessellated
-                    ? Promise.all([pipelineFor(state), ...tessellated.waits]).then(([one])=>one)
+                pipeline: tessellated || drawnGeometry
+                    ? Promise.all([pipelineFor(state),
+                        ...(tessellated ?? geometry).waits]).then(([one])=>one)
                     : pipelineFor(state),
                 target,
                 targets: standIns ?? colour,
@@ -3983,12 +4026,14 @@ export function createRenderer(services){
                     bindingsFor(pipeline.stages.ps, program.groups[1],
                         pipeline.pixelViews ?? NO_VIEWS),
                     ...(tessellated ? [tessellated.group] : []),
+                    ...(drawnGeometry ? [drawnGeometry.group] : []),
                 ],
-                vertexBuffers,
-                indexBuffer: indexBacking && indexBacking.gpu && indexFormat
-                    ? { gpu: indexBacking.gpu.gpu, format: indexFormat,
-                        offset: pipeline.indexOffset }
-                    : null,
+                vertexBuffers: drawnGeometry ? [] : vertexBuffers,
+                indexBuffer: drawnGeometry ? drawnGeometry.indexBuffer
+                    : indexBacking && indexBacking.gpu && indexFormat
+                        ? { gpu: indexBacking.gpu.gpu, format: indexFormat,
+                            offset: pipeline.indexOffset }
+                        : null,
                 layout: state.inputLayout.elements,
                 viewport: {
                     x: viewport.TopLeftX,
@@ -4003,17 +4048,18 @@ export function createRenderer(services){
                         height: scissor.bottom - scissor.top }
                     : null,
                 topology,
-                vertexCount: tessellated ? 0 : draw.vertexCount,
-                startVertex: tessellated ? 0 : draw.startVertex,
-                instanceCount: tessellated ? 1 : draw.instanceCount ?? 1,
-                startInstance: tessellated ? 0 : draw.startInstance ?? 0,
+                vertexCount: tessellated || drawnGeometry ? 0 : draw.vertexCount,
+                startVertex: tessellated || drawnGeometry ? 0 : draw.startVertex,
+                instanceCount: tessellated || drawnGeometry ? 1 : draw.instanceCount ?? 1,
+                startInstance: tessellated || drawnGeometry ? 0 : draw.startInstance ?? 0,
                 stencilRef: pipeline.stencilRef,
                 blendFactor: [...pipeline.blendFactor],
                 occlusion: occluding.size > 0 ? [...occluding] : null,
-                indexCount: tessellated ? null : draw.indexCount ?? null,
-                startIndex: draw.startIndex ?? 0,
-                baseVertex: draw.baseVertex ?? 0,
-                indirect: tessellated ? tessellated.args : indirect,
+                indexCount: drawnGeometry ? 0 : tessellated ? null : draw.indexCount ?? null,
+                startIndex: drawnGeometry ? 0 : draw.startIndex ?? 0,
+                baseVertex: drawnGeometry ? 0 : draw.baseVertex ?? 0,
+                indirect: drawnGeometry ? drawnGeometry.args : tessellated ? tessellated.args
+                    : indirect,
             });
             if (copiedOut)
             {
@@ -4035,6 +4081,7 @@ export function createRenderer(services){
                 return chain;
             }
             counters.frames++;
+            geometryPasses?.endFrame();
             const room = tessellation?.endFrame();
             if (room)
             {
@@ -4112,6 +4159,65 @@ export function createRenderer(services){
          *
          * @returns {OcclusionCounter | null}
          */
+        /**
+         * Stream-output buffers are bound: each given an offset is filled to
+         * it from here on, among the GPU's work in its turn.
+         *
+         * @param {readonly any[]} buffers @param {readonly number[]} offsets
+         */
+        streamTargets(buffers, offsets){
+            if (!backend)
+            {
+                return;
+            }
+            const command = geometryOf().bind(buffers, offsets);
+            if (command)
+            {
+                record(command);
+            }
+        },
+
+        /**
+         * `DrawAuto`: a draw of the vertices stream output last left in the
+         * buffer at the first vertex slot, counted on the GPU.
+         *
+         * @param {any} pipeline the device's state
+         */
+        drawAuto(pipeline){
+            if (!backend)
+            {
+                return;
+            }
+            const buffer = pipeline.vertexBuffers[0] ?? null;
+            const made = buffer && pipeline.vertexStrides[0]
+                ? geometryOf().autoArgs(buffer, pipeline.vertexStrides[0],
+                    pipeline.vertexOffsets[0] ?? 0)
+                : null;
+            if (!made)
+            {
+                return;
+            }
+            record(made.command);
+            this.draw(pipeline, { vertexCount: 0, startVertex: 0, auto: made.args });
+        },
+
+        /**
+         * A read-back of the streams' statistics where this is recorded, for a
+         * stream-output query: its `words` once the frame holding it is back,
+         * null without a GPU.
+         *
+         * @returns {{ words: Uint32Array | null, failed: boolean } | null}
+         */
+        streamStatistics(){
+            if (!backend)
+            {
+                return null;
+            }
+            const made = geometryOf().statistics();
+            record(made.command);
+            return made.mark;
+        },
+
         beginOcclusion(){
             if (!backend)
             {
@@ -4252,6 +4358,7 @@ export function createRenderer(services){
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
                 tessellation: tessellation ? tessellation.diagnostics() : null,
+                geometry: geometryPasses ? geometryPasses.diagnostics() : null,
             }, 'lastFrame', { value: lastFrame });
         },
     };

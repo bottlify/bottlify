@@ -432,6 +432,9 @@ export function translateShader(container, options = {}){
     // the one its linker names (`hull.js`).
     const isHull = program.kind === SHADER_KIND.HULL;
     const outputArray = options.outputName ?? 'o';
+    // A geometry shader reads its inputs a vertex at a time, v[vertex][register],
+    // out of the primitive its linker assembles (`vgs`, `linkGeometry`).
+    const isGeometry = program.kind === SHADER_KIND.GEOMETRY;
 
     /** @type {TranslatedShader} */
     const result = {
@@ -501,6 +504,11 @@ export function translateShader(container, options = {}){
             case OPERAND.TEMP:
                 return `r${operand.indices[0].value}.${swizzle}`;
             case OPERAND.INPUT:
+                if (isGeometry && operand.indices.length > 1)
+                {
+                    return `vgs[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
+                        + `.${swizzle}`;
+                }
                 return `v${operand.indices[0].value}.${swizzle}`;
             case OPERAND.OUTPUT:
                 return isHull ? `${outputArray}[${indexExpression(operand, 0)}].${swizzle}`
@@ -519,7 +527,7 @@ export function translateShader(container, options = {}){
             case OPERAND.INPUT_JOIN_INSTANCE_ID:
                 return `${REG}(hsInstance).${swizzle}`;
             case OPERAND.INPUT_PRIMITIVE_ID:
-                if (isHull || program.kind === SHADER_KIND.DOMAIN)
+                if (isHull || isGeometry || program.kind === SHADER_KIND.DOMAIN)
                 {
                     return `${REG}(primitiveId).${swizzle}`;
                 }
@@ -527,6 +535,8 @@ export function translateShader(container, options = {}){
                 return `${REG}(0u)`;
             case OPERAND.INPUT_DOMAIN_POINT:
                 return `dsDomain.${swizzle}`;
+            case OPERAND.INPUT_GS_INSTANCE_ID:
+                return `${REG}(gsInstance).${swizzle}`;
             case OPERAND.INDEXABLE_TEMP:
                 return `x${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.CONSTANT_BUFFER:
@@ -1090,9 +1100,12 @@ export function translateShader(container, options = {}){
             case OPCODE.DCL_HS_MAX_TESSFACTOR:
             case OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT:
             case OPCODE.DCL_HS_JOIN_PHASE_INSTANCE_COUNT:
-            case OPCODE.DCL_INPUT_SGV:
-            case OPCODE.DCL_INPUT_PS_SGV:
             case OPCODE.DCL_OUTPUT_SGV:
+            case OPCODE.DCL_GS_INPUT_PRIMITIVE:
+            case OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
+            case OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT:
+            case OPCODE.DCL_GS_INSTANCE_COUNT:
+            case OPCODE.DCL_STREAM:
             case OPCODE.NOP:
                 break;
             case OPCODE.DCL_TEMPS:
@@ -1135,12 +1148,14 @@ export function translateShader(container, options = {}){
                 break;
             case OPCODE.DCL_INPUT:
             case OPCODE.DCL_INPUT_SIV:
+            case OPCODE.DCL_INPUT_SGV:
             case OPCODE.DCL_INPUT_PS:
             case OPCODE.DCL_INPUT_PS_SIV:
+            case OPCODE.DCL_INPUT_PS_SGV:
                 if (dest.type === OPERAND.INPUT)
                 {
                     result.inputRegisters = Math.max(result.inputRegisters,
-                        dest.indices[0].value + 1);
+                        dest.indices[isGeometry && dest.indices.length > 1 ? 1 : 0].value + 1);
                 }
                 break;
             case OPCODE.DCL_OUTPUT:
@@ -2006,6 +2021,32 @@ export function translateShader(container, options = {}){
             case OPCODE.DERIV_RTY_FINE:
                 store(dest, fromFloat(`dpdyFine(${f(a)})`, sat));
                 break;
+
+            // A geometry shader's vertices: what its outputs hold is a vertex of
+            // the stream (`gsEmit`), and a cut ends the strip it is building.
+            case OPCODE.EMIT:
+            case OPCODE.EMITTHENCUT:
+            case OPCODE.CUT:
+            case OPCODE.EMIT_STREAM:
+            case OPCODE.EMITTHENCUT_STREAM:
+            case OPCODE.CUT_STREAM: {
+                if (!isGeometry)
+                {
+                    unsupported(instruction.name);
+                    break;
+                }
+                const streamed = instruction.opcode >= OPCODE.EMIT_STREAM;
+                const stream = streamed ? dest.indices[0].value : 0;
+                if (instruction.opcode !== OPCODE.CUT && instruction.opcode !== OPCODE.CUT_STREAM)
+                {
+                    emit(`gsEmit(${stream}u);`);
+                }
+                if (instruction.opcode !== OPCODE.EMIT && instruction.opcode !== OPCODE.EMIT_STREAM)
+                {
+                    emit(`gsCut(${stream}u);`);
+                }
+                break;
+            }
 
             // A range of registers indexed into: a hull shader's outputs are an
             // array already; anywhere else a relative input or output is not
@@ -3023,6 +3064,287 @@ export function linkHull(container){
             constantRegisters },
         unsupported: [...new Set(unsupported)],
     };
+}
+
+/** D3D10_SB_PRIMITIVE: the vertices a geometry shader's input primitive has. */
+const GS_INPUT_VERTICES = Object.freeze(/** @type {Record<number, number>} */ ({
+    1: 1, 2: 2, 3: 3, 6: 4, 7: 6,
+}));
+
+/**
+ * @typedef {Object} GeometryStage
+ * @property {number} inputVertices  The vertices of each primitive it takes.
+ * @property {number} outputVertices The vertices of each primitive it makes:
+ *     1 points, 2 lines, 3 triangles (a strip it builds is made a list).
+ * @property {number} maxOut         The vertices it may emit, a stream.
+ * @property {number} instances      Its invocations a primitive.
+ * @property {number[]} streams      The streams it emits to, in order.
+ * @property {number} inputRegisters
+ * @property {number} outputRegisters
+ */
+
+/**
+ * What a geometry shader's declarations say of it.
+ *
+ * @param {import('./dxbc.js').DxbcContainer} container
+ * @param {TranslatedShader} gs  Its translation.
+ * @returns {GeometryStage}
+ */
+export function geometryStage(container, gs){
+    const program = /** @type {import('./dxbc.js').ShaderProgram} */ (container.shader);
+    const stage = { inputVertices: 1, outputVertices: 1, maxOut: 1, instances: 1,
+        streams: /** @type {number[]} */ ([]), inputRegisters: Math.max(1, gs.inputRegisters),
+        outputRegisters: Math.max(1, gs.outputRegisters) };
+    for (const instruction of decodeSm4(program.tokens))
+    {
+        switch (instruction.opcode)
+        {
+            case OPCODE.DCL_GS_INPUT_PRIMITIVE: {
+                const primitive = instruction.control & 0x3f;
+                // A patch of n control points is primitive 7 + n.
+                stage.inputVertices = GS_INPUT_VERTICES[primitive]
+                    ?? (primitive >= 8 ? primitive - 7 : 1);
+                break;
+            }
+            case OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY: {
+                const topology = instruction.control & 0x7f;
+                stage.outputVertices = topology === 1 ? 1 : topology <= 3 ? 2 : 3;
+                break;
+            }
+            case OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT:
+                stage.maxOut = Math.max(1, instruction.extra[0] ?? 1);
+                break;
+            case OPCODE.DCL_GS_INSTANCE_COUNT:
+                stage.instances = Math.max(1, instruction.extra[0] ?? 1);
+                break;
+            case OPCODE.DCL_STREAM:
+                stage.streams.push(instruction.operands[0].indices[0].value);
+                break;
+            default:
+                break;
+        }
+    }
+    if (stage.streams.length === 0)
+    {
+        stage.streams.push(0);
+    }
+    return stage;
+}
+
+/**
+ * A vertex shader's bytecode made a geometry shader to stream its vertices
+ * out: the stage that passes each primitive the input assembler made on as it
+ * came, its vertices in order.
+ *
+ * @param {TranslatedShader} vs
+ * @param {number} vertices  The input assembler's primitive: 1, 2 or 3.
+ * @returns {{ shader: TranslatedShader, stage: GeometryStage }}
+ */
+export function passThroughGeometry(vs, vertices){
+    const registers = Math.max(1, vs.outputRegisters);
+    /** @type {TranslatedShader['body']} */
+    const body = [];
+    for (let vertex = 0; vertex < vertices; vertex++)
+    {
+        for (let register = 0; register < registers; register++)
+        {
+            body.push(`    o${register} = vgs[${vertex}][${register}];`);
+        }
+        body.push('    gsEmit(0u);');
+    }
+    body.push({ ret: true });
+    return {
+        shader: { ...NO_PIXEL_SHADER, kind: SHADER_KIND.GEOMETRY, inputs: vs.outputs,
+            outputs: vs.outputs, body, inputRegisters: registers, outputRegisters: registers },
+        stage: { inputVertices: vertices, outputVertices: vertices, maxOut: vertices,
+            instances: 1, streams: [0], inputRegisters: registers, outputRegisters: registers },
+    };
+}
+
+/** Group 1 of a geometry shader run as compute (`linkGeometry`). */
+export const GEOMETRY_BINDING = Object.freeze({
+    inputs: 0, indices: 1, vertices: 2, starts: 3, counts: 4, params: 5,
+});
+
+/** The topologies whose primitives share vertices, as Direct3D numbers them. */
+const STRIP_TOPOLOGIES = Object.freeze([3, 5, 11, 13]);
+
+/**
+ * A geometry shader as one compute program, one invocation a primitive and
+ * instance of the shader: the primitive's vertices found as the input
+ * assembler finds them (a strip's from its position, an odd triangle's first
+ * two swapped so that every triangle keeps the strip's winding; a strip's
+ * primitive that holds a cut index is none), each read out of what the vertex
+ * shader wrote for its position (`gsIn`) into `vgs`, the body run, and each
+ * vertex it emits stored at the next of its stream's places (`gsVertices`,
+ * `maxOut` a stream an invocation), with whether it starts a strip
+ * (`gsStarts`); `gsCounts` takes each stream's primitives and vertices.
+ *
+ * `gsParams`: the invocations, the primitives an instance of the draw, its
+ * topology, the positions an instance, the index size in bytes (0 for none),
+ * the index buffer's byte offset and the first index.
+ *
+ * @param {TranslatedShader} gs
+ * @param {GeometryStage} stage
+ * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
+ */
+export function linkGeometry(gs, stage){
+    const declared = declarations(gs, 0, STAGE.COMPUTE);
+    const unsupported = [...gs.unsupported, ...declared.unsupported];
+    const vertices = stage.inputVertices;
+    const inputs = stage.inputRegisters;
+    const outputs = stage.outputRegisters;
+    const streams = stage.streams.length;
+    const most = stage.maxOut;
+    const code = [
+        ...declared.text,
+        'struct GsParams { invocations: u32, prims: u32, topology: u32, points: u32,',
+        '    indexBytes: u32, indexOffset: u32, first: u32, pad: u32, }',
+        `@group(1) @binding(${GEOMETRY_BINDING.inputs}) var<storage, read> gsIn: array<${REG}>;`,
+        `@group(1) @binding(${GEOMETRY_BINDING.indices}) var<storage, read> gsIndices: `
+            + 'array<u32>;',
+        `@group(1) @binding(${GEOMETRY_BINDING.vertices}) var<storage, read_write> gsVertices: `
+            + `array<${REG}>;`,
+        `@group(1) @binding(${GEOMETRY_BINDING.starts}) var<storage, read_write> gsStarts: `
+            + 'array<u32>;',
+        `@group(1) @binding(${GEOMETRY_BINDING.counts}) var<storage, read_write> gsCounts: `
+            + 'array<vec4<u32>>;',
+        `@group(1) @binding(${GEOMETRY_BINDING.params}) var<uniform> gsParams: GsParams;`,
+        `var<private> vgs: array<array<${REG}, ${inputs}>, ${vertices}>;`,
+        ...Array.from({ length: outputs }, (_, index)=>`var<private> o${index}: ${REG};`),
+        'var<private> primitiveId: u32;',
+        'var<private> gsInstance: u32;',
+        'var<private> gsInvocation: u32;',
+        'var<private> gsEmitted: vec4<u32>;',
+        'var<private> gsMade: vec4<u32>;',
+        'var<private> gsStrip: vec4<u32>;',
+        // The place a stream's vertices take among the shader's streams.
+        'fn gsSlot(stream: u32) -> u32 {',
+        '    switch (stream) {',
+        ...stage.streams.map((stream, slot)=>`        case ${stream}u: { return ${slot}u; }`),
+        `        default: { return ${streams}u; }`,
+        '    }',
+        '}',
+        'fn gsEmit(stream: u32) {',
+        '    let s = gsSlot(stream);',
+        `    if (s >= ${streams}u || gsEmitted[s] >= ${most}u) { return; }`,
+        `    let at = (gsInvocation * ${streams}u + s) * ${most}u + gsEmitted[s];`,
+        ...Array.from({ length: outputs }, (_, index)=>
+            `    gsVertices[at * ${outputs}u + ${index}u] = o${index};`),
+        '    gsStarts[at] = select(0u, 1u, gsStrip[s] == 0u);',
+        '    gsEmitted[s] += 1u;',
+        '    gsStrip[s] += 1u;',
+        `    if (gsStrip[s] >= ${stage.outputVertices}u) { gsMade[s] += 1u; }`,
+        '}',
+        'fn gsCut(stream: u32) {',
+        '    let s = gsSlot(stream);',
+        `    if (s < ${streams}u) { gsStrip[s] = 0u; }`,
+        '}',
+        // The index at a position of the draw, for a strip's cuts.
+        'fn gsCutAt(position: u32) -> bool {',
+        '    if (gsParams.indexBytes == 0u) { return false; }',
+        '    let b = gsParams.indexOffset + (gsParams.first + position) * gsParams.indexBytes;',
+        '    if ((b >> 2u) >= arrayLength(&gsIndices)) { return false; }',
+        '    let word = gsIndices[b >> 2u];',
+        '    if (gsParams.indexBytes == 2u) {',
+        '        return extractBits(word, (b & 2u) * 8u, 16u) == 0xffffu;',
+        '    }',
+        '    return word == 0xffffffffu;',
+        '}',
+        'fn gsBody() {',
+        ...Array.from({ length: gs.temps }, (_, index)=>`    var r${index}: ${REG};`),
+        ...gs.indexableTemps.map(temp=>`    var x${temp.index}: array<${REG}, ${temp.size}>;`),
+        ...bodyText(gs, null),
+        '}',
+        '@compute @workgroup_size(64)',
+        'fn geometryMain(@builtin(global_invocation_id) id: vec3<u32>) {',
+        '    if (id.x >= gsParams.invocations) { return; }',
+        '    gsInvocation = id.x;',
+        `    gsInstance = id.x % ${stage.instances}u;`,
+        `    let gsFlat = id.x / ${stage.instances}u;`,
+        '    let gsDrawn = gsFlat / max(1u, gsParams.prims);',
+        '    let gsPrim = gsFlat % max(1u, gsParams.prims);',
+        '    primitiveId = gsPrim;',
+        `    var gsAt: array<u32, ${vertices}>;`,
+        '    var gsWhole = true;',
+        `    let gsStripped = ${STRIP_TOPOLOGIES.map(t=>`gsParams.topology == ${t}u`)
+            .join(' || ')};`,
+        `    for (var j = 0u; j < ${vertices}u; j++) {`,
+        `        gsAt[j] = select(gsPrim * ${vertices}u + j, gsPrim + j, gsStripped);`,
+        '        if (gsStripped && gsCutAt(gsAt[j])) { gsWhole = false; }',
+        '    }',
+        ...(vertices === 3 ? [
+            '    if (gsWhole && gsParams.topology == 5u) {',
+            // The strip's first triangle: after the last cut index, or the first.
+            '        var gsFrom = 0u;',
+            '        if (gsParams.indexBytes != 0u) {',
+            '            gsFrom = gsPrim;',
+            '            loop {',
+            '                if (gsFrom == 0u || gsCutAt(gsFrom - 1u)) { break; }',
+            '                gsFrom -= 1u;',
+            '            }',
+            '        }',
+            '        if (((gsPrim - gsFrom) & 1u) == 1u) {',
+            '            let gsFirst = gsAt[0];',
+            '            gsAt[0] = gsAt[1];',
+            '            gsAt[1] = gsFirst;',
+            '        }',
+            '    }',
+        ] : []),
+        '    if (gsWhole) {',
+        `        for (var j = 0u; j < ${vertices}u; j++) {`,
+        `            for (var reg = 0u; reg < ${inputs}u; reg++) {`,
+        `                vgs[j][reg] = gsIn[(gsDrawn * gsParams.points + gsAt[j]) * ${inputs}u`
+            + ' + reg];',
+        '            }',
+        '        }',
+        '        gsBody();',
+        '    }',
+        `    gsCounts[id.x * 2u] = gsMade;`,
+        `    gsCounts[id.x * 2u + 1u] = gsEmitted;`,
+        '}',
+    ].join('\n');
+    return { code, entries: declared.entries, unsupported: [...new Set(unsupported)] };
+}
+
+/** Group 2 of a draw of what a geometry shader made (`linkGeometryDraw`). */
+export const GEOMETRY_DRAW_BINDING = Object.freeze({ vertices: 0 });
+
+/**
+ * What a geometry shader made, drawn: the vertex stage reads each vertex the
+ * index list names out of the shader's places (`gsVertices`) into the
+ * registers its outputs are, and the pixel shader reads those by semantic as
+ * from a vertex shader. Only the rasterized stream's outputs are drawn.
+ *
+ * @param {TranslatedShader} gs
+ * @param {GeometryStage} stage
+ * @param {number} stream  The rasterized stream.
+ * @param {TranslatedShader} ps
+ * @param {{ targets?: readonly number[],
+ *     depthBias?: { units: number, slope: number, clamp: number } }} [options]
+ * @returns {LinkedProgram}
+ */
+export function linkGeometryDraw(gs, stage, stream, ps, options = {}){
+    const outputs = stage.outputRegisters;
+    /** @type {TranslatedShader} */
+    const drawn = {
+        ...NO_PIXEL_SHADER,
+        kind: SHADER_KIND.VERTEX,
+        inputs: [],
+        outputs: gs.outputs.filter(element=>(element.stream ?? 0) === stream),
+        outputRegisters: outputs,
+        body: [
+            ...Array.from({ length: outputs }, (_, index)=>
+                `    o${index} = gsVertices[gsVertex * ${outputs}u + ${index}u];`),
+            { ret: true },
+        ],
+    };
+    return linkProgram(drawn, ps, { ...options, vertexLoad: {
+        text: [`@group(2) @binding(${GEOMETRY_DRAW_BINDING.vertices}) var<storage, read> `
+            + `gsVertices: array<${REG}>;`],
+        params: '@builtin(vertex_index) gsVertex: u32',
+        load: [],
+    } });
 }
 
 /**
