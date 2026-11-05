@@ -2999,8 +2999,10 @@ function vertexPullOf(pull, inputs, registers){
  *     depthBias?: { units: number, slope: number, clamp: number },
  *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
  *     alphaCoverage?: boolean, sampleCount?: number,
- *     earlyDepth?: { compare: string, multisampled: boolean },
- *     viewportPass?: { index: number, count: number } }} [options]  `earlyDepth`: the
+ *     earlyDepth?: { compare: string, multisampled: boolean }, dualSource?: boolean,
+ *     viewportPass?: { index: number, count: number } }} [options]  `dualSource`:
+ *     the first target is blended by the second output as well (D3D11_BLEND_SRC1_*):
+ *     both go to location 0, the second as its second blend source. `earlyDepth`: the
  *     fragment tests itself against the depth buffer, bound read-only at
  *     `BINDING.EARLY_DEPTH`, before the shader runs (`compare` the operator a
  *     fragment's depth passes by, against what the buffer holds), so a rejected
@@ -3354,11 +3356,19 @@ export function linkProgram(vs, ps, options = {}){
             const slot = element.systemValue === SYSTEM_VALUE.TARGET
                 ? element.index : element.register;
             targets.push(slot);
+            const scalar = scalarOf(element.componentType);
+            // The second output is the first target's second blend source,
+            // whatever is bound at the second.
+            if (options.dualSource && slot <= 1)
+            {
+                psOut.push(`    @location(0) @blend_src(${slot}) target${slot}: vec4<${scalar}>,`);
+                psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
+                continue;
+            }
             if (options.targets && !options.targets.includes(slot))
             {
                 continue;
             }
-            const scalar = scalarOf(element.componentType);
             psOut.push(`    @location(${slot}) target${slot}: vec4<${scalar}>,`);
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
@@ -3478,6 +3488,7 @@ export function linkProgram(vs, ps, options = {}){
             + ` vec2<i32>(in.${member}.xy), 0))) { discard; }`);
     }
     const fragment = [
+        ...(options.dualSource ? ['enable dual_source_blending;'] : []),
         'diagnostic(off, derivative_uniformity);',
         ...(ps.rasterizerSamples ? [`const rasterSamples: u32 = ${options.sampleCount ?? 1}u;`]
             : []),

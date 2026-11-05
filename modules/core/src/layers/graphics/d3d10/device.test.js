@@ -1841,7 +1841,13 @@ test('private data is kept per object and an interface entry holds a reference',
     assert.equal(texture.SetPrivateData(guid, 2, Uint8Array.from([7, 8])), S_OK);
     assert.deepEqual(texture.GetPrivateData(guid, { size: 2, wantsData: true }),
         { hr: S_OK, size: 2, data: Uint8Array.from([7, 8]) });
+    // An object gone lets go of the interfaces it held (test_private_data).
+    const kept = other.refCount;
+    assert.equal(texture.SetPrivateDataInterface('{87654321-1234-1234-1234-123456789ABC}',
+        other), S_OK);
+    assert.equal(other.refCount, kept + 1);
     texture.release();
+    assert.equal(other.refCount, kept, 'the texture gone, its reference with it');
 
     assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
     assert.equal(other.refCount, before);
@@ -2187,6 +2193,35 @@ test('a layout of no elements feeds a vertex shader that reads only system value
     empty.layout.release();
     none.layout.release();
     assertFullyReleased(device);
+});
+
+test('Direct3D 11 refuses a null element array, and a slot fed both per vertex and per'
+    + ' instance (test_create_input_layout)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    const device = out.device;
+    const vertexId = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0)), ret()],
+    });
+    /** @type {{ layout?: any }} */
+    const made = {};
+    assert.equal(device.CreateInputLayout(null, vertexId, made), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([], vertexId, made), S_OK);
+    made.layout.release();
+    const element = { SemanticName: 'TEXCOORD', SemanticIndex: 0, Format: 6, InputSlot: 0,
+        AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 };
+    assert.equal(device.CreateInputLayout([element, { ...element, SemanticIndex: 1,
+        AlignedByteOffset: 12, InputSlotClass: 1 }], vertexId, made), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([element, { ...element, SemanticIndex: 1,
+        InputSlot: 1, InputSlotClass: 1 }], vertexId, made), S_OK, 'each slot its own');
+    made.layout.release();
+    device.release();
 });
 
 test('a layout made against a pixel shader feeds its position too: the vertex and instance'

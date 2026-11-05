@@ -628,8 +628,8 @@ export function createDirect3D11Seam(describe, kit, guests){
         CreateInputLayout: (device, [elements, count, code, length, out])=>{
             /** @type {{ layout?: any }} */
             const held = {};
-            const hr = device.CreateInputLayout(k().readInputElements(elements, count >>> 0),
-                bytecodeAt(code, length), held);
+            const hr = device.CreateInputLayout(isNull(elements) ? null
+                : k().readInputElements(elements, count >>> 0), bytecodeAt(code, length), held);
             return hr === S_OK
                 ? k().handBack(held.layout, k().lists.inputLayout, IID.ID3D11InputLayout, out)
                 : failed(out, hr);

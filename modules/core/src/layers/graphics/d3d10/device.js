@@ -58,7 +58,7 @@ import { validStreamOutput } from './streamout.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
-import { createPipelineState } from './pipeline.js';
+import { copyPipeline, createPipelineState } from './pipeline.js';
 import { createDeferredContext, createImmediateContext } from '../d3d11/context.js';
 import { STATE_KIND, createStateStore } from './states.js';
 import {
@@ -1455,9 +1455,22 @@ export function createDevice(options = {}){
             // system values -- a full-screen pass built from SV_VertexID --
             // is fed by it.
             const given = elements ?? [];
-            if (given.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode)
+            // Direct3D 11 takes an empty array, not a null one (test_create_input_layout).
+            if (given.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode
+                || (d3d11 && elements === null))
             {
                 return E_INVALIDARG;
+            }
+            // One slot's elements are all per vertex or all per instance.
+            const classes = new Map();
+            for (const element of given)
+            {
+                const slotClass = element.InputSlotClass ?? 0;
+                if ((classes.get(element.InputSlot) ?? slotClass) !== slotClass)
+                {
+                    return E_INVALIDARG;
+                }
+                classes.set(element.InputSlot, slotClass);
             }
             for (const element of given)
             {
@@ -1815,6 +1828,11 @@ export function createDevice(options = {}){
             }
             const kept = state.capture();
             state.clear();
+            // A list finished keeping its context's bindings starts from them.
+            if (list.start)
+            {
+                state.restore(copyPipeline(list.start));
+            }
             for (const [name, args] of list.calls)
             {
                 if (name === 'Begin' || name === 'End')

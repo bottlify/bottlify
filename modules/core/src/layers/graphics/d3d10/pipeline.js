@@ -185,6 +185,50 @@ function emptyPipeline(){
 /** @typedef {ReturnType<typeof emptyPipeline>} Pipeline */
 
 /**
+ * The bindings as they stand, apart from the ones a context goes on to
+ * change: what a command list starts from (`d3d11/context.js`). The objects
+ * are shared, not held.
+ *
+ * @param {Pipeline} bound
+ * @returns {Pipeline}
+ */
+export function copyPipeline(bound){
+    return {
+        ...bound,
+        stages: /** @type {Pipeline['stages']} */ (Object.fromEntries(Object.entries(bound.stages)
+            .map(([name, stage])=>[name, { shader: stage.shader,
+                constantBuffers: [...stage.constantBuffers],
+                shaderResources: [...stage.shaderResources], samplers: [...stage.samplers] }]))),
+        vertexBuffers: [...bound.vertexBuffers],
+        vertexStrides: [...bound.vertexStrides],
+        vertexOffsets: [...bound.vertexOffsets],
+        renderTargets: [...bound.renderTargets],
+        pixelViews: [...bound.pixelViews],
+        computeViews: [...bound.computeViews],
+        blendFactor: [...bound.blendFactor],
+        viewports: bound.viewports.map(viewport=>({ ...viewport })),
+        scissorRects: bound.scissorRects.map(rect=>({ ...rect })),
+        streamOutput: [...bound.streamOutput],
+        streamOutputOffsets: [...bound.streamOutputOffsets],
+    };
+}
+
+/**
+ * Every object a pipeline binds, once per binding.
+ *
+ * @param {Pipeline} bound
+ * @returns {any[]}
+ */
+export function bindingsOf(bound){
+    return [...Object.values(bound.stages).flatMap(stage=>[stage.shader,
+        ...stage.constantBuffers, ...stage.shaderResources, ...stage.samplers]),
+    bound.inputLayout, ...bound.vertexBuffers, bound.indexBuffer, ...bound.renderTargets,
+    bound.depthStencilView, ...bound.pixelViews, ...bound.computeViews, bound.blendState,
+    bound.depthStencilState, bound.rasterizerState, ...bound.streamOutput, bound.predicate]
+        .filter(Boolean);
+}
+
+/**
  * A context's bindings and the methods over them.
  *
  * @param {{ diverge: (detail: string) => void, uavSlots?: number, keepsBound?: boolean,

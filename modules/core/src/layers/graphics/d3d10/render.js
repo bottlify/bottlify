@@ -131,6 +131,10 @@ const COMPARE = Object.freeze({
     [D3D10_COMPARISON.ALWAYS]: 'always',
 });
 
+/** The formats whose fourth byte is unused, kept on the GPU as an alpha of one. */
+const X8_FORMATS = new Set([DXGI_FORMAT.B8G8R8X8_UNORM, DXGI_FORMAT.B8G8R8X8_UNORM_SRGB,
+    DXGI_FORMAT.B8G8R8X8_TYPELESS]);
+
 /** The most vec4 registers a constant buffer binds (D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT). */
 const MAX_CONSTANTS = 4096;
 
@@ -157,8 +161,9 @@ const STENCIL_OP = Object.freeze({
 });
 
 /**
- * The dual-source factors have no counterpart and are absent; a state that
- * names one is refused at draw time by name.
+ * The dual-source factors blend by the pixel shader's second output, which
+ * a device has only with its dual-source-blending feature; without it a
+ * state that names one is refused at draw time by name.
  *
  * @type {Readonly<Record<number, string>>}
  */
@@ -176,7 +181,15 @@ const BLEND_FACTOR = Object.freeze({
     [D3D10_BLEND.SRC_ALPHA_SAT]: 'src-alpha-saturated',
     [D3D10_BLEND.BLEND_FACTOR]: 'constant',
     [D3D10_BLEND.INV_BLEND_FACTOR]: 'one-minus-constant',
+    [D3D10_BLEND.SRC1_COLOR]: 'src1',
+    [D3D10_BLEND.INV_SRC1_COLOR]: 'one-minus-src1',
+    [D3D10_BLEND.SRC1_ALPHA]: 'src1-alpha',
+    [D3D10_BLEND.INV_SRC1_ALPHA]: 'one-minus-src1-alpha',
 });
+
+/** The factors that blend by the pixel shader's second output. */
+const DUAL_SOURCE = new Set([D3D10_BLEND.SRC1_COLOR, D3D10_BLEND.INV_SRC1_COLOR,
+    D3D10_BLEND.SRC1_ALPHA, D3D10_BLEND.INV_SRC1_ALPHA]);
 
 /** @type {Readonly<Record<number, string>>} */
 const BLEND_OP = Object.freeze({
@@ -682,6 +695,8 @@ export function createRenderer(services){
      * @property {LevelGeometry[]} levels
      * @property {number} sliceBytes     One array slice, every level of it.
      * @property {number} slices
+     * @property {boolean} [opaque]  A format whose fourth byte is unused (B8G8R8X8): the
+     *     GPU keeps it as an alpha of one, which sampling and blending read.
      */
 
     /**
@@ -731,6 +746,7 @@ export function createRenderer(services){
         return {
             format: storage ? storage.format : null,
             storage,
+            ...(X8_FORMATS.has(desc.Format) ? { opaque: true } : {}),
             texelBytes: info ? info.bytesPerPixel : 4,
             blockEdge: info ? info.blockEdge : 1,
             levels,
@@ -1207,6 +1223,15 @@ export function createRenderer(services){
      */
     const texelsForGpu = (layout, geometry, bytes)=>{
         const conversion = layout.storage ? layout.storage.conversion : null;
+        if (!conversion && layout.opaque)
+        {
+            const data = bytes.slice();
+            for (let at = 3; at < data.length; at += 4)
+            {
+                data[at] = 0xff;
+            }
+            return { data, bytesPerRow: geometry.rowPitch };
+        }
         if (!conversion)
         {
             return { data: bytes, bytesPerRow: geometry.rowPitch };
@@ -2180,6 +2205,13 @@ export function createRenderer(services){
         const pulling = state.hullShader || state.geometry ? null
             : vertexPullOf(state.inputLayout, state.strides, state.indirect, state.vertexShader);
         const [layerIndex, layerCount] = (state.layerPass || '').split('/').map(Number);
+        // The first target blended by the shader's second output: both
+        // outputs go to it (`dualSource` in `linkProgram`).
+        const firstBlend = blendTargetsOf(state.blendState).targets[0];
+        const dualSource = backend.hasFeature?.('dual-source-blending') === true
+            && !!firstBlend?.BlendEnable && [firstBlend.SrcBlend, firstBlend.DestBlend,
+            firstBlend.SrcBlendAlpha, firstBlend.DestBlendAlpha].some(factor=>
+            DUAL_SOURCE.has(factor));
         const linking = { targets: bound, depthBias: emulatedBias, sampleCount: state.sampleCount,
             alphaCoverage: !!blendTargetsOf(state.blendState).alphaToCoverage
                 && state.sampleCount === 1,
@@ -2188,6 +2220,7 @@ export function createRenderer(services){
             ...(state.viewportPass ? { viewportPass: { index: Number(state.viewportPass
                 .split('/')[0]), count: Number(state.viewportPass.split('/')[1]) } } : {}),
             ...(pulling ? { vertexPull: pulling.pull } : {}),
+            ...(dualSource ? { dualSource } : {}),
             ...(state.earlyDepth ? { earlyDepth: {
                 compare: state.earlyDepth.split(':')[0],
                 multisampled: state.earlyDepth.endsWith(':ms') } } : {}) };
@@ -2241,9 +2274,11 @@ export function createRenderer(services){
             for (const factor of [target.SrcBlend, target.DestBlend, target.SrcBlendAlpha,
                 target.DestBlendAlpha])
             {
-                if (target.BlendEnable && !BLEND_FACTOR[factor])
+                if (target.BlendEnable && (!BLEND_FACTOR[factor]
+                    || (DUAL_SOURCE.has(factor) && !dualSource)))
                 {
-                    throw new Error(`blend factor ${factor} has no counterpart`);
+                    throw new Error(`blend factor ${factor} has no counterpart`
+                        + `${DUAL_SOURCE.has(factor) ? ' without dual-source-blending' : ''}`);
                 }
             }
             if (target.BlendEnable && !blendable(format) && !/int$/.test(format))
@@ -2515,8 +2550,10 @@ export function createRenderer(services){
             texture,
             format,
             sampleCount: backing.sampleCount,
-            // What a draw writes, when the format keeps less than the texture does.
-            writeMask: desc.Format === DXGI_FORMAT.A8_UNORM ? 0x8 : 0xf,
+            // What a draw writes, when the format keeps less than the texture
+            // does: B8G8R8X8's unused byte stays the alpha of one it reads as.
+            writeMask: desc.Format === DXGI_FORMAT.A8_UNORM ? 0x8
+                : X8_FORMATS.has(desc.Format) ? 0x7 : 0xf,
             // A depth view's D3D11_DSV_FLAG bits: the aspects it leaves unwritten.
             readOnly: (desc.Flags ?? 0)
                 & (D3D11_DSV_FLAG.READ_ONLY_DEPTH | D3D11_DSV_FLAG.READ_ONLY_STENCIL),
@@ -4379,7 +4416,9 @@ export function createRenderer(services){
                 for (const target of slices)
                 {
                     target.backing.gpuDirty = true;
-                    record({ kind: 'clear', target, color: [...color] });
+                    record({ kind: 'clear', target, color: (target.writeMask & 0x8) === 0
+                        && target.writeMask !== 0 ? [color[0], color[1], color[2], 1]
+                        : [...color] });
                 }
             });
         },

@@ -34,6 +34,7 @@ export const E_FAIL = 0x80004005;
 export const E_INVALIDARG = 0x80070057;
 export const E_NOINTERFACE = 0x80004002;
 export const E_OUTOFMEMORY = 0x8007000e;
+export const E_UNEXPECTED = 0x8000ffff;
 export const DXGI_STATUS_OCCLUDED = 0x087a0001;
 export const DXGI_ERROR_INVALID_CALL = 0x887a0001;
 export const DXGI_ERROR_NOT_FOUND = 0x887a0002;

@@ -369,6 +369,56 @@ test('from level 11_0 a viewport corner left of or above the target is floored t
     assert.deepEqual(rects.at(-1), [0.25, 0], 'a corner inside the target is kept as it is');
 });
 
+test('a command list finished keeping its context\'s bindings starts from them where it plays;'
+    + ' one with nowhere to go is dropped (test_deferred_context_rendering)', async()=>{
+    const h = harness();
+    const target = texture2D(h, DXGI_FORMAT.R8G8B8A8_UNORM, D3D10_BIND.RENDER_TARGET, 4, 4);
+    /** @type {{ view?: any, views?: any[], shader?: any, context?: any, list?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateRenderTargetView(target, null, made), S_OK);
+    const rtv = made.view;
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    assert.equal(h.device.CreateVertexShader(assemble({ kind: SHADER_KIND.VERTEX, outputs:
+        [POSITION], instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+        mov(o(0), l(0, 0, 0.5, 1)), ret()] }), made), S_OK);
+    const vs = made.shader;
+    assert.equal(h.device.CreateDeferredContext(0, made), S_OK);
+    const deferred = made.context;
+    deferred.OMSetRenderTargets([rtv], null);
+    deferred.VSSetShader(vs, null, 0);
+    deferred.IASetPrimitiveTopology(4);
+    deferred.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 4, Height: 4, MinDepth: 0,
+        MaxDepth: 1 }]);
+    assert.equal(deferred.FinishCommandList(true, made), S_OK);
+    made.list.release();
+    deferred.Draw(3, 0);
+    assert.equal(deferred.FinishCommandList(false, made), S_OK);
+    const drawing = made.list;
+    deferred.Draw(3, 0);
+    assert.equal(deferred.FinishCommandList(false, null), 0x8000ffff, 'E_UNEXPECTED');
+    assert.equal(deferred.FinishCommandList(false, made), S_OK);
+    const dropped = made.list;
+    assert.deepEqual(dropped.calls, [], 'what was recorded went with the refused list');
+    h.context.ExecuteCommandList(drawing, false);
+    h.context.ExecuteCommandList(dropped, false);
+    h.context.Flush();
+    await h.device.idle();
+    assert.equal(h.gpu.count('draw'), 1, 'drawn with the bindings the list started from');
+    // A list played into a deferred context leaves its bindings cleared,
+    // unless it is asked to keep them (test_deferred_context_state).
+    deferred.OMSetRenderTargets([rtv], null);
+    deferred.ExecuteCommandList(dropped, true);
+    deferred.OMGetRenderTargets(1, made, null);
+    assert.equal(made.views?.[0], rtv);
+    deferred.ExecuteCommandList(dropped, false);
+    /** @type {any} */
+    const after = {};
+    deferred.OMGetRenderTargets(1, after, null);
+    assert.equal(after.views?.[0], null);
+    drawing.release();
+    dropped.release();
+});
+
 test('a clear of a buffer view writes its range in turn; of a texture, by a dispatch over it',
     async()=>{
         const h = harness();

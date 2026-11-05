@@ -28,6 +28,8 @@
  *  - indirect-first-instance: an indirect draw whose arguments a shader wrote
  *    may start past instance zero;
  *  - bgra8unorm-storage: a compute shader may write a BGRA texture;
+ *  - dual-source-blending: a blend by the pixel shader's second output
+ *    (D3D11_BLEND_SRC1_*); without it such a state's draws are refused;
  *  - timestamp-query, in a diagnostics build only: the GPU's time for each
  *    pass (`internal/gputime.js`).
  */
@@ -35,7 +37,7 @@ export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
     'texture-compression-astc', 'depth-clip-control', 'clip-distances', 'float32-filterable',
     'float32-blendable', 'depth32float-stencil8', 'texture-formats-tier1',
     'rg11b10ufloat-renderable',
-    'indirect-first-instance', 'bgra8unorm-storage',
+    'indirect-first-instance', 'bgra8unorm-storage', 'dual-source-blending',
     ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false ? ['timestamp-query'] : [])]);
 
 /**

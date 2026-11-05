@@ -1541,6 +1541,52 @@ test('a 10.1 blend state blends each target by its own description', async()=>{
     assert.equal(one.writeMask, 0x7);
 });
 
+test('a blend by the shader\'s second output takes both outputs to the first target where the'
+    + ' GPU has dual-source-blending, and is refused by name where not (test_dual_source_blend)',
+async()=>{
+    /** @param {string[]} features */
+    const drawn = async features=>{
+        const h = harness({ fake: { features } });
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        const first = renderTarget(h);
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(device.CreatePixelShader(multiTargetPixelShader([0, 1]), ps), S_OK);
+        device.PSSetShader(ps.shader);
+        const plain = { BlendEnable: false, SrcBlend: D3D10_BLEND.ONE,
+            DestBlend: D3D10_BLEND.ZERO, BlendOp: D3D10_BLEND_OP.ADD,
+            SrcBlendAlpha: D3D10_BLEND.ONE, DestBlendAlpha: D3D10_BLEND.ZERO,
+            BlendOpAlpha: D3D10_BLEND_OP.ADD, RenderTargetWriteMask: 0xf };
+        /** @type {{ state?: any }} */
+        const blend = {};
+        assert.equal(device.CreateBlendState1({
+            AlphaToCoverageEnable: false, IndependentBlendEnable: false,
+            RenderTarget: [{ ...plain, BlendEnable: true, SrcBlend: D3D10_BLEND.SRC1_COLOR,
+                DestBlend: D3D10_BLEND.INV_SRC1_ALPHA }, plain, plain, plain, plain, plain, plain,
+            plain],
+        }, blend), S_OK);
+        device.OMSetBlendState(blend.state, null, 0xffffffff);
+        device.OMSetRenderTargets([first.view], null);
+        device.Draw(3, 0);
+        await h.present();
+        return h;
+    };
+    const dual = await drawn(['dual-source-blending']);
+    const pipeline = dual.gpu.of('createRenderPipeline').at(-1).descriptor;
+    assert.deepEqual(pipeline.fragment.targets[0].blend.color, { srcFactor: 'src1',
+        dstFactor: 'one-minus-src1-alpha', operation: 'add' });
+    const fragment = dual.gpu.of('createShaderModule').at(-1).descriptor.code;
+    assert.match(fragment, /enable dual_source_blending;/);
+    assert.match(fragment, /@location\(0\) @blend_src\(0\) target0: /);
+    assert.match(fragment, /@location\(0\) @blend_src\(1\) target1: /);
+    assert.equal(dual.gpu.count('draw'), 1);
+    const single = await drawn([]);
+    assert.equal(single.gpu.count('draw'), 0);
+    assert.ok(single.divergences.some(said=>/without dual-source-blending/.test(said)),
+        single.divergences.join('\n'));
+});
+
 test('a render target of another size than the first is not drawn into, and says so',
     async()=>{
         const h = harness();
@@ -1609,6 +1655,39 @@ test('a float target\'s slice past the first is read back through a staging copy
     assert.equal(staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
     assert.equal(mapped.data?.length, 4 * 4 * 8);
     staging.resource.Unmap(0);
+});
+
+test('a B8G8R8X8 target keeps its unused byte an alpha of one: cleared so, never drawn into,'
+    + ' uploaded so (test_blend)', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    const bytes = new Uint8Array(64).fill(0x11);
+    /** @type {{ resource?: any }} */
+    const target = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.B8G8R8X8_UNORM,
+        BindFlags: D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE },
+    [{ pSysMem: bytes, SysMemPitch: 16, SysMemSlicePitch: 0 }], target), S_OK);
+    /** @type {{ view?: any }} */
+    const rtv = {};
+    assert.equal(device.CreateRenderTargetView(target.resource, null, rtv), S_OK);
+    device.OMSetRenderTargets([rtv.view], null);
+    device.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 4, Height: 4, MinDepth: 0,
+        MaxDepth: 1 }]);
+    device.ClearRenderTargetView(rtv.view, [0.5, 0.5, 0.5, 0]);
+    device.Draw(3, 0);
+    await h.present();
+    const upload = h.gpu.of('writeTexture').find((/** @type {any} */ call)=>
+        call.bytes?.length === 64);
+    assert.ok(upload, 'the texels sent');
+    assert.deepEqual([...upload.bytes.subarray(0, 8)], [0x11, 0x11, 0x11, 0xff, 0x11, 0x11, 0x11,
+        0xff]);
+    const pass = h.gpu.of('beginRenderPass').find((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments[0]?.loadOp === 'clear');
+    assert.equal(pass.descriptor.colorAttachments[0].clearValue.a, 1);
+    const pipeline = h.gpu.of('createRenderPipeline').at(-1);
+    assert.equal(pipeline.descriptor.fragment.targets[0].writeMask, 0x7);
 });
 
 test('an A8 target comes back to a staging copy as the alpha of the RGBA it is kept as'
