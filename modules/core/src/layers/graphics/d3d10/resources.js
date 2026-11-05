@@ -355,7 +355,8 @@ export function createResource(options){
             }
             const bind = options.desc.BindFlags ?? 0;
             return ((bind & D3D10_BIND.SHADER_RESOURCE) !== 0 ? DXGI_USAGE.SHADER_INPUT : 0)
-                | ((bind & D3D10_BIND.RENDER_TARGET) !== 0 ? DXGI_USAGE.RENDER_TARGET_OUTPUT : 0);
+                | ((bind & D3D10_BIND.RENDER_TARGET) !== 0 ? DXGI_USAGE.RENDER_TARGET_OUTPUT : 0)
+                | ((bind & D3D11_BIND_UNORDERED_ACCESS) !== 0 ? DXGI_USAGE.UNORDERED_ACCESS : 0);
         },
     }, {
         interfaces: options.interfaces,

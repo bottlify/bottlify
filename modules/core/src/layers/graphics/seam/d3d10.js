@@ -1595,9 +1595,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     const resourceBases = [
         describe(IID.ID3D10Resource, ID3D10RESOURCE_SLOTS, resourceMethods),
         describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, resourceMethods),
+        // IDXGIResource derives from IDXGIDeviceSubObject and IDXGIObject:
+        // asked for either, a resource hands back its IDXGIResource pointer
+        // (test_dxgi_resource).
         ...describeAll([
             [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
             [IID.IDXGIDeviceSubObject, IDXGIDEVICESUBOBJECT_SLOTS],
+        ], dxgiResourceMethods).map(face=>({ ...face, sharedWith: IID.IDXGIResource })),
+        ...describeAll([
             [IID.IDXGIResource, IDXGIRESOURCE_SLOTS],
             [IID.IDXGISurface, IDXGISURFACE_SLOTS],
             [IID.IDXGISurface1, IDXGISURFACE1_SLOTS],

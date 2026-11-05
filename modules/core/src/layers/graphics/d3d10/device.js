@@ -999,7 +999,12 @@ export function createDevice(options = {}){
             diverge(`${call} between a resource and itself, or with a null resource, is ignored`);
             return false;
         }
-        if (destination.dimension !== source.dimension)
+        // A region moves between textures of any shape: a slice of a volume
+        // to or from a 2D texture's (test_copy_subresource_region_3d).
+        const textures = destination.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER
+            && source.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER;
+        if (destination.dimension !== source.dimension
+            && !(textures && call === 'CopySubresourceRegion'))
         {
             diverge(`${call} between resources of different kinds is ignored`);
             return false;

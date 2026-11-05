@@ -2367,7 +2367,9 @@ export function createRenderer(services){
                 },
                 destination: {
                     texture: to.texture, mipLevel: dst.level,
-                    origin: { x: at.x, y: at.y, z: is3D ? at.z : dst.slice },
+                    origin: { x: at.x, y: at.y,
+                        z: destination.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? at.z
+                            : dst.slice },
                 },
                 size,
             });
