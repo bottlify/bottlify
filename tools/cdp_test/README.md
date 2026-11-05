@@ -264,6 +264,18 @@ lists (Wine's spec files, fetched once into DIR by `--fetch-specs DIR` and not
 kept in the repository): a function a program looks up by name that this
 build does not export is a NULL it may call.
 
+`tools/isa-audit.mjs <file|directory|bundle.btl|disc.iso>...` reads the code of
+every PE image under the paths and counts the instruction set extensions it
+uses: those the engine executes (SSE3 to SSE4.2, POPCNT, MOVBE), those it
+answers #UD to as the processor it presents (AVX, AVX2, FMA, F16C, BMI1/2,
+AVX-512, AES, SHA, ADX, XSAVE), and LZCNT, which runs there as BSR. Code is
+followed along its branches from each function an x86-64 image's `.pdata`
+lists (from the entry, exports and relocated addresses of an i386 one), so data
+among a function's instructions is never counted. Its verdict tells a program
+built for an extension (in most of its functions) from one that picks a path
+by cpuid and xgetbv (in a few). Run it with the import audit, before a title's
+first run.
+
 [`tools/vcredist-matrix.mjs`](../vcredist-matrix.mjs) runs Microsoft's own Visual C++ runtimes
 in Node -- vcomp.dll (2005) and msvcr90.dll (2008), whose DllMain checks that it was loaded
 through an activation context -- in seven deployment layouts each, and says where each runs
