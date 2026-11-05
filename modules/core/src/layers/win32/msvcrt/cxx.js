@@ -5,26 +5,18 @@
  */
 
 /**
- * Runtime type information, as the compiler laid it out.
- *
- * `dynamic_cast` is a library call rather than an instruction, and the data it
- * reads is a graph the compiler emitted into the image: the object's vtable is
+ * Runtime type information, as the compiler laid it out: the object's vtable is
  * preceded by a pointer to a "complete object locator", which names the type
- * and points at a hierarchy descriptor, which points at an array of base-class
- * descriptors, each of which carries the offset from the complete object to
- * that base. The cast is a search of that array for the requested type,
- * followed by an offset adjustment -- and the adjustment is the part that
- * matters, because a cast to the wrong offset returns a pointer that is not
- * null, passes every check the program makes, and is a different object.
+ * and how far into the complete object the subobject sits. `dynamic_cast`,
+ * which walks the rest of the graph in an engine's inner loops, runs in the
+ * guest (`inguest-rtti.js`).
  *
  * Nothing here is guessed: the layouts below are what the compiler writes, and
  * the field offsets are as fixed as an instruction encoding.
  */
 
-/** Offsets in the structures dynamic_cast walks, all 32-bit fields. */
-const LOCATOR = { OFFSET: 4, TYPE: 12, HIERARCHY: 16 };
-const HIERARCHY = { COUNT: 8, BASES: 12 };
-const BASE = { TYPE: 0, MDISP: 8, PDISP: 12, VDISP: 16 };
+/** Offsets in the complete object locator, 32-bit fields. */
+const LOCATOR = { OFFSET: 4, TYPE: 12 };
 
 /** A type descriptor's decorated name begins here, after two reserved words. */
 const TYPE_NAME = 8;
@@ -77,38 +69,6 @@ export function createCxxFunctions(host){
     /** The locator sits at vtable[-1], one slot below what the object points at. */
     const locatorOf = (/** @type {number} */ object)=>readU32(readU32(object) - 4);
 
-    /**
-     * Two type descriptors are the same type when they are the same address,
-     * and also when they carry the same decorated name: a type used in two
-     * images has a descriptor in each, and a cast across that boundary is the
-     * case a pointer comparison alone gets wrong.
-     *
-     * @param {number} left @param {number} right
-     */
-    const sameType = (left, right)=>left === right
-        || host.readCString(left + TYPE_NAME, 512) === host.readCString(right + TYPE_NAME, 512);
-
-    /**
-     * Where a base class sits inside the complete object.
-     *
-     * A non-virtual base is a constant offset. A virtual one is reached through
-     * the object's own virtual-base table, so the offset is not known until
-     * there is an object to read it from.
-     *
-     * @param {number} complete  Address of the complete object.
-     * @param {number} descriptor
-     */
-    const offsetOf = (complete, descriptor)=>{
-        const mdisp = readI32(descriptor + BASE.MDISP);
-        const pdisp = readI32(descriptor + BASE.PDISP);
-        if (pdisp < 0)
-        {
-            return mdisp;
-        }
-        const vbTable = readU32(complete + pdisp);
-        return mdisp + pdisp + readI32(vbTable + readI32(descriptor + BASE.VDISP));
-    };
-
     return {
         /**
          * _EH_prolog: the frame setup a function with C++ unwinding calls
@@ -126,46 +86,6 @@ export function createCxxFunctions(host){
          * host handler's answer would land in EAX over the checked call's.
          */
         _chkesp: { code: ()=>CHKESP_CODE },
-
-        /**
-         * void *__RTDynamicCast(void *object, LONG delta, void *from,
-         *                       void *to, BOOL isReference)
-         *
-         * The `delta` argument is the offset from the pointer the caller holds
-         * to the start of its own subobject; the locator's offset then reaches
-         * the complete object from there. Ignoring either one casts from the
-         * wrong place and finds the wrong base.
-         */
-        __RTDynamicCast: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([object, delta, from, to])=>{
-                if ((object >>> 0) === 0)
-                {
-                    return 0;
-                }
-                void from;
-                const subobject = object - (delta | 0);
-                const locator = locatorOf(subobject);
-                const complete = subobject - readI32(locator + LOCATOR.OFFSET);
-
-                const hierarchy = readU32(locator + LOCATOR.HIERARCHY);
-                const count = readU32(hierarchy + HIERARCHY.COUNT);
-                const bases = readU32(hierarchy + HIERARCHY.BASES);
-                for (let index = 0; index < count; index++)
-                {
-                    const descriptor = readU32(bases + index * 4);
-                    if (sameType(readU32(descriptor + BASE.TYPE), to >>> 0))
-                    {
-                        return complete + offsetOf(complete, descriptor);
-                    }
-                }
-                // Not a base of this object: the cast fails, and for a pointer
-                // that is a null result rather than an exception.
-                return 0;
-            },
-        },
 
         /**
          * void *__RTCastToVoid(void *object)

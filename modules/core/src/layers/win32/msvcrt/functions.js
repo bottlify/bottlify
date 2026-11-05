@@ -39,6 +39,8 @@ import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
+import * as inGuestRtti from './inguest-rtti.js';
+import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
@@ -1322,6 +1324,8 @@ export function createMsvcrtFunctions(host){
             ...host.currentThread ? { currentThread: host.currentThread } : {},
         }),
         ...createCxxFunctions(host),
+        // An engine's inner loops cast: in the guest, not a crossing a cast.
+        __RTDynamicCast: guestEntry(inGuestRtti.__RTDynamicCast, RTTI_CODE.__RTDynamicCast, host),
         ...createProcessFunctions({
             errno,
             readCString: readString,
