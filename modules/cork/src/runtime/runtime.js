@@ -69,6 +69,9 @@ const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87)
 const FORMS_REGIONS = 300;
 const FORMS_SHARE = 0.95;
 const FORMS_EVERY_MS = 30_000;
+/** How many addresses forced steps are counted for (`forcedAt`): the first met, which in a
+ * loop that forces are the ones that go on forcing. */
+const FORCED_KEPT = 256;
 
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
@@ -311,6 +314,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // (`readsFaulted`): a program that never goes near one pays nothing.
         // True tests from the start, false never.
         checkReads: undefined,
+        // Whether the guest's first page is the RAM's zeros, which nothing writes and
+        // a store there faults (the host's `zeroReadsBelow` over it): a tested window
+        // of reads inside it reads them in place rather than leaving to the host.
+        zeroPage: false,
         // Locked instructions as wasm atomics, each one indivisible on the shared
         // memory: for a process whose threads run on more than one executor.
         // Off, a process on one executor pays nothing.
@@ -1097,6 +1104,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // Turns the host retired nothing in and forced one interpreted
     // instruction through, so a slice always moves (the progress guarantee).
     let forcedSteps = 0;
+    /** Forced steps by address, for the first `FORCED_KEPT` addresses met.
+     * @type {Map<number, { count: number, top: number, why: string }>} */
+    const forcedAt = new Map();
     // The counter word folded the way the layer folds it: exact as long as
     // reads come less than 2^32 instructions apart.
     let counted = 0;
@@ -1981,6 +1991,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         structure: settings.structure,
         precise: settings.precise === true,
         checkReads: readsChecked,
+        zeroPage: settings.zeroPage === true,
         atomic: settings.atomic === true,
         ordered: settings.atomic === true && settings.ordered === true,
         looseStacks: loose,
@@ -5403,9 +5414,17 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
         },
         /** One turn the host forced an interpreted instruction through, for
-         * the progress guarantee's diagnostics. */
-        forcedStep(){
+         * the progress guarantee's diagnostics: where, at what x87 top, and why,
+         * kept for the busiest addresses (`forcedAt`).
+         * @param {number} [at] @param {number} [top] @param {string} [why] */
+        forcedStep(at, top, why){
             forcedSteps++;
+            if (at !== undefined && (forcedAt.size < FORCED_KEPT || forcedAt.has(at)))
+            {
+                const one = forcedAt.get(at) ?? { count: 0, top: top ?? -1, why: why ?? '' };
+                one.count++;
+                forcedAt.set(at, one);
+            }
         },
         // The numbers a slice's counters want, and nothing that costs more
         // than reading them: the frame counters ask every slice, and the
@@ -5593,6 +5612,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // misbehaves only without `precise` is looked for here first.
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
+                // The addresses most forced, busiest first, as "0x401000 x5000 top 3 why".
+                forcedAt: [...forcedAt].sort((a, b)=>b[1].count - a[1].count).slice(0, 10)
+                    .map(([at, one])=>`0x${at.toString(16)} x${one.count}`
+                        + ` top ${one.top} ${one.why}`),
                 worker: translatorReady() ? 'ready' : translatorLoading() ? 'loading' : 'none',
                 translators: translators.length,
                 translatorsReady: translators.filter(one=>one.ready).length,

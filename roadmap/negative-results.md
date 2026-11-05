@@ -2551,3 +2551,39 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   it. The next step is a profile of the drop frames themselves (`tools/drop-profile.mjs`).
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
 - **Decision.** No change; V8's defaults stay.
+
+
+### 2026-11-05: a smaller share of the engine thread for the translator (holdShare 0.15)
+
+- **Idea.** The translator's work on the engine thread refills at half the time that passes
+  (`holdShare` 0.5, with `holdMs` 4); a smaller share would leave a frame more of its time when a
+  scene meets new code, and fewer frames would drop there.
+- **Workload.** 3DMark2001 SE bundle (bundle.btl sha256 d0af85f2...), route `--press Benchmark`,
+  `game.mjs --worker --store local --prefetch --run-seconds 130 --cork '{"timings":true,
+  "holdShare":S}'` on a fresh browser profile each run, the arms alternated, two runs each;
+  hardware WebGPU adapter (adapter info empty), Chrome version not recorded; review at c8b065ddd.
+- **Values.** Car Chase low, fps / 1% low / drops: 0.5: 135.7 / 10.4 / 236 and 145.7 / 11.8 /
+  205; 0.15: 115.3 / 9.8 / 234 and 117.7 / 9.3 / 204.
+- **Why.** The drops on new code are not the translator's share of the thread: a dropped frame's
+  profile (`tools/drop-profile.mjs`) holds about 3 ms of translating beside more Direct3D work
+  and more time in a few regions; a smaller share only kept code interpreted longer.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** `holdShare` stays 0.5; the setting stays for the next measurement.
+
+
+### 2026-11-05: wasm compiled straight to TurboFan against 3DMark2001 SE's drops on new code
+
+- **Idea.** V8 runs a new wasm function in its baseline tier (Liftoff) until it has run enough
+  to be compiled again by TurboFan (`--wasm-dynamic-tiering`); regions met for the first time
+  would run slow meanwhile, and the frames that met them drop. Compiling every function by
+  TurboFan, eagerly, where the module is made would remove that.
+- **Workload.** As the holdShare entry above, `--cork '{"timings":true}'`, the arm
+  `--chrome-flag --js-flags=--no-wasm-dynamic-tiering,--no-wasm-lazy-compilation`, alternated,
+  two runs each.
+- **Values.** Car Chase low, fps / 1% low / drops: default 112.0 / 7.0 / 240 (and a second run
+  whose scenes fell differently); TurboFan 64.7 / 8.6 / 117 and 52.2 / 6.2 / 231. Car Chase high
+  86.7 / 13.2 / 37 against 47.0 / 6.4 / 74 and 20.1 / 3.1 / 102.
+- **Why.** Compiling every function by TurboFan costs more, on whatever thread compiles it, than
+  the baseline tier's slower first runs: the frames fell to half.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
+- **Decision.** V8's defaults stay.

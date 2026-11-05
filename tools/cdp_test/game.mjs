@@ -928,6 +928,7 @@ function describeCork(cork, say){
         + `  barren: ${cork.barren ?? 0}`
         + `  queueDrops: ${cork.queueDrops ?? 0}`
         + `  forced steps: ${cork.forcedSteps ?? 0}`
+        + ((cork.forcedAt ?? []).length > 0 ? ` (${cork.forcedAt.join(', ')})` : '')
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
         + ` (no record ${cork.missNoRecord ?? 0}, another region ${cork.missChanged ?? 0},`
         + ` no module ${cork.missNoModule ?? 0}; ${cork.formedAsRecorded ?? 0} hits formed`

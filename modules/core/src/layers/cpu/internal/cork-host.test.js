@@ -971,3 +971,36 @@ test('interpretedSteps counts what the interpreters retired, not zero', ()=>{
     assert.ok(h.interpretedSteps() > 0, 'a frame can tell code met for the first time');
     assert.ok(h.interpretedSteps() <= h.instructionCount());
 });
+
+test('a tested read of the null page reads its zeros in translated code, not at the host',
+    async()=>{
+        // mov ebx, base; mov ecx, 3000; L: mov eax, [ebx+4]; add esi, eax;
+        // mov edx, [ebx+8]; add edi, edx; dec ecx; jnz L; hlt -- at 0x20000: a getter
+        // called on a null object, as 3DMark2001 SE's engine calls one.
+        /** @param {number} base @param {boolean} zeroPage */
+        const run = async(base, zeroPage)=>{
+            const h = host({ closedBelow: 0x10000, zeroReadsBelow: 0x10000,
+                cork: { checkReads: true, wasmInterpreter: true, wasmInterpreterAfter: 0,
+                    zeroPage } });
+            load(h, 0x20000, [0xbb, base & 0xff, base >>> 8 & 0xff, 0, 0, 0xb9, 0xb8, 0x0b, 0, 0,
+                0x8b, 0x43, 0x04, 0x01, 0xc6, 0x8b, 0x53, 0x08, 0x01, 0xd7, 0x49, 0x75, 0xf3,
+                0xf4]);
+            for (let slices = 0; !h.halted() && slices < 10_000; slices++)
+            {
+                h.runSlice(1000);
+                await h.cork().translatePending();
+            }
+            assert.ok(h.halted(), 'ran to its end');
+            assert.equal(h.readReg32('esi'), 0, 'read as zeros');
+            assert.equal(h.readReg32('edi'), 0, 'read as zeros, never the engine\'s bytes');
+            const { untranslatedBy, forcedSteps } = h.cork().diagnostics();
+            return { held: untranslatedBy.held, forcedSteps };
+        };
+        assert.deepEqual(await run(0, true), { held: 0, forcedSteps: 0 },
+            'the first page\'s reads stay in translated code');
+        const without = await run(0, false);
+        assert.ok(without.held > 1000, `without zeroPage each round left: ${without.held}`);
+        const engineState = await run(0x2000, true);
+        assert.ok(engineState.held > 1000, 'a read of the engine\'s state still leaves, for zeros');
+    });
+

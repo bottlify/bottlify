@@ -215,10 +215,22 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
         b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
             .load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
     }
+    // A read inside the guest's first page reads the RAM's zeros there (`zeroPage`),
+    // as a window of them does (`emitGroupChecks`).
+    const inZeroPage = e.context.zeroPage === true && !store && !window;
+    if (inZeroPage)
+    {
+        b.localGet(Local.addr).i32const(0x1001 - size).op(I32.geU);
+        e.openGuard('pastZeroPage', EMPTY);
+    }
     b.localGet(Local.pflags).i32const(PageFlag.INACCESSIBLE).op(I32.and);
     e.openGuard('inaccessible', EMPTY);
     faultHere(e, counted);
     e.close();
+    if (inZeroPage)
+    {
+        e.close();
+    }
     if (noting)
     {
         b.localGet(Local.pflags).i32const(STORE_FLAGS).op(I32.and);
@@ -1766,6 +1778,17 @@ export function emitGroupChecks(e, checks, at = -1){
             b.localGet(Local.t64).op(I64.wrap);
             leaveIf('beyond');
         }
+        // A window of reads inside the guest's first page reads the RAM's zeros there
+        // (`zeroPage`): nothing writes that page and a store to it faults. A program
+        // that calls a getter on a null object reads it each call, and leaving to the
+        // host for it each time was most of a warm run's turns (3DMark2001 SE).
+        const inZeroPage = e.context.zeroPage === true && !stores && e.width.bits !== 64
+            && group.width <= 0x1000;
+        if (inZeroPage)
+        {
+            b.localGet(Local.addr).i32const(0x1001 - group.width).op(I32.geU);
+            e.openGuard('pastZeroPage', EMPTY);
+        }
         const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
         b.localGet(Local.addr).i32const(group.width - 1).i32const(first[0]).i32const(first[1])
             .call(e.context.windowHit);
@@ -1776,6 +1799,10 @@ export function emitGroupChecks(e, checks, at = -1){
                 .call(e.context.spanHit).op(I32.or);
         }
         leaveIf('window');
+        if (inZeroPage)
+        {
+            e.close();
+        }
         e.close();
     }
     if (shared)

@@ -48,6 +48,7 @@ the reference arm of a differential gate.
 | `precise` | `false` | x87 exception flags, signalling NaNs, underflow, C1 and the flags an instruction leaves undefined kept as the processor keeps them; the conformance tests and the hardware corpus turn it on. |
 | `exactNaN` | `false` | Every NaN a float operation makes carries x86's sign, not the host's. |
 | `checkReads` | unset | `true` tests every read's pages from the start, `false` never closes a page; unset, reads are wrapped into RAM until the program first faults on a closed page, and tested from then on. |
+| `zeroPage` | false | Whether the guest's first page is the RAM's zeros that nothing writes and a store to faults (the host's `zeroReadsBelow` over it): a tested read inside it reads them in translated code rather than leaving to the host. The cpu layer sets it where that holds. |
 | `looseStacks` | `true` | `false` tests the pages of every store through `esp`. |
 | `structure` | `true` | `false` sends every back edge of a region through its dispatch. |
 | `callReturn` | `true` | `false` makes every call and return out of a region a transfer through the entry hash. |

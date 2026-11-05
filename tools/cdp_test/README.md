@@ -416,6 +416,15 @@ so the profile's milliseconds divide into a frame's. Runs on one machine vary by
 a quarter from one to the next: a difference is only a measurement across
 several runs of each side.
 
+`game-<stamp>-frames.json` holds every frame the profiler recorded (its start, time by kind, and
+notes: instructions, interpreted, `translateMs` with the translator's `timings`, exits from
+translated code), and the report prints how evenly they came and the drops by cause
+(`app.log.drops`). What the drops did that the ordinary frames did not is
+`node tools/drop-profile.mjs <report base> [--from S] [--to S] [--cause NAME]` over a run with
+`--worker --cpu-profile N`: each function's self time per frame in the drops against the
+ordinary frames of the stretch, the two clocks laid together by an anchor the profiler sets
+as it stops. A whole run is several scenes; `--from`/`--to` take one, in the frames' seconds.
+
 The report, in the order it answers questions:
 
 1. adapter, elapsed, guest instructions, and `stopped:`, why the run ended.
