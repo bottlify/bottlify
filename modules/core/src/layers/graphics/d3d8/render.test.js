@@ -4459,6 +4459,10 @@ test('a wide format is half floats by its channel count, red first, converted on
         { format: D3DFMT.G16R16, gpu: 'rg16float',
             texels: u16([0xffff, 0, 0x8000, 0x4000]),
             halves: [0x3c00, 0, 0x3800, 0x3400] },
+        // Luminance into red, green and blue, alpha opaque: what Direct3D samples.
+        { format: D3DFMT.L16, gpu: 'rgba16float',
+            texels: u16([0xffff, 0x8000]),
+            halves: [0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x3800, 0x3800, 0x3800, 0x3c00] },
     ])
     {
         assert.equal(gpuFormatOf(format, 64, 64, true), gpu, `format ${format}`);

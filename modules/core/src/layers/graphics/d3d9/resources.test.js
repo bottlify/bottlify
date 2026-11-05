@@ -709,6 +709,18 @@ test('writePixels turns a wide target\'s half floats into the format it was made
     }
 });
 
+test('writePixels keeps an L16 surface\'s red from the four halves a texel the GPU holds', ()=>{
+    const base = 0x4000;
+    const surface = createSurface({
+        type: SURFACE_TYPE.RENDER_TARGET, width: 2, height: 1, format: D3DFMT.L16,
+        pool: D3DPOOL.DEFAULT, usage: 0, base, lockable: true, count: createReferenceCount(),
+    });
+    const pixels = new Uint8Array(Uint16Array.from([1, 0, 0, 1, 0.5, 1, 1, 1], toHalf).buffer);
+    const arrived = new Uint8Array(4);
+    writePixels(surface, pixels, (address, bytes)=>arrived.set(bytes, address - base));
+    assert.deepEqual([...new Uint16Array(arrived.buffer)], [0xffff, 0x8000]);
+});
+
 /**
  * A read-back's rows land in guest memory in the surface's own layout: the
  * four-byte case byte for byte as the GPU handed them over, the packed cases

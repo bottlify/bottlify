@@ -271,6 +271,8 @@ export const D3DFMT = Object.freeze({
     // bits band.
     G16R16: 34,
     A16B16G16R16: 36,
+    // Sixteen bits of luminance: a lookup volume or a height map that eight bits band.
+    L16: 81,
     // One floating-point channel: what a shadow map of the Direct3D 9 era keeps its
     // depths in when the card samples no depth texture.
     R16F: 111,
@@ -304,7 +306,10 @@ export const D3DFMT = Object.freeze({
     UYVY: 0x59565955,
 });
 
-/** @typedef {{ channels: 1 | 2 | 4, stored: 'half' | 'float' | 'unorm16' }} WideFormat */
+/**
+ * @typedef {{ channels: 1 | 2 | 4, stored: 'half' | 'float' | 'unorm16', luminance?: true }}
+ *     WideFormat
+ */
 
 /**
  * @param {number} bytesPerPixel @param {boolean} alpha @param {boolean} float
@@ -339,7 +344,9 @@ function wideFormat(bytesPerPixel, alpha, float, channels, stored){
  * every one of them as half floats, red first, `channels` of them a texel;
  * `stored` says how each channel lies in the guest's memory -- a half float, a
  * 32-bit float, or a 16-bit fraction of 65535 -- which is what an upload
- * converts from and a read-back converts to.
+ * converts from and a read-back converts to. A `luminance` one keeps its one
+ * channel in red, green and blue of four, with an opaque alpha, because that is
+ * what Direct3D samples from it.
  *
  * @type {Readonly<Record<number,
  *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
@@ -386,6 +393,8 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A32B32G32R32F]: wideFormat(16, true, true, 4, 'float'),
     [D3DFMT.G16R16]: wideFormat(4, false, false, 2, 'unorm16'),
     [D3DFMT.A16B16G16R16]: wideFormat(8, true, false, 4, 'unorm16'),
+    [D3DFMT.L16]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false,
+        wide: Object.freeze({ channels: 1, stored: 'unorm16', luminance: true }) }),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
@@ -437,7 +446,8 @@ export const FORMAT_INFO = Object.freeze({
  * @returns {number} zero for a format that samples as it is kept
  */
 export function sampledOnes(format){
-    const channels = FORMAT_INFO[format]?.wide?.channels ?? 4;
+    const wide = FORMAT_INFO[format]?.wide;
+    const channels = wide?.luminance ? 4 : wide?.channels ?? 4;
     return 0b1111 & ~((1 << channels) - 1);
 }
 
