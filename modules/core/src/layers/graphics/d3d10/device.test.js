@@ -2478,6 +2478,18 @@ test('a device asked for video support is refused as one without it: no video de
         'an unknown driver with no adapter is a bad argument before anything else');
 });
 
+test('a device asked for with the debug layer is refused as on a Windows without its Graphics'
+    + ' Tools (decision A81)', ()=>{
+    /** @type {any} */
+    const eleven = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0x2, null, eleven, {}), 0x887a002d);
+    assert.equal(eleven.device, null);
+    /** @type {any} */
+    const ten = {};
+    assert.equal(D3D10CreateDevice(null, 0, null, 0x2, 29, ten, {}), 0x887a002d);
+    assert.equal(ten.device, null);
+});
+
 test('from level 10.1 a copy moves compressed blocks into texels as big, and back, each counted'
     + ' in its own format (test_compressed_format_compatibility, d3d11.c:29631)', ()=>{
     /** @type {any} */

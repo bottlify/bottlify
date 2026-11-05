@@ -41,7 +41,8 @@ import {
     D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_QUERY,
     D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
     D3D10_USAGE, D3D11_RESOURCE_MISC, D3D11_TWIN,
-    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_SDK_COMPONENT_MISSING, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
+    D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
@@ -181,6 +182,10 @@ export function D3D10CreateDevice(adapter, driverType, software, flags, sdkVersi
     if ((driverType === D3D10_DRIVER_TYPE.SOFTWARE) !== !!software)
     {
         return E_INVALIDARG;
+    }
+    if ((flags & CREATE_DEVICE_DEBUG) !== 0)
+    {
+        return DXGI_ERROR_SDK_COMPONENT_MISSING;
     }
     out.device = createDevice({ ...options, adapter, flags });
     return S_OK;
@@ -379,6 +384,13 @@ function sharedExponentCopyable(a, b){
         || (b === R9G9B9E5 && FORMAT_INFO[a]?.family === DXGI_FORMAT.R32_TYPELESS);
 }
 
+/**
+ * D3D10_CREATE_DEVICE_DEBUG and D3D11_CREATE_DEVICE_DEBUG: the debug layer,
+ * which is not here, as it is not on a Windows without its Graphics Tools
+ * (decision A81).
+ */
+const CREATE_DEVICE_DEBUG = 0x2;
+
 /** D3D11_CREATE_DEVICE_VIDEO_SUPPORT. */
 const D3D11_CREATE_DEVICE_VIDEO_SUPPORT = 0x800;
 const D3D11_CREATE_DEVICE_MASK = 0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x800;
@@ -450,6 +462,10 @@ export function D3D11CreateDevice(adapter, driverType, software, flags, levels, 
     if ((flags & D3D11_CREATE_DEVICE_VIDEO_SUPPORT) !== 0)
     {
         return DXGI_ERROR_UNSUPPORTED;
+    }
+    if ((flags & CREATE_DEVICE_DEBUG) !== 0)
+    {
+        return DXGI_ERROR_SDK_COMPONENT_MISSING;
     }
     const asked = levels && levels.length > 0 ? levels : DEFAULT_LEVELS_11;
     if (asked.some(level=>!KNOWN_LEVELS.has(level)))

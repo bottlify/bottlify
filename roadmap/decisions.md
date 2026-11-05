@@ -799,7 +799,17 @@ test_video_support called a method of the null interface and the test process di
 answers DXGI_ERROR_UNSUPPORTED itself for drivers without video support (reference, null, WARP
 when named), and Media Foundation and the players built on it fall back to decoding on the
 processor then. The one check that expects a hardware device with the flag fails, on purpose,
-until then. *2026-11-05.*
+until then; so does the one that expects every context to answer ID3D11VideoContext, which no
+context here does for the same reason. *2026-11-05.*
+
+**A81. A device asked for with the debug layer is refused with
+DXGI_ERROR_SDK_COMPONENT_MISSING.** D3D10_CREATE_DEVICE_DEBUG and D3D11_CREATE_DEVICE_DEBUG
+load the SDK layers, which Windows has only with its Graphics Tools installed, and a program
+asking for them on an end user's Windows gets this answer and makes its device without the flag.
+Nothing here validates calls as the layer does or keeps its ID3D11InfoQueue of messages (what a
+program did wrong is said in the journal instead, as a divergence), and a device made with the
+flag and without the interfaces the layer adds would be one a program could not tell from a
+broken one. *2026-11-05.*
 
 ## B. From measured optimisation work
 
