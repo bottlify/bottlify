@@ -1606,7 +1606,7 @@ function describe(result, context, calls, symbols){
             + ` 1% low ${evenly.low1.toFixed(1)}, 0.1% low ${evenly.low01.toFixed(1)};`
             + ` median ${evenly.medianMs.toFixed(1)} ms,`
             + ` worst ${evenly.worstMs.map(ms=>ms.toFixed(0)).join(' ')} ms`);
-        say(`  ${evenly.drops.length} drop(s) over twice the median, by what grew`
+        say(`  ${evenly.drops.length} drop(s) (past 2x the median and 16.7 ms), by what grew`
             + ` (GPU time ${evenly.gpu}):`);
         for (const [cause, count] of Object.entries(evenly.byCause)
             .sort((one, two)=>two[1] - one[1]))

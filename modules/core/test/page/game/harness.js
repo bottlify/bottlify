@@ -946,6 +946,7 @@ export function keepFrames(app, state){
             byKind: frame.byKind, idleMs: frame.idleMs, waits: frame.waits,
             compiles: frame.compiles, instructions: frame.instructions,
             notes: { interpreted: frame.notes?.interpreted ?? 0,
+                instructions: frame.notes?.instructions ?? 0,
                 heapDelta: frame.notes?.heapDelta ?? 0 },
             longest: frame.longest });
     }

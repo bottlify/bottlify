@@ -35,6 +35,8 @@ test('each drop is named by the part of the frame that grew past the ordinary on
         [20, { ms: 60, byKind: { guest: 54, host: 4 }, notes: { interpreted: 5000 } },
             'translation'],
         [30, { ms: 60, byKind: { guest: 54, host: 4 }, instructions: 5e6 }, 'guest work'],
+        [35, { ms: 60, byKind: { guest: 54, host: 4 }, instructions: undefined,
+            notes: { interpreted: 100, instructions: 5e6 } }, 'guest work'],
         [40, { ms: 60, byKind: { guest: 54, host: 4 } }, 'guest slower'],
         [50, { ms: 60, byKind: { guest: 10, host: 48 }, longest: { name: 'drive', ms: 40 } },
             'host drive'],
@@ -55,7 +57,7 @@ test('each drop is named by the part of the frame that grew past the ordinary on
         cases.map(([index, , cause])=>[index, cause]));
     assert.equal(report.drops[0].excessMs, 44, 'past the median frame');
     assert.deepEqual(report.byCause, {
-        'translation': 2, 'guest work': 1, 'guest slower': 1, 'host drive': 1, 'fetch': 1,
+        'translation': 2, 'guest work': 2, 'guest slower': 1, 'host drive': 1, 'fetch': 1,
         'waiting': 1, 'outside the engine: garbage collection': 1, 'outside the engine': 1,
     });
 });
@@ -79,4 +81,10 @@ test('no frames is no report, not zeros dressed as one', ()=>{
     const report = frameDrops([]);
     assert.equal(report.frames, 0);
     assert.deepEqual(report.drops, []);
+});
+
+test('a frame twice the median that a 60 Hz display would not miss is no drop', ()=>{
+    const frames = [...Array.from({ length: 100 }, ()=>frame({ ms: 1.5 })), frame({ ms: 4 }),
+        frame({ ms: 20 })];
+    assert.deepEqual(frameDrops(frames).drops.map(drop=>drop.ms), [20]);
 });

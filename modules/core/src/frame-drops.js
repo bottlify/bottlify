@@ -7,7 +7,9 @@
 /**
  * Frame drops, each told why: how evenly the frames came (the mean, the
  * slowest 1% and 0.1% as frame rates, the worst frames), and for every frame
- * that took over twice the median, what it spent its extra time on.
+ * that took over twice the median and longer than a 60 Hz display waits for
+ * one (a frame it missed: a 3 ms frame among 1.5 ms ones is not seen), what
+ * it spent its extra time on.
  *
  * A drop is read against the median frame rather than against a budget: what
  * the frame did beyond what an ordinary frame of the same run did is its
@@ -47,6 +49,17 @@
  *     low01: number, worstMs: number[], drops: Drop[],
  *     byCause: Record<string, number>, gpu: string }} DropReport
  */
+
+/** A frame longer than this missed a 60 Hz display's refresh. */
+const MISSED_MS = 1000 / 60;
+
+/**
+ * A frame's instructions: the reader's record carries them as `instructions`,
+ * the profiler's own as the note of that name.
+ *
+ * @param {FrameLike} frame
+ */
+const instructionsOf = frame=>frame.instructions ?? frame.notes?.instructions ?? 0;
 
 /** @param {number[]} sorted @param {number} share */
 const quantile = (sorted, share)=>sorted[Math.min(sorted.length - 1,
@@ -102,7 +115,7 @@ export function frameDrops(frames, options = {}){
         host: median(frame=>partsOf(frame).host),
         idle: median(frame=>partsOf(frame).idle),
         outside: median(frame=>partsOf(frame).outside),
-        instructions: median(frame=>frame.instructions ?? 0),
+        instructions: median(instructionsOf),
         interpreted: median(frame=>frame.notes?.interpreted ?? 0),
         compiles: median(frame=>frame.compiles ?? 0),
     };
@@ -113,7 +126,7 @@ export function frameDrops(frames, options = {}){
     const byCause = {};
     for (const frame of timed)
     {
-        if (frame.ms <= 2 * medianMs)
+        if (frame.ms <= 2 * medianMs || frame.ms <= MISSED_MS)
         {
             continue;
         }
@@ -157,7 +170,7 @@ function causeOf(part, frame, ordinary){
         {
             return 'translation';
         }
-        return (frame.instructions ?? 0) > 1.5 * ordinary.instructions
+        return instructionsOf(frame) > 1.5 * ordinary.instructions
             ? 'guest work' : 'guest slower';
     }
     if (part === 'host')

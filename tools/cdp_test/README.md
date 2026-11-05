@@ -204,8 +204,8 @@ ones need the graphics worker.
 
 One more is on `app.log` rather than `app.debug`, since it reads the profiler's frames:
 `app.log.drops(n)` (default 1000; the engine keeps the last 240, about four seconds) answers
-the mean frame rate, the slowest 1% and 0.1% as rates, the worst frames, and every frame over
-twice the median named by the part that grew past an ordinary frame's: `translation` (more
+the mean frame rate, the slowest 1% and 0.1% as rates, the worst frames, and every frame over 16.7 ms
+and twice the median named by the part that grew past an ordinary frame's: `translation` (more
 modules instantiated or more interpreted), `guest work` (more instructions), `guest slower` (the
 same work, slower), `host <phase>`, `fetch` or `waiting` (parked), `outside the engine` (wall
 time no phase accounts for: `garbage collection` when the heap shrank). GPU time is not in the
