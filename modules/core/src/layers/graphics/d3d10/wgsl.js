@@ -286,6 +286,9 @@ export const HELPERS = Object.freeze({
  * @property {boolean} [multisampled]  A TEXTURE2DMS bound to a texture of several samples.
  * @property {boolean} [depth]  A float texture bound to a depth buffer: declared as a depth
  *     texture, each read of it one float, made (d, 0, 0, 1) as Direct3D reads such a view.
+ * @property {boolean} [stencil]  An integer texture bound to a depth buffer's stencil, which
+ *     WebGPU reads in red and Direct3D's X24_TYPELESS_G8_UINT and X32_TYPELESS_G8X24_UINT in
+ *     green: each read made (0, s, 0, 1).
  * @property {'raw' | 'structured'} [structure]  A buffer read by bytes or by structures.
  * @property {number} [stride]    Bytes a structure.
  */
@@ -294,6 +297,8 @@ export const HELPERS = Object.freeze({
  * @typedef {Object} SamplerDecl
  * @property {number} slot
  * @property {boolean} comparison
+ * @property {boolean} [nonFiltering]  Read with a depth texture, which WebGPU filters only
+ *     when it compares it: declared non-filtering and bound as a point sampler.
  */
 
 /**
@@ -422,7 +427,8 @@ const floatLiteral = value=>
  *
  * @param {import('./dxbc.js').DxbcContainer} container
  * @param {{ multisampled?: readonly number[], depth?: readonly number[],
- *     uavFormats?: Readonly<Record<number, string>>, tokens?: Uint32Array,
+ *     stencil?: readonly number[], uavFormats?: Readonly<Record<number, string>>,
+ *     tokens?: Uint32Array,
  *     outputName?: string, samplerBias?: Readonly<Record<number, number>> }} [options]
  * @returns {TranslatedShader}
  */
@@ -751,7 +757,8 @@ export function translateShader(container, options = {}){
      * @param {string} sampled
      */
     const sampledBits = (texture, operand, sampled)=>{
-        const swizzled = `(${sampled}).${swizzleText(operand.swizzle)}`;
+        const read = texture.stencil ? `vec4<u32>(0u, (${sampled}).x, 0u, 1u)` : sampled;
+        const swizzled = `(${read}).${swizzleText(operand.swizzle)}`;
         if (texture.returnType === RETURN_TYPE.UINT)
         {
             return swizzled;
@@ -795,6 +802,14 @@ export function translateShader(container, options = {}){
             shaped.layer = `i32(${shaped.layer})`;
         }
         const samplerName = sampler ? `s${sampler.indices[0].value}` : '';
+        // WebGPU reads a depth texture through no filtering sampler but a
+        // comparing one: a plain one used with it is declared non-filtering.
+        const declared = sampler ? result.samplers.find(one=>one.slot
+            === sampler.indices[0].value) : null;
+        if (declared && texture.depth && !declared.comparison)
+        {
+            declared.nonFiltering = true;
+        }
         const read = call(texture, shaped, samplerName, bias ? floatLiteral(bias) : null);
         store(dest, sampledBits(texture, resource, read));
     };
@@ -1161,6 +1176,8 @@ export function translateShader(container, options = {}){
                         : {}),
                     ...((options.depth ?? []).includes(dest.indices[0].value)
                         ? { depth: true } : {}),
+                    ...((options.stencil ?? []).includes(dest.indices[0].value)
+                        ? { stencil: true } : {}),
                 });
                 if ((instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -2298,7 +2315,8 @@ function declarations(shader, group, visibility){
         text.push(`@group(${group}) @binding(${binding}) var s${sampler.slot}: `
             + `${sampler.comparison ? 'sampler_comparison' : 'sampler'};`);
         entries.push({
-            binding, visibility, sampler: { type: sampler.comparison ? 'comparison' : 'filtering' },
+            binding, visibility, sampler: { type: sampler.comparison ? 'comparison'
+                : sampler.nonFiltering ? 'non-filtering' : 'filtering' },
         });
     }
     for (const uav of shader.uavs ?? [])

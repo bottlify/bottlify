@@ -507,6 +507,23 @@ test('a float texture bound to a depth buffer is declared as depth and read as (
         assert.equal(plain.textures[0].depth, undefined, 'only where a depth buffer is bound');
     });
 
+test('a plain sampler that reads a depth texture is declared non-filtering, and a stencil view'
+    + ' is read in green (test_depth_stencil_sampling, d3d11.c:10676)', ()=>{
+    const sampled = translate([sample(r(0), v(0, 'xy'), t(0), s(0))],
+        { declarations: TEXTURE, options: { depth: [0] } });
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, sampled);
+    assert.deepEqual(linked.groups[1].find(entry=>entry.sampler)?.sampler,
+        { type: 'non-filtering' });
+    const plain = linkProgram(vs, translate([sample(r(0), v(0, 'xy'), t(0), s(0))],
+        { declarations: TEXTURE }));
+    assert.deepEqual(plain.groups[1].find(entry=>entry.sampler)?.sampler, { type: 'filtering' });
+    const stencil = translate([ld(r(0), r(1), t(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT)],
+        options: { stencil: [0] } });
+    assert.match(bodyOf(stencil), /\(vec4<u32>\(0u, \(textureLoad\(t0, held0, held1\)\)\.x, 0u, 1u\)\)/);
+});
+
 test('ld fetches a texel by integer address with the level in w', ()=>{
     const translated = translate([ld(r(0), r(1), t(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT)],

@@ -559,6 +559,8 @@ export function createRenderer(services){
     const bufferViews = new WeakMap();
     /** @type {WeakMap<object, any>} sampler state -> GPU sampler */
     const samplers = new WeakMap();
+    /** The same states as point samplers, for the depth a shader reads. @type {WeakMap<object, any>} */
+    const pointSamplers = new WeakMap();
     /** @type {WeakMap<object, any>} shader -> translation */
     const translations = new WeakMap();
     /** @type {WeakMap<object, Map<string, any>>} shader -> its variants, by `variantOf` */
@@ -1429,7 +1431,8 @@ export function createRenderer(services){
                 : view.range.count,
         });
         gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect), dimension,
-            multisampled: backing.sampleCount > 1, backing, twin };
+            multisampled: backing.sampleCount > 1, backing, twin,
+            stencil: chosen.aspect === 'stencil-only' };
         views.set(view, gpu);
         if (twin)
         {
@@ -1443,8 +1446,9 @@ export function createRenderer(services){
         & D3D10_FILTER_COMPARISON_BIT) !== 0;
 
     /** @param {any} state a sampler state object */
-    const samplerOf = state=>{
-        let gpu = samplers.get(state);
+    const samplerOf = (state, nearest = false)=>{
+        const kept = nearest ? pointSamplers : samplers;
+        let gpu = kept.get(state);
         if (gpu)
         {
             return gpu;
@@ -1458,9 +1462,13 @@ export function createRenderer(services){
         const comparison = (filter & D3D10_FILTER_COMPARISON_BIT) !== 0;
         // The filter word is three bits: mip in bit 0, magnification in bit 2,
         // minification in bit 4; anisotropy implies linear on all three.
-        const linear = (/** @type {number} */ bit)=>(anisotropic || (filter & bit) !== 0
-            ? 'linear'
-            : 'nearest');
+        const linear = (/** @type {number} */ bit)=>(!nearest && (anisotropic || (filter & bit)
+            !== 0) ? 'linear' : 'nearest');
+        if (nearest && (anisotropic || (filter & 0x15) !== 0))
+        {
+            diverge('a depth texture read through a filtering sampler is read at its nearest'
+                + ' texel: WebGPU filters depth only when it compares it');
+        }
         gpu = createSampler({
             label: `d3d10:sampler:${filter.toString(16)}`,
             addressModeU: ADDRESS[desc.AddressU] ?? 'repeat',
@@ -1473,14 +1481,14 @@ export function createRenderer(services){
             lodMinClamp: Math.min(32, Math.max(0, desc.MinLOD)),
             lodMaxClamp: Math.max(Math.min(32, Math.max(0, desc.MinLOD)),
                 Math.min(32, desc.MaxLOD)),
-            maxAnisotropy: anisotropic ? Math.max(1, desc.MaxAnisotropy) : 1,
+            maxAnisotropy: anisotropic && !nearest ? Math.max(1, desc.MaxAnisotropy) : 1,
             ...(comparison ? { compare: COMPARE[desc.ComparisonFunc] ?? 'never' } : {}),
         });
         if (filter === D3D10_FILTER.TEXT_1BIT)
         {
             diverge('a text-filtering sampler is used as a point sampler');
         }
-        samplers.set(state, gpu);
+        kept.set(state, gpu);
         return gpu;
     };
 
@@ -1734,11 +1742,11 @@ export function createRenderer(services){
             let made = variants.get(variant);
             if (!made)
             {
-                const [multisampled, depth, biases, stored] = variant.split('|');
+                const [multisampled, depth, biases, stored, stencil] = variant.split('|');
                 /** @param {string} slots */
                 const list = slots=>(slots ? slots.split(',').map(Number) : []);
                 made = translateShader(shader.container, {
-                    multisampled: list(multisampled), depth: list(depth),
+                    multisampled: list(multisampled), depth: list(depth), stencil: list(stencil),
                     samplerBias: Object.fromEntries((biases ?? '').split(',').filter(Boolean)
                         .map(pair=>pair.split(':').map(Number))),
                     uavFormats: Object.fromEntries((stored ?? '').split(',').filter(Boolean)
@@ -1778,6 +1786,8 @@ export function createRenderer(services){
         const multisampled = [];
         /** @type {number[]} */
         const depth = [];
+        /** @type {number[]} */
+        const stencil = [];
         for (const texture of translationOf(stage.shader).textures)
         {
             const view = stage.shaderResources[texture.slot];
@@ -1796,6 +1806,10 @@ export function createRenderer(services){
                 && DEPTH_DIMENSIONS.has(texture.dimension))
             {
                 depth.push(texture.slot);
+            }
+            else if (gpu.stencil)
+            {
+                stencil.push(texture.slot);
             }
         }
         // A sampler with a MipLODBias: WebGPU's have none, so the shader adds it.
@@ -1816,9 +1830,9 @@ export function createRenderer(services){
             ? Object.entries(uavFormatsOf(written)).map(([slot, format])=>`${slot}:${format}`)
             : [];
         return multisampled.length === 0 && depth.length === 0 && biases.length === 0
-            && stored.length === 0 ? ''
+            && stored.length === 0 && stencil.length === 0 ? ''
             : `${multisampled.join(',')}|${depth.join(',')}|${biases.join(',')}`
-                + `|${stored.join(',')}`;
+                + `|${stored.join(',')}|${stencil.join(',')}`;
     };
 
     /** @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries @param {string} label */
@@ -2656,10 +2670,11 @@ export function createRenderer(services){
                 diverge('a sampler bound where the shader declares the other kind, comparison'
                     + ' or not, is replaced by a point sampler of the declared kind');
             }
+            const nearest = entry.sampler?.type === 'non-filtering';
             return {
                 binding: entry.binding,
                 resource: sampler && comparison === isComparisonSampler(sampler)
-                    ? samplerOf(sampler)
+                    ? samplerOf(sampler, nearest)
                     : comparison ? fallback.comparison : fallback.sampler,
             };
         });
