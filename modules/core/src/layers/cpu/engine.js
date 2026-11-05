@@ -582,7 +582,8 @@ export function engineContractProblem(engineModule, url){
  * @property {(address: number, x87Top?: number, held?: boolean) => void} missAt  One
  *     untranslated exit to an address at an x87 top; it becomes a candidate once enough land
  *     there at that top -- unless the region left it to the host on purpose (`held`).
- * @property {(at?: number, top?: number, why?: string) => void} forcedStep  Records one turn
+ * @property {(at?: number, top?: number, why?: string, registers?: () => number[]) => void}
+ *     forcedStep  Records one turn
  *     the host forced an interpreted instruction through, for the progress guarantee's
  *     `forcedSteps`, where, at what x87 top and why (`forcedAt`).
  * @property {() => Promise<number>} translatePending

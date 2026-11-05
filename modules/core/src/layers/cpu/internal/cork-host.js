@@ -1526,7 +1526,7 @@ export function createCorkHost(config){
                     // rather than spinning on the same entry.
                     const forced = interpretRange(at, remaining, true);
                     runtime.forcedStep(at, x87Top(),
-                        `region ran nothing (${exit.kind} ${exit.vector})`);
+                        `region ran nothing (${exit.kind} ${exit.vector})`, ()=>Array.from(reg32));
                     remaining -= forced;
                     ran += forced;
                     if (forced === 0 && eip() === at)
