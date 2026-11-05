@@ -21,6 +21,7 @@
  */
 
 import { createComObject } from './objects.js';
+import { DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE } from '../oleaut32/vartypes.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { CPUID, PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
 import { SOUND_ADAPTER_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
@@ -480,24 +481,31 @@ export function registerWbemClasses(host){
     /**
      * A SAFEARRAY of VT_I4 over the values, laid out and allocated as
      * SafeArrayCreate lays out its own -- so SafeArrayDestroy and VariantClear
-     * free it -- or 0.
+     * free it -- or 0. That includes the sixteen bytes in front of the
+     * descriptor, the VARTYPE last among them: SafeArrayDestroy frees the block
+     * from there, and a descriptor allocated without them has it free whatever
+     * block lies sixteen bytes before -- a live object's, as often as not.
      *
      * @param {number[]} values @returns {number}
      */
     const allocateArray = values=>{
-        const descriptor = host.heap.allocate(24);
+        const block = host.heap.allocate(DESCRIPTOR_PREFIX + 24);
         const data = host.heap.allocate(Math.max(1, values.length * 4));
-        if (descriptor === 0 || data === 0)
+        if (block === 0 || data === 0)
         {
             return 0;
         }
-        const header = new Uint8Array(24);
+        const descriptor = block + DESCRIPTOR_PREFIX;
+        const header = new Uint8Array(DESCRIPTOR_PREFIX + 24);
         const view = new DataView(header.buffer);
-        view.setUint16(0, 1, true); // one dimension
-        view.setUint32(4, 4, true); // four bytes an element
-        view.setUint32(12, data, true);
-        view.setUint32(16, values.length, true); // its count, from a lower bound of 0
-        host.writeMemory(descriptor, header);
+        view.setUint32(DESCRIPTOR_PREFIX - 4, VT_I4, true);
+        view.setUint16(DESCRIPTOR_PREFIX, 1, true); // one dimension
+        view.setUint16(DESCRIPTOR_PREFIX + 2, FADF_HAVEVARTYPE, true);
+        view.setUint32(DESCRIPTOR_PREFIX + 4, 4, true); // four bytes an element
+        view.setUint32(DESCRIPTOR_PREFIX + 12, data, true);
+        // Its count, from a lower bound of 0.
+        view.setUint32(DESCRIPTOR_PREFIX + 16, values.length, true);
+        host.writeMemory(block, header);
         const elements = new Uint8Array(values.length * 4);
         values.forEach((value, index)=>new DataView(elements.buffer)
             .setUint32(index * 4, value >>> 0, true));

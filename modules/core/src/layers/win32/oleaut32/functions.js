@@ -58,7 +58,7 @@ import {
     VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CLSID, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH,
     VT_EMPTY, VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
     VT_RECORD, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
-    VT_VECTOR,
+    VT_VECTOR, DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE,
 } from './vartypes.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
@@ -90,14 +90,7 @@ const FADF_EMBEDDED = 0x4;
 const FADF_FIXEDSIZE = 0x10;
 const FADF_RECORD = 0x20;
 const FADF_HAVEIID = 0x40;
-const FADF_HAVEVARTYPE = 0x80;
 const FADF_CREATEVECTOR = 0x2000;
-/**
- * The bytes Windows keeps in front of a descriptor it allocates: an IID at
- * -16 for FADF_HAVEIID, and at -4 the VARTYPE for FADF_HAVEVARTYPE or the
- * IRecordInfo for FADF_RECORD.
- */
-const DESCRIPTOR_PREFIX = 16;
 /** Element sizes a SAFEARRAY takes beside what a variant holds by reference. */
 /** @type {Readonly<Record<number, number>>} */
 const ARRAY_ELEMENT_BYTES = Object.freeze({ 37: 4, 38: 4 });
