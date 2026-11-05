@@ -923,7 +923,33 @@ export function schedulePresses(app, request, say = ()=>{}){
  *                                    translator's counters a frame over the same frames.
  * @property {any} [steadyFrom]        The translator's counters 240 frames before that.
  * @property {any[]} [series]           A row every `series` presents (see `seriesRow`).
+ * @property {Map<number, any>} [frameRecords]  Every frame of the run the profiler recorded, by
+ *                                    its number (`keepFrames`).
  */
+
+/**
+ * The profiler's frames taken into the run's own record, each once by its
+ * number: the engine keeps the last 240, and a run reads them every 200
+ * presents, so every frame of a run is told why if it dropped (frame-drops.js).
+ *
+ * @param {any} app @param {PresentState} state
+ */
+export function keepFrames(app, state){
+    state.frameRecords ??= new Map();
+    for (const frame of app.log.frames?.(240) ?? [])
+    {
+        if (state.frameRecords.size >= LIMITS.samples)
+        {
+            return;
+        }
+        state.frameRecords.set(frame.index, { index: frame.index, ms: frame.ms,
+            byKind: frame.byKind, idleMs: frame.idleMs, waits: frame.waits,
+            compiles: frame.compiles, instructions: frame.instructions,
+            notes: { interpreted: frame.notes?.interpreted ?? 0,
+                heapDelta: frame.notes?.heapDelta ?? 0 },
+            longest: frame.longest });
+    }
+}
 
 /**
  * The counts in a list of `name count ...` lines (the kernel's `byThread`, the
@@ -1085,6 +1111,10 @@ export function presentFrame(app, request, state, frame){
                 };
             }
         }
+    }
+    if (state.presents % 200 === 0)
+    {
+        keepFrames(app, state);
     }
     if (request.series && state.presents % request.series === 0)
     {
@@ -2202,6 +2232,9 @@ export function createHarness(canvas, how = {}){
         result.presentTimes = presentState.times.slice();
         result.steady = presentState.steady ?? null;
         result.series = presentState.series ?? [];
+        keepFrames(app, presentState);
+        result.frameRecords = [...(presentState.frameRecords ?? new Map()).values()]
+            .sort((one, two)=>one.index - two.index);
         // Guest memory as the run left it, where `--peek` asked: a flag or a
         // counter a program decides on without calling anything is otherwise
         // invisible from outside it.
