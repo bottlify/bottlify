@@ -43,6 +43,7 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
 import * as engine from '../index.js';
 import { PageFlag } from '../runtime/pages.js';
+import { features as hostFeatures } from '../wasm/features.js';
 import { restore, snapshot } from './snapshot.js';
 import { replaySlice, retireExactly } from './differential.js';
 import {
@@ -114,11 +115,18 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
     // sequence's own out of a batch, and a run is only repeatable from its
     // seed with the one feed. What a region leaves runs on the same
     // interpreter as the model, so a divergence is the translator's.
+    // A NaN an operation makes carries the host's sign unless `exactNaN` asks
+    // for x86's (roadmap/decisions.md): on a host whose default NaN is positive,
+    // an arm64 one, the translator is held to the model's NaNs with the fix-ups
+    // that make them, as on an x86 host it is by the host's own instructions.
+    const exact = (features ?? hostFeatures()).defaultNaNNegative || 'exactNaN' in cork
+        ? {} : { exactNaN: true };
     const translator = hostOf({
         precise: true,
         missThreshold: Number.POSITIVE_INFINITY,
         hotThreshold: Number.POSITIVE_INFINITY,
         wasmInterpreter: false,
+        ...exact,
         ...cork,
     }, executor, features);
     const runtime = translator.cork();
