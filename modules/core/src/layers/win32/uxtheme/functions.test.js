@@ -113,9 +113,10 @@ function fakeMemory(size = 0x10000){
  * still held, and whichever user32 and gdi32 exports a test supplies.
  *
  * @param {{ user32?: Record<string, (args: number[]) => any>,
- *     gdi32?: Record<string, (args: number[]) => any>, heap?: boolean }} [options]
+ *     gdi32?: Record<string, (args: number[]) => any>, heap?: boolean,
+ *     windows?: number }} [options]
  */
-function setup({ user32 = {}, gdi32 = {}, heap = true } = {}){
+function setup({ user32 = {}, gdi32 = {}, heap = true, windows = 5 } = {}){
     const memory = fakeMemory();
     memory.bytes.fill(UNTOUCHED);
     /** @type {number[]} */
@@ -143,6 +144,7 @@ function setup({ user32 = {}, gdi32 = {}, heap = true } = {}){
         },
         user32: lookup(user32),
         gdi32: lookup(gdi32),
+        windows: { major: windows },
     }));
     return { memory, errors, held, fns };
 }
@@ -158,8 +160,119 @@ test('exports exactly what XP SP3 exports, each popping its own arguments', ()=>
         'DrawThemeTextEx', 'GetThemeBitmap', 'GetThemeStream', 'OpenThemeDataEx',
         'IsCompositionActive', 'GetThemeTransitionDuration', 'SetWindowThemeAttribute'])
     {
-        assert.equal(fns[later], undefined, `${later} is Vista's, and XP answers NULL for it`);
+        assert.equal(fns[later], undefined, `${later} is 7's, and XP answers NULL for it`);
     }
+});
+
+/** What Windows 7's uxtheme.dll exports beyond XP's, with the bytes each pops. */
+const WIN7_EXPORTS = {
+    BufferedPaintInit: 0, BufferedPaintUnInit: 0, BeginBufferedPaint: 20, EndBufferedPaint: 8,
+    GetBufferedPaintDC: 4, GetBufferedPaintTargetDC: 4, GetBufferedPaintTargetRect: 8,
+    GetBufferedPaintBits: 12, BufferedPaintClear: 8, BufferedPaintSetAlpha: 12,
+    IsCompositionActive: 0, OpenThemeDataEx: 12, DrawThemeTextEx: 36, GetThemeBitmap: 24,
+    GetThemeStream: 28, GetThemeTransitionDuration: 24, SetWindowThemeAttribute: 16,
+};
+
+test('a Windows 7 machine exports 7\'s functions beside XP\'s, BufferedPaintInit among them', ()=>{
+    const { fns } = setup({ windows: 6 });
+    const all = { ...XP_EXPORTS, ...WIN7_EXPORTS };
+    assert.deepEqual(Object.keys(fns).sort(), Object.keys(all).sort());
+    for (const [name, bytes] of Object.entries(all))
+    {
+        assert.equal(fns[name].argBytes, bytes, name);
+    }
+    assert.equal(fns.BufferedPaintInit.handler([]), S_OK);
+    assert.equal(fns.BufferedPaintUnInit.handler([]), S_OK);
+    assert.equal(fns.IsCompositionActive.handler([]), 1, 'composed, as DWM says');
+    for (const name of ['DrawThemeTextEx', 'GetThemeBitmap', 'GetThemeStream',
+        'GetThemeTransitionDuration'])
+    {
+        assert.equal(fns[name].handler([0xdeadbeef, 0, 0, 0, 0, 0, 0, 0, 0]), E_HANDLE, name);
+    }
+    assert.equal(fns.OpenThemeDataEx.handler([0, RECT_IN, 0]), 0, 'no style, no theme');
+});
+
+test('a buffered paint draws in the target\'s coordinates and is copied over at the end', ()=>{
+    const BITS = 0x9000;
+    const TARGET = 0x30;
+    const MEMORY_DC = 0x40;
+    const SECTION = 0x50;
+    const OLD_BITMAP = 0x60;
+    /** @type {any[][]} */
+    const calls = [];
+    /** @type {ReturnType<typeof fakeMemory>} */
+    let memory;
+    const gdi32 = {
+        /** @param {number[]} args */
+        CreateCompatibleDC: args=>(calls.push(['CreateCompatibleDC', ...args]), MEMORY_DC),
+        /** @param {number[]} args */
+        CreateDIBSection: ([dc, info, usage, bitsOut])=>{
+            calls.push(['CreateDIBSection', dc, memory.i32(info + 4), memory.i32(info + 8),
+                memory.i32(info + 12) >>> 16, usage]);
+            memory.bytes.fill(0, BITS, BITS + 4 * 2 * 4);
+            memory.putI32s(bitsOut, [BITS]);
+            return SECTION;
+        },
+        /** @param {number[]} args */
+        SelectObject: args=>(calls.push(['SelectObject', ...args]), OLD_BITMAP),
+        /** @param {number[]} args */
+        SetViewportOrgEx: args=>(calls.push(['SetViewportOrgEx', ...args]), 1),
+        /** @param {number[]} args */
+        BitBlt: args=>(calls.push(['BitBlt', ...args]), 1),
+        /** @param {number[]} args */
+        DeleteObject: args=>(calls.push(['DeleteObject', ...args]), 1),
+        /** @param {number[]} args */
+        DeleteDC: args=>(calls.push(['DeleteDC', ...args]), 1),
+    };
+    const made = setup({ windows: 6, gdi32 });
+    memory = made.memory;
+    const { fns, held } = made;
+    memory.putI32s(RECT_IN, [10, 20, 14, 22]);
+    const BPBF_TOPDOWNDIB = 2;
+    const paint = fns.BeginBufferedPaint.handler([TARGET, RECT_IN, BPBF_TOPDOWNDIB, 0, OUT]);
+    assert.notEqual(paint, 0);
+    assert.equal(memory.i32(OUT), MEMORY_DC, 'the paint DC handed back');
+    assert.deepEqual(calls.splice(0), [
+        ['CreateCompatibleDC', TARGET],
+        ['CreateDIBSection', MEMORY_DC, 4, -2, 32, 0],
+        ['SelectObject', MEMORY_DC, SECTION],
+        ['SetViewportOrgEx', MEMORY_DC, -10, -20, 0],
+    ], 'a top-down 32-bit section of the rectangle, drawn in the target\'s coordinates');
+    assert.equal(fns.GetBufferedPaintDC.handler([paint]), MEMORY_DC);
+    assert.equal(fns.GetBufferedPaintTargetDC.handler([paint]), TARGET);
+    assert.equal(fns.GetBufferedPaintTargetRect.handler([paint, OUT]), S_OK);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.i32(OUT + at)), [10, 20, 14, 22]);
+    assert.equal(fns.GetBufferedPaintBits.handler([paint, OUT, OUT + 4]), S_OK);
+    assert.deepEqual([memory.i32(OUT), memory.i32(OUT + 4)], [BITS, 4], 'bits, four pixels a row');
+
+    memory.putI32s(BITS, Array(8).fill(0x00336699));
+    // The bottom row's right half, in the target's coordinates.
+    memory.putI32s(RECT_IN + 16, [12, 21, 99, 99]);
+    assert.equal(fns.BufferedPaintSetAlpha.handler([paint, RECT_IN + 16, 0x80]), S_OK);
+    assert.deepEqual(Array.from({ length: 8 }, (_, i)=>memory.i32(BITS + i * 4) >>> 0),
+        [...Array(6).fill(0x00336699), 0x80336699, 0x80336699]);
+    assert.equal(fns.BufferedPaintClear.handler([paint, 0]), S_OK);
+    assert.ok(Array.from({ length: 8 }, (_, i)=>memory.i32(BITS + i * 4)).every(v=>v === 0),
+        'cleared whole to ARGB 0');
+
+    assert.equal(fns.EndBufferedPaint.handler([paint, 1]), S_OK);
+    assert.deepEqual(calls.splice(0), [
+        ['BitBlt', TARGET, 10, 20, 4, 2, MEMORY_DC, 10, 20, 0x00cc0020],
+        ['SelectObject', MEMORY_DC, OLD_BITMAP],
+        ['DeleteObject', SECTION],
+        ['DeleteDC', MEMORY_DC],
+    ], 'copied to its rectangle, then freed');
+    assert.equal(held.size, 0, 'the header\'s scratch memory released');
+    assert.equal(fns.EndBufferedPaint.handler([paint, 1]), E_INVALIDARG, 'ended once');
+    assert.equal(fns.GetBufferedPaintDC.handler([paint]), 0);
+
+    const compatible = fns.BeginBufferedPaint.handler([TARGET, RECT_IN, 0, 0, 0]);
+    assert.equal(fns.GetBufferedPaintBits.handler([compatible, OUT, OUT + 4]), E_FAIL,
+        'a compatible bitmap has no bits a program may address');
+    assert.equal(fns.EndBufferedPaint.handler([compatible, 0]), S_OK);
+    assert.equal(calls.some(([name])=>name === 'BitBlt'), false, 'not copied when told not to');
+    memory.putI32s(RECT_IN, [5, 5, 5, 9]);
+    assert.equal(fns.BeginBufferedPaint.handler([TARGET, RECT_IN, 2, 0, 0]), 0, 'empty rectangle');
 });
 
 test('with the classic style nothing is themed and no theme data opens', ()=>{
