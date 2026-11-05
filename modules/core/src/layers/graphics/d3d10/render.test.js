@@ -1642,6 +1642,50 @@ test('a depth buffer read through a float view is read, as a depth texture', asy
     assert.equal(h.gpu.count('draw'), 1);
 });
 
+test('a depth buffer cleared and then read through a view, not bound, is cleared before the draw'
+    + ' reads it (test_depth_stencil_sampling, d3d11.c:10676)', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Width: 8, Height: 8, Format: DXGI_FORMAT.R32_TYPELESS,
+        BindFlags: D3D10_BIND.DEPTH_STENCIL | D3D10_BIND.SHADER_RESOURCE,
+    }, null, depth), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    /** @type {{ view?: any }} */
+    const dsv = {};
+    assert.equal(device.CreateDepthStencilView(depth.resource,
+        { Format: DXGI_FORMAT.D32_FLOAT, ViewDimension: 3, MipSlice: 0 }, dsv), S_OK);
+    /** @type {{ view?: any }} */
+    const srv = {};
+    assert.equal(device.CreateShaderResourceView(depth.resource,
+        { Format: DXGI_FORMAT.R32_FLOAT, ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 },
+        srv), S_OK);
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)), ld(o(0), r(0), t(0)), ret()],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    device.PSSetShaderResources(0, [srv.view]);
+    device.ClearDepthStencilView(dsv.view, D3D10_CLEAR.DEPTH, 0.25, 0);
+    device.Draw(3, 0);
+    await h.present();
+    const passes = h.gpu.of('beginRenderPass');
+    const clearing = passes.findIndex((/** @type {any} */ call)=>
+        call.descriptor.depthStencilAttachment?.view.texture === made.texture
+        && call.descriptor.depthStencilAttachment.depthLoadOp === 'clear');
+    assert.ok(clearing >= 0, 'the clear made in a pass of its own');
+    assert.equal(passes[clearing].descriptor.depthStencilAttachment.depthClearValue, 0.25);
+    const drawn = h.gpu.calls.findIndex((/** @type {any} */ call)=>call.op === 'draw');
+    assert.ok(h.gpu.calls.indexOf(passes[clearing]) < drawn, 'before the draw that reads it');
+});
+
 test('a depth buffer bound through a read-only view is tested and read in one pass, and never'
     + ' written', async()=>{
     // Soft particles and deferred lighting test against the depth they read:

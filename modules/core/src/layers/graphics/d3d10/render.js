@@ -2640,6 +2640,10 @@ export function createRenderer(services){
                         + ` ${entry.texture.viewDimension} one is read as an empty texture`);
                     return { binding: entry.binding, resource: fallback.view(entry.texture) };
                 }
+                if (gpu)
+                {
+                    reads.add(gpu.backing.id);
+                }
                 return {
                     binding: entry.binding,
                     resource: gpu ? gpu.view : fallback.view(entry.texture),
@@ -3627,6 +3631,12 @@ export function createRenderer(services){
 
     /** The backings the bindings being made write, by id. @type {Set<number>} */
     let writes = new Set();
+    /**
+     * The textures the bindings being made read through views, by backing
+     * id: a clear still waiting for a pass on one is made before the read.
+     * @type {Set<number>}
+     */
+    let reads = new Set();
 
     /**
      * A binding of what a shader writes through: the view's buffer or
@@ -4207,6 +4217,7 @@ export function createRenderer(services){
             const key = Object.entries(formats).map(entry=>entry.join(':')).join(',');
             const { linked } = computeOf(shader, formats, key);
             writes = new Set();
+            reads = new Set();
             twinUses = new Map();
             const entries = bindingsFor(pipeline.stages.cs, linked.entries, written);
             const indirect = 'buffer' in groups ? backingOf(groups.buffer) : null;
@@ -4216,7 +4227,7 @@ export function createRenderer(services){
             record({
                 kind: 'dispatch',
                 what: 'a dispatch was skipped',
-                ids: [...writes],
+                ids: [...writes, ...reads],
                 pipeline: computePipelineFor(`cs:${idOf(shader)}|${key}`, linked.code,
                     linked.entries, `d3d10:cs#${idOf(shader)}`, linked.unsupported),
                 entries,
@@ -4613,6 +4624,7 @@ export function createRenderer(services){
                     }
                 }
                 const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
+                reads = new Set();
                 const groups = [
                     pulling
                         ? [...bindingsFor(drawStage, program.groups[0].filter(entry=>
@@ -4644,6 +4656,7 @@ export function createRenderer(services){
                     targets: standIns ?? colour,
                     depth,
                     groups,
+                    reads: [...reads],
                     vertexBuffers: drawnGeometry ? [] : vertexBuffers,
                     indexBuffer: drawnGeometry ? drawnGeometry.indexBuffer
                         : indexBacking && indexBacking.gpu && indexFormat
@@ -5315,6 +5328,15 @@ export function createRenderer(services){
                             : previous ? previous.stencil : 0,
                     });
                     continue;
+                }
+                // A texture the draw reads that a clear still waits on is
+                // cleared first: the clear meets no pass of the draw's.
+                for (const id of command.reads ?? [])
+                {
+                    if ([...pendingClears.keys()].some(key=>key.startsWith(`${id}:`)))
+                    {
+                        settleClears(id);
+                    }
                 }
                 const settled = pipelinesNeeded[position];
                 if (settled.status === 'rejected')
