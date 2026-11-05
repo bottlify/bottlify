@@ -342,6 +342,33 @@ test('a pixel shader that asks for early depth tests tests itself against the de
     assert.equal(h.gpu.count('draw'), 1);
 });
 
+test('from level 11_0 a viewport corner left of or above the target is floored to a whole'
+    + ' pixel (test_negative_viewports)', async()=>{
+    const h = harness();
+    const target = texture2D(h, DXGI_FORMAT.R8G8B8A8_UNORM, D3D10_BIND.RENDER_TARGET, 4, 4);
+    /** @type {{ view?: any, shader?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateRenderTargetView(target, null, made), S_OK);
+    h.context.OMSetRenderTargets([made.view], null);
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    assert.equal(h.device.CreateVertexShader(assemble({ kind: SHADER_KIND.VERTEX, outputs:
+        [POSITION], instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+        mov(o(0), l(0, 0, 0.5, 1)), ret()] }), made), S_OK);
+    h.context.VSSetShader(made.shader, null, 0);
+    h.context.IASetPrimitiveTopology(4);
+    h.context.RSSetViewports([{ TopLeftX: -0.4, TopLeftY: -1 / 128, Width: 4, Height: 4,
+        MinDepth: 0, MaxDepth: 1 }]);
+    h.context.Draw(3, 0);
+    h.context.RSSetViewports([{ TopLeftX: 0.25, TopLeftY: 0, Width: 4, Height: 4,
+        MinDepth: 0, MaxDepth: 1 }]);
+    h.context.Draw(3, 0);
+    h.context.Flush();
+    await h.device.idle();
+    const rects = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect.slice(0, 2));
+    assert.deepEqual(rects.at(-2), [-1, -1]);
+    assert.deepEqual(rects.at(-1), [0.25, 0], 'a corner inside the target is kept as it is');
+});
+
 test('a clear of a buffer view writes its range in turn; of a texture, by a dispatch over it',
     async()=>{
         const h = harness();

@@ -38,9 +38,9 @@ import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInput,
-    dclInputPs, dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, l, ld, ldMs, lu,
-    mov, o, passThroughVertexShader, quadDomainShader, quadHullShader, r, ret, s, sample,
-    solidPixelShader, t, triangleGeometryShader, utof, v,
+    dclInputPs, dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, dclTemps,
+    indexedBy, l, ld, ldMs, lu, mov, o, passThroughVertexShader, quadDomainShader,
+    quadHullShader, r, ret, s, sample, solidPixelShader, t, triangleGeometryShader, utof, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -654,6 +654,40 @@ test('a constant buffer smaller than the shader declares is bound whole, padded 
     const made = h.gpu.of('createBuffer').find((/** @type {any} */ call)=>
         call.createBuffer === entries[0].resource.buffer);
     assert.ok(made.descriptor.size >= 32, 'room for the two registers');
+});
+
+test('a constant buffer read at a computed register reaches as far as the buffer bound, past'
+    + ' what the shader declares (test_cb_relative_addressing)', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclConstantBuffer(0, 1), dclConstantBuffer(1, 8), dclOutput(o(0)),
+            dclTemps(1), mov(r(0, 'x'), cb(0, 0, 'x')),
+            mov(o(0), indexedBy(cb(1, 0), r(0, 'x'))), ret()],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @type {{ resource?: any }} */
+    const index = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null, index),
+    S_OK);
+    /** @type {{ resource?: any }} */
+    const colours = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 160, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null, colours),
+    S_OK);
+    device.PSSetConstantBuffers(0, [index.resource, colours.resource]);
+    device.Draw(3, 0);
+    await h.present();
+    assert.deepEqual(h.divergences, []);
+    const fragment = h.gpu.of('createShaderModule').at(-1).descriptor.code;
+    assert.match(fragment, /var<uniform> cb1: array<vec4<u32>, 10>;/, 'the ten registers bound');
+    assert.match(fragment, /var<uniform> cb0: array<vec4<u32>, 1>;/, 'read at fixed registers');
 });
 
 test('a discard map between two draws renames the buffer, so each draw keeps its bytes',
@@ -1574,6 +1608,33 @@ test('a float target\'s slice past the first is read back through a staging copy
     const mapped = {};
     assert.equal(staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
     assert.equal(mapped.data?.length, 4 * 4 * 8);
+    staging.resource.Unmap(0);
+});
+
+test('an A8 target comes back to a staging copy as the alpha of the RGBA it is kept as'
+    + ' (test_render_a8)', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const target = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.A8_UNORM, BindFlags: D3D10_BIND.RENDER_TARGET }, null, target), S_OK);
+    /** @type {{ view?: any }} */
+    const rtv = {};
+    assert.equal(device.CreateRenderTargetView(target.resource, null, rtv), S_OK);
+    device.ClearRenderTargetView(rtv.view, [1, 1, 1, 0.5]);
+    /** @type {{ resource?: any }} */
+    const staging = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.A8_UNORM, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ }, null, staging), S_OK);
+    device.CopyResource(staging.resource, target.resource);
+    assert.ok(!diverged(h, 'copy out of'), h.divergences.join('\n'));
+    await h.present();
+    /** @type {{ data?: Uint8Array | null, rowPitch?: number }} */
+    const mapped = {};
+    assert.equal(await staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.deepEqual([...(mapped.data ?? new Uint8Array(4)).subarray(0, 4)], [128, 128, 128, 128]);
     staging.resource.Unmap(0);
 });
 

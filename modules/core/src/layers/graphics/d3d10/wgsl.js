@@ -20,12 +20,14 @@
  * stored in a float is not required to keep its payload.
  *
  * The other decision worth stating is how a vertex shader meets a pixel
- * shader. Direct3D links the two by semantic name, never by register: `COLOR0`
- * in one is `COLOR0` in the other whatever register each compiler chose. So a
- * shader is translated to a body that reads and writes named registers, and the
- * entry point around it -- the struct with the `@location` attributes -- is
- * written when a pair is linked, giving both halves the same numbering. The
- * body is the shader's; the interface is the pair's.
+ * shader. Direct3D 10 and 11 hand register n of one to register n of the
+ * other: the signatures name the registers, and a pair whose names disagree
+ * at a register reads what the register carries, not the name
+ * (test_shader_stage_input_output_matching). So a shader is translated to a
+ * body that reads and writes numbered registers, and the entry point around
+ * it -- the struct with the `@location` attributes -- is written when a pair
+ * is linked, giving both halves the same numbering. The body is the shader's;
+ * the interface is the pair's.
  *
  * What a first cut does not carry is listed rather than approximated: an
  * instruction this file has no translation for makes the whole shader
@@ -308,6 +310,8 @@ export const HELPERS = Object.freeze({
  * @typedef {Object} ConstantBufferDecl
  * @property {number} slot
  * @property {number} size   In vec4 registers.
+ * @property {boolean} [indexed]  Read at a register the shader computes: such a
+ *     read reaches as far as the bound buffer, past the declared size.
  */
 
 /**
@@ -349,6 +353,8 @@ export const HELPERS = Object.freeze({
  * @property {number} inputRegisters               How many `v` registers the body reads.
  * @property {number} outputRegisters              How many `o` registers the body writes.
  * @property {boolean} writesDepth
+ * @property {boolean} [writesMask]   A pixel shader writes its coverage (`oMask`).
+ * @property {boolean} [readsMask]    A pixel shader reads its coverage (`vCoverage`).
  * @property {boolean} [earlyDepth]  The shader asks for the depth and stencil
  *     tests before it runs (`[earlydepthstencil]`), so that what it writes
  *     through views is not written by a fragment the tests reject.
@@ -465,13 +471,15 @@ const floatLiteral = value=>
  * @param {import('./dxbc.js').DxbcContainer} container
  * `samplerBias` is the MipLODBias of the sampler bound at each slot that has
  * one: WebGPU's samplers have none, so the shader adds it to every level it
- * samples by.
+ * samples by. `constantSizes`: the registers a constant buffer read at a
+ * computed register has bound at its slot, where more than it declares.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
  * @param {{ multisampled?: readonly number[], depth?: readonly number[],
  *     stencil?: readonly number[], uavFormats?: Readonly<Record<number, string>>,
  *     tokens?: Uint32Array,
- *     outputName?: string, samplerBias?: Readonly<Record<number, number>> }} [options]
+ *     outputName?: string, samplerBias?: Readonly<Record<number, number>>,
+ *     constantSizes?: Readonly<Record<number, number>> }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
@@ -536,6 +544,30 @@ export function translateShader(container, options = {}){
     const textureOf = slot=>result.textures.find(texture=>texture.slot === slot) ?? null;
 
     /**
+     * The input and output registers a shader indexes into, by range
+     * (`dcl_index_range`): an input range is read out of an array of its
+     * registers, `vr<first>`, an output range written through a switch.
+     *
+     * @type {{ type: number, first: number, count: number }[]}
+     */
+    const indexRanges = [];
+    /** @param {number} type @param {number} register */
+    const rangeOf = (type, register)=>indexRanges.find(range=>range.type === type
+        && register >= range.first && register < range.first + range.count) ?? null;
+    /**
+     * A relative register's place in the range it falls in.
+     *
+     * @param {import('./sm4.js').Operand} operand @param {{ first: number }} range
+     */
+    const placeIn = (operand, range)=>{
+        const index = operand.indices[0];
+        const relative = `${untyped(/** @type {any} */ (index.relative))}`
+            + `.${COMPONENT[/** @type {any} */ (index.relative).swizzle[0]]}`;
+        return index.value === range.first ? relative
+            : `(${u32Literal(index.value - range.first)} + ${relative})`;
+    };
+
+    /**
      * @param {import('./sm4.js').Operand} operand
      * @param {number} at  Which of the operand's indices.
      * @returns {string} an index expression, resolving a relative part
@@ -580,6 +612,15 @@ export function translateShader(container, options = {}){
                     return `vicp[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
                         + `.${swizzle}`;
                 }
+                if (operand.indices[0].relative)
+                {
+                    const range = rangeOf(OPERAND.INPUT, operand.indices[0].value);
+                    if (range)
+                    {
+                        return `vr${range.first}[${placeIn(operand, range)}].${swizzle}`;
+                    }
+                    result.unsupported.push('an input register indexed outside a declared range');
+                }
                 return `v${operand.indices[0].value}.${swizzle}`;
             case OPERAND.OUTPUT:
                 return isHull ? `${outputArray}[${indexExpression(operand, 0)}].${swizzle}`
@@ -606,11 +647,23 @@ export function translateShader(container, options = {}){
                 return `${REG}(0u)`;
             case OPERAND.INPUT_DOMAIN_POINT:
                 return `dsDomain.${swizzle}`;
+            case OPERAND.INPUT_COVERAGE_MASK:
+                result.readsMask = true;
+                return `${REG}(vCoverage).${swizzle}`;
             case OPERAND.INPUT_GS_INSTANCE_ID:
                 return `${REG}(gsInstance).${swizzle}`;
             case OPERAND.INDEXABLE_TEMP:
                 return `x${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.CONSTANT_BUFFER:
+                if (operand.indices[1]?.relative)
+                {
+                    const declared = result.constantBuffers.find(buffer=>
+                        buffer.slot === operand.indices[0].value);
+                    if (declared)
+                    {
+                        declared.indexed = true;
+                    }
+                }
                 return `cb${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.IMMEDIATE_CONSTANT_BUFFER:
                 return `icb[${indexExpression(operand, 0)}].${swizzle}`;
@@ -689,6 +742,36 @@ export function translateShader(container, options = {}){
         {
             result.writesDepth = true;
             emit(`oDepth = bitcast<f32>((${value}).x);`);
+            return;
+        }
+        if (dest.type === OPERAND.OUTPUT_COVERAGE_MASK)
+        {
+            result.writesMask = true;
+            emit(`oMask = (${value}).x;`);
+            return;
+        }
+        const range = dest.type === OPERAND.OUTPUT && !isHull && dest.indices[0]?.relative
+            ? rangeOf(OPERAND.OUTPUT, dest.indices[0].value) : null;
+        if (range)
+        {
+            // Each register of the range a switch case of its own: WGSL
+            // names the outputs one by one.
+            const written = held();
+            emit(`let ${written} = ${value};`);
+            emit(`switch (${placeIn(dest, range)}) {`);
+            depth++;
+            for (let place = 0; place < range.count; place++)
+            {
+                emit(`case ${place}u: {`);
+                depth++;
+                store({ ...dest, indices: [{ value: range.first + place, relative: null }] },
+                    written);
+                depth--;
+                emit('}');
+            }
+            emit('default: {}');
+            depth--;
+            emit('}');
             return;
         }
         const target = untyped({ ...dest, swizzle: [0, 1, 2, 3] }).replace(/\.xyzw$/, '');
@@ -1236,7 +1319,8 @@ export function translateShader(container, options = {}){
             case OPCODE.DCL_CONSTANT_BUFFER:
                 result.constantBuffers.push({
                     slot: dest.indices[0].value,
-                    size: dest.indices[1] ? dest.indices[1].value : 0,
+                    size: Math.max(dest.indices[1] ? dest.indices[1].value : 0,
+                        options.constantSizes?.[dest.indices[0].value] ?? 0),
                 });
                 break;
             case OPCODE.DCL_SAMPLER:
@@ -1541,12 +1625,23 @@ export function translateShader(container, options = {}){
             case OPCODE.UTOF:
                 store(dest, fromFloat(`vec4<f32>(${u(a)})`, sat));
                 break;
-            case OPCODE.FTOI:
-                store(dest, fromInt(`vec4<i32>(${f(a)})`));
+            // WGSL saturates to the largest integer a float holds below the
+            // type's top (0xffffff00 unsigned, 0x7fffff80 signed); Direct3D
+            // to the top itself (test_uint_shader_instructions).
+            case OPCODE.FTOI: {
+                const value = held();
+                emit(`let ${value} = ${f(a)};`);
+                store(dest, fromInt(`select(vec4<i32>(${value}), vec4<i32>(2147483647),`
+                    + ` ${value} >= vec4<f32>(2147483648.0))`));
                 break;
-            case OPCODE.FTOU:
-                store(dest, `${REG}(${f(a)})`);
+            }
+            case OPCODE.FTOU: {
+                const value = held();
+                emit(`let ${value} = ${f(a)};`);
+                store(dest, `select(${REG}(${value}), ${REG}(0xffffffffu),`
+                    + ` ${value} >= vec4<f32>(4294967296.0))`);
                 break;
+            }
 
             // --- flow control ---
             case OPCODE.IF:
@@ -2276,15 +2371,36 @@ export function translateShader(container, options = {}){
                 break;
             }
 
-            // A range of registers indexed into: a hull shader's outputs are an
-            // array already; anywhere else a relative input or output is not
-            // carried, and is refused here rather than read at its base.
-            case OPCODE.DCL_INDEX_RANGE:
-                if (!isHull)
+            // A range of registers indexed into: a hull shader's outputs and a
+            // geometry shader's vertices are arrays already; another stage's
+            // inputs are copied into one once they are loaded, its outputs
+            // written through a switch (`indexRanges`).
+            case OPCODE.DCL_INDEX_RANGE: {
+                const count = instruction.extra[0] ?? 0;
+                if (isHull || (isGeometry && dest.type === OPERAND.INPUT
+                    && dest.indices.length > 1))
                 {
-                    unsupported(instruction.name);
+                    break;
                 }
+                if (dest.type === OPERAND.INPUT && dest.indices.length === 1)
+                {
+                    const first = dest.indices[0].value;
+                    indexRanges.push({ type: OPERAND.INPUT, first, count });
+                    result.inputRegisters = Math.max(result.inputRegisters, first + count);
+                    emit(`var vr${first} = array<${REG}, ${count}>(${Array.from({ length: count },
+                        (_, place)=>`v${first + place}`).join(', ')});`);
+                    break;
+                }
+                if (dest.type === OPERAND.OUTPUT && dest.indices.length === 1)
+                {
+                    const first = dest.indices[0].value;
+                    indexRanges.push({ type: OPERAND.OUTPUT, first, count });
+                    result.outputRegisters = Math.max(result.outputRegisters, first + count);
+                    break;
+                }
+                unsupported(instruction.name);
                 break;
+            }
 
             default:
                 unsupported(instruction.name);
@@ -2983,8 +3099,8 @@ export function linkProgram(vs, ps, options = {}){
     // --- the interface between the stages, numbered by the vertex outputs ---
     /** @type {Map<string, { location: number, scalar: string, interpolate: string }>} */
     const varyings = new Map();
-    /** The pixel shader's interpolation mode of each input, by semantic. */
-    const psModes = new Map(ps.inputs.map(element=>[semanticKey(element),
+    /** The pixel shader's interpolation mode of each input, by register. */
+    const psModes = new Map(ps.inputs.map(element=>[element.register,
         ps.interpolation?.[element.register] ?? 0]));
     /**
      * The varying each output register is passed as: two semantics packed
@@ -3058,7 +3174,8 @@ export function linkProgram(vs, ps, options = {}){
         // An integer varying cannot be interpolated and WGSL says so; a
         // float one is interpolated as the pixel shader declares the input
         // it arrives as, both stages saying it alike as WebGPU requires.
-        const interpolate = scalar === 'f32' ? INTERPOLATION[psModes.get(key) ?? 0] ?? ''
+        const interpolate = scalar === 'f32'
+            ? INTERPOLATION[psModes.get(element.register) ?? 0] ?? ''
             : ' @interpolate(flat)';
         const varying = { location, scalar, interpolate };
         varyings.set(key, varying);
@@ -3131,7 +3248,7 @@ export function linkProgram(vs, ps, options = {}){
         }
     }
 
-    // --- the pixel stage's inputs, found by semantic among the vertex outputs ---
+    // --- the pixel stage's inputs, found by register among the vertex outputs ---
     /** @type {string[]} */
     const psIn = [];
     /** @type {string[]} */
@@ -3181,13 +3298,14 @@ export function linkProgram(vs, ps, options = {}){
             unsupported.push(`pixel input system value ${element.systemValue}`);
             continue;
         }
-        const varying = varyings.get(semanticKey(element));
+        // Register n of the vertex outputs, as the hardware passes it; a
+        // register the vertex shader did not write is looked for by name.
+        const varying = byRegister.get(element.register) ?? varyings.get(semanticKey(element));
         if (!varying)
         {
             // An input the shader never reads (its signature's read mask
-            // empty) needs no output; one it reads under a name the vertex
-            // shader did not write Direct3D refuses at draw time; here the
-            // register reads as zero and the pair says why.
+            // empty) needs no output; one it reads where the vertex shader
+            // wrote nothing reads as zero, and the pair says why.
             if (element.readWriteMask !== 0)
             {
                 unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
@@ -3219,7 +3337,7 @@ export function linkProgram(vs, ps, options = {}){
     // only their names and no register: they are named here.
     const DEPTH_NAMES = /** @type {Record<string, number>} */ ({ SV_DEPTH: SYSTEM_VALUE.DEPTH,
         SV_DEPTHGREATEREQUAL: SYSTEM_VALUE.DEPTH_GREATER_EQUAL,
-        SV_DEPTHLESSEQUAL: SYSTEM_VALUE.DEPTH_LESS_EQUAL });
+        SV_DEPTHLESSEQUAL: SYSTEM_VALUE.DEPTH_LESS_EQUAL, SV_COVERAGE: SYSTEM_VALUE.COVERAGE });
     for (const output of ps.outputs)
     {
         const element = output.systemValue === SYSTEM_VALUE.UNDEFINED
@@ -3249,6 +3367,13 @@ export function linkProgram(vs, ps, options = {}){
         {
             psOut.push('    @builtin(frag_depth) depth: f32,');
             psReturn.push('oDepth');
+            continue;
+        }
+        // The samples the fragment covers, and'ed with the rasterizer's.
+        if (element.systemValue === SYSTEM_VALUE.COVERAGE)
+        {
+            psOut.push('    @builtin(sample_mask) mask: u32,');
+            psReturn.push(ps.writesMask ? 'oMask' : '0xffffffffu');
             continue;
         }
         // A depth written with a promise of its direction keeps it: the
@@ -3327,6 +3452,12 @@ export function linkProgram(vs, ps, options = {}){
     // A fragment stage with nothing to write -- depth alone, no target bound
     // -- still runs, for what it discards, and returns nothing.
     const writes = psOut.length > 0;
+    // The samples the fragment covers, as the shader reads them (vCoverage).
+    if (ps.readsMask)
+    {
+        psIn.push('    @builtin(sample_mask) coverage: u32,');
+        psLoad.push('    let vCoverage = in.coverage;');
+    }
     /** @type {string[]} */
     const early = [];
     if (options.earlyDepth)
@@ -3361,6 +3492,7 @@ export function linkProgram(vs, ps, options = {}){
         ...psLoad,
         ...registerDeclarations(ps),
         ...(ps.writesDepth ? ['    var oDepth: f32 = 0.0;'] : []),
+        ...(ps.writesMask ? ['    var oMask: u32 = 0xffffffffu;'] : []),
         ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null, coverage),
         '}',
     ].join('\n');

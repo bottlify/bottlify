@@ -37,7 +37,9 @@ import {
     rasterizer, sampleInfo, samplePos, dclInputPsSgv,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
-    atomicIadd, dclGlobalFlags, dclUavTyped, ldUavTyped, storeUavTyped, dclThreadGroup,
+    atomicIadd, dclGlobalFlags, dclIndexRange, oMask, vCoverage, dclUavTyped, ldUavTyped,
+    storeUavTyped,
+    dclThreadGroup,
     dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
     storeRaw, storeStructured, sync, u, vThreadID, vThreadIDInGroupFlattened,
 } from './shader-fixtures.js';
@@ -204,8 +206,13 @@ test('integer arithmetic reads and writes through the signed bitcast', ()=>{
     assert.equal(emitted([ineg(r(0), r(1))]), `r0 = ${U}((-${I}(r1.xyzw)));`);
     assert.equal(emitted([itof(r(0), r(1))]), `r0 = ${U}(vec4<f32>(${I}(r1.xyzw)));`);
     assert.equal(emitted([utof(r(0), r(1))]), `r0 = ${U}(vec4<f32>(r1.xyzw));`);
-    assert.equal(emitted([ftoi(r(0), r(1))]), `r0 = ${U}(vec4<i32>(${F}(r1.xyzw)));`);
-    assert.equal(emitted([ftou(r(0), r(1))]), `r0 = vec4<u32>(${F}(r1.xyzw));`);
+    // Saturated to the type's top, which WGSL's conversion stops short of.
+    assert.equal(emitted([ftoi(r(0), r(1))]), `let held0 = ${F}(r1.xyzw);\n`
+        + `r0 = ${U}(select(vec4<i32>(held0), vec4<i32>(2147483647),`
+        + ' held0 >= vec4<f32>(2147483648.0)));');
+    assert.equal(emitted([ftou(r(0), r(1))]), `let held0 = ${F}(r1.xyzw);\n`
+        + 'r0 = select(vec4<u32>(held0), vec4<u32>(0xffffffffu),'
+        + ' held0 >= vec4<f32>(4294967296.0));');
     assert.equal(emitted([umin(r(0), r(1), r(2))]), 'r0 = min(r1.xyzw, r2.xyzw);');
     assert.equal(emitted([umax(r(0), r(1), r(2))]), 'r0 = max(r1.xyzw, r2.xyzw);');
 });
@@ -796,9 +803,56 @@ test('a pass-through vertex shader and a solid pixel shader link into two entry 
     assert.deepEqual(linked.groups, [[], []]);
 });
 
-test('a varying is matched by semantic, not by register', ()=>{
+test('a pixel shader\'s coverage is the fragment\'s sample mask, read and written'
+    + ' (test_sample_mask)', ()=>{
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 },
+            { name: 'SV_Coverage', register: 0xffffffff, mask: 0x1 }],
+        instructions: [dclOutput(o(0)), mov(o(0), l(1, 1, 1, 1)),
+            iadd(oMask(), vCoverage('xxxx'), lu(5)), ret()],
+    }))));
+    assert.deepEqual(ps.unsupported, []);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, ps);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.fragment, /@builtin\(sample_mask\) mask: u32,/);
+    assert.match(linked.fragment, /@builtin\(sample_mask\) coverage: u32,/);
+    assert.match(linked.fragment, /let vCoverage = in\.coverage;/);
+    assert.match(linked.fragment, /var oMask: u32 = 0xffffffffu;/);
+    assert.match(linked.fragment, /oMask = \(.*vec4<u32>\(vCoverage\).*\)\.x;/);
+    assert.match(linked.fragment, /return FragmentOut\(.*, oMask\);/);
+    assert.doesNotMatch(linked.fragment, /@location\(4294967295\)/);
+});
+
+test('a varying is passed by register, as the hardware does, whatever the names say there'
+    + ' (test_shader_stage_input_output_matching)', ()=>{
+    const COLOURS = [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+        { name: 'COLOR', index: 0, register: 1 }, { name: 'COLOR', index: 1, register: 2 }];
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX, outputs: COLOURS,
+        instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), dclOutput(o(1)),
+            dclOutput(o(2)), mov(o(0), l(0, 0, 0, 1)), mov(o(1), l(1, 0, 0, 1)),
+            mov(o(2), l(0, 1, 0, 1)), ret()],
+    }))));
+    // The pixel shader names its registers the other way round.
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [COLOURS[0], { name: 'COLOR', index: 1, register: 1 },
+            { name: 'COLOR', index: 0, register: 2 }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPs(v(1)), dclInputPs(v(2)), dclOutput(o(0)), mov(o(0), v(2)),
+            ret()],
+    }))));
+    const linked = linkProgram(vs, ps);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.vertex, /@location\(0\) o1: vec4<f32>,\s+@location\(1\) o2/);
+    assert.match(linked.fragment, /@location\(0\) v1: vec4<f32>,\s+@location\(1\) v2/);
+});
+
+test('a pixel input at a register the vertex shader did not write is looked for by name', ()=>{
     // The vertex shader writes COLOR in o1; a pixel shader that reads it in v3
-    // still finds it, at the location the vertex output was given.
+    // finds it, at the location the vertex output was given.
     const vs = translateShader(/** @type {any} */ (parseDxbc(colouredVertexShader())));
     const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
         kind: SHADER_KIND.PIXEL,
@@ -1029,6 +1083,34 @@ test('a compute shader is a module of its own: its group\'s size, its thread ids
         [BINDING.UAV + 1, STAGE.COMPUTE, 'storage'],
         [BINDING.UAV_VIEW + 1, STAGE.COMPUTE, 'uniform'],
     ]);
+});
+
+test('a range of input registers indexed into is read out of an array of them, a range of'
+    + ' outputs written through a switch (test_vs_input_relative_addressing)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [0, 1, 2, 3].map(register=>({ name: 'COLOR', index: register, register })),
+        outputs: [0, 1, 2].map(register=>({ name: 'COLOR', index: register, register })),
+        instructions: [
+            ...[0, 1, 2, 3].map(register=>dclInput(v(register))),
+            ...[0, 1, 2].map(register=>dclOutput(o(register))),
+            dclIndexRange(v(1), 3),
+            dclIndexRange(o(1), 2),
+            dclTemps(1),
+            mov(r(0, 'x'), cb(0, 0, 'x')),
+            mov(o(0), indexedBy(v(2), r(0, 'x'))),
+            mov(indexedBy(o(1, 'xy'), r(0, 'x')), v(0)),
+            ret(),
+        ],
+    }))));
+    assert.deepEqual(vs.unsupported, []);
+    const text = vs.body.filter(line=>typeof line === 'string').join('\n');
+    assert.match(text, /var vr1 = array<vec4<u32>, 3>\(v1, v2, v3\);/);
+    // v[r0.x + 2] is the range's second place on.
+    assert.match(text, /o0 = vr1\[\(1u \+ r0\.x+\.x\)\]\.xyzw;/);
+    assert.match(text, /switch \(r0\.x+\.x\) \{\s+case 0u: \{\s+let (held\d+) = held\d+;\s+o1\.x = \1\.x;\s+o1\.y = \1\.y;/);
+    assert.match(text, /case 1u: \{\s+let held\d+ = held\d+;\s+o2\.x = /);
+    assert.equal(vs.outputRegisters, 3);
 });
 
 test('a typed texture view an atomic touches is the words of its texels in a buffer, every'

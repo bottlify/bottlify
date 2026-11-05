@@ -689,6 +689,7 @@ export function createDevice(options = {}){
         formatsTier1: options.formatsTier1,
         rg11b10Renderable: options.rg11b10Renderable,
         guest: options.guest,
+        featureLevel: options.featureLevel,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */

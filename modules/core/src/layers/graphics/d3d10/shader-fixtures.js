@@ -94,6 +94,9 @@ export const t = (slot, components)=>register(OPERAND.RESOURCE, [slot], componen
 export const s = slot=>({ type: OPERAND.SAMPLER, indices: [slot] });
 export const nullDest = ()=>({ type: OPERAND.NULL, indices: [] });
 export const oDepth = ()=>({ type: OPERAND.OUTPUT_DEPTH, indices: [] });
+export const oMask = ()=>({ type: OPERAND.OUTPUT_COVERAGE_MASK, indices: [] });
+/** @param {string} [components] */
+export const vCoverage = components=>register(OPERAND.INPUT_COVERAGE_MASK, [], components);
 
 /**
  * @param {AsmOperand} operand
@@ -468,6 +471,9 @@ export const dclResource = (slot, dimension, returnType)=>op(OPCODE.DCL_RESOURCE
 });
 /** @param {number} slot @param {number} [mode] */
 export const dclSampler = (slot, mode = 0)=>op(OPCODE.DCL_SAMPLER, [s(slot)], { control: mode });
+/** @param {AsmOperand} first @param {number} count */
+export const dclIndexRange = (first, count)=>
+    op(OPCODE.DCL_INDEX_RANGE, [first], { extra: [count] });
 /** @param {number} [flags]  D3D10_SB_GLOBAL_FLAGS: 1 refactoring allowed, 4 early depth tests. */
 export const dclGlobalFlags = (flags = 1)=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: flags });
 

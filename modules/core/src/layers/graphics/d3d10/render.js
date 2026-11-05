@@ -34,7 +34,7 @@ import {
     D3D10_FILTER_COMPARISON_BIT, D3D10_INPUT_CLASSIFICATION, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_RESOURCE_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
     D3D10_APPEND_ALIGNED_ELEMENT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BUFFER_UAV_FLAG,
-    D3D11_DSV_FLAG, D3D11_RESOURCE_MISC, DXGI_FORMAT, FORMAT_INFO, formatPitch,
+    D3D11_DSV_FLAG, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL, DXGI_FORMAT, FORMAT_INFO, formatPitch,
 } from './constants.js';
 import { channelsOf, clearElement, clearTexel } from './uavclear.js';
 import { SO_NO_RASTERIZED_STREAM } from './streamout.js';
@@ -92,6 +92,7 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  * @property {boolean} [rg11b10Renderable]  Likewise, rg11b10ufloat-renderable.
  * @property {GuestStorage} [guest]  Where a resource the program maps keeps the bytes a
  *     map hands out: guest memory, so a map is an address and no copy.
+ * @property {number} [featureLevel]  The device's D3D_FEATURE_LEVEL (10_0 without one).
  */
 
 /**
@@ -129,6 +130,9 @@ const COMPARE = Object.freeze({
     [D3D10_COMPARISON.GREATER_EQUAL]: 'greater-equal',
     [D3D10_COMPARISON.ALWAYS]: 'always',
 });
+
+/** The most vec4 registers a constant buffer binds (D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT). */
+const MAX_CONSTANTS = 4096;
 
 /** The WGSL operator a fragment's depth passes a test by, against the buffer's. */
 const COMPARE_OPERATOR = Object.freeze(/** @type {Record<number, string>} */ ({
@@ -534,6 +538,13 @@ export function createRenderer(services){
     const BufferUsage = backend ? backend.BufferUsage : null;
     const TextureUsage = backend ? backend.TextureUsage : null;
     const compressed = services.compressedTextures ?? false;
+    // From level 11_0 a viewport's corner left or above the target is
+    // floored to a whole pixel, which moves its far corner with it
+    // (test_negative_viewports).
+    const flooredCorners = (services.featureLevel ?? D3D_FEATURE_LEVEL.LEVEL_10_0)
+        >= D3D_FEATURE_LEVEL.LEVEL_11_0;
+    /** @param {number} corner */
+    const cornerOf = corner=>(flooredCorners && corner < 0 ? Math.floor(corner) : corner);
     /** What a texture's GPU format is chosen with: the device's block and depth features. */
     const formatOptions = { compressed,
         depth32Stencil: backend ? backend.hasFeature?.('depth32float-stencil8') === true : true,
@@ -1395,8 +1406,44 @@ export function createRenderer(services){
      */
     const readable = backing=>{
         const storage = backing.layout.storage;
-        return !!storage && !storage.conversion && !storage.depth
+        return !!storage && (!storage.conversion || storage.conversion === 'a8') && !storage.depth
             && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
+    };
+
+    /**
+     * The bytes a texel of a texture that can be read back comes back as to
+     * the program: its own, or A8's one, the alpha of the RGBA it is kept as.
+     *
+     * @param {any} backing
+     */
+    const programTexel = backing=>(backing.layout.storage.conversion === 'a8' ? 1
+        : TEXEL_BYTES[backing.layout.storage.format]);
+
+    /**
+     * A read back's delivery given the image as the program's texels.
+     *
+     * @param {any} backing
+     * @param {(image: { width: number, height: number, data: Uint8Array } | null) => void} deliver
+     * @returns {(image: { width: number, height: number, data: Uint8Array } | null) => void}
+     */
+    const asProgramTexels = (backing, deliver)=>{
+        if (backing.layout.storage.conversion !== 'a8')
+        {
+            return deliver;
+        }
+        return image=>{
+            if (!image)
+            {
+                deliver(null);
+                return;
+            }
+            const data = new Uint8Array(image.data.length >> 2);
+            for (let at = 0; at < data.length; at++)
+            {
+                data[at] = image.data[at * 4 + 3];
+            }
+            deliver({ ...image, data });
+        };
     };
 
     /**
@@ -1771,7 +1818,7 @@ export function createRenderer(services){
             let made = variants.get(variant);
             if (!made)
             {
-                const [multisampled, depth, biases, stored, stencil] = variant.split('|');
+                const [multisampled, depth, biases, stored, stencil, sizes] = variant.split('|');
                 /** @param {string} slots */
                 const list = slots=>(slots ? slots.split(',').map(Number) : []);
                 made = translateShader(shader.container, {
@@ -1780,6 +1827,8 @@ export function createRenderer(services){
                         .map(pair=>pair.split(':').map(Number))),
                     uavFormats: Object.fromEntries((stored ?? '').split(',').filter(Boolean)
                         .map(pair=>pair.split(':')).map(([slot, format])=>[Number(slot), format])),
+                    constantSizes: Object.fromEntries((sizes ?? '').split(',').filter(Boolean)
+                        .map(pair=>pair.split(':').map(Number))),
                 });
                 variants.set(variant, made);
             }
@@ -1858,10 +1907,24 @@ export function createRenderer(services){
         const stored = translationOf(stage.shader).uavs.length > 0
             ? Object.entries(uavFormatsOf(written)).map(([slot, format])=>`${slot}:${format}`)
             : [];
+        // A constant buffer read at a computed register reaches as far as
+        // the buffer bound, past what the shader declares (test_cb_relative_addressing).
+        /** @type {string[]} */
+        const sizes = [];
+        for (const declared of translationOf(stage.shader).constantBuffers)
+        {
+            const buffer = declared.indexed ? stage.constantBuffers[declared.slot] : null;
+            const registers = buffer ? Math.min(MAX_CONSTANTS,
+                Math.ceil(buffer.desc.ByteWidth / 16)) : 0;
+            if (registers > declared.size)
+            {
+                sizes.push(`${declared.slot}:${registers}`);
+            }
+        }
         return multisampled.length === 0 && depth.length === 0 && biases.length === 0
-            && stored.length === 0 && stencil.length === 0 ? ''
+            && stored.length === 0 && stencil.length === 0 && sizes.length === 0 ? ''
             : `${multisampled.join(',')}|${depth.join(',')}|${biases.join(',')}`
-                + `|${stored.join(',')}|${stencil.join(',')}`;
+                + `|${stored.join(',')}|${stencil.join(',')}|${sizes.join(',')}`;
     };
 
     /** @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries @param {string} label */
@@ -2901,7 +2964,8 @@ export function createRenderer(services){
         {
             return false;
         }
-        const texel = TEXEL_BYTES[from.layout.storage.format];
+        const texel = programTexel(from);
+        const gpuTexel = TEXEL_BYTES[from.layout.storage.format];
         // A volume comes back a depth slice at a time.
         if (is3D)
         {
@@ -2912,10 +2976,10 @@ export function createRenderer(services){
                     sourceId: from.id,
                     surface: {
                         texture: from.texture, mipLevel: src.level, layer: region.front + z,
-                        width: fromLevel.width, height: fromLevel.height, bytesPerTexel: texel,
+                        width: fromLevel.width, height: fromLevel.height, bytesPerTexel: gpuTexel,
                     },
-                    deliver: stagingDelivery(destination, destinationSubresource, at, region,
-                        size, texel, at.z + z),
+                    deliver: asProgramTexels(from, stagingDelivery(destination,
+                        destinationSubresource, at, region, size, texel, at.z + z)),
                 });
             }
             return true;
@@ -2925,10 +2989,10 @@ export function createRenderer(services){
             sourceId: from.id,
             surface: {
                 texture: from.texture, mipLevel: src.level, layer: src.slice,
-                width: fromLevel.width, height: fromLevel.height, bytesPerTexel: texel,
+                width: fromLevel.width, height: fromLevel.height, bytesPerTexel: gpuTexel,
             },
-            deliver: stagingDelivery(destination, destinationSubresource, at, region, size,
-                texel),
+            deliver: asProgramTexels(from, stagingDelivery(destination, destinationSubresource,
+                at, region, size, texel)),
         });
         return true;
     };
@@ -4859,8 +4923,8 @@ export function createRenderer(services){
                             : null,
                     layout: state.inputLayout.elements,
                     viewport: {
-                        x: viewport.TopLeftX,
-                        y: viewport.TopLeftY,
+                        x: cornerOf(viewport.TopLeftX),
+                        y: cornerOf(viewport.TopLeftY),
                         width: viewport.Width,
                         height: viewport.Height,
                         minDepth: viewport.MinDepth,
@@ -5139,7 +5203,7 @@ export function createRenderer(services){
                 return null;
             }
             const level = backing.layout.levels[0];
-            const texel = TEXEL_BYTES[backing.layout.storage.format];
+            const texel = programTexel(backing);
             /** @type {() => void} */
             let arrive = ()=>{};
             const arrived = new Promise(done=>{
@@ -5151,10 +5215,10 @@ export function createRenderer(services){
                 sourceId: backing.id,
                 surface: {
                     texture: backing.texture, mipLevel: 0, layer: 0,
-                    width: level.width, height: level.height, bytesPerTexel: texel,
+                    width: level.width, height: level.height,
+                    bytesPerTexel: TEXEL_BYTES[backing.layout.storage.format],
                 },
-                /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
-                deliver(image){
+                deliver: asProgramTexels(backing, image=>{
                     if (delivered)
                     {
                         return;
@@ -5176,7 +5240,7 @@ export function createRenderer(services){
                             + ' context is opened over as they were');
                     }
                     arrive();
-                },
+                }),
             });
             this.flush();
             return arrived;
