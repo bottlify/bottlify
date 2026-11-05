@@ -947,7 +947,9 @@ export function keepFrames(app, state){
             compiles: frame.compiles, instructions: frame.instructions,
             notes: { interpreted: frame.notes?.interpreted ?? 0,
                 instructions: frame.notes?.instructions ?? 0,
-                heapDelta: frame.notes?.heapDelta ?? 0 },
+                translateMs: frame.notes?.translateMs ?? 0,
+                // Absent where the heap cannot be read, which the drops say.
+                heapDelta: frame.notes?.heapDelta },
             longest: frame.longest });
     }
 }

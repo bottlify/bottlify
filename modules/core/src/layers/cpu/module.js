@@ -1458,6 +1458,13 @@ export function createCpuModule(){
                 },
                 compiledModules: ()=>started().compiledModules(),
                 interpretedSteps: ()=>started().interpretedSteps(),
+                /**
+                 * Milliseconds the translator has spent on this thread, all told:
+                 * forming, lookup, emitting, encoding, storing, instantiating and
+                 * publishing regions, which a slice pays for inside the guest's
+                 * time. 0 with no translator.
+                 */
+                translateMs: ()=>state.cork?.counters?.().translateMs ?? 0,
                 hostWrittenBytes: ()=>started().hostWrittenBytes(),
                 /**
                  * An engine's own account of where the guest ran, by address and
