@@ -2044,8 +2044,11 @@ export function translateShader(container, options = {}){
             }
             case OPCODE.IMM_ATOMIC_ALLOC:
             case OPCODE.IMM_ATOMIC_CONSUME: {
+                // An append or consume buffer's declaration carries no flag
+                // (fxc sets one only for an order-preserving counter): any
+                // structured view counts through the view's hidden counter.
                 const memory = memoryOf(a);
-                if (!memory?.uav || !memory.uav.counter)
+                if (!memory?.uav || memory.uav.structure !== 'structured')
                 {
                     unsupported(`${instruction.name} on a view with no counter`);
                     break;
@@ -2076,6 +2079,15 @@ export function translateShader(container, options = {}){
                 break;
             }
             case OPCODE.BUFINFO: {
+                // A typed buffer view answers its element count, which its
+                // view uniform holds.
+                const viewed = a.type === OPERAND.RESOURCE ? textureOf(a.indices[0]?.value ?? -1)
+                    : null;
+                if (viewed && !viewed.structure && viewed.dimension === RESOURCE_DIMENSION.BUFFER)
+                {
+                    store(dest, `${REG}(t${viewed.slot}view.z)`);
+                    break;
+                }
                 const memory = memoryOf(a);
                 const uav = memory?.uav;
                 if (!memory || (uav && uav.dimension !== RESOURCE_DIMENSION.BUFFER))

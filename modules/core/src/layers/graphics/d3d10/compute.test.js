@@ -177,7 +177,8 @@ test('the program\'s bytes for a buffer a shader writes land after the dispatche
 });
 
 test('an append view counts on the GPU from the count its binding gave, and the count is'
-    + ' copied by the GPU', async()=>{
+    + ' copied by the GPU; its declaration carries no counter flag, as fxc writes an append'
+    + ' buffer\'s (test_dispatch_indirect, d3d11.c:25572)', async()=>{
     const h = harness();
     const buffer = uavBuffer(h, null, { MiscFlags11: D3D11_RESOURCE_MISC.BUFFER_STRUCTURED,
         StructureByteStride: 4 });
@@ -186,7 +187,7 @@ test('an append view counts on the GPU from the count its binding gave, and the 
         Flags: D3D11_BUFFER_UAV_FLAG.APPEND });
     h.context.CSSetShader(computeShader(h, [
         dclThreadGroup(4, 1, 1),
-        dclUavStructured(0, 4, true),
+        dclUavStructured(0, 4),
         dclTemps(1),
         immAtomicAlloc(r(0, 'x'), u(0)),
         ret(),

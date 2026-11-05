@@ -1056,9 +1056,11 @@ export function createDirect3D11Seam(describe, kit, guests){
             }
             return k().mapInto(resource, subresource >>> 0, type >>> 0, flags & MAP_DO_NOT_WAIT,
                 mapped=>{
+                    // A refused map clears the pointer and leaves the pitches
+                    // as they were (test_resource_map).
                     if (mapped.hr !== S_OK)
                     {
-                        k().memory.writeMemory(out >>> 0, new Uint8Array(12));
+                        k().fields.writeU32(out, 0);
                         return mapped.hr;
                     }
                     const whole = resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
