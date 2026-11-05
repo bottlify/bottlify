@@ -1083,6 +1083,27 @@ export function createBackend(options){
                 },
 
                 /**
+                 * A region of one texture into another of a different format
+                 * with texels of the same size, byte for byte: WebGPU copies
+                 * texture to texture only within one format, but a buffer
+                 * between the two carries bytes of any.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 * @param {number} texelBytes
+                 */
+                copyThroughBuffer(source, destination, size, texelBytes){
+                    closeCurrentPass();
+                    const bytesPerRow = Math.ceil(size.width * texelBytes / 256) * 256;
+                    const layout = { bytesPerRow, rowsPerImage: size.height };
+                    const buffer = device.createBuffer({ label: 'reinterpreted',
+                        size: bytesPerRow * size.height * (size.depthOrArrayLayers ?? 1),
+                        usage: BufferUsage.COPY_SRC | BufferUsage.COPY_DST });
+                    encoder.copyTextureToBuffer(source, { buffer, ...layout }, size);
+                    encoder.copyBufferToTexture({ buffer, ...layout }, destination, size);
+                    stagingBuffers.push(buffer);
+                },
+
+                /**
                  * A compute shader run over a grid of thread groups, in a
                  * compute pass of its own between the frame's render passes,
                  * its one group bound as the shader declared it, or its

@@ -1695,51 +1695,112 @@ test('a depth buffer bound through a read-only view is tested and read in one pa
     assert.deepEqual(said.filter(detail=>/unbound|set as none|empty/.test(detail)), []);
 });
 
-test('a view of a typeless texture is cast where WebGPU allows it and said otherwise',
-    async()=>{
-        const h = harness();
-        const { device } = h;
-        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
-        /** @type {{ shader?: any }} */
-        const ps = {};
-        assert.equal(device.CreatePixelShader(assemble({
-            kind: SHADER_KIND.PIXEL,
-            outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
-            instructions: [
-                dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
-                dclResource(1, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
-                dclOutput(o(0)), ld(o(0), r(0), t(0)), ld(o(0), r(0), t(1)), ret(),
-            ],
-        }), ps), S_OK);
-        device.PSSetShader(ps.shader);
-        /** @type {{ resource?: any }} */
-        const texture = {};
-        assert.equal(device.CreateTexture2D({
-            ...TEXTURE_2X2, Format: DXGI_FORMAT.R8G8B8A8_TYPELESS,
-        }, [{ pSysMem: TEXELS, SysMemPitch: 8 }], texture), S_OK);
-        const made = h.gpu.of('createTexture').at(-1);
-        assert.equal(made.descriptor.format, 'rgba8unorm');
-        assert.deepEqual(made.descriptor.viewFormats, ['rgba8unorm-srgb']);
-        /** @param {number} format */
-        const viewAs = format=>{
-            /** @type {{ view?: any }} */
-            const view = {};
-            assert.equal(device.CreateShaderResourceView(texture.resource,
-                { Format: format, ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 }, view),
-            S_OK);
-            return view.view;
-        };
-        device.PSSetShaderResources(0, [viewAs(DXGI_FORMAT.R8G8B8A8_UNORM_SRGB),
-            viewAs(DXGI_FORMAT.R8G8B8A8_UINT)]);
-        device.Draw(3, 0);
-        await h.present();
-        const views = h.gpu.of('createView').filter((/** @type {any} */ call)=>
-            call.texture === made.texture
-                && call.view.viewDescriptor.label.startsWith('d3d10:view'))
-            .map((/** @type {any} */ call)=>call.view.viewDescriptor.format);
-        assert.deepEqual(views, ['rgba8unorm-srgb', 'rgba8unorm']);
-        assert.ok(diverged(h, 'does not reinterpret'), h.divergences.join('\n'));
-    });
+test('a view of a typeless texture is cast where WebGPU allows it, and read through a texture of'
+    + ' its own format given the texture\'s bytes where it does not', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclResource(1, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT),
+            dclOutput(o(0)), ld(o(0), r(0), t(0)), ld(o(0), r(0), t(1)), ret(),
+        ],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2X2, Format: DXGI_FORMAT.R8G8B8A8_TYPELESS,
+    }, [{ pSysMem: TEXELS, SysMemPitch: 8 }], texture), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    assert.equal(made.descriptor.format, 'rgba8unorm');
+    assert.deepEqual(made.descriptor.viewFormats, ['rgba8unorm-srgb']);
+    /** @param {number} format */
+    const viewAs = format=>{
+        /** @type {{ view?: any }} */
+        const view = {};
+        assert.equal(device.CreateShaderResourceView(texture.resource,
+            { Format: format, ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 }, view),
+        S_OK);
+        return view.view;
+    };
+    device.PSSetShaderResources(0, [viewAs(DXGI_FORMAT.R8G8B8A8_UNORM_SRGB),
+        viewAs(DXGI_FORMAT.R8G8B8A8_UINT)]);
+    device.Draw(3, 0);
+    await h.present();
+    const twin = h.gpu.of('createTexture').find((/** @type {any} */ call)=>
+        call.descriptor.format === 'rgba8uint');
+    assert.ok(twin, 'a texture of the view\'s format');
+    const viewsOf = (/** @type {any} */ of)=>h.gpu.of('createView').filter((/** @type {any} */
+        call)=>call.texture === of && call.view.viewDescriptor.label.startsWith('d3d10:view'))
+        .map((/** @type {any} */ call)=>call.view.viewDescriptor.format);
+    assert.deepEqual(viewsOf(made.texture), ['rgba8unorm-srgb']);
+    assert.deepEqual(viewsOf(twin.texture), ['rgba8uint']);
+    // Its bytes carried over before the draw, and nothing back after a read.
+    const out = h.gpu.of('copyTextureToBuffer');
+    const into = h.gpu.of('copyBufferToTexture');
+    assert.equal(out.filter((/** @type {any} */ call)=>call.source.texture === made.texture)
+        .length, 1);
+    assert.equal(out.filter((/** @type {any} */ call)=>call.source.texture === twin.texture)
+        .length, 0);
+    const carried = into.find((/** @type {any} */ call)=>call.destination.texture
+        === twin.texture);
+    assert.ok(carried);
+    assert.ok(h.gpu.calls.indexOf(carried) < h.gpu.calls.findIndex((/** @type {any} */ call)=>
+        call.op === 'beginRenderPass'), 'carried before the draw\'s pass');
+    assert.ok(!diverged(h, 'reads it as'), h.divergences.join('\n'));
+});
+
+test('a typeless render target drawn through views of two types holds what the last wrote:'
+    + ' the other type\'s clear made on a texture of its format and its bytes carried back'
+    + ' (test_uav_load, d3d11.c:22301)', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.R32_TYPELESS, BindFlags: D3D10_BIND.RENDER_TARGET }, null, texture),
+    S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    assert.equal(made.descriptor.format, 'r32float');
+    /** @param {number} format */
+    const targetAs = format=>{
+        /** @type {{ view?: any }} */
+        const view = {};
+        assert.equal(device.CreateRenderTargetView(texture.resource,
+            { Format: format, ViewDimension: 4, Texture2D: { MipSlice: 0 } }, view), S_OK);
+        return view.view;
+    };
+    device.ClearRenderTargetView(targetAs(DXGI_FORMAT.R32_FLOAT), [0.5, 0, 0, 0]);
+    device.ClearRenderTargetView(targetAs(DXGI_FORMAT.R32_UINT), [7, 0, 0, 0]);
+    await h.present();
+    const twin = h.gpu.of('createTexture').find((/** @type {any} */ call)=>
+        call.descriptor.format === 'r32uint');
+    assert.ok(twin);
+    const passes = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments[0]);
+    const onTwin = passes.find((/** @type {any} */ attachment)=>attachment.view.texture
+        === twin.texture);
+    assert.ok(onTwin, 'the uint clear is made on the twin');
+    assert.deepEqual([...Object.values(onTwin.clearValue)].slice(0, 1), [7]);
+    // A clear writes the whole slice: nothing is carried into the twin first,
+    // and its bytes are carried back after.
+    assert.equal(h.gpu.of('copyBufferToTexture').filter((/** @type {any} */ call)=>
+        call.destination.texture === twin.texture).length, 0);
+    const back = h.gpu.of('copyTextureToBuffer').find((/** @type {any} */ call)=>
+        call.source.texture === twin.texture);
+    const home = h.gpu.of('copyBufferToTexture').find((/** @type {any} */ call)=>
+        call.destination.texture === made.texture);
+    assert.ok(back && home);
+    assert.equal(home.source.buffer, back.destination.buffer);
+    assert.ok(h.gpu.calls.indexOf(home) > h.gpu.calls.indexOf(h.gpu.of('beginRenderPass')
+        .find((/** @type {any} */ call)=>call.descriptor.colorAttachments[0] === onTwin)));
+});
 
 test('a render target view draws into its own level, and an alpha target keeps only alpha',
     async()=>{

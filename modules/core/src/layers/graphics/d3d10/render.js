@@ -926,6 +926,10 @@ export function createRenderer(services){
                     : desc.ArraySize,
             };
             const viewFormats = layout.storage ? layout.storage.viewFormats : [];
+            backing.made = { size, mipLevelCount: desc.MipLevels,
+                dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? '3d' : '2d',
+                layers: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
+                    ? 1 : desc.ArraySize };
             backing.texture = madeTexture({
                 label: `d3d10:texture${resource.dimension - 1}d:${layout.format}`,
                 size,
@@ -964,6 +968,137 @@ export function createRenderer(services){
         }
         backings.set(resource, backing);
         return backing;
+    };
+
+    /**
+     * A texture of a typeless family in another format of it with texels of
+     * the same size: Direct3D reads and writes one memory through views of
+     * any format in the family, WebGPU views a texture only as its own
+     * format or its sRGB twin. A view of another type (an R32_UINT render
+     * target over a texture an R32_FLOAT one also draws into) goes through
+     * a twin texture of its format, given the texture's bytes before an
+     * operation through it and giving them back after (`twinUses`), so the
+     * texture itself always holds what the program last wrote.
+     *
+     * @param {any} backing @param {number} viewFormat  the view's DXGI format
+     * @returns {any | null}  null where the view's format is the texture's own,
+     *     or the bytes cannot be carried between the two
+     */
+    const twinOf = (backing, viewFormat)=>{
+        const own = textureStorage(viewFormat, 0, formatOptions);
+        const format = own?.format;
+        const storage = backing.layout.storage;
+        if (!format || !backing.texture || !backing.made || format === backing.layout.format
+            || storage?.viewFormats.includes(format) || backing.sampleCount !== 1
+            || storage?.depth || storage?.conversion || own.conversion
+            || !(TEXEL_BYTES[format] > 0) || TEXEL_BYTES[format] !== TEXEL_BYTES[storage.format])
+        {
+            return null;
+        }
+        backing.twins ??= new Map();
+        let twin = backing.twins.get(format);
+        if (!twin)
+        {
+            const drawable = gpuRenderable(format, formatOptions);
+            const storable = storableFormats().has(format);
+            const texture = madeTexture({
+                label: `d3d10:twin:${format}`,
+                size: backing.made.size,
+                mipLevelCount: backing.made.mipLevelCount,
+                dimension: backing.made.dimension,
+                format,
+                usage: TextureUsage.COPY_DST | TextureUsage.COPY_SRC
+                    | TextureUsage.TEXTURE_BINDING
+                    | (drawable ? TextureUsage.RENDER_ATTACHMENT : 0)
+                    | (storable ? TextureUsage.STORAGE_BINDING : 0),
+            });
+            if (!texture)
+            {
+                return null;
+            }
+            twin = { id: nextBacking++, texture, format, drawable, storable,
+                texelBytes: TEXEL_BYTES[format] };
+            backing.twins.set(format, twin);
+        }
+        return twin;
+    };
+
+    /**
+     * The twins an operation being recorded goes through: given the
+     * texture's bytes before it, and those it writes giving them back after.
+     *
+     * @type {Map<string, { backing: any, twin: any, mip: number, levels: number,
+     *     first: number, count: number, written: boolean, whole: boolean }>}
+     */
+    let twinUses = new Map();
+
+    /**
+     * @param {any} backing @param {any} twin
+     * @param {{ mip: number, levels: number, first: number, count: number }} range
+     * @param {boolean} written
+     * @param {boolean} [whole]  the operation writes every texel of the range,
+     *     so the twin need not be given the texture's bytes first
+     */
+    const useTwin = (backing, twin, range, written, whole = false)=>{
+        const key = `${twin.id}:${range.mip}:${range.levels}:${range.first}:${range.count}`;
+        const known = twinUses.get(key);
+        twinUses.set(key, { backing, twin, mip: range.mip, levels: range.levels,
+            first: range.first, count: range.count, written: written || !!known?.written,
+            whole: whole && (!known || known.whole) });
+    };
+
+    /**
+     * The copies between a texture and its twins over the levels and slices
+     * of each use, one way.
+     *
+     * @param {boolean} back  from the twins into the textures
+     */
+    const syncTwins = back=>{
+        for (const use of twinUses.values())
+        {
+            if (back ? !use.written : use.whole)
+            {
+                continue;
+            }
+            const { backing, twin } = use;
+            for (let mip = use.mip; mip < use.mip + use.levels; mip++)
+            {
+                const level = backing.layout.levels[mip];
+                const is3D = backing.made.dimension === '3d';
+                const home = { texture: backing.texture, mipLevel: mip,
+                    origin: { x: 0, y: 0, z: is3D ? 0 : use.first } };
+                const away = { texture: twin.texture, mipLevel: mip,
+                    origin: { x: 0, y: 0, z: is3D ? 0 : use.first } };
+                record({ kind: 'reinterpret', ids: [backing.id, twin.id],
+                    source: back ? away : home, destination: back ? home : away,
+                    size: { width: level.width, height: level.height,
+                        depthOrArrayLayers: is3D ? level.depth : use.count },
+                    texelBytes: twin.texelBytes });
+            }
+            if (back)
+            {
+                backing.gpuDirty = true;
+            }
+        }
+    };
+
+    /**
+     * Records `operation` with the twins it goes through given the texture's
+     * bytes before it and giving them back after.
+     *
+     * @template T
+     * @param {() => T} resolve  what finds the views, and so the twins
+     * @param {(resolved: T) => void} operation  what records the operation
+     */
+    const throughTwins = (resolve, operation)=>{
+        twinUses = new Map();
+        const resolved = resolve();
+        const uses = twinUses;
+        syncTwins(false);
+        operation(resolved);
+        twinUses = uses;
+        syncTwins(true);
+        twinUses = new Map();
     };
 
     /**
@@ -1240,6 +1375,10 @@ export function createRenderer(services){
         let gpu = views.get(view);
         if (gpu)
         {
+            if (gpu.twin)
+            {
+                useTwin(gpu.backing, gpu.twin, view.range, false);
+            }
             return gpu;
         }
         /** @type {{ resource?: any }} */
@@ -1259,17 +1398,22 @@ export function createRenderer(services){
         const shape = view.dimensionName ?? '';
         const isCube = shape === 'TEXTURECUBE';
         const array = shape.endsWith('ARRAY') || isCube;
-        const chosen = viewFormatOf(backing.layout.storage, desc.Format, formatOptions);
-        if (chosen.reinterpreted)
+        let chosen = viewFormatOf(backing.layout.storage, desc.Format, formatOptions);
+        const twin = chosen.reinterpreted ? twinOf(backing, desc.Format) : null;
+        if (twin)
+        {
+            chosen = { format: twin.format, reinterpreted: false };
+        }
+        else if (chosen.reinterpreted)
         {
             diverge(`a view of a typeless texture as format ${desc.Format} reads it as`
-                + ` ${chosen.format}: WebGPU does not reinterpret one type as another`);
+                + ` ${chosen.format}: its bytes cannot be carried into a texture of that format`);
         }
         const dimension = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
             ? '3d'
             : isCube ? 'cube' : shape === 'TEXTURECUBEARRAY' ? 'cube-array'
                 : array ? '2d-array' : '2d';
-        const created = backing.texture.createView({
+        const created = (twin ? twin.texture : backing.texture).createView({
             label: `d3d10:view:${chosen.format ?? chosen.aspect}`,
             ...(chosen.format ? { format: chosen.format } : {}),
             ...(chosen.aspect ? { aspect: chosen.aspect } : {}),
@@ -1284,8 +1428,12 @@ export function createRenderer(services){
                 : view.range.count,
         });
         gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect), dimension,
-            multisampled: backing.sampleCount > 1 };
+            multisampled: backing.sampleCount > 1, backing, twin };
         views.set(view, gpu);
+        if (twin)
+        {
+            useTwin(backing, twin, view.range, false);
+        }
         return gpu;
     };
 
@@ -2053,21 +2201,26 @@ export function createRenderer(services){
             return null;
         }
         let target = targets.get(view);
-        if (target)
+        if (!target)
         {
-            return target;
+            /** @type {{ resource?: any }} */
+            const held = {};
+            view.GetResource(held);
+            held.resource.release();
+            /** @type {{ desc?: any }} */
+            const described = {};
+            view.GetDesc(described);
+            target = layerTarget(held.resource, described.desc, view.range.mip,
+                view.range.first);
+            if (target)
+            {
+                targets.set(view, target);
+            }
         }
-        /** @type {{ resource?: any }} */
-        const held = {};
-        view.GetResource(held);
-        held.resource.release();
-        /** @type {{ desc?: any }} */
-        const described = {};
-        view.GetDesc(described);
-        target = layerTarget(held.resource, described.desc, view.range.mip, view.range.first);
-        if (target)
+        if (target?.twin)
         {
-            targets.set(view, target);
+            useTwin(target.backing, target.twin, { mip: target.mipLevel, levels: 1,
+                first: target.layer, count: 1 }, true);
         }
         return target;
     };
@@ -2099,17 +2252,26 @@ export function createRenderer(services){
             diverge('a view into a slice of a 3D texture draws into its first slice');
         }
         const chosen = viewFormatOf(backing.layout.storage, desc.Format, formatOptions);
-        const format = chosen.format ?? backing.layout.format;
+        const twin = chosen.reinterpreted ? twinOf(backing, desc.Format) : null;
+        if (twin && !twin.drawable)
+        {
+            lose(`a draw into a ${twin.format} view: this GPU draws into none`);
+            return null;
+        }
+        const format = twin ? twin.format : chosen.format ?? backing.layout.format;
+        const texture = twin ? twin.texture : backing.texture;
         const width = levelExtent(held.resource.desc.Width, mip);
         const height = held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D
             ? 1
             : levelExtent(held.resource.desc.Height, mip);
         return {
-            key: `${backing.id}:${mip}:${held.resource.dimension
+            key: `${twin ? twin.id : backing.id}:${mip}:${held.resource.dimension
                 === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer}`,
             layer: held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? 0 : layer,
+            mipLevel: mip,
             backing,
-            texture: backing.texture,
+            twin,
+            texture,
             format,
             sampleCount: backing.sampleCount,
             // What a draw writes, when the format keeps less than the texture does.
@@ -2118,8 +2280,8 @@ export function createRenderer(services){
             readOnly: (desc.Flags ?? 0)
                 & (D3D11_DSV_FLAG.READ_ONLY_DEPTH | D3D11_DSV_FLAG.READ_ONLY_STENCIL),
             surface: {
-                texture: backing.texture,
-                view: backing.texture.createView({
+                texture,
+                view: texture.createView({
                     label: `d3d10:target:${format}`,
                     format,
                     dimension: '2d',
@@ -3181,9 +3343,17 @@ export function createRenderer(services){
     const storageViewOf = (view, kind)=>{
         const resource = resourceOf(view);
         const backing = backingOf(resource);
-        if (!backing.storable || backing.layout.format !== kind.format)
+        const twin = backing.layout.format !== kind.format
+            ? twinOf(backing, stateDesc(view).Format) : null;
+        if (twin ? twin.format !== kind.format || !twin.storable
+            : !backing.storable || backing.layout.format !== kind.format)
         {
             return null;
+        }
+        if (twin)
+        {
+            useTwin(backing, twin, { mip: view.range.mip, levels: 1, first: view.range.first,
+                count: view.range.count }, true);
         }
         const key = `${kind.format}:${kind.viewDimension}`;
         let shapes = storageViews.get(view);
@@ -3196,7 +3366,7 @@ export function createRenderer(services){
         if (!gpu)
         {
             const is3D = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
-            gpu = backing.texture.createView({
+            gpu = (twin ? twin.texture : backing.texture).createView({
                 label: `d3d10:uav:${kind.format}`,
                 format: kind.format,
                 dimension: kind.viewDimension,
@@ -3730,15 +3900,26 @@ export function createRenderer(services){
             {
                 return;
             }
-            const target = targetOf(view);
-            if (!target)
-            {
-                counters.skipped.noTarget++;
-                return;
-            }
-            counters.clears++;
-            target.backing.gpuDirty = true;
-            record({ kind: 'clear', target, color: [...color] });
+            throughTwins(()=>{
+                const target = targetOf(view);
+                // A clear writes every texel of the slice it names.
+                twinUses = new Map();
+                if (target?.twin)
+                {
+                    useTwin(target.backing, target.twin, { mip: target.mipLevel, levels: 1,
+                        first: target.layer, count: 1 }, true, true);
+                }
+                return target;
+            }, target=>{
+                if (!target)
+                {
+                    counters.skipped.noTarget++;
+                    return;
+                }
+                counters.clears++;
+                target.backing.gpuDirty = true;
+                record({ kind: 'clear', target, color: [...color] });
+            });
         },
 
         /**
@@ -3812,10 +3993,12 @@ export function createRenderer(services){
             const key = Object.entries(formats).map(entry=>entry.join(':')).join(',');
             const { linked } = computeOf(shader, formats, key);
             writes = new Set();
+            twinUses = new Map();
             const entries = bindingsFor(pipeline.stages.cs, linked.entries, written);
             const indirect = 'buffer' in groups ? backingOf(groups.buffer) : null;
             indirect?.gpu.markRead();
             counters.dispatches++;
+            syncTwins(false);
             record({
                 kind: 'dispatch',
                 what: 'a dispatch was skipped',
@@ -3827,6 +4010,8 @@ export function createRenderer(services){
                     ? { buffer: indirect.gpu.gpu, offset: /** @type {any} */ (groups).offset }
                     : ['x', 'y', 'z'].map(axis=>/** @type {any} */ (groups)[axis]),
             });
+            syncTwins(true);
+            twinUses = new Map();
         },
 
         /**
@@ -3880,12 +4065,21 @@ export function createRenderer(services){
                 for (let layer = view.range.first; layer < view.range.first + view.range.count;
                     layer++)
                 {
-                    const target = layerTarget(resource, desc, view.range.mip, layer);
-                    if (target)
-                    {
-                        backing.gpuDirty = true;
-                        record({ kind: 'clear', target, color: colour });
-                    }
+                    throughTwins(()=>{
+                        const target = layerTarget(resource, desc, view.range.mip, layer);
+                        if (target?.twin)
+                        {
+                            useTwin(backing, target.twin, { mip: view.range.mip, levels: 1,
+                                first: layer, count: 1 }, true, true);
+                        }
+                        return target;
+                    }, target=>{
+                        if (target)
+                        {
+                            backing.gpuDirty = true;
+                            record({ kind: 'clear', target, color: colour });
+                        }
+                    });
                 }
                 return;
             }
@@ -3967,6 +4161,7 @@ export function createRenderer(services){
             {
                 return;
             }
+            twinUses = new Map();
             // A geometry shader runs, and streams out, whether or not the draw
             // then rasterizes anything (`geometry.js`); a vertex shader's
             // bytecode made one to stream out draws as if none were bound.
@@ -3983,6 +4178,7 @@ export function createRenderer(services){
                     return;
                 }
                 geometry = geometryOf().prepare(pipeline, draw);
+                syncTwins(false);
                 geometry?.commands.forEach(record);
                 if (geometryShader.passThrough
                     ? geometryShader.rasterizedStream === SO_NO_RASTERIZED_STREAM
@@ -4185,8 +4381,16 @@ export function createRenderer(services){
                     drawn.backing.gpuDirty = true;
                 }
             }
-            tessellated?.commands.forEach(record);
             const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
+            const groups = [
+                bindingsFor(drawStage, program.groups[0]),
+                bindingsFor(pipeline.stages.ps, program.groups[1],
+                    pipeline.pixelViews ?? NO_VIEWS),
+                ...(tessellated ? [tessellated.group] : []),
+                ...(drawnGeometry ? [drawnGeometry.group] : []),
+            ];
+            syncTwins(false);
+            tessellated?.commands.forEach(record);
             record({
                 kind: 'draw',
                 // Not drawn when a pass before it could not be built: its
@@ -4198,13 +4402,7 @@ export function createRenderer(services){
                 target,
                 targets: standIns ?? colour,
                 depth,
-                groups: [
-                    bindingsFor(drawStage, program.groups[0]),
-                    bindingsFor(pipeline.stages.ps, program.groups[1],
-                        pipeline.pixelViews ?? NO_VIEWS),
-                    ...(tessellated ? [tessellated.group] : []),
-                    ...(drawnGeometry ? [drawnGeometry.group] : []),
-                ],
+                groups,
                 vertexBuffers: drawnGeometry ? [] : vertexBuffers,
                 indexBuffer: drawnGeometry ? drawnGeometry.indexBuffer
                     : indexBacking && indexBacking.gpu && indexFormat
@@ -4243,6 +4441,8 @@ export function createRenderer(services){
                 copiedOut.forEach(record);
                 lastStandIns = { copies: copiedOut, key: copiedOut.map(copy=>copy.key).join('|') };
             }
+            syncTwins(true);
+            twinUses = new Map();
         },
 
         /**
@@ -4739,6 +4939,13 @@ export function createRenderer(services){
                 {
                     closePass();
                     readers.push({ read: frame.copyOut(command.ranges), command });
+                    continue;
+                }
+                if (command.kind === 'reinterpret')
+                {
+                    command.ids.forEach(settleClears);
+                    frame.copyThroughBuffer(command.source, command.destination, command.size,
+                        command.texelBytes);
                     continue;
                 }
                 if (command.kind === 'copyBufferToTexture')
