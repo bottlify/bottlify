@@ -942,12 +942,16 @@ export function keepFrames(app, state){
         {
             return;
         }
-        state.frameRecords.set(frame.index, { index: frame.index, ms: frame.ms,
+        state.frameRecords.set(frame.index, { index: frame.index, startedAt: frame.startedAt,
+            ms: frame.ms,
             byKind: frame.byKind, idleMs: frame.idleMs, waits: frame.waits,
             compiles: frame.compiles, instructions: frame.instructions,
             notes: { interpreted: frame.notes?.interpreted ?? 0,
                 instructions: frame.notes?.instructions ?? 0,
-                heapDelta: frame.notes?.heapDelta ?? 0 },
+                translateMs: frame.notes?.translateMs ?? 0,
+                exits: frame.notes?.exits ?? 0,
+                // Absent where the heap cannot be read, which the drops say.
+                heapDelta: frame.notes?.heapDelta },
             longest: frame.longest });
     }
 }

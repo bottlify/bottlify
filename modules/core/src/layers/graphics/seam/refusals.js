@@ -8,7 +8,8 @@
  * A device method's failures, said aloud. A program told D3DERR_INVALIDCALL goes on
  * without what it asked for -- a copy not made, a target not set -- and nothing on the
  * screen says why; the report must. Each method and code is said once, so a failure in a
- * frame loop is one line.
+ * frame loop is one line, with the arguments of its first call: "answered
+ * D3DERR_INVALIDCALL" alone does not say which of a program's textures was refused.
  */
 
 /** The failures a device method answers with, by name. */
@@ -29,24 +30,27 @@ export const hresultName = hr=>HRESULT_NAMES.get(hr >>> 0) ?? `0x${(hr >>> 0).to
  *
  * @param {string} api   'Direct3D 9'
  * @param {((api: string, detail: string, severity?: 'loss') => void) | undefined} divergence
- * @returns {(name: string, answer: any) => any}  the answer, passed through, a promise too
+ * @returns {(name: string, answer: any, args?: number[]) => any}  the answer, passed
+ *     through, a promise too
  */
 export function loudRefusals(api, divergence){
     /** @type {Set<string>} */
     const said = new Set();
-    /** @param {string} name @param {any} hr */
-    const say = (name, hr)=>{
+    /** @param {string} name @param {any} hr @param {number[]} [args] */
+    const say = (name, hr, args)=>{
         if (typeof hr === 'number' && (hr & 0x80000000) !== 0 && divergence)
         {
             const key = `${name}:${hr >>> 0}`;
             if (!said.has(key))
             {
                 said.add(key);
-                divergence(api, `${name} answered ${hresultName(hr)}`);
+                const asked = args ? `(${args.map(arg=>(typeof arg === 'number'
+                    ? `0x${(arg >>> 0).toString(16)}` : String(arg))).join(', ')})` : '';
+                divergence(api, `${name}${asked} answered ${hresultName(hr)}`);
             }
         }
         return hr;
     };
-    return (name, answer)=>(answer instanceof Promise ? answer.then(hr=>say(name, hr))
-        : say(name, answer));
+    return (name, answer, args)=>(answer instanceof Promise ? answer.then(hr=>say(name, hr, args))
+        : say(name, answer, args));
 }

@@ -207,10 +207,10 @@ One more is on `app.log` rather than `app.debug`, since it reads the profiler's 
 `app.log.drops(n)` (default 1000; the engine keeps the last 240, about four seconds) answers
 the mean frame rate, the slowest 1% and 0.1% as rates, the worst frames, and every frame over 16.7 ms
 and twice the median named by the part that grew past an ordinary frame's: `translation` (more
-modules instantiated or more interpreted), `guest work` (more instructions), `guest slower` (the
+modules instantiated, more translating on the engine's thread, or more interpreted), `guest work` (more instructions), `guest slower` (the
 same work, slower), `host <phase>`, `fetch` or `waiting` (parked), `outside the engine` (wall
 time no phase accounts for: `garbage collection` when the heap shrank). GPU time is not in the
-frame record yet and is said to be not measured (`modules/core/src/frame-drops.js`).
+frame record yet, nor the heap in a worker, and each is said to be not measured (`modules/core/src/frame-drops.js`).
 
 #### A wrong picture in a running game, step by step
 

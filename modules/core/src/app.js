@@ -4158,9 +4158,12 @@ async function buildApp(options){
     // Where the counters stood when the frame being measured began.
     let retiredAtFrameStart = 0;
     let interpretedAtFrameStart = 0;
+    let translateAtFrameStart = 0;
+    let exitsAtFrameStart = 0;
     let writtenAtFrameStart = 0;
     let heapAtFrameStart = 0;
     /** The JS heap, where the runtime will say; a frame's growth is what the host allocated. */
+    const heapReadable = ()=>/** @type {any} */ (globalThis.performance)?.memory !== undefined;
     const heapUsed = ()=>{
         const performance = /** @type {any} */ (globalThis.performance);
         return performance?.memory?.usedJSHeapSize ?? 0;
@@ -4792,9 +4795,24 @@ async function buildApp(options){
                                     cpu.instructionCount() - retiredAtFrameStart);
                                 journal.note('interpreted',
                                     cpu.interpretedSteps() - interpretedAtFrameStart);
+                                // Translating on this thread, inside the guest's slices:
+                                // only where it is measured (the translator's `timings`).
+                                const translated = cpu.translateMs();
+                                if (translated !== null)
+                                {
+                                    journal.note('translateMs',
+                                        Math.round(translated - translateAtFrameStart));
+                                }
+                                // Translated code leaving for the runtime, each a dispatch.
+                                journal.note('exits', cpu.translatedExits() - exitsAtFrameStart);
                                 journal.note('hostWrittenBytes',
                                     cpu.hostWrittenBytes() - writtenAtFrameStart);
-                                journal.note('heapDelta', heapUsed() - heapAtFrameStart);
+                                // Only where the heap can be read: a worker has no
+                                // performance.memory, and a zero there is no measurement.
+                                if (heapReadable())
+                                {
+                                    journal.note('heapDelta', heapUsed() - heapAtFrameStart);
+                                }
                             }
                             // Run in every build: the frame's samplers feed the translator.
                             journal.endFrame();
@@ -4819,6 +4837,8 @@ async function buildApp(options){
                         {
                             retiredAtFrameStart = cpu.instructionCount();
                             interpretedAtFrameStart = cpu.interpretedSteps();
+                            translateAtFrameStart = cpu.translateMs() ?? 0;
+                            exitsAtFrameStart = cpu.translatedExits();
                             writtenAtFrameStart = cpu.hostWrittenBytes();
                             heapAtFrameStart = heapUsed();
                         }

@@ -302,6 +302,8 @@ export function engineContractProblem(engineModule, url){
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
  *     answers published a few at a call (0: a batch formed and published whole in one call).
  *     Default 4.
+ * @property {number} [holdShare]  The share of the engine thread's time over a while that
+ *     `holdMs` refills at: what a frame gives up to new code. Default 0.5.
  * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
  *     instructions translated code runs at a time. Default 2^24.
  * @property {number} [interpretChunk]  `createMachine` alone: the instructions its interpreter
@@ -524,7 +526,8 @@ export function engineContractProblem(engineModule, url){
  *     instruction, so no slice of translated-plus-interpreted code stops moving.
  * @property {number} translateMs      Milliseconds spent translating: the sum of the seven
  *     parts below, so a whole figure and its split always agree. It and every other
- *     millisecond figure here are 0 unless the engine was configured with `timings`.
+ *     millisecond figure here are 0 unless the engine was configured with `timings`, which
+ *     `counters` says as `timed`.
  * @property {number} formingMs        Of it: forming the batch's regions, a decode each.
  * @property {number} lookupMs         Of it: the store's lookups, awaited.
  * @property {number} emitMs           Of it: emitting the regions the store did not hold.
@@ -616,7 +619,7 @@ export function engineContractProblem(engineModule, url){
  * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it
  *     sorts and explains the exit targets, so it is not for a slice.
  * @property {() => Pick<EngineDiagnostics, 'regions' | 'modules' | 'invalidations'
- *     | 'translatedShare' | 'retired' | 'translateMs' | 'exits'>} counters
+ *     | 'translatedShare' | 'retired' | 'translateMs' | 'exits'> & { timed: boolean }} counters
  *     The slice-cheap subset, read by the frame counters every slice.
  */
 

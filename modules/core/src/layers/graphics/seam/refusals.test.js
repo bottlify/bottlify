@@ -21,3 +21,13 @@ test('a device method that fails is reported once by method and code, its answer
         assert.deepEqual(said, ['Direct3D 9: StretchRect answered D3DERR_INVALIDCALL',
             'Direct3D 9: Reset answered D3DERR_DEVICELOST']);
     });
+
+test('a refusal says the arguments of the call it was first answered to', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const loud = loudRefusals('Direct3D 9', (api, detail)=>said.push(detail));
+    loud('CreateVolumeTexture', 0x8876086c, [128, 128, 128, 1, 0, 0x31545844, 1, 0x2ff000]);
+    loud('CreateVolumeTexture', 0x8876086c, [64, 64, 64, 1, 0, 21, 1, 0x2ff000]);
+    assert.deepEqual(said, ['CreateVolumeTexture(0x80, 0x80, 0x80, 0x1, 0x0, 0x31545844, 0x1,'
+        + ' 0x2ff000) answered D3DERR_INVALIDCALL']);
+});

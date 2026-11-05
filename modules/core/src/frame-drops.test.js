@@ -88,3 +88,14 @@ test('a frame twice the median that a 60 Hz display would not miss is no drop', 
         frame({ ms: 20 })];
     assert.deepEqual(frameDrops(frames).drops.map(drop=>drop.ms), [20]);
 });
+
+test('translating on the engine\'s thread is translation, and an unread heap is said', ()=>{
+    const frames = Array.from({ length: 100 }, (_, index)=>({ ...frame(), index }));
+    frames[50] = { ...frame({ ms: 60, byKind: { guest: 54, host: 4 },
+        notes: { interpreted: 100, translateMs: 40 } }), index: 50 };
+    const report = frameDrops(frames);
+    assert.deepEqual(report.drops.map(drop=>drop.cause), ['translation']);
+    assert.equal(report.gc, 'measured', 'these frames carry the heap');
+    const unread = frameDrops(frames.map(one=>({ ...one, notes: { interpreted: 100 } })));
+    assert.equal(unread.gc, 'not measured', 'a worker\'s frames do not');
+});

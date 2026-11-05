@@ -14,8 +14,8 @@
 let access = null;
 
 /**
- * @param {{ id: number, type: 'open' | 'write' | 'flush' | 'close', file?: any,
- *     writes?: [number, Uint8Array][] }} data
+ * @param {{ id: number, type: 'open' | 'write' | 'flush' | 'close' | 'append', file?: any,
+ *     writes?: [number, Uint8Array][], at?: number, bytes?: Uint8Array }} data
  */
 const serve = async data=>{
     if (data.type === 'open')
@@ -39,6 +39,21 @@ const serve = async data=>{
     {
         access?.close();
         access = null;
+    }
+    else if (data.type === 'append')
+    {
+        // The index's lines, at its end: a handle of its own for the one write,
+        // flushed and closed here, where the disk holds this worker alone.
+        const index = await data.file.createSyncAccessHandle();
+        try
+        {
+            index.write(data.bytes, { at: data.at });
+            index.flush();
+        }
+        finally
+        {
+            index.close();
+        }
     }
 };
 

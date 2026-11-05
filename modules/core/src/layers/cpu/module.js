@@ -1458,6 +1458,26 @@ export function createCpuModule(){
                 },
                 compiledModules: ()=>started().compiledModules(),
                 interpretedSteps: ()=>started().interpretedSteps(),
+                /**
+                 * Milliseconds the translator has spent on this thread, all told:
+                 * forming, lookup, emitting, encoding, storing, instantiating and
+                 * publishing regions, which a slice pays for inside the guest's
+                 * time. Null where it is not measured: no translator, or its
+                 * `timings` off, whose clock then reads zero.
+                 */
+                translateMs: ()=>{
+                    const counters = state.cork?.counters?.();
+                    return counters?.timed ? counters.translateMs : null;
+                },
+                /**
+                 * Times translated code has left for the runtime, all told: at a
+                 * target it had no translation for, or out of budget. 0 with no
+                 * translator.
+                 */
+                translatedExits: ()=>{
+                    const exits = state.cork?.counters?.().exits;
+                    return exits ? exits.untranslated + exits.budget : 0;
+                },
                 hostWrittenBytes: ()=>started().hostWrittenBytes(),
                 /**
                  * An engine's own account of where the guest ran, by address and

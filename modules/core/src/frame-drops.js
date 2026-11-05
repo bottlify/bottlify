@@ -19,7 +19,8 @@
  * names the drop:
  *
  * - `translation`: the guest's time grew in a frame the translator
- *   instantiated more modules in than an ordinary one, or ran more of its
+ *   instantiated more modules in than an ordinary one, spent more time
+ *   translating on the engine's thread (`translateMs`), or ran more of its
  *   instructions interpreted:
  *   new code, met for the first time.
  * - `guest work`: the guest's time grew with its instructions: the program
@@ -31,7 +32,8 @@
  *   queue or data arriving from outside.
  * - `outside the engine`: wall time no phase accounts for, which is the
  *   browser's -- a garbage collection when the heap shrank in the frame,
- *   otherwise the page's other work or the system's scheduling.
+ *   otherwise the page's other work or the system's scheduling. Where no
+ *   frame carries the heap (a worker cannot read it), `gc` says "not measured".
  *
  * The GPU's own time and the wait to present are not in the frame record; a
  * drop they caused falls in `outside the engine`, and `gpu` says so as "not
@@ -47,7 +49,7 @@
  *
  * @typedef {{ frames: number, fps: number, medianMs: number, low1: number,
  *     low01: number, worstMs: number[], drops: Drop[],
- *     byCause: Record<string, number>, gpu: string }} DropReport
+ *     byCause: Record<string, number>, gpu: string, gc: string }} DropReport
  */
 
 /** A frame longer than this missed a 60 Hz display's refresh. */
@@ -98,11 +100,13 @@ const partsOf = frame=>{
  */
 export function frameDrops(frames, options = {}){
     const gpu = options.gpuMeasured ? 'measured' : 'not measured';
+    const gc = frames.some(frame=>frame.notes?.heapDelta !== undefined)
+        ? 'measured' : 'not measured';
     const timed = frames.filter(frame=>frame.ms > 0);
     if (timed.length === 0)
     {
         return { frames: 0, fps: 0, medianMs: 0, low1: 0, low01: 0, worstMs: [], drops: [],
-            byCause: {}, gpu };
+            byCause: {}, gpu, gc };
     }
     const ascending = timed.map(frame=>frame.ms).sort((one, two)=>one - two);
     const descending = [...ascending].reverse();
@@ -118,6 +122,7 @@ export function frameDrops(frames, options = {}){
         instructions: median(instructionsOf),
         interpreted: median(frame=>frame.notes?.interpreted ?? 0),
         compiles: median(frame=>frame.compiles ?? 0),
+        translateMs: median(frame=>frame.notes?.translateMs ?? 0),
     };
 
     /** @type {Drop[]} */
@@ -151,6 +156,7 @@ export function frameDrops(frames, options = {}){
         drops,
         byCause,
         gpu,
+        gc,
     };
 }
 
@@ -160,12 +166,14 @@ export function frameDrops(frames, options = {}){
  *
  * @param {string} part
  * @param {FrameLike} frame
- * @param {{ instructions: number, interpreted: number, compiles: number }} ordinary
+ * @param {{ instructions: number, interpreted: number, compiles: number,
+ *     translateMs: number }} ordinary
  */
 function causeOf(part, frame, ordinary){
     if (part === 'guest')
     {
         if ((frame.compiles ?? 0) > ordinary.compiles
+            || (frame.notes?.translateMs ?? 0) > Math.max(1, 2 * ordinary.translateMs)
             || (frame.notes?.interpreted ?? 0) > Math.max(1, 2 * ordinary.interpreted))
         {
             return 'translation';

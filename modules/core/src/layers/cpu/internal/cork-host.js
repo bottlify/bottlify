@@ -2042,7 +2042,9 @@ export function createCorkHost(config){
         hostWrites: ()=>hostWrites,
         hostWrittenBytes: ()=>hostWrittenBytes,
         compiledModules: ()=>runtime.counters().modules,
-        interpretedSteps: ()=>0,
+        // Both interpreters' instructions, the wasm tier's among them: a frame's
+        // share of them is what tells a drop on new code from one in translated code.
+        interpretedSteps: ()=>interpretedSoFar(),
         /** The instructions the interpreter tier in wasm retired, for a gate that judges it. */
         wasmRetired: ()=>wasmRetired,
         instructionStats: ()=>null,

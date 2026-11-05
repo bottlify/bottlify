@@ -2451,7 +2451,7 @@ export function createDirect3D8Seam(
     /** @type {Record<string, (device: any, args: number[]) => number | Promise<number>>} */
     const syncedMethods = Object.fromEntries(Object.entries(deviceMethods)
         .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>
-            refusedLoudly(name, settledAfter(shadowOf(device), ()=>method(device, args)))]));
+            refusedLoudly(name, settledAfter(shadowOf(device), ()=>method(device, args)), args)]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
         ? {

@@ -8,6 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createClassFunctions } from './classes.js';
 import { createCxxFunctions } from './cxx.js';
+import { guestEntry } from './guest-code.js';
+import { __RTDynamicCast } from './inguest-rtti.js';
+import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { fakeMemory } from './harness.test.js';
 
 /**
@@ -188,9 +191,10 @@ test('the classes carry the type information typeid and dynamic_cast read', ()=>
     const bti = cxx.__RTtypeid.handler([b]);
     assert.equal(memory.text(bti + 8), '.?AVbad_typeid@@');
     assert.equal(cxx.__RTCastToVoid.handler([e]), e);
-    assert.equal(cxx.__RTDynamicCast.handler([b, 0, 0, ti, 0]), b, 'up');
-    assert.equal(cxx.__RTDynamicCast.handler([e, 0, 0, bti, 0]), 0, 'not down');
-    assert.equal(cxx.__RTDynamicCast.handler([n, 0, 0, bti, 0]), n, 'through two levels');
+    const cast = guestEntry(__RTDynamicCast, RTTI_CODE.__RTDynamicCast, memory).handler;
+    assert.equal(cast([b, 0, 0, ti, 0]), b, 'up');
+    assert.equal(cast([e, 0, 0, bti, 0]), 0, 'not down');
+    assert.equal(cast([n, 0, 0, bti, 0]), n, 'through two levels');
 
     // The vtable's slots are the deleting destructor and what().
     const vtable = /** @type {number} */ (addresses.get('??_7exception@@6B@'));

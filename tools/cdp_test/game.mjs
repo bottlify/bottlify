@@ -1607,7 +1607,7 @@ function describe(result, context, calls, symbols){
             + ` median ${evenly.medianMs.toFixed(1)} ms,`
             + ` worst ${evenly.worstMs.map(ms=>ms.toFixed(0)).join(' ')} ms`);
         say(`  ${evenly.drops.length} drop(s) (past 2x the median and 16.7 ms), by what grew`
-            + ` (GPU time ${evenly.gpu}):`);
+            + ` (GPU time ${evenly.gpu}, GC ${evenly.gc}):`);
         for (const [cause, count] of Object.entries(evenly.byCause)
             .sort((one, two)=>two[1] - one[1]))
         {
