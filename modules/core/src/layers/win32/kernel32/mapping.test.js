@@ -514,3 +514,44 @@ test('a native section maps a view that must fit inside it, and unmaps it once',
     assert.equal(basicInformation(at, dword(bytes, 0x200)).size, 0x4000,
         'the page file\'s section is whole pages');
 });
+
+test('NtOpenSection opens a section by its object name, and refuses physical memory', ()=>{
+    const NAME = 0x900;
+    const { fns, bytes } = setup({ [NAME]: 'Local\\Survey' });
+    const { NtOpenSection } = fns.CreateFileMappingW.natives;
+    const STATUS_ACCESS_DENIED = 0xc0000022;
+    const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
+    const STATUS_ACCESS_VIOLATION = 0xc0000005;
+    const made = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, NAME]);
+    assert.notEqual(made, 0);
+    /**
+     * OBJECT_ATTRIBUTES at 0x400 naming `path` (a UNICODE_STRING at 0x420, its
+     * characters at 0x440), with `root` as its directory; the section's
+     * handle written at 0x200.
+     *
+     * @param {string} path @param {number} [root]
+     */
+    const open = (path, root = 0)=>{
+        bytes.fill(0, 0x200, 0x600);
+        const units = [...path].flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >> 8]);
+        bytes.set(units, 0x440);
+        bytes.set([units.length, 0, units.length, 0, 0x40, 0x04, 0, 0], 0x420);
+        bytes.set([24, 0, 0, 0, root & 0xff, root >> 8, 0, 0, 0x20, 0x04, 0, 0], 0x400);
+        return NtOpenSection.handler([0x200, 0x4, 0x400]);
+    };
+    for (const path of ['\\Sessions\\1\\BaseNamedObjects\\Survey', '\\BaseNamedObjects\\Survey'])
+    {
+        assert.equal(open(path), 0, path);
+        const handle = dword(bytes, 0x200);
+        assert.ok(handle !== 0 && handle !== made, `${path}: a handle of its own`);
+        assert.notEqual(fns.MapViewOfFile.handler([handle, FILE_MAP_WRITE, 0, 0, 0]), 0,
+            `${path}: onto the same section`);
+    }
+    assert.equal(open('\\Device\\PhysicalMemory'), STATUS_ACCESS_DENIED,
+        'refused to user mode since Windows Server 2003 SP1');
+    assert.equal(dword(bytes, 0x200), 0, 'and no handle written');
+    assert.equal(open('\\BaseNamedObjects\\Nothing'), STATUS_OBJECT_NAME_NOT_FOUND);
+    assert.equal(NtOpenSection.handler([0, 0x4, 0x400]), STATUS_ACCESS_VIOLATION);
+    assert.equal(NtOpenSection.argBytes, 12);
+});

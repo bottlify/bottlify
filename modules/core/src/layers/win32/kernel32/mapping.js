@@ -432,14 +432,47 @@ export function createMappingFunctions(host){
             {
                 return fail(ERROR_FILE_NOT_FOUND);
             }
-            host.namedObjects.reference(found);
-            if (found.node)
-            {
-                host.files.retain(found.node);
-            }
-            return host.handles.open('mapping', found);
+            return openNamed(found);
         },
     });
+
+    /**
+     * A handle of its own onto a section found by its name, which holds the
+     * name and the file as long as it is open.
+     *
+     * @param {Section} found
+     */
+    const openNamed = found=>{
+        host.namedObjects.reference(found);
+        if (found.node)
+        {
+            host.files.retain(found.node);
+        }
+        return host.handles.open('mapping', found);
+    };
+
+    /**
+     * The object name an OBJECT_ATTRIBUTES gives, its UNICODE_STRING read;
+     * null for none.
+     *
+     * @param {number} attributes
+     * @returns {string | null}
+     */
+    const objectName = attributes=>{
+        const string = (attributes >>> 0) === 0 ? 0 : readDword((attributes >>> 0) + 8);
+        if (string === 0)
+        {
+            return null;
+        }
+        const head = host.readMemory(string, 2);
+        const units = host.readMemory(readDword(string + 4), head[0] | head[1] << 8);
+        let name = '';
+        for (let at = 0; at + 1 < units.length; at += 2)
+        {
+            name += String.fromCharCode(units[at] | units[at + 1] << 8);
+        }
+        return name;
+    };
 
     /**
      * @param {number} handle
@@ -489,6 +522,61 @@ export function createMappingFunctions(host){
                     writeDword(out >>> 0, openSection(made));
                     return STATUS.SUCCESS;
                 });
+            },
+        },
+
+        /**
+         * NTSTATUS NtOpenSection(PHANDLE SectionHandle, ACCESS_MASK,
+         *   POBJECT_ATTRIBUTES ObjectAttributes)
+         *
+         * A section made by name, as OpenFileMapping finds one: the object
+         * directory Win32 names live in (\BaseNamedObjects, or a session's)
+         * taken off, and the rest looked up as a Win32 call may have spelt it,
+         * bare or after Global\ or Local\. A name given relative to a
+         * directory handle is taken as one in that directory, the one a
+         * program opens for it. \Device\PhysicalMemory, which a hardware
+         * survey (Futuremark's SystemInfo) opens for the BIOS's tables, is
+         * refused, as Windows has refused it to user mode since Server 2003
+         * Service Pack 1.
+         */
+        NtOpenSection: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, , attributes])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const path = objectName(attributes);
+                if (path === null || path === '')
+                {
+                    return STATUS.OBJECT_NAME_INVALID;
+                }
+                if (/^\\device\\physicalmemory$/i.test(path))
+                {
+                    return STATUS.ACCESS_DENIED;
+                }
+                const relative = readDword((attributes >>> 0) + 4) !== 0;
+                const name = relative ? path
+                    : /^\\(?:sessions\\\d+\\)?basenamedobjects\\(.+)$/i.exec(path)?.[1];
+                if (name === undefined)
+                {
+                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                }
+                for (const spelt of [name, `Global\\${name}`, `Local\\${name}`])
+                {
+                    const found = host.namedObjects.existing(spelt, 'mapping');
+                    if (found === TAKEN)
+                    {
+                        return STATUS.OBJECT_TYPE_MISMATCH;
+                    }
+                    if (found)
+                    {
+                        writeDword(out >>> 0, openNamed(found));
+                        return STATUS.SUCCESS;
+                    }
+                }
+                return STATUS.OBJECT_NAME_NOT_FOUND;
             },
         },
 
