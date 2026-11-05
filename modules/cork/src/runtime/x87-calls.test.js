@@ -13,8 +13,14 @@
  * converting with the rounding mode set and put back (`_ftol`), loading
  * another control word after a call, a value held on the stack across a
  * call, direct and indirect calls, and the regions' budgets running out
- * inside a callee. Every result goes to memory as it is made. Beside them, a
- * callee formed into its caller that makes calls of its own.
+ * inside a callee. Every result goes to memory as it is made, and the whole
+ * x87 block at the `hlt` (top, tags, control and status words, every register
+ * held) is compared too. With `unit`, the functions also save and restore the
+ * whole unit (fnsave and frstor, fnstenv and fldenv, fxsave and fxrstor), move
+ * the top, reset it (finit, emms) and use MMX, through which the registers and
+ * the tags are other views of the same state. Beside them, a callee formed into
+ * its caller that makes calls of its own, and a directed case of a formed callee
+ * restoring the unit under a caller that reads MMX.
  */
 
 import { test } from 'node:test';
@@ -27,10 +33,13 @@ const CODE = 0x401000;
 const DATA = 0x500000;
 const CONSTANTS = 0x500800;
 const WORDS = 0x500900;
+/** Where the unit's own forms save and restore it: fnsave's image, fxsave's 512 bytes. */
+const SAVE = 0x500a00;
 const DOUBLES = [1.5, -2.25, 3e10, 1e-20, 0.1, -7, 12345.678, 2 / 3];
 const INTEGERS = [3, -100000, 7, 2147483647];
 /** Round to nearest at extended, double and single precision; toward zero at extended. */
 const CONTROL_WORDS = [0x37f, 0x27f, 0x07f, 0xf7f];
+const SINGLES = [1.5, -0.1, 3e38, 7];
 
 /** @param {number} value */
 const le = value=>[value & 0xff, value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24];
@@ -39,9 +48,10 @@ const le = value=>[value & 0xff, value >> 8 & 0xff, value >> 16 & 0xff, value >>
  * A program's generator, deterministic from its seed.
  *
  * @param {number} seed
+ * @param {boolean} [unit]  the whole unit's forms and MMX among the functions' parts
  * @returns {number[]}  the code, placed at CODE
  */
-function generate(seed){
+function generate(seed, unit = false){
     let state = seed >>> 0;
     /** @param {number} n */
     const pick = n=>{
@@ -111,6 +121,39 @@ function generate(seed){
             0xdb, 0x1d, ...le(DATA + 0x300 + (slot++ % 16) * 4), 0xd9, 0x2d, ...le(saved)];
     };
 
+    // The whole unit's forms. The first three keep the stack as it was; the
+    // rest leave it empty or in the MMX state, so a stack is stored first and
+    // loaded again after.
+    /** @type {(() => number[])[]} */
+    const unitForms = [
+        ()=>[0xdd, 0x35, ...le(SAVE), 0xdd, 0x25, ...le(SAVE)], // fnsave; frstor
+        ()=>[0xd9, 0x35, ...le(SAVE + 0x80), 0xd9, 0x25, ...le(SAVE + 0x80)], // fnstenv; fldenv
+        ()=>[0x0f, 0xae, 0x05, ...le(SAVE + 0x100), 0x0f, 0xae, 0x0d, ...le(SAVE + 0x100)],
+        ()=>[0xd9, 0xf7, 0xd9, 0xf6], // fincstp; fdecstp
+        ()=>[0x0f, 0x77], // emms
+        ()=>[0x9b, 0xdb, 0xe3], // finit
+        // fnsave; finit; fld1; fstp st0; frstor
+        ()=>[0xdd, 0x35, ...le(SAVE), 0x9b, 0xdb, 0xe3, 0xd9, 0xe8, 0xdd, 0xd8,
+            0xdd, 0x25, ...le(SAVE)],
+        // movq mm0, [c]; movq [out], mm0; emms
+        ()=>[0x0f, 0x6f, 0x05, ...le(CONSTANTS), 0x0f, 0x7f, 0x05,
+            ...le(DATA + 0x380 + (slot++ % 4) * 8), 0x0f, 0x77],
+        // movq mm1, [c]; fnsave; frstor; movq [out], mm1; emms
+        ()=>[0x0f, 0x6f, 0x0d, ...le(CONSTANTS + 8 * pick(8)), 0xdd, 0x35, ...le(SAVE),
+            0xdd, 0x25, ...le(SAVE), 0x0f, 0x7f, 0x0d, ...le(DATA + 0x360 + (slot++ % 4) * 8),
+            0x0f, 0x77],
+        // movq mm0, [c]; paddd mm0, mm0; movq [out], mm0; emms
+        ()=>[0x0f, 0x6f, 0x05, ...le(CONSTANTS + 8 * pick(8)), 0x0f, 0xfe, 0xc0, 0x0f, 0x7f,
+            0x05, ...le(DATA + 0x340 + (slot++ % 4) * 8), 0x0f, 0x77],
+    ];
+    /** @param {number} depth */
+    const unitPart = depth=>{
+        const form = pick(unitForms.length);
+        return form <= 3 || depth === 0 ? unitForms[form]()
+            : [...drain(depth), ...unitForms[form](),
+                ...Array.from({ length: depth }, ()=>[0xd9, 0xe8]).flat()];
+    };
+
     const count = 1 + pick(3);
     const returns = Array.from({ length: count }, ()=>pick(3) > 0);
     /** @type {{ code: number[], calls: { to: number, at: number }[] }[]} */
@@ -124,10 +167,14 @@ function generate(seed){
         let depth = 1;
         for (let part = 1 + pick(3); part > 0; part--)
         {
-            const kind = pick(5);
+            const kind = pick(unit ? 6 : 5);
             if (kind === 0)
             {
                 code.push(...compareBranch(depth));
+            }
+            else if (kind === 5)
+            {
+                code.push(...unitPart(depth));
             }
             else if (kind === 1 && depth >= 2)
             {
@@ -252,6 +299,8 @@ async function runProgram(code, callReturn, budget, leafCalls = false, more = {}
     INTEGERS.forEach((value, i)=>view().setInt32(layout.ramBase + CONSTANTS + 0x80 + i * 4,
         value, true));
     CONTROL_WORDS.forEach((word, i)=>view().setUint16(layout.ramBase + WORDS + i * 2, word, true));
+    SINGLES.forEach((value, i)=>view().setFloat32(layout.ramBase + CONSTANTS + 0xa0 + i * 4,
+        value, true));
     view().setUint32(layout.regs + 16, 0x800000, true);
     view().setUint32(layout.eip, CODE, true);
     const eip = ()=>view().getUint32(layout.eip, true);
@@ -282,7 +331,28 @@ async function runProgram(code, callReturn, budget, leafCalls = false, more = {}
         assert.ok(turn < 100_000 - 1, 'the program halts');
     }
     done?.(runtime.diagnostics());
-    return bytes().slice(layout.ramBase + DATA, layout.ramBase + DATA + 0x400);
+    // The data area, then the x87 block as a program can see it: the top, the
+    // tags, the control and status words, and each register held (an empty
+    // one's bytes are no one's).
+    const empty = view().getUint8(layout.x87Empty);
+    const unit = new Uint8Array(6 + 8 * 8);
+    const words = new DataView(unit.buffer);
+    words.setUint8(0, view().getUint8(layout.x87Top));
+    words.setUint8(1, empty);
+    words.setUint16(2, view().getUint16(layout.x87Control, true), true);
+    words.setUint16(4, view().getUint16(layout.x87Status, true), true);
+    for (let k = 0; k < 8; k++)
+    {
+        if ((empty >> k & 1) === 0)
+        {
+            unit.set(bytes().slice(layout.x87 + k * 16, layout.x87 + k * 16 + 8), 6 + k * 8);
+        }
+    }
+    const data = bytes().slice(layout.ramBase + DATA, layout.ramBase + DATA + 0x400);
+    const out = new Uint8Array(data.length + unit.length);
+    out.set(data);
+    out.set(unit, data.length);
+    return out;
 }
 
 for (const [first, budget] of [[1, 10_000_000], [1001, 61]])
@@ -299,6 +369,49 @@ for (const [first, budget] of [[1, 10_000_000], [1001, 61]])
         }
     });
 }
+
+for (const [first, budget] of [[3001, 10_000_000], [3301, 61], [3601, 13]])
+{
+    test(`x87 code that saves, restores and resets the unit and uses MMX, calling as wasm calls`
+        + ` and with its small callees formed in, leaves what calling by leaving leaves (seeds`
+        + ` ${first}.., budget ${budget})`, async()=>{
+        for (let seed = first; seed < first + 120; seed++)
+        {
+            const code = generate(seed * 7919, true);
+            const plain = await runProgram(code, false, budget);
+            for (const [callReturn, leafCalls] of [[true, false], [true, true], [false, true]])
+            {
+                assert.deepEqual(await runProgram(code, callReturn, budget, leafCalls), plain,
+                    `seed ${seed}, callReturn ${callReturn}, leafCalls ${leafCalls}`);
+            }
+        }
+    });
+}
+
+test('a callee formed into its caller that restores the unit leaves the registers it restored,'
+    + ' under a caller that reads MMX', async()=>{
+    // fldz x8; fnsave [SAVE]; frstor [SAVE]; mov ecx, 100; L: call M; dec ecx; jnz L; hlt
+    // M: call F; movq [DATA], mm0; ret
+    // F: fld dword [1.5f]; frstor [SAVE]; ret
+    // F is formed into M, whose MMX read keeps a local of every register's MMX view: the
+    // value fld pushed into register 7 was written back over the one frstor restored.
+    const code = [
+        ...Array.from({ length: 8 }, ()=>[0xd9, 0xee]).flat(),
+        0xdd, 0x35, ...le(SAVE), 0xdd, 0x25, ...le(SAVE), 0xb9, 100, 0, 0, 0,
+        0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4,
+        0xe8, 0x08, 0, 0, 0, 0x0f, 0x7f, 0x05, ...le(DATA), 0xc3,
+        0xd9, 0x05, ...le(CONSTANTS + 0xa0), 0xdd, 0x25, ...le(SAVE), 0xc3,
+    ];
+    const plain = await runProgram(code, false, 10_000_000);
+    const unit = plain.subarray(0x400);
+    assert.deepEqual([unit[0], unit[1]], [0, 0], 'the top 0, every register held');
+    assert.ok(unit.subarray(6).every(byte=>byte === 0), 'the eight zeros restored');
+    for (const [callReturn, leafCalls] of [[false, true], [true, true]])
+    {
+        assert.deepEqual(await runProgram(code, callReturn, 10_000_000, leafCalls), plain,
+            `callReturn ${callReturn}, leafCalls ${leafCalls}`);
+    }
+});
 
 test('x87 regions compiled each for the precision control it runs under leave what regions'
     + ' testing it at every rounding instruction leave', async()=>{

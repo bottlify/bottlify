@@ -4151,6 +4151,10 @@ export function emitX87(e, instruction, flagsLive){
                     b.localGet(Local.addr).op(I32.add).i32const(ram + 28).op(I32.add);
                     b.call(/** @type {number} */ (e.context.f80ToF64));
                     b.localSet(x.base + state.slot[k]);
+                    // The MMX view too: a region with MMX writes its mm locals
+                    // back at the exit, and one still holding a register's
+                    // value from before the restore wrote it over the restored one.
+                    syncMm(k, x.base + state.slot[k]);
                 }
                 b.i32const(0xff).localSet(Local.x87Dirty);
             }
