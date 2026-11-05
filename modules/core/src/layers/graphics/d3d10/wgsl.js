@@ -1697,8 +1697,18 @@ export function translateShader(container, options = {}){
             }
             case OPCODE.RESINFO: {
                 const [target, level, resource] = instruction.operands;
-                const texture = textureOf(resource.indices[0].value);
-                const name = texture ? `t${texture.slot}` : '';
+                // A view written through is one level, measured without naming it.
+                const written = resource.type === OPERAND.UNORDERED_ACCESS_VIEW
+                    ? memoryOf(resource) : null;
+                const view = written?.uav && written.uav.dimension !== RESOURCE_DIMENSION.BUFFER
+                    ? written : null;
+                const texture = view
+                    ? /** @type {TextureDecl} */ ({ slot: resource.indices[0].value,
+                        dimension: view.uav?.dimension ?? 0, returnType: RETURN_TYPE.FLOAT,
+                        comparison: false, multisampled: true })
+                    : resource.type === OPERAND.UNORDERED_ACCESS_VIEW ? null
+                        : textureOf(resource.indices[0].value);
+                const name = view ? view.name : texture ? `t${texture.slot}` : '';
                 // A multisampled texture has one level and is measured without
                 // naming it.
                 const levels = texture?.multisampled ? '1u' : `textureNumLevels(${name})`;
@@ -2564,7 +2574,7 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  *
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
- * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad,
+ * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad, clipDistances?: boolean,
  *     depthBias?: { units: number, slope: number, clamp: number } }} [options]  `targets`:
  *     the locations with a target bound; every location the shader writes when
  *     absent. `vertexLoad`: how the vertex stage fills its registers when they do not
@@ -2572,7 +2582,8 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  *     rasterizer's depth bias the fragment stage applies itself, writing the
  *     fragment's depth (`units` the constant bias already in depth, `slope` the
  *     slope scale, `clamp` the clamp, as Direct3D adds them); not where the pixel
- *     shader writes its depth, which no bias touches.
+ *     shader writes its depth, which no bias touches. `clipDistances`: the device clips
+ *     by the distances a vertex writes (WebGPU's `clip-distances`).
  * @returns {LinkedProgram}
  */
 export function linkProgram(vs, ps, options = {}){
@@ -2645,10 +2656,27 @@ export function linkProgram(vs, ps, options = {}){
     /** @type {string[]} */
     const vsReturn = [];
     let position = false;
+    /** Each clip and cull distance a vertex writes, a component each. @type {string[]} */
+    const clips = [];
+    /** @type {string[]} */
+    const culls = [];
     for (const element of vs.outputs)
     {
         const register = `o${element.register}`;
         const value = element.register < vs.outputRegisters ? register : `${REG}(0u)`;
+        if (element.systemValue === SYSTEM_VALUE.CLIP_DISTANCE
+            || element.systemValue === SYSTEM_VALUE.CULL_DISTANCE)
+        {
+            const into = element.systemValue === SYSTEM_VALUE.CLIP_DISTANCE ? clips : culls;
+            for (let c = 0; c < 4; c++)
+            {
+                if ((element.mask & (1 << c)) !== 0)
+                {
+                    into.push(`bitcast<f32>(${value}.${COMPONENT[c]})`);
+                }
+            }
+            continue;
+        }
         if (element.systemValue === SYSTEM_VALUE.POSITION)
         {
             position = true;
@@ -2687,6 +2715,40 @@ export function linkProgram(vs, ps, options = {}){
     {
         unsupported.push('a vertex shader that writes no SV_Position');
     }
+    // Clip distances clip where the device does (clip-distances); elsewhere
+    // they travel, interpolated, and the fragment stage discards where one
+    // is negative: the same cut, the distance being linear across a
+    // primitive. A cull distance travels as whether each vertex is on the
+    // kept side, and a primitive all of whose vertices are not is a primitive
+    // whose fragments read zero there: those are discarded.
+    /** @type {string[]} */
+    const cutLoad = [];
+    /** @type {string[]} */
+    const cutIn = [];
+    /** @param {string[]} values @param {string} name @param {string} test */
+    const travelling = (values, name, test)=>{
+        for (let group = 0; group * 4 < values.length; group++)
+        {
+            const location = byRegister.size + cutIn.length;
+            const four = [0, 1, 2, 3].map(c=>values[group * 4 + c] ?? '1.0');
+            vsOut.push(`    @location(${location}) ${name}${group}: vec4<f32>,`);
+            vsReturn.push(`vec4<f32>(${four.join(', ')})`);
+            cutIn.push(`    @location(${location}) ${name}${group}: vec4<f32>,`);
+            cutLoad.push(`    if (any(${test.replace('$', `in.${name}${group}`)})) { discard; }`);
+        }
+    };
+    const deviceClips = clips.length > 0 && options.clipDistances === true;
+    if (deviceClips)
+    {
+        vsOut.push(`    @builtin(clip_distances) clipDistances: array<f32, ${clips.length}>,`);
+        vsReturn.push(`array<f32, ${clips.length}>(${clips.join(', ')})`);
+    }
+    else
+    {
+        travelling(clips, 'clipDistance', '$ < vec4<f32>(0.0)');
+    }
+    travelling(culls.map(value=>`select(0.0, 1.0, ${value} >= 0.0)`), 'cullKept',
+        '$ == vec4<f32>(0.0)');
 
     // --- the pixel stage's inputs, found by semantic among the vertex outputs ---
     /** @type {string[]} */
@@ -2831,8 +2893,10 @@ export function linkProgram(vs, ps, options = {}){
         psReturn.push('biasedDepth');
     }
 
+    psIn.push(...cutIn);
     // WGSL has no empty struct, so a stage that reads nothing takes nothing.
     const vertex = [
+        ...(deviceClips ? ['enable clip_distances;'] : []),
         ...vsDecl.text,
         ...options.vertexLoad?.text ?? [],
         ...(vsIn.length > 0 ? ['struct VertexIn {', ...vsIn, '};'] : []),
@@ -2860,6 +2924,7 @@ export function linkProgram(vs, ps, options = {}){
         ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
         `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''})`
             + `${writes ? ' -> FragmentOut' : ''} {`,
+        ...cutLoad,
         ...biasLoad,
         ...psLoad,
         ...registerDeclarations(ps),
@@ -3403,7 +3468,7 @@ export const GEOMETRY_DRAW_BINDING = Object.freeze({ vertices: 0 });
  * @param {GeometryStage} stage
  * @param {number} stream  The rasterized stream.
  * @param {TranslatedShader} ps
- * @param {{ targets?: readonly number[],
+ * @param {{ targets?: readonly number[], clipDistances?: boolean,
  *     depthBias?: { units: number, slope: number, clamp: number } }} [options]
  * @returns {LinkedProgram}
  */
@@ -3704,7 +3769,7 @@ export const DOMAIN_BINDING = Object.freeze({
  * @param {TranslatedShader} ps
  * @param {import('./dxbc.js').DxbcContainer} hull
  * @param {LinkedHull['stage']} stage
- * @param {{ targets?: readonly number[],
+ * @param {{ targets?: readonly number[], clipDistances?: boolean,
  *     depthBias?: { units: number, slope: number, clamp: number } }} [options]
  * @returns {LinkedProgram}
  */

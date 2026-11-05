@@ -884,6 +884,34 @@ test('a depth written with a promise of its direction is the nearer of it and th
     assert.doesNotMatch(less.fragment, /@location\(4294967295\)/);
 });
 
+test('clip distances clip on the device or by the fragment stage; a cull distance discards a'
+    + ' primitive all of whose vertices are on its far side (test_combined_clip_and_cull_distances,'
+    + ' d3d11.c:30460)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_CLIPDISTANCE', systemValue: SYSTEM_VALUE.CLIP_DISTANCE, register: 1,
+                mask: 0x7 },
+            { name: 'SV_CULLDISTANCE', systemValue: SYSTEM_VALUE.CULL_DISTANCE, register: 2,
+                mask: 0x1 }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'xyz'), SYSTEM_VALUE.CLIP_DISTANCE),
+            dclOutputSiv(o(2, 'x'), SYSTEM_VALUE.CULL_DISTANCE),
+            mov(o(0), v(0)), mov(o(1, 'xyz'), v(0, 'xyz')), mov(o(2, 'x'), v(0, 'x')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const device = linkProgram(vs, ps, { clipDistances: true });
+    assert.deepEqual(device.unsupported, []);
+    assert.match(device.vertex, /^enable clip_distances;/);
+    assert.match(device.vertex, /@builtin\(clip_distances\) clipDistances: array<f32, 3>,/);
+    assert.match(device.fragment, /if \(any\(in\.cullKept0 == vec4<f32>\(0\.0\)\)\) \{ discard; \}/);
+    const fragmentCut = linkProgram(vs, ps);
+    assert.doesNotMatch(fragmentCut.vertex, /clip_distances/);
+    assert.match(fragmentCut.fragment, /if \(any\(in\.clipDistance0 < vec4<f32>\(0\.0\)\)\) \{ discard; \}/);
+    assert.match(fragmentCut.vertex, /select\(0\.0, 1\.0, bitcast<f32>\(o2\.x\) >= 0\.0\)/);
+});
+
 test('a vertex shader that writes no position cannot be linked', ()=>{
     const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
         kind: SHADER_KIND.VERTEX,

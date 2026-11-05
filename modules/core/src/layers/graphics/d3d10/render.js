@@ -1267,7 +1267,8 @@ export function createRenderer(services){
         }
         const dimension = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
             ? '3d'
-            : isCube ? 'cube' : array ? '2d-array' : '2d';
+            : isCube ? 'cube' : shape === 'TEXTURECUBEARRAY' ? 'cube-array'
+                : array ? '2d-array' : '2d';
         const created = backing.texture.createView({
             label: `d3d10:view:${chosen.format ?? chosen.aspect}`,
             ...(chosen.format ? { format: chosen.format } : {}),
@@ -1584,13 +1585,15 @@ export function createRenderer(services){
             let made = variants.get(variant);
             if (!made)
             {
-                const [multisampled, depth, biases] = variant.split('|');
+                const [multisampled, depth, biases, stored] = variant.split('|');
                 /** @param {string} slots */
                 const list = slots=>(slots ? slots.split(',').map(Number) : []);
                 made = translateShader(shader.container, {
                     multisampled: list(multisampled), depth: list(depth),
                     samplerBias: Object.fromEntries((biases ?? '').split(',').filter(Boolean)
                         .map(pair=>pair.split(':').map(Number))),
+                    uavFormats: Object.fromEntries((stored ?? '').split(',').filter(Boolean)
+                        .map(pair=>pair.split(':')).map(([slot, format])=>[Number(slot), format])),
                 });
                 variants.set(variant, made);
             }
@@ -1617,7 +1620,7 @@ export function createRenderer(services){
      * @param {any} stage
      * @returns {string}
      */
-    const variantOf = stage=>{
+    const variantOf = (stage, written = NO_VIEWS)=>{
         if (!stage.shader)
         {
             return '';
@@ -1658,8 +1661,15 @@ export function createRenderer(services){
                 biases.push(`${sampler.slot}:${Math.fround(bias)}`);
             }
         }
-        return multisampled.length === 0 && depth.length === 0 && biases.length === 0 ? ''
-            : `${multisampled.join(',')}|${depth.join(',')}|${biases.join(',')}`;
+        // The formats of the views a pixel shader writes through, which its
+        // storage textures are declared as.
+        const stored = translationOf(stage.shader).uavs.length > 0
+            ? Object.entries(uavFormatsOf(written)).map(([slot, format])=>`${slot}:${format}`)
+            : [];
+        return multisampled.length === 0 && depth.length === 0 && biases.length === 0
+            && stored.length === 0 ? ''
+            : `${multisampled.join(',')}|${depth.join(',')}|${biases.join(',')}`
+                + `|${stored.join(',')}`;
     };
 
     /** @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries @param {string} label */
@@ -1844,14 +1854,15 @@ export function createRenderer(services){
             ? { units: rasterizer.DepthBias * 2 ** -unormBits,
                 slope: rasterizer.SlopeScaledDepthBias, clamp: rasterizer.DepthBiasClamp }
             : undefined;
+        const linking = { targets: bound, depthBias: emulatedBias,
+            clipDistances: backend.hasFeature?.('clip-distances') === true };
         const program = state.hullShader
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
-                tessellationOf().hullOf(state.hullShader).stage,
-                { targets: bound, depthBias: emulatedBias })
+                tessellationOf().hullOf(state.hullShader).stage, linking)
             : state.geometry
                 ? linkGeometryDraw(state.geometry.gs, state.geometry.stage, state.geometry.stream,
-                    ps, { targets: bound, depthBias: emulatedBias })
-                : linkProgram(vs, ps, { targets: bound, depthBias: emulatedBias });
+                    ps, linking)
+                : linkProgram(vs, ps, linking);
         if (program.unsupported.length > 0)
         {
             throw Object.assign(new Error('the shaders cannot be translated:'
@@ -4038,7 +4049,7 @@ export function createRenderer(services){
                 geometry: drawnGeometry ? { shader: geometryShader, gs: geometry.gs,
                     stage: geometry.stage, stream: drawnGeometry.stream } : null,
                 vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
-                psVariant: variantOf(pipeline.stages.ps),
+                psVariant: variantOf(pipeline.stages.ps, pipeline.pixelViews ?? NO_VIEWS),
             };
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
