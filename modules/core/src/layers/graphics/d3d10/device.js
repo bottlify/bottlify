@@ -1163,8 +1163,8 @@ export function createDevice(options = {}){
         },
 
         /**
-         * Tessellation's two stages, made as a geometry shader is: a draw with
-         * either bound is skipped, there being no tessellator.
+         * Tessellation's two stages: a draw with both bound runs them and the
+         * tessellator as compute passes (`tessellation.js`).
          *
          * @param {Uint8Array} bytecode @param {{ shader?: any }} out
          */

@@ -164,3 +164,7 @@ jobs:
       - run: npm run cdp:shaders
         env:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # The WGSL tessellator against the reference tessellator's corpus.
+      - run: npm run cdp:tess
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}

@@ -625,20 +625,23 @@ export function createFakeDevice(options = {}){
             let pipeline = null;
             /** @type {any} */
             let group = null;
+            /** @type {any[]} every group, by its number */
+            const groups = [];
             pass.setPipeline = (/** @type {any} */ next)=>{
                 pipeline = next;
             };
             pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ next)=>{
-                group = next;
-                void index;
+                groups[index] = next;
+                group = groups[0] ?? next;
             };
             pass.dispatchWorkgroups = (/** @type {number[]} */ ...grid)=>{
-                calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group, grid });
+                calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group,
+                    groups: [...groups], grid });
             };
             /** @param {any} buffer @param {number} offset */
             pass.dispatchWorkgroupsIndirect = (buffer, offset)=>{
                 calls.push({ op: 'dispatchWorkgroups', encoder, pipeline, group,
-                    indirect: { buffer, offset } });
+                    groups: [...groups], indirect: { buffer, offset } });
             };
             pass.end = ()=>{};
             return pass;

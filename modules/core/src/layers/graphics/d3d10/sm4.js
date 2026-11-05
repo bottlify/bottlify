@@ -248,7 +248,14 @@ export const OPERAND = Object.freeze({
     NULL: 13,
     RASTERIZER: 14,
     OUTPUT_COVERAGE_MASK: 15,
-    // Shader Model 5.
+    // Shader Model 5: the tessellation stages' own, then the rest.
+    OUTPUT_CONTROL_POINT_ID: 22,
+    INPUT_FORK_INSTANCE_ID: 23,
+    INPUT_JOIN_INSTANCE_ID: 24,
+    INPUT_CONTROL_POINT: 25,
+    OUTPUT_CONTROL_POINT: 26,
+    INPUT_PATCH_CONSTANT: 27,
+    INPUT_DOMAIN_POINT: 28,
     UNORDERED_ACCESS_VIEW: 30,
     THREAD_GROUP_SHARED_MEMORY: 31,
     INPUT_THREAD_ID: 32,
