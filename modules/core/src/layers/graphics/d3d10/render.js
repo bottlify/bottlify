@@ -66,6 +66,7 @@ import { GEOMETRY_DRAW_ENTRIES, createGeometry } from './geometry.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
+import { SYSTEM_VALUE } from './dxbc.js';
 
 /**
  * The shapes WGSL has a depth texture of, which a float texture over a depth
@@ -1978,7 +1979,7 @@ export function createRenderer(services){
             state.depthFormat ?? '-', state.depthReadOnly ?? 0,
             state.sampleMask >>> 0,
             state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
-            state.indirect ? 'indirect' : '',
+            state.indirect ? 'indirect' : '', state.layerPass ?? '',
         ].join('|');
         const keyed = state.hullShader ? `${key}|hs:${idOf(state.hullShader)}`
             : state.geometry ? `${key}|gs:${idOf(state.geometry.shader)}:${state.geometry.stream}`
@@ -2065,8 +2066,10 @@ export function createRenderer(services){
             : undefined;
         const pulling = state.hullShader || state.geometry ? null
             : vertexPullOf(state.inputLayout, state.strides, state.indirect);
+        const [layerIndex, layerCount] = (state.layerPass || '').split('/').map(Number);
         const linking = { targets: bound, depthBias: emulatedBias,
             clipDistances: backend.hasFeature?.('clip-distances') === true,
+            ...(state.layerPass ? { layerPass: { index: layerIndex, count: layerCount } } : {}),
             ...(pulling ? { vertexPull: pulling.pull } : {}) };
         const program = state.hullShader
             ? linkDomain(vs, state.vertexShader.container, ps, state.hullShader.container,
@@ -2288,6 +2291,62 @@ export function createRenderer(services){
         }
         return target;
     };
+
+    /** A view's targets past its first layer, by layer. @type {WeakMap<object, Map<number, any>>} */
+    const layerTargets = new WeakMap();
+    /**
+     * A render target or depth stencil view's layer `layer` of those it
+     * names, as a surface a pass draws into; null past them.
+     *
+     * @param {any} view @param {number} layer
+     */
+    const targetAtLayer = (view, layer)=>{
+        if (!view || layer === 0)
+        {
+            return targetOf(view);
+        }
+        if (!view.range || layer >= view.range.count)
+        {
+            return null;
+        }
+        let byLayer = layerTargets.get(view);
+        if (!byLayer)
+        {
+            byLayer = new Map();
+            layerTargets.set(view, byLayer);
+        }
+        let target = byLayer.get(layer);
+        if (target === undefined)
+        {
+            /** @type {{ resource?: any }} */
+            const held = {};
+            view.GetResource(held);
+            held.resource.release();
+            /** @type {{ desc?: any }} */
+            const described = {};
+            view.GetDesc(described);
+            target = layerTarget(held.resource, described.desc, view.range.mip,
+                view.range.first + layer);
+            byLayer.set(layer, target);
+        }
+        if (target?.twin)
+        {
+            useTwin(target.backing, target.twin, { mip: target.mipLevel, levels: 1,
+                first: target.layer, count: 1 }, true);
+        }
+        return target;
+    };
+
+    /**
+     * How many layers a draw's targets have to send primitives to: the
+     * most any bound array view names. A volume's view is drawn into its
+     * first slice (`layerTarget`), so counts as one.
+     *
+     * @param {PipelineSnapshot} pipeline
+     */
+    const layersOf = pipeline=>Math.max(1, ...[...pipeline.renderTargets,
+        pipeline.depthStencilView].map(view=>(view?.range
+        && view.dimensionName !== 'TEXTURE3D' ? view.range.count : 1)));
 
     /**
      * One level and slice of a texture as a surface a pass draws into, by
@@ -2540,6 +2599,10 @@ export function createRenderer(services){
                 {
                     roomFor(buffer, backing, declared);
                 }
+                // A write before the frame is submitted renames what this draw
+                // reads (UpdateSubresource between draws), as a vertex
+                // buffer's does.
+                backing?.gpu?.markRead();
                 return {
                     binding: entry.binding,
                     resource: backing && backing.gpu
@@ -4340,276 +4403,304 @@ export function createRenderer(services){
             }
             const drawnGeometry = geometryShader && !geometryShader.passThrough
                 ? geometry.drawn : null;
-            // Every bound render target, by slot, and the depth target: the
-            // first of them sizes the pass, and a draw with a depth target and
-            // no colour one draws depth alone.
-            let depth = targetOf(pipeline.depthStencilView);
-            const bound = pipeline.renderTargets.map(view=>targetOf(view));
-            // With neither, a pixel shader that writes through views draws over
-            // the viewport alone.
-            const field = pipeline.viewports[0];
-            if (!bound.some(entry=>entry) && !depth && field && field.Width > 0
-                && field.Height > 0 && (pipeline.pixelViews ?? []).some(view=>view))
-            {
-                bound[0] = blindTarget(Math.min(16384, Math.ceil(field.TopLeftX + field.Width)),
-                    Math.min(16384, Math.ceil(field.TopLeftY + field.Height)));
-            }
-            const sizing = bound.find(entry=>entry) ?? depth;
-            if (!sizing)
-            {
-                counters.skipped.noTarget++;
-                return;
-            }
-            const colour = bound.map(entry=>(entry
-                && (entry.surface.width !== sizing.surface.width
-                    || entry.surface.height !== sizing.surface.height)
-                ? null
-                : entry));
-            if (colour.some((entry, index)=>entry !== bound[index]))
-            {
-                lose('a render target of another size than the first is not drawn into:'
-                    + ' the targets of a pass are one size');
-            }
-            while (colour.length > 0 && !colour[colour.length - 1])
-            {
-                colour.pop();
-            }
-            // Direct3D draws where the targets and the depth buffer overlap,
-            // whatever their sizes; WebGPU takes attachments of one size. A
-            // depth buffer the draw neither tests nor writes is left out; one
-            // it does is drawn with stand-ins of the depth buffer's size for
-            // the colour targets, their overlap copied in and back out.
-            /** @type {any[] | null} */
-            let standIns = null;
-            const first = colour.find(entry=>entry) ?? null;
-            if (depth && first && (depth.surface.width !== first.surface.width
-                || depth.surface.height !== first.surface.height))
-            {
-                const tests = pipeline.depthStencilState
-                    ? stateDesc(pipeline.depthStencilState)
-                    : DEFAULT_DEPTH_STENCIL;
-                if (!tests.DepthEnable && !tests.StencilEnable)
+            /**
+             * The draw into the targets' layer `layerPass` names, or into
+             * their first where its primitives name none.
+             *
+             * @param {{ index: number, count: number } | null} layerPass
+             */
+            const rasterize = layerPass=>{
+                // Every bound render target, by slot, and the depth target: the
+                // first of them sizes the pass, and a draw with a depth target and
+                // no colour one draws depth alone.
+                let depth = targetAtLayer(pipeline.depthStencilView, layerPass?.index ?? 0);
+                const bound = pipeline.renderTargets.map(view=>targetAtLayer(view,
+                    layerPass?.index ?? 0));
+                // With neither, a pixel shader that writes through views draws over
+                // the viewport alone.
+                const field = pipeline.viewports[0];
+                if (!bound.some(entry=>entry) && !depth && field && field.Width > 0
+                    && field.Height > 0 && (pipeline.pixelViews ?? []).some(view=>view))
                 {
-                    depth = null;
+                    bound[0] = blindTarget(Math.min(16384, Math.ceil(field.TopLeftX + field.Width)),
+                        Math.min(16384, Math.ceil(field.TopLeftY + field.Height)));
                 }
-                else if (first.sampleCount > 1)
+                const sizing = bound.find(entry=>entry) ?? depth;
+                if (!sizing)
                 {
-                    lose('a multisampled draw with a depth buffer of another size than its'
-                        + ' targets is skipped');
+                    counters.skipped.noTarget++;
                     return;
                 }
-                else
+                const colour = bound.map(entry=>(entry
+                    && (entry.surface.width !== sizing.surface.width
+                        || entry.surface.height !== sizing.surface.height)
+                    ? null
+                    : entry));
+                if (colour.some((entry, index)=>entry !== bound[index]))
                 {
-                    standIns = colour.map((entry, slot)=>entry && standInOf(entry, slot,
-                        /** @type {any} */ (depth)));
+                    lose('a render target of another size than the first is not drawn into:'
+                        + ' the targets of a pass are one size');
                 }
-            }
-            const target = (standIns ?? colour).find(entry=>entry) ?? null;
-            const viewport = pipeline.viewports[0];
-            if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
-            {
-                counters.skipped.noViewport++;
-                return;
-            }
-            // Without a pixel shader the draw still runs: it writes depth and
-            // stencil and no render target, as a depth-only pass expects.
-            if (!pipeline.stages.vs.shader)
-            {
-                counters.skipped.noShader++;
-                return;
-            }
-            // Through the tessellator: compute passes, then a draw of the
-            // domain shader over what they made (`tessellation.js`).
-            const tessellating = !drawnGeometry && (pipeline.stages.hs?.shader
-                || pipeline.stages.ds?.shader || pipeline.topology >= FIRST_PATCH_LIST);
-            const tessellated = tessellating ? tessellationOf().prepare(pipeline, draw) : null;
-            if (tessellating && !tessellated)
-            {
-                counters.skipped.stage++;
-                return;
-            }
-            const topology = drawnGeometry ? drawnGeometry.topology
-                : tessellated ? tessellated.topology : TOPOLOGY[pipeline.topology];
-            if (!topology)
-            {
-                diverge(`primitive topology ${pipeline.topology} cannot be drawn`);
-                return;
-            }
-            const indexFormat = INDEX_FORMAT[pipeline.indexFormat] ?? null;
-            const state = {
-                vertexShader: tessellated ? pipeline.stages.ds.shader : pipeline.stages.vs.shader,
-                hullShader: tessellated ? pipeline.stages.hs.shader : null,
-                pixelShader: pipeline.stages.ps.shader,
-                // No layout feeds no attribute: the draw runs on what the
-                // vertex shader makes of its system values alone.
-                inputLayout: tessellated || drawnGeometry ? NO_INPUT_LAYOUT
-                    : pipeline.inputLayout ?? NO_INPUT_LAYOUT,
-                blendState: pipeline.blendState,
-                depthStencilState: pipeline.depthStencilState,
-                rasterizerState: pipeline.rasterizerState,
-                topology,
-                targetFormats: colour.map(entry=>(entry ? entry.format : null)),
-                targetWriteMasks: colour.map(entry=>(entry ? entry.writeMask : 0)),
-                depthFormat: depth ? depth.format : null,
-                depthReadOnly: depth ? depth.readOnly : 0,
-                sampleMask: pipeline.sampleMask,
-                sampleCount: sizing.sampleCount,
-                strides: tessellated || drawnGeometry ? [] : pipeline.vertexStrides.slice(),
-                indexFormat: draw.indexCount === undefined || tessellated || drawnGeometry ? null
-                    : indexFormat,
-                // An indirect draw's first instance is on the GPU: its
-                // per-instance streams are read by the vertex stage from there.
-                indirect: !!draw.indirect && !tessellated && !drawnGeometry,
-                geometry: drawnGeometry ? { shader: geometryShader, gs: geometry.gs,
-                    stage: geometry.stage, stream: drawnGeometry.stream } : null,
-                vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
-                psVariant: variantOf(pipeline.stages.ps, pipeline.pixelViews ?? NO_VIEWS),
-            };
-            const rasterizer = pipeline.rasterizerState
-                ? stateDesc(pipeline.rasterizerState)
-                : DEFAULT_RASTERIZER;
-            let scissor = rasterizer.ScissorEnable && pipeline.scissorRects[0]
-                ? pipeline.scissorRects[0]
-                : null;
-            if (standIns && first && depth)
-            {
-                // Nothing is drawn past the overlap, which is what is copied back.
-                const right = Math.min(first.surface.width, depth.surface.width);
-                const bottom = Math.min(first.surface.height, depth.surface.height);
-                scissor = scissor
-                    ? { left: scissor.left, top: scissor.top,
-                        right: Math.min(scissor.right, right),
-                        bottom: Math.min(scissor.bottom, bottom) }
-                    : { left: 0, top: 0, right, bottom };
-            }
-            const pulling = tessellated || drawnGeometry ? null
-                : vertexPullOf(state.inputLayout, state.strides, state.indirect);
-            const program = tessellated
-                ? linkDomain(translationOf(state.vertexShader, state.vsVariant),
-                    state.vertexShader.container, translationOf(state.pixelShader, state.psVariant),
-                    pipeline.stages.hs.shader.container, tessellated.hull.stage)
-                : drawnGeometry
-                    ? linkGeometryDraw(geometry.gs, geometry.stage, drawnGeometry.stream,
-                        translationOf(state.pixelShader, state.psVariant))
-                    : linkProgram(translationOf(state.vertexShader, state.vsVariant),
+                while (colour.length > 0 && !colour[colour.length - 1])
+                {
+                    colour.pop();
+                }
+                // Direct3D draws where the targets and the depth buffer overlap,
+                // whatever their sizes; WebGPU takes attachments of one size. A
+                // depth buffer the draw neither tests nor writes is left out; one
+                // it does is drawn with stand-ins of the depth buffer's size for
+                // the colour targets, their overlap copied in and back out.
+                /** @type {any[] | null} */
+                let standIns = null;
+                const first = colour.find(entry=>entry) ?? null;
+                if (depth && first && (depth.surface.width !== first.surface.width
+                    || depth.surface.height !== first.surface.height))
+                {
+                    const tests = pipeline.depthStencilState
+                        ? stateDesc(pipeline.depthStencilState)
+                        : DEFAULT_DEPTH_STENCIL;
+                    if (!tests.DepthEnable && !tests.StencilEnable)
+                    {
+                        depth = null;
+                    }
+                    else if (first.sampleCount > 1)
+                    {
+                        lose('a multisampled draw with a depth buffer of another size than its'
+                            + ' targets is skipped');
+                        return;
+                    }
+                    else
+                    {
+                        standIns = colour.map((entry, slot)=>entry && standInOf(entry, slot,
+                            /** @type {any} */ (depth)));
+                    }
+                }
+                const target = (standIns ?? colour).find(entry=>entry) ?? null;
+                const viewport = pipeline.viewports[0];
+                if (!viewport || !(viewport.Width > 0) || !(viewport.Height > 0))
+                {
+                    counters.skipped.noViewport++;
+                    return;
+                }
+                // Without a pixel shader the draw still runs: it writes depth and
+                // stencil and no render target, as a depth-only pass expects.
+                if (!pipeline.stages.vs.shader)
+                {
+                    counters.skipped.noShader++;
+                    return;
+                }
+                // Through the tessellator: compute passes, then a draw of the
+                // domain shader over what they made (`tessellation.js`).
+                const tessellating = !drawnGeometry && (pipeline.stages.hs?.shader
+                    || pipeline.stages.ds?.shader || pipeline.topology >= FIRST_PATCH_LIST);
+                const tessellated = tessellating ? tessellationOf().prepare(pipeline, draw) : null;
+                if (tessellating && !tessellated)
+                {
+                    counters.skipped.stage++;
+                    return;
+                }
+                const topology = drawnGeometry ? drawnGeometry.topology
+                    : tessellated ? tessellated.topology : TOPOLOGY[pipeline.topology];
+                if (!topology)
+                {
+                    diverge(`primitive topology ${pipeline.topology} cannot be drawn`);
+                    return;
+                }
+                const indexFormat = INDEX_FORMAT[pipeline.indexFormat] ?? null;
+                const state = {
+                    vertexShader: tessellated ? pipeline.stages.ds.shader
+                        : pipeline.stages.vs.shader,
+                    hullShader: tessellated ? pipeline.stages.hs.shader : null,
+                    pixelShader: pipeline.stages.ps.shader,
+                    // No layout feeds no attribute: the draw runs on what the
+                    // vertex shader makes of its system values alone.
+                    inputLayout: tessellated || drawnGeometry ? NO_INPUT_LAYOUT
+                        : pipeline.inputLayout ?? NO_INPUT_LAYOUT,
+                    blendState: pipeline.blendState,
+                    depthStencilState: pipeline.depthStencilState,
+                    rasterizerState: pipeline.rasterizerState,
+                    topology,
+                    targetFormats: colour.map(entry=>(entry ? entry.format : null)),
+                    targetWriteMasks: colour.map(entry=>(entry ? entry.writeMask : 0)),
+                    depthFormat: depth ? depth.format : null,
+                    depthReadOnly: depth ? depth.readOnly : 0,
+                    sampleMask: pipeline.sampleMask,
+                    sampleCount: sizing.sampleCount,
+                    strides: tessellated || drawnGeometry ? [] : pipeline.vertexStrides.slice(),
+                    indexFormat: draw.indexCount === undefined || tessellated || drawnGeometry
+                        ? null : indexFormat,
+                    layerPass: layerPass ? `${layerPass.index}/${layerPass.count}` : '',
+                    // An indirect draw's first instance is on the GPU: its
+                    // per-instance streams are read by the vertex stage from there.
+                    indirect: !!draw.indirect && !tessellated && !drawnGeometry,
+                    geometry: drawnGeometry ? { shader: geometryShader, gs: geometry.gs,
+                        stage: geometry.stage, stream: drawnGeometry.stream } : null,
+                    vsVariant: variantOf(tessellated ? pipeline.stages.ds : pipeline.stages.vs),
+                    psVariant: variantOf(pipeline.stages.ps, pipeline.pixelViews ?? NO_VIEWS),
+                };
+                const rasterizer = pipeline.rasterizerState
+                    ? stateDesc(pipeline.rasterizerState)
+                    : DEFAULT_RASTERIZER;
+                let scissor = rasterizer.ScissorEnable && pipeline.scissorRects[0]
+                    ? pipeline.scissorRects[0]
+                    : null;
+                if (standIns && first && depth)
+                {
+                    // Nothing is drawn past the overlap, which is what is copied back.
+                    const right = Math.min(first.surface.width, depth.surface.width);
+                    const bottom = Math.min(first.surface.height, depth.surface.height);
+                    scissor = scissor
+                        ? { left: scissor.left, top: scissor.top,
+                            right: Math.min(scissor.right, right),
+                            bottom: Math.min(scissor.bottom, bottom) }
+                        : { left: 0, top: 0, right, bottom };
+                }
+                const pulling = tessellated || drawnGeometry ? null
+                    : vertexPullOf(state.inputLayout, state.strides, state.indirect);
+                const program = tessellated
+                    ? linkDomain(translationOf(state.vertexShader, state.vsVariant),
+                        state.vertexShader.container,
                         translationOf(state.pixelShader, state.psVariant),
-                        pulling ? { vertexPull: pulling.pull } : {});
-            const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
-                const backing = buffer ? backingOf(buffer) : null;
-                if (!backing || !backing.gpu)
+                        pipeline.stages.hs.shader.container, tessellated.hull.stage)
+                    : drawnGeometry
+                        ? linkGeometryDraw(geometry.gs, geometry.stage, drawnGeometry.stream,
+                            translationOf(state.pixelShader, state.psVariant))
+                        : linkProgram(translationOf(state.vertexShader, state.vsVariant),
+                            translationOf(state.pixelShader, state.psVariant),
+                            pulling ? { vertexPull: pulling.pull } : {});
+                const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
+                    const backing = buffer ? backingOf(buffer) : null;
+                    if (!backing || !backing.gpu)
+                    {
+                        return null;
+                    }
+                    // The bytes this draw reads have to survive a later write into
+                    // the same buffer, which is what makes such a write rename.
+                    backing.gpu.markRead();
+                    return { gpu: backing.gpu.gpu, offset: pipeline.vertexOffsets[slot],
+                        stride: pipeline.vertexStrides[slot] };
+                });
+                const indexBacking = pipeline.indexBuffer ? backingOf(pipeline.indexBuffer) : null;
+                if (indexBacking && indexBacking.gpu && pipeline.indexBuffer)
                 {
-                    return null;
+                    indexBacking.gpu.markRead();
                 }
-                // The bytes this draw reads have to survive a later write into
-                // the same buffer, which is what makes such a write rename.
-                backing.gpu.markRead();
-                return { gpu: backing.gpu.gpu, offset: pipeline.vertexOffsets[slot],
-                    stride: pipeline.vertexStrides[slot] };
-            });
-            const indexBacking = pipeline.indexBuffer ? backingOf(pipeline.indexBuffer) : null;
-            if (indexBacking && indexBacking.gpu && pipeline.indexBuffer)
-            {
-                indexBacking.gpu.markRead();
-            }
-            // Counts the GPU reads from a buffer it wrote: the instances then
-            // start where the arguments say, which needs the device feature
-            // that lets them.
-            const argumentBuffer = draw.indirect ? backingOf(draw.indirect.buffer) : null;
-            argumentBuffer?.gpu.markRead();
-            const asked = argumentBuffer
-                ? { gpu: argumentBuffer.gpu.gpu, offset: /** @type {any} */ (draw.indirect).offset }
-                : null;
-            counters.draws++;
-            for (const counter of occluding)
-            {
-                if (!recordingCounters.has(counter))
+                // Counts the GPU reads from a buffer it wrote: the instances then
+                // start where the arguments say, which needs the device feature
+                // that lets them.
+                const argumentBuffer = draw.indirect ? backingOf(draw.indirect.buffer) : null;
+                argumentBuffer?.gpu.markRead();
+                const asked = argumentBuffer
+                    ? { gpu: argumentBuffer.gpu.gpu, offset: /** @type {any} */ (draw.indirect).offset }
+                    : null;
+                counters.draws++;
+                for (const counter of occluding)
                 {
-                    recordingCounters.add(counter);
-                    counter.outstanding++;
+                    if (!recordingCounters.has(counter))
+                    {
+                        recordingCounters.add(counter);
+                        counter.outstanding++;
+                    }
                 }
-            }
-            const copiedOut = standIns ? standInsIn(colour, standIns,
-                /** @type {any} */ (depth)) : null;
-            // What the GPU draws into is newer there than the host's bytes.
-            for (const drawn of [...colour, depth])
-            {
-                if (drawn?.backing)
+                const copiedOut = standIns ? standInsIn(colour, standIns,
+                    /** @type {any} */ (depth)) : null;
+                // What the GPU draws into is newer there than the host's bytes.
+                for (const drawn of [...colour, depth])
                 {
-                    drawn.backing.gpuDirty = true;
+                    if (drawn?.backing)
+                    {
+                        drawn.backing.gpuDirty = true;
+                    }
                 }
-            }
-            const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
-            const groups = [
-                pulling
-                    ? [...bindingsFor(drawStage, program.groups[0].filter(entry=>
-                        entry.binding < BINDING.VERTEX_PULL)),
-                    ...pulledBindings(pulling, pipeline, draw)]
-                    : bindingsFor(drawStage, program.groups[0]),
-                bindingsFor(pipeline.stages.ps, program.groups[1],
-                    pipeline.pixelViews ?? NO_VIEWS),
-                ...(tessellated ? [tessellated.group] : []),
-                ...(drawnGeometry ? [drawnGeometry.group] : []),
-            ];
-            syncTwins(false);
-            tessellated?.commands.forEach(record);
-            if (!pulling)
-            {
-                pulledFirst = [];
-            }
-            const indirect = asked && state.indirect
-                ? indirectOf(asked, draw.indexCount !== undefined) : asked ?? draw.auto ?? null;
-            record({
-                kind: 'draw',
-                // Not drawn when a pass before it could not be built: its
-                // arguments would be whatever the buffer last held.
-                pipeline: tessellated || drawnGeometry
-                    ? Promise.all([pipelineFor(state),
-                        ...(tessellated ?? geometry).waits]).then(([one])=>one)
-                    : pipelineFor(state),
-                target,
-                targets: standIns ?? colour,
-                depth,
-                groups,
-                vertexBuffers: drawnGeometry ? [] : vertexBuffers,
-                indexBuffer: drawnGeometry ? drawnGeometry.indexBuffer
-                    : indexBacking && indexBacking.gpu && indexFormat
-                        ? { gpu: indexBacking.gpu.gpu, format: indexFormat,
-                            offset: pipeline.indexOffset }
+                const drawStage = tessellated ? pipeline.stages.ds : pipeline.stages.vs;
+                const groups = [
+                    pulling
+                        ? [...bindingsFor(drawStage, program.groups[0].filter(entry=>
+                            entry.binding < BINDING.VERTEX_PULL)),
+                        ...pulledBindings(pulling, pipeline, draw)]
+                        : bindingsFor(drawStage, program.groups[0]),
+                    bindingsFor(pipeline.stages.ps, program.groups[1],
+                        pipeline.pixelViews ?? NO_VIEWS),
+                    ...(tessellated ? [tessellated.group] : []),
+                    ...(drawnGeometry ? [drawnGeometry.group] : []),
+                ];
+                syncTwins(false);
+                tessellated?.commands.forEach(record);
+                if (!pulling)
+                {
+                    pulledFirst = [];
+                }
+                const indirect = asked && state.indirect
+                    ? indirectOf(asked, draw.indexCount !== undefined) : asked ?? draw.auto ?? null;
+                record({
+                    kind: 'draw',
+                    // Not drawn when a pass before it could not be built: its
+                    // arguments would be whatever the buffer last held.
+                    pipeline: tessellated || drawnGeometry
+                        ? Promise.all([pipelineFor(state),
+                            ...(tessellated ?? geometry).waits]).then(([one])=>one)
+                        : pipelineFor(state),
+                    target,
+                    targets: standIns ?? colour,
+                    depth,
+                    groups,
+                    vertexBuffers: drawnGeometry ? [] : vertexBuffers,
+                    indexBuffer: drawnGeometry ? drawnGeometry.indexBuffer
+                        : indexBacking && indexBacking.gpu && indexFormat
+                            ? { gpu: indexBacking.gpu.gpu, format: indexFormat,
+                                offset: pipeline.indexOffset }
+                            : null,
+                    layout: state.inputLayout.elements,
+                    viewport: {
+                        x: viewport.TopLeftX,
+                        y: viewport.TopLeftY,
+                        width: viewport.Width,
+                        height: viewport.Height,
+                        minDepth: viewport.MinDepth,
+                        maxDepth: viewport.MaxDepth,
+                    },
+                    scissor: scissor
+                        ? { x: scissor.left, y: scissor.top, width: scissor.right - scissor.left,
+                            height: scissor.bottom - scissor.top }
                         : null,
-                layout: state.inputLayout.elements,
-                viewport: {
-                    x: viewport.TopLeftX,
-                    y: viewport.TopLeftY,
-                    width: viewport.Width,
-                    height: viewport.Height,
-                    minDepth: viewport.MinDepth,
-                    maxDepth: viewport.MaxDepth,
-                },
-                scissor: scissor
-                    ? { x: scissor.left, y: scissor.top, width: scissor.right - scissor.left,
-                        height: scissor.bottom - scissor.top }
-                    : null,
-                topology,
-                vertexCount: tessellated || drawnGeometry ? 0 : draw.vertexCount,
-                startVertex: tessellated || drawnGeometry ? 0 : draw.startVertex,
-                instanceCount: tessellated || drawnGeometry ? 1 : draw.instanceCount ?? 1,
-                startInstance: tessellated || drawnGeometry ? 0 : draw.startInstance ?? 0,
-                stencilRef: pipeline.stencilRef,
-                blendFactor: [...pipeline.blendFactor],
-                occlusion: occluding.size > 0 ? [...occluding] : null,
-                indexCount: drawnGeometry ? 0 : tessellated ? null : draw.indexCount ?? null,
-                startIndex: drawnGeometry ? 0 : draw.startIndex ?? 0,
-                baseVertex: drawnGeometry ? 0 : draw.baseVertex ?? 0,
-                indirect: drawnGeometry ? drawnGeometry.args : tessellated ? tessellated.args
-                    : indirect,
-            });
-            if (copiedOut)
+                    topology,
+                    vertexCount: tessellated || drawnGeometry ? 0 : draw.vertexCount,
+                    startVertex: tessellated || drawnGeometry ? 0 : draw.startVertex,
+                    instanceCount: tessellated || drawnGeometry ? 1 : draw.instanceCount ?? 1,
+                    startInstance: tessellated || drawnGeometry ? 0 : draw.startInstance ?? 0,
+                    stencilRef: pipeline.stencilRef,
+                    blendFactor: [...pipeline.blendFactor],
+                    occlusion: occluding.size > 0 ? [...occluding] : null,
+                    indexCount: drawnGeometry ? 0 : tessellated ? null : draw.indexCount ?? null,
+                    startIndex: drawnGeometry ? 0 : draw.startIndex ?? 0,
+                    baseVertex: drawnGeometry ? 0 : draw.baseVertex ?? 0,
+                    indirect: drawnGeometry ? drawnGeometry.args : tessellated ? tessellated.args
+                        : indirect,
+                });
+                if (copiedOut)
+                {
+                    copiedOut.forEach(record);
+                    lastStandIns = { copies: copiedOut,
+                        key: copiedOut.map(copy=>copy.key).join('|') };
+                }
+                syncTwins(true);
+                twinUses = new Map();
+            };
+            // Primitives a shader sends to layers of array targets are drawn
+            // once a layer, each keeping its own (`linkProgram`'s `layerPass`).
+            const rasterOutputs = (drawnGeometry ? geometryShader : pipeline.stages.ds?.shader
+                ?? pipeline.stages.vs.shader)?.container?.outputs ?? [];
+            const layers = rasterOutputs.some((/** @type {any} */ element)=>element.systemValue
+                === SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX) ? layersOf(pipeline) : 1;
+            if (layers <= 1)
             {
-                copiedOut.forEach(record);
-                lastStandIns = { copies: copiedOut, key: copiedOut.map(copy=>copy.key).join('|') };
+                rasterize(null);
+                return;
             }
-            syncTwins(true);
-            twinUses = new Map();
+            for (let index = 0; index < layers; index++)
+            {
+                rasterize({ index, count: layers });
+            }
         },
 
         /**

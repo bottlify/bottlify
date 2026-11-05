@@ -37,9 +37,9 @@ import { defaultSwapChainDesc } from './dxgi.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
-    assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInputPs,
-    dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, l, ld, ldMs, lu, mov, o,
-    passThroughVertexShader, quadDomainShader, quadHullShader, r, ret, s, sample,
+    assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInput,
+    dclInputPs, dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, l, ld, ldMs, lu,
+    mov, o, passThroughVertexShader, quadDomainShader, quadHullShader, r, ret, s, sample,
     solidPixelShader, t, triangleGeometryShader, utof, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -550,6 +550,40 @@ test('a dynamic constant buffer is mapped, written, and bound at the draw', asyn
     assert.deepEqual([...queuedBytes(h, entry.resource.buffer)], [...floatBytes([1, 0.5, 0, 1])],
         'the bytes written through the map are the ones the draw reads');
     assert.deepEqual(h.gpu.of('setBindGroup').map((/** @type {any} */ call)=>call.index), [0, 1]);
+});
+
+test('a default constant buffer updated between two draws of a frame is renamed: each draw'
+    + ' reads the bytes given before it', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclConstantBuffer(0, 1), dclOutput(o(0)), mov(o(0), cb(0, 0)), ret()],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @type {{ resource?: any }} */
+    const constants = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null,
+    constants), S_OK);
+    device.PSSetConstantBuffers(0, [constants.resource]);
+    device.UpdateSubresource(constants.resource, 0, null, floatBytes([1, 0, 0, 1]), 16, 16);
+    device.Draw(3, 0);
+    device.UpdateSubresource(constants.resource, 0, null, floatBytes([0, 1, 0, 1]), 16, 16);
+    device.Draw(3, 0);
+    await h.present();
+    const fragmentLayout = h.gpu.of('createBindGroupLayout').find((/** @type {any} */ call)=>
+        call.descriptor.label === 'd3d10:ps');
+    const read = h.gpu.of('createBindGroup').filter((/** @type {any} */ call)=>
+        call.descriptor.layout === fragmentLayout.createBindGroupLayout)
+        .map((/** @type {any} */ call)=>call.descriptor.entries[0].resource.buffer);
+    assert.equal(new Set(read).size, 2, 'two backings');
+    assert.deepEqual(read.map((/** @type {any} */ buffer)=>[...queuedBytes(h, buffer)]),
+        [[...floatBytes([1, 0, 0, 1])], [...floatBytes([0, 1, 0, 1])]]);
 });
 
 test('a vertex slot the layout reads with nothing bound reads zeros: WebGPU refuses a frame'
@@ -2726,4 +2760,47 @@ test('a stencil test over a depth buffer with no stencil is left out of the pipe
     assert.equal(depthStencil.format, 'depth16unorm');
     assert.equal(depthStencil.stencilFront, undefined, 'passOp replace on depth16unorm before');
     assert.equal(depthStencil.depthCompare, 'less');
+});
+
+test('a draw whose vertices name a render target array index is drawn once a layer of the'
+    + ' target array, each drawing into its own layer (test_layered_rendering, d3d11.c:11754)',
+async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_RenderTargetArrayIndex', systemValue:
+                SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX, register: 1, mask: 0x1,
+            componentType: COMPONENT_TYPE.UINT }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'x'), SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX),
+            mov(o(0), v(0)), mov(o(1, 'x'), l(2, 2, 2, 2)), ret()],
+    }), vs), S_OK);
+    device.VSSetShader(vs.shader);
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 8, Height: 8, ArraySize: 3,
+        BindFlags: D3D10_BIND.RENDER_TARGET }, null, texture), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateRenderTargetView(texture.resource, null, view), S_OK);
+    device.OMSetRenderTargets([view.view], null);
+    device.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0,
+        MaxDepth: 1 }]);
+    device.Draw(3, 0);
+    await h.present();
+    const layers = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments[0]?.view)
+        .filter((/** @type {any} */ drawn)=>drawn?.texture === made.texture)
+        .map((/** @type {any} */ drawn)=>drawn.viewDescriptor.baseArrayLayer);
+    assert.deepEqual(layers, [0, 1, 2]);
+    const fragments = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).filter((/** @type {string} */ code)=>code.includes('rtLayer != '));
+    assert.equal(fragments.length, 3, 'one pipeline a layer, each keeping its own');
 });

@@ -599,6 +599,10 @@ function featureSupport(feature, input, level, device){
             return bytesOf([0]);
         case 13: // D3D9_OPTIONS1
             return bytesOf([1, 1, 1, 1]);
+        case 14: // D3D11_OPTIONS2: none of its eight
+            return new Uint8Array(8 * 4);
+        case 15: // D3D11_OPTIONS3: a layer and viewport index from any stage
+            return bytesOf([1]);
         default:
             void level;
             return null;

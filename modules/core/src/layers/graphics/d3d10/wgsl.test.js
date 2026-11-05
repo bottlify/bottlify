@@ -1039,3 +1039,39 @@ test('a depth bias the fragment stage applies itself writes the rasterized depth
         { depthBias: { units: -1e-3, slope: 0, clamp: 0 } });
     assert.match(alone.fragment, /return FragmentOut\(biasedDepth\);/);
 });
+
+test('a primitive\'s render target array index travels flat to the pixel stage, and a drawing'
+    + ' of one layer keeps the fragments routed there, those past the views going to the first'
+    + ' (test_layered_rendering, d3d11.c:11754)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_RenderTargetArrayIndex', systemValue:
+                SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX, register: 1, mask: 0x1,
+            componentType: COMPONENT_TYPE.UINT }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'x'), SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX),
+            mov(o(0), v(0)), mov(o(1, 'x'), v(0, 'x')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'SV_RenderTargetArrayIndex', systemValue:
+            SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX, register: 0, mask: 0x1,
+        componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPsSiv(v(0, 'x'), SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX),
+            dclOutput(o(0)), mov(o(0), v(0)), ret()],
+    }))));
+    const whole = linkProgram(vs, ps);
+    assert.deepEqual(whole.unsupported, []);
+    assert.match(whole.vertex, /@location\(0\) @interpolate\(flat\) rtLayer: u32,/);
+    assert.match(whole.fragment, /v0\.x = in\.rtLayer;/);
+    assert.doesNotMatch(whole.fragment, /discard/);
+    const second = linkProgram(vs, ps, { layerPass: { index: 1, count: 4 } });
+    assert.match(second.fragment,
+        /if \(in\.rtLayer != 1u && \(1u != 0u \|\| in\.rtLayer < 4u\)\) \{ discard; \}/);
+    const unwritten = linkProgram(translateShader(/** @type {any} */ (parseDxbc(
+        passThroughVertexShader()))), ps);
+    assert.match(unwritten.fragment, /v0\.x = 0u;/, 'an index no vertex wrote reads zero');
+});

@@ -2568,6 +2568,12 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  * @property {string[]} unsupported Why the pair cannot be built, if it cannot.
  */
 
+/** The members a primitive's render target array index and viewport index travel as. */
+const ROUTES = Object.freeze(/** @type {Record<number, string>} */ ({
+    [SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX]: 'rtLayer',
+    [SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX]: 'rtViewport',
+}));
+
 /**
  * Vertex streams the vertex stage reads from storage as words, where WebGPU
  * cannot fetch them as vertex buffers: a stride or element offset it does
@@ -2674,7 +2680,11 @@ function vertexPullOf(pull, inputs, registers){
  * @param {TranslatedShader} ps
  * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad, clipDistances?: boolean,
  *     depthBias?: { units: number, slope: number, clamp: number },
- *     vertexPull?: VertexPull }} [options]  `vertexPull`: the streams the vertex stage
+ *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
+ *     viewportPass?: { index: number, count: number } }} [options]  `layerPass`,
+ *     `viewportPass`: the one of `count` layers or viewports this drawing of a draw
+ *     whose primitives say which goes to; their other fragments are discarded.
+ *     `vertexPull`: the streams the vertex stage
  *     reads itself, their inputs taken from no vertex buffer. `targets`:
  *     the locations with a target bound; every location the shader writes when
  *     absent. `vertexLoad`: how the vertex stage fills its registers when they do not
@@ -2776,6 +2786,11 @@ export function linkProgram(vs, ps, options = {}){
     /** @type {string[]} */
     const vsReturn = [];
     let position = false;
+    /**
+     * The render target array index and viewport index the vertices carry,
+     * by the member they travel as. @type {Map<string, string>}
+     */
+    const routes = new Map();
     /** Each clip and cull distance a vertex writes, a component each. @type {string[]} */
     const clips = [];
     /** @type {string[]} */
@@ -2802,6 +2817,12 @@ export function linkProgram(vs, ps, options = {}){
             position = true;
             vsOut.push('    @builtin(position) position: vec4<f32>,');
             vsReturn.push(`bitcast<vec4<f32>>(${value})`);
+            continue;
+        }
+        const route = ROUTES[element.systemValue];
+        if (route)
+        {
+            routes.set(route, `${value}.${COMPONENT[firstComponent(element.mask)]}`);
             continue;
         }
         if (element.systemValue !== SYSTEM_VALUE.UNDEFINED)
@@ -2869,6 +2890,29 @@ export function linkProgram(vs, ps, options = {}){
     }
     travelling(culls.map(value=>`select(0.0, 1.0, ${value} >= 0.0)`), 'cullKept',
         '$ == vec4<f32>(0.0)');
+    // The layer and viewport a primitive goes to, from its first vertex as
+    // Direct3D takes them from its leading one. WebGPU draws a pass into one
+    // layer through one viewport, so a draw that routes primitives is drawn
+    // once a layer or viewport (`layerPass`, `viewportPass`), keeping the
+    // fragments routed there: those of an index past the views' range go
+    // to the first, as Direct3D sends them.
+    for (const [name, value] of routes)
+    {
+        const location = byRegister.size + cutIn.length;
+        vsOut.push(`    @location(${location}) @interpolate(flat) ${name}: u32,`);
+        vsReturn.push(value);
+        cutIn.push(`    @location(${location}) @interpolate(flat) ${name}: u32,`);
+    }
+    /** @type {[string, { index: number, count: number } | undefined][]} */
+    const passes = [['rtLayer', options.layerPass], ['rtViewport', options.viewportPass]];
+    for (const [name, pass] of passes)
+    {
+        if (pass && routes.has(name))
+        {
+            cutLoad.push(`    if (in.${name} != ${pass.index}u && (${pass.index}u != 0u`
+                + ` || in.${name} < ${pass.count}u)) { discard; }`);
+        }
+    }
 
     // --- the pixel stage's inputs, found by semantic among the vertex outputs ---
     /** @type {string[]} */
@@ -2898,6 +2942,14 @@ export function linkProgram(vs, ps, options = {}){
         {
             psIn.push(`    @builtin(front_facing) ${name}: bool,`);
             psLoad.push(`    ${name}.x = select(0u, 0xffffffffu, in.${name});`);
+            continue;
+        }
+        const route = ROUTES[element.systemValue];
+        if (route)
+        {
+            // What the vertices did not write reads zero.
+            psLoad.push(`    ${name}.${COMPONENT[firstComponent(element.mask)]} = ${
+                routes.has(route) ? `in.${route}` : '0u'};`);
             continue;
         }
         if (element.systemValue !== SYSTEM_VALUE.UNDEFINED)
