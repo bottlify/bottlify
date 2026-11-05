@@ -214,10 +214,13 @@ class BlockState64 {
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'] }} what
+ *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'],
+ *     zeroReadsBelow?: number }} what  `zeroReadsBelow` as `blockState`'s
  */
-export function blockState64({ memory, layout, onCodeWrite, rdtsc, ports }){
-    return new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports);
+export function blockState64({ memory, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0 }){
+    const state = new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports);
+    state.blockMemory.zeroReadsBelow = zeroReadsBelow;
+    return state;
 }
 
 /**

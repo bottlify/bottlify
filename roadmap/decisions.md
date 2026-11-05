@@ -776,6 +776,16 @@ that reads a result back after the event (a lock of a render target) waits on th
 Revisit if a program is found that times its work by how long an event stays pending.
 *2026-11-02.*
 
+**A79. A read of the first 64 KiB finds zeros; a store or a fetch there faults.** Windows maps
+nothing below 0x10000, so every access there is an access violation. A store through NULL is one a
+program may make on purpose: PECompact2's stub makes one to reach the handler it installed, and a
+packed setup goes no further unless it faults. A read through a structure pointer its owner has
+not set yet is one a program may make by accident and get away with on a fast machine: FMOD's
+mixer thread reads NULL+0x54 before its creator sets the pointer, and faulted here. Translated
+reads do not test their page (`emit/memory.js`), so a read faulting only where an interpreter
+happened to run it would answer the same instruction two ways; it reads zeros everywhere instead.
+Revisit if a program is found that relies on a read of the null range faulting. *2026-11-05.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

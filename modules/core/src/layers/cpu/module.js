@@ -394,6 +394,8 @@ export function createCpuModule(){
                 cork: config?.cork ?? {},
                 // Addresses below this are no-access; zero closes none.
                 closedBelow: config?.closedBelow ?? 0,
+                // Below this a closed page reads as zeros; its stores still fault.
+                zeroReadsBelow: config?.zeroReadsBelow ?? 0,
                 // And below this nothing runs, whatever reads and writes the
                 // range answers.
                 noExecuteBelow: config?.noExecuteBelow ?? 0,
@@ -627,6 +629,7 @@ export function createCpuModule(){
                                 ? { arena: engineModule.createArena() }
                                 : {}) } : settings.cork,
                         closedBelow: settings.closedBelow,
+                        zeroReadsBelow: settings.zeroReadsBelow,
                         noExecuteBelow: settings.noExecuteBelow,
                         executors: settings.executors,
                         // One time-stamp counter for every executor (`useGuestClock`).

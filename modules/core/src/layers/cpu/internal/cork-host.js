@@ -132,6 +132,14 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     they answer.
  * @property {number} [closedBelow]  Addresses below this are no-access: a fetch, a
  *           store or an interpreted read there faults. Zero, the default, closes none.
+ * @property {number} [zeroReadsBelow]  Below this a closed page reads as zeros, its
+ *           stores and fetches still faulting: the null range as a program finds
+ *           it, a store through NULL reaching its handler, a read of a structure
+ *           through a pointer not yet set finding zeros. Translated reads, which
+ *           do not test their page, find the RAM's zeros there; whatever tests
+ *           (the interpreters, a checked read) leaves the instruction to the
+ *           JavaScript interpreter, which reads the zeros. Zero, the default,
+ *           opens none.
  * @property {number} [executors]  Executors the memory has room for, each a state page and
  *     tables of its own past the first's (`executorLayout`). Default 1.
  * @property {number} [executor]   Which of them this host is. Default 0, the first, whose state
@@ -210,8 +218,8 @@ export function cacheShare(bytes, executors, executor){
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given,
-        reused, tsc, features, translationZone, bits = 32 } = config;
+        closedBelow = 0, zeroReadsBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0,
+        memory: given, reused, tsc, features, translationZone, bits = 32 } = config;
     // Long mode: the 64-bit block, the shared runtime's regions at its width and
     // the long-mode interpreter.
     const long = bits === 64;
@@ -1161,6 +1169,7 @@ export function createCorkHost(config){
             layout,
             rdtsc: readTsc,
             atomic: corkConfig?.atomic === true,
+            zeroReadsBelow,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.
@@ -1222,6 +1231,7 @@ export function createCorkHost(config){
             memory,
             layout,
             rdtsc: readTsc,
+            zeroReadsBelow,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
                 invalidate(at, size, true);

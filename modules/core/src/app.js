@@ -4450,12 +4450,13 @@ async function buildApp(options){
             memorySize,
             reused: options.reusedMemory ?? undefined,
             initialStack: mainStack.initialStack,
-            // ponytail: open, where Windows never maps the first 64 KiB, until
-            // a store alone can fault there. Closed, FMOD's mixer thread reads
-            // NULL+0x54 before its creator has set the pointer and faults; open,
-            // PECompact2's deliberate store through NULL goes through instead of
-            // reaching the handler it installed, so a packed setup cannot run.
-            closedBelow: 0,
+            // The first 64 KiB, which Windows never maps: a store there faults,
+            // as PECompact2's deliberate store through NULL needs to reach the
+            // handler it installed, and a read finds zeros, as FMOD's mixer
+            // thread reads NULL+0x54 before its creator has set the pointer.
+            // Reading zeros where Windows faults is decisions.md's A79.
+            closedBelow: 0x10000,
+            zeroReadsBelow: 0x10000,
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,

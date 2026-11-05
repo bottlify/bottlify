@@ -245,6 +245,42 @@ for (const wasmInterpreter of [false, true])
     });
 }
 
+for (const [tier, cork] of /** @type {[string, any][]} */ ([
+    ['JavaScript', { wasmInterpreter: false }],
+    ['wasm', { wasmInterpreter: true, wasmInterpreterAfter: 0 }],
+    ['translated, reads tested', { checkReads: true, wasmInterpreter: true,
+        wasmInterpreterAfter: 0 }],
+]))
+{
+    test(`the closed null range reads as zeros and a store there faults, on the ${tier} tier`,
+        async()=>{
+            const h = host({ closedBelow: 0x10000, zeroReadsBelow: 0x10000, cork });
+            // mov ecx, 3000; L: mov eax, [0x54]; add esi, eax; mov edx, [0xfffe];
+            // add edi, edx; dec ecx; jnz L; mov [0x10], eax; hlt -- at 0x20000. The
+            // read at 0xfffe takes its two upper bytes from the open page above.
+            // Nothing writes the range (its stores fault), so translated reads,
+            // which do not test their page, find the same zeros there.
+            load(h, 0x20000, [0xb9, 0xb8, 0x0b, 0, 0, 0xa1, 0x54, 0, 0, 0, 0x01, 0xc6,
+                0x8b, 0x15, 0xfe, 0xff, 0, 0, 0x01, 0xd7, 0x49, 0x75, 0xee,
+                0xa3, 0x10, 0, 0, 0, 0xf4]);
+            h.writePhysical(0x10000, Uint8Array.of(0x01, 0x02));
+            for (let slices = 0; !h.halted() && slices < 10_000; slices++)
+            {
+                h.runSlice(1000);
+                await h.cork().translatePending();
+            }
+            assert.equal(h.readReg32('ecx'), 0, 'every round ran');
+            assert.equal(h.readReg32('esi'), 0, 'NULL+0x54 read as zeros');
+            assert.equal(h.readReg32('edi'), 0x02010000 * 3000 >>> 0,
+                'a read across into the open page took that page\'s bytes');
+            const fault = h.fault();
+            assert.equal(fault?.vector, 14, 'the store faulted');
+            assert.equal(fault?.address, 0x10);
+            assert.equal(fault?.errorCode, 2, 'as a write');
+            assert.equal(fault?.eip, 0x20017, 'at the store');
+        });
+}
+
 test('a call into code left untranslated runs on the wasm tier in place, not through the host',
     async()=>{
         const CALLS = 3000;

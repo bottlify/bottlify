@@ -356,6 +356,9 @@ export class BlockMemory {
         this.watchStart = 0;
         this.watchEnd = 0;
         this.hit = false;
+        // Below this a closed page reads as zeros rather than faulting
+        // (`zeroReadsBelow`); 0 opens none.
+        this.zeroReadsBelow = 0;
         // The locked instructions as one indivisible access each (`lockedStep`),
         // as the atomic variant's translated code makes them.
         this.atomic = false;
@@ -560,11 +563,33 @@ export class BlockMemory {
             ? (this.pageFlags[address >>> 12] & PageFlag.INACCESSIBLE) !== 0
             : this.inaccessible(address, size))
         {
-            throw this.fault(address, size, false);
+            return this.readClosed(address, size);
         }
         const offset = this.ramBase + address;
         return size === 1 ? this.ramBytes[address]
             : size === 2 ? this.view.getUint16(offset, true) : this.view.getUint32(offset, true);
+    }
+
+    /**
+     * A read that reaches a closed page: zeros for its bytes below
+     * `zeroReadsBelow` and what the rest hold where it runs on to an open page,
+     * or the fault if any byte it reads lies in a closed page above.
+     *
+     * @param {number} address @param {number} size
+     */
+    readClosed(address, size){
+        let value = 0;
+        for (let i = size - 1; i >= 0; i--)
+        {
+            const at = address + i;
+            const closed = (this.pageFlags[at >>> 12] & PageFlag.INACCESSIBLE) !== 0;
+            if (closed && at >= this.zeroReadsBelow)
+            {
+                throw this.fault(address, size, false);
+            }
+            value = value * 256 + (closed ? 0 : this.ramBytes[at]);
+        }
+        return value;
     }
 
     /** @param {number} address @param {number} size @param {number} value */
@@ -961,16 +986,21 @@ class BlockState {
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
  *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'],
- *     atomic?: boolean }} what
+ *     atomic?: boolean, zeroReadsBelow?: number }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it
  *     translated there, as a translated store's `stale` exit does; `atomic`: the
- *     engine's, every locked instruction one indivisible access (`lockedStep`).
+ *     engine's, every locked instruction one indivisible access (`lockedStep`);
+ *     `zeroReadsBelow`: below it a closed page reads as zeros, where stores and
+ *     fetches still fault (the null range: what translated reads, which do not
+ *     test their page, find there too).
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
-export function blockState({ memory, layout, onCodeWrite, rdtsc, ports, atomic = false }){
+export function blockState(what){
+    const { memory, layout, onCodeWrite, rdtsc, ports, atomic = false, zeroReadsBelow = 0 } = what;
     const state = new BlockState(memory, layout, onCodeWrite ?? null, rdtsc, ports);
     state.memory.atomic = atomic;
+    state.memory.zeroReadsBelow = zeroReadsBelow;
     return state;
 }
 

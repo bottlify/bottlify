@@ -318,7 +318,7 @@ function buildNullStoreExe(){
 }
 
 test('a store through NULL faults where it stands, with the stack and frame of the store',
-    { timeout: 60000, todo: 'the first 64 KiB stay open until a store alone can fault there' },
+    { timeout: 60000 },
     async t=>{
         const { code } = await runExecutable(t, buildNullStoreExe());
         assert.equal(code, 0, '1: the context\'s Esp was another; 2: the frame was another;'
