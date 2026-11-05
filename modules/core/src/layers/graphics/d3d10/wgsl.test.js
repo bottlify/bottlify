@@ -1119,3 +1119,13 @@ test('the vertex ID counts neither the first vertex nor the base vertex: the ver
     assert.match(linked.vertex, /v0\.x = in\.vsVertexIndex - vsPulls\[0\]\.x;/);
     assert.ok(linked.groups[0].some(entry=>entry.binding === BINDING.VERTEX_PULL_PARAMS));
 });
+
+test('alpha to coverage on one sample keeps a fragment where the first target\'s alpha reaches'
+    + ' half (test_alpha_to_coverage, d3d11.c:30988)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 0.25]))));
+    const covered = linkProgram(vs, ps, { alphaCoverage: true });
+    assert.match(covered.fragment,
+        /\{ if \(bitcast<f32>\(o0\.w\) < 0\.5\) \{ discard; \} return FragmentOut\(/);
+    assert.doesNotMatch(linkProgram(vs, ps).fragment, /discard/);
+});

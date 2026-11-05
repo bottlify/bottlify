@@ -2564,12 +2564,14 @@ function registerDeclarations(shader){
 /**
  * @param {TranslatedShader} shader
  * @param {string | null} returnExpression  Null for an entry point that returns nothing.
+ * @param {string} [beforeReturn]  A statement made at each return, before it.
  * @returns {string[]}
  */
-function bodyText(shader, returnExpression){
+function bodyText(shader, returnExpression, beforeReturn = ''){
     return shader.body.map(line=>(typeof line === 'string'
         ? line
-        : `    return${returnExpression === null ? '' : ` ${returnExpression}`};`));
+        : `    ${beforeReturn ? `{ ${beforeReturn} ` : ''}return${returnExpression === null ? ''
+            : ` ${returnExpression}`};${beforeReturn ? ' }' : ''}`));
 }
 
 /** @param {import('./dxbc.js').SignatureElement} element */
@@ -2702,6 +2704,7 @@ function vertexPullOf(pull, inputs, registers){
  * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad, clipDistances?: boolean,
  *     depthBias?: { units: number, slope: number, clamp: number },
  *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
+ *     alphaCoverage?: boolean,
  *     viewportPass?: { index: number, count: number } }} [options]  `layerPass`,
  *     `viewportPass`: the one of `count` layers or viewports this drawing of a draw
  *     whose primitives say which goes to; their other fragments are discarded.
@@ -3111,6 +3114,15 @@ export function linkProgram(vs, ps, options = {}){
         '}',
     ].join('\n');
 
+    // Alpha to coverage on one sample: Direct3D covers the pixel by the
+    // first target's alpha, WebGPU only with several samples; the fragment
+    // is kept where that alpha reaches half (`alphaCoverage`).
+    const first = ps.outputs.find(element=>element.register < ps.outputRegisters
+        && (element.systemValue === SYSTEM_VALUE.TARGET ? element.index === 0
+            : element.systemValue === SYSTEM_VALUE.UNDEFINED && element.register === 0));
+    const coverage = options.alphaCoverage && first
+        ? `if (bitcast<f32>(o${first.register}.w) < 0.5) { discard; }` : '';
+
     // Direct3D leaves a derivative taken in divergent flow undefined rather
     // than refusing the shader, and compilers emit sample instructions inside
     // branches and loops that WGSL's uniformity analysis would reject.
@@ -3129,7 +3141,7 @@ export function linkProgram(vs, ps, options = {}){
         ...psLoad,
         ...registerDeclarations(ps),
         ...(ps.writesDepth ? ['    var oDepth: f32 = 0.0;'] : []),
-        ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null),
+        ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null, coverage),
         '}',
     ].join('\n');
 

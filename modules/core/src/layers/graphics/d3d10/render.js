@@ -2091,6 +2091,8 @@ export function createRenderer(services){
             : vertexPullOf(state.inputLayout, state.strides, state.indirect, state.vertexShader);
         const [layerIndex, layerCount] = (state.layerPass || '').split('/').map(Number);
         const linking = { targets: bound, depthBias: emulatedBias,
+            alphaCoverage: !!blendTargetsOf(state.blendState).alphaToCoverage
+                && state.sampleCount === 1,
             clipDistances: backend.hasFeature?.('clip-distances') === true,
             ...(state.layerPass ? { layerPass: { index: layerIndex, count: layerCount } } : {}),
             ...(pulling ? { vertexPull: pulling.pull } : {}) };
@@ -2249,7 +2251,9 @@ export function createRenderer(services){
             multisample: {
                 count: state.sampleCount,
                 mask: state.sampleMask >>> 0,
-                alphaToCoverageEnabled: !!blend.alphaToCoverage,
+                // One sample covers by alpha in the fragment stage
+                // (`linkProgram`'s `alphaCoverage`).
+                alphaToCoverageEnabled: !!blend.alphaToCoverage && state.sampleCount > 1,
             },
         });
         return {
