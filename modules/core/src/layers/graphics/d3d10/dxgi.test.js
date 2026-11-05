@@ -417,6 +417,51 @@ test('a buffer obtained after a resize is not the one from before it', ()=>{
     assertFullyReleased(device, 'the device');
 });
 
+test('a present moves a sequential chain\'s buffers down one, the shown one to the end; only'
+    + ' the first is drawn into (test_swapchain_flip)', async()=>{
+    const device = createDevice();
+    /** @type {{ swapChain?: any }} */
+    const created = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc({
+        bufferCount: 3, swapEffect: DXGI_SWAP_EFFECT.SEQUENTIAL,
+        bufferDesc: { ...defaultSwapChainDesc().bufferDesc, width: 4, height: 4 },
+        bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT | DXGI_USAGE.SHADER_INPUT,
+    }), created), S_OK);
+    const swapChain = created.swapChain;
+    const buffers = [0, 1, 2].map(index=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(swapChain.GetBuffer(index, IID.ID3D10Texture2D, out), S_OK);
+        device.UpdateSubresource(out.buffer, 0, null, new Uint8Array(64).fill(index + 1), 16, 0);
+        return out.buffer;
+    });
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateRenderTargetView(buffers[1], null, view), E_INVALIDARG);
+    assert.equal(view.view, null);
+    assert.equal(swapChain.Present(0, 0), S_OK);
+    /** @type {{ resource?: any }} */
+    const staging = {};
+    assert.equal(device.CreateTexture2D({ Width: 4, Height: 4, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 }, Usage: 3,
+        BindFlags: 0, CPUAccessFlags: 0x20000, MiscFlags: 0 }, null, staging), S_OK);
+    const firstBytes = [];
+    for (const buffer of buffers)
+    {
+        device.CopyResource(staging.resource, buffer);
+        /** @type {{ data?: Uint8Array }} */
+        const mapped = {};
+        assert.equal(await staging.resource.Map(0, 1, 0, mapped), S_OK);
+        firstBytes.push(mapped.data?.[0]);
+        staging.resource.Unmap(0);
+    }
+    assert.deepEqual(firstBytes, [2, 3, 1], 'buffer 1 is the new 0, buffer 0 the last');
+    staging.resource.release();
+    buffers.forEach(buffer=>buffer.release());
+    swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
+
 test('presenting advances the buffer and is counted', ()=>{
     const device = createDevice();
     /** @type {{ swapChain?: any }} */

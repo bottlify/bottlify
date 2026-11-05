@@ -1161,6 +1161,16 @@ export function createDevice(options = {}){
 
         /** @param {any} resource @param {any} desc @param {{ view?: any }} out */
         CreateRenderTargetView(resource, desc, out){
+            // Only a swap chain's first buffer is drawn into; the others are
+            // there to be read (test_swapchain_flip).
+            if ((resource?.backBufferIndex ?? 0) > 0)
+            {
+                if (out)
+                {
+                    out.view = null;
+                }
+                return E_INVALIDARG;
+            }
             return createViewOf(resource, desc, VIEW_KINDS.RENDER_TARGET, out);
         },
 
@@ -2323,7 +2333,7 @@ export function createDevice(options = {}){
                 MiscFlags: request.gdiCompatible ? D3D10_RESOURCE_MISC.GDI_COMPATIBLE : 0,
                 DXGIUsage: request.usage,
             });
-            return createResource({
+            const buffer = createResource({
                 dimension: D3D10_RESOURCE_DIMENSION.TEXTURE2D,
                 desc,
                 interfaces: textureInterfaces(desc, IID.ID3D10Texture2D,
@@ -2336,6 +2346,8 @@ export function createDevice(options = {}){
                 onFirstRef: request.onFirstRef,
                 onLastRef: request.onLastRef,
             });
+            /** @type {any} */ (buffer).backBufferIndex = request.index ?? 0;
+            return buffer;
         },
     }, {
         // Direct3D 10's device is Direct3D 11's too; one made by Direct3D 11

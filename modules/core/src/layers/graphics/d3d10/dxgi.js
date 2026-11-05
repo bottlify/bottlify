@@ -625,6 +625,7 @@ function createSwapChain(requested, device, factory, services){
             return existing;
         }
         const buffer = device.createSwapChainBuffer({
+            index,
             width: desc.bufferDesc.width,
             height: desc.bufferDesc.height,
             format: desc.bufferDesc.format,
@@ -642,6 +643,31 @@ function createSwapChain(requested, device, factory, services){
         });
         buffers.set(index, buffer);
         return buffer;
+    };
+
+    /** @type {any} */
+    let parked = null;
+    /**
+     * After a present the buffers move down one, the shown one to the end:
+     * buffer 1 is the new buffer 0, buffer 0 the last (test_swapchain_flip).
+     * Each buffer stays the object a program holds, so their contents move,
+     * copied on the GPU; only where a buffer past the first is read at all.
+     */
+    const rotate = ()=>{
+        const last = highestAccessibleBuffer(desc.swapEffect, desc.bufferCount);
+        if (last === 0 || ![...buffers.keys()].some(index=>index > 0))
+        {
+            return;
+        }
+        parked ??= device.createSwapChainBuffer({ index: -1, width: desc.bufferDesc.width,
+            height: desc.bufferDesc.height, format: desc.bufferDesc.format,
+            sampleDesc: desc.sampleDesc, usage: desc.bufferUsage, gdiCompatible: false });
+        device.CopyResource(parked, bufferFor(0));
+        for (let index = 0; index < last; index++)
+        {
+            device.CopyResource(bufferFor(index), bufferFor(index + 1));
+        }
+        device.CopyResource(bufferFor(last), parked);
     };
 
     const swapChain = attachCom({
@@ -702,6 +728,7 @@ function createSwapChain(requested, device, factory, services){
             // Buffer zero is the one a program draws into whatever the swap
             // effect, so it is the one shown.
             const held = device.frameQueued?.(device.present(bufferFor(0))) ?? null;
+            rotate();
             return held ? held.then(()=>S_OK) : S_OK;
         },
 
@@ -746,6 +773,7 @@ function createSwapChain(requested, device, factory, services){
             // are no longer the swap chain's -- which is exactly why the call
             // refuses to run while one is still held.
             buffers = new Map();
+            parked = null;
             currentBuffer = 0;
             return S_OK;
         },
