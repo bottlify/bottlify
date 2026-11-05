@@ -67,6 +67,7 @@ import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/sha
 import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
+import { frameDrops } from '../../modules/core/src/frame-drops.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -1597,6 +1598,26 @@ function describe(result, context, calls, symbols){
                 + `, exits to the host: ${exits}`);
         }
     }
+    // Every frame the profiler recorded, each drop told why (frame-drops.js).
+    const evenly = frameDrops(result.frameRecords ?? []);
+    if (evenly.frames > 0)
+    {
+        say(`  how evenly ${evenly.frames} frames came: ${evenly.fps.toFixed(1)} fps on average,`
+            + ` 1% low ${evenly.low1.toFixed(1)}, 0.1% low ${evenly.low01.toFixed(1)};`
+            + ` median ${evenly.medianMs.toFixed(1)} ms,`
+            + ` worst ${evenly.worstMs.map(ms=>ms.toFixed(0)).join(' ')} ms`);
+        say(`  ${evenly.drops.length} drop(s) (past 2x the median and 16.7 ms), by what grew`
+            + ` (GPU time ${evenly.gpu}):`);
+        for (const [cause, count] of Object.entries(evenly.byCause)
+            .sort((one, two)=>two[1] - one[1]))
+        {
+            say(`    ${String(count).padStart(5)}  ${cause}`);
+        }
+    }
+    else
+    {
+        say('  how evenly the frames came: not measured (the profiler recorded no frame)');
+    }
     const series = /** @type {any[]} */ (result.series ?? []);
     if (series.length > 1)
     {
@@ -2510,6 +2531,11 @@ the run as it stands: ${path}`;
         // frames rather than the same seconds (tools/frame-span.mjs).
         writeFileSync(join(REPORTS_DIR, `game-${stamp}-presents.json`),
             JSON.stringify(result.presentTimes ?? []));
+        if ((result.frameRecords ?? []).length > 0)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-frames.json`),
+                JSON.stringify(result.frameRecords));
+        }
         if ((result.series ?? []).length > 0)
         {
             writeFileSync(join(REPORTS_DIR, `game-${stamp}-series.json`),

@@ -353,7 +353,7 @@ function describe(before, after, windowMs){
         say(`how evenly the ${report.frames} frames came: ${report.fps.toFixed(1)} fps on average,`
             + ` 1% low ${report.low1.toFixed(1)}, 0.1% low ${report.low01.toFixed(1)};`
             + ` median ${asMs(report.medianMs)}, worst ${report.worstMs.map(asMs).join(' ')}`);
-        say(`  ${report.drops.length} drop(s) over twice the median, by what grew`
+        say(`  ${report.drops.length} drop(s) (past 2x the median and 16.7 ms), by what grew`
             + ` (GPU time ${report.gpu}):`);
         for (const [cause, count] of Object.entries(report.byCause)
             .sort((one, two)=>Number(two[1]) - Number(one[1])))

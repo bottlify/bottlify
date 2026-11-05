@@ -57,6 +57,11 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 /** The longest locale name, its terminator counted (winnls.h). */
 const LOCALE_NAME_MAX_LENGTH = 85;
 const ERROR_INVALID_FLAGS = 1004;
+/** IsValidLanguageGroup: the group installed, or one Windows knows; and the first and last group. */
+const LGRPID_INSTALLED = 1;
+const LGRPID_SUPPORTED = 2;
+const LGRPID_WESTERN_EUROPE = 1;
+const LGRPID_ARMENIAN = 17;
 /** UTF-7 and the symbol page, which take no default character. */
 const CP_UTF7 = 65000;
 const CP_SYMBOL = 42;
@@ -2439,6 +2444,27 @@ export function createLocaleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([locale])=>isOurLocale(locale >>> 0) ? 1 : 0,
+        },
+
+        /**
+         * BOOL IsValidLanguageGroup(LGRPID LanguageGroup, DWORD dwFlags)
+         *
+         * Windows knows seventeen language groups (LGRPID_WESTERN_EUROPE to
+         * LGRPID_ARMENIAN); of them the one locale's, Western Europe and the
+         * United States, is the one installed.
+         */
+        IsValidLanguageGroup: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([id, flags])=>{
+                if ((flags >>> 0) !== LGRPID_INSTALLED && (flags >>> 0) !== LGRPID_SUPPORTED)
+                {
+                    return refuse(ERROR_INVALID_FLAGS);
+                }
+                return (flags >>> 0) === LGRPID_INSTALLED
+                    ? Number((id >>> 0) === LGRPID_WESTERN_EUROPE)
+                    : Number((id >>> 0) >= 1 && (id >>> 0) <= LGRPID_ARMENIAN);
+            },
         },
 
         /**
