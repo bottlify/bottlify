@@ -2567,3 +2567,24 @@ test('a shader resource view over a subresource bound as a target is set as none
         assert.deepEqual(bound(), kept, `flags ${flags}`);
     }
 });
+
+test('an input element\'s offset is a whole number of its channels, up to a word'
+    + ' (test_input_layout_alignment, d3d11.c:19406)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    /** @param {number} first @param {number} second @param {number} offset */
+    const made = (first, second, offset)=>out.device.CreateInputLayout([
+        { SemanticName: 'POSITION', SemanticIndex: 0, Format: first, InputSlot: 0,
+            AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 },
+        { SemanticName: 'COLOR', SemanticIndex: 0, Format: second, InputSlot: 0,
+            AlignedByteOffset: offset, InputSlotClass: 0, InstanceDataStepRate: 0 },
+    ], passThroughVertexShader(), {});
+    const F = DXGI_FORMAT;
+    assert.equal(made(F.R8_UINT, F.R16_UINT, 2), S_OK);
+    assert.equal(made(F.R8_UINT, F.R16_UINT, 1), E_INVALIDARG);
+    assert.equal(made(F.R8_UINT, F.R8_UINT, 1), S_OK);
+    assert.equal(made(F.R16_UINT, F.R32_UINT, 2), E_INVALIDARG);
+    assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 17), E_INVALIDARG);
+    assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 20), S_OK);
+});

@@ -142,3 +142,15 @@ test('level 10: one stride, stream 0 rasterized, and several buffers one output 
     assert.ok(!valid(POSITION, null, NONE, ten));
     assert.ok(!valid(POSITION, null, 1, ten));
 });
+
+test('an entry\'s components count from its element\'s first: an element packed into .z has one'
+    + ' (test_stream_output, d3d11.c:27043)', ()=>{
+    const packed = OUTPUTS.map(output=>(output.index === 4 && output.name === 'ATTRIB'
+        ? { ...output, register: 3, mask: 0x4 } : output));
+    /** @param {any} declared */
+    const answer = declared=>validStreamOutput({ outputs: packed, entries: declared,
+        strides: STRIDES, rasterizedStream: NONE, eleven: true, vertex: false });
+    assert.equal(answer(entries([[0, 'ATTRIB', 4, 0, 1, 0]])), true);
+    assert.equal(answer(entries([[0, 'ATTRIB', 4, 0, 2, 0]])), false);
+    assert.equal(answer(entries([[0, 'ATTRIB', 4, 1, 1, 0]])), false);
+});

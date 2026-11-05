@@ -36,7 +36,8 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DRIVER_TYPE,
+    D3D10_APPEND_ALIGNED_ELEMENT, D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK,
+    D3D10_DRIVER_TYPE,
     D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_QUERY,
     D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
     D3D10_USAGE, D3D11_RESOURCE_MISC, D3D11_TWIN,
@@ -50,6 +51,7 @@ import {
     gpuRenderable, multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
+import { channelsOf } from './uavclear.js';
 import { D3D10_COMMANDS } from './commands.js';
 import { createRenderer } from './render.js';
 import { validStreamOutput } from './streamout.js';
@@ -607,6 +609,18 @@ function featureSupport(feature, input, level, device){
             void level;
             return null;
     }
+}
+
+/**
+ * The bytes an input element's offset is a multiple of: its channel's size,
+ * at most a word; a word for a format of packed channels.
+ *
+ * @param {number} format
+ */
+function elementAlignment(format){
+    const bits = channelsOf(format)?.channels.map(channel=>channel.bits) ?? [];
+    return bits.length > 0 && bits.every(one=>one === bits[0] && one % 8 === 0)
+        ? Math.min(4, bits[0] / 8) : 4;
 }
 
 /**
@@ -1447,6 +1461,13 @@ export function createDevice(options = {}){
             for (const element of given)
             {
                 if (!element.SemanticName || element.InputSlot >= D3D10_LIMITS.VERTEX_INPUT_SLOTS)
+                {
+                    return E_INVALIDARG;
+                }
+                // An element's offset is a whole number of its channels, up to
+                // a word (test_input_layout_alignment).
+                if (element.AlignedByteOffset !== D3D10_APPEND_ALIGNED_ELEMENT
+                    && (element.AlignedByteOffset >>> 0) % elementAlignment(element.Format) !== 0)
                 {
                     return E_INVALIDARG;
                 }

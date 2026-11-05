@@ -550,6 +550,13 @@ export function translateShader(container, options = {}){
                     return `vgs[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
                         + `.${swizzle}`;
                 }
+                // A hull shader's control point phase names its input points
+                // as v[point][register] (test_clip_distance).
+                if (isHull && operand.indices.length > 1)
+                {
+                    return `vicp[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
+                        + `.${swizzle}`;
+                }
                 return `v${operand.indices[0].value}.${swizzle}`;
             case OPERAND.OUTPUT:
                 return isHull ? `${outputArray}[${indexExpression(operand, 0)}].${swizzle}`

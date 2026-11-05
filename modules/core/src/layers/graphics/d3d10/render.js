@@ -4403,16 +4403,15 @@ export function createRenderer(services){
             {
                 return;
             }
-            const to = backingOf(destination);
-            if (!to.gpu || (offset & 3) !== 0)
+            // The count is a buffer of one word on the GPU, copied as any
+            // buffer the GPU wrote is: into a buffer it keeps, or read back
+            // into a staging one.
+            const counted = { gpu: { gpu: counterOf(view), markRead(){} },
+                bytes: new Uint8Array(4) };
+            if (!gpuBufferCopy(destination, backingOf(destination), offset, counted, null))
             {
-                diverge('a structure count copied into a buffer the GPU does not keep, or to an'
-                    + ' unaligned offset, is not copied');
-                return;
+                diverge('a structure count copied to an unaligned offset is not copied');
             }
-            record({ kind: 'copyBuffer', source: counterOf(view), sourceOffset: 0,
-                destination: to.gpu.gpu, destinationOffset: offset, size: 4 });
-            to.gpuDirty = true;
         },
 
         /**

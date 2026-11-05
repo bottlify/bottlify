@@ -64,6 +64,10 @@ export const o = (index, components)=>register(OPERAND.OUTPUT, [index], componen
  *  @param {string} [components] */
 export const vicp = (point, index, components)=>
     register(OPERAND.INPUT_CONTROL_POINT, [point, index], components);
+/** A hull shader's input control point as its control point phase names it: v[point][index].
+ *  @param {number} point @param {number} index @param {string} [components] */
+export const vPoint = (point, index, components)=>
+    register(OPERAND.INPUT, [point, index], components);
 /** A hull shader's output control point, as a later phase reads it.
  *  @param {number} point @param {number} index @param {string} [components] */
 export const vocp = (point, index, components)=>

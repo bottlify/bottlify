@@ -8,7 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import {
-    assemble, dclOutputSiv, forkPhaseHullShader, mov, o, quadHullShader, ret, vicp,
+    assemble, dclInputControlPointCount, dclOutput, dclOutputControlPointCount, dclTessDomain,
+    dclTessOutputPrimitive, dclTessPartitioning, dclOutputSiv, forkPhaseHullShader,
+    hsControlPointPhase, hsDecls, mov, o, quadHullShader, ret, vicp, vPoint,
 } from './shader-fixtures.js';
 import {
     NO_PIXEL_SHADER, linkDomain, linkHull, translateShader, vertexFetch,
@@ -72,4 +74,19 @@ test('a domain shader reads each control point and patch constant by its name, w
     assert.match(linked.vertex, /vpc\[0\]\.z = dsConstants\[dsPatch \* 6u \+ 1u\]\.x;/,
         'the second edge factor, from the hull\'s register 1 .x into the domain\'s register 0 .z');
     assert.match(linked.vertex, /var<private> vicp: array<array<vec4<u32>, 3>, 4>;/);
+});
+
+test('a control point phase reads its input points as v[point][register]'
+    + ' (test_clip_distance, d3d11.c:29959)', ()=>{
+    const linked = linkHull(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [hsDecls(), dclInputControlPointCount(4), dclOutputControlPointCount(4),
+            dclTessDomain(3), dclTessPartitioning(1), dclTessOutputPrimitive(3),
+            hsControlPointPhase(), dclOutput(o(0)), mov(o(0), vPoint(2, 0)), ret()],
+    }))));
+    assert.match(linked.code, /cpo\[0u?\] = vicp\[2u?\]\[0u?\]\.xyzw;/);
+    assert.doesNotMatch(linked.code, /= v0\./);
 });
