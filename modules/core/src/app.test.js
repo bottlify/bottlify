@@ -1402,11 +1402,12 @@ test('the first thread gets its whole reserve, in the pool when it does not fit 
         'an enormous reserve is capped at a quarter of the pool');
 });
 
-test('the heap reaches the end of RAM unless a size was asked for', ()=>{
+test('the heap reaches the end of RAM, short of the shared page, unless a size was asked for', ()=>{
     // A fixed heap short of the end of RAM was what a program loading a level
     // ran into: it reported the machine's memory as exhausted while most of
-    // it sat unused above the heap.
-    assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x0c000000);
+    // it sat unused above the heap. A RAM short of 0x7FFE0000 keeps the shared
+    // page in its last 128 KiB (`sharedPageAt`).
+    assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x20000 - 0x0c000000);
     assert.equal(heapSizeFor(1024 * 1024 * 1024, 0x14000000), 0x14000000, 'an asked-for size wins');
     assert.throws(()=>heapSizeFor(64 * 1024 * 1024), /less than the heap's base/);
     assert.equal(heapSizeFor(0x80000000), 0x7ffe0000 - 0x0c000000,

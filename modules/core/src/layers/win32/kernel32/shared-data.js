@@ -26,6 +26,21 @@ import { PROCESSOR_FEATURES } from './processor.js';
 
 export const SHARED_USER_DATA = 0x7ffe0000;
 
+/**
+ * Where in RAM the page is kept: at its own address in a RAM that reaches it;
+ * in a smaller one 128 KiB short of RAM's end, which is where the translator
+ * finds an address past RAM when it reads without testing (cork's
+ * `wrappedAddress` keeps one at its distance from RAM's end), and where the
+ * interpreters are told to read it (`readThrough`). The host checks the
+ * engine agrees when the page is made.
+ *
+ * @param {number} memorySize
+ */
+export function sharedPageAt(memorySize){
+    return memorySize > SHARED_USER_DATA ? SHARED_USER_DATA
+        : memorySize - (0x80000000 - SHARED_USER_DATA);
+}
+
 /** Field offsets, and the page it occupies. */
 export const KUSER = Object.freeze({
     TICK_COUNT_LOW: 0x000,
@@ -67,22 +82,25 @@ const TWO_32 = 0x100000000;
  * @param {any} options.memory  The memory layer's API.
  * @param {{ major: number, minor: number, suiteMask?: number }} options.version
  * @param {number} [options.physicalPages]
+ * @param {number} [options.at]  where in RAM the page is kept (`sharedPageAt`):
+ *     its own address unless given
  * @returns {{ address: number,
  *     refresh: (milliseconds: number, systemTimeMs: number) => void } | null}
- *     null where the page cannot be had: memory too small to reach it, or taken
+ *     null where the page cannot be had: memory too small to hold it, or taken
  */
-export function createSharedUserData({ memory, version, physicalPages = 0x40000 }){
+export function createSharedUserData(options){
+    const { memory, version, physicalPages = 0x40000, at: place = SHARED_USER_DATA } = options;
     /** @param {string} access */
     const region = access=>memory.register({
         name: 'kuser-shared-data',
-        base: SHARED_USER_DATA,
+        base: place,
         size: KUSER.SIZE,
         kind: memory.RegionKind.THUNK_DATA,
         access,
     });
     // Written while it may be, and read-only from then on, as the program
     // finds it on Windows; the clocks move through the RAM's own words.
-    const words = memory.wordsOver?.(SHARED_USER_DATA, KUSER.SIZE) ?? null;
+    const words = memory.wordsOver?.(place, KUSER.SIZE) ?? null;
     try
     {
         region(memory.Access.READ_WRITE);
@@ -108,7 +126,7 @@ export function createSharedUserData({ memory, version, physicalPages = 0x40000 
     view.setUint32(KUSER.NUMBER_OF_PHYSICAL_PAGES, physicalPages, true);
     try
     {
-        memory.writeBytes(SHARED_USER_DATA, page);
+        memory.writeBytes(place, page);
     } catch {
         // A machine given less memory than reaches the address has no page.
         memory.unregister('kuser-shared-data');
@@ -156,7 +174,7 @@ export function createSharedUserData({ memory, version, physicalPages = 0x40000 
         }
         else
         {
-            memory.writeU32(SHARED_USER_DATA + at, value >>> 0);
+            memory.writeU32(place + at, value >>> 0);
         }
     };
 

@@ -215,11 +215,15 @@ class BlockState64 {
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
  *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'],
- *     zeroReadsBelow?: number }} what  `zeroReadsBelow` as `blockState`'s
+ *     zeroReadsBelow?: number, readThrough?: [number, number][] }} what  `zeroReadsBelow`
+ *     and `readThrough` as `blockState`'s
  */
-export function blockState64({ memory, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0 }){
+export function blockState64(what){
+    const { memory, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0,
+        readThrough = [] } = what;
     const state = new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports);
     state.blockMemory.zeroReadsBelow = zeroReadsBelow;
+    state.blockMemory.readThrough = readThrough;
     return state;
 }
 

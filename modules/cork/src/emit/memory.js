@@ -57,13 +57,35 @@ export function readsWrapped(context){
 }
 
 /**
+ * Where a read left untested finds `address`: in RAM, as it is; past RAM,
+ * modulo the largest power of two not above RAM's size, counted from that
+ * many bytes below RAM's end. With RAM a power of two that is the address
+ * modulo the size; with any other, the top of RAM, so an address past RAM
+ * lands at the same distance from RAM's end whatever the size: the system's
+ * shared page at 0x7FFE0000 in a RAM short of it at RAM's end less 128 KiB,
+ * where the host keeps it (`readThrough`). The interpreters read a page given
+ * to them that way through this; the emitter's `wrapIntoRam` is the same.
+ *
+ * @param {number} address @param {number} ramSize
+ */
+export function wrappedAddress(address, ramSize){
+    const at = address >>> 0;
+    if (at < ramSize)
+    {
+        return at;
+    }
+    const below = (ramSize & ramSize - 1) === 0 ? ramSize : 2 ** Math.floor(Math.log2(ramSize));
+    return (at & below - 1) + (ramSize - below);
+}
+
+/**
  * Wraps the address in the i32 local `addr` into RAM for a read left
- * untested: with RAM a power of two, one `and`; with any other size, an
- * address past RAM is taken modulo the largest power of two below it, and one
- * inside RAM is left as it is, without a branch. Both read RAM where the
- * access would have raised #GP. A RAM of 1.5 or 3 GB tested every read before
- * (the access's page flags loaded and tested, an exit for the fault): a load
- * was 46 bytes of wasm. The long-mode emitter wraps its reads the same way.
+ * untested, as `wrappedAddress` says: with RAM a power of two, one `and`; with
+ * any other size, an address inside RAM is left as it is and one past RAM
+ * taken into its top, without a branch. Both read RAM where the access would
+ * have raised #GP. A RAM of 1.5 or 3 GB tested every read before (the
+ * access's page flags loaded and tested, an exit for the fault): a load was 46
+ * bytes of wasm. The long-mode emitter wraps its reads the same way.
  *
  * @param {import('./region.js').RegionEmitter['b']} b
  * @param {number} ramSize
@@ -77,7 +99,7 @@ export function wrapIntoRam(b, ramSize, addr = Local.addr){
     }
     const below = 2 ** Math.floor(Math.log2(ramSize));
     b.localGet(addr);
-    b.localGet(addr).i32const(below - 1).op(I32.and);
+    b.localGet(addr).i32const(below - 1).op(I32.and).i32const(ramSize - below | 0).op(I32.add);
     b.localGet(addr).i32const(ramSize | 0).op(I32.ltU);
     b.select().localSet(addr);
 }

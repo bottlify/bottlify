@@ -396,6 +396,8 @@ export function createCpuModule(){
                 closedBelow: config?.closedBelow ?? 0,
                 // Below this a closed page reads as zeros; its stores still fault.
                 zeroReadsBelow: config?.zeroReadsBelow ?? 0,
+                // Ranges past RAM a read finds where an untested one does.
+                readThrough: config?.readThrough ?? [],
                 // And below this nothing runs, whatever reads and writes the
                 // range answers.
                 noExecuteBelow: config?.noExecuteBelow ?? 0,
@@ -630,6 +632,7 @@ export function createCpuModule(){
                                 : {}) } : settings.cork,
                         closedBelow: settings.closedBelow,
                         zeroReadsBelow: settings.zeroReadsBelow,
+                        readThrough: settings.readThrough,
                         noExecuteBelow: settings.noExecuteBelow,
                         executors: settings.executors,
                         // One time-stamp counter for every executor (`useGuestClock`).
@@ -1439,6 +1442,15 @@ export function createCpuModule(){
                  */
                 pageAccess: (address, length, open)=>
                     state.host?.pageAccess?.(address, length, open) ?? false,
+                /**
+                 * Where a read the engine does not test finds `address` in RAM (the
+                 * host's `wrappedAddress`); null before the engine is up or from one
+                 * that does not say.
+                 *
+                 * @param {number} address
+                 * @returns {number | null}
+                 */
+                wrappedAddress: address=>state.host?.wrappedAddress?.(address) ?? null,
 
                 instructionCount: ()=>{
                     started();

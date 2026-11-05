@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
 import { PageFlag } from '../runtime/pages.js';
-import { planLoop, planRegion, readUndoLog, resetUndoLog, spansOf } from './memory.js';
+import { planLoop, planRegion, readUndoLog, resetUndoLog, spansOf, wrappedAddress }
+    from './memory.js';
 import { Exit, emitRegion, enterRegion, mathImports, prepareModule } from './region.js';
 import { buildHelpersModule } from './helpers.js';
 import { formRegion, inlineReturns } from '../region.js';
@@ -676,15 +677,15 @@ test('outside precise a read past RAM wraps into it, and a store leaves before i
 });
 
 test('outside precise a RAM that is not a power of two reads inside it as it is and wraps a read'
-    + ' past it below the power of two under it; precise, the read past it faults', ()=>{
+    + ' past it into its top, as wrappedAddress says; precise, the read past it faults', ()=>{
     const ramSize = 0x180000;   // 1.5 MiB
     /** @param {number} address @param {boolean} precise */
     const runAt = (address, precise)=>{
         const m = createTestMachine({ ramSize, precise });
         m.write(CODE, [0xa1, ...[0, 8, 16, 24].map(shift=>address >>> shift & 0xff), 0xf4]);
         m.write(0x140010, [0x44, 0x33, 0x22, 0x11]);
-        m.write(0x080010, [0x78, 0x56, 0x34, 0x12]);
-        m.write(0x0ffff0, [0xef, 0xbe, 0xad, 0xde]);
+        m.write(0x100010, [0x78, 0x56, 0x34, 0x12]);
+        m.write(0x17fff0, [0xef, 0xbe, 0xad, 0xde]);
         m.setReg('esp', STACK);
         return { m, exit: m.runProgram(CODE) };
     };
@@ -692,6 +693,8 @@ test('outside precise a RAM that is not a power of two reads inside it as it is 
     // the address space.
     const cases = /** @type {[number, number][]} */ ([
         [0x140010, 0x11223344], [0x180010, 0x12345678], [0xfffffff0, 0xdeadbeef]]);
+    assert.deepEqual(cases.map(([address])=>wrappedAddress(address, ramSize)),
+        [0x140010, 0x100010, 0x17fff0], 'past RAM into its top half-megabyte');
     for (const [address, value] of cases)
     {
         const { m, exit } = runAt(address, false);
@@ -1256,4 +1259,16 @@ test('a self-loop of string instructions streams its pointers while DF is clear'
         0x75, 0xf3,                         // jnz back
     ]).blocks[0].instructions);
     assert.deepEqual(copied?.streams.map(s=>[s.base, s.stride, s.lo]), [[3, 1, 1]]);
+});
+
+test('an address past a RAM short of it is found at its distance from RAM\'s end, whatever the'
+    + ' size: the system\'s shared page 128 KiB short of it', ()=>{
+    for (const ramSize of [0x10000000, 0x20000000, 0x30000000, 0x40000000, 0x60000000,
+        0x70000000])
+    {
+        assert.equal(wrappedAddress(0x7ffe0000, ramSize), ramSize - 0x20000, ramSize.toString(16));
+        assert.equal(wrappedAddress(0x7ffe0abc, ramSize), ramSize - 0x20000 + 0xabc);
+        assert.equal(wrappedAddress(0x1234, ramSize), 0x1234, 'inside RAM, as it is');
+    }
+    assert.equal(wrappedAddress(0x7ffe0000, 0x80000000), 0x7ffe0000, 'two gigabytes reach it');
 });

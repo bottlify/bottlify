@@ -37,7 +37,8 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { installedHeaders } from './layers/loader/internal/synth.js';
 import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
-import { SHARED_USER_DATA, createSharedUserData } from './layers/win32/kernel32/shared-data.js';
+import { KUSER, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
+    from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
@@ -1512,9 +1513,10 @@ export function placeMainStack(reserve, poolBase, poolSize){
 
 /**
  * How much of the guest's RAM the heap gets: what the caller asked for, or
- * everything from the heap's base to the end of RAM, short of the system's
- * shared page at 0x7FFE0000 in a RAM that reaches it (`shared-data.js`), as a
- * Windows process's own memory ends there. The heap is otherwise the last
+ * everything from the heap's base up to where RAM keeps the system's shared
+ * page (`sharedPageAt`): at 0x7FFE0000 in a RAM that reaches it, as a Windows
+ * process's own memory ends there, and 128 KiB short of RAM's end in one that
+ * does not. The heap is otherwise the last
  * region, so the end of RAM is the only ceiling -- and a fixed size short of
  * it was what a program loading a level ran into, reporting the machine's
  * memory as exhausted while most of it sat unused above.
@@ -1532,7 +1534,7 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
     {
         throw new Error(`heap: ${memorySize} bytes of RAM is less than the heap's base`);
     }
-    return Math.min(memorySize, SHARED_USER_DATA) - base;
+    return sharedPageAt(memorySize) - base;
 }
 
 /**
@@ -4457,6 +4459,10 @@ async function buildApp(options){
             // Reading zeros where Windows faults is decisions.md's A79.
             closedBelow: 0x10000,
             zeroReadsBelow: 0x10000,
+            // The system's shared page in a RAM short of it, read where RAM keeps
+            // it (`sharedPageAt`).
+            readThrough: memorySize > SHARED_USER_DATA ? []
+                : [[SHARED_USER_DATA, SHARED_USER_DATA + KUSER.SIZE]],
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
@@ -7199,7 +7205,18 @@ async function buildApp(options){
 
     // The page every NT process reads at 0x7FFE0000 without a call: the same
     // version as every other road, and the clocks GetTickCount answers with.
-    const sharedData = createSharedUserData({ memory, version: windowsVersion(options.windows) });
+    // In a RAM short of 0x7FFE0000 the page is kept where the engine's
+    // untested reads find it: an engine that wraps elsewhere would have the
+    // program read the heap there, so it stops the start instead.
+    const sharedAt = sharedPageAt(memorySize);
+    const wrapped = cpu.wrappedAddress?.(SHARED_USER_DATA) ?? null;
+    if (wrapped !== null && wrapped !== sharedAt)
+    {
+        throw new Error(`kernel32: the engine reads 0x7FFE0000 at 0x${wrapped.toString(16)},`
+            + ` the shared page is kept at 0x${sharedAt.toString(16)}`);
+    }
+    const sharedData = createSharedUserData({ memory, version: windowsVersion(options.windows),
+        at: sharedAt });
     if (sharedData)
     {
         const refresh = ()=>sharedData.refresh(kernel.clock.virtualTime(),

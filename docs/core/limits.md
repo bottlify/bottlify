@@ -20,8 +20,13 @@ event, an error. Neither stops the program.
   `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
   refused when it is loaded.
 - Only user mode. There is no kernel underneath; the engine's layers answer every system call.
-- Reading or writing through a null pointer does not fault: memory from address 0 is readable and
-  writable. Running code below `0x10000` does fault, as an access violation.
+- Below `0x10000` a write or running code faults, as an access violation, as on Windows; a read
+  there finds zeros where Windows would fault too (`roadmap/decisions.md` A79).
+- The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
+  AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
+  title's code uses.
+- With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
+  RAM's last 128 KiB, and the heap ends below it.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.

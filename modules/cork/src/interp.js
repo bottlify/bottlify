@@ -20,6 +20,7 @@ import { Fault, Unsupported, createState, evaluate, operandAddress } from './ir.
 import { ZF } from './decode/table.js';
 import { compileFast } from './fast.js';
 import { eflagsOf } from './emit/flags.js';
+import { wrappedAddress } from './emit/memory.js';
 import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { PageFlag, STORE_FLAGS, markWritten } from './runtime/pages.js';
 
@@ -359,6 +360,11 @@ export class BlockMemory {
         // Below this a closed page reads as zeros rather than faulting
         // (`zeroReadsBelow`); 0 opens none.
         this.zeroReadsBelow = 0;
+        // Ranges past RAM a read finds where an untested translated read does
+        // (`readThrough`), [from, to) each.
+        /** @type {[number, number][]} */
+        this.readThrough = [];
+        this.ramSize = layout.ramSize;
         // The locked instructions as one indivisible access each (`lockedStep`),
         // as the atomic variant's translated code makes them.
         this.atomic = false;
@@ -572,8 +578,9 @@ export class BlockMemory {
 
     /**
      * A read that reaches a closed page: zeros for its bytes below
-     * `zeroReadsBelow` and what the rest hold where it runs on to an open page,
-     * or the fault if any byte it reads lies in a closed page above.
+     * `zeroReadsBelow`, the RAM an untested translated read finds for those in
+     * a `readThrough` range, and what the rest hold where it runs on to an open
+     * page; the fault if any byte it reads lies in another closed page.
      *
      * @param {number} address @param {number} size
      */
@@ -581,13 +588,21 @@ export class BlockMemory {
         let value = 0;
         for (let i = size - 1; i >= 0; i--)
         {
-            const at = address + i;
-            const closed = (this.pageFlags[at >>> 12] & PageFlag.INACCESSIBLE) !== 0;
-            if (closed && at >= this.zeroReadsBelow)
+            const at = (address + i) >>> 0;
+            let byte = 0;
+            if ((this.pageFlags[at >>> 12] & PageFlag.INACCESSIBLE) === 0)
+            {
+                byte = this.ramBytes[at];
+            }
+            else if (this.readThrough.some(([from, to])=>at >= from && at < to))
+            {
+                byte = this.ramBytes[wrappedAddress(at, this.ramSize)];
+            }
+            else if (at >= this.zeroReadsBelow)
             {
                 throw this.fault(address, size, false);
             }
-            value = value * 256 + (closed ? 0 : this.ramBytes[at]);
+            value = value * 256 + byte;
         }
         return value;
     }
@@ -986,21 +1001,25 @@ class BlockState {
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
  *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'],
- *     atomic?: boolean, zeroReadsBelow?: number }} what
+ *     atomic?: boolean, zeroReadsBelow?: number, readThrough?: [number, number][] }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it
  *     translated there, as a translated store's `stale` exit does; `atomic`: the
  *     engine's, every locked instruction one indivisible access (`lockedStep`);
  *     `zeroReadsBelow`: below it a closed page reads as zeros, where stores and
  *     fetches still fault (the null range: what translated reads, which do not
- *     test their page, find there too).
+ *     test their page, find there too); `readThrough`: ranges past RAM a read
+ *     finds where an untested translated read does (`wrappedAddress`), stores
+ *     there faulting: a page the host keeps at that place in RAM.
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
 export function blockState(what){
-    const { memory, layout, onCodeWrite, rdtsc, ports, atomic = false, zeroReadsBelow = 0 } = what;
+    const { memory, layout, onCodeWrite, rdtsc, ports, atomic = false, zeroReadsBelow = 0,
+        readThrough = [] } = what;
     const state = new BlockState(memory, layout, onCodeWrite ?? null, rdtsc, ports);
     state.memory.atomic = atomic;
     state.memory.zeroReadsBelow = zeroReadsBelow;
+    state.memory.readThrough = readThrough;
     return state;
 }
 

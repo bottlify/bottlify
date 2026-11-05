@@ -140,6 +140,10 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *           (the interpreters, a checked read) leaves the instruction to the
  *           JavaScript interpreter, which reads the zeros. Zero, the default,
  *           opens none.
+ * @property {[number, number][]} [readThrough]  Ranges past RAM, [from, to), a read
+ *           finds where an untested translated read finds them (`wrappedAddress`),
+ *           their stores faulting: a page the host keeps at that place in RAM, the
+ *           system's shared page in a RAM short of 0x7FFE0000. Default none.
  * @property {number} [executors]  Executors the memory has room for, each a state page and
  *     tables of its own past the first's (`executorLayout`). Default 1.
  * @property {number} [executor]   Which of them this host is. Default 0, the first, whose state
@@ -218,8 +222,8 @@ export function cacheShare(bytes, executors, executor){
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, zeroReadsBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0,
-        memory: given, reused, tsc, features, translationZone, bits = 32 } = config;
+        closedBelow = 0, zeroReadsBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
+        executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32 } = config;
     // Long mode: the 64-bit block, the shared runtime's regions at its width and
     // the long-mode interpreter.
     const long = bits === 64;
@@ -1170,6 +1174,7 @@ export function createCorkHost(config){
             rdtsc: readTsc,
             atomic: corkConfig?.atomic === true,
             zeroReadsBelow,
+            readThrough,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.
@@ -1232,6 +1237,7 @@ export function createCorkHost(config){
             layout,
             rdtsc: readTsc,
             zeroReadsBelow,
+            readThrough,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
                 invalidate(at, size, true);
@@ -1879,6 +1885,16 @@ export function createCorkHost(config){
         takeWrites: (address, length)=>runtime.takeWrites?.(address, length) ?? null,
         /** @param {number} address @param {number} length */
         markWritten: (address, length)=>runtime.markWritten?.(address, length),
+        /**
+         * Where an untested read of `address` finds RAM (the engine's
+         * `wrappedAddress`): the address itself inside RAM. Null from an engine
+         * that does not say.
+         *
+         * @param {number} address
+         * @returns {number | null}
+         */
+        wrappedAddress: address=>(typeof engine.wrappedAddress === 'function'
+            ? engine.wrappedAddress(address, memorySize) : null),
         /**
          * Opens or closes pages to the program, as a reservation's commit and
          * VirtualProtect do: a closed one faults any access, with its address.
