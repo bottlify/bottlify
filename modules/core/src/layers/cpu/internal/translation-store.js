@@ -67,9 +67,13 @@ export const STORE_VERSION = 3;
  * waits for the disk, and one held a game's frame for forty milliseconds. A
  * record is for the runs after this one, so nothing waits for it: it is named
  * in the index, and found, once the writer says it is on the file.
+ * The index's appends go the same way (`append`): opening, writing, flushing and
+ * closing a handle on it held a frame for milliseconds each time the index was
+ * published (3DMark2001 SE's Car Chase: 1.7 ms of every dropped frame).
  * @typedef {{ open: (file: any) => Promise<boolean>,
  *     write: (writes: [number, Uint8Array][]) => Promise<void>,
- *     flush: () => Promise<void>, close: () => void }} RecordsWriter
+ *     flush: () => Promise<void>, close: () => void,
+ *     append?: (file: any, at: number, bytes: Uint8Array) => Promise<void> }} RecordsWriter
  */
 
 /**
@@ -133,6 +137,8 @@ export function openRecordsWriter(){
         write: async writes=>done(await ask({ type: 'write', writes },
             [...new Set(writes.map(([, bytes])=>bytes.buffer))])),
         flush: async()=>done(await ask({ type: 'flush' })),
+        append: async(file, at, bytes)=>done(await ask({ type: 'append', file, at, bytes },
+            [bytes.buffer])),
         close: ()=>{
             ask({ type: 'close' }).then(()=>worker.terminate());
         },
@@ -922,8 +928,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 pendingLines = [];
                 const at = indexEnd;
                 indexEnd += bytes.length;
-                await appendAt(await directory.getFileHandle(generationName(INDEX, generation),
-                    { create: true }), at, bytes);
+                const index = await directory.getFileHandle(generationName(INDEX, generation),
+                    { create: true });
+                await (writer?.append ? writer.append(index, at, bytes)
+                    : appendAt(index, at, bytes));
             }
             publishing = null;
         })().catch(()=>{

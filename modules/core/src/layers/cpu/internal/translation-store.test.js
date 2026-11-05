@@ -963,7 +963,7 @@ function heldWriter(){
     let closed = false;
     /** @type {any} */
     let handle = null;
-    const state = { writes: 0 };
+    const state = { writes: 0, appends: 0 };
     /** @param {() => void} run @returns {Promise<void>} */
     const later = run=>new Promise((resolve, reject)=>{
         const go = ()=>{
@@ -1018,6 +1018,14 @@ function heldWriter(){
                 });
             },
             flush: ()=>later(()=>handle.flush()),
+            // The index's lines, on a handle of the writer's own for the one write.
+            append: async(/** @type {any} */ file, at, bytes)=>{
+                const index = await file.createSyncAccessHandle();
+                index.write(bytes, { at });
+                index.flush();
+                index.close();
+                state.appends++;
+            },
             // As a worker that ends: what it held is never written.
             close: ()=>{
                 closed = true;
@@ -1050,6 +1058,7 @@ test('with a records writer the store\'s own thread writes no record, found once
         assert.ok(writer.state.writes > 0, 'the writer wrote it');
         assert.deepEqual(store.getNow('cork/41/a/module/m'), bytes);
         await store.flush();
+        assert.ok(writer.state.appends > 0, 'the index too, by the writer');
         store.close();
         const next = await createDirectoryTranslationStore(root, 'game');
         assert.deepEqual(await next.get('cork/41/a/module/m'), bytes, 'and the next run finds it');
