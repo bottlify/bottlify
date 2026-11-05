@@ -11,9 +11,11 @@ import { after } from '../user32/controls.js';
  *
  * A program asks whether themes are on before it picks how to draw a control,
  * and a framework binds the whole library by name before it asks anything, so
- * every documented entry point Windows XP SP3 has is here and none that came
- * later: GetProcAddress answering NULL for one of those is how the caller
- * learns it is on XP. With no visual style active every question has the classic answer.
+ * every documented entry point the machine's Windows has is here and none
+ * that came later: GetProcAddress answering NULL for one of 7's is how the
+ * caller learns it is on XP, and a 7 answers them (a Delphi program
+ * binds BufferedPaintInit at its start once the version says 6, and its start
+ * fails without it). With no visual style active every question has the classic answer.
  * No theme data opens, so every call about a theme handle is given one this
  * library never made and refuses it as E_HANDLE; the system-metric calls,
  * which are documented to answer the global value when given no theme, ask
@@ -55,6 +57,12 @@ const SPI_GETICONTITLELOGFONT = 0x001f;
 const SPI_GETNONCLIENTMETRICS = 0x0029;
 const SPI_GETFLATMENU = 0x1022;
 
+/** BP_BUFFERFORMAT: a compatible bitmap, a bottom-up DIB, a top-down one, a top-down 1-bit one. */
+const BPBF_COMPATIBLEBITMAP = 0;
+const BPBF_TOPDOWNDIB = 2;
+const BPBF_TOPDOWNMONODIB = 3;
+const SRCCOPY = 0x00cc0020;
+
 /** LOGFONTW, and NONCLIENTMETRICSW as XP lays it out: no iPaddedBorderWidth on the end. */
 const LOGFONTW_SIZE = 92;
 const NONCLIENTMETRICSW_SIZE = 500;
@@ -93,6 +101,9 @@ const GA_PARENT = 1;
  * @property {(name: string) => Export | undefined} [user32]
  *           user32's export of that name, looked up when called.
  * @property {(name: string) => Export | undefined} [gdi32]
+ * @property {{ major: number }} [windows]  The Windows the machine is: 7's
+ *           entry points are there from major version 6, XP's alone when absent.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -286,7 +297,7 @@ export function createThemeFunctions(host){
         return Promise.resolve(painted).finally(restore).then(()=>S_OK);
     };
 
-    return {
+    const xp = {
         /** BOOL IsThemeActive(void) */
         IsThemeActive: {
             argBytes: 0,
@@ -723,6 +734,292 @@ export function createThemeFunctions(host){
                 appProperties = flags >>> 0;
                 return 0;
             },
+        },
+    };
+    return (host.windows?.major ?? 5) >= 6
+        ? { ...xp, ...win7Functions(host, gdi32, isWindow) } : xp;
+}
+
+/**
+ * What Windows 7 has beyond XP. Buffered painting needs no theme: a paint goes to a DIB
+ * section the size of the target's rectangle and is copied over at the end.
+ * The questions about a theme handle have no theme to answer from, as on XP,
+ * and composition is on, as DwmIsCompositionEnabled says.
+ *
+ * @param {ThemeHost} host
+ * @param {(name: string, args: number[]) => any} gdi32
+ * @param {(hwnd: number) => boolean} isWindow
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ */
+function win7Functions(host, gdi32, isWindow){
+    /**
+     * @typedef {{ target: number, rect: number[], dc: number, bitmap: number, previous: number,
+     *     bits: number, format: number, blend: number }} PaintBuffer
+     */
+    /** @type {Map<number, PaintBuffer>} */
+    const buffers = new Map();
+    let nextBuffer = 0x5000;
+    /** @param {number} at @param {number} count @returns {number[]} signed */
+    const read = (at, count)=>{
+        const bytes = host.readMemory?.(at >>> 0, count * 4) ?? new Uint8Array(count * 4);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        return Array.from({ length: count }, (_, index)=>view.getInt32(index * 4, true));
+    };
+    /** @param {number} at @param {number[]} values */
+    const write = (at, values)=>
+        host.writeMemory?.(at >>> 0, new Uint8Array(new Int32Array(values).buffer));
+    /** @param {number} handle */
+    const bufferOf = handle=>buffers.get(handle >>> 0);
+
+    /**
+     * Changes each pixel of a 32-bit buffer within a rectangle of the target's
+     * coordinates, the whole buffer for NULL; ARGB in, ARGB out.
+     *
+     * @param {PaintBuffer} buffer @param {number} rect @param {(argb: number) => number} change
+     */
+    const eachPixel = (buffer, rect, change)=>{
+        if (buffer.format === BPBF_TOPDOWNMONODIB || !host.readMemory || !host.writeMemory)
+        {
+            return E_FAIL;
+        }
+        const [left, top, right, bottom] = buffer.rect;
+        const [x0, y0, x1, y1] = (rect >>> 0) === 0 ? buffer.rect : read(rect, 4);
+        const from = Math.max(x0, left) - left;
+        const count = Math.min(x1, right) - left - from;
+        const last = count > 0 ? Math.min(y1, bottom) - top : 0;
+        for (let y = Math.max(y0, top) - top; y < last; y++)
+        {
+            // Only a top-down buffer keeps its top row first.
+            const row = buffer.format === BPBF_TOPDOWNDIB ? y : bottom - top - 1 - y;
+            const at = buffer.bits + (row * (right - left) + from) * 4;
+            const bytes = host.readMemory(at, count * 4).slice();
+            const pixels = new Uint32Array(bytes.buffer);
+            pixels.forEach((argb, index)=>{
+                pixels[index] = change(argb) >>> 0;
+            });
+            host.writeMemory(at, bytes);
+        }
+        return S_OK;
+    };
+
+    return {
+        /** HRESULT BufferedPaintInit(void): a thread's buffers need no setting up. */
+        BufferedPaintInit: { argBytes: 0, handler: ()=>S_OK },
+
+        /** HRESULT BufferedPaintUnInit(void) */
+        BufferedPaintUnInit: { argBytes: 0, handler: ()=>S_OK },
+
+        /**
+         * HPAINTBUFFER BeginBufferedPaint(HDC hdcTarget, const RECT *prcTarget,
+         *     BP_BUFFERFORMAT dwFormat, BP_PAINTPARAMS *pPaintParams, HDC *phdc)
+         *
+         * A memory DC over a DIB section of the rectangle's size, its origin
+         * moved so the program draws in the target's coordinates. A new
+         * section is zeros, which BPPF_ERASE asks for and the rest may start
+         * from. A compatible bitmap is a 32-bit one, as the display's is.
+         */
+        BeginBufferedPaint: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([target, rect, format, params, dcOut])=>{
+                if ((target >>> 0) === 0 || (rect >>> 0) === 0
+                    || (format >>> 0) > BPBF_TOPDOWNMONODIB)
+                {
+                    return 0;
+                }
+                const box = read(rect, 4);
+                const [left, top, right, bottom] = box;
+                if (right <= left || bottom <= top)
+                {
+                    return 0;
+                }
+                // BP_PAINTPARAMS: cbSize, dwFlags, prcExclude, pBlendFunction.
+                const [, , exclude = 0, blend = 0] = (params >>> 0) === 0 ? [] : read(params, 4);
+                if (exclude !== 0)
+                {
+                    host.divergence?.('BeginBufferedPaint',
+                        'prcExclude is copied to the target with the rest');
+                }
+                const mono = (format >>> 0) === BPBF_TOPDOWNMONODIB;
+                const info = host.allocate?.(52) ?? 0;
+                if (info === 0)
+                {
+                    return 0;
+                }
+                try
+                {
+                    // BITMAPINFOHEADER, a mono table's black and white, and
+                    // where CreateDIBSection puts the bits' address.
+                    write(info, [40, right - left,
+                        (format >>> 0) === BPBF_TOPDOWNDIB || mono ? top - bottom : bottom - top,
+                        (mono ? 1 : 32) << 16 | 1, 0, 0, 0, 0, 0, 0, 0, 0xffffff, 0]);
+                    const dc = gdi32('CreateCompatibleDC', [target >>> 0]) >>> 0;
+                    const bitmap = dc === 0 ? 0
+                        : gdi32('CreateDIBSection', [dc, info, 0, info + 48, 0]) >>> 0;
+                    if (bitmap === 0)
+                    {
+                        if (dc !== 0)
+                        {
+                            gdi32('DeleteDC', [dc]);
+                        }
+                        return 0;
+                    }
+                    const previous = gdi32('SelectObject', [dc, bitmap]) >>> 0;
+                    gdi32('SetViewportOrgEx', [dc, -left | 0, -top | 0, 0]);
+                    const handle = nextBuffer++;
+                    buffers.set(handle, { target: target >>> 0, rect: box, dc, bitmap, previous,
+                        bits: read(info + 48, 1)[0] >>> 0, format: format >>> 0,
+                        blend: blend >>> 0 });
+                    if ((dcOut >>> 0) !== 0)
+                    {
+                        write(dcOut, [dc]);
+                    }
+                    return handle;
+                }
+                finally
+                {
+                    host.release?.(info);
+                }
+            },
+        },
+
+        /**
+         * HRESULT EndBufferedPaint(HPAINTBUFFER hBufferedPaint, BOOL fUpdateTarget)
+         *
+         * The buffer copied to its rectangle of the target, blended where the
+         * paint's parameters gave a BLENDFUNCTION, and freed.
+         */
+        EndBufferedPaint: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, update])=>{
+                const buffer = bufferOf(handle);
+                if (!buffer)
+                {
+                    return E_INVALIDARG;
+                }
+                buffers.delete(handle >>> 0);
+                const [left, top, right, bottom] = buffer.rect;
+                const [width, height] = [right - left, bottom - top];
+                const free = ()=>{
+                    gdi32('SelectObject', [buffer.dc, buffer.previous]);
+                    gdi32('DeleteObject', [buffer.bitmap]);
+                    gdi32('DeleteDC', [buffer.dc]);
+                    return S_OK;
+                };
+                if ((update >>> 0) === 0)
+                {
+                    return free();
+                }
+                return after(buffer.blend === 0
+                    ? gdi32('BitBlt', [buffer.target, left, top, width, height,
+                        buffer.dc, left, top, SRCCOPY])
+                    : gdi32('GdiAlphaBlend', [buffer.target, left, top, width, height,
+                        buffer.dc, left, top, width, height, read(buffer.blend, 1)[0] >>> 0]),
+                free);
+            },
+        },
+
+        /** HDC GetBufferedPaintDC(HPAINTBUFFER hBufferedPaint) */
+        GetBufferedPaintDC: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>bufferOf(handle)?.dc ?? 0,
+        },
+
+        /** HDC GetBufferedPaintTargetDC(HPAINTBUFFER hBufferedPaint) */
+        GetBufferedPaintTargetDC: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>bufferOf(handle)?.target ?? 0,
+        },
+
+        /** HRESULT GetBufferedPaintTargetRect(HPAINTBUFFER hBufferedPaint, RECT *prc) */
+        GetBufferedPaintTargetRect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const buffer = bufferOf(handle);
+                if (!buffer || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                write(out, buffer.rect);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT GetBufferedPaintBits(HPAINTBUFFER hBufferedPaint, RGBQUAD **ppbBuffer,
+         *     int *pcxRow)
+         *
+         * A DIB buffer's pixels and its row in pixels; a compatible bitmap has
+         * none a program may address.
+         */
+        GetBufferedPaintBits: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, bitsOut, rowOut])=>{
+                const buffer = bufferOf(handle);
+                if (!buffer || (bitsOut >>> 0) === 0 || (rowOut >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (buffer.format === BPBF_COMPATIBLEBITMAP)
+                {
+                    return E_FAIL;
+                }
+                write(bitsOut, [buffer.bits]);
+                write(rowOut, [buffer.rect[2] - buffer.rect[0]]);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT BufferedPaintClear(HPAINTBUFFER hBufferedPaint, const RECT *prc): ARGB 0. */
+        BufferedPaintClear: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, rect])=>{
+                const buffer = bufferOf(handle);
+                return buffer ? eachPixel(buffer, rect, ()=>0) : E_INVALIDARG;
+            },
+        },
+
+        /** HRESULT BufferedPaintSetAlpha(HPAINTBUFFER hBufferedPaint, const RECT *prc, BYTE alpha) */
+        BufferedPaintSetAlpha: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, rect, alpha])=>{
+                const buffer = bufferOf(handle);
+                return buffer
+                    ? eachPixel(buffer, rect, argb=>(argb & 0xffffff | (alpha & 0xff) << 24) >>> 0)
+                    : E_INVALIDARG;
+            },
+        },
+
+        /** BOOL IsCompositionActive(void): the desktop is composed, as DWM says. */
+        IsCompositionActive: { argBytes: 0, handler: ()=>1 },
+
+        /** HTHEME OpenThemeDataEx(HWND, LPCWSTR, DWORD): no style, no theme, as OpenThemeData. */
+        OpenThemeDataEx: {
+            argBytes: 12,
+            handler: ()=>{
+                host.setLastError?.(E_PROP_ID_UNSUPPORTED);
+                return 0;
+            },
+        },
+
+        /** The questions about a theme handle: this library never made one. */
+        DrawThemeTextEx: { argBytes: 36, handler: ()=>E_HANDLE },
+        GetThemeBitmap: { argBytes: 24, handler: ()=>E_HANDLE },
+        GetThemeStream: { argBytes: 28, handler: ()=>E_HANDLE },
+        GetThemeTransitionDuration: { argBytes: 24, handler: ()=>E_HANDLE },
+
+        /** HRESULT SetWindowThemeAttribute(HWND, WINDOWTHEMEATTRIBUTETYPE, PVOID, DWORD) */
+        SetWindowThemeAttribute: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(isWindow(hwnd) ? S_OK : E_HANDLE),
         },
     };
 }

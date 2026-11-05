@@ -9,6 +9,7 @@ import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
+import { frameDrops } from './frame-drops.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { HEAP_POOLS, NOT_MEASURED, withZones } from './memory-zones.js';
@@ -8175,6 +8176,14 @@ async function buildApp(options){
 
             /** @param {number} [count] The most recent frames, one row each. */
             frames: count=>core.api('log').frames(count),
+
+            /**
+             * The last `count` frames' drops, each told why, and the rates of
+             * the slowest frames (`frame-drops.js`).
+             *
+             * @param {number} [count]
+             */
+            drops: count=>frameDrops(core.api('log').frames(count ?? 1000)),
 
             /**
              * The journal's block and every layer's tables, for a reader on

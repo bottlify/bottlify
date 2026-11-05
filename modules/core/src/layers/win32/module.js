@@ -3762,6 +3762,7 @@ export function createWin32Module(){
                     gdi32: name=>libraries['GDI32.dll']?.[name],
                     allocate: bytes=>heap.allocate(bytes),
                     release: address=>heap.free(address),
+                    windows, divergence: config?.divergence,
                 }),
 
                 // The codec manager, with the drivers Windows installs: a sound

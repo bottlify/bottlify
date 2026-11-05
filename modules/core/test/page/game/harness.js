@@ -1598,8 +1598,12 @@ export function createHarness(canvas, how = {}){
                     longest: frame.longest, longestGuest: frame.longestGuest,
                     waits: frame.waits, compiles: frame.compiles, notes: frame.notes,
                 })),
+                // Whole enough for a drop to be told why (frame-drops.js), and
+                // numbered, so a reader polling every few seconds keeps each once.
                 recentFrames: seen.recentFrames.map((/** @type {any} */ frame)=>({
-                    ms: frame.ms, byKind: frame.byKind,
+                    index: frame.index, ms: frame.ms, byKind: frame.byKind,
+                    idleMs: frame.idleMs, waits: frame.waits, compiles: frame.compiles,
+                    instructions: frame.instructions, notes: frame.notes, longest: frame.longest,
                 })),
                 messages: layers.win32?.messages ?? null,
                 // Where the guest itself is spending its turns. The only account
