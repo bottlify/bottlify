@@ -58,3 +58,14 @@ export const DISP_E_TYPEMISMATCH = 0x80020005;
 export const DISP_E_BADVARTYPE = 0x80020008;
 export const DISP_E_OVERFLOW = 0x8002000a;
 export const DISP_E_DIVBYZERO = 0x80020012;
+
+/** A SAFEARRAY whose VARTYPE is kept in front of its descriptor. */
+export const FADF_HAVEVARTYPE = 0x80;
+/**
+ * The bytes Windows keeps in front of a descriptor it allocates: an IID at
+ * -16 for FADF_HAVEIID, and at -4 the VARTYPE for FADF_HAVEVARTYPE or the
+ * IRecordInfo for FADF_RECORD. SafeArrayDestroy frees the block from there,
+ * so every descriptor anyone hands a program as SafeArrayCreate's is laid out
+ * with them.
+ */
+export const DESCRIPTOR_PREFIX = 16;
