@@ -173,5 +173,34 @@ test('a dynamic buffer\'s map and unmap in the guest answer and write as their J
         same('BufferMap', { stack: [SELF, type, next() % 3 === 0 ? 0x100000 : 0, out], memory },
             HANDED);
         same('BufferUnmap', { stack: [SELF], memory }, HANDED);
+        // Direct3D 11's context: an immediate one's word is its device's block,
+        // a deferred one's zero, which leaves its maps to the host.
+        const CONTEXT = ARRAYS + 0x100;
+        view.setUint32(CONTEXT - DATA + 4, next() % 3 === 0 ? 0 : BLOCK, true);
+        same('ContextMap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0, type,
+            next() % 3 === 0 ? 0x100000 : 0, out], memory }, HANDED);
+        same('ContextUnmap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0], memory },
+            HANDED);
     }
+});
+
+test('a deferred context\'s map and unmap are the host\'s (test_deferred_context_map)', ()=>{
+    const memory = new Uint8Array(0x100);
+    const words = new DataView(memory.buffer);
+    let handed = 0;
+    const guest = {
+        u32: (/** @type {number} */ at)=>words.getUint32(at, true),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>{
+            words.setUint32(at, value, true);
+        },
+        compareExchange: ()=>0,
+        host: ()=>{
+            handed++;
+            return 0;
+        },
+    };
+    // The context at 0x10, its word past the pointer zero; a resource at 0x40.
+    sources.ContextMap(guest, 0x10, 0x40, 0, 4, 0, 0x80);
+    sources.ContextUnmap(guest, 0x10, 0x40, 0);
+    assert.equal(handed, 2);
 });
