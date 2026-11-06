@@ -602,6 +602,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           The top-level windows bottom to top, for the screen to be composed of.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
+ * @property {(hwnd: number) => void} cover
+ *           Makes a window the one a full-screen device presents into, its
+ *           frame taking no room.
  * @property {() => number} active
  *           The active top-level window -- what GetForegroundWindow answers --
  *           or zero while there is none.
@@ -6710,6 +6713,21 @@ export function createWindowFunctions(host){
          * @param {number} width @param {number} height
          * @param {{ announce?: boolean }} [how]
          */
+        /**
+         * Makes a window the one a full-screen device presents into: its
+         * frame takes no room, so its client area is the whole of it, as the
+         * picture is the whole mode. Nothing moves; the device places it.
+         *
+         * @param {number} hwnd
+         */
+        cover: hwnd=>{
+            const record = live(hwnd);
+            if (record && !record.frameless)
+            {
+                record.frameless = true;
+                tell(record);
+            }
+        },
         place: (hwnd, x, y, width, height, how = {})=>{
             const record = live(hwnd);
             if (!record)

@@ -2160,7 +2160,7 @@ test('a fullscreen device gives the display back to the registry mode at its las
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
     assert.equal(h.release(device), 0);
     assert.deepEqual(h.resolutions.at(-1), [800, 600, undefined, undefined]);
-    assert.equal(h.resolutions.length, 2);
+    assert.equal(h.resolutions.length, 3, 'the mode, the window placed in it, the mode given back');
     h.release(root);
 });
 

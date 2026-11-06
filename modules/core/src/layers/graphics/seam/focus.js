@@ -40,9 +40,11 @@ const WM_DISPLAYCHANGE = 0x007e;
 const WM_SYSCOMMAND = 0x0112;
 const SC_RESTORE = 0xf120;
 
+const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
 const SW_RESTORE = 9;
 const HWND_TOPMOST = 0xffffffff;
+const HWND_BROADCAST = 0xffff;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
@@ -74,6 +76,7 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  * @property {boolean} changes  Whether the windows are the runtime's to change.
  * @property {boolean} extended
  * @property {{ width: number, height: number }} size
+ * @property {boolean} setting  While the mode it set is being told.
  */
 
 /**
@@ -81,9 +84,12 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  * @param {(name: string) => { handler: (args: number[]) => unknown } | undefined} deps.user32
  * @param {(name: string, handler: (args: number[]) => unknown) => number} deps.procedure
  *        A guest-callable address that runs `handler` with a window procedure's four arguments.
+ * @param {(hwnd: number) => void} [deps.cover]
+ *        Makes a window the one a full-screen device presents into: its frame
+ *        takes no room.
  * @param {{ LOST: string, NOT_RESET: string, OK: string }} deps.states
  */
-export function createFocusWindows({ user32, procedure, states }){
+export function createFocusWindows({ user32, procedure, cover, states }){
     /** @param {string} name @param {number[]} args */
     const call = (name, args)=>user32(name)?.handler(args) ?? 0;
 
@@ -123,7 +129,8 @@ export function createFocusWindows({ user32, procedure, states }){
                     before.push(()=>filtered(one.focus, ()=>activate(one, (wParam >>> 0) !== 0)));
                     break;
                 case WM_DISPLAYCHANGE:
-                    if (!one.extended && one.device.deviceState === states.OK)
+                    // The mode the device set itself loses it nothing.
+                    if (!one.extended && !one.setting && one.device.deviceState === states.OK)
                     {
                         one.device.injectDeviceLoss(true);
                     }
@@ -259,7 +266,8 @@ export function createFocusWindows({ user32, procedure, states }){
          * @param {FocusDevice} device
          * @param {{ focus: number, window: number, fullscreen: boolean,
          *     noWindowChanges: boolean, extended: boolean, width: number,
-         *     height: number, created: boolean }} how
+         *     height: number, created: boolean, mode?: { bitsPerPixel: number } | null }} how
+         *        `mode` when the device set a mode other than the one it found.
          * @returns {unknown} a promise while the windows hear of it
          */
         take(device, how){
@@ -280,27 +288,53 @@ export function createFocusWindows({ user32, procedure, states }){
             }
             /** @type {Held} */
             const one = before ?? { device, focus, window: how.window >>> 0, changes: false,
-                extended: how.extended, size: { width: 0, height: 0 } };
+                extended: how.extended, size: { width: 0, height: 0 }, setting: false };
             Object.assign(one, { focus, window: (how.window >>> 0) || focus,
                 changes: !how.noWindowChanges, size: { width: how.width, height: how.height } });
             held.set(device, one);
             hook(focus).devices.add(one);
             return inTurn([
                 ()=>(how.created ? call('SetForegroundWindow', [focus]) : 0),
+                // A mode the device set is every window's to hear of, as a
+                // mode ChangeDisplaySettings set is.
+                ()=>{
+                    if (!how.mode)
+                    {
+                        return 0;
+                    }
+                    one.setting = true;
+                    /** @param {unknown} answer */
+                    const set = answer=>{
+                        one.setting = false;
+                        return answer;
+                    };
+                    return andThen(call('SendMessageA', [HWND_BROADCAST, WM_DISPLAYCHANGE,
+                        how.mode.bitsPerPixel, ((how.height & 0xffff) << 16 | how.width & 0xffff)
+                            >>> 0]), set);
+                },
                 ()=>{
                     if (!one.changes)
                     {
                         return 0;
                     }
-                    // An extended device leaves the window it is first made on
-                    // as it is, and shows it above the others every time after.
+                    // The picture is the whole mode, and so is the window.
+                    cover?.(one.window);
+                    const hidden = !visible(one.window);
+                    // Created, an extended device leaves the window it is
+                    // first made on where it is, and shows it above the others
+                    // every time after; a reset shows a window hidden since.
                     const again = how.extended && how.created
                         ? madeOn.has(one.window) : null;
                     madeOn.add(one.window);
-                    return again ?? !visible(one.window)
-                        ? filtered(one.window, ()=>call('SetWindowPos', [one.window, HWND_TOPMOST,
-                            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW]))
-                        : 0;
+                    const raise = how.created && (again ?? hidden);
+                    return inTurn([
+                        ()=>filtered(one.focus, ()=>call('SetWindowPos', [one.window,
+                            raise ? HWND_TOPMOST : 0, 0, 0, how.width, how.height, SWP_NOACTIVATE
+                            | (raise ? SWP_SHOWWINDOW : SWP_NOZORDER)])),
+                        ()=>(!how.created && hidden
+                            ? filtered(one.focus, ()=>call('ShowWindow', [one.window, SW_SHOW]))
+                            : 0),
+                    ]);
                 },
             ]);
         },

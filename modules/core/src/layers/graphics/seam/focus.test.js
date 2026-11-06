@@ -40,6 +40,9 @@ function harness({ visible = false } = {}){
         CallWindowProcA: ()=>0,
         DefWindowProcA: ()=>0,
         SetForegroundWindow: ()=>1,
+        // A broadcast reaches the focus window's procedure, among the others.
+        SendMessageA: ([, message, wParam, lParam])=>Number(nested?.([FOCUS, message, wParam,
+            lParam]) ?? 0),
         ChangeDisplaySettingsA: ()=>0,
         IsIconic: ()=>(iconic ? 1 : 0),
         ShowWindow: ([, command])=>{
@@ -57,7 +60,12 @@ function harness({ visible = false } = {}){
             return 1;
         },
     };
+    /** @type {number[]} */
+    const covered = [];
     const windows = createFocusWindows({
+        cover: hwnd=>{
+            covered.push(hwnd);
+        },
         user32: name=>({ handler: (/** @type {number[]} */ args)=>{
             calls.push([name, args]);
             return table[name](args);
@@ -79,28 +87,35 @@ function harness({ visible = false } = {}){
     /** @param {number} message @param {number} wParam */
     const send = (message, wParam)=>/** @type {(args: number[]) => unknown} */ (hook)(
         [FOCUS, message, wParam, 0]);
-    return { windows, device, calls, procs, send, names: ()=>calls.map(([name])=>name) };
+    const hide = ()=>{
+        style &= ~0x10000000;
+    };
+    return { windows, device, calls, procs, send, covered, hide,
+        names: ()=>calls.map(([name])=>name) };
 }
 
 const HOW = { focus: FOCUS, window: DEVICE_WINDOW, fullscreen: true, noWindowChanges: false,
     extended: false, width: 640, height: 480, created: true };
 
 test('a full-screen device hooks its focus window, activates it and shows its window', ()=>{
-    const { windows, device, procs, names, calls } = harness();
+    const { windows, device, procs, names, calls, covered } = harness();
     windows.take(device, HOW);
     assert.equal(procs.get(FOCUS), STUB, 'the runtime\'s procedure is the window\'s');
     assert.ok(names().includes('SetForegroundWindow'));
     const placed = calls.find(([name])=>name === 'SetWindowPos');
-    assert.ok(placed, 'a hidden device window is shown');
-    assert.equal(placed[1][1], 0xffffffff, 'and put above the others (WS_EX_TOPMOST)');
+    assert.deepEqual(placed?.[1].slice(0, 6), [DEVICE_WINDOW, 0xffffffff, 0, 0, 640, 480],
+        'a hidden device window is placed at the mode\'s size, above the others (WS_EX_TOPMOST)');
+    assert.equal((placed?.[1][6] ?? 0) & 0x40, 0x40, 'and shown');
+    assert.deepEqual(covered, [DEVICE_WINDOW], 'its frame taking no room');
     windows.release(device);
     assert.equal(procs.get(FOCUS), PROGRAM_PROC, 'the program\'s procedure back');
 });
 
-test('a visible device window is left where it is, and a windowed device hooks nothing', ()=>{
+test('a visible device window is only placed, and a windowed device hooks nothing', ()=>{
     const visible = harness({ visible: true });
     visible.windows.take(visible.device, HOW);
-    assert.equal(visible.names().includes('SetWindowPos'), false);
+    assert.deepEqual(visible.calls.filter(([name])=>name === 'SetWindowPos').map(([, args])=>args),
+        [[DEVICE_WINDOW, 0, 0, 0, 640, 480, 0x14]], 'the mode\'s size, where it is in the order');
     const windowed = harness();
     windowed.windows.take(windowed.device, { ...HOW, fullscreen: false });
     assert.equal(windowed.procs.get(FOCUS), PROGRAM_PROC);
@@ -165,7 +180,8 @@ test('an extended device shows its window only from the second made on it, and k
     const SHOWN = 0x40;
     const first = harness({ visible: true });
     first.windows.take(first.device, { ...HOW, extended: true });
-    assert.equal(first.names().includes('SetWindowPos'), false, 'the first leaves it as it is');
+    assert.deepEqual(first.calls.filter(([name])=>name === 'SetWindowPos').map(([, args])=>args),
+        [[DEVICE_WINDOW, 0, 0, 0, 640, 480, 0x14]], 'the first only places it');
     first.windows.release(first.device);
     const again = { ...first.device };
     first.calls.length = 0;
@@ -183,4 +199,39 @@ test('an extended device shows its window only from the second made on it, and k
     hidden.calls.length = 0;
     hidden.send(0x1c, 0);
     assert.equal(hidden.names().includes('ShowWindow'), false, 'a hidden window stays as it is');
+});
+
+test('a reset shows a device window hidden since, and places it at the new mode', ()=>{
+    // Wine's d3d9 test_wndproc, mode_change_messages_hidden: the window
+    // placed, then ShowWindow's own WINDOWPOS (SWP_SHOWWINDOW | SWP_NOMOVE |
+    // SWP_NOSIZE, no window to go after).
+    const { windows, device, calls, hide } = harness();
+    windows.take(device, HOW);
+    calls.length = 0;
+    const RESET = { ...HOW, created: false, width: 800, height: 600 };
+    windows.take(device, RESET);
+    /** @returns {[string, number[]][]} */
+    const placing = ()=>calls.splice(0).filter(([name])=>name === 'SetWindowPos'
+        || name === 'ShowWindow');
+    assert.deepEqual(placing(), [['SetWindowPos', [DEVICE_WINDOW, 0, 0, 0, 800, 600, 0x14]]],
+        'shown already: only placed');
+    // The program hides it, as World of Warplanes does, and resets.
+    hide();
+    windows.take(device, RESET);
+    assert.deepEqual(placing(), [['SetWindowPos', [DEVICE_WINDOW, 0, 0, 0, 800, 600, 0x14]],
+        ['ShowWindow', [DEVICE_WINDOW, 5]]]);
+});
+
+test('a mode the device sets is broadcast, and loses that device nothing', ()=>{
+    const { windows, device, calls } = harness();
+    windows.take(device, { ...HOW, mode: { bitsPerPixel: 32 } });
+    const told = calls.find(([name])=>name === 'SendMessageA');
+    assert.deepEqual(told?.[1], [0xffff, 0x7e, 32, (480 << 16 | 640) >>> 0],
+        'WM_DISPLAYCHANGE to every window: the depth, the size');
+    assert.equal(device.deviceState, STATES.OK);
+    assert.ok(calls.some(([name, args])=>name === 'CallWindowProcA' && args[2] === 0x7e),
+        'the program hears it');
+    calls.length = 0;
+    windows.take(device, { ...HOW, created: false });
+    assert.equal(calls.some(([name])=>name === 'SendMessageA'), false, 'the same mode: nothing');
 });

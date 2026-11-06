@@ -495,7 +495,7 @@ test('a fullscreen device gives the display back to the registry mode at its las
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
     assert.equal(h.release(device), 0);
     assert.deepEqual(h.resolutions.at(-1), [1280, 1024, undefined, undefined]);
-    assert.equal(h.resolutions.length, 2);
+    assert.equal(h.resolutions.length, 3, 'the mode, the window placed in it, the mode given back');
     h.release(root);
 });
 
@@ -521,7 +521,8 @@ test('D3DCREATE_NOWINDOWCHANGES sets the mode and leaves the window as it is', (
     assert.notEqual(device, 0);
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.map(([w, hh, window])=>[w, hh, window]),
-        [[640, 480, 0], [640, 480, 0]], 'the mode, and no window named to place');
+        [[640, 480, undefined], [640, 480, 0], [640, 480, 0]],
+        'the mode, and no window named to place');
 });
 
 test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
@@ -532,11 +533,11 @@ test('a fullscreen device tells its window the mode at its first frame, once', (
     const root = h.create();
     const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
         Windowed: 0, hDeviceWindow: 0x777 });
-    assert.equal(h.resolutions.length, 1, 'creation placed the window');
+    assert.equal(h.resolutions.length, 2, 'creation set the mode and placed the window');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true, 'announced']);
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
-    assert.equal(h.resolutions.length, 2, 'the second frame says nothing');
+    assert.equal(h.resolutions.length, 3, 'the second frame says nothing');
 
     const windowed = h.createDevice(h.create()).device;
     const before = h.resolutions.length;

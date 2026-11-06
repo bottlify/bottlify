@@ -588,7 +588,7 @@ export function createWin32Module(){
             /** @type {{ list: () => any[], clientRect: (hwnd: number) => any,
              *     place: (hwnd: number, x: number, y: number, width: number,
              *     height: number, how?: { announce?: boolean }) => boolean,
-             *     active: () => number, deactivated: () => boolean,
+             *     cover: (hwnd: number) => void, active: () => number, deactivated: () => boolean,
              *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
@@ -598,7 +598,7 @@ export function createWin32Module(){
              *     surfaces?: () => { hwnd: number, rect: any, shown: boolean,
              *         shape: any[] }[] }} */
             let windowService = {
-                list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
+                list: ()=>[], clientRect: ()=>null, place: ()=>false, cover: ()=>{}, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
                 modalLoop: ()=>0, painting: ()=>false,
             };
@@ -5056,6 +5056,14 @@ export function createWin32Module(){
                  */
                 placeWindow: (hwnd, x, y, width, height, how)=>
                     windowService.place(hwnd, x, y, width, height, how),
+
+                /**
+                 * Makes a window the one a full-screen device presents into,
+                 * its frame taking no room, before the device places it.
+                 *
+                 * @param {number} hwnd
+                 */
+                coverWindow: hwnd=>windowService.cover(hwnd),
 
                 /**
                  * One window's client rectangle on the screen, or null for a

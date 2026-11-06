@@ -3825,8 +3825,16 @@ export function createDirect3D9Seam(
         const width = parameters.backBufferWidth >>> 0;
         const height = parameters.backBufferHeight >>> 0;
         const how = windowsOf.get(device);
+        const found = screen();
+        const mode = !parameters.windowed && (found.width !== width || found.height !== height)
+            ? { bitsPerPixel: found.bitsPerPixel ?? 32 } : null;
+        if (!parameters.windowed)
+        {
+            // The mode first, which the windows placed in it then hear.
+            resolution?.(width, height);
+        }
         const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
-            fullscreen: !parameters.windowed, width, height, created: !how.taken }) : 0;
+            fullscreen: !parameters.windowed, width, height, created: !how.taken, mode }) : 0;
         if (how)
         {
             how.taken = true;
@@ -3854,9 +3862,11 @@ export function createDirect3D9Seam(
         }
         unshown.delete(device);
         // D3DCREATE_NOWINDOWCHANGES leaves the window's size to the program.
-        resolution?.(width, height, { window: how?.noWindowChanges ? 0 : window,
-            fullscreen: true });
-        return taken;
+        return andThen(taken, ()=>{
+            resolution?.(width, height, { window: how?.noWindowChanges ? 0 : window,
+                fullscreen: true });
+            return 0;
+        });
     };
 
     /**
