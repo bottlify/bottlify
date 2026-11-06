@@ -680,7 +680,11 @@ function parse(argv){
         placement: argv.includes('--placement') ? argv[argv.indexOf('--placement') + 1] : null,
         // Direct3D and OpenGL drawn in a graphics worker, the program's thread
         // keeping only their state, as the player runs them.
-        graphicsWorker: argv.includes('--graphics-worker'),
+        // Its frames come back as pictures, as the player's do; as bytes only
+        // on SwiftShader, which loses `mapAsync` once a worker holds a WebGPU
+        // canvas. Bytes cost the program's thread a texture upload a frame.
+        graphicsWorker: argv.includes('--graphics-worker')
+            && (argv.some(arg=>/--use-webgpu-adapter=swiftshader/.test(arg)) ? 'pixels' : true),
         // A GPU that takes every call and draws nothing, the devices played in
         // a graphics worker over it: what measures the engine alone, with no
         // software rasteriser taking the machine's cores and holding it for frames.

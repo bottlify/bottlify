@@ -1573,7 +1573,8 @@ export function createHarness(canvas, how = {}){
                 url: new URL(`./fake-graphics.worker.js?pipelineMs=${request.fakePipelineMs ?? 0}`
                     + `&features=${(request.fakeFeatures ?? []).join(',')}`, import.meta.url) })
             : request.graphicsWorker
-                ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics, gcNudge })
+                ? await openGraphicsWorker({ capture: captureGraphics, gcNudge,
+                    frames: request.graphicsWorker === 'pixels' ? 'pixels' : 'bitmap' })
                 : null;
         if (graphicsWorker && !graphicsWorker.worker)
         {
