@@ -1472,3 +1472,52 @@ test('the earlier interfaces\' sampler render states are kept on IDirect3DDevice
     assert.equal(target.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
 });
+
+test('a device is made on no indexed surface, and its target moves to one in system memory or a'
+    + ' depth buffer, not an indexed one (test_rt_caps)', ()=>{
+    const root = ddrawObject();
+    const d3d = createDirect3D7(root);
+    const p8 = { size: 0x20, flags: 0x20 | 0x40, fourCC: 0, bitCount: 8, redMask: 0,
+        greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const palette = /** @type {any} */ (root.createPalette(4 | 0x40, new Array(256).fill(0))
+        .palette);
+    const indexed = (/** @type {number} */ caps)=>{
+        const made = surface(root, { caps: caps | DDSCAPS_3DDEVICE | 0x40, pixelFormat: p8 });
+        assert.equal(made.setPalette(palette), D3D_OK);
+        return made;
+    };
+    const video = indexed(0x4000);
+    const system = indexed(0x800);
+    assert.equal(d3d.createDevice(DEVICE_IDS.HAL, video).hr >>> 0, 0x88760091,
+        'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(d3d.createDevice(DEVICE_IDS.HAL, system).hr >>> 0, 0x887602eb,
+        'D3DERR_SURFACENOTINVIDMEM');
+    assert.equal(d3d.createDevice(DEVICE_IDS.RGB, system).hr >>> 0, 0x80004005, 'E_FAIL');
+    const older = d3d.createDevice(DEVICE_IDS.RGB, system, { legacy: true });
+    assert.equal(older.hr, D3D_OK, 'an older interface\'s rasteriser makes it');
+    older.device.release();
+
+    const target = surface(root);
+    const made = d3d.createDevice(DEVICE_IDS.HAL, target);
+    assert.equal(made.hr, D3D_OK);
+    const device = made.device;
+    const sysmem = surface(root, { caps: DDSCAPS_3DDEVICE | 0x40 | 0x800 });
+    assert.equal(device.SetRenderTarget(sysmem), D3D_OK, 'system memory is taken as a target');
+    assert.equal(device.SetRenderTarget(video) >>> 0, 0x88760064, 'DDERR_INVALIDCAPS');
+    const depth = surface(root, { caps: DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+    assert.equal(device.SetRenderTarget(depth) >>> 0, 0x88760091,
+        'a depth buffer is refused as a format');
+    /** @type {{ surface?: any }} */
+    const held = {};
+    assert.equal(device.GetRenderTarget(held), D3D_OK);
+    assert.equal(held.surface, depth, 'and taken all the same');
+    held.surface.release();
+    assert.equal(depth.refCount, 2, 'with a reference of its own');
+    // Through IDirect3DDevice2 no reference is taken.
+    assert.equal(device.SetRenderTarget(target), D3D_OK);
+    assert.equal(device.SetRenderTarget(depth, { unheldDepth: true }) >>> 0, 0x88760091);
+    assert.equal(depth.refCount, 1);
+    assert.equal(depth.addRef(), 2);
+    assert.equal(device.release(), 0);
+    assert.equal(depth.refCount, 1, 'let go of at the device\'s release');
+});

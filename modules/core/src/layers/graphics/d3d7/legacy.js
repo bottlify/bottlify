@@ -777,7 +777,7 @@ export function createLegacyDirect3D(d3d7, textures){
             {
                 return { hr: DDERR_NOTFOUND, device: null };
             }
-            const made = d3d7.createDevice(deviceId, surface);
+            const made = d3d7.createDevice(deviceId, surface, { legacy: true });
             if (made.hr !== D3D_OK)
             {
                 return made;
@@ -1271,7 +1271,7 @@ function createLegacyDevice(inner, version, legacy){
 
         /** @param {any} surface */
         setRenderTarget(surface){
-            const hr = inner.SetRenderTarget(surface);
+            const hr = inner.SetRenderTarget(surface, { unheldDepth: version === 2 });
             if (hr === D3D_OK)
             {
                 applyViewport();

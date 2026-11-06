@@ -37,7 +37,8 @@
 import {
     D3DERR_INBEGINSTATEBLOCK, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDSTATEBLOCK,
     D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK, D3DERR_SCENE_IN_SCENE,
-    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE, D3DRENDERSTATE,
+    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_SURFACENOTINVIDMEM, D3DERR_VERTEXBUFFERLOCKED, D3DFMT,
+    D3DLIGHTTYPE, D3DRENDERSTATE,
     D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
     D3DTSS_ADDRESS,
     D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
@@ -60,7 +61,8 @@ import { writePixels } from '../d3d9/resources.js';
 import { packDepths, unpackDepths } from './depth.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DXT_CODES, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER,
-    DDSCAPS_ZBUFFER,
+    DDSCAPS_ZBUFFER, DDERR_INVALIDCAPS, DDERR_INVALIDPIXELFORMAT, DDSCAPS_3DDEVICE,
+    DDSCAPS_SYSTEMMEMORY, E_FAIL,
 } from '../ddraw/constants.js';
 
 /**
@@ -280,6 +282,55 @@ function bufferLockFlags(lockFlags){
 }
 
 /**
+ * Why a device cannot be created on a surface, or D3D_OK. Past the caps and
+ * the palette DirectDraw asks of any target, an indexed one is drawn by no
+ * device here: in video memory its format is refused, in system memory a
+ * hardware device wants video memory first, and the software rasteriser of
+ * IDirect3D7 fails it while an older interface's makes it (Wine's
+ * test_rt_caps, each version).
+ *
+ * @param {any} surface
+ * @param {boolean} hardware
+ * @param {boolean} legacy  Asked through IDirect3D, 2 or 3.
+ * @returns {number}
+ */
+export function deviceTargetRefusal(surface, hardware, legacy){
+    const hr = validateDeviceTarget({
+        caps: surface.caps,
+        pixelFormatFlags: surface.pixelFormat.flags,
+        hasPalette: surface.palette !== null,
+    }, hardware);
+    if (hr !== D3D_OK || (surface.pixelFormat.flags & DDPF_PALETTEINDEXED_ANY) === 0)
+    {
+        return hr;
+    }
+    if (!hardware)
+    {
+        return legacy ? D3D_OK : E_FAIL;
+    }
+    return (surface.caps & DDSCAPS_SYSTEMMEMORY) !== 0
+        ? D3DERR_SURFACENOTINVIDMEM : DDERR_INVALIDPIXELFORMAT;
+}
+
+/**
+ * Why a device's target cannot be moved to a surface, or D3D_OK. Unlike a
+ * device's creation, a target in system memory is taken; an indexed one is
+ * refused by its caps, and a depth buffer is taken but answered as a format
+ * no target has (Wine's test_rt_caps: GetRenderTarget names it after).
+ *
+ * @param {any} surface
+ * @returns {number}
+ */
+export function renderTargetRefusal(surface){
+    if ((surface.caps & DDSCAPS_3DDEVICE) === 0
+        || (surface.pixelFormat.flags & DDPF_PALETTEINDEXED_ANY) !== 0)
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    return (surface.caps & DDSCAPS_ZBUFFER) !== 0 ? DDERR_INVALIDPIXELFORMAT : D3D_OK;
+}
+
+/**
  * The Direct3D 7 object, which is a view of the DirectDraw object: it has
  * no count of its own (the seam routes its references to IDirectDraw7's),
  * and every surface it is handed belongs to that object.
@@ -315,9 +366,10 @@ export function createDirect3D7(ddraw, services = {}){
         /**
          * @param {string} deviceId
          * @param {any} surface  A DirectDraw surface with DDSCAPS_3DDEVICE.
+         * @param {{ legacy?: boolean }} [options]  `legacy` when asked through an older interface.
          * @returns {{ hr: number, device: any }}
          */
-        createDevice(deviceId, surface){
+        createDevice(deviceId, surface, options = {}){
             const description = DEVICE_DESCRIPTIONS.find(device=>device.id === deviceId);
             if (!description)
             {
@@ -329,11 +381,8 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return { hr: DDERR_INVALIDPARAMS, device: null };
             }
-            const hr = validateDeviceTarget({
-                caps: surface.caps,
-                pixelFormatFlags: surface.pixelFormat.flags,
-                hasPalette: surface.palette !== null,
-            }, description.id !== DEVICE_IDS.RGB);
+            const hr = deviceTargetRefusal(surface, description.id !== DEVICE_IDS.RGB,
+                options.legacy === true);
             if (hr !== D3D_OK)
             {
                 return { hr, device: null };
@@ -1201,38 +1250,42 @@ export function createDirect3D7(ddraw, services = {}){
             },
 
             /**
-             * A new target must be one a device could have been created on.
-             * The reference moves with it: the old target is released, the
-             * new one held.
+             * A new target: one with DDSCAPS_3DDEVICE that is not indexed
+             * (`renderTargetRefusal`). The reference moves with it: the old
+             * target is released, the new one held.
              *
              * @param {any} surface
+             * @param {{ unheldDepth?: boolean }} [how]
              */
-            SetRenderTarget(surface){
+            SetRenderTarget(surface, how = {}){
                 if (!surface)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const hr = validateDeviceTarget({
-                    caps: surface.caps,
-                    pixelFormatFlags: surface.pixelFormat.flags,
-                    hasPalette: surface.palette !== null,
-                }, description.id !== DEVICE_IDS.RGB);
-                if (hr !== D3D_OK)
+                const hr = renderTargetRefusal(surface);
+                const depth = hr === DDERR_INVALIDPIXELFORMAT;
+                if (hr !== D3D_OK && !depth)
                 {
                     return hr;
                 }
                 if (surface !== renderTarget)
                 {
-                    surface.addRef();
+                    // IDirect3DDevice2 takes a depth buffer as its target with
+                    // no reference of its own, and lets one go all the same
+                    // (Wine's ddraw2 test_rt_caps).
+                    if (!depth || !how.unheldDepth)
+                    {
+                        surface.addRef();
+                    }
                     renderTarget.release();
                     renderTarget = surface;
                     viewport = fullTarget({ width: surface.width, height: surface.height });
-                    if (renderer)
+                    if (renderer && !depth)
                     {
                         targetAdapterFor(surface);
                     }
                 }
-                return D3D_OK;
+                return hr;
             },
 
             /** @param {{ surface?: any }} out */
