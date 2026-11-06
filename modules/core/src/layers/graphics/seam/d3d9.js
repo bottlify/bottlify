@@ -3325,10 +3325,11 @@ export function createDirect3D9Seam(
                     (windowed >>> 0) !== 0)),
 
         /** @param {any} root @param {number[]} args */
-        CheckDeviceFormat: (root, [adapter, , , usage, resourceType, format])=>(
+        CheckDeviceFormat: (root, [adapter, , adapterFormat, usage, resourceType, format])=>(
             (adapter >>> 0) !== 0
                 ? D3DERR_INVALIDCALL
-                : root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0)),
+                : root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0,
+                    adapterFormat >>> 0)),
 
         /** @param {any} root @param {number[]} args */
         CheckDeviceMultiSampleType: (root, [adapter, , , , type, out])=>{

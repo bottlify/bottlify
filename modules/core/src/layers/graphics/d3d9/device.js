@@ -597,9 +597,21 @@ export function createDirect3D9(options = {}){
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
          * @param {number} format
-         * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
+         * @param {number} [adapterFormat]  The display format asked about.
+         * @returns {number} D3D_OK, D3DERR_NOTAVAILABLE, or D3DERR_INVALIDCALL for
+         *     no adapter format at all
          */
-        CheckDeviceFormat(usage, resourceType, format){
+        CheckDeviceFormat(usage, resourceType, format, adapterFormat = D3DFMT.X8R8G8B8){
+            // Asked against no display format at all, the question is not
+            // one (Wine's test_check_device_format: D3DFMT_UNKNOWN).
+            if (adapterFormat === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (!DISPLAY_FORMATS.has(adapterFormat))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
             const info = FORMAT_INFO[format];
             if (!info || info.video)
             {

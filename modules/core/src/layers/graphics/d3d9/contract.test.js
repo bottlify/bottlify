@@ -84,6 +84,12 @@ test('the adapter answers format questions from the table its creates consult', 
         'A8R8G8B8 is no display format');
 
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.UNKNOWN),
+        D3DERR_INVALIDCALL, 'no adapter format (test_check_device_format)');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'an adapter format no display is in');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.R5G6B5),
+        D3D_OK);
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),
         D3D_OK);
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.SURFACE, D3DFMT.D24S8),
