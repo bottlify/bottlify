@@ -1511,10 +1511,8 @@ export function moveCopyCode(){
  *     cmp dword [ecx+LENT], 0
  *     je free
  *   guarded:
- *     mov eax, [esp+8]
- *     and eax, NOOVERWRITE | DISCARD
- *     cmp eax, NOOVERWRITE
- *     jne held
+ *     test dword [esp+8], NOOVERWRITE   ; with DISCARD too, a NOOVERWRITE
+ *     jz held
  *   free:
  *     cmp dword [esp+12], 0
  *     jne take
@@ -1528,6 +1526,10 @@ export function moveCopyCode(){
  *     mov eax, [ecx+LENGTH]
  *     mov [ecx+TO], eax
  *     mov ebx, [esp+12]           ; flags, one word further for the push
+ *     test ebx, NOOVERWRITE
+ *     jz alone
+ *     and ebx, ~DISCARD           ; with NOOVERWRITE, a NOOVERWRITE
+ *   alone:
  *     or [ecx+LOCK_FLAGS], ebx
  *     mov dword [ecx+LOCKED], 1
  *     mov ebx, [ecx+DEVICE]
@@ -1571,10 +1573,8 @@ export function lock7Code(at, trap){
         [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
         { jcc: 0x74, to: 'free' },                               // je free
         { label: 'guarded' },
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
-        [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x75, to: 'held' },                               // jne held
+        [0xf7, 0x44, 0x24, 0x08, ...dword(D3DLOCK_NOOVERWRITE)], // test dword [esp+8], 0x1000
+        { jcc: 0x74, to: 'held' },                               // jz held
         { label: 'free' },
         [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
         { jcc: 0x75, to: 'take' },                               // jne take
@@ -1588,6 +1588,10 @@ export function lock7Code(at, trap){
         [0x8b, 0x41, BUFFER.LENGTH],                             // mov eax, [ecx+8]
         [0x89, 0x41, BUFFER.TO],                                 // mov [ecx+20], eax
         [0x8b, 0x5c, 0x24, 0x0c],                                // mov ebx, [esp+12]
+        [0xf7, 0xc3, ...dword(D3DLOCK_NOOVERWRITE)],             // test ebx, 0x1000
+        { jcc: 0x74, to: 'alone' },                              // jz alone
+        [0x81, 0xe3, ...dword(~D3DLOCK_DISCARD >>> 0)],          // and ebx, ~0x2000
+        { label: 'alone' },
         [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
         [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]

@@ -33,7 +33,7 @@ import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_WIDTH } from '../ddraw/constants.js';
 import { COMMAND_MIRRORS } from './d3d7.js';
-import { BUFFER, VERTEX_BUFFER7, commandCode, createShadow, lock7Code, settledAfter,
+import { BUFFER, SHADOW, VERTEX_BUFFER7, commandCode, createShadow, lock7Code, settledAfter,
     unlockCode } from './shadow.js';
 
 const PROGRAM = 0x8000;
@@ -113,15 +113,18 @@ function generate(seed, count){
             const span = 1 + next(Math.min(24, VERTICES - first));
             const offset = first * STRIDE;
             const length = span * STRIDE;
-            if (flags === DDLOCK_NOOVERWRITE && read.subarray(offset, offset + length).includes(1))
+            // With NOOVERWRITE, DISCARDCONTENTS is no discard: the lock is
+            // in place (ddraw7 test_map_synchronisation).
+            const inPlace = (flags & DDLOCK_NOOVERWRITE) !== 0;
+            if (inPlace && read.subarray(offset, offset + length).includes(1))
             {
                 continue;
             }
-            if (flags !== DDLOCK_NOOVERWRITE)
+            if (!inPlace)
             {
                 read = new Uint8Array(LENGTH);
             }
-            if ((flags & DDLOCK_DISCARDCONTENTS) !== 0)
+            if (flags === DDLOCK_DISCARDCONTENTS)
             {
                 defined = new Uint8Array(LENGTH);
             }
@@ -334,10 +337,14 @@ function guest(steps){
     };
 
     let inGuest = 0;
+    // Locks with both flags taken in the guest while draws waited in the ring.
+    let bothUnderDraws = 0;
     for (const step of steps)
     {
         if (step.kind === 'lock')
         {
+            const flagsBefore = readU32(block + BUFFER.LOCK_FLAGS);
+            const pending = readU32(shadow.address() + SHADOW.DRAWS_PENDING) !== 0;
             const locked = run(LOCK, BUFFER_IF, [step.flags, OUT, SIZE_OUT]);
             if ('trap' in locked)
             {
@@ -354,6 +361,17 @@ function guest(steps){
             {
                 assert.equal(locked.hr, D3D_OK);
                 assert.equal(readU32(SIZE_OUT), LENGTH, 'the size written where it points');
+                // Both flags are a NOOVERWRITE taken in place: the replay must
+                // not rename what the draws before it read.
+                if ((step.flags & DDLOCK_NOOVERWRITE) !== 0)
+                {
+                    assert.equal(readU32(block + BUFFER.LOCK_FLAGS) & ~flagsBefore
+                        & DDLOCK_DISCARDCONTENTS, 0, 'a NOOVERWRITE remembers no DISCARD');
+                    if (pending && (step.flags & DDLOCK_DISCARDCONTENTS) !== 0)
+                    {
+                        bothUnderDraws++;
+                    }
+                }
                 inGuest++;
             }
             writeMemory(readU32(OUT) + step.offset, bytesOf(step));
@@ -396,18 +414,20 @@ function guest(steps){
         }
     }
     shadow.sync();
-    return { reads, inGuest };
+    return { reads, inGuest, bothUnderDraws };
 }
 
 test('Direct3D 7: a draw reads the vertices its buffer held when the program made it, however'
     + ' its locks were taken', ()=>{
     let inGuest = 0;
+    let bothUnderDraws = 0;
     for (let seed = 1; seed <= 20; seed++)
     {
         const steps = generate(seed, 300);
         const expected = direct(steps);
         const actual = guest(steps);
         inGuest += actual.inGuest;
+        bothUnderDraws += actual.bothUnderDraws;
         const label = `seed ${seed}`;
         assert.equal(actual.reads.length, expected.length, `${label}: every draw is made`);
         const first = expected.findIndex((bytes, i)=>
@@ -415,4 +435,7 @@ test('Direct3D 7: a draw reads the vertices its buffer held when the program mad
         assert.equal(first, -1, `${label}: draw ${first} reads what it would on the host`);
     }
     assert.ok(inGuest > 500, `${inGuest} locks taken in the guest`);
+    // A NOOVERWRITE with DISCARD is a NOOVERWRITE: taken in the guest under
+    // waiting draws as one without it is (ddraw7 test_map_synchronisation).
+    assert.ok(bothUnderDraws > 20, `${bothUnderDraws} with both flags under draws`);
 });
