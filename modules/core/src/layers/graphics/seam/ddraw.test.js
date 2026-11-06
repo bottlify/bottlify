@@ -2391,6 +2391,15 @@ test('a DXT5 surface reports its size whole, and a copy into an RGB texture deco
             flags: DDPF_RGB | DDPF_ALPHAPIXELS, fourCC: 0, bitCount: 16, redMask: 0xf00,
             greenMask: 0xf0, blueMask: 0xf, alphaMask: 0xf000 });
 
+        // No colour fill of blocks is made, and a depth fill is a wrong
+        // argument before that (test_color_fill).
+        h.box.bytes.fill(0, 0x5f00, 0x5f00 + 100);
+        h.box.memory.writeU32(0x5f00, 100);
+        assert.equal(h.surface7(dxt5, 'Blt', [0, 0, 0, DDBLT_COLORFILL, 0x5f00]) >>> 0,
+            0x80004001);
+        assert.equal(h.surface7(dxt5, 'Blt', [0, 0, 0, 0x02000000, 0x5f00]) >>> 0,
+            DDERR_INVALIDPARAMS >>> 0);
+
         const desc = descOf(h, dxt5);
         assert.equal(desc.flags & DDSD_PITCH, 0, 'no pitch');
         assert.ok((desc.flags & DDSD_LINEARSIZE) !== 0, 'DDSD_LINEARSIZE');

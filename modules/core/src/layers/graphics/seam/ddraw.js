@@ -1050,6 +1050,14 @@ export function createDirectDrawSeam(
             /** @param {any} surface @param {number[]} args */
             Blt: (surface, [destRect, source, sourceRect, flags, fx])=>{
                 const from = publisher.objectAt(source);
+                // A depth fill of what holds no depth is a wrong argument
+                // whatever the surface's format: a DXTn texture says so
+                // before it says it has no pixels to fill (test_color_fill).
+                if ((flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL)) === DDBLT_DEPTHFILL
+                    && (surface.caps & DDSCAPS_ZBUFFER) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
                 const hr = blitPreconditions(surface, from);
                 if (hr !== DD_OK)
                 {
