@@ -221,6 +221,7 @@ function seamed(build = {}){
             deleteSurfaceDc: handle=>{
                 dcs.push({ event: 'delete', handle });
             },
+            displayDc: ()=>0x1d1d,
         },
         present: surface=>presented.push(surface),
         flipQueued: build.flipQueued,
@@ -482,11 +483,21 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
     // DDRAW.dll's export finds the surface by the DC alone, as the first generation.
     assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0x5500, 0x5504]), DD_OK);
     assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5500)), model);
+    assert.equal(h.box.memory.readU32(0x5504), 0x1d1d, 'the display\'s DC beside it');
     h.release(h.box.memory.readU32(0x5500));
     assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0, 0x5504]) >>> 0, 0x80070057);
     assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([0x1234, 0x5500, 0x5504]) >>> 0,
         DDERR_NOTFOUND);
     assert.deepEqual([h.box.memory.readU32(0x5500), h.box.memory.readU32(0x5504)], [0, 0]);
+    // The object's own method: a DC it did not hand out names nothing.
+    h.box.memory.writeU32(0x5508, 0xdeadbeef);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetSurfaceFromDC'),
+        [0x1234, 0x5508]) >>> 0, DDERR_NOTFOUND);
+    assert.equal(h.box.memory.readU32(0x5508), 0);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetSurfaceFromDC'),
+        [hdc, 0x5508]), DD_OK);
+    assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5508)), model);
+    h.release(h.box.memory.readU32(0x5508));
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
         width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
         format: '555', sizeImage: 0,

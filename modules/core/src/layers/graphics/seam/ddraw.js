@@ -340,6 +340,8 @@ export function versionOf(id){
  *     GDI owns device contexts; this seam only knows where the pixels are.
  * @property {(attributes: import('../ddraw/objects.js').DcAttributes) => number} createSurfaceDc
  * @property {(handle: number) => void} deleteSurfaceDc
+ * @property {() => number} [displayDc]  A device context of the display, which
+ *     GetSurfaceFromDC names as the one a surface's DC is made for.
  */
 
 /**
@@ -2199,10 +2201,16 @@ export function createDirectDrawSeam(
 
         /** @param {any} root @param {number[]} args */
         GetSurfaceFromDC: (root, [handle, out])=>{
-            const surface = root.surfaceWithDc(handle >>> 0);
-            if (!surface || (out >>> 0) === 0)
+            if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            const surface = root.surfaceWithDc(handle >>> 0);
+            // A DC no surface of this object handed out names none.
+            if (!surface)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return DDERR_NOTFOUND;
             }
             surface.addRef();
             handBack(surface, surfaceInterfaces, generation.surface, out >>> 0);
@@ -2393,7 +2401,9 @@ export function createDirectDrawSeam(
                 {
                     surface.addRef();
                     handBack(surface, surfaceInterfaces, IID_IDirectDrawSurface, out >>> 0);
-                    fields.writeU32(deviceOut >>> 0, hdc >>> 0);
+                    // The display's DC, which the surface's is made like
+                    // (Wine's test_get_surface_from_dc: OBJ_DC, a raster display).
+                    fields.writeU32(deviceOut >>> 0, (gdi?.displayDc?.() ?? 0) || (hdc >>> 0));
                     return DD_OK;
                 }
             }
