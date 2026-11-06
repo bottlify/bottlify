@@ -824,14 +824,15 @@ test('event and occlusion queries are offered, the timings are not, and a null p
         assert.equal(refused.query, undefined);
 
         // A device that draws nothing counts nothing: an occlusion query
-        // never ended answers without writing, and once ended, zero.
+        // never issued answers the runtime's fill (Wine's
+        // test_occlusion_query), and once ended, zero.
         /** @type {{ query?: any }} */
         const occlusion = {};
         assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, occlusion), D3D_OK);
         /** @type {{ value?: number }} */
         const pixels = {};
         assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
-        assert.equal(pixels.value, undefined);
+        assert.equal(pixels.value, 0xdddddddd);
         assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
         assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
         assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);

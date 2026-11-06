@@ -5129,8 +5129,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
              * the caller wait for the count (Wine's d3d9 test_occlusion_query,
              * whose loop polls with it). An event's buffer too small for its
              * BOOL is refused; an occlusion count is written in as many of
-             * its bytes as there is room for, and a query never ended writes
-             * nothing.
+             * its bytes as there is room for, and a query never issued writes
+             * the runtime's fill, 0xdddddddd.
              *
              * @param {{ value?: number } | null} out
              * @param {number} size  Bytes the caller has room for; zero asks nothing.
@@ -5157,6 +5157,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 if (!occlusion)
                 {
                     return answer(1);
+                }
+                // Never issued, the count is the runtime's fill (Wine's
+                // test_occlusion_query: 0xdddddddd, S_OK).
+                if (!ended)
+                {
+                    return answer(0xdddddddd);
                 }
                 if (!counted)
                 {
