@@ -95,6 +95,7 @@ import { canonicalAttribName } from './arb-program.js';
  * @property {number} element  the element of an array of blocks, or 0
  * @property {string | null} instance
  * @property {number} size  UNIFORM_BLOCK_DATA_SIZE, in bytes
+ * @property {'std140' | 'std430'} packing
  * @property {import('./glsl-layout.js').MemberLayout[]} members
  * @property {{ vertex: boolean, fragment: boolean }} stages
  * @property {number} binding  the binding point a link leaves it at: the
@@ -541,7 +542,7 @@ export function linkProgram({ vertex, fragment, attribBindings,
     const uniforms = [];
     /** @type {Map<number, { leaf: UniformLeaf, element: number }>} */
     const locations = new Map();
-    /** @type {{ leaf: UniformLeaf, element: number, dim: string, shadow: boolean }[]} */
+    /** @type {LinkedProgram["samplers"]} */
     const samplers = [];
     let nextLocation = 0;
     let storeWords = 0;
@@ -792,6 +793,7 @@ function uniformBlocksOf(vs, fs, error){
                 }
                 continue;
             }
+            /** @type {'std140' | 'std430'} */
             const packing = info.layout.std430 ? 'std430' : 'std140';
             const laid = info.laid ?? blockLayout(info.members.map(m=>({ name: m.name,
                 type: m.type, rowMajor: !!m.layout.row_major })), 'std140');
@@ -810,7 +812,7 @@ function uniformBlocksOf(vs, fs, error){
                 blocks.push({
                     name: info.arrays.length > 0 ? `${info.name}[${k}]` : info.name,
                     blockName: info.name, element: k, instance: info.instance,
-                    size: laid.size, members: laid.members,
+                    size: laid.size, packing, members: laid.members,
                     stages: { vertex: stage === vs, fragment: stage === fs },
                     binding: typeof info.layout.binding === 'number' ? binding + k : 0,
                 });

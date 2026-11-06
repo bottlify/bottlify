@@ -35,7 +35,9 @@ import { GL } from './constants.js';
 import {
     CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
 } from './arb-wgsl.js';
-import { emitStage, interfaceStruct } from './glsl-wgsl.js';
+import {
+    blockDeclaration, emitStage, interfaceStruct, samplerTypeOf, textureTypeOf,
+} from './glsl-wgsl.js';
 
 /**
  * @typedef {Object} UnitState
@@ -1215,13 +1217,15 @@ function generateGlslDraw(state){
     const options = {
         attributes: state.attributes, flat: state.flat, twoSide: !!state.twoSide,
         alphaFunc: state.alphaFunc, targets, compare: compareExpression,
+        targetScalars: (state.targets?.map(t=>t.format) ?? [state.targetFormat])
+            .map(format=>(/sint$/.test(format) ? 'i32' : /uint$/.test(format) ? 'u32' : 'f32')),
         fixed: {
             texcoords: state.units.map(unit=>unit.index),
             fog: state.fog ? fogFactorOf(state.fog) : null,
         },
     };
     /** @type {GlslStages} */
-    const stages = { vertex: null, fragment: null, samplers: [] };
+    const stages = { vertex: null, fragment: null, samplers: [], blocks: [] };
     /** @type {string[]} */
     const parts = [];
     try
@@ -1234,6 +1238,7 @@ function generateGlslDraw(state){
             stages.vertex = vertex.plan;
             stages.fragment = fragment.plan;
             stages.samplers = [...new Set([...vertex.usedSamplers, ...fragment.usedSamplers])];
+            stages.blocks = [...new Set([...vertex.usedBlocks, ...fragment.usedBlocks])];
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
         else if (program.vertex)
@@ -1246,6 +1251,7 @@ function generateGlslDraw(state){
                 fragment.bindings, fragment.main);
             stages.vertex = vertex.plan;
             stages.samplers = vertex.usedSamplers;
+            stages.blocks = vertex.usedBlocks;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
         else
@@ -1260,6 +1266,7 @@ function generateGlslDraw(state){
                 fixedVertexMain({ ...state, clip: null }, varyings), fragment.code);
             stages.fragment = fragment.plan;
             stages.samplers = fragment.usedSamplers;
+            stages.blocks = fragment.usedBlocks;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
     }
@@ -1267,7 +1274,11 @@ function generateGlslDraw(state){
         return { code: '', label, programs: { vertex: null, fragment: null,
             error: e instanceof Error ? e.message : String(e) }, glsl: stages };
     }
-    const vertexIn = program.vertex ? fixedVertexIn(state) : '';
+    stages.blocks.sort((a, b)=>a - b);
+    parts.unshift(...stages.blocks.map(index=>blockDeclaration(program, index)));
+    // A vertex shader that reads no array -- one drawing from gl_VertexID --
+    // takes no vertex struct, which WGSL does not have empty.
+    const vertexIn = program.vertex && state.attributes.length > 0 ? fixedVertexIn(state) : '';
     const code = `diagnostic(off, derivative_uniformity);
 ${UNIFORM_STRUCT}
 ${vertexIn}
@@ -1281,6 +1292,7 @@ ${parts.join('\n\n')}
  * @property {import('./glsl-wgsl.js').BlockPlan | null} vertex
  * @property {import('./glsl-wgsl.js').BlockPlan | null} fragment
  * @property {number[]} samplers  the program's samplers the stages sample, by index
+ * @property {number[]} blocks  the program's uniform blocks the stages read, by index
  */
 
 /**
@@ -1292,7 +1304,7 @@ ${parts.join('\n\n')}
 function samplerDeclarations(program, used){
     return [...used].sort((a, b)=>a - b).map(index=>{
         const sampler = program.samplers[index];
-        const kind = sampler.dim === 'Cube' ? 'texture_cube<f32>' : 'texture_2d<f32>';
+        const kind = textureTypeOf(samplerTypeOf(sampler));
         return `@group(0) @binding(${1 + index * 2}) var glt${index}: ${kind};
 @group(0) @binding(${2 + index * 2}) var gls${index}: sampler;`;
     });
