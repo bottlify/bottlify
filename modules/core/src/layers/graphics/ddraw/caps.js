@@ -38,6 +38,7 @@ import {
     DDERR_NOPALETTEATTACHED,
     DDPF_PALETTEINDEXED_ANY,
     DDSCAPS2_CUBEMAP,
+    DDSCAPS2_D3DTEXTUREMANAGE,
     DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_3DDEVICE,
     DDSCAPS_BACKBUFFER,
@@ -145,6 +146,16 @@ export function validateSurfaceCaps(request){
         return fail(DDERR_INVALIDCAPS);
     }
 
+    // A managed texture's place is the runtime's to choose: one named with a
+    // memory, or that is no texture, is refused, and it is kept in system
+    // memory (Wine's test_texturemanage).
+    const managed = (request.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) !== 0;
+    if (managed && ((caps & DDSCAPS_TEXTURE) === 0
+        || (caps & (DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY)) !== 0))
+    {
+        return fail(DDERR_INVALIDCAPS);
+    }
+
     const flipChain = wantsFlipChain(request);
     if (flipChain)
     {
@@ -204,7 +215,9 @@ export function validateSurfaceCaps(request){
         return fail(DDERR_NOOVERLAYHW);
     }
 
-    return { hr: DD_OK, caps: placedCaps(caps, flipChain), flipChain };
+    return { hr: DD_OK,
+        caps: placedCaps(managed ? (caps | DDSCAPS_SYSTEMMEMORY) >>> 0 : caps, flipChain),
+        flipChain };
 }
 
 /**
