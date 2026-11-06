@@ -341,7 +341,7 @@ export function createGraphicsLibraries(
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
-        publisher, memory, allocate, free, screen, resolution, gdi,
+        publisher, memory, allocate, free, screen, resolution, gdi, callGuest, currentThread,
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
         deviceOptions: ()=>graphics.create('d3d10'),

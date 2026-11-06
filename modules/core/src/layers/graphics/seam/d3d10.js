@@ -52,6 +52,7 @@ import {
     createShaderReflection, debugInfoOf, reflectShader,
 } from '../d3d10/reflection.js';
 import { STATE_BLOCK_MASK_SIZE, createStateBlock, stateBlockMask } from '../d3d10/stateblock.js';
+import { createCompilerSeam } from './d3dcompiler.js';
 
 /**
  * A method here may answer nothing: the setters of this API are `void`, and
@@ -414,6 +415,48 @@ export const ID3D10SHADERREFLECTIONTYPE_SLOTS = /** @type {[string, number][]} *
     ['GetMemberTypeName', 1],
 ]);
 
+/** ID3D11ShaderReflection, D3DReflect's: Direct3D 10's methods, then its own. */
+export const ID3D11SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10SHADERREFLECTION_SLOTS,
+    ['GetPatchConstantParameterDesc', 2],
+    ['GetVariableByName', 1],
+    ['GetResourceBindingDescByName', 2],
+    ['GetMovInstructionCount', 0],
+    ['GetMovcInstructionCount', 0],
+    ['GetConversionInstructionCount', 0],
+    ['GetBitwiseInstructionCount', 0],
+    ['GetGSInputPrimitive', 0],
+    ['IsSampleFrequencyShader', 0],
+    ['GetNumInterfaceSlots', 0],
+    ['GetMinFeatureLevel', 1],
+    ['GetThreadGroupSize', 3],
+    ['GetRequiresFlags', 0],
+]);
+
+export const ID3D11SHADERREFLECTIONCONSTANTBUFFER_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetVariableByIndex', 1],
+    ['GetVariableByName', 1],
+]);
+
+export const ID3D11SHADERREFLECTIONVARIABLE_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetType', 0],
+    ['GetBuffer', 0],
+    ['GetInterfaceSlot', 1],
+]);
+
+export const ID3D11SHADERREFLECTIONTYPE_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10SHADERREFLECTIONTYPE_SLOTS,
+    ['IsEqual', 1],
+    ['GetSubType', 0],
+    ['GetBaseClass', 0],
+    ['GetNumInterfaces', 0],
+    ['GetInterfaceByIndex', 1],
+    ['IsOfType', 1],
+    ['ImplementsInterface', 1],
+]);
+
 /** D3D10_BLEND_DESC1: two words, then eight targets of thirty-two bytes. */
 const D3D10_BLEND_DESC1 = Object.freeze({
     AlphaToCoverageEnable: 0x00, IndependentBlendEnable: 0x04, RenderTarget: 0x08,
@@ -561,6 +604,9 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @property {import('../d3d10/dxgi.js').FactoryOptions['resolution']} [resolution]
  *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
  * @property {import('./ddraw.js').SurfaceDcServices} [gdi]
+ * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [callGuest]   Into the program, for the ID3DInclude a compile is given.
+ * @property {() => any} [currentThread]
  *     Device contexts over guest memory, for IDXGISurface1::GetDC; absent, none is handed out.
  */
 
@@ -568,7 +614,8 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions: given, screen, identity, videoMemory, resolution, gdi })
+    factoryOptions: given, screen, identity, videoMemory, resolution, gdi, callGuest,
+    currentThread })
 {
     const fields = createFields(memory);
     /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
@@ -3042,34 +3089,297 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         return constants.get(text) ?? 0;
     };
 
-    /**
-     * No HLSL compiler runs here. A compile is answered the way a failed one
-     * is -- E_FAIL, no output, and the reason in the error blob when the
-     * program asked for one -- so a program that logs its compiler's errors
-     * says why.
-     *
-     * @param {string} entry
-     * @param {number} outputAt
-     * @param {number} errorsAt
-     */
-    const refuseCompile = (entry, outputAt, errorsAt)=>{
-        if ((outputAt >>> 0) !== 0)
-        {
-            fields.writeU32(outputAt, 0);
-        }
-        if ((errorsAt >>> 0) !== 0)
-        {
-            const message = `${entry}: this runtime has no HLSL compiler\n`;
-            const hr = blobInto(errorsAt,
-                Uint8Array.from([...message].map(char=>char.charCodeAt(0)).concat(0)), E_FAIL);
-            if (hr !== S_OK)
-            {
-                fields.writeU32(errorsAt, 0);
-            }
-        }
-        report(`${entry}: no HLSL compiler; the program was told the compile failed`);
-        return E_FAIL;
+    // --- Direct3D 11's reflection, D3DReflect's ---
+
+    /** D3D_NAME of a pixel shader's output named by its semantic alone, as fxc writes them. */
+    const OUTPUT_NAMES = /** @type {Record<string, number>} */ ({ SV_TARGET: 64, SV_DEPTH: 65,
+        SV_COVERAGE: 66, SV_DEPTHGREATEREQUAL: 67, SV_DEPTHLESSEQUAL: 68 });
+
+    /** @param {any} reflection @param {any} entry @param {boolean} output */
+    const systemValueOf = (reflection, entry, output)=>{
+        const pixel = (reflection.reflection.desc.Version >>> 16) === 0;
+        return output && pixel && entry.systemValue === 0
+            ? OUTPUT_NAMES[entry.name.toUpperCase()] ?? 0 : entry.systemValue;
     };
+
+    /** The name of a type as model 5's RDEF gives it, or the one its shape spells. */
+    const typeNameOf = (/** @type {any} */ type)=>{
+        const entry = type.entry;
+        if (!entry)
+        {
+            return 0;
+        }
+        if (entry.nameAt !== undefined)
+        {
+            return pointerInto(type.owner, entry.nameAt);
+        }
+        const base = /** @type {Record<number, string>} */ ({ 1: 'bool', 2: 'int', 3: 'float',
+            19: 'uint' })[entry.type] ?? 'void';
+        const shape = entry.class === 0 ? base : entry.class === 1 ? `${base}${entry.columns}`
+            : entry.class <= 3 ? `${base}${entry.rows}x${entry.columns}` : '';
+        return constantString(shape);
+    };
+
+    /**
+     * The interfaces of one version of ID3D11ShaderReflection: 43's signature description is
+     * seven dwords, 46 and 47 add MinPrecision.
+     *
+     * @param {string} id   The interface's identifier.
+     * @param {boolean} precision   Whether the signature description has MinPrecision.
+     */
+    const reflection11 = (id, precision)=>{
+        /** @param {any} type @returns {number} */
+        const publishType11 = type=>publisher.publish(type, typeInterfaces,
+            IID.ID3D11ShaderReflectionType);
+        /** @param {any} variable @returns {number} */
+        const publishVariable11 = variable=>publisher.publish(variable, variableInterfaces,
+            IID.ID3D11ShaderReflectionVariable);
+        /** @param {any} buffer @returns {number} */
+        const publishBuffer11 = buffer=>publisher.publish(buffer, bufferInterfaces11,
+            IID.ID3D11ShaderReflectionConstantBuffer);
+        /** @type {import('./com.js').InterfaceDescriptor[]} */
+        const typeInterfaces = [bare(describe(IID.ID3D11ShaderReflectionType,
+            ID3D11SHADERREFLECTIONTYPE_SLOTS, {
+                /** @param {any} type @param {number[]} args */
+                GetDesc: (type, [out])=>{
+                    const hr = describedAs(SHADER_TYPE_DESC_FIELDS)(type, [out]);
+                    if (hr === S_OK)
+                    {
+                        fields.writeU32(out + 28, typeNameOf(type));
+                    }
+                    return hr;
+                },
+                /** @param {any} type @param {number[]} args */
+                GetMemberTypeByIndex: (type, [index])=>
+                    publishType11(type.GetMemberTypeByIndex(index >>> 0)),
+                /** @param {any} type @param {number[]} args */
+                GetMemberTypeByName: (type, [name])=>
+                    publishType11(type.GetMemberTypeByName(nameArgument(name))),
+                /** @param {any} type @param {number[]} args */
+                GetMemberTypeName: (type, [index])=>{
+                    const name = type.GetMemberTypeName(index >>> 0);
+                    if (!name)
+                    {
+                        return 0;
+                    }
+                    return 'text' in name ? constantString(name.text)
+                        : pointerInto(type.owner, name.at);
+                },
+                /** @param {any} type @param {number[]} args */
+                IsEqual: (type, [other])=>(publisher.objectAt(other) === type ? S_OK : 1),
+                GetSubType: ()=>0,
+                GetBaseClass: ()=>0,
+                GetNumInterfaces: ()=>0,
+                GetInterfaceByIndex: ()=>0,
+                IsOfType: ()=>1,
+                ImplementsInterface: ()=>1,
+            }))];
+        /** @type {import('./com.js').InterfaceDescriptor[]} */
+        const variableInterfaces = [bare(describe(IID.ID3D11ShaderReflectionVariable,
+            ID3D11SHADERREFLECTIONVARIABLE_SLOTS, {
+                /** @param {any} variable @param {number[]} args */
+                GetDesc: (variable, [out])=>{
+                    const hr = describedAs(SHADER_VARIABLE_DESC_FIELDS)(variable, [out]);
+                    if (hr === S_OK)
+                    {
+                        // Where a model 5 entry says it binds textures and samplers; a model
+                        // 4 one binds none.
+                        (variable.entry?.bindings ?? [0xffffffff, 0, 0xffffffff, 0])
+                            .forEach((/** @type {number} */ word, /** @type {number} */ i)=>
+                                fields.writeU32(out + 20 + i * 4, word));
+                    }
+                    return hr;
+                },
+                /** @param {any} variable */
+                GetType: variable=>publishType11(variable.GetType()),
+                /** @param {any} variable */
+                GetBuffer: variable=>(variable.GetBuffer
+                    ? publishBuffer11(variable.GetBuffer()) : 0),
+                GetInterfaceSlot: ()=>0xffffffff,
+            }))];
+        /** @type {import('./com.js').InterfaceDescriptor[]} */
+        const bufferInterfaces11 = [bare(describe(IID.ID3D11ShaderReflectionConstantBuffer,
+            ID3D11SHADERREFLECTIONCONSTANTBUFFER_SLOTS, {
+                GetDesc: describedAs(SHADER_BUFFER_DESC_FIELDS),
+                /** @param {any} buffer @param {number[]} args */
+                GetVariableByIndex: (buffer, [index])=>
+                    publishVariable11(buffer.GetVariableByIndex(index >>> 0)),
+                /** @param {any} buffer @param {number[]} args */
+                GetVariableByName: (buffer, [name])=>
+                    publishVariable11(buffer.GetVariableByName(nameArgument(name))),
+            }))];
+        /** @param {'GetInputParameterDesc' | 'GetOutputParameterDesc'} method */
+        const signature = method=>{
+            /** @param {any} reflection @param {number[]} args */
+            const write = (reflection, [index, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection[method](index >>> 0, (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    const entry = held.entry;
+                    [pointerInto(reflection, entry.nameAt), entry.index, entry.register,
+                        systemValueOf(reflection, entry, method === 'GetOutputParameterDesc'),
+                        entry.componentType, entry.mask | (entry.readWriteMask << 8), 0,
+                        ...(precision ? [0] : [])]
+                        .forEach((value, position)=>fields.writeU32(out + position * 4, value));
+                }
+                return hr;
+            };
+            return write;
+        };
+        /** @param {any} reflection @param {number} index */
+        const stat = (reflection, index)=>reflection.reflection.statistics?.[index] ?? 0;
+        /** @param {any} reflection @param {any} entry @param {number} out */
+        const writeBinding = (reflection, entry, out)=>{
+            [pointerInto(reflection, entry.nameAt), entry.type, entry.bindPoint,
+                entry.bindCount, entry.flags, entry.returnType, entry.dimension,
+                entry.sampleCount]
+                .forEach((value, position)=>fields.writeU32(out + position * 4, value));
+        };
+        return [describe(id, ID3D11SHADERREFLECTION_SLOTS, {
+            /** @param {any} reflection @param {number[]} args */
+            GetDesc: (reflection, [out])=>{
+                /** @type {{ desc?: Record<string, number> }} */
+                const held = {};
+                const hr = reflection.GetDesc((out >>> 0) === 0 ? null : held);
+                if (hr === S_OK && held.desc)
+                {
+                    const desc = held.desc;
+                    SHADER_DESC_FIELDS.forEach((field, index)=>fields.writeU32(out + index * 4,
+                        field === 'Creator' ? pointerInto(reflection, desc.Creator)
+                            : desc[field]));
+                    // InputPrimitive, then the hull, domain and compute fields: none here.
+                    fields.writeU32(out + SHADER_DESC_FIELDS.length * 4, stat(reflection, 23));
+                    for (let i = SHADER_DESC_FIELDS.length + 1; i < 38; i++)
+                    {
+                        fields.writeU32(out + i * 4, 0);
+                    }
+                }
+                return hr;
+            },
+            /** @param {any} reflection @param {number[]} args */
+            GetConstantBufferByIndex: (reflection, [index])=>
+                publishBuffer11(reflection.GetConstantBufferByIndex(index >>> 0)),
+            /** @param {any} reflection @param {number[]} args */
+            GetConstantBufferByName: (reflection, [name])=>
+                publishBuffer11(reflection.GetConstantBufferByName(nameArgument(name))),
+            /** @param {any} reflection @param {number[]} args */
+            GetResourceBindingDesc: (reflection, [index, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection.GetResourceBindingDesc(index >>> 0,
+                    (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    writeBinding(reflection, held.entry, out);
+                }
+                return hr;
+            },
+            GetInputParameterDesc: signature('GetInputParameterDesc'),
+            GetOutputParameterDesc: signature('GetOutputParameterDesc'),
+            GetPatchConstantParameterDesc: ()=>E_INVALIDARG,
+            /** @param {any} reflection @param {number[]} args */
+            GetVariableByName: (reflection, [name])=>
+                publishVariable11(reflection.GetVariableByName(nameArgument(name))),
+            /** @param {any} reflection @param {number[]} args */
+            GetResourceBindingDescByName: (reflection, [name, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection.GetResourceBindingDescByName(nameArgument(name),
+                    (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    writeBinding(reflection, held.entry, out);
+                }
+                return hr;
+            },
+            /** @param {any} reflection */
+            GetMovInstructionCount: reflection=>stat(reflection, 19),
+            /** @param {any} reflection */
+            GetMovcInstructionCount: reflection=>stat(reflection, 20),
+            /** @param {any} reflection */
+            GetConversionInstructionCount: reflection=>stat(reflection, 21),
+            GetBitwiseInstructionCount: ()=>{
+                report('ID3D11ShaderReflection::GetBitwiseInstructionCount: not counted here; '
+                    + 'answered 0');
+                return 0;
+            },
+            /** @param {any} reflection */
+            GetGSInputPrimitive: reflection=>stat(reflection, 23),
+            IsSampleFrequencyShader: ()=>0,
+            GetNumInterfaceSlots: ()=>0,
+            /** @param {any} reflection @param {number[]} args */
+            GetMinFeatureLevel: (reflection, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const major = (reflection.reflection.desc.Version >>> 4) & 0xf;
+                fields.writeU32(out, major >= 5 ? 0xb000 : 0xa000);
+                return S_OK;
+            },
+            /** @param {any} reflection @param {number[]} args */
+            GetThreadGroupSize: (reflection, [x, y, z])=>{
+                for (const out of [x, y, z])
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        fields.writeU32(out, 0);
+                    }
+                }
+                return 0;
+            },
+            GetRequiresFlags: ()=>0,
+        })];
+    };
+    const reflection11Interfaces43 = reflection11(IID.ID3D11ShaderReflection43, false);
+    const reflection11Interfaces = reflection11(IID.ID3D11ShaderReflection, true);
+
+    /**
+     * D3DReflect: an ID3D11ShaderReflection of either version over a copy of the container,
+     * or of Direct3D 10 when that is what was asked.
+     *
+     * @param {Uint8Array} bytes @param {number} riid @param {number} out
+     */
+    const reflectInto = (bytes, riid, out)=>{
+        const id = readGuid(memory, riid);
+        /** @type {string[]} */
+        const ids = [IID.ID3D11ShaderReflection43, IID.ID3D11ShaderReflection,
+            IID.ID3D10ShaderReflection];
+        if (!ids.includes(id))
+        {
+            fields.writeU32(out, 0);
+            return 0x80004002 | 0;
+        }
+        const reflected = reflectShader(bytes);
+        if (!reflected)
+        {
+            fields.writeU32(out, 0);
+            return E_FAIL;
+        }
+        const copy = allocate ? allocate(bytes.length) : 0;
+        if (!copy)
+        {
+            fields.writeU32(out, 0);
+            return E_OUTOFMEMORY;
+        }
+        memory.writeMemory(copy, bytes);
+        const reflection = createShaderReflection(reflected, ()=>{
+            for (const child of reflection.children())
+            {
+                publisher.unpublish(child);
+            }
+            free?.(copy);
+        }, [id]);
+        reflectionCopies.set(reflection, copy);
+        const interfaces = id === IID.ID3D11ShaderReflection43 ? reflection11Interfaces43
+            : id === IID.ID3D11ShaderReflection ? reflection11Interfaces : reflectionInterfaces;
+        return handBack(reflection, interfaces, id, out);
+    };
+
+    const compiler = createCompilerSeam({ fields, memory, allocate, free, report, blobInto,
+        readCString, callGuest, currentThread, reflect: reflectInto });
 
     /** @param {string[]} chunks */
     const signatureEntry = chunks=>({
@@ -3501,22 +3811,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,
          *     UINT, ID3D10Blob**, ID3D10Blob**)
          */
-        D3D10CompileShader: {
-            argBytes: 40,
-            /** @param {number[]} args */
-            handler: args=>refuseCompile('D3D10CompileShader', args[8], args[9]),
-        },
+        D3D10CompileShader: compiler.D3D10CompileShader,
         /**
          * HRESULT D3D10CompileEffectFromMemory(void*, SIZE_T, const char*,
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, UINT, UINT, ID3D10Blob**,
          *     ID3D10Blob**)
          */
-        D3D10CompileEffectFromMemory: {
-            argBytes: 36,
-            /** @param {number[]} args */
-            handler: args=>refuseCompile('D3D10CompileEffectFromMemory', args[7],
-                args[8]),
-        },
+        D3D10CompileEffectFromMemory: compiler.D3D10CompileEffectFromMemory,
         /**
          * HRESULT D3D10DisassembleShader(const void*, SIZE_T, BOOL, const char*,
          *     ID3D10Blob**)
@@ -3558,6 +3859,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     name !== 'D3D10CreateDevice' && name !== 'D3D10CreateDeviceAndSwapChain')),
             },
             'D3D10.dll': d3d10Exports,
+            // D3DCompile, D3DReflect and the blob functions: the June 2010 runtime's library
+            // and the one Windows ships.
+            'D3DCompiler_43.dll': compiler.exports,
+            'D3DCOMPILER_47.dll': compiler.exports,
             'DXGI.dll': {
                 /** HRESULT CreateDXGIFactory(REFIID, void**) */
                 CreateDXGIFactory: {

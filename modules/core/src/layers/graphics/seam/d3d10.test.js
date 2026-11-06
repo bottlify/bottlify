@@ -31,7 +31,8 @@ import {
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
     IDXGIRESOURCE_SLOTS, IDXGISURFACE1_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS,
-    createDirect3D10Seam,
+    ID3D11SHADERREFLECTION_SLOTS, ID3D11SHADERREFLECTIONTYPE_SLOTS,
+    ID3D11SHADERREFLECTIONVARIABLE_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -1122,40 +1123,246 @@ test('a reflection\'s constant buffers, variables and types are tables without I
     assert.equal(variable(invalidVariable, 'GetType'), invalidType);
 });
 
-test('a compile is refused as a failed compile, with the reason in the error blob', ()=>{
-    const h = seamed();
-    const E_FAIL = 0x80004005;
-    const outs = h.box.place([0xdeadbeef, 0xdeadbeef]);
-    const args = [h.box.placeString('float4 main() : SV_Target { return 0; }'), 38, 0, 0, 0,
-        h.box.placeString('main'), h.box.placeString('ps_4_0'), 0, outs, outs + 4];
-    assert.equal(h.d3d10.D3D10CompileShader.argBytes, 40);
-    assert.equal(h.d3d10.D3D10CompileShader.handler(args) >>> 0, E_FAIL);
-    assert.equal(h.box.memory.readU32(outs), 0, 'no shader');
-    const errors = h.box.memory.readU32(outs + 4);
-    assert.notEqual(errors, 0);
-    const text = h.box.services.readMemory(h.box.call(errors, slot(ID3D10BLOB_SLOTS,
-        'GetBufferPointer')), h.box.call(errors, slot(ID3D10BLOB_SLOTS, 'GetBufferSize')));
-    assert.match(String.fromCharCode(...text), /no HLSL compiler/);
-    assert.equal(h.d3d10.D3D10CompileEffectFromMemory.argBytes, 36);
-    assert.equal(h.d3d10.D3D10CompileEffectFromMemory.handler([0, 0, 0, 0, 0, 0, 0, outs, 0])
-        >>> 0, E_FAIL);
-    assert.equal(h.d3d10.D3D10DisassembleShader.argBytes, 20);
-    assert.equal(h.d3d10.D3D10DisassembleShader.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
-    assert.ok(h.divergences.some(line=>line.includes('D3D10CompileShader')));
+/**
+ * What a blob holds, as the program reads it through the interface.
+ * @param {ReturnType<typeof seamed>} h @param {number} blob
+ */
+const blobBytes = (h, blob)=>h.box.services.readMemory(h.box.call(blob, slot(ID3D10BLOB_SLOTS,
+    'GetBufferPointer')), h.box.call(blob, slot(ID3D10BLOB_SLOTS, 'GetBufferSize')));
 
-    // An effect without a device is D3DERR_INVALIDCALL, with the out pointer
-    // cleared; a pool is refused, as its child would be.
-    const effectAt = h.box.place([0xdeadbeef]);
-    assert.equal(h.d3d10.D3D10CreateEffectFromMemory.argBytes, 24);
-    assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([0, 0, 0, 0, 0, effectAt]) >>> 0,
-        0x8876086c);
-    assert.equal(h.box.memory.readU32(effectAt), 0);
-    h.box.memory.writeU32(effectAt, 0xdeadbeef);
-    assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.argBytes, 20);
-    assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.handler([0, 0, 0, 0, effectAt])
-        >>> 0, E_NOTIMPL);
-    assert.equal(h.box.memory.readU32(effectAt), 0);
-    assert.ok(h.divergences.some(line=>line.includes('effect pools')));
+test('D3D10CompileShader compiles, and a compile that fails says why in the error blob',
+    async()=>{
+        const h = seamed();
+        const E_FAIL = 0x80004005;
+        const outs = h.box.place([0xdeadbeef, 0xdeadbeef]);
+        const good = 'float4 c; float4 main() : SV_Target { return c * 2; }';
+        const args = [h.box.placeString(good), good.length, 0, 0, 0,
+            h.box.placeString('main'), h.box.placeString('ps_4_0'), 0, outs, outs + 4];
+        assert.equal(h.d3d10.D3D10CompileShader.argBytes, 40);
+        assert.equal(await h.d3d10.D3D10CompileShader.handler(args) >>> 0, 0);
+        const code = blobBytes(h, h.box.memory.readU32(outs));
+        assert.equal(String.fromCharCode(...code.subarray(0, 4)), 'DXBC');
+        assert.equal(h.box.memory.readU32(outs + 4), 0, 'no messages, no error blob');
+
+        const bad = 'float4 main() : SV_Target { return undefined_thing; }';
+        const failing = [h.box.placeString(bad), bad.length, 0, 0, 0,
+            h.box.placeString('main'), h.box.placeString('ps_4_0'), 0, outs, outs + 4];
+        assert.equal(await h.d3d10.D3D10CompileShader.handler(failing) >>> 0, E_FAIL);
+        assert.equal(h.box.memory.readU32(outs), 0, 'no shader');
+        const text = String.fromCharCode(...blobBytes(h, h.box.memory.readU32(outs + 4)));
+        assert.match(text, /memory\(1,\d+\): error X3004: undeclared identifier 'undefined_thing'/);
+        assert.ok(h.divergences.some(line=>line.includes('D3D10CompileShader')));
+
+        assert.equal(h.d3d10.D3D10DisassembleShader.argBytes, 20);
+        assert.equal(h.d3d10.D3D10DisassembleShader.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
+        // An effect without a device is D3DERR_INVALIDCALL, with the out pointer
+        // cleared; a pool is refused, as its child would be.
+        const effectAt = h.box.place([0xdeadbeef]);
+        assert.equal(h.d3d10.D3D10CreateEffectFromMemory.argBytes, 24);
+        assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([0, 0, 0, 0, 0, effectAt])
+            >>> 0, 0x8876086c);
+        assert.equal(h.box.memory.readU32(effectAt), 0);
+        h.box.memory.writeU32(effectAt, 0xdeadbeef);
+        assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.argBytes, 20);
+        assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.handler([0, 0, 0, 0, effectAt])
+            >>> 0, E_NOTIMPL);
+        assert.equal(h.box.memory.readU32(effectAt), 0);
+        assert.ok(h.divergences.some(line=>line.includes('effect pools')));
+    });
+
+test('D3DCompile: model 4 and 5 containers, model 2 and 3 tokens, macros, and refusals',
+    async()=>{
+        const h = seamed();
+        const compiler = h.seam.libraries['D3DCompiler_43.dll'];
+        assert.equal(h.seam.libraries['D3DCOMPILER_47.dll'], compiler);
+        assert.equal(compiler.D3DCompile.argBytes, 44);
+        assert.equal(compiler.D3DCompile2.argBytes, 56);
+        const outs = h.box.place([0, 0]);
+        /** @param {string} source @param {string} profile @param {number} [defines] */
+        const compile = async(source, profile, defines = 0)=>{
+            const hr = await compiler.D3DCompile.handler([h.box.placeString(source),
+                source.length + 1, 0, defines, 0, h.box.placeString('main'),
+                h.box.placeString(profile), 0, 0, outs, outs + 4]) >>> 0;
+            const code = h.box.memory.readU32(outs);
+            const errors = h.box.memory.readU32(outs + 4);
+            return { hr, code: code ? blobBytes(h, code) : null,
+                errors: errors ? String.fromCharCode(...blobBytes(h, errors)) : '' };
+        };
+        const vs = await compile('float4 main(float4 p : POSITION) : SV_Position { return p; }',
+            'vs_4_0');
+        assert.equal(vs.hr, 0);
+        assert.equal(String.fromCharCode(.../** @type {Uint8Array} */ (vs.code).subarray(0, 4)),
+            'DXBC');
+        const nine = await compile('float4 main(float2 t : TEXCOORD0) : COLOR { return t.xyxy; }',
+            'ps_2_0');
+        assert.equal(nine.hr, 0);
+        const view = new DataView(/** @type {Uint8Array} */ (nine.code).buffer);
+        assert.equal(view.getUint32(0, true), 0xffff0200, 'the Direct3D 9 version token');
+        // NAME=2 from the program's D3D_SHADER_MACRO array, which a null name ends.
+        const macros = h.box.place([h.box.placeString('SCALE'), h.box.placeString('2'), 0, 0]);
+        const defined = await compile('float4 main() : SV_Target { return SCALE; }', 'ps_4_0',
+            macros);
+        assert.equal(defined.hr, 0);
+        const invalid = await compile('float4 main() : SV_Target { return 0; }', 'ps_9_9');
+        assert.equal(invalid.hr, 0x80004005);
+        assert.match(invalid.errors, /X3506/);
+        const blobAt = h.box.place([0xdeadbeef]);
+        assert.equal(compiler.D3DCreateBlob.handler([0, blobAt]) >>> 0, 0);
+        assert.equal(blobBytes(h, h.box.memory.readU32(blobAt)).length, 0);
+        assert.equal(compiler.D3DCreateBlob.handler([1, 0]) >>> 0, 0x8876086c);
+        const pre = await compiler.D3DPreprocess.handler([h.box.placeString('#define X 3\nX + X'),
+            18, 0, 0, 0, outs, outs + 4]) >>> 0;
+        assert.equal(pre, 0);
+        assert.match(String.fromCharCode(...blobBytes(h, h.box.memory.readU32(outs))), /3 \+ 3/);
+        assert.equal(compiler.D3DDisassemble.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
+    });
+
+/**
+ * fxc's `float4 VS(float4 position : POSITION, float4 pos : SV_POSITION) : SV_POSITION`
+ * for vs_4_0_level_9_0, from Wine's d3dcompiler blob tests: XNAS, XNAP, Aon9, SHDR, STAT,
+ * RDEF, ISGN and OSGN.
+ */
+const BLOB_PART = [0x43425844, 0x0ef2a70f, 0x6a548011, 0x91ff9409, 0x9973a43d, 0x00000001,
+    0x000002e0, 0x00000008, 0x00000040, 0x0000008c, 0x000000d8, 0x0000013c, 0x00000180,
+    0x000001fc, 0x00000254, 0x000002ac, 0x53414e58, 0x00000044, 0x00000044, 0xfffe0200,
+    0x00000020, 0x00000024, 0x00240000, 0x00240000, 0x00240000, 0x00240000, 0x00240000,
+    0xfffe0200, 0x0200001f, 0x80000005, 0x900f0000, 0x02000001, 0xc00f0000, 0x80e40000,
+    0x0000ffff, 0x50414e58, 0x00000044, 0x00000044, 0xfffe0200, 0x00000020, 0x00000024,
+    0x00240000, 0x00240000, 0x00240000, 0x00240000, 0x00240000, 0xfffe0200, 0x0200001f,
+    0x80000005, 0x900f0000, 0x02000001, 0xc00f0000, 0x80e40000, 0x0000ffff, 0x396e6f41,
+    0x0000005c, 0x0000005c, 0xfffe0200, 0x00000034, 0x00000028, 0x00240000, 0x00240000,
+    0x00240000, 0x00240000, 0x00240001, 0x00000000, 0xfffe0200, 0x0200001f, 0x80000005,
+    0x900f0000, 0x04000004, 0xc0030000, 0x90ff0000, 0xa0e40000, 0x90e40000, 0x02000001,
+    0xc00c0000, 0x90e40000, 0x0000ffff, 0x52444853, 0x0000003c, 0x00010040, 0x0000000f,
+    0x0300005f, 0x001010f2, 0x00000000, 0x04000067, 0x001020f2, 0x00000000, 0x00000001,
+    0x05000036, 0x001020f2, 0x00000000, 0x00101e46, 0x00000000, 0x0100003e, 0x54415453,
+    0x00000074, 0x00000002, 0x00000000, 0x00000000, 0x00000002, 0x00000000, 0x00000000,
+    0x00000000, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000001,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x46454452, 0x00000050, 0x00000000, 0x00000000, 0x00000000,
+    0x0000001c, 0xfffe0400, 0x00000100, 0x0000001c, 0x7263694d, 0x666f736f, 0x52282074,
+    0x4c482029, 0x53204c53, 0x65646168, 0x6f432072, 0x6c69706d, 0x39207265, 0x2e39322e,
+    0x2e323539, 0x31313133, 0xababab00, 0x4e475349, 0x00000050, 0x00000002, 0x00000008,
+    0x00000038, 0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x00000f0f, 0x00000041,
+    0x00000000, 0x00000000, 0x00000003, 0x00000001, 0x0000000f, 0x49534f50, 0x4e4f4954,
+    0x5f565300, 0x49534f50, 0x4e4f4954, 0xababab00, 0x4e47534f, 0x0000002c, 0x00000001,
+    0x00000008, 0x00000020, 0x00000000, 0x00000001, 0x00000003, 0x00000000, 0x0000000f,
+    0x505f5653, 0x5449534f, 0x004e4f49];
+
+test('D3DGetBlobPart and D3DStripShader answer as Wine\'s blob tests have Windows answer',
+    ()=>{
+        const h = seamed();
+        const compiler = h.seam.libraries['D3DCompiler_43.dll'];
+        const blob = h.box.place(BLOB_PART);
+        const size = BLOB_PART[6];
+        const out = h.box.place([0xdeadbeef]);
+        const INVALIDCALL = 0x8876086c;
+        const E_FAIL = 0x80004005;
+        /** @param {number[]} args */
+        const part = args=>compiler.D3DGetBlobPart.handler(args) >>> 0;
+        assert.equal(part([0, size, 0, 0, out]), INVALIDCALL);
+        assert.equal(part([blob, 0, 0, 0, out]), INVALIDCALL);
+        assert.equal(part([blob, 7 * 4, 0, 0, out]), INVALIDCALL);
+        assert.equal(part([blob, 8 * 4, 0, 0, out]), E_FAIL);
+        assert.equal(part([blob, size, 0, 1, out]), INVALIDCALL, 'flags');
+        assert.equal(part([blob, size, 0xffffffff, 0, out]), INVALIDCALL, 'no such part');
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, 'left as it was');
+        /** @param {number} which */
+        const sizeOf = which=>{
+            assert.equal(part([blob, size, which, 0, out]), 0, `part ${which}`);
+            return blobBytes(h, h.box.memory.readU32(out)).length;
+        };
+        assert.equal(sizeOf(0), 124);
+        assert.equal(sizeOf(1), 88);
+        assert.equal(sizeOf(2), 180);
+        assert.equal(sizeOf(6), 92, 'Aon9, the chunk alone');
+        assert.equal(sizeOf(7), 68);
+        assert.equal(sizeOf(8), 68);
+        for (const missing of [3, 4, 5])
+        {
+            assert.equal(part([blob, size, missing, 0, out]), E_FAIL, `part ${missing}`);
+        }
+        // A signature part is a container of its own, with only that part in it.
+        assert.equal(part([blob, size, 0, 0, out]), 0);
+        const inputs = blobBytes(h, h.box.memory.readU32(out));
+        const copy = h.box.placeBytes(inputs);
+        assert.equal(part([copy, inputs.length, 0, 0, out]), 0);
+        assert.equal(part([copy, inputs.length, 1, 0, out]), E_FAIL);
+
+        /** @param {number[]} args */
+        const strip = args=>compiler.D3DStripShader.handler(args) >>> 0;
+        assert.equal(strip([blob, size, 0xffffffff, out]), 0);
+        assert.equal(strip([0, size, 0, out]), INVALIDCALL);
+        assert.equal(strip([blob, 7 * 4, 0, out]), INVALIDCALL);
+        assert.equal(strip([blob, 8 * 4, 0, out]), E_FAIL);
+        assert.equal(strip([blob, size, 0, 0]), E_FAIL);
+        assert.equal(strip([blob, size, 2, out]), 0);
+        assert.equal(blobBytes(h, h.box.memory.readU32(out)).length, 736, 'no debug info to take');
+        assert.equal(strip([blob, size, 1, out]), 0);
+        const stripped = blobBytes(h, h.box.memory.readU32(out));
+        assert.equal(stripped.length, 516, 'RDEF and STAT out');
+        const words = new DataView(stripped.buffer);
+        assert.equal(words.getUint32(77 * 4, true), 0x52444853, 'SHDR where Windows has it');
+        assert.equal(words.getUint32(94 * 4, true), 0x4e475349, 'ISGN where Windows has it');
+    });
+
+test('D3DReflect hands out ID3D11ShaderReflection over what this compiler wrote', async()=>{
+    const h = seamed();
+    const compiler = h.seam.libraries['D3DCompiler_43.dll'];
+    const outs = h.box.place([0, 0]);
+    const source = `cbuffer Frame : register(b3) { float4 tint; float2 scale; }
+Texture2D tex; SamplerState sam;
+float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
+{ return tex.Sample(sam, uv * scale) * tint; }`;
+    assert.equal(await compiler.D3DCompile.handler([h.box.placeString(source), source.length,
+        0, 0, 0, h.box.placeString('main'), h.box.placeString('ps_4_0'), 0, 0, outs, 0]) >>> 0,
+    0);
+    const code = blobBytes(h, h.box.memory.readU32(outs));
+    const data = h.box.placeBytes(code);
+    const reflectionAt = h.box.place([0]);
+    const reflect = (/** @type {string} */ iid)=>compiler.D3DReflect.handler([data, code.length,
+        h.box.placeGuid(iid), reflectionAt]) >>> 0;
+    assert.equal(reflect('{00000000-0000-0000-0000-000000000000}'), 0x80004002);
+    assert.equal(reflect('{8D536CA1-0CCA-4956-A837-786963755584}'), 0);
+    const reflection = h.box.memory.readU32(reflectionAt);
+    const slots = ID3D11SHADERREFLECTION_SLOTS;
+    const desc = h.box.allocate(38 * 4);
+    assert.equal(h.box.call(reflection, slot(slots, 'GetDesc'), [desc]), 0);
+    assert.equal(h.box.memory.readU32(desc), 0x40, 'ps_4_0');
+    assert.equal(h.box.memory.readU32(desc + 3 * 4), 1, 'one constant buffer');
+    assert.equal(h.box.memory.readU32(desc + 4 * 4), 3, 'three bindings');
+    // The target's system value is D3D_NAME_TARGET to this reflection, though the
+    // signature holds none; Stream and MinPrecision follow.
+    const param = h.box.allocate(9 * 4);
+    assert.equal(h.box.call(reflection, slot(slots, 'GetOutputParameterDesc'), [0, param]), 0);
+    assert.deepEqual([1, 2, 3, 4].map(i=>h.box.memory.readU32(param + i * 4)), [0, 0, 64, 3]);
+    assert.equal(h.box.memory.readU32(param + 24), 0, 'stream');
+    const variable = h.box.call(reflection, slot(slots, 'GetVariableByName'),
+        [h.box.placeString('scale')]);
+    const vdesc = h.box.allocate(9 * 4);
+    const variableSlots = ID3D11SHADERREFLECTIONVARIABLE_SLOTS;
+    assert.equal(h.box.call(variable, slot(variableSlots, 'GetDesc') - 3, [vdesc]), 0);
+    assert.deepEqual([1, 2, 3].map(i=>h.box.memory.readU32(vdesc + i * 4)), [16, 8, 2]);
+    assert.equal(h.box.memory.readU32(vdesc + 20), 0xffffffff, 'no textures of its own');
+    const type = h.box.call(variable, slot(variableSlots, 'GetType') - 3);
+    const tdesc = h.box.allocate(8 * 4);
+    assert.equal(h.box.call(type, slot(ID3D11SHADERREFLECTIONTYPE_SLOTS, 'GetDesc') - 3, [tdesc]),
+        0);
+    const name = h.box.services.readMemory(h.box.memory.readU32(tdesc + 28), 6);
+    assert.equal(String.fromCharCode(...name), 'float2');
+    const buffer = h.box.call(variable, slot(variableSlots, 'GetBuffer') - 3);
+    assert.equal(buffer, h.box.call(reflection, slot(slots, 'GetConstantBufferByName'),
+        [h.box.placeString('Frame')]));
+    const binding = h.box.allocate(8 * 4);
+    assert.equal(h.box.call(reflection, slot(slots, 'GetResourceBindingDescByName'),
+        [h.box.placeString('Frame'), binding]), 0);
+    assert.equal(h.box.memory.readU32(binding + 8), 3, 'bound where it said');
+    assert.equal(h.box.call(reflection, slot(slots, 'GetMovInstructionCount')) >= 0, true);
+});
+
+test('the entry points of D3D10.dll that are not compiles take their arguments', ()=>{
+    const h = seamed();
     assert.equal(h.d3d10.D3D10DisassembleEffect.argBytes, 12);
     assert.equal(h.d3d10.D3D10PreprocessShader.argBytes, 28);
     /** @type {Record<string, any>} */
@@ -1171,6 +1378,7 @@ test('a compile is refused as a failed compile, with the reason in the error blo
         assert.equal(entries[entry].argBytes, bytes, entry);
     }
 });
+
 
 test('DXGI 1.1: the second factory entry point answers as IDXGIFactory1', ()=>{
     // After Wine's dxgi test_create_factory.

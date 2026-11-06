@@ -130,6 +130,12 @@ differently raises a `divergence` event naming the API.
 - Direct3D 10 has no geometry shaders: WebGPU has no geometry stage and none is emulated, so
   `CreateGeometryShader` and its stream-output variant answer `E_NOTIMPL` for a valid shader. An
   effect pass that sets one is drawn without it, and the effect says so.
+- HLSL compiled at run time (`D3DCompile` of D3DCompiler_43 and D3DCOMPILER_47,
+  `D3D10CompileShader`): vertex and pixel shaders of models 4.0, 4.1 and 5.0, and the model 2
+  and 3 profiles as `D3DXCompileShader` compiles them. Geometry, hull, domain and compute
+  shaders, unordered access views, interfaces and classes are refused with fxc's X3506 or the
+  error of the construct. The standard file include (`D3D_COMPILE_STANDARD_FILE_INCLUDE`) reads
+  no files: an `#include` through it is a file not found. `D3DDisassemble` answers `E_NOTIMPL`.
 - Direct3D 10 multisamples at four samples only, the count WebGPU has:
   `CheckMultisampleQualityLevels` answers one quality level at four for the colour and depth
   formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture

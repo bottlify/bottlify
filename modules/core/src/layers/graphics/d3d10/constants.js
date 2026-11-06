@@ -435,6 +435,12 @@ export const IID = Object.freeze({
     ID3D10ShaderReflectionConstantBuffer: '{66C66A94-DDDD-4B62-A66A-F0DA33C2B4D0}',
     ID3D10ShaderReflectionVariable: '{1BF63C95-2650-405D-99C1-3636BD1DA0A1}',
     ID3D10ShaderReflectionType: '{C530AD7D-9B16-4395-A979-BA2ECFF83ADD}',
+    // D3DReflect's: d3dcompiler_43's identifier, and the one of 46 and 47.
+    ID3D11ShaderReflection43: '{0A233719-3960-4578-9D7C-203B8B1D9CC1}',
+    ID3D11ShaderReflection: '{8D536CA1-0CCA-4956-A837-786963755584}',
+    ID3D11ShaderReflectionConstantBuffer: '{EB62D63D-93DD-4318-8AE8-C6F83AD371B8}',
+    ID3D11ShaderReflectionVariable: '{51F23923-F3E5-4BD1-91CB-606177D8DB4C}',
+    ID3D11ShaderReflectionType: '{6E6FFA6A-9BAE-4613-A51E-91652D508C21}',
     ID3D10Effect: '{51B0CA8B-EC0B-4519-870D-8EE1CB5017C7}',
     ID3D10EffectPool: '{9537AB04-3250-412E-8213-FCD2F8677933}',
     ID3D10EffectTechnique: '{DB122CE8-D1C9-4292-B237-24ED3DE8B175}',
