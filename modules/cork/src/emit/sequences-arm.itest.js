@@ -12,11 +12,13 @@
  * held to the instruction model as the host's own translation is; see
  * `testing/sequences-judge.js`. A second part as such a host translates it by default, the
  * NaN's sign left as the host makes it (`exactNaN` off): the scalar forms on their low lane
- * with no fix-up, whose NaNs this x64 host makes x86's own.
+ * with no fix-up, whose NaNs an x64 host makes x86's own. That part takes the sign of the
+ * host it runs on, so on an arm64 one, whose NaN the model does not make, the judge asks
+ * for `exactNaN` as it does for that host's own translation.
  */
 
 import { testSequences } from '../testing/sequences-judge.js';
 import { features } from '../wasm/features.js';
 
 testSequences(1, 4, { ...features(), defaultNaNNegative: false }, { exactNaN: true });
-testSequences(2, 4, { ...features(), defaultNaNNegative: true, armHost: true });
+testSequences(2, 4, { ...features(), armHost: true });
