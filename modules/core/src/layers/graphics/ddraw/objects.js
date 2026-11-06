@@ -525,6 +525,8 @@ function sameRect(a, b){
  * @property {boolean} [emulated]
  *           Made by DirectDrawCreate(DDCREATE_EMULATIONONLY): no hardware, so
  *           every surface is in system memory and depth is 16 or 32 bits.
+ * @property {boolean} [hardwareOnly]
+ *           Made by DirectDrawCreate(DDCREATE_HARDWAREONLY): no emulation to describe.
  * @property {number} [screenWidth]
  * @property {number} [screenHeight]
  * @property {() => { width: number, height: number }} [screenMode]
@@ -2620,6 +2622,10 @@ export function createDirectDraw(options = {}){
         /** Whether the object was made without hardware (DDCREATE_EMULATIONONLY). */
         get emulated(){
             return options.emulated === true;
+        },
+        /** Whether the object was made with the hardware alone (DDCREATE_HARDWAREONLY). */
+        get hardwareOnly(){
+            return options.hardwareOnly === true;
         },
 
         get videoBytes(){

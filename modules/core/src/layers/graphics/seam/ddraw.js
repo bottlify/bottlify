@@ -2257,8 +2257,11 @@ export function createDirectDrawSeam(
             {
                 if ((pointer >>> 0) !== 0)
                 {
-                    const hr = writeCaps(pointer,
-                        emulation ? 'hel' : root.emulated ? 'none' : 'hal');
+                    // An object of the hardware alone describes no emulation
+                    // (ddraw7 test_caps), one of the emulation alone no hardware.
+                    const hr = writeCaps(pointer, emulation
+                        ? (root.hardwareOnly ? 'none' : 'hel')
+                        : root.emulated ? 'none' : 'hal');
                     if (hr !== DD_OK)
                     {
                         return hr;
@@ -2686,11 +2689,12 @@ export function createDirectDrawSeam(
          * @param {1 | 2 | 4 | 7} version
          * @returns {import('../ddraw/objects.js').DirectDrawOptions}
          */
-        rootOptions(version, emulated = false){
+        rootOptions(version, emulated = false, hardwareOnly = false){
             /** @type {import('../ddraw/objects.js').DirectDrawOptions} */
             const options = {
                 version,
                 emulated,
+                hardwareOnly,
                 textureFormat: textureFormatOffered,
                 surfaceCountOf,
                 surfaceRefusal,

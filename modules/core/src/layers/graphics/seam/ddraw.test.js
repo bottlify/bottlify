@@ -2966,6 +2966,13 @@ test('the emulation\'s caps are its own, and an object made without hardware put
         assert.equal(depthBuffer(24), emulated ? 0x88760091 : 0x10000000 | 0x4000 | 0x20000);
         assert.equal(h.release(ddraw), 0);
     }
+    // Made with the hardware alone, it describes no emulation.
+    assert.equal(h.ddrawDll.DirectDrawCreate.handler([1, 0x4100, 0]), DD_OK);
+    const hardware = h.box.memory.readU32(0x4100);
+    const none = capsOf(hardware, true);
+    assert.deepEqual([none.surfaces, none.old], [0, 0]);
+    assert.notEqual(capsOf(hardware, false).surfaces, 0);
+    assert.equal(h.release(hardware), 0);
     h.assertAllReleased();
 });
 
