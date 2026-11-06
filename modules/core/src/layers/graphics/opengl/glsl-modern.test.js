@@ -218,10 +218,14 @@ test('a block read at a computed index adds its stride; a row-major matrix\'s co
     const program = linked(link(`#version 140
 in vec4 position;
 layout(std140, row_major) uniform M { mat4 m; vec4 list[3]; int at; };
-void main() { gl_Position = m[1] + list[at]; }`, null));
+void main() { gl_Position = m[1] + list[at] + m * position; }`, null));
     const { vertex } = emit(program);
     assert.match(vertex.code,
         /bitcast<vec4f>\(vec4u\(glb0\[0\]\.y, glb0\[1\]\.y, glb0\[2\]\.y, glb0\[3\]\.y\)\)/);
+    const whole = String.raw`mat4x4f\(bitcast<vec4f>\(vec4u\(glb0\[0\]\.x, glb0\[1\]\.x,`
+        + String.raw` glb0\[2\]\.x, glb0\[3\]\.x\)\), bitcast<vec4f>\(vec4u\(glb0\[0\]\.y,`;
+    assert.match(vertex.code, new RegExp(whole),
+        'the whole matrix column by column, each from the rows');
     assert.match(vertex.code, /let t\d+: u32 = u32\(bitcast<i32>\(glb0\[7\]\.x\)\) \* 16u;/,
         'list[at]: at\'s value times the array stride');
     assert.match(vertex.code, /vubw0\(t\d+ \+ 64u\)/, 'from list\'s offset');
