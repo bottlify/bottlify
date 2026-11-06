@@ -286,9 +286,12 @@ function defaultLight(){
  * @param {number} lockFlags DDLOCK
  * @returns {number} the D3DLOCK the renderer's buffer contract reads
  */
-function bufferLockFlags(lockFlags){
+export function bufferLockFlags(lockFlags){
     let flags = 0;
-    if ((lockFlags & DDLOCK_DISCARDCONTENTS) !== 0)
+    // Asked for both, a vertex buffer is written in place: NOOVERWRITE wins,
+    // and the draw before the lock reads what it writes (ddraw7
+    // test_map_synchronisation).
+    if ((lockFlags & DDLOCK_DISCARDCONTENTS) !== 0 && (lockFlags & DDLOCK_NOOVERWRITE) === 0)
     {
         flags |= D3DLOCK.DISCARD;
     }

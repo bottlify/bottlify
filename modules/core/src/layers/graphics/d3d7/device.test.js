@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDirect3D7, d3dFormatOf } from './device.js';
+import { bufferLockFlags, createDirect3D7, d3dFormatOf } from './device.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INBEGINSTATEBLOCK,
     D3DERR_INVALIDSTATEBLOCK, D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK,
@@ -1627,4 +1627,13 @@ test('a device is made on no indexed surface, and its target moves to one in sys
     assert.equal(depth.addRef(), 2);
     assert.equal(device.release(), 0);
     assert.equal(depth.refCount, 1, 'let go of at the device\'s release');
+});
+
+test('a vertex buffer locked with both NOOVERWRITE and DISCARDCONTENTS is written in place'
+    + ' (ddraw7 test_map_synchronisation)', ()=>{
+    const D3DLOCK_DISCARD = 0x2000;
+    const D3DLOCK_NOOVERWRITE = 0x1000;
+    assert.equal(bufferLockFlags(0x2000), D3DLOCK_DISCARD);
+    assert.equal(bufferLockFlags(0x1000), D3DLOCK_NOOVERWRITE);
+    assert.equal(bufferLockFlags(0x3000), D3DLOCK_NOOVERWRITE);
 });
