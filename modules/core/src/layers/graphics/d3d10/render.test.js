@@ -2408,6 +2408,8 @@ test('a shader with an instruction that has no translation refuses its draws by 
             h.device.diagnostics().skipped.pipeline], [1, 0],
         'counted as untranslatable, apart from a pipeline the GPU refused');
         assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
+        assert.ok(h.divergences.some(line=>line.includes('lost: a draw was skipped')),
+            'a draw not made is a loss, not a warning');
     });
 
 test('a swap chain\'s present past the bound waits for the oldest frame to finish', async()=>{

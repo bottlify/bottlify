@@ -831,6 +831,17 @@ format reads and writes through the bias (an affine step at sampling and at the 
 presenter decodes it.
 *2026-11-06.*
 
+**A84. Temporary: a draw or dispatch whose stage binds more shader resources than the GPU device
+lets WebGPU bind is not made, and the loss is said.** Direct3D 11 promises 128 shader resource
+views a stage; WebGPU binds as many sampled textures and storage buffers a stage as the adapter
+allows, which is asked for at its most (`webgpu/features.js`) and is far fewer on some (16
+textures and 10 buffers a stage on SwiftShader). A typed or raw buffer view is a storage buffer
+here, so it counts against the second. The pipeline past the limit cannot be made; the draw is
+skipped and said as a loss in the journal, and the program goes on (test_high_resource_count
+binds 50 of each). It stands until buffer views past the limit are packed into one binding and
+textures past it are bound through WebGPU's binding arrays where a browser has them.
+*2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

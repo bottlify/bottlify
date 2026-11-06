@@ -5638,7 +5638,7 @@ export function createRenderer(services){
                     {
                         counters.skipped[built.reason?.untranslatable ? 'untranslatable'
                             : 'pipeline']++;
-                        diverge(`${command.what}: ${built.reason && built.reason.message
+                        lose(`${command.what}: ${built.reason && built.reason.message
                             || built.reason}`);
                         continue;
                     }
@@ -5691,7 +5691,7 @@ export function createRenderer(services){
                     const built = pipelinesNeeded[position];
                     if (built.status === 'rejected')
                     {
-                        diverge(`${command.what}: ${built.reason && built.reason.message
+                        lose(`${command.what}: ${built.reason && built.reason.message
                             || built.reason}`);
                         continue;
                     }
@@ -5739,7 +5739,7 @@ export function createRenderer(services){
                     counters.skipped[settled.reason?.untranslatable
                         ? 'untranslatable'
                         : 'pipeline']++;
-                    diverge(`a draw was skipped: ${settled.reason && settled.reason.message
+                    lose(`a draw was skipped: ${settled.reason && settled.reason.message
                         || settled.reason}`);
                     continue;
                 }
