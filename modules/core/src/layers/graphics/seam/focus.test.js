@@ -24,6 +24,8 @@ function harness({ visible = false } = {}){
     let iconic = false;
     /** @type {((args: number[]) => unknown) | null} */
     let hook = null;
+    /** @type {((args: number[]) => unknown) | null} */
+    let nested = null;
     /** @type {Record<string, (args: number[]) => number>} */
     const table = {
         SetWindowLongA: ([hwnd, index, value])=>{
@@ -42,6 +44,9 @@ function harness({ visible = false } = {}){
         IsIconic: ()=>(iconic ? 1 : 0),
         ShowWindow: ([, command])=>{
             iconic = command === 6;
+            // What the change makes reaches the focus window's procedure meanwhile.
+            nested?.([FOCUS, 0x46, 0, 0]);
+            nested?.([FOCUS, 0x7e, 0, 0]);
             return 1;
         },
         SetWindowPos: ([, , , , , , flags])=>{
@@ -59,6 +64,7 @@ function harness({ visible = false } = {}){
         } }),
         procedure: (_, handler)=>{
             hook = handler;
+            nested = handler;
             return STUB;
         },
         states: STATES,
@@ -107,12 +113,19 @@ test('losing the activation loses the device; regaining it waits for a Reset', (
     calls.length = 0;
     send(0x1c, 0);
     assert.equal(device.deviceState, STATES.LOST);
-    assert.deepEqual(names(), ['ChangeDisplaySettingsA', 'ShowWindow', 'SetWindowPos',
-        'CallWindowProcA'], 'the registry mode, the window minimised, then the program hears it');
+    assert.deepEqual(names(), ['ChangeDisplaySettingsA', 'GetWindowLongA', 'ShowWindow',
+        'DefWindowProcA', 'CallWindowProcA', 'SetWindowPos', 'CallWindowProcA'], 'the registry'
+        + ' mode, the window'
+        + ' minimised, shown as it is -- what that makes is the default procedure\'s, a mode change aside --'
+        + ' then the program hears it');
     calls.length = 0;
     send(0x1c, 1);
     assert.equal(device.deviceState, STATES.NOT_RESET);
-    assert.deepEqual(names(), ['IsIconic', 'ShowWindow', 'CallWindowProcA']);
+    assert.deepEqual(names(), ['IsIconic', 'ShowWindow', 'DefWindowProcA', 'CallWindowProcA',
+        'CallWindowProcA']);
+    calls.length = 0;
+    send(0x46, 0);
+    assert.deepEqual(names(), ['CallWindowProcA'], 'the program\'s own changes are its to hear');
     device.deviceState = STATES.OK;
     send(0x7e, 0);
     assert.equal(device.deviceState, STATES.NOT_RESET, 'a mode set under it');
@@ -146,4 +159,29 @@ test('a procedure the program set meanwhile stays at the last release', ()=>{
     procs.set(FOCUS, 0x402000);
     windows.release(device);
     assert.equal(procs.get(FOCUS), 0x402000);
+});
+
+test('an extended device shows its window only from the second made on it, and keeps it'
+    + ' out of the topmost band when the activation goes', ()=>{
+    const SHOWN = 0x40;
+    const first = harness({ visible: true });
+    first.windows.take(first.device, { ...HOW, extended: true });
+    assert.equal(first.names().includes('SetWindowPos'), false, 'the first leaves it as it is');
+    first.windows.release(first.device);
+    const again = { ...first.device };
+    first.calls.length = 0;
+    first.windows.take(again, { ...HOW, extended: true });
+    const placed = first.calls.find(([name])=>name === 'SetWindowPos');
+    assert.ok(placed && placed[1][1] === 0xffffffff && (placed[1][6] & SHOWN) !== 0,
+        'the second shows it above the others, shown already or not');
+    first.calls.length = 0;
+    first.send(0x1c, 0);
+    assert.deepEqual(first.names().filter(name=>name === 'ShowWindow' || name === 'SetWindowPos'),
+        ['ShowWindow'], 'minimised, not put above the others');
+
+    const hidden = harness();
+    hidden.windows.take(hidden.device, { ...HOW, extended: true });
+    hidden.calls.length = 0;
+    hidden.send(0x1c, 0);
+    assert.equal(hidden.names().includes('ShowWindow'), false, 'a hidden window stays as it is');
 });

@@ -6633,6 +6633,72 @@ test('SetWindowPos asks the window first, applies what it answers, and tells it 
         ], 'a move alone is no size');
     });
 
+test('a window minimised goes off the screen with no client area, and comes back restored',
+    async()=>{
+        // WM_SIZE tells the state whatever the size did: SWP_STATECHANGED in
+        // WM_WINDOWPOSCHANGED (msg.c WmShowMinOverlappedSeq; d3d9 test_wndproc's
+        // sc_restore_messages, sc_minimize_messages).
+        const SW_MINIMIZE = 6;
+        const SW_RESTORE = 9;
+        const SWP_STATECHANGED = 0x8000;
+        const WS_POPUP = 0x80000000;
+        /** @type {any} */
+        let table = null;
+        /** @type {any[]} */
+        const heard = [];
+        const { fns, memory } = setup({ heap: true, reply: message=>{
+            if (message.message === WM_WINDOWPOSCHANGED)
+            {
+                heard.push(['changed', ...[2, 3, 4, 5].map(at=>memory.u32(message.lParam + at * 4)
+                    | 0), (memory.u32(message.lParam + 24) & SWP_STATECHANGED) !== 0]);
+                return table.DefWindowProcA.handler([message.hwnd, message.message,
+                    message.wParam, message.lParam]);
+            }
+            if (message.message === WM_SIZE)
+            {
+                heard.push(['size', message.wParam, message.lParam & 0xffff, message.lParam >>> 16]);
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        } });
+        table = fns;
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = await createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE });
+        await fns.SetWindowPos.handler([hwnd, 0, 30, 40, 100, 50, 0x14]);
+        heard.length = 0;
+
+        await fns.ShowWindow.handler([hwnd, SW_MINIMIZE]);
+        assert.equal(fns.IsIconic.handler([hwnd]), 1);
+        const changed = heard.find(([what])=>what === 'changed');
+        assert.deepEqual(changed?.slice(1, 3), [-32000, -32000], 'where Windows keeps icons');
+        assert.equal(changed?.[5], true, 'a change of state');
+        assert.deepEqual(heard.find(([what])=>what === 'size'), ['size', 1, 0, 0],
+            'SIZE_MINIMIZED, and no client area');
+        heard.length = 0;
+
+        await fns.ShowWindow.handler([hwnd, SW_RESTORE]);
+        assert.deepEqual(heard.find(([what])=>what === 'changed')?.slice(1), [30, 40, 100, 50, true],
+            'back where it was');
+        assert.deepEqual(heard.find(([what])=>what === 'size'), ['size', 0, 100, 50]);
+        await fns.GetWindowRect.handler([hwnd, 0x900]);
+        assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [30, 40, 130, 90]);
+    });
+
+test('SetWindowPos with HWND_TOPMOST puts a window in the topmost band, HWND_NOTOPMOST out of it',
+    async()=>{
+        const GWL_EXSTYLE = -20;
+        const WS_EX_TOPMOST = 0x8;
+        const SWP_NOSIZE_NOMOVE = 0x3;
+        const { fns, memory } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = await createWindow(fns, memory, { style: WS_VISIBLE });
+        await fns.SetWindowPos.handler([hwnd, 0xffffffff, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE]);
+        assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST, WS_EX_TOPMOST);
+        await fns.SetWindowPos.handler([hwnd, 0xfffffffe, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE]);
+        assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST, 0);
+    });
+
 // --- what the run's window manager is told ---
 
 /**

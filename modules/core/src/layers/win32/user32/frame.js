@@ -28,6 +28,7 @@ export const WS_HSCROLL = 0x00100000;
 export const WS_CHILD = 0x40000000;
 export const WS_VISIBLE = 0x10000000;
 export const WS_DISABLED = 0x08000000;
+export const WS_MINIMIZE = 0x20000000;
 /** What decides whether a window is top-level, and what every top-level window has. */
 export const WS_POPUP = 0x80000000;
 export const WS_CLIPSIBLINGS = 0x04000000;
@@ -297,6 +298,11 @@ export function createGeometry(windowOf){
      * @param {PlacedWindow} record
      */
     const clientSize = record=>{
+        // A minimised window has no client area (WM_SIZE SIZE_MINIMIZED says 0 by 0).
+        if ((record.style & WS_MINIMIZE) !== 0)
+        {
+            return { width: 0, height: 0 };
+        }
         const edges = frame(record);
         return {
             width: Math.max(0, record.width - edges.left - edges.right),

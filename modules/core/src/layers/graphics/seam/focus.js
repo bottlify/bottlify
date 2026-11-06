@@ -8,16 +8,22 @@
  * What a full-screen Direct3D 8 or 9 device does to the windows it is given:
  * the focus window's procedure is the runtime's while the device is full
  * screen, so the runtime hears the application lose and regain the
- * activation before the program does; and the device window is shown and
- * kept the mode's size.
+ * activation before the program does; and the device window is kept the
+ * mode's size, and shown above the others (WS_EX_TOPMOST) when it was
+ * hidden -- by an extended device only from the second device made on it,
+ * and then whether hidden or not.
  *
  * Losing the activation (WM_ACTIVATEAPP with FALSE) puts the display back to
- * the registry's mode, minimises the device window and loses the device;
- * regaining it brings the device window back, and the device then waits for
- * a Reset. A mode another set under the device (WM_DISPLAYCHANGE) also
+ * the registry's mode, minimises a shown device window -- above the others
+ * but for an extended device -- and loses the device; regaining it brings
+ * the device window back, and the device then waits for a Reset. Windows
+ * leaves a minimised window to the taskbar to restore; there being none
+ * here, regaining the activation restores it (decision A87). A mode another set under the device (WM_DISPLAYCHANGE) also
  * leaves it waiting for one. SC_RESTORE is carried out by the default
  * procedure before the program hears it. An extended device is never lost.
- * D3DCREATE_NOWINDOWCHANGES leaves both windows to the program. (Wine's d3d8
+ * D3DCREATE_NOWINDOWCHANGES leaves both windows to the program. What the
+ * runtime's own changes to the focus window make goes to the default
+ * procedure, not the program's, a WM_DISPLAYCHANGE aside. (Wine's d3d8
  * and d3d9 test_wndproc, test_window_style, test_lost_device.)
  *
  * The procedure given back at the device's last release is the program's,
@@ -81,11 +87,16 @@ export function createFocusWindows({ user32, procedure, states }){
     const call = (name, args)=>user32(name)?.handler(args) ?? 0;
 
     /** The devices full screen on each focus window, and its procedure before. */
-    /** @type {Map<number, { original: number, devices: Set<Held> }>} */
+    /** @type {Map<number, { original: number, devices: Set<Held>, filtering: number }>} */
     const hooked = new Map();
     /** @type {Map<FocusDevice, Held>} */
     const held = new Map();
     let stub = 0;
+    /** The device windows an extended device has been made on. */
+    /** @type {Set<number>} */
+    const madeOn = new Set();
+    /** @param {number} hwnd */
+    const visible = hwnd=>(Number(call('GetWindowLongA', [hwnd, GWL_STYLE])) & WS_VISIBLE) !== 0;
 
     /**
      * The runtime's procedure: what the devices on this window make of a
@@ -95,7 +106,9 @@ export function createFocusWindows({ user32, procedure, states }){
      */
     const dispatch = ([hwnd, message, wParam, lParam])=>{
         const entry = hooked.get(hwnd >>> 0);
-        if (!entry)
+        // What the runtime's own changes to the window make is not the
+        // program's to hear, a mode change aside (wined3d filter_messages).
+        if (!entry || (entry.filtering > 0 && (message >>> 0) !== WM_DISPLAYCHANGE))
         {
             return call('DefWindowProcA', [hwnd, message, wParam, lParam]);
         }
@@ -106,7 +119,7 @@ export function createFocusWindows({ user32, procedure, states }){
         {
             switch (message >>> 0){
                 case WM_ACTIVATEAPP:
-                    before.push(()=>activate(one, (wParam >>> 0) !== 0));
+                    before.push(()=>filtered(one.focus, ()=>activate(one, (wParam >>> 0) !== 0)));
                     break;
                 case WM_DISPLAYCHANGE:
                     if (!one.extended && one.device.deviceState === states.OK)
@@ -123,6 +136,41 @@ export function createFocusWindows({ user32, procedure, states }){
             before.push(()=>call('DefWindowProcA', [hwnd, message, wParam, lParam]));
         }
         return andThen(inTurn(before), passOn);
+    };
+
+    /**
+     * Runs the runtime's own changes to a window with what they make sent
+     * to the default procedure rather than to the program's, when the
+     * window is a focus window.
+     *
+     * @param {number} hwnd @param {() => unknown} changes
+     */
+    const filtered = (hwnd, changes)=>{
+        const entry = hooked.get(hwnd);
+        if (!entry)
+        {
+            return changes();
+        }
+        entry.filtering++;
+        /** @param {unknown} answer */
+        const done = answer=>{
+            entry.filtering--;
+            return answer;
+        };
+        try
+        {
+            const answer = changes();
+            return typeof (/** @type {any} */ (answer))?.then === 'function'
+                ? /** @type {Promise<unknown>} */ (answer).then(done, error=>{
+                    done(0);
+                    throw error;
+                }) : done(answer);
+        }
+        catch (error)
+        {
+            done(0);
+            throw error;
+        }
     };
 
     /**
@@ -151,9 +199,12 @@ export function createFocusWindows({ user32, procedure, states }){
         return inTurn([
             // The registry's mode, which every window hears of.
             ()=>call('ChangeDisplaySettingsA', [0, 0]),
-            ()=>(one.changes ? call('ShowWindow', [one.window, SW_MINIMIZE]) : 0),
-            ()=>(one.changes ? call('SetWindowPos', [one.window, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
+            // A hidden window stays as it is; an extended device's is not
+            // put above the others.
+            ()=>(one.changes && visible(one.window)
+                ? call('ShowWindow', [one.window, SW_MINIMIZE]) : 0),
+            ()=>(one.changes && !one.extended ? call('SetWindowPos', [one.window, HWND_TOPMOST,
+                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
             ()=>{
                 if (!one.extended)
                 {
@@ -169,7 +220,7 @@ export function createFocusWindows({ user32, procedure, states }){
         if (!entry)
         {
             stub ||= procedure('d3d focus window', dispatch);
-            entry = { original: 0, devices: new Set() };
+            entry = { original: 0, devices: new Set(), filtering: 0 };
             hooked.set(focus, entry);
             entry.original = Number(call('SetWindowLongA', [focus, GWLP_WNDPROC, stub])) >>> 0;
         }
@@ -239,11 +290,14 @@ export function createFocusWindows({ user32, procedure, states }){
                     {
                         return 0;
                     }
-                    const hidden = (Number(call('GetWindowLongA', [one.window, GWL_STYLE]))
-                        & WS_VISIBLE) === 0;
-                    return hidden
-                        ? call('SetWindowPos', [one.window, HWND_TOPMOST, 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW])
+                    // An extended device leaves the window it is first made on
+                    // as it is, and shows it above the others every time after.
+                    const again = how.extended && how.created
+                        ? madeOn.has(one.window) : null;
+                    madeOn.add(one.window);
+                    return again ?? !visible(one.window)
+                        ? filtered(one.window, ()=>call('SetWindowPos', [one.window, HWND_TOPMOST,
+                            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW]))
                         : 0;
                 },
             ]);

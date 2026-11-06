@@ -869,6 +869,16 @@ with a large bone palette is the one that meets it. It stands until a software d
 constant file is 8192 registers wide on both sides and the translated shader indexes it.
 *2026-11-06.*
 
+**A87. A full-screen Direct3D 8 or 9 device restores its minimised device window when the
+application regains the activation.** On Windows the runtime minimises the device window when
+the application loses the activation and, regaining it, only sets the window's size (Wine's
+test_wndproc reactivate sequences); the window comes back because the person clicked its
+taskbar button, which restores it. There is no taskbar here, and the application regains the
+activation only by its own calls, so the runtime restores the window itself (SW_RESTORE) where
+the window is minimised, and otherwise sets its size as Windows does. What that makes on the
+focus window goes to the default procedure, as the runtime's own changes do on Windows, so a
+program hears the same messages. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
