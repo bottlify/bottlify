@@ -3268,6 +3268,15 @@ test('another object holding the screen exclusively refuses a mode set'
     assert.equal(mode(holder, 8), DD_OK, 'its holder\'s to change');
     assert.equal(h.release(holder), 0);
     assert.equal(mode(other, 8), DD_OK, 'free again once the holder is gone');
+
+    // An object that goes while another holds the screen leaves the mode alone.
+    const holding = h.create7();
+    assert.equal(mode(holding, 10), DD_OK);
+    assert.equal(h.box.call(holding, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
     assert.equal(h.release(other), 0);
+    assert.equal(h.display.width, 10, 'the holder\'s mode stays');
+    assert.equal(h.release(holding), 0);
+    assert.equal(h.display.width, 16, 'the registry\'s once the holder goes');
     h.assertAllReleased();
 });

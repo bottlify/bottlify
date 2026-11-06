@@ -605,8 +605,10 @@ export function createDirectDrawSeam(
                 ended.add(root);
                 focus?.release(holderOf(facade));
                 const device = root.deviceWindow;
-                publisher.owe?.(()=>andThen(leaveScreen(root), ()=>(device !== 0
-                    ? user32?.('DestroyWindow')?.handler([device]) : 0)));
+                // The mode is left alone while another object holds the screen
+                // (test_coop_level_mode_set_multi).
+                publisher.owe?.(()=>andThen(heldElsewhere(root) ? 0 : leaveScreen(root),
+                    ()=>(device !== 0 ? user32?.('DestroyWindow')?.handler([device]) : 0)));
             }
             return left;
         };
