@@ -55,6 +55,9 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
  *           and the host has not yet read is adopted then, or never.
+ * @property {number} [stranger]
+ *           What its methods answer when called through a pointer that never
+ *           was one of its objects (DirectDraw's clipper: DDERR_INVALIDPARAMS).
  * @property {boolean} [countedInHost]
  *           AddRef and Release go to the host, not the guest routine that
  *           counts through the pointer it is given: for an interface whose
@@ -103,6 +106,7 @@ function methodsFor(descriptor){
                 ...method.floats ? { floats: method.floats } : {},
                 guest: method.guest,
                 inPlace: method.inPlace,
+                ...descriptor.stranger === undefined ? {} : { stranger: descriptor.stranger },
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
                         method.invoke(adapter.api, args) ?? 0

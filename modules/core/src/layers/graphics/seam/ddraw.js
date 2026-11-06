@@ -822,7 +822,8 @@ export function createDirectDrawSeam(
         /** @param {any} clipper @param {number[]} args */
         SetHWnd: (clipper, [, window])=>clipper.setHWnd(window >>> 0),
     });
-    const clipperInterfaces = [{ ...clipperMethods, countedInHost: true }];
+    const clipperInterfaces = [{ ...clipperMethods, countedInHost: true,
+        stranger: DDERR_INVALIDPARAMS }];
 
     // --- surface ---
 

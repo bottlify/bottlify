@@ -1228,6 +1228,14 @@ test('a clipper carries its list as RGNDATA, both ways', ()=>{
     assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5900)).refCount, 1);
     const listSize = ()=>h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetClipList'),
         [0, 0, 0x5e00]) >>> 0;
+    // Its methods called through memory that only holds its table answer
+    // DDERR_INVALIDPARAMS and touch nothing (test_clipper_refcount).
+    const fake = 0x7e00;
+    h.box.memory.writeU32(fake, h.box.memory.readU32(clipper));
+    h.box.memory.writeU32(0x7f00, 0x1234);
+    assert.equal(h.box.call(fake, slot(IDIRECTDRAWCLIPPER_SLOTS, 'IsClipListChanged'), [0x7f00]),
+        DDERR_INVALIDPARAMS >>> 0);
+    assert.equal(h.box.memory.readU32(0x7f00), 0x1234);
     // Made, it has no list until one is given (test_clipper_blt).
     assert.equal(listSize(), 0x887600cd, 'DDERR_NOCLIPLIST');
 
