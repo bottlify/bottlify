@@ -1787,7 +1787,16 @@ export function createDirect3D9Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, publisher.objectAt(surface));
+            const bitmap = publisher.objectAt(surface);
+            // No larger than the display it is shown on (Wine's test_cursor).
+            /** @type {{ desc?: any }} */
+            const shape = {};
+            if (bitmap?.GetDesc?.(shape) === D3D_OK && shape.desc
+                && (shape.desc.Width > screen().width || shape.desc.Height > screen().height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, bitmap);
             if (hr === D3D_OK)
             {
                 tellCursor(device);
