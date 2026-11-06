@@ -164,6 +164,8 @@ const D3DDISPLAYROTATION_IDENTITY = 1;
 const ADAPTER_LUID = 0x00000001;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
+/** What a device of the plain interface answers a shared handle with. */
+const E_NOTIMPL = 0x80004001 | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
 const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 /** D3DPRESENTFLAG_LOCKABLE_BACKBUFFER. */
@@ -1666,6 +1668,15 @@ export function createDirect3D9Seam(
     const sharedHandleRefused = shared=>(shared >>> 0) !== 0;
 
     /**
+     * A shared handle asked of a device made through the plain interface,
+     * which has no sharing at all: E_NOTIMPL, before anything else is looked
+     * at (Wine's test_shared_handle; Windows 7 answers D3DERR_INVALIDCALL).
+     *
+     * @param {any} device @param {number} shared
+     */
+    const plainShareRefused = (device, shared)=>(shared >>> 0) !== 0 && device?.extended !== true;
+
+    /**
      * What a create's shared-handle pointer asks of an extended device for a
      * resource in the system-memory pool: the handle it holds is the address
      * of memory of the program's own to keep the resource in. Any other use of
@@ -1993,6 +2004,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateTexture: (device, [width, height, levels, usage, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             const userMemory = userMemoryOf(device, shared, pool);
             if (userMemory === null || (out >>> 0) === 0)
             {
@@ -2023,6 +2038,10 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         CreateVolumeTexture: (device, args)=>{
             const [width, height, depth, levels, usage, format, pool, out, shared] = args;
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2048,6 +2067,10 @@ export function createDirect3D9Seam(
         },
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2066,6 +2089,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateVertexBuffer: (device, [length, usage, fvf, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 // A buffer is never kept in the program's own memory.
@@ -2087,6 +2114,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateIndexBuffer: (device, [length, usage, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 // A buffer is never kept in the program's own memory.
@@ -2110,6 +2141,10 @@ export function createDirect3D9Seam(
         // one sample per pixel whatever it is asked for (decision A85).
         /** @param {any} device @param {number[]} args */
         CreateRenderTarget: (device, [width, height, format, samples, , lockable, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2129,6 +2164,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateDepthStencilSurface: (device, [width, height, format, samples, , , out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2148,6 +2187,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateOffscreenPlainSurface: (device, [width, height, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             const userMemory = userMemoryOf(device, shared, pool);
             if (userMemory === null || (out >>> 0) === 0)
             {

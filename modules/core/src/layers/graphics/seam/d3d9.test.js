@@ -58,6 +58,7 @@ import { createSystemFunctions } from '../../win32/user32/system.js';
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
+const E_NOTIMPL = 0x80004001;
 /** A query whose answer is not ready yet. */
 const S_FALSE = 1;
 const E_NOINTERFACE = 0x80004002;
@@ -720,7 +721,7 @@ test('a texture is made without a shared handle, described and locked at this ve
         const { device } = h.createDevice(root);
         const out = 0x3000;
         assert.equal(h.device(device, 'CreateTexture',
-            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), E_NOTIMPL,
         'a shared handle is the extended interface\'s');
         assert.equal(h.device(device, 'CreateTexture',
             [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
@@ -945,7 +946,7 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     const { device } = h.createDevice(root);
     const out = 0x3000;
     assert.equal(h.device(device, 'CreateCubeTexture',
-        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), E_NOTIMPL,
     'a shared handle is the extended interface\'s');
     assert.equal(h.device(device, 'CreateCubeTexture',
         [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
@@ -1007,7 +1008,7 @@ test('a volume texture is made, and its levels lock, describe and name it as a b
         const { device } = h.createDevice(root);
         const out = 0x3000;
         assert.equal(h.device(device, 'CreateVolumeTexture',
-            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), D3DERR_INVALIDCALL,
+            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), E_NOTIMPL,
         'a shared handle is the extended interface\'s');
         h.box.memory.writeU32(out, 0xdeadbeef);
         assert.equal(h.device(device, 'CreateVolumeTexture',
@@ -2213,18 +2214,42 @@ test('a create refused for its shared handle leaves no pointer behind', ()=>{
     // its out-parameter: a pointer from an earlier call there is a call into
     // a freed object.
     const h = seamed();
-    const root = h.create();
-    const { device } = h.createDevice(root);
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const { device } = h.createDevice(h.box.memory.readU32(0x2200));
     const out = 0x3000;
-    for (const [name, args] of /** @type {[string, number[]][]} */ ([
-        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
-        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
-        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+    for (const [name, args, hr] of /** @type {[string, number[], number][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000],
+            D3DERR_INVALIDCALL],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000],
+            D3DERR_INVALIDCALL],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000], D3DERR_NOTAVAILABLE],
     ]))
     {
         h.box.memory.writeU32(out, 0xdeadbeef);
-        assert.equal(h.device(device, name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.device(device, name, args), hr, name);
         assert.equal(h.box.memory.readU32(out), 0, `${name} cleared its out-parameter`);
+    }
+});
+
+test('a device of the plain interface answers any shared handle with E_NOTIMPL', ()=>{
+    // Wine's test_shared_handle: before anything else is looked at.
+    const h = seamed();
+    const { device } = h.createDevice(h.create());
+    const out = 0x3000;
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateCubeTexture', [8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0x4000]],
+        ['CreateVolumeTexture', [8, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0x4000]],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateRenderTarget', [8, 4, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0x4000]],
+        ['CreateDepthStencilSurface', [8, 4, D3DFMT.D24S8, 0, 0, 0, out, 0x4000]],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateIndexBuffer', [16, 0, 101, D3DPOOL.DEFAULT, out, 0x4000]],
+    ]))
+    {
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, name, args), E_NOTIMPL, name);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, `${name} wrote nothing`);
     }
 });
 
