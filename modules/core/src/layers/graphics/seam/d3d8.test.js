@@ -2312,6 +2312,27 @@ test('the guest routines a device writes come from the code pages, not the heap 
         assert.ok(code.every(([, size])=>size > 0 && size <= 0x200));
     });
 
+test('a target made by another device is not bound', ()=>{
+    // Wine's d3d8 test_render_target_device_mismatch.
+    const h = seamed();
+    const root = h.create();
+    const first = h.createDevice(root);
+    const second = h.createDevice(root);
+    const out = 0x3200;
+    assert.equal(h.device(second, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, out]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [target, 0]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(second, 'CreateDepthStencilSurface',
+        [32, 16, D3DFMT.D24S8, 0, out]), D3D_OK);
+    const depth = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'GetRenderTarget', [out]), D3D_OK);
+    const own = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [own, depth]), D3DERR_INVALIDCALL,
+        'nor its depth surface');
+    assert.equal(h.device(second, 'SetRenderTarget', [target, 0]), D3D_OK);
+});
+
 test('a device whose last reference a swap chain held still lets go of its Direct3D object', ()=>{
     // Wine's d3d8 test_refcount: the swap chain's Release destroys the device.
     const h = seamed();

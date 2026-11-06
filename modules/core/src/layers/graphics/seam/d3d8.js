@@ -1711,8 +1711,14 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [target, depth])=>{
-            const hr = device.SetRenderTarget(publisher.objectAt(target),
-                publisher.objectAt(depth));
+            // A surface another device made is refused (Wine's d3d8
+            // test_render_target_device_mismatch).
+            const made = [publisher.objectAt(target), publisher.objectAt(depth)];
+            if (made.some(surface=>surface && ![null, device].includes(ownerOf(surface))))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetRenderTarget(made[0], made[1]);
             // A new target is a new viewport, which the guest's GetViewport reads.
             shadowOf(device)?.remirror({ viewport: true });
             return hr;
