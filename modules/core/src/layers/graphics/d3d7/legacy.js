@@ -727,10 +727,11 @@ export function createLegacyDirect3D(d3d7, textures){
         createLight,
 
         createMaterial(){
-            let handle = 0;
+            /** @type {Map<any, number>} its handle on each device asked through */
+            const handles = new Map();
             let data = emptyMaterial();
             const life = counted(()=>{
-                if (handle !== 0)
+                for (const handle of handles.values())
                 {
                     materials.delete(handle);
                 }
@@ -754,11 +755,19 @@ export function createLegacyDirect3D(d3d7, textures){
                     };
                     return D3D_OK;
                 },
-                /** The handle that names this material, made on first asking and kept. */
-                getHandle(){
-                    if (handle === 0)
+                /**
+                 * The handle that names this material on a device, made on first
+                 * asking and kept: one a device, each naming it on any of them
+                 * (Wine's ddraw2 and ddraw4 test_multiple_devices).
+                 *
+                 * @param {any} [device]
+                 */
+                getHandle(device = null){
+                    let handle = handles.get(device);
+                    if (handle === undefined)
                     {
                         handle = nextMaterial++;
+                        handles.set(device, handle);
                         materials.set(handle, material);
                     }
                     return handle;
@@ -887,6 +896,29 @@ function createLegacyDevice(inner, version, legacy){
         }
     };
 
+    /**
+     * Stage zero's alpha under TEXTUREMAPBLEND's MODULATE, set when the blend
+     * or the texture changes: the texture's alpha where it has one, the
+     * colour's where it has none or there is no texture. It reads back so
+     * (Wine's ddraw4 test_texturemapblend) and counts as what the blend set.
+     */
+    const fixAlphaOp = ()=>{
+        const mode = ownStates.get(RS.TEXTUREMAPBLEND);
+        if (!legacyBlend || (mode !== D3DTBLEND.MODULATE && mode !== D3DTBLEND.MODULATEMASK))
+        {
+            return;
+        }
+        /** @type {{ surface?: any }} */
+        const bound = {};
+        inner.GetTexture(0, bound);
+        const hasAlpha = bound.surface
+            && (bound.surface.pixelFormat.flags & DDPF_ALPHAPIXELS) !== 0;
+        bound.surface?.release();
+        const op = hasAlpha ? D3DTOP.SELECTARG1 : D3DTOP.SELECTARG2;
+        blendSet.set(D3DTSS.ALPHAOP, op);
+        inner.SetTextureStageState(0, D3DTSS.ALPHAOP, op);
+    };
+
     /** Draws, by kind, for GetStats. */
     const stats = { triangles: 0, lines: 0, points: 0, vertices: 0 };
 
@@ -992,41 +1024,22 @@ function createLegacyDevice(inner, version, legacy){
     };
 
     /**
-     * Lighting, material and lights for one draw, the texture a handle
-     * names, and the stage-zero alpha TEXTUREMAPBLEND's MODULATE means for
-     * the texture bound now. Answers what to put back afterwards.
+     * Lighting, material and lights for one draw, and the texture a handle
+     * names now, with the stage-zero alpha TEXTUREMAPBLEND's MODULATE means
+     * for it.
      *
      * @param {number} fvf @param {number} flags
-     * @returns {() => void}
      */
     const prepare = (fvf, flags)=>{
         if (textureByHandle)
         {
             inner.SetTexture(0, textures.surfaceOf(ownStates.get(RS.TEXTUREHANDLE) ?? 0),
                 { unheld: true });
+            fixAlphaOp();
         }
         const lit = (fvf & FVF_POSITION_MASK) !== FVF_XYZRHW && (fvf & FVF_NORMAL) !== 0
             && (flags & D3DDP_DONOTLIGHT) === 0 && applyMaterial() !== null;
         inner.SetRenderState(RS.LIGHTING, lit ? 1 : 0);
-        const mode = ownStates.get(RS.TEXTUREMAPBLEND);
-        if (legacyBlend && (mode === D3DTBLEND.MODULATE || mode === D3DTBLEND.MODULATEMASK))
-        {
-            /** @type {{ surface?: any }} */
-            const bound = {};
-            inner.GetTexture(0, bound);
-            const hasAlpha = bound.surface
-                && (bound.surface.pixelFormat.flags & DDPF_ALPHAPIXELS) !== 0;
-            bound.surface?.release();
-            if (!hasAlpha)
-            {
-                /** @type {{ value?: number }} */
-                const kept = {};
-                inner.GetTextureStageState(0, D3DTSS.ALPHAOP, kept);
-                inner.SetTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG2);
-                return ()=>inner.SetTextureStageState(0, D3DTSS.ALPHAOP, kept.value);
-            }
-        }
-        return ()=>{};
     };
 
     /**
@@ -1038,9 +1051,8 @@ function createLegacyDevice(inner, version, legacy){
      * @param {() => number} run
      */
     const draw = (type, fvf, flags, elements, vertices, run)=>{
-        const restore = prepare(fvf, flags);
+        prepare(fvf, flags);
         const hr = run();
-        restore();
         if (hr === D3D_OK)
         {
             const primitives = primitivesOf(type, elements);
@@ -1305,11 +1317,14 @@ function createLegacyDevice(inner, version, legacy){
             ownStates.set(state, value >>> 0);
             switch (state)
             {
-                case RS.TEXTUREHANDLE:
+                case RS.TEXTUREHANDLE: {
                     // A handle binds the texture without holding it (Wine's
                     // ddraw2 test_texturemapblend releases it while bound).
                     textureByHandle = true;
-                    return inner.SetTexture(0, textures.surfaceOf(value), { unheld: true });
+                    const hr = inner.SetTexture(0, textures.surfaceOf(value), { unheld: true });
+                    fixAlphaOp();
+                    return hr;
+                }
                 case RS.TEXTUREMAPBLEND:
                     if (value !== previous)
                     {
@@ -1319,6 +1334,7 @@ function createLegacyDevice(inner, version, legacy){
                         {
                             inner.SetTextureStageState(0, type, setting);
                         }
+                        fixAlphaOp();
                     }
                     return D3D_OK;
                 case RS.TEXTUREMAG:
@@ -1488,6 +1504,7 @@ function createLegacyDevice(inner, version, legacy){
             if (hr === D3D_OK && stage === 0)
             {
                 textureByHandle = false;
+                fixAlphaOp();
             }
             return hr;
         },

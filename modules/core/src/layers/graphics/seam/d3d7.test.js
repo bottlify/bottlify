@@ -735,6 +735,11 @@ test('a vertex buffer is a guest allocation with a description of its own', ()=>
     assert.equal(create(), D3D_OK);
     const buffer = h.box.memory.readU32(0x6500);
     assert.notEqual(buffer, 0);
+    h.box.putGuid(0x6800, '{00000000-0000-0000-C000-000000000046}');
+    assert.equal(h.box.call(buffer, 0, [0x6800, 0x6810]), D3D_OK);
+    assert.equal(h.box.memory.readU32(0x6810), buffer,
+        'IUnknown is the buffer\'s own (test_vb_refcount)');
+    h.box.call(buffer, 2, []);
 
     assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0x6604]), D3D_OK);
     const data = h.box.memory.readU32(0x6600);

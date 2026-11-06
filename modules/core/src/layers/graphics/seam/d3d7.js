@@ -85,7 +85,9 @@ export const LEGACY_DEVICE_COMMANDS = Object.freeze(Object.fromEntries(Object.en
     SetRenderState: {},
     SetTextureStageState: {},
     SetTransform: { within: [{ arg: 0, ranges: [[0, 2], [4, 0xffffffff]] }] },
-    SetTexture: {},
+    // Stage zero's texture sets the alpha TEXTUREMAPBLEND's MODULATE takes
+    // (`fixAlphaOp`), which the host makes and mirrors.
+    SetTexture: { within: [{ arg: 0, ranges: [[1, 7]] }] },
 }).map(([name, own])=>[name, { ...D3D7_COMMANDS.COMMANDS[name], ...own,
     slot: D3D7_COMMANDS.commandSlot(name),
     mirror: /** @type {Record<string, any>} */ (COMMAND_MIRRORS)[name] }])));
@@ -428,6 +430,14 @@ export function createDirect3D7Seam(
         SetTextureStageState: (shadow, [stage, type])=>shadow.remirror({
             stageStates: (type === 12 ? [12, 13, 14] : [type])
                 .map(each=>(stage & 0xffffff) << 8 | each & 0xff) }),
+        // A legacy device's texture on stage zero sets that stage's alpha
+        // operation under TEXTUREMAPBLEND's MODULATE.
+        SetTexture: (shadow, [stage])=>{
+            if (legacyShadows.has(shadow) && stage === 0)
+            {
+                shadow.remirror({ stageStates: [4] });
+            }
+        },
         SetViewport: shadow=>shadow.remirror({ viewport: true }),
         SetRenderTarget: shadow=>shadow.remirror({ viewport: true }),
         ApplyStateBlock: shadow=>shadow.remirror(),
@@ -1063,9 +1073,10 @@ export function createDirect3D7Seam(
                 unlockCode(at, trap)),
         }).filter(([name])=>!traps.has(name) && !traps.has('locks')))
         : {};
+    // IUnknown is the buffer's own interface (Wine's ddraw7 test_vb_refcount).
     const bufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods,
-            bufferGuests),
+        { ...describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods,
+            bufferGuests), identity: true },
     ];
 
     // --- device ---

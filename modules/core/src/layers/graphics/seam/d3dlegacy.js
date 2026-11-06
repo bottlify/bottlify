@@ -548,11 +548,12 @@ export function createLegacyDirect3DSeam(
          * @param {any} material @param {number[]} args
          */
         GetHandle: (material, [device, out])=>{
-            if (!publisher.objectAt(device) || (out >>> 0) === 0)
+            const owner = publisher.objectAt(device);
+            if (!owner || (out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, material.getHandle());
+            fields.writeU32(out >>> 0, material.getHandle(owner));
             return D3D_OK;
         },
 
@@ -853,8 +854,10 @@ export function createLegacyDirect3DSeam(
 
     // --- vertex buffers ---
 
+    // IUnknown is the buffer's own interface (Wine's ddraw4 test_vb_refcount).
     const bufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer, IDIRECT3DVERTEXBUFFER_SLOTS, bufferMethods),
+        { ...describe(IID_IDirect3DVertexBuffer, IDIRECT3DVERTEXBUFFER_SLOTS, bufferMethods),
+            identity: true },
     ];
 
     // --- devices ---

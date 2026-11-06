@@ -902,6 +902,9 @@ test('a DirectX 6 vertex buffer counts on its own and is no IDirect3DVertexBuffe
     assert.equal(h.query(buffer, IID_IDirect3DVertexBuffer).hr, DD_OK);
     h.release(buffer);
     assert.equal(h.query(buffer, IID_IDirect3DVertexBuffer7).hr, E_NOINTERFACE);
+    const unknown = h.query(buffer, '{00000000-0000-0000-C000-000000000046}');
+    assert.equal(unknown.pointer, buffer, 'IUnknown is the buffer\'s own pointer');
+    h.release(unknown.pointer);
 
     const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
         h.box.call(buffer, slot(IDIRECT3DVERTEXBUFFER_SLOTS, name), args);
@@ -1383,6 +1386,32 @@ test('a surface no device could draw into refuses the device GUID with why (test
     h.release(indexed);
     h.release(plain);
     h.release(system);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a material has a handle a device (test_multiple_devices)', ()=>{
+    const h = seamed();
+    const ddraw = h.create4();
+    const first = h.createDevice(ddraw);
+    const second = h.createDevice(ddraw);
+    const d3d = h.direct3D(ddraw);
+    const material = h.make(d3d, 'CreateMaterial');
+    const handle = (/** @type {number} */ device)=>{
+        assert.equal(h.box.call(material, slot(IDIRECT3DMATERIAL3_SLOTS, 'GetHandle'),
+            [device, 0x6300]), D3D_OK);
+        return h.box.memory.readU32(0x6300);
+    };
+    const one = handle(first.device);
+    assert.equal(handle(first.device), one, 'asked again through one device, the same');
+    assert.notEqual(handle(second.device), one, 'another through another');
+    h.release(material);
+    h.release(d3d);
+    for (const { device, target } of [first, second])
+    {
+        assert.equal(h.release(device), 0);
+        h.release(target);
+    }
     h.release(ddraw);
     h.assertAllReleased();
 });

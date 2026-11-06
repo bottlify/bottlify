@@ -336,6 +336,11 @@ test('a viewport clears to its background material\'s diffuse colour, or black',
         texture: 0, rampSize: 0 });
     const handle = material.getHandle();
     assert.equal(material.getHandle(), handle, 'one material, one handle');
+    // A handle a device (Wine's ddraw2 and ddraw4 test_multiple_devices),
+    // each naming the material.
+    const other = material.getHandle({});
+    assert.notEqual(other, handle);
+    assert.equal(f.legacy.materialOf(other), material);
     const rect = [{ x1: 0, y1: 0, x2: 64, y2: 48 }];
 
     assert.deepEqual(viewport.getBackground(), { handle: 0, valid: false });
@@ -541,35 +546,37 @@ test('TEXTUREMAPBLEND sets stage zero, until a stage state set to something else
 
     const plain = surface(f.root, { caps: DDSCAPS_TEXTURE, pixelFormat: XRGB32 });
     const alpha = surface(f.root, { caps: DDSCAPS_TEXTURE, pixelFormat: ARGB32 });
-    f.device.BeginScene();
-    /** @returns {number[]} the stage-zero alpha operations a draw set, in order */
-    const alphaOpsOfDraw = ()=>{
-        const mark = f.calls.length;
-        f.device.drawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TLVERTEX, zeros(4, 24), 4, 0);
-        return f.since('SetTextureStageState', mark)
-            .filter(call=>call[1] === 0 && call[2] === D3DTSS.ALPHAOP).map(call=>call[3]);
+    /** @returns {number} stage zero's alpha operation, as the program reads it */
+    const alphaOp = ()=>{
+        /** @type {{ value?: number }} */
+        const value = {};
+        assert.equal(f.device.inner.GetTextureStageState(0, D3DTSS.ALPHAOP, value), D3D_OK);
+        return /** @type {number} */ (value.value);
     };
 
     assert.equal(f.device.setTexture(0, plain), D3D_OK);
-    assert.deepEqual(alphaOpsOfDraw(), [D3DTOP.SELECTARG2, D3DTOP.SELECTARG1],
-        'MODULATE takes the vertex alpha for a texture that has none, for that draw only');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2,
+        'MODULATE takes the vertex alpha for a texture that has none, and reads so');
     f.device.setTexture(0, alpha);
-    assert.deepEqual(alphaOpsOfDraw(), [], 'and the texture\'s for one that has it');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'and the texture\'s for one that has it');
     f.device.setTexture(0, plain);
 
-    assert.equal(f.device.setTextureStageState(0, D3DTSS.COLOROP, D3DTOP.MODULATE), D3D_OK);
-    assert.deepEqual(alphaOpsOfDraw(), [D3DTOP.SELECTARG2, D3DTOP.SELECTARG1],
+    assert.equal(f.device.setTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG2), D3D_OK);
+    f.device.setTexture(0, alpha);
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1,
         'a stage state set to what the blend already put there leaves the blend on');
     f.device.setTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG2);
-    assert.deepEqual(alphaOpsOfDraw(), [], 'set to anything else, the program owns the stage');
+    f.device.setTexture(0, plain);
+    f.device.setTexture(0, alpha);
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2, 'set to anything else, the program owns the stage');
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.MODULATE);
-    assert.deepEqual(alphaOpsOfDraw(), [], 'the same mode again does not take it back');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2, 'the same mode again does not take it back');
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.ADD);
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.MODULATE);
-    assert.deepEqual(alphaOpsOfDraw(), [D3DTOP.SELECTARG2, D3DTOP.SELECTARG1],
-        'a different mode does');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'a different mode does');
+    f.device.setTexture(0, null);
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2, 'no texture takes the vertex alpha');
 
-    f.device.EndScene();
     f.device.setTexture(0, null);
     assert.equal(plain.release(), 0);
     assert.equal(alpha.release(), 0);
