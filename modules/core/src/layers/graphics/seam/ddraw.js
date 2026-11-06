@@ -950,7 +950,8 @@ export function createDirectDrawSeam(
             {
                 return DDERR_SURFACEBUSY;
             }
-            if (surface.bytesPerPixel === 0 && !(surface === source && compressedKind(source)))
+            // Blocks are copied from and into, never filled.
+            if (surface.bytesPerPixel === 0 && !(source && compressedKind(surface)))
             {
                 return DDERR_UNSUPPORTED;
             }

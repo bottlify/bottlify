@@ -2426,8 +2426,14 @@ test('a DXT5 surface reports its size whole, and a copy into an RGB texture deco
                 | (h.box.bytes[texels + y * pitch + x * 2 + 1] << 8), 0xff00, `${x},${y}`);
         }
 
-        assert.equal(h.surface7(dxt5, 'Blt', [0, argb4444, 0, DDBLT_WAIT, 0]), DDERR_UNSUPPORTED,
-            'nothing compresses');
+        // And back: the texels compressed into blocks again, the copy out of
+        // them the colour they were (test_compressed_surface_stretch).
+        assert.equal(h.surface7(dxt5, 'Blt', [0, argb4444, 0, DDBLT_WAIT, 0]), DD_OK);
+        h.box.memory.writeU32(0x5f00 + DDBLTFX.dwFillColor, 0);
+        assert.equal(h.surface7(argb4444, 'Blt', [0, 0, 0, DDBLT_COLORFILL, 0x5f00]), DD_OK);
+        assert.equal(h.surface7(argb4444, 'Blt', [0, dxt5, 0, DDBLT_WAIT, 0]), DD_OK);
+        const again = lockedAt(h, argb4444);
+        assert.equal(h.box.bytes[again] | (h.box.bytes[again + 1] << 8), 0xff00);
         assert.equal(h.release(dxt5), 0);
         assert.equal(h.release(argb4444), 0);
         assert.equal(h.release(ddraw), 0);

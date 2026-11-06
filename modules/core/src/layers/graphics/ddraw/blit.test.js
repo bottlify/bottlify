@@ -492,3 +492,29 @@ test('a fill or raster operation is checked before its rectangles: it needs its 
     assert.equal(blt({ memory, dest: depth, flags: DDBLT_COLORFILL | DEPTHFILL, fx }),
         DDERR_INVALIDPARAMS);
 });
+
+test('a copy into DXTn blocks encodes the blocks it touched and leaves the rest'
+    + ' (test_compressed_surface_stretch)', ()=>{
+    const memory = ram(0x1000);
+    // 8x8 DXT1: four blocks of eight bytes, all 0xab.
+    const dest = { ...surface(BASE, 8, 8, 0, 16), compressed: /** @type {const} */ ('dxt1') };
+    memory.bytes.fill(0xab, BASE, BASE + 32);
+    // 2x2 of A1R5G5B5 opaque blue, stretched into the dest's (2,2)-(4,4).
+    const src = { ...surface(BASE + 0x100, 2, 2, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0x8000 } };
+    for (let k = 0; k < 4; k++)
+    {
+        writePixel(memory, src, k & 1, k >> 1, 0x801f);
+    }
+    assert.equal(blt({ memory, dest, src, flags: 0,
+        destRect: { left: 2, top: 2, right: 4, bottom: 4 } }), 0);
+    assert.deepEqual([...memory.bytes.subarray(BASE + 8, BASE + 32)], new Array(24).fill(0xab),
+        'blocks 1 to 3 untouched');
+    const view = new DataView(memory.bytes.buffer);
+    const c0 = view.getUint16(BASE, true);
+    const c1 = view.getUint16(BASE + 2, true);
+    const indices = view.getUint32(BASE + 4, true);
+    // Texel (2,2) is index 10 of the block: its colour is pure blue.
+    const picked = (indices >>> 20) & 3;
+    assert.equal(picked === 0 ? c0 : picked === 1 ? c1 : -1, 0x001f);
+});

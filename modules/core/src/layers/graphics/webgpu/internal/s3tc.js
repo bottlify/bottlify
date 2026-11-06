@@ -171,3 +171,149 @@ export function decodeS3tc(bytes, kind, width, height, into){
     }
     return texels;
 }
+
+/** @param {number} byte @param {number} bits @returns {number} the nearest field of `bits` */
+const fieldOfByte = (byte, bits)=>Math.round(byte * ((1 << bits) - 1) / 255);
+
+/**
+ * Encodes RGBA texels into S3TC blocks with a range fit: a block's colours
+ * placed between its two most distant ones. A block that is one colour
+ * decodes back to that colour as far as RGB565 holds it. `blocks`, when
+ * given, are the only ones written into `into` (the rest keep their bytes):
+ * a copy into part of a surface leaves the blocks it does not touch as they
+ * were rather than re-encoded. Direct3DX's loader keeps an encoder of its own
+ * (win32/d3dx9/pixels.js) on the far side of the module boundary.
+ *
+ * @param {Uint8Array} texels  width x height RGBA
+ * @param {S3tcKind} kind
+ * @param {number} width
+ * @param {number} height
+ * @param {Uint8Array} into  compressedBytes(kind, width, height) bytes
+ * @param {{ left: number, top: number, right: number, bottom: number }} [blocks]
+ *        in blocks, right and bottom exclusive
+ */
+export function encodeS3tc(texels, kind, width, height, into, blocks){
+    const dxt1 = kind === 'dxt1';
+    const blockBytes = dxt1 ? 8 : 16;
+    const across = Math.ceil(width / 4);
+    const view = new DataView(into.buffer, into.byteOffset, into.byteLength);
+    const area = blocks ?? { left: 0, top: 0, right: across, bottom: Math.ceil(height / 4) };
+    /** @type {number[][]} */
+    const block = Array.from({ length: 16 }, ()=>[0, 0, 0, 0]);
+    /** @param {number[]} p @returns {number} */
+    const to565 = p=>fieldOfByte(p[0], 5) << 11 | fieldOfByte(p[1], 6) << 5 | fieldOfByte(p[2], 5);
+    /** @param {number} c @returns {number[]} */
+    const from565 = c=>[from5(c >> 11), from6((c >> 5) & 0x3f), from5(c & 0x1f)];
+    for (let by = area.top; by < area.bottom; by++)
+    {
+        for (let bx = area.left; bx < area.right; bx++)
+        {
+            for (let k = 0; k < 16; k++)
+            {
+                const x = Math.min(width - 1, bx * 4 + (k & 3));
+                const y = Math.min(height - 1, by * 4 + (k >> 2));
+                const at = (y * width + x) * 4;
+                block[k] = [texels[at], texels[at + 1], texels[at + 2], texels[at + 3]];
+            }
+            const start = (by * across + bx) * blockBytes;
+            into.fill(0, start, start + blockBytes);
+            const punch = dxt1 && block.some(t=>t[3] < 128);
+            const lit = block.filter(t=>!punch || t[3] >= 128);
+            let ends = [lit[0] ?? [0, 0, 0], lit[0] ?? [0, 0, 0]];
+            let spread = -1;
+            for (const p of lit)
+            {
+                for (const q of lit)
+                {
+                    const d = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2;
+                    if (d > spread)
+                    {
+                        spread = d;
+                        ends = [p, q];
+                    }
+                }
+            }
+            let c0 = to565(ends[0]);
+            let c1 = to565(ends[1]);
+            // Four colours want c0 > c1; three and transparent want c0 <= c1.
+            if (punch ? c0 > c1 : c0 < c1)
+            {
+                [c0, c1] = [c1, c0];
+            }
+            const p0 = from565(c0);
+            const p1 = from565(c1);
+            const palette = punch || c0 <= c1
+                ? [p0, p1, [0, 1, 2].map(i=>(p0[i] + p1[i]) / 2)]
+                : [p0, p1, [0, 1, 2].map(i=>(2 * p0[i] + p1[i]) / 3),
+                    [0, 1, 2].map(i=>(p0[i] + 2 * p1[i]) / 3)];
+            let indices = 0;
+            block.forEach((t, k)=>{
+                let best = 3;
+                if (!punch || t[3] >= 128)
+                {
+                    let error = Infinity;
+                    palette.forEach((p, i)=>{
+                        const e = (p[0] - t[0]) ** 2 + (p[1] - t[1]) ** 2 + (p[2] - t[2]) ** 2;
+                        if (e < error)
+                        {
+                            error = e;
+                            best = i;
+                        }
+                    });
+                }
+                indices |= best << (k * 2);
+            });
+            const colourAt = dxt1 ? start : start + 8;
+            view.setUint16(colourAt, c0, true);
+            view.setUint16(colourAt + 2, c1, true);
+            view.setUint32(colourAt + 4, indices >>> 0, true);
+            if (kind === 'dxt3')
+            {
+                block.forEach((t, k)=>{
+                    into[start + (k >> 1)] |= fieldOfByte(t[3], 4) << ((k & 1) * 4);
+                });
+            }
+            else if (kind === 'dxt5')
+            {
+                const a0 = Math.max(...block.map(t=>t[3]));
+                const a1 = Math.min(...block.map(t=>t[3]));
+                into[start] = a0;
+                into[start + 1] = a1;
+                const levels = [a0, a1];
+                for (let k = 1; k < 7; k++)
+                {
+                    levels.push(((7 - k) * a0 + k * a1) / 7);
+                }
+                let low = 0;
+                let high = 0;
+                block.forEach((t, k)=>{
+                    let best = 0;
+                    if (a0 !== a1)
+                    {
+                        levels.forEach((level, i)=>{
+                            if (Math.abs(level - t[3]) < Math.abs(levels[best] - t[3]))
+                            {
+                                best = i;
+                            }
+                        });
+                    }
+                    const bit = k * 3;
+                    // Eight indices fill 24 bits exactly: none straddles the halves.
+                    if (bit < 24)
+                    {
+                        low |= best << bit;
+                    }
+                    else
+                    {
+                        high |= best << (bit - 24);
+                    }
+                });
+                for (let k = 0; k < 3; k++)
+                {
+                    into[start + 2 + k] = (low >> (k * 8)) & 0xff;
+                    into[start + 5 + k] = (high >> (k * 8)) & 0xff;
+                }
+            }
+        }
+    }
+}

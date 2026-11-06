@@ -30,7 +30,7 @@ import {
     DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDBLT_ROP, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT,
     DDERR_NORASTEROPHW, DDERR_UNSUPPORTED, DD_OK, ROP,
 } from './constants.js';
-import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { compressedBytes, decodeS3tc, encodeS3tc } from '../webgpu/internal/s3tc.js';
 
 /**
  * @typedef {Object} BlitSurface
@@ -552,6 +552,54 @@ function depthFill(memory, dest, rect, value, clipList){
     return DD_OK;
 }
 
+/** Where a decoded DXTn destination lives: past every guest address. */
+const DECODED_AT = 2 ** 32;
+
+/**
+ * A blit into DXTn blocks: the destination decoded, the blit made into the
+ * texels as into any surface, and the blocks it touched encoded again; the
+ * others keep their bytes (Wine's test_compressed_surface_stretch).
+ *
+ * @param {Parameters<typeof blt>[0]} request
+ * @returns {number} HRESULT
+ */
+function bltIntoBlocks(request){
+    const { memory, dest } = request;
+    const kind = /** @type {import('../webgpu/internal/s3tc.js').S3tcKind} */ (dest.compressed);
+    const blocks = memory.readMemory(dest.buffer,
+        compressedBytes(kind, dest.width, dest.height)).slice();
+    const texels = decodeS3tc(blocks, kind, dest.width, dest.height);
+    if (!texels)
+    {
+        return DDERR_INVALIDPARAMS;
+    }
+    /** @type {BlitMemory} */
+    const both = {
+        readMemory: (at, length)=>(at >= DECODED_AT
+            ? texels.slice(at - DECODED_AT, at - DECODED_AT + length)
+            : memory.readMemory(at, length)),
+        writeMemory: (at, bytes)=>(at >= DECODED_AT
+            ? texels.set(bytes, at - DECODED_AT)
+            : memory.writeMemory(at, bytes)),
+    };
+    const decoded = { ...DECODED, buffer: DECODED_AT, pitch: dest.width * 4, width: dest.width,
+        height: dest.height };
+    const hr = blt({ ...request, memory: both, dest: decoded });
+    if (hr !== DD_OK)
+    {
+        return hr;
+    }
+    const rect = wholeOf(request.destRect, dest);
+    encodeS3tc(texels, kind, dest.width, dest.height, blocks, {
+        left: Math.max(0, Math.floor(rect.left / 4)),
+        top: Math.max(0, Math.floor(rect.top / 4)),
+        right: Math.min(Math.ceil(dest.width / 4), Math.ceil(rect.right / 4)),
+        bottom: Math.min(Math.ceil(dest.height / 4), Math.ceil(rect.bottom / 4)),
+    });
+    memory.writeMemory(dest.buffer, blocks);
+    return DD_OK;
+}
+
 /**
  * IDirectDrawSurface::Blt.
  *
@@ -585,6 +633,10 @@ export function blt(request){
         || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0))
     {
         return DDERR_INVALIDPARAMS;
+    }
+    if (dest.compressed !== undefined)
+    {
+        return bltIntoBlocks(request);
     }
     const asked = wholeOf(request.destRect, dest);
     // A rectangle past the surface is refused, unless a clipper is there to

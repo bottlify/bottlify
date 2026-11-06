@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compressedBytes, decodeS3tc } from './s3tc.js';
+import { compressedBytes, decodeS3tc, encodeS3tc } from './s3tc.js';
 
 /**
  * A result that must be there: the test says so before it reads it.
@@ -161,4 +161,65 @@ test('decoded into bytes the caller gives, the texels are those bytes and the sa
     const short = new Uint8Array(15);
     const decoded = some(decodeS3tc(new Uint8Array(8), 'dxt1', 2, 2, short));
     assert.notEqual(decoded.buffer, short.buffer, 'bytes too few for the texels are left alone');
+});
+
+test('encoding: a block of one colour comes back as that colour, alpha as each kind keeps it, and'
+    + ' blocks not named keep their bytes', ()=>{
+    // 8x4: two blocks. Left pure blue at alpha 255, right a two-colour pattern.
+    const width = 8;
+    const height = 4;
+    const texels = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y++)
+    {
+        for (let x = 0; x < width; x++)
+        {
+            const at = (y * width + x) * 4;
+            const right = x >= 4;
+            const white = right && ((x + y) & 1) === 0;
+            texels.set(right ? (white ? [255, 255, 255, 136] : [0, 0, 0, 136]) : [0, 0, 255, 255],
+                at);
+        }
+    }
+    for (const kind of /** @type {const} */ (['dxt1', 'dxt3', 'dxt5']))
+    {
+        const blocks = new Uint8Array(compressedBytes(kind, width, height));
+        encodeS3tc(texels, kind, width, height, blocks);
+        const back = /** @type {Uint8Array} */ (decodeS3tc(blocks, kind, width, height));
+        assert.deepEqual([...back.subarray(0, 4)], [0, 0, 255, 255], `${kind} blue`);
+        assert.deepEqual([...back.subarray(4 * 4, 4 * 4 + 3)], [255, 255, 255], `${kind} white`);
+        assert.deepEqual([...back.subarray(5 * 4, 5 * 4 + 3)], [0, 0, 0], `${kind} black`);
+        assert.equal(back[4 * 4 + 3], kind === 'dxt1' ? 255 : 136, `${kind} alpha`);
+        // Only the left block re-encoded: the right one's bytes stay.
+        const size = kind === 'dxt1' ? 8 : 16;
+        blocks.fill(0xab, size, 2 * size);
+        texels[0] = 255;
+        encodeS3tc(texels, kind, width, height, blocks, { left: 0, top: 0, right: 1, bottom: 1 });
+        assert.deepEqual([...blocks.subarray(size)], new Array(size).fill(0xab));
+        assert.deepEqual([...(/** @type {Uint8Array} */ (decodeS3tc(blocks, kind, width, height)))
+            .subarray(0, 3)], [255, 0, 255], 'the block named moved with its texels');
+        texels[0] = 0;
+    }
+    // DXT1 keeps a transparent texel transparent.
+    const holes = new Uint8Array(16 * 4).fill(255);
+    holes[3] = 0;
+    const one = new Uint8Array(8);
+    encodeS3tc(holes, 'dxt1', 4, 4, one);
+    const decoded = /** @type {Uint8Array} */ (decodeS3tc(one, 'dxt1', 4, 4));
+    assert.equal(decoded[3], 0);
+    assert.deepEqual([...decoded.subarray(4, 8)], [255, 255, 255, 255]);
+});
+
+test('encoding: DXT5 alpha keeps a ramp within half a step, every index in its place', ()=>{
+    const ramp = new Uint8Array(16 * 4);
+    for (let k = 0; k < 16; k++)
+    {
+        ramp.set([10, 20, 30, k * 17], k * 4);
+    }
+    const block = new Uint8Array(16);
+    encodeS3tc(ramp, 'dxt5', 4, 4, block);
+    const back = /** @type {Uint8Array} */ (decodeS3tc(block, 'dxt5', 4, 4));
+    for (let k = 0; k < 16; k++)
+    {
+        assert.ok(Math.abs(back[k * 4 + 3] - k * 17) <= 19, `texel ${k}: ${back[k * 4 + 3]}`);
+    }
 });
