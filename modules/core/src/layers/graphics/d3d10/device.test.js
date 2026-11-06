@@ -19,8 +19,8 @@ import {
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import {
-    assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, quadDomainShader, ret,
-    solidPixelShader, utof, v,
+    assemble, dclInputSiv, dclOutput, dclOutputSiv, dclResourceRaw, ldRaw, l, o,
+    passThroughVertexShader, quadDomainShader, ret, solidPixelShader, t, utof, v,
 } from './shader-fixtures.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 
@@ -2674,4 +2674,41 @@ test('an input element\'s offset is a whole number of its channels, up to a word
     assert.equal(made(F.R16_UINT, F.R32_UINT, 2), E_INVALIDARG);
     assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 17), E_INVALIDARG);
     assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 20), S_OK);
+});
+
+test('a shader model 4 program that reads raw memory is refused below level 11, where no'
+    + ' device here computes through shader model 4 (test_unaligned_raw_buffer_access)', ()=>{
+    const raw = assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResourceRaw(0),
+            dclOutput(o(0)),
+            ldRaw(o(0, 'x'), l(0), t(0)),
+            ret(),
+        ],
+    });
+    /** @param {number} level @param {Uint8Array} code */
+    const made = (level, code)=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        /** @type {{ shader?: any }} */
+        const shader = {};
+        const hr = out.device.CreatePixelShader(code, shader);
+        shader.shader?.release();
+        out.device.release();
+        return hr;
+    };
+    /** @type {any} */
+    const ten = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, {}), S_OK);
+    const answer = ten.device.CheckFeatureSupport(4, new Uint8Array(4));
+    ten.device.release();
+    assert.deepEqual([answer.hr, ...answer.data], [S_OK, 0, 0, 0, 0],
+        'no compute through shader model 4');
+    assert.equal(made(0xa000, raw), E_INVALIDARG);
+    assert.equal(made(0xa100, raw), E_INVALIDARG);
+    assert.equal(made(0xb000, raw), S_OK);
+    assert.equal(made(0xa000, solidPixelShader([1, 0, 0, 1])), S_OK);
 });

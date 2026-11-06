@@ -45,7 +45,9 @@ import {
     D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
-import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
+import {
+    SHADER_KIND, SYSTEM_VALUE, declaresBufferViews, parseDxbc, parseShaderOfKind,
+} from './dxbc.js';
 import { createFactory } from './dxgi.js';
 import {
     INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
@@ -939,6 +941,11 @@ export function createDevice(options = {}){
             : null);
         if (!container || (kind >= SHADER_KIND.HULL
             && /** @type {any} */ (container.shader).major < 5))
+        {
+            return E_INVALIDARG;
+        }
+        if (featureLevel < D3D_FEATURE_LEVEL.LEVEL_11_0
+            && declaresBufferViews(/** @type {any} */ (container.shader)))
         {
             return E_INVALIDARG;
         }

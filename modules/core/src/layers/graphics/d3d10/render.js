@@ -1190,6 +1190,33 @@ export function createRenderer(services){
     };
 
     /**
+     * Every texel of a level's slices in a texture's own bytes set to one
+     * texel's bytes: an array's layers, or a volume's depth slices.
+     *
+     * @param {any} resource
+     * @param {{ mip: number, first: number, count: number }} range
+     * @param {Uint8Array} element
+     */
+    const clearHeld = (resource, range, element)=>{
+        const { layout, bytes } = backingOf(resource);
+        const geometry = layout.levels[range.mip];
+        const volume = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        for (let slice = range.first; slice < range.first + range.count; slice++)
+        {
+            const base = volume ? geometry.offset + slice * geometry.depthPitch
+                : slice * layout.sliceBytes + geometry.offset;
+            for (let row = 0; row < geometry.height; row++)
+            {
+                const start = base + row * geometry.rowPitch;
+                for (let x = 0; x < geometry.width; x++)
+                {
+                    bytes.set(element, start + x * element.length);
+                }
+            }
+        }
+    };
+
+    /**
      * A box in texels as the host layout counts it: whole blocks, a row in
      * bytes, and clipped to the level it lies in.
      *
@@ -4528,13 +4555,29 @@ export function createRenderer(services){
          * @param {number[]} values @param {boolean} float
          */
         clearUnorderedAccessView(view, values, float){
+            const resource = resourceOf(view);
+            const backing = backingOf(resource);
+            const desc = stateDesc(view);
+            if (view.dimensionName !== 'BUFFER' && !backing.texture)
+            {
+                // A texture the GPU cannot keep lives in its bytes alone, so
+                // that is where it is cleared (test_clear_image_unordered_access_view).
+                const element = clearElement(desc.Format, values, float);
+                if (element && element.length === backing.layout.texelBytes)
+                {
+                    clearHeld(resource, view.range, element);
+                }
+                else
+                {
+                    diverge(`a ${float ? 'Float' : 'Uint'} clear of a texture view in format`
+                        + ` ${desc.Format} writes nothing`);
+                }
+                return;
+            }
             if (!backend)
             {
                 return;
             }
-            const resource = resourceOf(view);
-            const backing = backingOf(resource);
-            const desc = stateDesc(view);
             if (view.dimensionName === 'BUFFER')
             {
                 const words = (desc.Flags & D3D11_BUFFER_UAV_FLAG.RAW) !== 0
