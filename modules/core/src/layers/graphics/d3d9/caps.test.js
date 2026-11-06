@@ -65,8 +65,9 @@ test('the device claims full-screen blending, any texture size, stream offsets a
     const words = capabilityWords(DEFAULT_CAPS);
     // D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD: ALPHABLENDENABLE holds however the chain presents.
     assert.equal(words.Caps3 & 0x20, 0x20);
-    // D3DPTEXTURECAPS_NONPOW2CONDITIONAL without POW2: no texture size is refused.
-    assert.equal(words.TextureCaps & 0x100, 0x100);
+    // Neither D3DPTEXTURECAPS_POW2 nor NONPOW2CONDITIONAL: no texture size is
+    // refused or held to clamping.
+    assert.equal(words.TextureCaps & 0x100, 0);
     assert.equal(words.TextureCaps & 0x2, 0);
     // D3DDEVCAPS2_STREAMOFFSET: SetStreamSource's offset is read.
     assert.equal(words.DevCaps2 & 0x1, 0x1);

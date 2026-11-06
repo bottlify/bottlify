@@ -101,7 +101,6 @@ const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
 const D3DPTEXTURECAPS_VOLUMEMAP = 0x00002000;
 const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
-const D3DPTEXTURECAPS_NONPOW2CONDITIONAL = 0x00000100;
 
 const D3DPTFILTERCAPS_MINFPOINT = 0x00000100;
 const D3DPTFILTERCAPS_MINFLINEAR = 0x00000200;
@@ -217,10 +216,11 @@ export function capabilityWords(caps, identity = {}){
             | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
         TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP
             | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP
-            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP
-            // Without POW2 a texture of any size is whole; programs test this bit for a
-            // two-dimensional texture of any size at all.
-            | D3DPTEXTURECAPS_NONPOW2CONDITIONAL,
+            // Neither POW2 nor NONPOW2CONDITIONAL: a texture of any size is whole,
+            // wrapped and mipmapped as any other, as a card of Direct3D 10 says it
+            // under Direct3D 9. NONPOW2CONDITIONAL alone is a pair no card gave
+            // (Wine's d3d9 conditional_np2_repeat_test asks for POW2 beside it).
+            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP,
         TextureFilterCaps: FILTER_CAPS,
         CubeTextureFilterCaps: FILTER_CAPS,
         VolumeTextureFilterCaps: FILTER_CAPS,
