@@ -132,6 +132,15 @@ function machine(){
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
         /**
+         * A call through a table the caller kept, whatever the pointer's own
+         * word now holds.
+         *
+         * @param {number} table @param {number} pointer @param {number} index
+         */
+        callThrough(table, pointer, index){
+            return registered.get(memory.readU32(table + index * 4)).fn.handler([pointer]) >>> 0;
+        },
+        /**
          * The same, with the answer as the method gave it: a promise stays one.
          *
          * @param {number} pointer @param {number} index @param {number[]} args
@@ -1286,6 +1295,14 @@ test('a clipper carries its list as RGNDATA, both ways', ()=>{
     assert.equal(h.box.call(fake, slot(IDIRECTDRAWCLIPPER_SLOTS, 'IsClipListChanged'), [0x7f00]),
         DDERR_INVALIDPARAMS >>> 0);
     assert.equal(h.box.memory.readU32(0x7f00), 0x1234);
+    // Through a table kept from before its own word was overwritten, AddRef
+    // counts and Release answers 0 and lets nothing go.
+    const table = h.box.memory.readU32(clipper);
+    h.box.memory.writeU32(clipper, 0xdeadbeef);
+    assert.equal(h.box.callThrough(table, clipper, 1), 2);
+    assert.equal(h.box.callThrough(table, clipper, 2), 0);
+    h.box.memory.writeU32(clipper, table);
+    assert.equal(h.release(clipper), 1);
     // Made, it has no list until one is given (test_clipper_blt).
     assert.equal(listSize(), 0x887600cd, 'DDERR_NOCLIPLIST');
 

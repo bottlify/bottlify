@@ -76,6 +76,11 @@ const LONG_WORD = 8;
  * @property {number} [stranger]
  *           What a call through a pointer nobody published answers, where the
  *           runtime has its own word for it; E_POINTER otherwise.
+ * @property {boolean} [checksTable]
+ *           A Release that answers 0 and keeps the count when the word at the
+ *           pointer is not this interface's table: DirectDraw's clipper takes
+ *           every call through a pointer whose table was overwritten except
+ *           that one (ddraw test_clipper_refcount).
  * @property {Record<number, 'f32' | 'f64'>} [floats]
  *           The float and double arguments, by their first dword counting the
  *           interface pointer, which a 64-bit caller passes among its first
@@ -188,7 +193,8 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
      * pointer is the first argument of every COM method, so this is where the
      * call finds its object and what to run on it.
      *
-     * @type {Map<number, { object: any, interfaceId: string, methods: InterfaceMethod[] }>}
+     * @type {Map<number, { object: any, interfaceId: string, methods: InterfaceMethod[],
+     *     vtable: number }>}
      */
     const owners = new Map();
     /**
@@ -291,6 +297,11 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                             return method.builtin === 'addRef' || method.builtin === 'release'
                                 ? 0
                                 : method.stranger ?? 0x80004003;
+                        }
+                        if (method.checksTable === true
+                            && memory.readU32(args[0] >>> 0) !== owner.vtable)
+                        {
+                            return 0;
                         }
                         const given = rest;
                         for (let i = 1; i < args.length; i++)
@@ -403,7 +414,7 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         writeWord(block, vtable);
         writeWord(block + word, (object.guestState?.() ?? 0) >>> 0);
         writeWord(block + 2 * word, (object.countCell?.() ?? 0) >>> 0);
-        owners.set(block, { object, interfaceId, methods: table });
+        owners.set(block, { object, interfaceId, methods: table, vtable });
         byInterface.set(interfaceId, block);
         interfaces++;
         return block;

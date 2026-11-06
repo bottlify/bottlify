@@ -85,12 +85,14 @@ const IUNKNOWN_ONLY = Object.freeze([...IUNKNOWN_METHODS]);
 /**
  * IUnknown with its counts kept at their traps: a slot that runs "in the
  * guest" as its own trap is the trap, and the bridge's owner lookup refuses a
- * pointer it never published.
+ * pointer it never published. Release also looks at the table word, which a
+ * runtime that checks `this` does before it lets a reference go.
  */
 const IUNKNOWN_IN_HOST = Object.freeze(IUNKNOWN_METHODS.map(method=>(
     method.builtin === 'queryInterface'
         ? method
-        : Object.freeze({ ...method, guest: (/** @type {{ trap: number }} */ { trap })=>trap }))));
+        : Object.freeze({ ...method, guest: (/** @type {{ trap: number }} */ { trap })=>trap,
+            ...method.builtin === 'release' ? { checksTable: true } : {} }))));
 
 /** @param {any} descriptor */
 function methodsFor(descriptor){
