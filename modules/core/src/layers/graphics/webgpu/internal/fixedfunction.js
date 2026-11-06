@@ -1328,6 +1328,12 @@ function fragmentBody(state, specularEnable, position = 'input.position',
             // goes to the register D3DTSS_RESULTARG names, the current colour
             // or the temporary one.
             const target = stage.resultArg === D3DTA.TEMP ? 'temp' : 'current';
+            // DOTPRODUCT3's result goes into alpha too, whatever the alpha
+            // operation says (Wine's d3d9 dp3_alpha_test).
+            if (stage.colorOp === D3DTOP.DOTPRODUCT3)
+            {
+                return `    ${target} = saturate(${color});`;
+            }
             return `    ${target} = vec4f(saturate((${color}).rgb), `
                 + `${alpha === null ? `(${target}).a` : `saturate((${alpha}).a)`});`;
         })].join('\n');

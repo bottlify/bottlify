@@ -206,6 +206,9 @@ test('the colour-plus-alpha forms, the signed dot product and ARG0 as a third op
         `(vec4f(1.0) - (${T})) * (input.diffuse) + vec4f((${T}).a)`));
     assert.ok(codeOf(D3DTOP.DOTPRODUCT3).includes(
         `4.0 * dot((${T}).rgb - vec3f(0.5), (input.diffuse).rgb - vec3f(0.5))`));
+    // Its result is the stage's alpha too, whatever ALPHAOP says (Wine's d3d9
+    // dp3_alpha_test): the stage writes all four channels of the product.
+    assert.ok(codeOf(D3DTOP.DOTPRODUCT3).includes('    current = saturate(vec4f(saturate(4.0'));
     // ARG0 is the addend and the interpolant, and defaults to CURRENT: ARG1 * ARG2 + ARG0,
     // as Windows draws it (Wine's wined3d says MSDN has the order wrong).
     assert.ok(codeOf(D3DTOP.MULTIPLYADD).includes(`(${T}) * (input.diffuse) + (current)`));
