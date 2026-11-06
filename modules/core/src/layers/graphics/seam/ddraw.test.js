@@ -1217,6 +1217,13 @@ test('a surface keeps private data under a GUID, an interface entry with a refer
     assert.deepEqual([model.refCount('IDirectDraw4'), count()], [2, before]);
     assert.equal(h.surface7(surface, 'FreePrivateData', [guid]), DD_OK);
     assert.equal(model.refCount('IDirectDraw4'), 1);
+    // A surface that goes gives back what its entries hold, each on its own count.
+    const other7 = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 4 });
+    assert.equal(h.surface7(other7, 'SetPrivateData', [guid, ddraw4, 4, DDSPD_IUNKNOWNPOINTER]),
+        DD_OK);
+    const ownBefore = count();
+    assert.equal(h.release(other7), 0);
+    assert.deepEqual([model.refCount('IDirectDraw4'), count()], [1, ownBefore - 1]);
     assert.equal(h.release(ddraw4), 0);
 
     assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw, 4, DDSPD_IUNKNOWNPOINTER]),

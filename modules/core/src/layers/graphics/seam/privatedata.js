@@ -316,7 +316,7 @@ export function createPrivateData({ memory, publisher, rules, callGuest, current
             holders.delete(object);
             for (const entry of store?.values() ?? [])
             {
-                entry.adapter?.release();
+                entry.adapter?.release(entry.held ?? undefined);
                 if (holdsGuest(entry))
                 {
                     publisher.owe?.((/** @type {unknown} */ thread)=>
