@@ -655,12 +655,24 @@ test('Clear needs something to clear and a depth buffer to clear depth', ()=>{
     assert.equal(device.Clear(0, null, 0, 0, 1, 0), DDERR_INVALIDPARAMS);
     assert.equal(device.Clear(0, null, D3DCLEAR.ZBUFFER, 0, 1, 0), DDERR_INVALIDPARAMS,
         'no depth attached');
-    assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), DDERR_INVALIDPARAMS,
-        'two rectangles and none given');
     assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0x00123456, 1, 0), D3D_OK);
 
     releaseAll(f);
 });
+
+test('a Clear given a count and no rectangles clears the whole target (test_clear_rect_count)',
+    async()=>{
+        const { device, gpu, root, target } = recorded();
+        assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0x0000ff00, 1, 0), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const pass = gpu.of('beginRenderPass')[0].descriptor.colorAttachments[0];
+        assert.equal(pass.loadOp, 'clear', 'all of it, as a pass\'s clear');
+        assert.deepEqual([pass.clearValue.r, pass.clearValue.g, pass.clearValue.b], [0, 1, 0]);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+    });
 
 test('the material, clip status and clip planes read back as copies', ()=>{
     const f = fixture();

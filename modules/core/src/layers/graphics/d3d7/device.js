@@ -1320,7 +1320,7 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {number} stencil
              */
             Clear(rectCount, rects, flags, color, z, stencil){
-                if ((flags & 7) === 0 || (rectCount > 0 && !rects))
+                if ((flags & 7) === 0)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
@@ -1328,6 +1328,8 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                // A count with no rectangles clears the whole target (Wine's
+                // test_clear_rect_count).
                 if (renderer)
                 {
                     renderer.clear(model, rectCount > 0 ? (rects ?? []).slice(0, rectCount) : [],
