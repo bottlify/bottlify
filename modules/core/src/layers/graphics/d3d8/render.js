@@ -60,6 +60,7 @@ import {
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { convertTexels } from '../d3d10/blocks.js';
 import { fromHalf, storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
@@ -5430,10 +5431,11 @@ export function createRenderer(options){
                 // that blits a decoded frame onto its target, or locks the
                 // target and writes it, puts bytes into it that a draw never
                 // did.
-                // A depth surface is copied whole by StretchRect.
+                // A depth surface is copied whole by StretchRect, and read by
+                // the pass that brings its depths out (`readDepth`).
                 usage: depth
-                    ? TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC
-                        | TextureUsage.COPY_DST
+                    ? TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
+                        | TextureUsage.COPY_SRC | TextureUsage.COPY_DST
                     : TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
                         | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
             });
@@ -10475,10 +10477,10 @@ export function createRenderer(options){
          * asked for exactly that. Rows are four bytes a pixel in the
          * surface's GPU format, blue first.
          *
-         * A depth buffer is not read back: WebGPU copies no depth with
-         * stencil out of a texture, and a copy of the others would need its
-         * own conversion into the program's depth format. The read is lost,
-         * said, and answers null; the guest's bytes stay as they were.
+         * A depth buffer is not read here: its depths are numbers in the
+         * program's own depth format, which `readDepth` brings out. Asked of
+         * one, the read is lost, said, and answers null; the guest's bytes
+         * stay as they were.
          *
          * @param {any} surface a d3d8 surface
          * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
@@ -10491,48 +10493,56 @@ export function createRenderer(options){
                     + ' (a lock) is not made: the program reads the bytes it last wrote');
                 return Promise.resolve(null);
             }
-            const recorded = ensureFrame();
-            recording = null;
-            recorded.cut = backend.markPresent();
-            recorded.dump = dump;
-            // A device that never presents -- Direct3D 7's, whose target the
-            // program brings into its memory and blits -- ends its frames here,
-            // so a dump a page asked for is counted and handed over here, and
-            // what it wrote starts again. One that presents ends them there,
-            // and a read in the middle of its frame is part of that frame.
-            let handOver = null;
-            if (counters.frames === 0)
+            return readOut(gpu);
+        },
+
+        /**
+         * A depth surface's depths as the GPU holds them at this point of the
+         * frame, 0 to 1 a texel by rows, and its stencil where it has one:
+         * what a program that locks its depth buffer reads, once put in its
+         * depth format. Null for a surface that is not a depth one, or one of
+         * several samples, which is said.
+         *
+         * @param {any} surface a d3d8 surface
+         * @returns {Promise<{ width: number, height: number, depths: Float32Array,
+         *     stencils: Uint8Array | null } | null>}
+         */
+        readDepth(surface){
+            const gpu = surfaceFor(surface);
+            if (!gpu?.format || !/^depth/.test(gpu.format) || (gpu.sampleCount ?? 1) > 1)
             {
-                const parts = dump.length > 0 ? [...submittedDump, dump] : submittedDump;
-                submittedDump = [];
-                dump = [];
-                kept = 0;
-                const written = parts.some(part=>part.length > 0);
-                if (written)
-                {
-                    lastDump = parts;
-                }
-                if (liveDump !== null && liveDump.dumpFrames > 0 && written)
-                {
-                    liveDump.dumpFrames--;
-                    handOver = liveDump.dumpFrames === 0 ? parts : null;
-                }
+                failure(`a read back of depths from a ${gpu?.format ?? 'missing'} surface`
+                    + `${(gpu?.sampleCount ?? 1) > 1 ? ' of several samples' : ''} is not made`);
+                return Promise.resolve(null);
             }
-            const asked = clock();
-            const read = chain.then(()=>replay(recorded, null, gpu));
-            read.then(()=>{
-                const took = clock() - asked;
-                timing.readBacks++;
-                timing.readBackMs += took;
-                timing.worstReadBackMs = Math.max(timing.worstReadBackMs, took);
-            }, ()=>{});
-            chain = read.then(()=>undefined, failure);
-            if (handOver !== null)
+            return readOut({ depthOf: gpu, built: backend.depthPipelines(gpu.format) });
+        },
+
+        /**
+         * A depth surface given depths, 0 to 1 a texel by rows, and a stencil
+         * where it has one, at this point of the frame: what a program wrote
+         * into its depth buffer through a lock or a blit, drawn into the GPU's
+         * copy (`webgpu/internal/depth.js`).
+         *
+         * @param {any} surface a d3d8 surface
+         * @param {Float32Array} depths
+         * @param {Uint8Array | null} [stencils]
+         */
+        writeDepth(surface, depths, stencils = null){
+            const gpu = surfaceFor(surface);
+            if (!gpu?.format || !/^depth/.test(gpu.format) || (gpu.sampleCount ?? 1) > 1
+                || depths.length !== gpu.width * gpu.height)
             {
-                const lines = handOver;
-                chain = chain.then(()=>liveDump?.written?.(joinDump(lines), timing.readBacks));
+                failure(`depths a program wrote are not drawn into a ${gpu?.format ?? 'missing'}`
+                    + ' surface');
+                return;
             }
-            return /** @type {Promise<any>} */ (read);
+            const frame = ensureFrame();
+            frame.pipelines.push(backend.depthPipelines(gpu.format));
+            frame.commands.push({ kind: 'depthWrite', surface: gpu,
+                words: depthWriteWords(gpu.width, depths, hasStencil(gpu.format) ? stencils
+                    ?? new Uint8Array(depths.length) : null),
+                pipeline: frame.pipelines.length - 1 });
         },
 
         /**
@@ -11418,6 +11428,58 @@ export function createRenderer(options){
     return renderer;
 
     /**
+     * What has been recorded so far replayed and submitted without a present,
+     * and a surface read after it (`readSurface`, `readDepth`).
+     *
+     * @param {any} snapshot  what `replay` reads after the draws
+     * @returns {Promise<any>}
+     */
+    function readOut(snapshot){
+        const recorded = ensureFrame();
+        recording = null;
+        recorded.cut = backend.markPresent();
+        recorded.dump = dump;
+        // A device that never presents -- Direct3D 7's, whose target the
+        // program brings into its memory and blits -- ends its frames here,
+        // so a dump a page asked for is counted and handed over here, and
+        // what it wrote starts again. One that presents ends them there,
+        // and a read in the middle of its frame is part of that frame.
+        let handOver = null;
+        if (counters.frames === 0)
+        {
+            const parts = dump.length > 0 ? [...submittedDump, dump] : submittedDump;
+            submittedDump = [];
+            dump = [];
+            kept = 0;
+            const written = parts.some(part=>part.length > 0);
+            if (written)
+            {
+                lastDump = parts;
+            }
+            if (liveDump !== null && liveDump.dumpFrames > 0 && written)
+            {
+                liveDump.dumpFrames--;
+                handOver = liveDump.dumpFrames === 0 ? parts : null;
+            }
+        }
+        const asked = clock();
+        const read = chain.then(()=>replay(recorded, null, snapshot));
+        read.then(()=>{
+            const took = clock() - asked;
+            timing.readBacks++;
+            timing.readBackMs += took;
+            timing.worstReadBackMs = Math.max(timing.worstReadBackMs, took);
+        }, ()=>{});
+        chain = read.then(()=>undefined, failure);
+        if (handOver !== null)
+        {
+            const lines = handOver;
+            chain = chain.then(()=>liveDump?.written?.(joinDump(lines), timing.readBacks));
+        }
+        return /** @type {Promise<any>} */ (read);
+    }
+
+    /**
      * @param {any} recorded
      * @param {any} surface what to present, or null for a flush
      * @param {any} [snapshot] a backend surface to read back after the replay
@@ -11430,6 +11492,14 @@ export function createRenderer(options){
     async function replay(recorded, surface, snapshot = null, again = null){
         const waitFrom = clock();
         const pipelines = await Promise.allSettled(recorded.pipelines);
+        // A read of depths (`readDepth`) through the pipelines of its format.
+        const depthRead = snapshot?.depthOf
+            ? await Promise.allSettled([snapshot.built]).then(([made])=>made)
+            : null;
+        if (depthRead?.status === 'rejected')
+        {
+            failure(depthRead.reason);
+        }
         const began = clock();
         if (began - waitFrom >= PIPELINE_WAIT_MS)
         {
@@ -11461,7 +11531,13 @@ export function createRenderer(options){
             {
                 counted = frame.occlusionResults();
             }
-            if (snapshot)
+            if (depthRead)
+            {
+                shot = depthRead.status === 'fulfilled'
+                    ? frame.readDepth(snapshot.depthOf, depthRead.value)
+                    : async()=>null;
+            }
+            else if (snapshot)
             {
                 shot = Array.isArray(snapshot)
                     ? (()=>{
@@ -11891,6 +11967,21 @@ export function createRenderer(options){
                         origin: { ...command.destinationOrigin,
                             z: command.destination.layer ?? 0 } },
                     { width: command.width, height: command.height, depthOrArrayLayers: 1 });
+                pass = null;
+                continue;
+            }
+            if (command.kind === 'depthWrite')
+            {
+                giveBack();
+                const made = pipelines[command.pipeline];
+                if (made.status === 'rejected')
+                {
+                    failure(made.reason);
+                }
+                else
+                {
+                    frame.writeDepth(command.surface, command.words, made.value);
+                }
                 pass = null;
                 continue;
             }

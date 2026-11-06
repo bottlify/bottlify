@@ -57,6 +57,7 @@ import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { validateDeviceTarget } from '../ddraw/caps.js';
 import { validateStages } from '../d3d8/validity.js';
 import { writePixels } from '../d3d9/resources.js';
+import { packDepths, unpackDepths } from './depth.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DXT_CODES, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER,
     DDSCAPS_ZBUFFER,
@@ -958,18 +959,48 @@ export function createDirect3D7(ddraw, services = {}){
         const drawnAt = surface=>((surface.caps & DDSCAPS_ZBUFFER) === 0
             ? targetAdapters.get(surface.buffer) ?? null
             : null);
+        /**
+         * The depth buffer this device has drawn against at the address a
+         * surface shows, if it has: its depths are the GPU's.
+         *
+         * @param {any} surface
+         */
+        const depthDrawnAt = surface=>((surface.caps & DDSCAPS_ZBUFFER) !== 0
+            ? targetAdapters.get(surface.buffer) ?? null
+            : null);
         const write = services.writeMemory;
+        const read = services.readMemory;
+        /** @param {any} surface */
+        const depthPixels = surface=>({ width: surface.width, height: surface.height,
+            pitch: surface.pitch, bytesPerPixel: surface.bytesPerPixel });
         /**
          * A surface this device renders into has its picture on the GPU and
          * stale bytes in guest memory. Before a program reads those bytes --
          * a lock, a device context, a blit out of it -- they are read back,
          * and the caller waits; once it has written them, they go up to the
-         * target at its next use. A depth buffer has no way back.
+         * target at its next use. A depth buffer's depths come back in its own
+         * depth format, and go up drawn into the GPU's copy (`d3d7/depth.js`).
          *
          * @param {any} surface
          * @returns {Promise<void> | null}
          */
         const readBack = surface=>{
+            const depth = depthDrawnAt(surface);
+            if (depth && renderer && write && read)
+            {
+                return renderer.readDepth(depth).then(
+                    (/** @type {{ depths: Float32Array, stencils: Uint8Array | null } | null} */
+                        values)=>{
+                        if (values)
+                        {
+                            const bytes = read(surface.buffer, surface.pitch * surface.height)
+                                .slice();
+                            packDepths(bytes, depthPixels(surface), surface.pixelFormat,
+                                values.depths, values.stencils);
+                            write(surface.buffer, bytes);
+                        }
+                    });
+            }
             const adapter = drawnAt(surface);
             if (!adapter || !renderer || !write)
             {
@@ -985,6 +1016,14 @@ export function createDirect3D7(ddraw, services = {}){
         };
         /** @param {any} surface */
         const written = surface=>{
+            const depth = depthDrawnAt(surface);
+            if (depth && renderer && read)
+            {
+                const values = unpackDepths(read(surface.buffer, surface.pitch * surface.height),
+                    depthPixels(surface), surface.pixelFormat);
+                renderer.writeDepth(depth, values.depths, values.stencils);
+                return;
+            }
             const adapter = drawnAt(surface);
             if (adapter && renderer)
             {
