@@ -1179,6 +1179,8 @@ export function createDirect3D7Seam(
             /** @type {{ surface?: any }} */
             const held = {};
             device.GetRenderTarget(held);
+            // The model's reference is the IDirectDrawSurface7's to release.
+            held.surface.handedAs?.(IID_IDirectDrawSurface7);
             fields.writeU32(out >>> 0,
                 publisher.publish(held.surface, [], IID_IDirectDrawSurface7));
             return D3D_OK;
@@ -1409,6 +1411,7 @@ export function createDirect3D7Seam(
             const hr = device.GetTexture(stage >>> 0, held);
             if (hr === D3D_OK)
             {
+                held.surface?.handedAs?.(IID_IDirectDrawSurface7);
                 fields.writeU32(out >>> 0, held.surface
                     ? publisher.publish(held.surface, [], IID_IDirectDrawSurface7)
                     : 0);

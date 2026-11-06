@@ -85,7 +85,7 @@ import {
     DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
-import { DDBD_16, DDBD_32 } from '../d3d7/constants.js';
+import { DDBD_16, DDBD_32, DEVICE_IDS } from '../d3d7/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
@@ -216,6 +216,9 @@ const SURFACE_COUNTS = Object.freeze({
     [IID_IDirectDrawSurface]: '1', [IID_IDirectDrawSurface2]: '2',
     [IID_IDirectDrawSurface3]: '3', [IID_IDirectDrawSurface4]: '4',
     [IID_IDirectDrawSurface7]: '7', [IID_IDirectDrawGammaControl]: 'gamma',
+    // A first-generation device is part of the surface it was asked of, and
+    // counts with its IDirectDrawSurface (ddraw1 test_device_qi, test_rt_caps).
+    [DEVICE_IDS.HAL]: '1', [DEVICE_IDS.RGB]: '1',
 });
 
 /**
