@@ -21,7 +21,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { createDirectDrawSeam } from './ddraw.js';
-import { displayModes } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import {
     IDIRECTDRAW7_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS,
     IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE3_SLOTS,
@@ -1440,6 +1440,8 @@ test('a mode set through the first generation is what the seventh reads back', (
     assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC.dwHeight), 4);
     assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC.lPitch), 8, 'one byte a pixel');
     assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC.ddpfPixelFormat + 0x0c), 8);
+    assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC.dwRefreshRate), REFRESH_HZ,
+        'a mode set with no rate runs at the display\'s (test_get_display_mode)');
 
     // A primary made now is 8x4 at 8 bits, and the presenter is handed the
     // palette to show it with.

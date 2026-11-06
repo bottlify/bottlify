@@ -2279,7 +2279,8 @@ export function createDirectDrawSeam(
                 height: mode.height,
                 pitch: mode.width * bytesPerPixel(pixelFormat),
                 backBufferCount: 0,
-                mipMapCount: mode.refreshRate,
+                // A mode set with no rate, or never set, runs at the display's.
+                mipMapCount: mode.refreshRate > 0 ? mode.refreshRate : refresh(),
                 caps: 0,
                 caps2: 0,
                 pixelFormat,
