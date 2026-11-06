@@ -690,6 +690,13 @@ export function createDirect3D9(options = {}){
                     {
                         return info.depth ? D3D_OK : D3DERR_NOTAVAILABLE;
                     }
+                    // ATI1 and ATI2 are texture formats: no plain surface in
+                    // them but a scratch one (test_resource_access,
+                    // test_surface_blocks).
+                    if (format === D3DFMT.ATI1 || format === D3DFMT.ATI2)
+                    {
+                        return D3DERR_NOTAVAILABLE;
+                    }
                     return !info.depth || resolved.depthPlain ? D3D_OK : D3DERR_NOTAVAILABLE;
                 default:
                     // Buffers have no format to ask about.
@@ -4237,6 +4244,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // memory as in video memory; only scratch holds one without it
                 // (test_surface_blocks).
                 || (info.video && !videoPoolAllowed(pool, false))
+                // ATI1 and ATI2 are texture formats: a plain surface in them
+                // is only a scratch one (test_resource_access).
+                || ((format === D3DFMT.ATI1 || format === D3DFMT.ATI2) && pool !== D3DPOOL.SCRATCH)
                 || !(width > 0) || !(height > 0) || !blockAligned(format, width, height)
                 || (userMemory !== 0 && pool !== D3DPOOL.SYSTEMMEM))
             {

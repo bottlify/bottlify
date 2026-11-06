@@ -19,7 +19,7 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
 } from './constants.js';
 import { PRESENTATION_INTERVALS } from './caps.js';
 
@@ -256,8 +256,11 @@ export function volumeCreateResult(request){
 /**
  * Whether a created surface answers a lock. A depth stencil never does, however
  * it was asked for; a render target does exactly when it was created lockable.
+ * A texture's level in video memory does when it is dynamic, or in ATI1 or
+ * ATI2, which lock in any pool (Wine's test_resource_access).
  *
- * @param {{ type: string, pool: number, usage: number, lockable?: boolean }} surface
+ * @param {{ type: string, pool: number, usage: number, lockable?: boolean,
+ *           format?: number }} surface
  * @returns {boolean}
  */
 export function surfaceIsLockable(surface){
@@ -273,7 +276,8 @@ export function surfaceIsLockable(surface){
     {
         return surface.lockable === true;
     }
-    return surface.pool !== D3DPOOL.DEFAULT || (surface.usage & D3DUSAGE.DYNAMIC) !== 0;
+    return surface.pool !== D3DPOOL.DEFAULT || (surface.usage & D3DUSAGE.DYNAMIC) !== 0
+        || surface.format === D3DFMT.ATI1 || surface.format === D3DFMT.ATI2;
 }
 
 /**

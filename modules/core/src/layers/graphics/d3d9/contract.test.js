@@ -594,6 +594,50 @@ test('a cube texture forgives an unlock of a face not locked; the face itself do
     assert.equal(device.release(), 0);
 });
 
+test('a video-memory level locks when dynamic or in ATI1/ATI2, and owes an unlock only then', ()=>{
+    // Wine's test_resource_access.
+    const { device } = make();
+    /** @param {number} format @param {number} usage */
+    const levelOf = (format, usage)=>{
+        /** @type {{ texture?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture(16, 16, 1, usage, format, D3DPOOL.DEFAULT, texture),
+            D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(texture.texture.GetSurfaceLevel(0, level), D3D_OK);
+        texture.texture.release();
+        return level.surface;
+    };
+    const plain = levelOf(D3DFMT.A8R8G8B8, 0);
+    assert.equal(plain.LockRect({}, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(plain.UnlockRect(), D3DERR_INVALIDCALL, 'never lockable, so nothing forgiven');
+    const dynamic = levelOf(D3DFMT.A8R8G8B8, D3DUSAGE.DYNAMIC);
+    assert.equal(dynamic.LockRect({}, null, 0), D3D_OK);
+    assert.equal(dynamic.UnlockRect(), D3D_OK);
+    assert.equal(dynamic.UnlockRect(), D3D_OK, 'a lockable level forgives');
+    const ati2 = levelOf(D3DFMT.ATI2, 0);
+    assert.equal(ati2.LockRect({}, null, 0), D3D_OK);
+    assert.equal(ati2.UnlockRect(), D3D_OK);
+    for (const surface of [plain, dynamic, ati2])
+    {
+        surface.release();
+    }
+    for (const [pool, expected] of [[D3DPOOL.DEFAULT, D3DERR_INVALIDCALL],
+        [D3DPOOL.SYSTEMMEM, D3DERR_INVALIDCALL], [D3DPOOL.SCRATCH, D3D_OK]])
+    {
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateOffscreenPlainSurface(16, 16, D3DFMT.ATI2, pool, out), expected,
+            `an ATI2 plain surface in pool ${pool}`);
+        out.surface?.release();
+    }
+    const { d3d } = make();
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.SURFACE, D3DFMT.ATI1), D3DERR_NOTAVAILABLE,
+        'and the adapter says so');
+    assert.equal(device.release(), 0);
+});
+
 test('a buffer is no render target or depth-stencil, and lives in no scratch pool', ()=>{
     // Wine's test_resource_access.
     const { device } = make();

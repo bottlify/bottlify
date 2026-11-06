@@ -804,7 +804,10 @@ export function createSurface(options){
             {
                 // A context held on another surface of the resource is the
                 // resource's lock, and this is one of its surfaces.
-                return forgivesDoubleUnlock || (family.dc !== null && family.dc !== self)
+                // Only a level that could have been locked forgives: one in
+                // video memory that never could refuses (test_resource_access).
+                return (forgivesDoubleUnlock && lockable)
+                    || (family.dc !== null && family.dc !== self)
                     ? D3D_OK
                     : D3DERR_INVALIDCALL;
             }
