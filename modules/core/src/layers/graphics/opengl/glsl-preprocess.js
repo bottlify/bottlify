@@ -16,14 +16,19 @@
  *   in that string, which is what an info log names (`0:12`), and what
  *   `__FILE__` and `__LINE__` expand to.
  * - **`#version` comes first**, before anything but comments and white
- *   space; 110 is assumed without one, and a version past 120 is an error,
- *   since this is what a 2.1 implementation compiles.
+ *   space; 110 is assumed without one. Which versions compile is the
+ *   caller's (`versions`): 1.10 and 1.20 unless it asks for the later ones.
+ *   From 1.50 the version names a profile, core unless it says
+ *   compatibility, and the profiles' macros are defined (section 3.3).
+ * - **A backslash ending a line joins the next one** (4.20, section 3.2):
+ *   a directive or a token may continue across it.
  * - **An identifier `#if` does not know is an error**, not zero; `defined` is
  *   the way to ask. There is no stringification and no token pasting.
  * - **Names starting with `GL_` belong to the implementation**: defining or
  *   undefining one is an error, as is redefining a predefined macro.
- * - **`#extension` names an extension this compiler supports**, and there
- *   are none: `require` fails, `enable` and `warn` warn.
+ * - **`#extension` names an extension this compiler supports**
+ *   (`extensions`): one it does not is an error to `require` and a warning
+ *   to `enable` or `warn`.
  */
 
 /**
@@ -45,12 +50,24 @@
 /**
  * @typedef {Object} Preprocessed
  * @property {Token[]} tokens   ending in an `eof` token
- * @property {number} version   110 or 120
+ * @property {number} version   as #version said, 110 without one
+ * @property {'core' | 'compatibility' | null} profile  from 1.50; null before
+ * @property {Map<string, string>} extensions  each #extension's behaviour, by name
  * @property {Diagnostic[]} diagnostics
  */
 
-/** The versions this compiler takes. */
+/**
+ * @typedef {Object} PreprocessOptions
+ * @property {readonly number[]} [versions]  the versions that compile; 1.10 and 1.20 by default
+ * @property {ReadonlySet<string>} [extensions]  the extensions #extension may name
+ */
+
+/** The versions a 2.1 implementation compiles. */
 export const GLSL_VERSIONS = Object.freeze([110, 120]);
+
+/** Every desktop version of the language, 1.10 to 4.60. */
+export const ALL_GLSL_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 400, 410, 420,
+    430, 440, 450, 460]);
 
 /** Punctuators, longest first so that a match is the longest one. */
 const PUNCTUATORS = [
@@ -217,10 +234,12 @@ function lexLine(line, string, number){
 }
 
 /** @param {string} text */
-const isInteger = text=>/^(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)$/.test(text);
+const isInteger = text=>/^(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)[uU]?$/.test(text);
 /** @param {string} text */
-const isFloat = text=>/^(([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)[fF]?$/
+const isFloat = text=>/^(([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)([fF]|lf|LF)?$/
     .test(text);
+/** A directive's number, which takes no suffix. @param {string} text */
+const isPlainInteger = text=>/^(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)$/.test(text);
 
 /**
  * @typedef {Object} Macro
@@ -231,9 +250,12 @@ const isFloat = text=>/^(([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?|[0-9]+[eE][
 
 /**
  * @param {readonly string[]} sources  glShaderSource's strings, in order
+ * @param {PreprocessOptions} [options]
  * @returns {Preprocessed}
  */
-export function preprocess(sources){
+export function preprocess(sources, options = {}){
+    const versions = options.versions ?? GLSL_VERSIONS;
+    const supported = options.extensions ?? new Set();
     /** @type {Diagnostic[]} */
     const diagnostics = [];
     const joined = joinSources(sources);
@@ -288,16 +310,39 @@ export function preprocess(sources){
     const lines = [];
     {
         let offset = 0;
+        /** @type {{ text: string, offset: number } | null} */
+        let continued = null;
         for (const text of stripped.text.split('\n'))
         {
-            lines.push({ text, offset });
+            // The backslash and the newline become spaces in the joined
+            // line, so a column there is still an offset into the source.
+            /** @type {{ text: string, offset: number }} */
+            const logical = continued ? { text: `${continued.text} ${text}`,
+                offset: continued.offset } : { text, offset };
+            continued = null;
+            if (logical.text.endsWith('\\'))
+            {
+                continued = { text: logical.text.slice(0, -1) + ' ', offset: logical.offset };
+            }
+            else
+            {
+                lines.push(logical);
+            }
             offset += text.length + 1;
+        }
+        if (continued)
+        {
+            lines.push(continued);
         }
     }
 
     /** @type {Map<string, Macro>} */
     const macros = new Map();
     let version = 110;
+    /** @type {'core' | 'compatibility' | null} */
+    let profile = null;
+    /** @type {Map<string, string>} */
+    const extensions = new Map();
     let versionSeen = false;
     let anythingSeen = false;
     /** The line offset `#line` set: what the next line's number is said to be, less its own. */
@@ -716,19 +761,47 @@ export function preprocess(sources){
                 versionSeen = true;
                 anythingSeen = true;
                 const number = rest[0];
-                if (!number || number.kind !== 'number' || !isInteger(number.text))
+                if (!number || number.kind !== 'number' || !isPlainInteger(number.text))
                 {
                     error(hash, '#version needs a number');
                     break;
                 }
                 const asked = Number.parseInt(number.text, 10);
-                if (!GLSL_VERSIONS.includes(asked))
+                if (!versions.includes(asked))
                 {
                     error(number, `version ${asked} is not supported: this implementation`
-                        + ' compiles GLSL 1.10 and 1.20');
+                        + ` compiles GLSL ${versions.map(v=>`${Math.floor(v / 100)}.`
+                            + `${String(v % 100).padStart(2, '0')}`).join(', ')}`);
                     break;
                 }
                 version = asked;
+                const named = rest[1];
+                if (named && (named.kind !== 'ident' || rest.length > 2))
+                {
+                    error(named, `'${named.text}' : syntax error in #version`);
+                    break;
+                }
+                if (named && asked < 150)
+                {
+                    error(named, `'${named.text}' : a profile needs version 150 or later`);
+                    break;
+                }
+                if (named && named.text !== 'core' && named.text !== 'compatibility')
+                {
+                    error(named, `'${named.text}' : profile is not supported`);
+                    break;
+                }
+                if (asked >= 150)
+                {
+                    profile = named ? /** @type {'core' | 'compatibility'} */ (named.text)
+                        : 'core';
+                    // Both profiles are this implementation's (section 3.3).
+                    for (const macro of ['GL_core_profile', 'GL_compatibility_profile'])
+                    {
+                        macros.set(macro, { params: null, predefined: true, body: [
+                            { kind: 'number', text: '1', string: hash.string, line: hash.line }] });
+                    }
+                }
                 break;
             }
             case 'define': {
@@ -849,7 +922,11 @@ export function preprocess(sources){
                     }
                     break;
                 }
-                if (behaviour.text === 'require')
+                if (supported.has(extension.text))
+                {
+                    extensions.set(extension.text, behaviour.text);
+                }
+                else if (behaviour.text === 'require')
                 {
                     error(extension, `'${extension.text}' : extension is not supported`);
                 }
@@ -862,7 +939,7 @@ export function preprocess(sources){
             case 'line': {
                 const expanded = expand(rest, new Set());
                 const number = expanded[0];
-                if (!number || number.kind !== 'number' || !isInteger(number.text))
+                if (!number || number.kind !== 'number' || !isPlainInteger(number.text))
                 {
                     error(hash, '#line needs a line number');
                     break;
@@ -872,7 +949,7 @@ export function preprocess(sources){
                 lineShift += next - (hash.line + 1);
                 if (expanded[1])
                 {
-                    if (expanded[1].kind !== 'number' || !isInteger(expanded[1].text))
+                    if (expanded[1].kind !== 'number' || !isPlainInteger(expanded[1].text))
                     {
                         error(hash, '#line needs a source string number');
                         break;
@@ -967,5 +1044,5 @@ export function preprocess(sources){
     }
     const last = tokens[tokens.length - 1];
     tokens.push({ kind: 'eof', text: '', string: last?.string ?? 0, line: last?.line ?? 1 });
-    return { tokens, version, diagnostics };
+    return { tokens, version, profile, extensions, diagnostics };
 }

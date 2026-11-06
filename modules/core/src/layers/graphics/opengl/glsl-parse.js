@@ -5,75 +5,81 @@
  */
 
 /**
- * The GLSL 1.20 grammar (section 9 of the language specification), from the
- * preprocessor's tokens to a syntax tree. Nothing here knows types beyond
- * their names: whether `S(x)` constructs a struct or calls a function, and
- * how long `float a[N]` is, the checker decides. The one thing the parser
- * must know is which identifiers name structs, because `S x;` is a
- * declaration and `a * b;` an expression.
+ * The GLSL grammar, 1.10 to 4.60 (section 9 of the language specification),
+ * from the preprocessor's tokens to a syntax tree. Nothing here knows types
+ * beyond their names: whether `S(x)` constructs a struct or calls a function,
+ * and how long `float a[N]` is, the checker decides. What the parser must
+ * know is which identifiers name types -- the version's own (`Language`) and
+ * the structs declared so far -- because `S x;` is a declaration and `a * b;`
+ * an expression, and which words the version reserves.
  *
  * The first syntax error ends the parse: the specification lets a compiler
  * stop there, and every later message would be about the recovery, not the
  * shader.
  */
 
-import { basicType } from './glsl-types.js';
+import { basicTypeAt } from './glsl-types.js';
+import { languageOf } from './glsl-versions.js';
 
 /**
  * @typedef {import('./glsl-preprocess.js').Token} Token
  * @typedef {import('./glsl-types.js').GlslType} GlslType
+ * @typedef {import('./glsl-versions.js').Language} Language
  */
 
 /**
  * A type as written: a basic type, a struct's name, or a struct defined in
- * place, with an array length -- an expression, or 'unsized' for `[]`.
+ * place, with its array dimensions outermost first -- each an expression, or
+ * 'unsized' for `[]`.
  *
  * @typedef {Object} TypeSpec
  * @property {Token} at
  * @property {GlslType | null} basic
  * @property {string | null} structName
  * @property {StructDef | null} structDef
- * @property {any} arrayLength  an expression node, 'unsized', or null
+ * @property {any[]} arrays
  */
 
 /**
  * @typedef {Object} StructDef
  * @property {Token} at
  * @property {string | null} name
- * @property {{ type: TypeSpec, declarators: Declarator[] }[]} members
+ * @property {{ qualifiers: Qualifiers, type: TypeSpec, declarators: Declarator[] }[]} members
  */
 
 /**
  * @typedef {Object} Declarator
  * @property {Token} at
  * @property {string} name
- * @property {any} arrayLength  an expression node, 'unsized', or null
- * @property {any} initializer  an expression node, or null
+ * @property {any[]} arrays  its own dimensions, after the name, outermost first
+ * @property {any} initializer  an expression node, an initializer list, or null
+ */
+
+/**
+ * One `layout` qualifier: its name as written (case folds for the shader's
+ * own identifiers only where the specification says so) and its value, an
+ * expression, or null.
+ *
+ * @typedef {{ at: Token, name: string, value: any }} LayoutEntry
  */
 
 /**
  * @typedef {Object} Qualifiers
- * @property {'const' | 'attribute' | 'uniform' | 'varying' | null} storage
+ * @property {Token} at
+ * @property {'const' | 'attribute' | 'uniform' | 'varying' | 'in' | 'out' | 'buffer'
+ *     | 'shared' | null} storage
  * @property {boolean} invariant
+ * @property {boolean} precise
  * @property {boolean} centroid
+ * @property {boolean} sample
+ * @property {boolean} patch
+ * @property {'flat' | 'smooth' | 'noperspective' | null} interpolation
+ * @property {LayoutEntry[]} layout
+ * @property {string[]} memory  coherent, volatile, restrict, readonly, writeonly
+ * @property {string | null} precision
+ * @property {Token[] | null} subroutine  `subroutine` alone (an empty list) or
+ *     `subroutine(T, ...)` the types named; null without it
  */
-
-/** Words a shader may not use as names (section 3.6). */
-const RESERVED = new Set([
-    'asm', 'class', 'union', 'enum', 'typedef', 'template', 'this', 'packed', 'goto', 'switch',
-    'default', 'inline', 'noinline', 'volatile', 'public', 'static', 'extern', 'external',
-    'interface', 'long', 'short', 'double', 'half', 'fixed', 'unsigned', 'input', 'output',
-    'hvec2', 'hvec3', 'hvec4', 'dvec2', 'dvec3', 'dvec4', 'fvec2', 'fvec3', 'fvec4',
-    'sampler2DRect', 'sampler3DRect', 'sampler2DRectShadow', 'sizeof', 'cast', 'namespace',
-    'using', 'case',
-]);
-
-/** Keywords that are not type names. */
-const KEYWORDS = new Set([
-    'attribute', 'const', 'uniform', 'varying', 'centroid', 'break', 'continue', 'do', 'for',
-    'while', 'if', 'else', 'in', 'out', 'inout', 'true', 'false', 'invariant', 'discard',
-    'return', 'struct', 'lowp', 'mediump', 'highp', 'precision',
-]);
 
 /** The binary operators, by how tightly each binds. */
 const PRECEDENCE = new Map([
@@ -83,6 +89,10 @@ const PRECEDENCE = new Map([
 ]);
 
 const ASSIGNMENTS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '|=', '^=']);
+
+const MEMORY = new Set(['coherent', 'volatile', 'restrict', 'readonly', 'writeonly']);
+const INTERPOLATION = new Set(['flat', 'smooth', 'noperspective']);
+const PRECISION = new Set(['lowp', 'mediump', 'highp']);
 
 /** A syntax error, carrying the token it was found at. */
 export class GlslSyntaxError extends Error {
@@ -96,12 +106,15 @@ export class GlslSyntaxError extends Error {
 
 /**
  * @param {Token[]} tokens  the preprocessor's, ending in `eof`
+ * @param {Language} [language]  the version's; 1.10 by default
  * @returns {{ decls: any[] }}
  */
-export function parse(tokens){
+export function parse(tokens, language = languageOf(110)){
     let i = 0;
     /** @type {Set<string>} */
     const structNames = new Set();
+    const version = language.version;
+    const { keywords, reserved } = language;
 
     const peek = (offset = 0)=>tokens[Math.min(i + offset, tokens.length - 1)];
     const next = ()=>tokens[Math.min(i++, tokens.length - 1)];
@@ -130,100 +143,205 @@ export function parse(tokens){
         i++;
         return token;
     };
+    /** @param {Token} token */
+    const isKeyword = token=>token.kind === 'ident' && keywords.has(token.text);
+    /** @param {string} name */
+    const typeOf = name=>basicTypeAt(name, version) ?? null;
     /** @returns {Token} */
     const identifier = ()=>{
         const token = peek();
-        if (token.kind !== 'ident' || KEYWORDS.has(token.text) || basicType(token.text))
-        {
-            fail(token, `'${token.text || 'end of shader'}' : syntax error, expected a name`);
-        }
-        if (RESERVED.has(token.text))
+        if (token.kind === 'ident' && reserved.has(token.text))
         {
             fail(token, `'${token.text}' : reserved word`);
+        }
+        if (token.kind !== 'ident' || isKeyword(token))
+        {
+            fail(token, `'${token.text || 'end of shader'}' : syntax error, expected a name`);
         }
         i++;
         return token;
     };
 
-    /** Whether the next tokens begin a type. */
+    /** Whether the token `offset` ahead begins a type. */
     const startsType = (offset = 0)=>{
         const token = peek(offset);
         if (token.kind !== 'ident')
         {
             return false;
         }
-        return token.text === 'struct' || !!basicType(token.text) || structNames.has(token.text);
+        return token.text === 'struct' || !!typeOf(token.text) || structNames.has(token.text);
     };
 
-    /** Skips a precision qualifier, which 1.20 reserves and drivers accept. */
-    const skipPrecision = ()=>{
-        while (is('lowp') || is('mediump') || is('highp'))
+    /** Whether the token `offset` ahead is one a qualifier list may start with. */
+    const isQualifierWord = (offset = 0)=>{
+        const text = peek(offset).text;
+        if (peek(offset).kind !== 'ident' || !keywords.has(text))
         {
-            i++;
+            return false;
         }
+        return ['const', 'attribute', 'uniform', 'varying', 'in', 'out', 'inout', 'buffer',
+            'shared', 'invariant', 'precise', 'centroid', 'sample', 'patch', 'layout',
+            'subroutine'].includes(text) || MEMORY.has(text) || INTERPOLATION.has(text)
+            || PRECISION.has(text);
     };
 
-    /** @returns {Qualifiers} */
-    const qualifiers = ()=>{
+    /** @returns {LayoutEntry[]} */
+    const layoutList = ()=>{
+        expect('(');
+        /** @type {LayoutEntry[]} */
+        const entries = [];
+        do {
+            const token = next();
+            // `shared` is a keyword and a layout qualifier both.
+            if (token.kind !== 'ident')
+            {
+                fail(token, `'${token.text}' : syntax error, expected a layout qualifier`);
+            }
+            const value = accept('=') ? conditional() : null;
+            entries.push({ at: token, name: token.text, value });
+        }
+        while (accept(','));
+        expect(')');
+        return entries;
+    };
+
+    /**
+     * The qualifiers before a type, in any order (4.20 lifted 1.x's order).
+     *
+     * @param {boolean} [parameter]  a parameter's: `in`, `out` and `inout` are
+     *     directions there, read by the caller
+     * @returns {Qualifiers}
+     */
+    const qualifiers = (parameter = false)=>{
         /** @type {Qualifiers} */
-        const q = { storage: null, invariant: false, centroid: false };
+        const q = { at: peek(), storage: null, invariant: false, precise: false, centroid: false,
+            sample: false, patch: false, interpolation: null, layout: [], memory: [],
+            precision: null, subroutine: null };
+        /** @param {Qualifiers['storage']} storage */
+        const store = storage=>{
+            if (q.storage)
+            {
+                fail(peek(), `'${peek().text}' : only one storage qualifier is allowed`);
+            }
+            q.storage = storage;
+            i++;
+        };
         for (;;)
         {
-            const text = peek().text;
-            if (text === 'invariant')
+            const token = peek();
+            const text = token.text;
+            if (token.kind !== 'ident')
+            {
+                return q;
+            }
+            if (text === 'invariant' && keywords.has(text))
             {
                 q.invariant = true;
                 i++;
-                continue;
             }
-            if (text === 'centroid')
+            else if (text === 'precise' && keywords.has(text))
+            {
+                q.precise = true;
+                i++;
+            }
+            else if (text === 'centroid')
             {
                 q.centroid = true;
                 i++;
-                continue;
             }
-            if (text === 'const' || text === 'attribute' || text === 'uniform'
-                || text === 'varying')
+            else if ((text === 'sample' || text === 'patch') && keywords.has(text))
             {
-                if (q.storage)
+                q[text] = true;
+                i++;
+            }
+            else if (INTERPOLATION.has(text) && keywords.has(text))
+            {
+                if (q.interpolation)
                 {
-                    fail(peek(), `'${text}' : only one storage qualifier is allowed`);
+                    fail(token, `'${text}' : only one interpolation qualifier is allowed`);
                 }
-                q.storage = /** @type {Qualifiers['storage']} */ (text);
+                q.interpolation = /** @type {Qualifiers['interpolation']} */ (text);
                 i++;
-                continue;
             }
-            if (text === 'lowp' || text === 'mediump' || text === 'highp')
+            else if (MEMORY.has(text) && keywords.has(text))
+            {
+                q.memory.push(text);
+                i++;
+            }
+            else if (PRECISION.has(text))
+            {
+                q.precision = text;
+                i++;
+            }
+            else if (text === 'layout' && keywords.has(text))
             {
                 i++;
-                continue;
+                q.layout.push(...layoutList());
             }
-            return q;
+            else if (text === 'subroutine' && keywords.has(text))
+            {
+                i++;
+                /** @type {Token[]} */
+                const types = [];
+                if (accept('('))
+                {
+                    do {
+                        types.push(identifier());
+                    }
+                    while (accept(','));
+                    expect(')');
+                }
+                q.subroutine = types;
+            }
+            else if (!parameter && (text === 'const' || text === 'attribute'
+                || text === 'uniform' || text === 'varying'
+                || ((text === 'buffer' || text === 'shared') && keywords.has(text))))
+            {
+                store(/** @type {Qualifiers['storage']} */ (text));
+            }
+            else if (!parameter && (text === 'in' || text === 'out') && language.has('inOut'))
+            {
+                store(text);
+            }
+            else if (!parameter && text === 'inout' && language.has('inOut'))
+            {
+                fail(token, "'inout' : only allowed on a function parameter");
+            }
+            else
+            {
+                return q;
+            }
         }
     };
 
-    /** @returns {any} an array length: an expression, or 'unsized' */
-    const arraySuffix = ()=>{
-        if (!accept('['))
+    /** @returns {any[]} the array dimensions here, each an expression or 'unsized' */
+    const arraySuffixes = ()=>{
+        /** @type {any[]} */
+        const dims = [];
+        while (is('['))
         {
-            return null;
+            const at = next();
+            if (dims.length > 0 && !language.has('arraysOfArrays'))
+            {
+                fail(at, "'[' : arrays of arrays need version 430");
+            }
+            if (accept(']'))
+            {
+                dims.push('unsized');
+                continue;
+            }
+            dims.push(conditional());
+            expect(']');
         }
-        if (accept(']'))
-        {
-            return 'unsized';
-        }
-        const length = conditional();
-        expect(']');
-        if (is('['))
-        {
-            fail(peek(), "'[' : arrays of arrays are not allowed");
-        }
-        return length;
+        return dims;
     };
 
     /** @returns {TypeSpec} */
     const typeSpec = ()=>{
-        skipPrecision();
+        while (PRECISION.has(peek().text))
+        {
+            i++;
+        }
         const at = peek();
         if (accept('struct'))
         {
@@ -237,9 +355,17 @@ export function parse(tokens){
             const members = [];
             while (!accept('}'))
             {
-                if (is('const') || is('uniform') || is('attribute') || is('varying'))
+                if (peek().kind === 'eof')
                 {
-                    fail(peek(), `'${peek().text}' : a struct member takes no qualifier`);
+                    fail(peek(), "'end of shader' : syntax error, expected '}'");
+                }
+                const memberQualifiers = qualifiers();
+                if (memberQualifiers.storage || memberQualifiers.invariant
+                    || memberQualifiers.layout.length > 0 || memberQualifiers.interpolation
+                    || memberQualifiers.centroid || memberQualifiers.memory.length > 0)
+                {
+                    fail(memberQualifiers.at, `'${memberQualifiers.at.text}' : a struct member`
+                        + ' takes no qualifier');
                 }
                 const type = typeSpec();
                 /** @type {Declarator[]} */
@@ -247,35 +373,35 @@ export function parse(tokens){
                 do {
                     const nameToken = identifier();
                     declarators.push({ at: nameToken, name: nameToken.text,
-                        arrayLength: arraySuffix(), initializer: null });
+                        arrays: arraySuffixes(), initializer: null });
                 }
                 while (accept(','));
                 expect(';');
-                members.push({ type, declarators });
+                members.push({ qualifiers: memberQualifiers, type, declarators });
             }
             if (members.length === 0)
             {
                 fail(at, "'struct' : a struct needs at least one member");
             }
             return { at, basic: null, structName: null, structDef: { at, name, members },
-                arrayLength: arraySuffix() };
+                arrays: arraySuffixes() };
         }
         const token = next();
         if (token.kind !== 'ident')
         {
             fail(token, `'${token.text || 'end of shader'}' : syntax error, expected a type`);
         }
-        const basic = basicType(token.text);
+        const basic = typeOf(token.text);
         if (basic)
         {
-            return { at, basic, structName: null, structDef: null, arrayLength: arraySuffix() };
+            return { at, basic, structName: null, structDef: null, arrays: arraySuffixes() };
         }
         if (structNames.has(token.text))
         {
             return { at, basic: null, structName: token.text, structDef: null,
-                arrayLength: arraySuffix() };
+                arrays: arraySuffixes() };
         }
-        if (RESERVED.has(token.text))
+        if (reserved.has(token.text))
         {
             fail(token, `'${token.text}' : reserved word`);
         }
@@ -415,27 +541,53 @@ export function parse(tokens){
         return args;
     };
 
+    /** @param {Token} token @returns {any} */
+    const integerLiteral = token=>{
+        const unsigned = /[uU]$/.test(token.text);
+        const text = unsigned ? token.text.slice(0, -1) : token.text;
+        if (unsigned && !language.has('uint'))
+        {
+            fail(token, `'${token.text}' : an unsigned literal needs version 130`);
+        }
+        const value = /^0[xX]/.test(text) ? Number.parseInt(text, 16)
+            : text.length > 1 && text[0] === '0' ? Number.parseInt(text, 8)
+                : Number.parseInt(text, 10);
+        if (value > 0xffffffff)
+        {
+            fail(token, `'${token.text}' : integer constant overflow`);
+        }
+        return unsigned ? { node: 'literal', at: token, kind: 'uint', value: value >>> 0 }
+            : { node: 'literal', at: token, kind: 'int', value: value | 0 };
+    };
+
+    /** @param {Token} token @returns {any} */
+    const floatLiteral = token=>{
+        const isDouble = /(lf|LF)$/.test(token.text);
+        if (isDouble && !language.has('double'))
+        {
+            fail(token, `'${token.text}' : a double literal needs version 400`);
+        }
+        if (/[fF]$/.test(token.text) && !isDouble && !language.has('inOut'))
+        {
+            fail(token, `'${token.text}' : a float suffix needs version 130`);
+        }
+        const value = Number.parseFloat(token.text.replace(/(lf|LF|[fF])$/, ''));
+        return isDouble ? { node: 'literal', at: token, kind: 'double', value }
+            : { node: 'literal', at: token, kind: 'float', value: Math.fround(value) };
+    };
+
     /** @returns {any} */
     const primary = ()=>{
         const token = peek();
         if (token.kind === 'int')
         {
             i++;
-            const text = token.text;
-            const value = /^0[xX]/.test(text) ? Number.parseInt(text, 16)
-                : text.length > 1 && text[0] === '0' ? Number.parseInt(text, 8)
-                    : Number.parseInt(text, 10);
-            if (value > 0xffffffff)
-            {
-                fail(token, `'${text}' : integer constant overflow`);
-            }
-            return { node: 'literal', at: token, kind: 'int', value: value | 0 };
+            return integerLiteral(token);
         }
         if (token.kind === 'float')
         {
             i++;
-            return { node: 'literal', at: token, kind: 'float',
-                value: Math.fround(Number.parseFloat(token.text.replace(/[fF]$/, ''))) };
+            return floatLiteral(token);
         }
         if (token.text === 'true' || token.text === 'false')
         {
@@ -448,7 +600,7 @@ export function parse(tokens){
             expect(')');
             return inner;
         }
-        if (token.kind === 'ident' && (basicType(token.text) || structNames.has(token.text)))
+        if (token.kind === 'ident' && (typeOf(token.text) || structNames.has(token.text)))
         {
             // A constructor: a basic type's or a struct's, maybe of an array.
             const spec = typeSpec();
@@ -458,9 +610,9 @@ export function parse(tokens){
             }
             return { node: 'construct', at: token, type: spec, args: callArguments() };
         }
-        if (token.kind === 'ident' && !KEYWORDS.has(token.text))
+        if (token.kind === 'ident' && !keywords.has(token.text))
         {
-            if (RESERVED.has(token.text))
+            if (reserved.has(token.text))
             {
                 fail(token, `'${token.text}' : reserved word`);
             }
@@ -474,10 +626,45 @@ export function parse(tokens){
         return fail(token, `'${token.text || 'end of shader'}' : syntax error`);
     };
 
+    /**
+     * An initializer: an expression, or from 4.20 a brace list of them
+     * (section 4.1.11), nested as the type it initializes is.
+     *
+     * @returns {any}
+     */
+    const initializer = ()=>{
+        const at = peek();
+        if (!is('{'))
+        {
+            return assignment();
+        }
+        if (!language.has('shadingLanguage420pack'))
+        {
+            fail(at, "'{' : an initializer list needs version 420");
+        }
+        expect('{');
+        /** @type {any[]} */
+        const items = [];
+        do {
+            if (is('}'))
+            {
+                break;
+            }
+            items.push(initializer());
+        }
+        while (accept(','));
+        expect('}');
+        if (items.length === 0)
+        {
+            fail(at, "'{' : an initializer list cannot be empty");
+        }
+        return { node: 'list', at, items };
+    };
+
     // --- statements ---
 
     /**
-     * The declarators after a type: names, array lengths, initializers.
+     * The declarators after a type: names, array dimensions, initializers.
      *
      * @param {TypeSpec} type
      * @param {Qualifiers} q
@@ -491,10 +678,10 @@ export function parse(tokens){
         {
             do {
                 const nameToken = identifier();
-                const arrayLength = arraySuffix();
-                const initializer = accept('=') ? assignment() : null;
-                declarators.push({ at: nameToken, name: nameToken.text, arrayLength,
-                    initializer });
+                const arrays = arraySuffixes();
+                const init = accept('=') ? initializer() : null;
+                declarators.push({ at: nameToken, name: nameToken.text, arrays,
+                    initializer: init });
             }
             while (accept(','));
         }
@@ -502,11 +689,56 @@ export function parse(tokens){
         return { node: 'variables', at, qualifiers: q, type, declarators };
     };
 
+    /**
+     * An interface block (sections 4.3.9): `uniform Name { members } instance[];`.
+     *
+     * @param {Qualifiers} q @param {Token} at
+     * @returns {any}
+     */
+    const blockRest = (q, at)=>{
+        const nameToken = identifier();
+        expect('{');
+        /** @type {{ qualifiers: Qualifiers, type: TypeSpec, declarators: Declarator[] }[]} */
+        const members = [];
+        while (!accept('}'))
+        {
+            if (peek().kind === 'eof')
+            {
+                fail(peek(), "'end of shader' : syntax error, expected '}'");
+            }
+            const memberQualifiers = qualifiers();
+            if (is('struct'))
+            {
+                fail(peek(), "'struct' : a structure cannot be defined in a block");
+            }
+            const type = typeSpec();
+            /** @type {Declarator[]} */
+            const declarators = [];
+            do {
+                const memberName = identifier();
+                declarators.push({ at: memberName, name: memberName.text, arrays: arraySuffixes(),
+                    initializer: null });
+            }
+            while (accept(','));
+            expect(';');
+            members.push({ qualifiers: memberQualifiers, type, declarators });
+        }
+        /** @type {Declarator | null} */
+        let instance = null;
+        if (!is(';'))
+        {
+            const instanceToken = identifier();
+            instance = { at: instanceToken, name: instanceToken.text, arrays: arraySuffixes(),
+                initializer: null };
+        }
+        expect(';');
+        return { node: 'block', at, qualifiers: q, name: nameToken.text, nameAt: nameToken,
+            members, instance };
+    };
+
     /** Whether the next tokens begin a declaration rather than an expression. */
     const startsDeclaration = ()=>{
-        const text = peek().text;
-        if (['const', 'attribute', 'uniform', 'varying', 'invariant', 'centroid', 'struct',
-            'lowp', 'mediump', 'highp', 'precision'].includes(text))
+        if (isQualifierWord() || is('struct') || is('precision'))
         {
             return true;
         }
@@ -534,7 +766,7 @@ export function parse(tokens){
                 {
                     depth++;
                 }
-                else if (t.text === ']' && --depth === 0)
+                else if (t.text === ']' && --depth === 0 && peek(k + 1).text !== '[')
                 {
                     return peek(k + 1).text !== '(';
                 }
@@ -543,29 +775,70 @@ export function parse(tokens){
         return true;
     };
 
+    /**
+     * `invariant a, b;` and `precise a;`: a qualifier given to names
+     * declared before.
+     *
+     * @returns {boolean}
+     */
+    const startsRequalification = ()=>(is('invariant') || (is('precise')
+        && keywords.has('precise'))) && peek(1).kind === 'ident' && !startsType(1)
+        && !isQualifierWord(1);
+
     /** @returns {any} */
     const declaration = ()=>{
         const at = peek();
         if (accept('precision'))
         {
-            skipPrecision();
+            if (!PRECISION.has(peek().text))
+            {
+                fail(peek(), `'${peek().text}' : syntax error, expected a precision`);
+            }
+            i++;
             typeSpec();
             expect(';');
             return { node: 'empty', at };
         }
-        if (is('invariant') && peek(1).kind === 'ident' && !startsType(1)
-            && !['varying', 'centroid'].includes(peek(1).text))
+        if (startsRequalification())
         {
-            i++;
+            const qualifier = next().text;
             const names = [identifier()];
             while (accept(','))
             {
                 names.push(identifier());
             }
             expect(';');
-            return { node: 'invariant', at, names };
+            return { node: qualifier === 'invariant' ? 'invariant' : 'precise', at, names };
         }
         const q = qualifiers();
+        if (is(';') && (q.layout.length > 0 || q.storage))
+        {
+            // `layout(std140) uniform;`, `layout(triangles) in;`: defaults.
+            i++;
+            return { node: 'defaults', at, qualifiers: q };
+        }
+        if (q.storage && peek().kind === 'ident' && peek(1).text === '{'
+            && !startsType())
+        {
+            return blockRest(q, at);
+        }
+        if (q.storage && q.storage !== 'const' && q.storage !== 'attribute'
+            && q.storage !== 'varying' && peek().kind === 'ident' && peek(1).text === '{')
+        {
+            return blockRest(q, at);
+        }
+        // `invariant gl_Position;` after other qualifiers names a variable.
+        if ((q.invariant || q.precise) && !q.storage && peek().kind === 'ident'
+            && !startsType() && (peek(1).text === ';' || peek(1).text === ','))
+        {
+            const names = [identifier()];
+            while (accept(','))
+            {
+                names.push(identifier());
+            }
+            expect(';');
+            return { node: q.invariant ? 'invariant' : 'precise', at, names };
+        }
         const type = typeSpec();
         return declarationRest(type, q, at);
     };
@@ -593,7 +866,8 @@ export function parse(tokens){
         if (accept('while'))
         {
             expect('(');
-            const test = expression();
+            const test = startsDeclaration() ? conditionDeclaration()
+                : expression();
             expect(')');
             return { node: 'while', at, test, body: statement() };
         }
@@ -612,11 +886,31 @@ export function parse(tokens){
             expect('(');
             const init = is(';') ? (i++, { node: 'empty', at }) : startsDeclaration()
                 ? declaration() : expressionStatement();
-            const test = is(';') ? null : expression();
+            const test = is(';') ? null : startsDeclaration() ? conditionDeclaration()
+                : expression();
             expect(';');
             const update = is(')') ? null : expression();
             expect(')');
             return { node: 'for', at, init, test, update, body: statement() };
+        }
+        if (keywords.has('switch') && accept('switch'))
+        {
+            expect('(');
+            const test = expression();
+            expect(')');
+            const body = block();
+            return { node: 'switch', at, test, body: body.body };
+        }
+        if (keywords.has('case') && accept('case'))
+        {
+            const value = expression();
+            expect(':');
+            return { node: 'case', at, value };
+        }
+        if (keywords.has('default') && accept('default'))
+        {
+            expect(':');
+            return { node: 'default', at };
         }
         if (accept('return'))
         {
@@ -646,6 +940,20 @@ export function parse(tokens){
         return expressionStatement();
     };
 
+    /**
+     * A condition that declares (section 6.3): `while (bool b = f())`, its
+     * variable in the loop's scope.
+     *
+     * @returns {any}
+     */
+    const conditionDeclaration = ()=>{
+        const at = peek();
+        const type = typeSpec();
+        const name = identifier();
+        expect('=');
+        return { node: 'condition', at, type, name, value: assignment() };
+    };
+
     /** @returns {any} */
     const expressionStatement = ()=>{
         const at = peek();
@@ -670,6 +978,68 @@ export function parse(tokens){
         return { node: 'block', at, body };
     };
 
+    /** @returns {any[]} a function's parameters, after its '(' */
+    const parameters = ()=>{
+        /** @type {any[]} */
+        const params = [];
+        if (is('void') && peek(1).text === ')')
+        {
+            i++;
+        }
+        if (!is(')'))
+        {
+            do {
+                const paramAt = peek();
+                let constant = false;
+                /** @type {'in' | 'out' | 'inout'} */
+                let direction = 'in';
+                let directed = false;
+                /** @type {string[]} */
+                const memory = [];
+                for (;;)
+                {
+                    if (accept('const'))
+                    {
+                        constant = true;
+                        continue;
+                    }
+                    if (is('in') || is('out') || is('inout'))
+                    {
+                        if (directed)
+                        {
+                            fail(peek(), `'${peek().text}' : only one parameter direction`
+                                + ' is allowed');
+                        }
+                        directed = true;
+                        direction = /** @type {'in' | 'out' | 'inout'} */ (next().text);
+                        continue;
+                    }
+                    if (MEMORY.has(peek().text) && keywords.has(peek().text))
+                    {
+                        memory.push(next().text);
+                        continue;
+                    }
+                    if (PRECISION.has(peek().text) || (is('precise')
+                        && keywords.has('precise')))
+                    {
+                        i++;
+                        continue;
+                    }
+                    break;
+                }
+                const paramType = typeSpec();
+                const name = peek().kind === 'ident' && !keywords.has(peek().text)
+                    ? identifier() : null;
+                const arrays = name ? arraySuffixes() : [];
+                params.push({ at: paramAt, name: name?.text ?? null, type: paramType,
+                    arrays, direction, constant, memory });
+            }
+            while (accept(','));
+        }
+        expect(')');
+        return params;
+    };
+
     // --- the translation unit ---
 
     /** @type {any[]} */
@@ -681,59 +1051,51 @@ export function parse(tokens){
         {
             continue;
         }
-        if (is('precision') || (is('invariant') && peek(1).kind === 'ident' && !startsType(1)
-            && !['varying', 'centroid'].includes(peek(1).text)))
+        if (is('precision') || startsRequalification())
         {
             decls.push(declaration());
             continue;
         }
         const q = qualifiers();
+        if (is(';') && (q.layout.length > 0 || q.storage))
+        {
+            i++;
+            decls.push({ node: 'defaults', at, qualifiers: q });
+            continue;
+        }
+        if (q.storage && q.storage !== 'const' && peek().kind === 'ident'
+            && peek(1).text === '{' && !isKeyword(peek()))
+        {
+            decls.push(blockRest(q, at));
+            continue;
+        }
+        if ((q.invariant || q.precise) && !q.storage && peek().kind === 'ident'
+            && !startsType() && (peek(1).text === ';' || peek(1).text === ','))
+        {
+            const names = [identifier()];
+            while (accept(','))
+            {
+                names.push(identifier());
+            }
+            expect(';');
+            decls.push({ node: q.invariant ? 'invariant' : 'precise', at, names });
+            continue;
+        }
         const type = typeSpec();
         // A function: a type, a name and a parenthesis.
         if (peek().kind === 'ident' && peek(1).text === '(' && !q.storage && !q.invariant)
         {
             const nameToken = identifier();
             expect('(');
-            /** @type {any[]} */
-            const params = [];
-            if (is('void') && peek(1).text === ')')
-            {
-                i++;
-            }
-            if (!is(')'))
-            {
-                do {
-                    const paramAt = peek();
-                    let constant = false;
-                    /** @type {'in' | 'out' | 'inout'} */
-                    let direction = 'in';
-                    for (;;)
-                    {
-                        if (accept('const'))
-                        {
-                            constant = true;
-                            continue;
-                        }
-                        if (is('in') || is('out') || is('inout'))
-                        {
-                            direction = /** @type {'in' | 'out' | 'inout'} */ (next().text);
-                            continue;
-                        }
-                        break;
-                    }
-                    const paramType = typeSpec();
-                    const name = peek().kind === 'ident' && !KEYWORDS.has(peek().text)
-                        ? identifier() : null;
-                    const arrayLength = name ? arraySuffix() : null;
-                    params.push({ at: paramAt, name: name?.text ?? null, type: paramType,
-                        arrayLength, direction, constant });
-                }
-                while (accept(','));
-            }
-            expect(')');
+            const params = parameters();
             const body = is('{') ? block() : (expect(';'), null);
+            if (q.subroutine?.length === 0 && !body)
+            {
+                // A subroutine type's name is a type a subroutine uniform declares.
+                structNames.add(nameToken.text);
+            }
             decls.push({ node: 'function', at: nameToken, name: nameToken.text,
-                returnType: type, params, body });
+                returnType: type, params, body, qualifiers: q });
             continue;
         }
         decls.push(declarationRest(type, q, at));
