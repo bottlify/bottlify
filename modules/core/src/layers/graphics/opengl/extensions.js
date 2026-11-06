@@ -119,6 +119,12 @@ export const GL_EXTENSIONS = Object.freeze({
         'glFogCoordPointerEXT',
     ],
     GL_EXT_draw_range_elements: ['glDrawRangeElementsEXT'],
+    // The copies of 1.1 and 1.2 under their first names, which programs of
+    // the era ask for by them (Wine's opengl32 test_getprocaddress: RuneScape).
+    GL_EXT_copy_texture: [
+        'glCopyTexImage1DEXT', 'glCopyTexImage2DEXT', 'glCopyTexSubImage1DEXT',
+        'glCopyTexSubImage2DEXT', 'glCopyTexSubImage3DEXT',
+    ],
     GL_EXT_blend_color: ['glBlendColorEXT'],
     GL_EXT_blend_minmax: ['glBlendEquationEXT'],
     GL_EXT_blend_subtract: [],
@@ -317,6 +323,8 @@ const LATER_EXTENSION_WORDS = [
     ...SHADER_OBJECT_WORDS,
     ['glBindAttribLocationARB', 3], ['glGetActiveAttribARB', 7], ['glGetAttribLocationARB', 2],
     ['glBlendColorEXT', 4], ['glBlendEquationEXT', 1], ['glBlendFuncSeparateEXT', 4],
+    ['glCopyTexImage1DEXT', 7], ['glCopyTexImage2DEXT', 8], ['glCopyTexSubImage1DEXT', 6],
+    ['glCopyTexSubImage2DEXT', 8], ['glCopyTexSubImage3DEXT', 9],
 ];
 
 /**

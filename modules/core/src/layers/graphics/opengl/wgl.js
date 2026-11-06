@@ -426,6 +426,26 @@ export function createWgl(options){
             bitmaps.meet(context);
         },
 
+        /**
+         * The attribute groups of `mask` copied from one context to another,
+         * as glPushAttrib saves and glPopAttrib restores them. The source may
+         * be current anywhere; a destination current on any thread is
+         * ERROR_INVALID_HANDLE (Wine's opengl32 test_copy_context).
+         *
+         * @param {any} source @param {any} destination @param {number} mask
+         * @returns {boolean}
+         */
+        wglCopyContext(source, destination, mask){
+            if (!source || !destination || !live.has(source) || !live.has(destination)
+                || holderOf(destination) !== null)
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return false;
+            }
+            destination.pasteAttribs(source.copyAttribs(mask >>> 0));
+            return true;
+        },
+
         /** @returns {any | null} */
         wglGetCurrentContext(){
             return current.get(options.currentThread())?.context ?? null;
@@ -451,7 +471,13 @@ export function createWgl(options){
             {
                 return false;
             }
-            if (destination.shareGroup.used || destination.shareGroup === source.shareGroup)
+            // Two contexts already sharing share again (Wine's opengl32
+            // test_sharelists: both joined a third first).
+            if (destination.shareGroup === source.shareGroup)
+            {
+                return true;
+            }
+            if (destination.shareGroup.used)
             {
                 return false;
             }

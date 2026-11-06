@@ -1559,6 +1559,36 @@ export function createGlContext(options = {}){
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
         },
 
+        /**
+         * wglCopyContext's first half: the server attribute groups of `mask`
+         * as glPushAttrib saves them, for `pasteAttribs` of another context.
+         *
+         * @param {number} mask
+         */
+        copyAttribs(mask){
+            return {
+                mask,
+                values: snapshot(queriesSavedBy(SERVER_BITS, mask)),
+                textures: kernel.side.saveServerTextures(mask),
+                lighting: kernel.side.saveServerLighting(mask),
+                programs: kernel.side.saveServerPrograms(mask),
+            };
+        },
+
+        /**
+         * And its second: what `copyAttribs` took, laid onto this context
+         * as glPopAttrib restores it.
+         *
+         * @param {{ mask: number, values: any, textures: any, lighting: any,
+         *     programs: any }} saved
+         */
+        pasteAttribs(saved){
+            restore(saved.values);
+            kernel.side.restoreServerTextures(saved.mask, saved.textures);
+            kernel.side.restoreServerLighting(saved.lighting);
+            kernel.side.restoreServerPrograms(saved.programs);
+        },
+
         /** @param {number} mask */
         glPushClientAttrib(mask){
             if (!enter('glPushClientAttrib', [mask]))

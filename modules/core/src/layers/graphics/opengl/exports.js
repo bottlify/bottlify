@@ -47,15 +47,14 @@ import { EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, WGL_EXTENSIONS } from './e
 import { GL_SIGNATURES } from './registry.js';
 import { laterEntryPoints } from './exports-later.js';
 import {
-    choosePixelFormat, decodePixelFormat, encodePixelFormat, PIXEL_FORMATS,
-    PIXELFORMATDESCRIPTOR,
+    choosePixelFormat, choosePixelFormatsARB, decodePixelFormat, encodePixelFormat,
+    formatAttribute, PIXEL_FORMATS, PIXELFORMATDESCRIPTOR,
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
 import { createOpenglRoot } from './root.js';
 import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
-import { PFD } from './constants.js';
 import {
     COMMAND_RING_BYTES, TEB_GL_CONTEXT, createCommandReader, placeCommandRing,
 } from '../seam/shadow.js';
@@ -1459,93 +1458,6 @@ export function createOpengl(services){
     });
 
     /**
-     * The one-time attribute answers WGL_ARB_pixel_format gives about a
-     * format, as the descriptor's fields.
-     *
-     * @param {import('./pixelformat.js').PixelFormat} format
-     * @param {number} attribute
-     * @returns {number | null}
-     */
-    const formatAttribute = (format, attribute)=>{
-        switch (attribute)
-        {
-            case WGL.NUMBER_PIXEL_FORMATS_ARB:
-                return PIXEL_FORMATS.length;
-            case WGL.DRAW_TO_WINDOW_ARB:
-                return (format.dwFlags & PFD.DRAW_TO_WINDOW) ? 1 : 0;
-            case WGL.DRAW_TO_BITMAP_ARB:
-                return (format.dwFlags & PFD.DRAW_TO_BITMAP) ? 1 : 0;
-            case WGL.ACCELERATION_ARB:
-                return (format.dwFlags & PFD.GENERIC_ACCELERATED) ? WGL.FULL_ACCELERATION_ARB
-                    : (format.dwFlags & PFD.GENERIC_FORMAT) ? WGL.NO_ACCELERATION_ARB
-                        : WGL.FULL_ACCELERATION_ARB;
-            case WGL.NEED_PALETTE_ARB:
-            case WGL.NEED_SYSTEM_PALETTE_ARB:
-            case WGL.NUMBER_OVERLAYS_ARB:
-            case WGL.NUMBER_UNDERLAYS_ARB:
-            case WGL.TRANSPARENT_ARB:
-            case WGL.SHARE_DEPTH_ARB:
-            case WGL.SHARE_STENCIL_ARB:
-            case WGL.SHARE_ACCUM_ARB:
-            case WGL.SAMPLE_BUFFERS_ARB:
-            case WGL.SAMPLES_ARB:
-                return 0;
-            case WGL.SWAP_LAYER_BUFFERS_ARB:
-                return (format.dwFlags & PFD.SWAP_LAYER_BUFFERS) ? 1 : 0;
-            case WGL.SWAP_METHOD_ARB:
-                return (format.dwFlags & PFD.SWAP_EXCHANGE) ? WGL.SWAP_EXCHANGE_ARB
-                    : (format.dwFlags & PFD.SWAP_COPY) ? WGL.SWAP_COPY_ARB : WGL.SWAP_UNDEFINED_ARB;
-            case WGL.SUPPORT_GDI_ARB:
-                return (format.dwFlags & PFD.SUPPORT_GDI) ? 1 : 0;
-            case WGL.SUPPORT_OPENGL_ARB:
-                return (format.dwFlags & PFD.SUPPORT_OPENGL) ? 1 : 0;
-            case WGL.DOUBLE_BUFFER_ARB:
-                return (format.dwFlags & PFD.DOUBLEBUFFER) ? 1 : 0;
-            case WGL.STEREO_ARB:
-                return (format.dwFlags & PFD.STEREO) ? 1 : 0;
-            case WGL.PIXEL_TYPE_ARB:
-                return format.iPixelType === PFD.TYPE_COLORINDEX
-                    ? WGL.TYPE_COLORINDEX_ARB : WGL.TYPE_RGBA_ARB;
-            case WGL.COLOR_BITS_ARB:
-                return format.cColorBits;
-            case WGL.RED_BITS_ARB:
-                return format.cRedBits;
-            case WGL.RED_SHIFT_ARB:
-                return format.cRedShift;
-            case WGL.GREEN_BITS_ARB:
-                return format.cGreenBits;
-            case WGL.GREEN_SHIFT_ARB:
-                return format.cGreenShift;
-            case WGL.BLUE_BITS_ARB:
-                return format.cBlueBits;
-            case WGL.BLUE_SHIFT_ARB:
-                return format.cBlueShift;
-            case WGL.ALPHA_BITS_ARB:
-                return format.cAlphaBits;
-            case WGL.ALPHA_SHIFT_ARB:
-                return format.cAlphaShift;
-            case WGL.ACCUM_BITS_ARB:
-                return format.cAccumBits;
-            case WGL.ACCUM_RED_BITS_ARB:
-                return format.cAccumRedBits;
-            case WGL.ACCUM_GREEN_BITS_ARB:
-                return format.cAccumGreenBits;
-            case WGL.ACCUM_BLUE_BITS_ARB:
-                return format.cAccumBlueBits;
-            case WGL.ACCUM_ALPHA_BITS_ARB:
-                return format.cAccumAlphaBits;
-            case WGL.DEPTH_BITS_ARB:
-                return format.cDepthBits;
-            case WGL.STENCIL_BITS_ARB:
-                return format.cStencilBits;
-            case WGL.AUX_BUFFERS_ARB:
-                return format.cAuxBuffers;
-            default:
-                return null;
-        }
-    };
-
-    /**
      * Answers a WGL_ARB_pixel_format attribute query, in either type.
      *
      * @param {number[]} args
@@ -1629,6 +1541,9 @@ export function createOpengl(services){
             return from && to && wgl.wglShareLists(from, to) ? 1 : 0;
         },
 
+        wglCopyContext: ([source, destination, mask])=>(wgl.wglCopyContext(
+            contexts.get(source >>> 0), contexts.get(destination >>> 0), mask >>> 0) ? 1 : 0),
+
         /**
          * The address of an extension function, and null for everything
          * else -- a core entry point, a name nobody reported, no context.
@@ -1679,63 +1594,42 @@ export function createOpengl(services){
         wglGetPixelFormatAttribfvARB: args=>pixelFormatAttributes(args, 'float'),
 
         /**
-         * The extension's way of choosing: attribute pairs rather than a
-         * descriptor, answered with the one best format.
+         * The extension's way of choosing: attribute pairs, integer and float
+         * lists both, answered with every format that meets them, best first.
          */
         wglChoosePixelFormatARB: args=>{
-            const [hdc, intAttributes] = args;
-            const [maxFormats, out, outCount] = args.slice(3);
+            const [hdc, intAttributes, floatAttributes, maxFormats, out, outCount] = args;
             if (!describeDrawable(hdc >>> 0) || (out >>> 0) === 0 || (outCount >>> 0) === 0)
             {
                 return 0;
             }
-            const request = { ...PIXEL_FORMATS[0], dwFlags: 0, cDepthBits: 0, cStencilBits: 0,
-                cAlphaBits: 0, cAccumBits: 0, cAuxBuffers: 0, cColorBits: 0 };
-            /** @type {Record<number, number>} */
-            const flagOf = {
-                [WGL.DRAW_TO_WINDOW_ARB]: PFD.DRAW_TO_WINDOW,
-                [WGL.DRAW_TO_BITMAP_ARB]: PFD.DRAW_TO_BITMAP,
-                [WGL.SUPPORT_OPENGL_ARB]: PFD.SUPPORT_OPENGL,
-                [WGL.SUPPORT_GDI_ARB]: PFD.SUPPORT_GDI,
-                [WGL.DOUBLE_BUFFER_ARB]: PFD.DOUBLEBUFFER,
-                [WGL.STEREO_ARB]: PFD.STEREO,
+            /** @type {Array<[number, number]>} */
+            const pairs = [];
+            /**
+             * @param {number} address
+             * @param {(at: number) => number} valueAt
+             */
+            const readPairs = (address, valueAt)=>{
+                for (let at = address >>> 0; at !== 0; at += 8)
+                {
+                    const [attribute] = readI32s(at, 1);
+                    if (attribute === 0)
+                    {
+                        break;
+                    }
+                    pairs.push([attribute, valueAt(at + 4)]);
+                }
             };
-            for (let at = intAttributes >>> 0; at !== 0;)
+            readPairs(intAttributes, at=>readI32s(at, 1)[0]);
+            readPairs(floatAttributes, at=>readF32s(at, 1)[0]);
+            const { formats, unknown } = choosePixelFormatsARB(pairs);
+            if (unknown.length > 0)
             {
-                const [attribute, value] = readI32s(at, 2);
-                if (attribute === 0)
-                {
-                    break;
-                }
-                at += 8;
-                if (flagOf[attribute] !== undefined)
-                {
-                    request.dwFlags = value ? request.dwFlags | flagOf[attribute] : request.dwFlags;
-                }
-                else if (attribute === WGL.COLOR_BITS_ARB)
-                {
-                    request.cColorBits = value;
-                }
-                else if (attribute === WGL.DEPTH_BITS_ARB)
-                {
-                    request.cDepthBits = value;
-                }
-                else if (attribute === WGL.STENCIL_BITS_ARB)
-                {
-                    request.cStencilBits = value;
-                }
-                else if (attribute === WGL.ALPHA_BITS_ARB)
-                {
-                    request.cAlphaBits = value;
-                }
-                else if (attribute === WGL.PIXEL_TYPE_ARB)
-                {
-                    request.iPixelType = value === WGL.TYPE_COLORINDEX_ARB
-                        ? PFD.TYPE_COLORINDEX : PFD.TYPE_RGBA;
-                }
+                services.divergence?.('OpenGL', `wglChoosePixelFormatARB: attributes ${
+                    unknown.map(attribute=>`0x${attribute.toString(16)}`).join(', ')
+                } are not known here and match every format`);
             }
-            const chosen = choosePixelFormat(request);
-            const found = chosen > 0 && (maxFormats >>> 0) > 0 ? [chosen] : [];
+            const found = formats.slice(0, maxFormats >>> 0);
             writeU32s(out, found);
             writeU32s(outCount, [found.length]);
             return 1;

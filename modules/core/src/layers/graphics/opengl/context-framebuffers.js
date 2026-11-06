@@ -12,12 +12,15 @@
  *
  * The object rules:
  *
- * - **Renderbuffers live in the share group, framebuffers in the context.**
- *   A framebuffer is a container of attachments and the specification does
- *   not share containers.
+ * - **Renderbuffers and framebuffers live in the share group.** OpenGL 3.0
+ *   shares no containers, but GL_EXT_framebuffer_object shares framebuffers
+ *   and Windows' drivers go on sharing them between the contexts
+ *   wglShareLists joins, under either spelling (Wine's opengl32
+ *   test_sharelists).
  * - **A name glGenFramebuffers did not hand out cannot be bound** under the
  *   ARB names (GL_INVALID_OPERATION); the EXT names make the object on the
- *   first bind, as that extension does.
+ *   first bind, as that extension does, to the draw and read targets as well
+ *   (GL_EXT_framebuffer_blit).
  * - **Deleting what is bound unbinds it**, and deleting a renderbuffer or a
  *   texture detaches it from the framebuffer bound for drawing or reading.
  * - **The draw and read buffers belong to the framebuffer**: binding another
@@ -147,9 +150,13 @@ export const FRAMEBUFFER_CALLS_NOT_COMPILED = Object.freeze([
 export function installFramebufferCalls(context, kernel){
     const { enter, setError, setState, diverge } = kernel;
 
-    /** The context's framebuffers, by name; generated names hold null until bound. */
-    /** @type {Map<number, FramebufferObject | null>} */
-    const framebuffers = new Map();
+    /**
+     * The share group's framebuffers, by name; generated names hold null
+     * until bound.
+     *
+     * @returns {Map<number, FramebufferObject | null>}
+     */
+    const framebuffers = ()=>kernel.shareGroup().framebuffers;
     /** @type {FramebufferObject | null} */
     let drawFbo = null;
     /** @type {FramebufferObject | null} */
@@ -318,7 +325,7 @@ export function installFramebufferCalls(context, kernel){
      */
     const bindFramebuffer = (call, target, name, ext)=>{
         const which = targetsOf(target);
-        if (!which || (ext && target !== GL.FRAMEBUFFER))
+        if (!which)
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -327,16 +334,17 @@ export function installFramebufferCalls(context, kernel){
         let fbo = null;
         if (name !== 0)
         {
-            if (!framebuffers.has(name) && !ext)
+            if (!framebuffers().has(name) && !ext)
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            fbo = framebuffers.get(name) ?? null;
+            fbo = framebuffers().get(name) ?? null;
             if (!fbo)
             {
                 fbo = createFramebufferObject(name);
-                framebuffers.set(name, fbo);
+                framebuffers().set(name, fbo);
+                kernel.shareGroup().used = true;
             }
         }
         if (which.includes('draw'))
@@ -421,9 +429,10 @@ export function installFramebufferCalls(context, kernel){
             let next = 1;
             while (names.length < count)
             {
-                if (!framebuffers.has(next))
+                if (!framebuffers().has(next))
                 {
-                    framebuffers.set(next, null);
+                    framebuffers().set(next, null);
+                    kernel.shareGroup().used = true;
                     names.push(next);
                 }
                 next++;
@@ -439,11 +448,11 @@ export function installFramebufferCalls(context, kernel){
             }
             for (const name of names)
             {
-                if (name === 0 || !framebuffers.has(name))
+                if (name === 0 || !framebuffers().has(name))
                 {
                     continue;
                 }
-                const fbo = framebuffers.get(name);
+                const fbo = framebuffers().get(name);
                 if (fbo && fbo === drawFbo)
                 {
                     drawFbo = null;
@@ -452,7 +461,7 @@ export function installFramebufferCalls(context, kernel){
                 {
                     readFbo = null;
                 }
-                framebuffers.delete(name);
+                framebuffers().delete(name);
             }
             publish();
         },
@@ -463,7 +472,7 @@ export function installFramebufferCalls(context, kernel){
             {
                 return GL.FALSE;
             }
-            return framebuffers.get(name) ? GL.TRUE : GL.FALSE;
+            return framebuffers().get(name) ? GL.TRUE : GL.FALSE;
         },
 
         /** @param {number} target @param {number} name @param {boolean} ext */
@@ -749,7 +758,7 @@ export function installFramebufferCalls(context, kernel){
             }
             Object.assign(boundRenderbuffer, { width, height, internalFormat, samples,
                 version: boundRenderbuffer.version + 1 });
-            for (const fbo of framebuffers.values())
+            for (const fbo of framebuffers().values())
             {
                 if (fbo && [...fbo.attachments.values()].some(a=>a.kind === 'renderbuffer'
                     && a.renderbuffer === boundRenderbuffer))

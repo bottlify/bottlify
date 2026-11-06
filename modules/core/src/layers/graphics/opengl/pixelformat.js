@@ -32,7 +32,7 @@
  * when set and says nothing when clear.
  */
 
-import { PFD } from './constants.js';
+import { PFD, WGL } from './constants.js';
 
 /**
  * PIXELFORMATDESCRIPTOR. Twenty consecutive BYTEs sit between the header and
@@ -367,4 +367,172 @@ export function choosePixelFormat(request, formats = PIXEL_FORMATS){
         }
     });
     return bestIndex;
+}
+
+/**
+ * The one-time attribute answers WGL_ARB_pixel_format gives about a
+ * format, as the descriptor's fields.
+ *
+ * @param {PixelFormat} format
+ * @param {number} attribute
+ * @returns {number | null}
+ */
+export function formatAttribute(format, attribute){
+    switch (attribute)
+    {
+        case WGL.NUMBER_PIXEL_FORMATS_ARB:
+            return PIXEL_FORMATS.length;
+        case WGL.DRAW_TO_WINDOW_ARB:
+            return (format.dwFlags & PFD.DRAW_TO_WINDOW) ? 1 : 0;
+        case WGL.DRAW_TO_BITMAP_ARB:
+            return (format.dwFlags & PFD.DRAW_TO_BITMAP) ? 1 : 0;
+        case WGL.ACCELERATION_ARB:
+            return (format.dwFlags & PFD.GENERIC_ACCELERATED) ? WGL.FULL_ACCELERATION_ARB
+                : (format.dwFlags & PFD.GENERIC_FORMAT) ? WGL.NO_ACCELERATION_ARB
+                    : WGL.FULL_ACCELERATION_ARB;
+        case WGL.NEED_PALETTE_ARB:
+        case WGL.NEED_SYSTEM_PALETTE_ARB:
+        case WGL.NUMBER_OVERLAYS_ARB:
+        case WGL.NUMBER_UNDERLAYS_ARB:
+        case WGL.TRANSPARENT_ARB:
+        case WGL.SHARE_DEPTH_ARB:
+        case WGL.SHARE_STENCIL_ARB:
+        case WGL.SHARE_ACCUM_ARB:
+        case WGL.SAMPLE_BUFFERS_ARB:
+        case WGL.SAMPLES_ARB:
+            return 0;
+        case WGL.SWAP_LAYER_BUFFERS_ARB:
+            return (format.dwFlags & PFD.SWAP_LAYER_BUFFERS) ? 1 : 0;
+        case WGL.SWAP_METHOD_ARB:
+            return (format.dwFlags & PFD.SWAP_EXCHANGE) ? WGL.SWAP_EXCHANGE_ARB
+                : (format.dwFlags & PFD.SWAP_COPY) ? WGL.SWAP_COPY_ARB : WGL.SWAP_UNDEFINED_ARB;
+        case WGL.SUPPORT_GDI_ARB:
+            return (format.dwFlags & PFD.SUPPORT_GDI) ? 1 : 0;
+        case WGL.SUPPORT_OPENGL_ARB:
+            return (format.dwFlags & PFD.SUPPORT_OPENGL) ? 1 : 0;
+        case WGL.DOUBLE_BUFFER_ARB:
+            return (format.dwFlags & PFD.DOUBLEBUFFER) ? 1 : 0;
+        case WGL.STEREO_ARB:
+            return (format.dwFlags & PFD.STEREO) ? 1 : 0;
+        case WGL.PIXEL_TYPE_ARB:
+            return format.iPixelType === PFD.TYPE_COLORINDEX
+                ? WGL.TYPE_COLORINDEX_ARB : WGL.TYPE_RGBA_ARB;
+        case WGL.COLOR_BITS_ARB:
+            return format.cColorBits;
+        case WGL.RED_BITS_ARB:
+            return format.cRedBits;
+        case WGL.RED_SHIFT_ARB:
+            return format.cRedShift;
+        case WGL.GREEN_BITS_ARB:
+            return format.cGreenBits;
+        case WGL.GREEN_SHIFT_ARB:
+            return format.cGreenShift;
+        case WGL.BLUE_BITS_ARB:
+            return format.cBlueBits;
+        case WGL.BLUE_SHIFT_ARB:
+            return format.cBlueShift;
+        case WGL.ALPHA_BITS_ARB:
+            return format.cAlphaBits;
+        case WGL.ALPHA_SHIFT_ARB:
+            return format.cAlphaShift;
+        case WGL.ACCUM_BITS_ARB:
+            return format.cAccumBits;
+        case WGL.ACCUM_RED_BITS_ARB:
+            return format.cAccumRedBits;
+        case WGL.ACCUM_GREEN_BITS_ARB:
+            return format.cAccumGreenBits;
+        case WGL.ACCUM_BLUE_BITS_ARB:
+            return format.cAccumBlueBits;
+        case WGL.ACCUM_ALPHA_BITS_ARB:
+            return format.cAccumAlphaBits;
+        case WGL.DEPTH_BITS_ARB:
+            return format.cDepthBits;
+        case WGL.STENCIL_BITS_ARB:
+            return format.cStencilBits;
+        case WGL.AUX_BUFFERS_ARB:
+            return format.cAuxBuffers;
+        default:
+            return null;
+    }
+}
+
+/**
+ * How WGL_ARB_pixel_format matches each attribute a program names: exactly,
+ * or as a floor the format meets or exceeds. The shifts and the transparent
+ * values are named but match nothing.
+ *
+ * @type {ReadonlyMap<number, 'exact' | 'minimum' | 'ignored'>}
+ */
+const ARB_MATCH = new Map([
+    [WGL.DRAW_TO_WINDOW_ARB, 'exact'],
+    [WGL.DRAW_TO_BITMAP_ARB, 'exact'],
+    [WGL.ACCELERATION_ARB, 'exact'],
+    [WGL.NEED_PALETTE_ARB, 'exact'],
+    [WGL.NEED_SYSTEM_PALETTE_ARB, 'exact'],
+    [WGL.SWAP_LAYER_BUFFERS_ARB, 'exact'],
+    [WGL.SWAP_METHOD_ARB, 'exact'],
+    [WGL.NUMBER_OVERLAYS_ARB, 'minimum'],
+    [WGL.NUMBER_UNDERLAYS_ARB, 'minimum'],
+    [WGL.TRANSPARENT_ARB, 'exact'],
+    [WGL.SHARE_DEPTH_ARB, 'exact'],
+    [WGL.SHARE_STENCIL_ARB, 'exact'],
+    [WGL.SHARE_ACCUM_ARB, 'exact'],
+    [WGL.SUPPORT_GDI_ARB, 'exact'],
+    [WGL.SUPPORT_OPENGL_ARB, 'exact'],
+    [WGL.DOUBLE_BUFFER_ARB, 'exact'],
+    [WGL.STEREO_ARB, 'exact'],
+    [WGL.PIXEL_TYPE_ARB, 'exact'],
+    [WGL.COLOR_BITS_ARB, 'minimum'],
+    [WGL.RED_BITS_ARB, 'minimum'],
+    [WGL.GREEN_BITS_ARB, 'minimum'],
+    [WGL.BLUE_BITS_ARB, 'minimum'],
+    [WGL.ALPHA_BITS_ARB, 'minimum'],
+    [WGL.ACCUM_BITS_ARB, 'minimum'],
+    [WGL.ACCUM_RED_BITS_ARB, 'minimum'],
+    [WGL.ACCUM_GREEN_BITS_ARB, 'minimum'],
+    [WGL.ACCUM_BLUE_BITS_ARB, 'minimum'],
+    [WGL.ACCUM_ALPHA_BITS_ARB, 'minimum'],
+    [WGL.DEPTH_BITS_ARB, 'minimum'],
+    [WGL.STENCIL_BITS_ARB, 'minimum'],
+    [WGL.AUX_BUFFERS_ARB, 'minimum'],
+    [WGL.SAMPLE_BUFFERS_ARB, 'minimum'],
+    [WGL.SAMPLES_ARB, 'minimum'],
+    [WGL.NUMBER_PIXEL_FORMATS_ARB, 'ignored'],
+    [WGL.RED_SHIFT_ARB, 'ignored'],
+    [WGL.GREEN_SHIFT_ARB, 'ignored'],
+    [WGL.BLUE_SHIFT_ARB, 'ignored'],
+    [WGL.ALPHA_SHIFT_ARB, 'ignored'],
+]);
+
+/**
+ * wglChoosePixelFormatARB: every format meeting all the named attributes, the
+ * best first. The specification leaves "best" to the implementation; here it
+ * is the list's own order, accelerated before generic and, among formats that
+ * differ only there, the smaller depth first (Wine's opengl32
+ * test_wglChoosePixelFormatARB).
+ *
+ * @param {ReadonlyArray<readonly [number, number]>} pairs attribute, value
+ * @param {readonly PixelFormat[]} [formats]
+ * @returns {{ formats: number[], unknown: number[] }} one-based indices, and
+ *   the attributes this implementation does not know (matched by none)
+ */
+export function choosePixelFormatsARB(pairs, formats = PIXEL_FORMATS){
+    const unknown = pairs.map(([attribute])=>attribute)
+        .filter(attribute=>!ARB_MATCH.has(attribute));
+    /** @type {number[]} */
+    const chosen = [];
+    formats.forEach((format, index)=>{
+        const meets = pairs.every(([attribute, value])=>{
+            const how = ARB_MATCH.get(attribute);
+            const have = formatAttribute(format, attribute);
+            return how === 'ignored' || (how === undefined
+                ? true
+                : have !== null && (how === 'exact' ? have === value : have >= value));
+        });
+        if (meets)
+        {
+            chosen.push(index + 1);
+        }
+    });
+    return { formats: chosen, unknown };
 }
