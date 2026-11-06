@@ -1816,3 +1816,32 @@ test('a surface\'s DC reports no image size, a 16-bit one its masks, and a lumin
     assert.equal(a8l8.getDC().hr, DDERR_CANTCREATEDC);
     assert.equal(made.length, 2, 'no DC is made for it');
 });
+
+test('a buffer attached to a chain the runtime made goes in behind the surface, and the front'
+    + ' counts it (test_surface_attachment)', ()=>{
+    const { ddraw, front, back1 } = withFlipChain();
+    const added = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: front.width,
+        height: front.height });
+    assert.equal(front.backBufferCount, 3);
+    assert.equal(front.addAttachedSurface(added), DD_OK);
+    assert.equal(front.flipNext, added);
+    assert.equal(added.flipNext, back1, 'what was behind the front is behind it');
+    assert.equal(front.backBufferCount, 4);
+    assert.equal(back1.backBufferCount, 0, 'only the front counts');
+    assert.equal(added.deleteAttachedSurface(back1), DDERR_CANNOTDETACHSURFACE,
+        'the link it took over is still the runtime\'s');
+    assert.equal(front.addAttachedSurface(added), DDERR_SURFACEALREADYATTACHED);
+
+    assert.equal(front.deleteAttachedSurface(added), DD_OK);
+    assert.equal(front.flipNext, back1);
+    assert.equal(front.backBufferCount, 3);
+    assert.equal(front.deleteAttachedSurface(back1), DDERR_CANNOTDETACHSURFACE,
+        'and goes back to the front as the runtime\'s');
+
+    assert.equal(back1.addAttachedSurface(added), DD_OK, 'further down the chain as well');
+    assert.equal(front.backBufferCount, 4);
+    assert.ok(added.caps & DDSCAPS_FLIP);
+    assert.equal(back1.deleteAttachedSurface(added), DD_OK);
+    assert.equal(front.backBufferCount, 3);
+    assert.equal(added.caps & DDSCAPS_FLIP, 0);
+});

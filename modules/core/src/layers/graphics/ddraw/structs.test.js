@@ -178,7 +178,7 @@ test('the second caps word is read from the offset the newer layout gave it', ()
 
 test('writing a descriptor fills the fields a reader will look at', ()=>{
     const memory = fakeMemory();
-    memory.fill(DESC, DDSURFACEDESC2.SIZE / 4);
+    memory.fill(DESC, DDSURFACEDESC2.SIZE / 4 + 1);
 
     writeSurfaceDesc(memory, DESC, DDSURFACEDESC2, {
         flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
@@ -209,7 +209,9 @@ test('writing a descriptor fills the fields a reader will look at', ()=>{
     assert.equal(readBack.caps2, DDSCAPS2_TEXTUREMANAGE);
     assert.equal(readBack.pixelFormat.flags, DDPF_PALETTEINDEXED8);
     assert.equal(readU32(memory, DESC + DDSURFACEDESC2.lpSurface), 0x40001000);
-    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwTextureStage), UNTOUCHED,
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwTextureStage), 0,
+        'the texture stage is written as the first one (test_surface_desc_size)');
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.SIZE), UNTOUCHED,
         'and it stops where the structure it was asked for stops');
 });
 

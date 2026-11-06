@@ -1272,7 +1272,19 @@ export function createDirectDraw(options = {}){
                 return pixelFormat;
             },
             get backBufferCount(){
-                return spec.backBufferCount;
+                // A front the runtime made with its buffers counts the chain
+                // it heads as it is now, buffers added or taken out included;
+                // a chain the program put together counts none.
+                if (spec.backBufferCount === 0 || flipPrev !== null)
+                {
+                    return spec.backBufferCount;
+                }
+                let behind = 0;
+                for (let next = flipNext; next !== null && next !== surface; next = next.flipNext)
+                {
+                    behind++;
+                }
+                return behind;
             },
             get mipMapCount(){
                 return spec.mipMapCount ?? 0;
@@ -1425,10 +1437,18 @@ export function createDirectDraw(options = {}){
             get attachedVia(){
                 return flipVia;
             },
-            /** @param {Surface | null} next @param {boolean} isImplicit */
-            setFlipNext(next, isImplicit){
+            /** Whether the runtime made the link to the buffer behind it. */
+            get attachedImplicitly(){
+                return flipImplicit;
+            },
+            /**
+             * @param {Surface | null} next @param {boolean} isImplicit
+             * @param {string} [via]  The interface the link was made through.
+             */
+            setFlipNext(next, isImplicit, via = undefined){
                 flipNext = next;
                 flipImplicit = isImplicit;
+                flipVia = via;
             },
             markLost(){
                 lost = true;
@@ -1704,16 +1724,24 @@ export function createDirectDraw(options = {}){
                     other.addRef(via);
                     return DD_OK;
                 }
-                // A flip chain is a line, so the surface doing the attaching
-                // must not already have something behind it and the one being
-                // attached must be in no chain at all.
-                if (flipNext !== null || other.flipPrev !== null || other.flipNext !== null)
+                // A flip chain is a line: the one being attached must be in no
+                // chain at all. Attached to a surface with a buffer behind it,
+                // it goes in between, and the link it takes over keeps how it
+                // was made (test_surface_attachment: a buffer added to a chain
+                // the runtime made).
+                if (other.flipPrev !== null || other.flipNext !== null)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
                 if (other.width !== width || other.height !== height)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
+                }
+                const after = flipNext;
+                if (after !== null)
+                {
+                    other.setFlipNext(after, flipImplicit, flipVia);
+                    after.setFlipPrev(other);
                 }
                 flipNext = other;
                 flipVia = via;
@@ -1789,10 +1817,13 @@ export function createDirectDraw(options = {}){
                 // on that successor transfers here rather than being retaken.
                 const successor = other.flipNext;
                 const released = flipVia;
+                const successorVia = other.attachedVia;
+                const successorImplicit = other.attachedImplicitly;
                 other.setFlipNext(null, false);
                 other.setFlipPrev(null);
                 flipNext = successor;
-                flipVia = other.attachedVia;
+                flipVia = successorVia;
+                flipImplicit = successorImplicit;
                 successor?.setFlipPrev(surface);
                 other.release(released);
                 leaveChain(other);
