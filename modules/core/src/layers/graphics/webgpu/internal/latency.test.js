@@ -208,3 +208,31 @@ test('the diagnostics say how far behind the device is and how often a call wait
             waiting: 0,
         });
     });
+
+test('a finished frame is timed to its queue and on the GPU, a backed-up queue counted once',
+    async()=>{
+        const gpu = createFakeDevice({ workDone: true });
+        let clock = 0;
+        const latency = createFrameLatency({ queue: gpu.queue, limit: 0, now: ()=>clock });
+        /** @type {() => void} */
+        let replayed = ()=>{};
+        const submitted = new Promise(resolve=>{
+            replayed = ()=>resolve(undefined);
+        });
+        latency.queued(submitted);
+        clock = 30;
+        gpu.queue.submit([]);
+        replayed();
+        await drain();
+        clock = 50;
+        gpu.queue.submit([]);
+        latency.queued();
+        clock = 100;
+        gpu.finish(1);
+        await drain();
+        clock = 120;
+        gpu.finish(1);
+        await drain();
+        assert.deepEqual(latency.times(), { frames: 2, toQueueMs: 30, gpuMs: 90 },
+            'the first waited 30 ms for its replay and drew 70; the second, queued behind it, 20');
+    });

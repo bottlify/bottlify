@@ -62,6 +62,8 @@ function plainOf(services){
  * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'd3d10' | 'opengl', factory: (services: any) => any,
  *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
+ * @property {() => import('./channel.js').WorkerFrameTimes | null} frameTimes
+ *     the worker's frames over every root, summed, as of each one's last present
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
@@ -534,6 +536,19 @@ export function connectGraphicsWorker(options){
             }
         },
         answered: ()=>Promise.all(senders.map(sender=>sender.answered())).then(()=>{}),
+        /**
+         * The worker's frames over every root, as of each one's last present
+         * (`WorkerFrameTimes`), or null before any root has presented.
+         *
+         * @returns {import('./channel.js').WorkerFrameTimes | null}
+         */
+        frameTimes: ()=>senders.reduce((/** @type {any} */ sum, sender)=>{
+            const one = sender.frameTimes();
+            return one === null ? sum : { frames: (sum?.frames ?? 0) + one.frames,
+                toQueueMs: (sum?.toQueueMs ?? 0) + one.toQueueMs,
+                gpuMs: (sum?.gpuMs ?? 0) + one.gpuMs,
+                replayMs: (sum?.replayMs ?? 0) + one.replayMs };
+        }, null),
         diagnostics: ()=>{
             /** @type {Record<string, { count: number, ms: number, maxMs: number, queuedMs: number,
              *     heldMs: number, backMs: number }>} */

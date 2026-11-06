@@ -4162,6 +4162,19 @@ async function buildApp(options){
     let exitsAtFrameStart = 0;
     let writtenAtFrameStart = 0;
     let heapAtFrameStart = 0;
+    /** The graphics worker's frame times when the frame began (`WorkerFrameTimes`). */
+    /** @type {any} */
+    let workerAtFrameStart = null;
+    /** The graphics worker's frame times now, or null with no worker or no graphics layer. */
+    const workerFrameTimes = ()=>{
+        try
+        {
+            return core.api('graphics').workerFrameTimes?.() ?? null;
+        }
+        catch {
+            return null;
+        }
+    };
     /** The JS heap, where the runtime will say; a frame's growth is what the host allocated. */
     const heapReadable = ()=>/** @type {any} */ (globalThis.performance)?.memory !== undefined;
     const heapUsed = ()=>{
@@ -4813,6 +4826,22 @@ async function buildApp(options){
                                 {
                                     journal.note('heapDelta', heapUsed() - heapAtFrameStart);
                                 }
+                                // What the graphics worker finished while this
+                                // frame ran: why a present held on its GPU waited
+                                // - a frame's pipelines and replay, the GPU's own
+                                // drawing, or the worker busy.
+                                const worker = workerFrameTimes();
+                                if (worker !== null)
+                                {
+                                    const from = workerAtFrameStart
+                                        ?? { frames: 0, toQueueMs: 0, gpuMs: 0, replayMs: 0 };
+                                    journal.note('gfxFrames', worker.frames - from.frames);
+                                    journal.note('gfxToQueueMs',
+                                        Math.round(worker.toQueueMs - from.toQueueMs));
+                                    journal.note('gfxGpuMs', Math.round(worker.gpuMs - from.gpuMs));
+                                    journal.note('gfxReplayMs',
+                                        Math.round(worker.replayMs - from.replayMs));
+                                }
                             }
                             // Run in every build: the frame's samplers feed the translator.
                             journal.endFrame();
@@ -4841,6 +4870,7 @@ async function buildApp(options){
                             exitsAtFrameStart = cpu.translatedExits();
                             writtenAtFrameStart = cpu.hostWrittenBytes();
                             heapAtFrameStart = heapUsed();
+                            workerAtFrameStart = workerFrameTimes();
                         }
                         framed = true;
                     },

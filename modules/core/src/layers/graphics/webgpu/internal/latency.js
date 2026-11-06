@@ -54,6 +54,17 @@ export function createFrameLatency(options = {}){
     let held = 0;
     let heldMs = 0;
     /**
+     * Where the finished frames' time went, summed: from the presenting call
+     * until the frame's work was on the queue (its pipelines built, its
+     * replay done), and the GPU's own share after that - each frame counted
+     * from when it was queued or the frame before it finished, whichever came
+     * later, so a queue that backs up is not counted once per frame in it.
+     */
+    let timedFrames = 0;
+    let toQueueMs = 0;
+    let gpuMs = 0;
+    let lastDoneAt = -Infinity;
+    /**
      * Calls waiting, oldest first, each until the frames ahead of its own
      * are down to the bound.
      *
@@ -99,11 +110,24 @@ export function createFrameLatency(options = {}){
             // `onSubmittedWorkDone` speaks for the work submitted before the
             // call: now, for a frame already there. A frame that never gets
             // there -- its replay threw -- is finished as soon as that is known.
-            const whenFinished = ()=>queue.onSubmittedWorkDone();
+            const queuedAt = now();
+            let onQueueAt = queuedAt;
+            const whenFinished = ()=>{
+                onQueueAt = now();
+                return queue.onSubmittedWorkDone();
+            };
             const work = submitted
                 ? Promise.resolve(submitted).then(whenFinished)
                 : new Promise(resolve=>resolve(whenFinished()));
-            work.then(done, done);
+            const timed = ()=>{
+                const doneAt = now();
+                timedFrames++;
+                toQueueMs += onQueueAt - queuedAt;
+                gpuMs += Math.max(0, doneAt - Math.max(onQueueAt, lastDoneAt));
+                lastDoneAt = Math.max(lastDoneAt, doneAt);
+                done();
+            };
+            work.then(timed, done);
             if (limit === 0 || finished >= ticket - limit)
             {
                 return null;
@@ -113,6 +137,12 @@ export function createFrameLatency(options = {}){
                 waiting.push({ ticket, since: now(), release });
             });
         },
+
+        /**
+         * The finished frames' time so far, unrounded: a reader takes the
+         * difference between two readings to place it in its own frames.
+         */
+        times: ()=>({ frames: timedFrames, toQueueMs, gpuMs }),
 
         /** Counts and holds nothing from here on, and lets whoever waits go. */
         close,

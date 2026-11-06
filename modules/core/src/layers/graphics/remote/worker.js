@@ -608,7 +608,7 @@ export function serveGraphics(scope, deps){
             });
         }
         receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics(),
-            gpuMemory: ()=>ledger?.diagnostics() ?? null });
+            gpuMemory: ()=>ledger?.diagnostics() ?? null, times: ()=>latency.times() });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,

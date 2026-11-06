@@ -919,6 +919,13 @@ export function createGraphicsModule(){
                 answered: ()=>state.remote?.answered() ?? Promise.resolve(),
 
                 /**
+                 * The graphics worker's frames, summed so far
+                 * (`remote/channel.js` WorkerFrameTimes); null without a
+                 * worker or before its first present.
+                 */
+                workerFrameTimes: ()=>state.remote?.frameTimes() ?? null,
+
+                /**
                  * The hardware behind the device, as the assembling caller knows
                  * it: vendor, architecture and description as WebGPU reports them.
                  * A program asks who made its adapter before deciding how much to
