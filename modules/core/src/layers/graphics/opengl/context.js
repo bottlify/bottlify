@@ -52,6 +52,9 @@ import { SHADER_CALLS_NOT_COMPILED, installShaderCalls } from './context-glsl.js
 import { FRAMEBUFFER_CALLS_NOT_COMPILED, installFramebufferCalls } from './context-framebuffers.js';
 import { BLEND_FACTORS, CORE_CALLS_NOT_COMPILED, installCoreCalls } from './context-core.js';
 import { VERTEX_ARRAY_CALLS_NOT_COMPILED, installVertexArrayCalls } from './context-vao.js';
+import {
+    UNIFORM_BUFFER_CALLS_NOT_COMPILED, installUniformBufferCalls,
+} from './context-uniform-buffers.js';
 import { createSceneBuilder } from './context-scene.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
@@ -110,7 +113,7 @@ const NOT_COMPILABLE = new Set([
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
-    ...VERTEX_ARRAY_CALLS_NOT_COMPILED,
+    ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -1611,6 +1614,7 @@ export function createGlContext(options = {}){
     installShaderCalls(context, kernel);
     installFramebufferCalls(context, kernel);
     installCoreCalls(context, kernel);
+    installUniformBufferCalls(context, kernel);
     // Last: a new vertex array object starts from the arrays as the others left them.
     installVertexArrayCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);

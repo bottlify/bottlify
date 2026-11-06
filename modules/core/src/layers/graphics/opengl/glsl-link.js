@@ -191,12 +191,13 @@ function leavesOf(name, type, path){
 /**
  * @param {{ vertex: ShaderUnit[], fragment: ShaderUnit[],
  *     attribBindings: Map<string, number>,
- *     fragDataBindings?: Map<string, { location: number, index: number }> }} input
+ *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
  * @returns {{ ok: true, log: string, program: LinkedProgram }
  *     | { ok: false, log: string }}
  */
-export function linkProgram({ vertex, fragment, attribBindings,
-    fragDataBindings = new Map() }){
+export function linkProgram(given){
+    const { vertex, fragment, attribBindings } = given;
+    const fragDataBindings = given.fragDataBindings ?? new Map();
     /** @type {string[]} */
     const errors = [];
     /** @param {string} message */
@@ -904,4 +905,6 @@ function describe(struct){
  * @property {Float32Array} floats
  * @property {Int32Array} ints
  * @property {number} version  raised on every glUniform* that changes a value
+ * @property {Int32Array} blockBindings  the binding point each uniform block
+ *     reads (glUniformBlockBinding), by block index
  */

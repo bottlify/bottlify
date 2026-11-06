@@ -42,7 +42,7 @@
  * `?:` whose right side would then run unconditionally become `if`s.
  */
 
-import { FLOAT, baseOf, componentsOf, glslName, innermost, vectorOf } from './glsl-types.js';
+import { FLOAT, baseOf, componentsOf, glslName, vectorOf } from './glsl-types.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
@@ -869,8 +869,9 @@ export function emitStage(program, which, options, given, partner){
                 return { instance: info, element: 0, type: symbol.type };
             }
             const index = blockIndex(info, 0);
-            const member = /** @type {import('./glsl-link.js').UniformBlock[]} */ (program.blocks)
-                [index].members.find(m=>m.name === symbol.name);
+            const blocks = /** @type {import('./glsl-link.js').UniformBlock[]} */ (
+                program.blocks);
+            const member = blocks[index].members.find(m=>m.name === symbol.name);
             if (!member)
             {
                 throw new Error(`glsl: '${symbol.name}' is not in its block's layout`);
@@ -1335,12 +1336,12 @@ export function emitStage(program, which, options, given, partner){
         }
         const op = node.op.slice(0, -1);
         const current = expr(node.target, out);
-        const given = expr(node.value, out);
+        const operand = expr(node.value, out);
         const value = op === '<<' || op === '>>'
-            ? shift(op, current, node.target.type, given, node.value.type)
+            ? shift(op, current, node.target.type, operand, node.value.type)
             : op === '&' || op === '|' || op === '^'
-                ? bitwise(op, current, node.target.type, given, node.value.type)
-                : arithmetic(op, current, node.target.type, given, node.value.type, node.type,
+                ? bitwise(op, current, node.target.type, operand, node.value.type)
+                : arithmetic(op, current, node.target.type, operand, node.value.type, node.type,
                     out);
         store(node.target, value, out);
     }

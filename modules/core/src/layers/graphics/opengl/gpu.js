@@ -2404,7 +2404,8 @@ export function createGpuRenderer(services){
         const unit = executable.ints[sampler.leaf.offset + sampler.element];
         const bound = /** @type {Record<string, any> | undefined} */ (scene.boundTextures[unit]);
         const type = samplerTypeOf(sampler);
-        const target = BOUND_TARGETS[`${type.dim}${type.ms ? 'MS' : ''}${type.array ? 'Array' : ''}`];
+        const target = BOUND_TARGETS[`${type.dim}${type.ms ? 'MS' : ''}`
+            + `${type.array ? 'Array' : ''}`];
         const texture = target ? bound?.[target] : null;
         return texture && isTextureComplete(texture) ? texture : incompleteTexture(entry.cube);
     };
@@ -2427,11 +2428,12 @@ export function createGpuRenderer(services){
         const binding = GLSL_BLOCK_BINDING + index;
         if (bound)
         {
-            const record = bufferFor(bound.buffer);
-            if (bound.offset + size <= record.gpu.size)
+            const backing = bufferFor(bound.buffer);
+            if (bound.offset + size <= backing.gpu.size)
             {
-                record.reads.note(recording.id, bound.offset, bound.offset + size);
-                return { binding, resource: { buffer: record.gpu.gpu, offset: bound.offset, size } };
+                backing.reads.note(recording.id, bound.offset, bound.offset + size);
+                return { binding,
+                    resource: { buffer: backing.gpu.gpu, offset: bound.offset, size } };
             }
         }
         diverge(`uniform block '${block.name}' was read ${bound
