@@ -426,6 +426,12 @@ translated code), and the report prints how evenly they came and the drops by ca
 `--worker --cpu-profile N`: each function's self time per frame in the drops against the
 ordinary frames of the stretch, the two clocks laid together by an anchor the profiler sets
 as it stops. A whole run is several scenes; `--from`/`--to` take one, in the frames' seconds.
+Which drops are worth that hunt is
+`node tools/cdp_test/drop-repeat.mjs <frames.json>... [--bin S] [--share F] [--gap MS]`
+over several runs of one scenario: each cut into scenes at its loads, the scenes laid
+together, and the points of a scene (by seconds since it began) where most runs dropped,
+with what grew there. A drop our code or the guest's causes repeats at its point; one the
+machine causes lands elsewhere each run.
 
 The report, in the order it answers questions:
 
