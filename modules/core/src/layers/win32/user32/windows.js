@@ -2326,6 +2326,56 @@ export function createWindowFunctions(host){
         return candidate;
     };
     /**
+     * A thread's own active window, made by its SetActiveWindow while another
+     * thread of the program had the activation: as Windows keeps the active
+     * window per message queue, the window is active to its thread and hears
+     * so, and the foreground stays where it is (Wine's ddraw test_window_style:
+     * a window of the test's second thread has the foreground). Gone once the
+     * thread has the activation itself.
+     *
+     * @type {Map<number, number>}
+     */
+    const threadActive = new Map();
+    /** @param {unknown} thread @returns {number} that thread's own active window, or zero */
+    const activeOfThread = thread=>{
+        const hwnd = threadActive.get(threadIdOf(thread) ?? -1) ?? 0;
+        return live(hwnd) ? hwnd : 0;
+    };
+    /**
+     * SetActiveWindow from a thread without the activation: the thread's
+     * window before it hears WM_NCACTIVATE(FALSE) and WA_INACTIVE, this one
+     * WM_NCACTIVATE(FALSE) -- it is not the foreground window -- and
+     * WA_ACTIVE, each naming the other. The keyboard focus stays with the
+     * thread that has the activation.
+     *
+     * @param {number} hwnd @param {unknown} thread
+     * @returns {number | Promise<number>} the thread's active window before
+     */
+    const activateInThread = (hwnd, thread)=>{
+        const id = threadIdOf(thread);
+        const record = live(hwnd);
+        if (id === null || !record)
+        {
+            return 0;
+        }
+        const target = topLevelOf(record).hwnd;
+        const previous = activeOfThread(thread);
+        if (previous === target)
+        {
+            return previous;
+        }
+        threadActive.set(id, target);
+        /** @type {[number, number, number, number][]} */
+        const told = previous !== 0
+            ? [[previous, WM_NCACTIVATE, 0, target], [previous, WM_ACTIVATE, WA_INACTIVE, target]]
+            : [];
+        told.push([target, WM_NCACTIVATE, 0, previous], [target, WM_ACTIVATE, WA_ACTIVE, previous]);
+        return andThen(told.reduce((/** @type {unknown} */ before, [to, message, wParam, lParam])=>
+            andThen(before, ()=>(live(to) ? send(to, message, wParam, lParam, thread) : 0)),
+        0), ()=>previous);
+    };
+
+    /**
      * Makes a top-level window the active one, telling the window that loses
      * activation and the one that gains it, and moving the focus into it.
      *
@@ -2407,6 +2457,10 @@ export function createWindowFunctions(host){
         const runBefore = directory.foreground?.() ?? 0;
         const focusBefore = focusWindow();
         active = record ? topLevelOf(record).hwnd : 0;
+        if (record)
+        {
+            threadActive.delete(creatorOf(record) ?? -1);
+        }
         host.traceActivation?.(`hwnd=0x${(hwnd >>> 0).toString(16)} active=0x${active.toString(16)}`
             + ` previous=0x${previous.toString(16)} focus=0x${focusBefore.toString(16)}`
             + ` here=${active !== 0 && answeredHere(active, thread)}`);
@@ -7558,6 +7612,7 @@ export function createWindowFunctions(host){
         ...createSystemFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
+                activeOfThread, activateInThread,
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
                 heldByCaller, lowLevelHook, winEvent, procAs, procBehind,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,

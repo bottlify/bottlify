@@ -5193,6 +5193,44 @@ test('the active window and the focus are the thread\'s: another thread reads NU
     assert.equal(fns.GetActiveWindow.handler(), 0, 'parted, it is not again');
 });
 
+test('a thread without the activation makes its own window active and leaves the foreground'
+    + ' (ddraw test_window_style)', async()=>{
+    // The test's second thread has the foreground window; the main thread's
+    // SetActiveWindow makes its window active to it alone, which hears so as
+    // a window that is not the foreground one.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory, dispatched } = setup({ caller,
+        threadExists: id=>id === 1 || id === 2 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const foreground = createWindow(fns, memory, { style: WS_VISIBLE });
+    await fns.SetActiveWindow.handler([foreground]);
+    caller.current = main;
+    // Hidden: a window made visible would take the activation as it appears.
+    const mine = createWindow(fns, memory);
+    const other = createWindow(fns, memory);
+    dispatched.length = 0;
+    assert.equal(await fns.SetActiveWindow.handler([mine]), 0, 'no window of its own before');
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam, lParam })=>
+        [hwnd, message, wParam & 0xffff, lParam]), [[mine, 0x0086, 0, 0], [mine, 0x0006, 1, 0]],
+    'WM_NCACTIVATE as not the foreground window, then WM_ACTIVATE');
+    assert.equal(fns.GetActiveWindow.handler(), mine, 'active to its thread');
+    assert.equal(fns.GetForegroundWindow.handler(), foreground, 'the foreground stays');
+    dispatched.length = 0;
+    assert.equal(await fns.SetActiveWindow.handler([other]), mine, 'the one before answered');
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam & 0xffff]),
+        [[mine, 0x0086, 0], [mine, 0x0006, 0], [other, 0x0086, 0], [other, 0x0006, 1]]);
+    caller.current = worker;
+    assert.equal(fns.GetActiveWindow.handler(), foreground, 'the other thread keeps its own');
+
+    caller.current = main;
+    await fns.SetForegroundWindow.handler([mine]);
+    assert.equal(fns.GetActiveWindow.handler(), mine, 'with the activation, the run\'s');
+    assert.equal(fns.GetForegroundWindow.handler(), mine);
+});
+
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{
     const { fns, queue, errors } = setup({ threadExists: id=>id === 0x88 });
     assert.equal(fns.PostThreadMessageA.handler([0x99, WM_USER, 0, 0]), 0);

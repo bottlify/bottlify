@@ -5609,7 +5609,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         GetActiveWindow: {
             argBytes: 0,
-            handler: ()=>programs(callerHolds(host.active?.() ?? 0)),
+            handler: ()=>programs(callerHolds(host.active?.() ?? 0)
+                || (host.activeOfThread?.(host.callerThread?.()) ?? 0)),
         },
 
         /**
@@ -5885,7 +5886,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * answers the active window; the desktop and another thread's window
          * change nothing and answer NULL; and NULL, as Windows 10 answers it,
          * changes nothing and answers NULL, the last error untouched (win.c
-         * test_SetActiveWindow_0_proc).
+         * test_SetActiveWindow_0_proc). Called by a thread while another
+         * thread of the program has the activation, it makes the window that
+         * thread's own active one and leaves the foreground where it is.
          */
         SetActiveWindow: {
             argBytes: 4,
@@ -5909,6 +5912,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 if (host.isDesktop?.(record) || callerHolds(hwnd >>> 0) === 0)
                 {
                     return 0;
+                }
+                // Another thread of the program has the activation: the
+                // window is this thread's active one, and the foreground
+                // stays with that thread.
+                const current = host.active?.() ?? 0;
+                if (current !== 0 && callerHolds(current) === 0 && host.activateInThread)
+                {
+                    return host.activateInThread(hwnd >>> 0, host.callerThread?.());
                 }
                 return andThen(host.activate?.(hwnd >>> 0,
                     { thread: host.callerThread?.(), sent: true }), ()=>previous);
