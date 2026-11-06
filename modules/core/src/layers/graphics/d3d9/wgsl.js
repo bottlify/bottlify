@@ -66,7 +66,8 @@
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import {
-    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, sampledWithOnes,
+    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, processedCoordinate,
+    sampledWithOnes,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
@@ -2225,7 +2226,7 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
  *     points?: { sprite: boolean, scale: boolean },
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
- *     carried?: ({ set: number, transformed: boolean } | null)[],
+ *     carried?: ({ set: number, transform: number } | null)[],
  *     clipsBehindEye?: boolean }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
@@ -2237,13 +2238,14 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        `clip`: the user clip planes, in the vertex's own space -- world
  *        planes through the world matrix, which the caller puts there -- one
  *        register each from `HYBRID_CONSTANTS.COUNT`. A pre-transformed
- *        vertex is not clipped. `carried`: per coordinate set, the vertex's
- *        set the stage of that number reads (its D3DTSS_TEXCOORDINDEX) and
- *        whether the stage's transform (`c[TRANSFORMS..]`) applies, for a
- *        stage that reads another set than its own or transforms it: the
- *        fixed function hands a pixel shader each stage's coordinates, not
- *        the declaration's sets by number. A two-component set goes through
- *        the matrix as (u, v, 1), so a translation is the third row.
+ *        vertex is not clipped. `carried`: per coordinate set the pixel
+ *        shader reads, the vertex's set the stage of that number reads (its
+ *        D3DTSS_TEXCOORDINDEX) and what its transform flags make of it
+ *        (`coordinateTransformOf`, the matrix in `c[TRANSFORMS..]`): the fixed function
+ *        hands a pixel shader each stage's coordinates, not the
+ *        declaration's sets by number, made as `processedCoordinate` says. A
+ *        pre-transformed vertex's set goes through as declared, through no
+ *        matrix.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -2266,6 +2268,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let specularAlpha = '1.0';
     let pointBase = `c[${HYBRID_CONSTANTS.POINT}].x`;
     const carried = options.carried ?? [];
+    const pretransformed = elements.some(element=>element.usage === D3DDECLUSAGE.POSITIONT);
+    /** The stage's texture transform by columns. @param {number} stage */
+    const transformColumn = stage=>(/** @type {number} */ axis)=>
+        `c[${HYBRID_CONSTANTS.TRANSFORMS + stage * 4 + axis}]`;
     /** The declaration's coordinate sets by number, as read and as wide. @type {Map<number, { value: string, components: number }>} */
     const sets = new Map();
     for (const element of elements)
@@ -2351,11 +2357,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             : mode === TCI_CAMERASPACEREFLECTIONVECTOR
                 ? 'reflect(d3dNrm(cameraPosition), cameraNormal)'
                 : 'cameraPosition';
-        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 4;
-        body.push(`    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
+        body.push(`    let generated${set} = vec4f(${coordinate}, 0.0);`,
+            `    out.o${location} = ${processedCoordinate(`generated${set}`, 3,
+                carried[set]?.transform ?? 0, transformColumn(set))};`);
     }
     for (const [stage, source] of carried.entries())
     {
@@ -2373,17 +2377,18 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             body.push(`    out.o${location} = vec4f(0.0);`);
             continue;
         }
-        if (!source.transformed)
+        if (pretransformed)
         {
             body.push(`    out.o${location} = ${from.value};`);
             continue;
         }
-        const extended = from.components <= 2 ? `vec4f(${from.value}.xy, 1.0, 0.0)` : from.value;
-        const row = HYBRID_CONSTANTS.TRANSFORMS + stage * 4;
-        body.push(`    let set${stage} = ${extended};`,
-            `    out.o${location} = vec4f(dot(c[${row}], set${stage}),`
-            + ` dot(c[${row + 1}], set${stage}), dot(c[${row + 2}], set${stage}),`
-            + ` dot(c[${row + 3}], set${stage}));`);
+        // Its missing components zero, not as the declaration fills them.
+        const count = Math.min(from.components, 4);
+        const kept = count >= 4 ? from.value
+            : `vec4f(${from.value}.${'xyz'.slice(0, count)}${', 0.0'.repeat(4 - count)})`;
+        body.push(`    let set${stage} = ${kept};`,
+            `    out.o${location} = ${processedCoordinate(`set${stage}`, count,
+                source.transform, transformColumn(stage))};`);
     }
     // The fog the fixed-function stage adds after the pixel shader, with the
     // colour beside it so a fogged pixel shader needs nothing but varyings to

@@ -159,6 +159,86 @@ export function generatedCoordinate(texCoordIndex){
     }
 }
 
+/** D3DTTFF_PROJECTED, as a stage key's `transform` carries it beside the count. */
+export const TRANSFORM_PROJECTED = 0x100;
+
+/**
+ * What a stage's D3DTSS_TEXTURETRANSFORMFLAGS make of its coordinate, as the
+ * stage key carries it (`transform`): the count the matrix runs over, two to
+ * four, or zero where the flags name none -- D3DTTFF_COUNT1 and any count
+ * past four leave the coordinate as the vertex carried it --, and
+ * D3DTTFF_PROJECTED beside it (Wine's d3d9 test_texture_transform_flags).
+ *
+ * @param {number} flags @returns {number}
+ */
+export function coordinateTransformOf(flags){
+    const count = (flags & ~TRANSFORM_PROJECTED) >>> 0;
+    return (count >= 2 && count <= 4 ? count : 0) | (flags & TRANSFORM_PROJECTED);
+}
+
+const AXES = ['x', 'y', 'z', 'w'];
+
+/**
+ * A coordinate as Direct3D's vertex processing hands it to the rasteriser
+ * (Wine's d3d9 test_texture_transform_flags, as Windows answers it). Under a
+ * count of two to four the components the vertex carries, with a one after
+ * the last, go through the stage's matrix, and the count's first components
+ * are kept, the rest zero. Without one the coordinate goes on as carried,
+ * its missing components zero -- not the one a declaration fills w with.
+ * Projected, w is the count's last component, or with no count the last
+ * the vertex carries: the rasteriser divides by w whatever the count.
+ *
+ * @param {string} raw  A vec4f with the components the vertex carries and
+ *     zero for the rest; a name, since it is read more than once.
+ * @param {number} count  How many components the vertex carries, 1 to 4.
+ * @param {number} transform  The stage's `transform` (`coordinateTransformOf`).
+ * @param {(column: number) => string} column  The matrix's column, a vec4f.
+ * @returns {string}  A vec4f.
+ */
+export function processedCoordinate(raw, count, transform, column){
+    const counted = transform & 0xff;
+    const projected = (transform & TRANSFORM_PROJECTED) !== 0;
+    if (counted === 0)
+    {
+        return projected ? `vec4f(${raw}.xyz, ${raw}.${AXES[Math.min(count, 4) - 1]})` : raw;
+    }
+    const padded = count >= 4 ? raw
+        : `vec4f(${raw}.${AXES.slice(0, count).join('')}, 1.0${', 0.0'.repeat(3 - count)})`;
+    const kept = (/** @type {number} */ axis)=>(axis < counted
+        ? `dot(${column(axis)}, ${padded})` : '0.0');
+    return `vec4f(${kept(0)}, ${kept(1)}, ${kept(2)}, ${projected ? kept(counted - 1) : kept(3)})`;
+}
+
+/**
+ * How many components a vertex input of `format` carries.
+ *
+ * @param {string} format @returns {number}
+ */
+function componentsOf(format){
+    const type = wgslType(format);
+    return type === 'f32' ? 1 : Number(type.slice(3, 4)) || 4;
+}
+
+/**
+ * A pre-transformed vertex's coordinate as a declaration fills it: the
+ * missing components zero and w one. Nothing processes it on the way.
+ *
+ * @param {string} name @param {string} format
+ */
+function filled(name, format){
+    switch (wgslType(format))
+    {
+        case 'f32':
+            return `vec4f(${name}, 0.0, 0.0, 1.0)`;
+        case 'vec2f':
+            return `vec4f(${name}, 0.0, 1.0)`;
+        case 'vec3f':
+            return `vec4f(${name}, 1.0)`;
+        default:
+            return name;
+    }
+}
+
 /** D3DFOG. */
 export const D3DFOG = Object.freeze({ NONE: 0, EXP: 1, EXP2: 2, LINEAR: 3 });
 
@@ -779,33 +859,45 @@ export function generateFixedFunction(state, layout){
         assignments.push('    out.specularAlpha = out.specular.a;');
     }
 
-    // A set a cube or volume stage reads carries all its components, zero
-    // for one the vertex does not have; every other set carries two.
-    const wide = wideSets(state);
+    // Each stage's coordinate is a varying of its own, four wide, the
+    // stage's texture transform applied here as Direct3D applies it, in
+    // vertex processing (`processedCoordinate`): two stages reading one set
+    // through two matrices is how a detail pass scrolls apart from its base.
     // A set a stage reads and the vertex does not carry is zero, as Direct3D
-    // reads an absent one.
-    const sets = state.stages.reduce((most, stage)=>(generates(stage.texCoordIndex) ? most
-        : Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1)), layout.texCoordSets);
-    for (let set = 0; set < sets; set++)
-    {
-        const format = layout.attributes.find(attribute=>attribute.name === `texCoord${set}`)
-            ?.format ?? 'float32x2';
-        const carried = set < layout.texCoordSets;
-        varyings.push(
-            `    @location(${location++}) texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`);
-        assignments.push(`    out.texCoord${set} = ${!carried
-            ? wide.has(set) ? 'vec4f(0.0, 0.0, 0.0, 1.0)' : 'vec2f(0.0)'
-            : wide.has(set) ? widened(`vertex.texCoord${set}`, format)
-                : `vertex.texCoord${set}.xy`};`);
-    }
-
-    // A stage generating its coordinates from the vertex in camera space gets
-    // a varying of its own, with the stage's texture transform applied here
-    // as Direct3D applies it, in vertex processing, and not again at the
-    // sample. A pre-transformed vertex has no camera space: it gets zero. The
-    // normal goes there by the inverse transpose of world then view, as a lit
-    // normal goes into world space by the world's.
+    // reads an absent one. A pre-transformed vertex's coordinate goes on as
+    // the declaration fills it, through no matrix. A generated one is taken
+    // from the vertex in camera space; a pre-transformed vertex has none and
+    // gets zero. The normal goes there by the inverse transpose of world then
+    // view, as a lit normal goes into world space by the world's.
     const generated = state.stages.map(stage=>generates(stage.texCoordIndex));
+    const column = (/** @type {number} */ index)=>(/** @type {number} */ axis)=>
+        `uniforms.texTransform[${index * 4 + axis}]`;
+    for (const [index, stage] of state.stages.entries())
+    {
+        if (generated[index])
+        {
+            continue;
+        }
+        const set = stage.texCoordIndex & COORD_SET_MASK;
+        const format = layout.attributes.find(attribute=>attribute.name === `texCoord${set}`)
+            ?.format;
+        varyings.push(`    @location(${location++}) coord${index}: vec4f,`);
+        if (format === undefined)
+        {
+            assignments.push(`    out.coord${index} = vec4f(0.0);`);
+        }
+        else if (layout.preTransformed)
+        {
+            assignments.push(`    out.coord${index} = ${filled(`vertex.texCoord${set}`, format)};`);
+        }
+        else
+        {
+            const carried = widened(`vertex.texCoord${set}`, format);
+            assignments.push(`    let carried${index} = ${carried};`,
+                `    out.coord${index} = ${processedCoordinate(`carried${index}`,
+                    componentsOf(format), stage.transform ?? 0, column(index))};`);
+        }
+    }
     if (generated.some(Boolean) && !layout.preTransformed)
     {
         assignments.push(
@@ -821,11 +913,16 @@ export function generateFixedFunction(state, layout){
         {
             continue;
         }
-        varyings.push(`    @location(${location++}) generated${index}: vec4f,`);
-        assignments.push(layout.preTransformed
-            ? `    out.generated${index} = vec4f(0.0, 0.0, 1.0, 1.0);`
-            : `    out.generated${index} = ${transformedGeneration(index,
-                generatedCoordinate(stage.texCoordIndex))};`);
+        varyings.push(`    @location(${location++}) coord${index}: vec4f,`);
+        if (layout.preTransformed)
+        {
+            assignments.push(`    out.coord${index} = vec4f(0.0, 0.0, 1.0, 1.0);`);
+            continue;
+        }
+        const made = generatedCoordinate(stage.texCoordIndex);
+        assignments.push(`    let generated${index} = vec4f(${made}, 0.0);`,
+            `    out.coord${index} = ${processedCoordinate(`generated${index}`, 3,
+                stage.transform ?? 0, column(index))};`);
     }
 
     // A point drawn as a quad: this vertex is one of its six corners, moved
@@ -955,9 +1052,8 @@ export function generateFixedFunction(state, layout){
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
 ${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
-    sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state), onesOf(state),
-    state.stages)}
+    sampleFunctions(state.stages.length, keys, dimensionsOf(state), onesOf(state),
+        state.stages)}
 struct VertexIn {
 ${inputs}
 };
@@ -984,7 +1080,7 @@ ${[...assignments, ...fogAmount, ...clipped?.lines ?? []].join('\n')}
 
 @fragment
 fn fragmentMain(input: ${clip?.distances ? 'FragmentIn' : 'VertexOut'}) -> @location(0) vec4f {
-${fragmentBody(state, specularEnable, undefined, undefined,
+${fragmentBody(state, specularEnable, undefined,
         flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular',
         points?.sprite === true)}${discarded?.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
@@ -1081,22 +1177,6 @@ function uniformStruct(lightCount, tail = { stageConstants: false }){
 }
 
 /**
- * A generated three-component coordinate through the stage's texture
- * transform: (x, y, z, 1) against the four output rows the block carries,
- * which is where a translation lands for three coordinates and where the
- * component a projected sample divides by comes from.
- *
- * @param {number} index @param {string} coordinate
- */
-function transformedGeneration(index, coordinate){
-    const row = index * 4;
-    return `vec4f(dot(uniforms.texTransform[${row}], vec4f(${coordinate}, 1.0)),`
-        + ` dot(uniforms.texTransform[${row + 1}], vec4f(${coordinate}, 1.0)),`
-        + ` dot(uniforms.texTransform[${row + 2}], vec4f(${coordinate}, 1.0)),`
-        + ` dot(uniforms.texTransform[${row + 3}], vec4f(${coordinate}, 1.0)))`;
-}
-
-/**
  * Table fog's factor for the pixel: the curve over its depth, which is its w
  * under a perspective projection -- the reciprocal of the interpolated 1/w
  * the position builtin carries, which for a pre-transformed vertex is its
@@ -1125,21 +1205,19 @@ export function tableFog(position, depth){
  * diffuse, specular and coordinate sets, then the specular add, the fog and
  * the alpha test, leaving the result in `current`.
  *
+ * Each stage reads its own coordinate, `input.coord{n}`, four wide.
+ *
  * @param {import('./pipeline.js').PipelineState} state
  * @param {boolean} specularEnable
- * @param {boolean[]} [generated]  Which stages sample a coordinate the
- *     vertex stage generated (`generated{n}`) rather than a carried set.
  * @param {string} [position]  The fragment's position builtin, for table fog.
  * @param {string} [specular]  What a stage reads the specular colour as.
  * @param {boolean} [sprite]  Every carried set is the point sprite's `input.sprite`.
  * @param {string} [table]  Table fog's factor, the depth's by default, carried
  *     in `input.fogAmount`.
  */
-function fragmentBody(state, specularEnable, generated = state.stages.map(
-    stage=>generates(stage.texCoordIndex)), position = 'input.position',
-specular = 'input.specular', sprite = false, table = tableFog(position, 'input.fogAmount'))
+function fragmentBody(state, specularEnable, position = 'input.position',
+    specular = 'input.specular', sprite = false, table = tableFog(position, 'input.fogAmount'))
 {
-    const wide = wideSets(state);
     /**
      * What a bump stage hands the stage after it: the offset its coordinate
      * moves by and the factor its texture's colour is scaled by.
@@ -1154,17 +1232,14 @@ specular = 'input.specular', sprite = false, table = tableFog(position, 'input.f
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : [...registers, ...state.stages.map((stage, index)=>{
-            // The set the program bound, not the stage's own number: two stages
-            // sharing one set is the ordinary way a detail or lightmap pass is
-            // written, and reading set N for stage N samples a varying the
-            // vertex never carried.
-            const set = stage.texCoordIndex & COORD_SET_MASK;
+            // The stage's own coordinate, made from the set the program bound
+            // through the stage's transform; a cube or volume stage reads
+            // three components, divided by w where the stage projects.
             const flat = (stage.dimension ?? '2d') === '2d';
-            const own = `input.generated${index}`;
-            const coordinate = generated[index]
-                ? flat ? own : stage.projected === 4 ? `(${own}.xyz / ${own}.w)` : `${own}.xyz`
-                : sprite ? flat ? 'input.sprite' : 'vec3f(input.sprite, 0.0)'
-                    : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
+            const own = sprite ? 'vec4f(input.sprite, 0.0, 1.0)' : `input.coord${index}`;
+            const coordinate = flat ? own
+                : ((stage.transform ?? 0) & TRANSFORM_PROJECTED) !== 0
+                    ? `(${own}.xyz / ${own}.w)` : `${own}.xyz`;
             if (stage.colorOp === D3DTOP.BUMPENVMAP || stage.colorOp === D3DTOP.BUMPENVMAPLUMINANCE)
             {
                 // The stage's texel is (du, dv, L), signed offsets and a
@@ -1192,12 +1267,10 @@ specular = 'input.specular', sprite = false, table = tableFog(position, 'input.f
             const from = bumped;
             bumped = null;
             // A bump stage before this one moves a flat coordinate; a cube or
-            // volume one it cannot, as the hardware could not.
-            // A generated flat coordinate is four wide, its last two what a
-            // projected sample divides by; the offset moves its first two.
+            // volume one it cannot, as the hardware could not. The offset
+            // moves the first two of the four, before a projected divide.
             const moved = !from || !flat ? coordinate
-                : generated[index] ? `vec4f(${coordinate}.xy + ${from.offset}, ${coordinate}.zw)`
-                    : `(${coordinate} + ${from.offset})`;
+                : `vec4f(${coordinate}.xy + ${from.offset}, ${coordinate}.zw)`;
             const sample = `sampleStage${index}(${moved})`;
             const texture = from?.luminance
                 ? `(${sample} * vec4f(vec3f(${from.luminance}), 1.0))`
@@ -1301,19 +1374,22 @@ export function fixedFragmentStage(state, written, options = {}){
     {
         fields.push(`    @location(1)${interpolation} v1: vec4f,`);
     }
-    const sets = state.stages.reduce(
-        (most, stage)=>Math.max(most, (stage.texCoordIndex & COORD_SET_MASK) + 1), 0);
-    const wide = wideSets(state);
-    for (let set = 0; set < sets; set++)
+    // Each stage reads the set it names as the shader wrote it, four wide:
+    // no matrix applies to a shader's coordinates, and a projected stage
+    // divides by the w the shader wrote (Wine's d3d9
+    // test_texture_transform_flags).
+    const sets = new Set(state.stages.map(stage=>stage.texCoordIndex & COORD_SET_MASK));
+    for (const set of [...sets].sort((a, b)=>a - b))
     {
         if (has(2 + set))
         {
             fields.push(`    @location(${2 + set}) t${set}: vec4f,`);
         }
-        const keep = wide.has(set);
-        const absent = keep ? 'vec4f(0.0)' : 'vec2f(0.0)';
-        carried.push(`    input.texCoord${set} = `
-            + `${has(2 + set) ? `in.t${set}${keep ? '' : '.xy'}` : absent};`);
+    }
+    for (const [index, stage] of state.stages.entries())
+    {
+        const set = stage.texCoordIndex & COORD_SET_MASK;
+        carried.push(`    input.coord${index} = ${has(2 + set) ? `in.t${set}` : 'vec4f(0.0)'};`);
     }
     // Below table fog, a shader-drawn vertex is fogged by what the shader
     // wrote: its oFog when it wrote one, else its specular alpha -- neither
@@ -1339,14 +1415,13 @@ export function fixedFragmentStage(state, written, options = {}){
     const discarded = clipInputs(clipStateOf(state), 'in');
     fields.push(...discarded.fields);
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
-        ...Array.from({ length: sets },
-            (_, set)=>`    texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`),
+        ...state.stages.map((_, index)=>`    coord${index}: vec4f,`),
         ...(carriedFog ? ['    fogAmount: f32,'] : [])];
     const wgsl = `${uniformStruct(0, tailOf(state))}
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
     samplerDeclarations(dimensionsOf(state), 2, 0)}
-${sampleFunctions(state.stages.length, [], [], dimensionsOf(state), onesOf(state),
+${sampleFunctions(state.stages.length, [], dimensionsOf(state), onesOf(state),
         state.stages)}
 struct PsIn {
 ${fields.join('\n')}
@@ -1360,7 +1435,7 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true, [], 'in.position', undefined, false,
+${fragmentBody(state, state.specularEnable === true, 'in.position', undefined, false,
         tableOverFog ? 'fogFactorOf(in.fog.x)'
             : table && has(10) ? tableFog('in.position', 'in.fog.x')
                 : 'fogFactorOf(select(1.0 / in.position.w, in.position.z,'
@@ -1484,11 +1559,12 @@ function bordered(read, border, raw, axes){
  * mip mode as an explicit level. The derivatives are taken from the raw
  * coordinate first, in uniform control flow, whatever the mode then does.
  *
+ * Each stage's coordinate arrives four wide, made by the vertex stage
+ * (`processedCoordinate`); a projected stage divides it by its w, and one
+ * whose w is zero samples at the origin (Wine's d3d9
+ * test_texture_transform_flags).
+ *
  * @param {number} count
- * @param {({ projected: number } | null)[]} [generated]
- *     Stages whose coordinate the vertex stage generated and transformed
- *     already, arriving as four components; `projected` names the one the
- *     first two are divided by, or is zero.
  * @param {(number | null)[]} [keys]
  *     Per stage, the colour key in force as 0xRRGGBB, or null: a sample
  *     whose nearest texel is that colour marks the fragment keyed. The texel
@@ -1504,9 +1580,7 @@ function bordered(read, border, raw, axes){
  *     bias (`lodBias`), written into that stage's sample alone.
  * @returns {string}
  */
-function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones = [],
-    stages = [])
-{
+function sampleFunctions(count, keys = [], dimensions = [], ones = [], stages = []){
     if (count === 0)
     {
         return '';
@@ -1528,29 +1602,17 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
                 : volumeSample(index, flags, ones[index], lod, stages[index]));
             continue;
         }
-        // The stage's texture transform, as Direct3D applies it to a
-        // two-dimensional coordinate: (u, v, 1) through the first three rows,
-        // so a translation is the third row and not the fourth. Identity rows
-        // are carried for a stage without one, so the sample is one expression.
-        // A generated coordinate arrives transformed by the vertex stage,
-        // and a projected one is divided here, per pixel, as the rasteriser
-        // does it.
-        const generation = generated[index] ?? null;
+        // A projected coordinate is divided here, per pixel, as the
+        // rasteriser does it.
         const stage = stages[index];
         const mirrorOnce = stage?.mirrorOnce ?? 0;
-        const transformed = generation
-            ? `    let raw = ${generation.projected === 3 ? 'carried.xy / carried.z'
-                : generation.projected === 4 ? 'carried.xy / carried.w' : 'carried.xy'};\n`
-            : [
-                '    let extended = vec3f(carried, 1.0);',
-                `    let raw = vec2f(dot(uniforms.texTransform[${index * 4}].xyz, extended),`,
-                `        dot(uniforms.texTransform[${index * 4 + 1}].xyz, extended));`,
-                '',
-            ].join('\n');
+        const raw = ((stage?.transform ?? 0) & TRANSFORM_PROJECTED) !== 0
+            ? 'select(carried.xy / carried.w, vec2f(0.0), carried.w == 0.0)' : 'carried.xy';
         const read = sampledWithOnes(
             `textureSampleLevel(texture${index}, sampler${index}, uv, level)`, ones[index]);
-        lines.push(`fn sampleStage${index}(carried: ${generation ? 'vec4f' : 'vec2f'}) -> vec4f {
-${transformed}    let flags = ${flags};
+        lines.push(`fn sampleStage${index}(carried: vec4f) -> vec4f {
+    let raw = ${raw};
+    let flags = ${flags};
     let size = vec2f(textureDimensions(texture${index}, 0));
     let dx = dpdx(raw * size);
     let dy = dpdy(raw * size);
@@ -1701,19 +1763,6 @@ function dimensionsOf(state){
  */
 function onesOf(state){
     return state.stages.map(stage=>stage.ones ?? 0);
-}
-
-/**
- * The carried coordinate sets a cube or volume stage reads: those carry every
- * component rather than two.
- *
- * @param {import('./pipeline.js').PipelineState} state
- * @returns {Set<number>}
- */
-function wideSets(state){
-    return new Set(state.stages
-        .filter(stage=>(stage.dimension ?? '2d') !== '2d' && !generates(stage.texCoordIndex))
-        .map(stage=>stage.texCoordIndex & COORD_SET_MASK));
 }
 
 /**

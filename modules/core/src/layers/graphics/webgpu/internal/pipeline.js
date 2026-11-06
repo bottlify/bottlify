@@ -147,10 +147,11 @@ function lookUp(table, value, what){
  * @property {number} [colorArg0]  MULTIPLYADD's and LERP's third operand; CURRENT if absent
  * @property {number} [alphaArg0]
  * @property {number} texCoordIndex
- * @property {number} [projected]
- *     For a stage generating its coordinate: which component the transformed
- *     coordinate is divided by at the sample -- 3 or 4 under
- *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
+ * @property {number} [transform]
+ *     What D3DTSS_TEXTURETRANSFORMFLAGS make of the stage's coordinate
+ *     (`coordinateTransformOf` in fixedfunction.js): the count the fixed vertex stage
+ *     runs the matrix over, and D3DTTFF_PROJECTED, which the pixel divides by
+ *     w for. Zero or absent for neither.
  * @property {number[]} [bump]
  *     A BUMPENVMAP stage's matrix and luminance, as numbers: BUMPENVMAT00, 01,
  *     10, 11, BUMPENVLSCALE, BUMPENVLOFFSET. Carried in the draw's uniform block
@@ -312,7 +313,7 @@ export function pipelineKey(state){
         .map(stage=>[
             stage.colorOp, stage.colorArg1, stage.colorArg2,
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
-            stage.texCoordIndex, stage.projected ?? 0,
+            stage.texCoordIndex, stage.transform ?? 0,
             ...(stage.colorArg0 === undefined && stage.alphaArg0 === undefined ? []
                 : [`a${stage.colorArg0 ?? 1}/${stage.alphaArg0 ?? 1}`]),
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),

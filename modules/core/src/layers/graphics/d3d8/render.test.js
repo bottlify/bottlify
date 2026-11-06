@@ -1369,8 +1369,9 @@ test('recorded: a second stage reusing coordinate set zero is not cut for its ow
         assert.equal(diagnostics.cascade.noCoordSet, 0);
         assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
         const code = gpu.of('createShaderModule')[0].descriptor.code;
-        assert.match(code, /sampleStage1\(input\.texCoord0\)/,
+        assert.match(code, /out\.coord1 = vec4f\(vertex\.texCoord0, 0\.0, 1\.0\);/,
             'stage one samples the set it named, not the set of its own number');
+        assert.match(code, /sampleStage1\(input\.coord1\)/);
     });
 
 test('recorded: a stage generating its coordinates is not cut for the set the vertex lacks',
@@ -1416,7 +1417,8 @@ test('recorded: a stage generating its coordinates is not cut for the set the ve
         assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
         assert.deepEqual(said, []);
         const code = gpu.of('createShaderModule')[0].descriptor.code;
-        assert.match(code, /sampleStage0\(input\.generated0\)/);
+        assert.match(code, /sampleStage0\(input\.coord0\)/);
+        assert.match(code, /let generated0 = vec4f\(cameraPosition, 0\.0\);/);
         assert.match(code, /uniforms\.worldView \* vec4f\(vertex\.position, 1\.0\)/);
         const draw = diagnostics.lastFrame.find((/** @type {any} */ c)=>c.kind === 'draw');
         assert.deepEqual([...draw.uniforms.subarray(
@@ -1861,7 +1863,8 @@ test('recorded: a cube map is six layers of one texture, each face going up into
         const code = gpu.of('createShaderModule')
             .map((/** @type {any} */ call)=>call.descriptor.code).join('\n');
         assert.match(code, /var texture0: texture_cube<f32>;/);
-        assert.match(code, /texCoord0: vec4f/, 'the set carries its third component');
+        assert.match(code, /sampleStage0\(input\.coord0\.xyz\)/,
+            'the set carries its third component');
 
         fill(3, 1, 99);
         await draw();
@@ -3461,16 +3464,17 @@ test('the dump prints a texture transform as the elements a coordinate travels t
         'm11, m21, m31, m41 then m12, m22, m32, m42, then the w and q columns');
 });
 
-test('a texture transform of more than two coordinates is reported, two are not', async()=>{
-    // Recorded commands. Two coordinates through the matrix are applied at
-    // the sample, so a program asking for that -- moving or not -- gets what
-    // it asked for and nothing is said. Three or four, or a projected divide,
-    // are accepted and not acted on, which is the one case that has to speak:
-    // in silence it produces a picture instead of an error.
+test('every texture transform the flags name is applied, and none is reported', async()=>{
+    // Recorded commands. A count of two to four goes through the matrix in
+    // the vertex stage, projected or not, and one coordinate or a projected
+    // set without a count goes on as carried, divided by its last component
+    // (Wine's d3d9 test_texture_transform_flags): nothing is left unapplied,
+    // so nothing is said, and the stage's key says what the vertex stage
+    // made of the flags.
     /** @type {string[]} */
     const said = [];
     // Textured, because a transform on a stage the cascade never runs moves
-    // nothing and should stay as quiet as an identity one.
+    // nothing whatever it is.
     const draw = (/** @type {any} */ h)=>{
         const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8,
             Uint8Array.from([0, 0, 255, 255]));
@@ -3488,16 +3492,8 @@ test('a texture transform of more than two coordinates is reported, two are not'
         0.5, 0.5, 1, 0,
         0, 0, 0, 1,
     ];
-    const quiet = harness({
-        dumpDraws: true,
-        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
-    });
-    assert.equal(quiet.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
-    assert.equal(quiet.device.SetTransform(D3DTS.TEXTURE0, scaled), D3D_OK);
-    draw(quiet);
-    assert.equal(said.length, 0, 'two coordinates through a moving matrix are applied');
-
-    for (const flags of [1, 0x100 | 2, 0x100 | 3])
+    for (const [flags, transform] of [[2, 2], [1, 0], [0x100 | 2, 0x102], [0x100 | 3, 0x103],
+        [0xffffff03, 0x100]])
     {
         const h = harness({
             dumpDraws: true,
@@ -3507,12 +3503,12 @@ test('a texture transform of more than two coordinates is reported, two are not'
             D3D_OK);
         assert.equal(h.device.SetTransform(D3DTS.TEXTURE0, scaled), D3D_OK);
         draw(h);
+        await h.present();
+        const recorded = h.device.diagnostics().lastFrame
+            .find((/** @type {any} */ c)=>c.kind === 'draw');
+        assert.equal(recorded.state.stages[0].transform, transform, `flags ${flags}`);
     }
-    assert.equal(said.length, 3, 'one coordinate and a projected carried set each spoke once');
-    for (const line of said)
-    {
-        assert.match(line, /^Direct3D 8: a texture transform of one coordinate, or a projected one over a set the vertex carries, is accepted and not applied/);
-    }
+    assert.deepEqual(said.filter(line=>/texture transform/.test(line)), []);
 });
 
 test('every draw sampling one texture can be dropped, by the id the dump names it', async()=>{

@@ -420,8 +420,10 @@ writes (u w, v w, w, w) from its vertex shader (z equal to w, so that a driver d
 either reads the same place) and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by y, the
 screen copy it refracts was read far outside itself and the water drawn in stripes; divided by
 w, as by the default here, it is water (the person's run, 2026-10-13, browser, graphics worker,
-Parallels GPU). `driverRules: 'current'` divides by the count, as later drivers and Wine do.
-*2026-10-13.*
+Parallels GPU). Windows divides by w too, under either driver rules: Wine's later d3d9
+`test_texture_transform_flags` shows the fixed vertex stage putting the count's last component in
+w and every projected read dividing by w, so this is no longer a departure and `driverRules`
+does not change it. *2026-10-13, both rules 2026-11-06.*
 
 **A45. A pre-transformed vertex with a negative RHW is clipped behind the eye only where the
 runtime clipped it.** A Direct3D 7 or 6 vertex buffer that ProcessVertices transformed with

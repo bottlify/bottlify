@@ -1225,30 +1225,32 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         [0, { components: 3, scalar: 'f32', bgra: false }],
         [1, { components: 3, scalar: 'f32', bgra: false }],
         [2, { components: 2, scalar: 'f32', bgra: false }],
-    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true });
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true,
+        carried: [{ set: 0, transform: 4 }, { set: 1, transform: 0 }, null, null,
+            { set: 4, transform: 4 }] });
     assert.equal(generated.error, null);
     const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
     const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
     const t4 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 4);
     assert.deepEqual(generated.outputs, [t0, t1, t4]);
-    // A fifth set goes through the fifth stage's own rows: a terrain's
+    // A fifth set goes through the fifth stage's own columns: a terrain's
     // blend map is that far along the cascade, and a coordinate left raw
     // there moved with the camera.
-    assertLine(generated.wgsl, `out.o${t4} = vec4f(dot(c[25], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[26], vec4f(cameraPosition, 1.0)), dot(c[27], vec4f(cameraPosition, 1.0)),'
-        + ' dot(c[28], vec4f(cameraPosition, 1.0)));');
+    const through = (/** @type {number} */ index, /** @type {number} */ from)=>
+        `vec4f(${[0, 1, 2, 3].map(axis=>`dot(c[${from + axis}], vec4f(generated${index}.xyz, 1.0))`)
+            .join(', ')})`;
+    assertLine(generated.wgsl, `out.o${t4} = ${through(4, 25)};`);
     assertLine(generated.wgsl, 'let worldView = mat4x4f(c[5], c[6], c[7], c[8]);');
     assertLine(generated.wgsl,
         'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
     assertLine(generated.wgsl,
         'let cameraNormal = d3dNrm((mat4x4f(c[43], c[44], c[45], c[46])'
             + ' * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
-    assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
-        + ' dot(c[12], vec4f(cameraPosition, 1.0)));');
-    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[13], vec4f(cameraNormal, 1.0)),`
-        + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
-        + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
+    assertLine(generated.wgsl, 'let generated0 = vec4f(cameraPosition, 0.0);');
+    assertLine(generated.wgsl, `out.o${t0} = ${through(0, 9)};`);
+    // With no count in the flags, the normal goes on as made, w zero.
+    assertLine(generated.wgsl, 'let generated1 = vec4f(cameraNormal, 0.0);');
+    assertLine(generated.wgsl, `out.o${t1} = generated1;`);
     assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
 
     // With D3DRS_NORMALIZENORMALS off -- its default -- the camera-space
