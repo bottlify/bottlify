@@ -2417,6 +2417,8 @@ test('an exclusive owner loses its video memory when deactivated, and restores i
             [HWND, DDSCL_NORMAL]), DD_OK);
         assert.deepEqual([primary, sysmem, vidmem].map(isLost),
             [DDERR_SURFACELOST, DD_OK, DDERR_SURFACELOST]);
+        assert.equal(h.surface7(primary, 'Flip', [0, 0]), DDERR_SURFACELOST,
+            'lost before it is out of exclusive mode');
         assert.equal(h.surface7(vidmem, 'Restore', []), DD_OK);
         deactivated = true;
         deactivations = 3;

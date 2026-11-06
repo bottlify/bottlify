@@ -2067,6 +2067,13 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_NOTFLIPPABLE;
                 }
+                // A lost surface says so first: one lost by leaving exclusive
+                // mode is lost before it is out of that mode (test_lost_device).
+                noticeDeactivation();
+                if (lost)
+                {
+                    return DDERR_SURFACELOST;
+                }
                 // A primary surface in video memory is the screen, and only the
                 // exclusive owner of the screen may change what it shows. One
                 // held in system memory is a copy and flips regardless.
@@ -2074,11 +2081,6 @@ export function createDirectDraw(options = {}){
                     && !exclusive())
                 {
                     return DDERR_NOEXCLUSIVEMODE;
-                }
-                noticeDeactivation();
-                if (lost)
-                {
-                    return DDERR_SURFACELOST;
                 }
                 if (target)
                 {
