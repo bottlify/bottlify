@@ -66,6 +66,7 @@ import {
     showDescriptor, showKey, writeLighting,
 } from './wgsl.js';
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
+import { GLSL_BLOCK_BINDING, samplerTypeOf, textureLayoutOf } from './glsl-wgsl.js';
 
 /**
  * A framebuffer object is drawn upside down -- its first row GL's bottom
@@ -74,6 +75,29 @@ import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
  * the vertex stage (`uniforms.misc.z`), the viewport and scissor, the front
  * face and every copy between the two follow it.
  */
+
+/**
+ * Which of a unit's bindings a GLSL sampler of each shape reads (`Scene`'s
+ * `boundTextures`): the shapes a unit has no binding for yet read the
+ * incomplete texture.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const BOUND_TARGETS = Object.freeze({
+    '1D': 'oneD', '2D': 'twoD', Cube: 'cube', '3D': 'threeD', '1DArray': 'oneDArray',
+    '2DArray': 'twoDArray', CubeArray: 'cubeArray', '2DRect': 'rectangle',
+    '2DMS': 'twoDMultisample', '2DMSArray': 'twoDMultisampleArray',
+});
+
+/**
+ * A uniform block's binding as a draw records it.
+ *
+ * @typedef {{ binding: number, resource: { buffer: any, offset: number, size: number } }}
+ *     UniformBlockBinding
+ */
+
+/** @type {readonly UniformBlockBinding[]} */
+const NO_BLOCKS = Object.freeze([]);
 
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
@@ -522,11 +546,15 @@ export function createGpuRenderer(services){
      *     uniform block, a texture pair per unit the fragment stage samples,
      *     and a uniform block per program stage.
      * @property {string} key
-     * @property {{ binding: number, cube: boolean, unit: number, sampler?: number }[]} textures
-     *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value
+     * @property {{ binding: number, cube: boolean, unit: number, sampler?: number,
+     *     layout?: { viewDimension: string, sampleType: string, multisampled: boolean }
+     *     }[]} textures
+     *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value, and
+     *     the texture its type reads (`layout`)
      * @property {boolean} vertexBlock
      * @property {boolean} fragmentBlock
      * @property {boolean} [glsl]  the textures are visible to the vertex stage too
+     * @property {number[]} [blocks]  a GLSL program's uniform blocks the stages read
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -546,14 +574,18 @@ export function createGpuRenderer(services){
         if (glsl && state.glsl)
         {
             const program = state.glsl.program;
-            const textures = glsl.samplers.map(index=>({ binding: 1 + index * 2,
-                cube: program.samplers[index].dim === 'Cube', unit: -1, sampler: index }))
-                .sort((a, b)=>a.binding - b.binding);
+            const textures = glsl.samplers.map(index=>{
+                const layout = textureLayoutOf(samplerTypeOf(program.samplers[index]));
+                return { binding: 1 + index * 2, cube: layout.viewDimension === 'cube',
+                    unit: -1, sampler: index, layout };
+            }).sort((a, b)=>a.binding - b.binding);
             const vertexBlock = glsl.vertex !== null;
             const fragmentBlock = glsl.fragment !== null;
-            const key = `g${textures.map(t=>`${t.binding}${t.cube ? 'c' : '2'}`).join(',')}|`
-                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}`;
-            return { key, textures, vertexBlock, fragmentBlock, glsl: true };
+            const blocks = glsl.blocks ?? [];
+            const key = `g${textures.map(t=>`${t.binding}${t.layout.viewDimension}`
+                + `${t.layout.sampleType}${t.layout.multisampled ? 'm' : ''}`).join(',')}|`
+                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`;
+            return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks };
         }
         /** @type {{ binding: number, cube: boolean, unit: number }[]} */
         const textures = [];
@@ -618,10 +650,17 @@ export function createGpuRenderer(services){
         for (const texture of plan.textures)
         {
             const visibility = plan.glsl ? VERTEX_STAGE | FRAGMENT_STAGE : FRAGMENT_STAGE;
+            const layout = texture.layout;
             fixedEntries.push({
                 binding: texture.binding,
                 visibility,
-                texture: texture.cube ? { viewDimension: 'cube' } : {},
+                texture: layout ? {
+                    viewDimension: layout.viewDimension,
+                    // A multisampled texture is never filtered.
+                    sampleType: layout.multisampled && layout.sampleType === 'float'
+                        ? 'unfilterable-float' : layout.sampleType,
+                    multisampled: layout.multisampled,
+                } : texture.cube ? { viewDimension: 'cube' } : {},
             });
             fixedEntries.push({
                 binding: texture.binding + 1, visibility, sampler: {},
@@ -633,6 +672,16 @@ export function createGpuRenderer(services){
                 binding: VERTEX_PROGRAM_BINDING,
                 visibility: VERTEX_STAGE,
                 buffer: { type: 'uniform', hasDynamicOffset: true },
+            });
+        }
+        // A program's uniform blocks are the buffer objects bound to them,
+        // at the offsets bound: a group follows the bindings, not the draws.
+        for (const block of plan.blocks ?? [])
+        {
+            fixedEntries.push({
+                binding: GLSL_BLOCK_BINDING + block,
+                visibility: VERTEX_STAGE | FRAGMENT_STAGE,
+                buffer: { type: 'uniform' },
             });
         }
         /** @type {any[]} */
@@ -1208,7 +1257,8 @@ export function createGpuRenderer(services){
             record = {
                 gpu: backend.createDynamicBuffer({
                     size: capacity,
-                    usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.COPY_DST,
+                    usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
+                        | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
                 }),
                 size: buffer.size,
@@ -1986,6 +2036,15 @@ export function createGpuRenderer(services){
             && entry.sampler === b[i].sampler);
 
     /**
+     * @param {readonly UniformBlockBinding[] | undefined} a
+     * @param {readonly UniformBlockBinding[] | undefined} b
+     */
+    const sameBlocks = (a = NO_BLOCKS, b = NO_BLOCKS)=>a.length === b.length
+        && a.every((entry, i)=>entry.binding === b[i].binding
+            && entry.resource.buffer === b[i].resource.buffer
+            && entry.resource.offset === b[i].resource.offset);
+
+    /**
      * @param {{ x: number, y: number, width: number, height: number }} a
      * @param {{ x: number, y: number, width: number, height: number }} b
      */
@@ -2000,7 +2059,8 @@ export function createGpuRenderer(services){
         && a.indices.format === b.indices.format && a.indices.gpu === b.indices.gpu
         && a.uniforms === b.uniforms && a.vertexUniforms === b.vertexUniforms
         && a.fragmentUniforms === b.fragmentUniforms && sameSlots(a.slots, b.slots)
-        && sameBindings(a.bindings, b.bindings) && matchRect(a.viewport, b.viewport)
+        && sameBindings(a.bindings, b.bindings) && sameBlocks(a.blocks, b.blocks)
+        && matchRect(a.viewport, b.viewport)
         && matchRect(a.scissor, b.scissor) && a.stencilReference === b.stencilReference
         && a.target === b.target && sameColour(a.blendConstant, b.blendConstant);
 
@@ -2081,9 +2141,11 @@ export function createGpuRenderer(services){
      * @param {number} baseVertex
      * @param {'point-list' | 'line-list' | 'triangle-list'} topology
      * @param {number} [instances]  how many instances (glDrawArraysInstanced)
+     * @param {number} [idBias]  the program's vertex number of the vertex the
+     *     device numbers 0: where the draw put its arrays (gl_VertexID)
      */
     const record = (context, scene, layout, slots, indices, count, first, baseVertex, topology,
-        instances = 1)=>
+        instances = 1, idBias = 0)=>
     {
         const surfaces = drawables.get(context);
         if (!surfaces)
@@ -2189,7 +2251,7 @@ export function createGpuRenderer(services){
         const uniforms = uniformsOf(context, scene, mvp, target);
         const glslStages = generated.glsl ?? null;
         const vertexUniforms = glslStages && executable
-            ? glslStages.vertex && glslUniforms(glslStages.vertex, executable, scene, mvp)
+            ? glslStages.vertex && glslUniforms(glslStages.vertex, executable, scene, mvp, idBias)
             : generated.programs?.vertex && state.vertexProgram
                 ? programUniforms(generated.programs.vertex, state.vertexProgram, scene, mvp)
                 : null;
@@ -2198,6 +2260,8 @@ export function createGpuRenderer(services){
             : generated.programs?.fragment && state.fragmentProgram
                 ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene, mvp)
                 : null;
+        const blocks = plan.blocks && plan.blocks.length > 0 && executable
+            ? uniformBlocksFor(scene, executable, plan.blocks, recording) : NO_BLOCKS;
         stats.draws++;
         recording.counts.draws++;
         const rects = rectangles(scene, target);
@@ -2276,6 +2340,7 @@ export function createGpuRenderer(services){
             uniforms,
             vertexUniforms,
             fragmentUniforms,
+            blocks,
             slots,
             indices,
             count,
@@ -2337,10 +2402,54 @@ export function createGpuRenderer(services){
     const textureForSampler = (scene, executable, entry)=>{
         const sampler = executable.linked.samplers[/** @type {number} */ (entry.sampler)];
         const unit = executable.ints[sampler.leaf.offset + sampler.element];
-        const bound = scene.boundTextures[unit];
-        const texture = sampler.dim === 'Cube' ? bound?.cube
-            : sampler.dim === '1D' ? bound?.oneD : bound?.twoD;
+        const bound = /** @type {Record<string, any> | undefined} */ (scene.boundTextures[unit]);
+        const type = samplerTypeOf(sampler);
+        const target = BOUND_TARGETS[`${type.dim}${type.ms ? 'MS' : ''}${type.array ? 'Array' : ''}`];
+        const texture = target ? bound?.[target] : null;
         return texture && isTextureComplete(texture) ? texture : incompleteTexture(entry.cube);
+    };
+
+    /**
+     * The buffer objects a draw's uniform blocks read, at the ranges bound to
+     * the binding points the program gave its blocks (glUniformBlockBinding).
+     * A block whose point has no buffer, or whose bytes run past the buffer,
+     * reads zeros there: the specification leaves both undefined.
+     *
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @param {number[]} blocks @param {Recording} recording
+     * @returns {UniformBlockBinding[]}
+     */
+    const uniformBlocksFor = (scene, executable, blocks, recording)=>blocks.map(index=>{
+        const block = executable.linked.blocks[index];
+        const point = executable.blockBindings?.[index] ?? block.binding;
+        const bound = scene.uniformBuffers?.[point] ?? null;
+        const size = Math.max(16, Math.ceil(block.size / 16) * 16);
+        const binding = GLSL_BLOCK_BINDING + index;
+        if (bound)
+        {
+            const record = bufferFor(bound.buffer);
+            if (bound.offset + size <= record.gpu.size)
+            {
+                record.reads.note(recording.id, bound.offset, bound.offset + size);
+                return { binding, resource: { buffer: record.gpu.gpu, offset: bound.offset, size } };
+            }
+        }
+        diverge(`uniform block '${block.name}' was read ${bound
+            ? 'past the end of the buffer bound to it' : 'with no buffer bound to its binding'
+                + ` point ${point}`}, and read zeros there`);
+        return { binding, resource: { buffer: zeroBlock(size), offset: 0, size } };
+    });
+
+    /** A buffer of zeros as large as the largest block asked for. @type {any} */
+    let zeros = null;
+    /** @param {number} size */
+    const zeroBlock = size=>{
+        if (!zeros || zeros.size < size)
+        {
+            zeros = backend.createDynamicBuffer({ size: Math.max(size, 256),
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, label: 'gl-zero-block' });
+        }
+        return zeros.gpu;
     };
 
     /**
@@ -2390,9 +2499,10 @@ export function createGpuRenderer(services){
     /**
      * @param {import('./glsl-wgsl.js').BlockPlan} plan @param {any} executable
      * @param {import('./pipeline.js').Scene} scene @param {Float64Array} mvp
+     * @param {number} [idBias]  what gl_VertexID adds to the device's vertex number
      * @returns {Float32Array}
      */
-    const glslUniforms = (plan, executable, scene, mvp)=>{
+    const glslUniforms = (plan, executable, scene, mvp, idBias = 0)=>{
         const matricesOnly = plan.state.every(s=>MATRIX_ONLY.test(s.name));
         const refs = plan.state.length === 0 ? [] : [scene.modelview, scene.projection, mvp];
         /** @type {number[]} */
@@ -2400,6 +2510,10 @@ export function createGpuRenderer(services){
         for (const attrib of plan.attribs)
         {
             values.push(...currentValueOf(scene, attrib));
+        }
+        if (plan.idBias !== undefined)
+        {
+            values.push(idBias);
         }
         if (plan.state.some(s=>s.name === 'gl_DepthRange'))
         {
@@ -2428,7 +2542,23 @@ export function createGpuRenderer(services){
         }
         for (const attrib of plan.attribs)
         {
-            block.set(currentValueOf(scene, attrib), attrib.offset);
+            const value = currentValueOf(scene, attrib);
+            if (attrib.integer)
+            {
+                // An integer input's current value, as glVertexAttribI* gave it.
+                const into = attrib.integer === 'u32' ? new Uint32Array(block.buffer)
+                    : new Int32Array(block.buffer);
+                into.set(value.map(v=>(attrib.integer === 'u32' ? v >>> 0 : v | 0)),
+                    attrib.offset);
+            }
+            else
+            {
+                block.set(value, attrib.offset);
+            }
+        }
+        if (plan.idBias !== undefined)
+        {
+            new Int32Array(block.buffer)[plan.idBias] = idBias;
         }
         glslBlocks.set(plan, { id: executable.id, version: executable.version, refs, values,
             block });
@@ -2795,7 +2925,7 @@ export function createGpuRenderer(services){
             indices ? 0 : request.first - from,
             (expanded && !scanned ? request.first : 0) - from
                 + (scanned ? request.baseVertex ?? 0 : 0),
-            topologyOf(request.mode), instances);
+            topologyOf(request.mode), instances, from);
         return true;
     };
 
@@ -3285,6 +3415,10 @@ export function createGpuRenderer(services){
                         binding: VERTEX_PROGRAM_BINDING,
                         resource: pass.uniforms(command.vertexUniforms),
                     });
+                }
+                for (const block of command.blocks ?? NO_BLOCKS)
+                {
+                    entries.push(block);
                 }
                 pass.setBindings(0, pipeline.groups[0], entries);
                 if (command.fragmentUniforms)

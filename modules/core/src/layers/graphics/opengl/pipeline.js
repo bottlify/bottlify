@@ -170,6 +170,9 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  *             oneD?: import('./objects.js').TextureObject | null }[]} boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [uniformBuffers]  what each uniform buffer
+ *           binding point holds (glBindBufferRange), for a GLSL program's blocks
  */
 
 /**

@@ -411,6 +411,7 @@ export function createSceneBuilder(kernel){
             genericAttribs,
             textureMatrices,
             boundTextures,
+            uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
 
             /**
              * The colour a vertex ends up with: lit, or its own.
