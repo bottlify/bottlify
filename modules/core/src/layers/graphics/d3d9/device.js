@@ -4874,7 +4874,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            captureRecord(record, view);
+            captureRecord(record, view, { keepOffsets: true });
             return D3D_OK;
         },
         apply: ()=>{
