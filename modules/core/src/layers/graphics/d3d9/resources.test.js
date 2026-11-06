@@ -665,8 +665,11 @@ test("packColour gives a pixel of a format's width, listed layout or not", ()=>{
     assert.equal(packColour(D3DFMT.A2R10G10B10, 0xff123456).length, 4);
 });
 
-test('packColour gives a wide format each channel as its fraction of 255, red first', ()=>{
-    // Red 255, green 0, blue 51 (0.2), alpha 128.
+test('packColour gives a wide format each channel as its fraction of 255, red first, in the'
+    + ' format\'s own precision', ()=>{
+    // Red 255, green 0, blue 51 (0.2), alpha 128: a 32-bit float keeps the
+    // fraction whole and a 16-bit one spreads the byte over both of its bytes
+    // (Wine's d3d9 test_colorfill).
     const colour = 0x80ff0033;
     const half = (/** @type {Uint8Array} */ bytes)=>[...new Uint16Array(bytes.buffer)];
     const float = (/** @type {Uint8Array} */ bytes)=>[...new Float32Array(bytes.buffer)];
@@ -675,12 +678,11 @@ test('packColour gives a wide format each channel as its fraction of 255, red fi
     assert.deepEqual(half(packColour(D3DFMT.G16R16F, colour)), [0x3c00, 0]);
     assert.deepEqual(half(packColour(D3DFMT.R16F, colour)), [0x3c00]);
     assert.deepEqual(float(packColour(D3DFMT.A32B32G32R32F, colour)),
-        [1, 0, fromHalf(toHalf(0.2)), fromHalf(toHalf(128 / 255))]);
+        [1, 0, Math.fround(51 / 255), Math.fround(128 / 255)]);
     assert.deepEqual(float(packColour(D3DFMT.G32R32F, colour)), [1, 0]);
     assert.deepEqual(float(packColour(D3DFMT.R32F, colour)), [1]);
-    const fraction = (/** @type {number} */ value)=>Math.round(fromHalf(toHalf(value)) * 0xffff);
     assert.deepEqual(half(packColour(D3DFMT.A16B16G16R16, colour)),
-        [0xffff, 0, fraction(0.2), fraction(128 / 255)]);
+        [0xffff, 0, 0x3333, 0x8080]);
     assert.deepEqual(half(packColour(D3DFMT.G16R16, colour)), [0xffff, 0]);
 });
 

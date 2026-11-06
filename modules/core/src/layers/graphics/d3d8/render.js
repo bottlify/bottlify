@@ -5213,9 +5213,9 @@ export function createRenderer(options){
     };
 
     /**
-     * Says once that a stage asked for coordinates this engine does not
-     * generate. The set it names is used regardless, which is the coordinates
-     * the vertex carried rather than the ones the program asked to be computed.
+     * Says once that a stage asked for a generation mode Direct3D does not
+     * define. The set it names is used regardless, which is the coordinates
+     * the vertex carried.
      *
      * @param {import('../webgpu/internal/pipeline.js').StageKey[]} stages
      */
@@ -5228,9 +5228,9 @@ export function createRenderer(options){
             && !generates(stage.texCoordIndex)))
         {
             divergence('Direct3D 8',
-                'a sphere-map texture coordinate generation is accepted and not applied'
-                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_SPHEREMAP): the set named in the'
-                + ' low bits is sampled as the vertex carries it');
+                'a texture coordinate generation mode past D3DTSS_TCI_SPHEREMAP is accepted'
+                + ' and not applied (D3DTSS_TEXCOORDINDEX): the set named in the low bits is'
+                + ' sampled as the vertex carries it');
         }
     };
 

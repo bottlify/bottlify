@@ -139,6 +139,16 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
         + ' normalize((uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz);'));
     assert.ok(lit.includes('reflect(normalize(cameraPosition), cameraNormal)'));
 
+    // A sphere map: the reflection's x and y over twice the length of
+    // (x, y, z - 1), moved to the middle of the map (Wine's d3d9
+    // test_generated_texcoords, 0x836900 at the centre).
+    const sphere = generate(baseState({
+        fvf: FVF.XYZ | FVF.NORMAL, stages: [stage(TCI.SPHEREMAP)],
+    })).code;
+    const reflection = 'reflect(normalize(cameraPosition), cameraNormal)';
+    assert.ok(sphere.includes(`let generated0 = vec4f(vec3f(${reflection}.xy / (2.0 * length(`
+        + `vec3f(${reflection}.xy, ${reflection}.z - 1.0))) + 0.5, 0.0), 0.0);`), sphere);
+
     // A pre-transformed vertex has no camera space to be taken in.
     const flat = generate(baseState({
         fvf: FVF.XYZRHW | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACEPOSITION)],

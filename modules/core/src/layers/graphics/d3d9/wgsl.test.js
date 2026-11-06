@@ -71,6 +71,15 @@ const pixelBody = tokens=>{
 const assertLine = (wgsl, line)=>assert.ok(wgsl.split('\n').some(one=>one.trim() === line),
     `expected the line\n    ${line}\nin\n${wgsl}`);
 
+/**
+ * A 1.x stage's coordinates divided as it projects, a zero divisor reading
+ * at the origin.
+ *
+ * @param {number} stage @param {string} by
+ */
+const projected = (stage, by)=>`(select(in.t${stage} / in.t${stage}.${by}, vec4f(0.0),`
+    + ` in.t${stage}.${by} == 0.0))`;
+
 test('the arithmetic instructions become the statements they mean', ()=>{
     const r = REGISTER.TEMP;
     const c = REGISTER.CONST;
@@ -714,8 +723,8 @@ test('a 1.x read samples the texture bound at its stage, divided as the stage pr
         { stageDimensions: ['cube', '2d', '3d'], projectedBy: ['', 'w', 'z'] });
     assert.equal(shader.error, null);
     assertLine(shader.wgsl, 't0 = textureSample(tex0, samp0, in.t0.xyz);');
-    assertLine(shader.wgsl, 't1 = textureSample(tex1, samp1, (in.t1 / in.t1.w).xy);');
-    assertLine(shader.wgsl, 't2 = textureSample(tex2, samp2, (in.t2 / in.t2.z).xyz);');
+    assertLine(shader.wgsl, `t1 = textureSample(tex1, samp1, ${projected(1, 'w')}.xy);`);
+    assertLine(shader.wgsl, `t2 = textureSample(tex2, samp2, ${projected(2, 'z')}.xyz);`);
     assert.deepEqual(shader.samplers, [
         { index: 0, type: 'texture_cube<f32>' },
         { index: 1, type: 'texture_2d<f32>' },
@@ -753,9 +762,9 @@ test('texbem and texbeml move a stage\'s coordinates by its bump matrix', ()=>{
         END_TOKEN];
     const bumped = translateShader(parseShader(tokens(0x00000043)), { projectedBy: ['', 'w'] });
     assert.equal(bumped.error, null);
-    assertLine(bumped.wgsl, 't1 = textureSample(tex1, samp1, (vec4f((in.t1 / in.t1.w).xy'
+    assertLine(bumped.wgsl, `t1 = textureSample(tex1, samp1, (vec4f(${projected(1, 'w')}.xy`
         + ' + vec2f(dot(t0.xy, c[_bump + 2].xz), dot(t0.xy, c[_bump + 2].yw)),'
-        + ' (in.t1 / in.t1.w).zw)).xy);');
+        + ` ${projected(1, 'w')}.zw)).xy);`);
     assertLine(bumped.wgsl, 'const _bump = 0;');
     assert.equal(bumped.bumpRegister, 0, 'after the none it reads');
     assert.equal(bumped.constants, 16, 'eight stages of two registers');

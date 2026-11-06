@@ -1102,16 +1102,25 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
         /** @type {{ surface?: any }} */
         const plain = {};
         device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plain);
+        /** @type {{ surface?: any }} */
+        const plainSource = {};
+        device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plainSource);
         memory.fill(7, source.surface.base, source.surface.base + 64);
+        memory.fill(7, plainSource.surface.base, plainSource.surface.base + 64);
         const before = writes;
         assert.equal(device.StretchRect(source.surface, null, target.surface, null, 1), D3D_OK);
         const between = writes - before;
         const intoTarget = memory[target.surface.base];
-        assert.equal(device.StretchRect(source.surface, null, plain.surface, null, 1), D3D_OK);
+        // A target into a plain surface is refused, as Windows refuses it
+        // (Wine's d3d9 test_stretch_rect); a plain one into another is not.
+        assert.equal(device.StretchRect(source.surface, null, plain.surface, null, 1),
+            D3DERR_INVALIDCALL);
+        assert.equal(device.StretchRect(plainSource.surface, null, plain.surface, null, 1), D3D_OK);
         const intoPlain = memory[plain.surface.base];
         source.surface.release();
         target.surface.release();
         plain.surface.release();
+        plainSource.surface.release();
         device.release();
         return { between, intoTarget, intoPlain };
     };
@@ -1120,6 +1129,69 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
         { between: 0, intoTarget: 0, intoPlain: 7 },
         'into a target nothing moves; into a plain surface the bytes still do');
     assert.deepEqual(copied({ drawsNothing: true }), { between: 0, intoTarget: 0, intoPlain: 7 });
+});
+
+test('StretchRect takes a texture level only into a target, a plain surface only from another,'
+    + ' and converts plain colour formats pixel by pixel (test_stretch_rect)', ()=>{
+    const memory = new Uint8Array(1 << 20);
+    let next = 0x1000;
+    const { device } = make({ services: {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        },
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            memory.slice(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+            memory.set(bytes, address);
+        },
+    } });
+    /** @param {number} format */
+    const textureLevel = format=>{
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(4, 4, 1, 0, format, D3DPOOL.DEFAULT, made), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+        made.texture.release();
+        return level.surface;
+    };
+    /** @param {number} format */
+    const plainOf = format=>{
+        /** @type {{ surface?: any }} */
+        const made = {};
+        assert.equal(device.CreateOffscreenPlainSurface(4, 4, format, D3DPOOL.DEFAULT, made),
+            D3D_OK);
+        return made.surface;
+    };
+    /** @type {{ surface?: any }} */
+    const target = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, target), D3D_OK);
+    const texture = textureLevel(D3DFMT.A8R8G8B8);
+    const otherTexture = textureLevel(D3DFMT.A8R8G8B8);
+    const plain = plainOf(D3DFMT.A8R8G8B8);
+    const narrow = plainOf(D3DFMT.R5G6B5);
+    assert.equal(device.StretchRect(texture, null, otherTexture, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(target.surface, null, texture, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(texture, null, plain, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(plain, null, texture, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(target.surface, null, plain, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(texture, null, target.surface, null, 0), D3D_OK);
+    assert.equal(device.StretchRect(plain, null, target.surface, null, 0), D3D_OK);
+    // Pure red, opaque, into five-six-five: 0xf800 a pixel.
+    for (let at = 0; at < 64; at += 4)
+    {
+        memory.set([0, 0, 0xff, 0xff], plain.base + at);
+    }
+    assert.equal(device.StretchRect(plain, null, narrow, null, 0), D3D_OK);
+    assert.deepEqual([...memory.subarray(narrow.base, narrow.base + 4)], [0x00, 0xf8, 0x00, 0xf8]);
+    for (const surface of [target.surface, texture, otherTexture, plain, narrow])
+    {
+        surface.release();
+    }
+    device.release();
 });
 
 test('ColorFill of a target drawn elsewhere, or not at all, writes no guest bytes', ()=>{

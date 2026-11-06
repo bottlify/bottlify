@@ -57,7 +57,7 @@ import {
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
-    IDENTITY, STAGE_COUNT, createRenderer, gpuFormatOf, multiplyMatrices, sameLight,
+    IDENTITY, STAGE_COUNT, createRenderer, expandTexels, gpuFormatOf, multiplyMatrices, sameLight,
     srgbViewFormats,
     vertexCountOf,
 } from '../d3d8/render.js';
@@ -65,8 +65,8 @@ import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
     HeldBindings, chainBytes, countedBuffer, createPriority, createReferenceCount, createSurface,
-    createTexture, createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel,
-    volumeUpdate, writeFrontBuffer, writePixels,
+    createTexture, createVideoMemory, createVolumeTexture, packBits, packColour, rectMoveOf,
+    regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from './resources.js';
 import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
@@ -436,6 +436,12 @@ const ALPHA_TWINS = new Map([
 ]);
 /** @param {number} format @returns {number | undefined} */
 const alphaTwin = format=>ALPHA_TWINS.get(format);
+/**
+ * The colour formats StretchRect converts between in guest bytes, each
+ * pixel through its D3DCOLOR (`expandTexels`, `packBits`).
+ */
+const CONVERTED = new Set(/** @type {number[]} */ ([D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.R5G6B5, D3DFMT.A1R5G5B5,
+    D3DFMT.X1R5G5B5, D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4]));
 /** @param {number} format */
 const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[format].depth;
 
@@ -1997,6 +2003,62 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
     /** @param {import('./resources.js').SurfaceDesc} desc @returns {Rect} */
     const wholeOf = desc=>({ left: 0, top: 0, right: desc.Width, bottom: desc.Height });
+
+    /**
+     * Copies a rectangle between two colour formats in guest bytes, each
+     * pixel through its colour: what StretchRect does between the formats
+     * CheckDeviceFormatConversion names when neither surface is on the GPU.
+     * False, and nothing written, where a format is not one of them or guest
+     * memory is out of reach.
+     *
+     * @param {any} source @param {Rect} rect @param {any} destination
+     * @param {{ x: number, y: number }} point
+     */
+    const convertBytes = (source, rect, destination, point)=>{
+        const read = services.windowMemory ?? services.readMemory;
+        const from = describe(source);
+        const to = describe(destination);
+        if (!services.writeMemory || !read || !CONVERTED.has(from.Format)
+            || !CONVERTED.has(to.Format))
+        {
+            return false;
+        }
+        const fromBytes = FORMAT_INFO[from.Format].bytesPerPixel;
+        const toBytes = FORMAT_INFO[to.Format].bytesPerPixel;
+        const width = rect.right - rect.left;
+        const row = new Uint8Array(width * toBytes);
+        for (let y = 0; y < rect.bottom - rect.top; y++)
+        {
+            const at = source.base + (rect.top + y) * pitchOf(from) + rect.left * fromBytes;
+            const bgra = expandTexels(from.Format, read(at, width * fromBytes), width);
+            for (let x = 0; x < width; x++)
+            {
+                const bits = packBits(to.Format, ((bgra[x * 4 + 3] << 24) | (bgra[x * 4 + 2] << 16)
+                    | (bgra[x * 4 + 1] << 8) | bgra[x * 4]) >>> 0);
+                for (let byte = 0; byte < toBytes; byte++)
+                {
+                    row[x * toBytes + byte] = (bits >>> (byte * 8)) & 0xff;
+                }
+            }
+            services.writeMemory(destination.base + (point.y + y) * pitchOf(to)
+                + point.x * toBytes, row);
+        }
+        return true;
+    };
+
+    /**
+     * What a surface is to StretchRect: a render target (a target surface or
+     * a target texture's level), a depth surface, a texture's level that is
+     * not a target, or an offscreen plain surface.
+     *
+     * @param {any} surface @returns {'target' | 'depth' | 'texture' | 'plain'}
+     */
+    const stretchKindOf = surface=>{
+        const desc = describe(surface);
+        return FORMAT_INFO[desc.Format].depth ? 'depth'
+            : (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 ? 'target'
+                : surface.container ? 'texture' : 'plain';
+    };
 
     /**
      * Fills a rectangle of a surface's guest bytes with one colour, packed the
@@ -4475,6 +4537,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return refuse('pool', 'a surface outside the default pool');
             }
+            // A texture's level that is not a target takes no copy, and an
+            // offscreen plain surface only another's; a texture's level goes
+            // only into a target (Wine's d3d9 test_stretch_rect).
+            const fromKind = stretchKindOf(source);
+            const toKind = stretchKindOf(destination);
+            if (toKind === 'texture' || (toKind === 'plain' && fromKind !== 'plain'))
+            {
+                return refuse('kind', `a ${fromKind} surface into a ${toKind} one`);
+            }
             const depth = FORMAT_INFO[from.Format].depth;
             if (depth !== FORMAT_INFO[to.Format].depth || (depth && from.Format !== to.Format))
             {
@@ -4532,6 +4603,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (from.Format !== to.Format && alphaTwin(from.Format) !== to.Format)
             {
+                if (!isGpuResident(source) && convertBytes(source, rect, destination,
+                    { x: target.left, y: target.top }))
+                {
+                    out.moves = [];
+                    renderer?.markDirty?.(destination);
+                    return D3D_OK;
+                }
                 return refuse('convert', 'a conversion between these formats is not made here');
             }
             if (isGpuResident(source))

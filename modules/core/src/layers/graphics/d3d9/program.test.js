@@ -350,7 +350,8 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
             .find(module=>module.label.startsWith('ps:'));
         assert.ok(pixelModule.code.includes('var tex1: texture_cube<f32>;'),
             'stage one samples the cube bound there');
-        assert.ok(pixelModule.code.includes('(in.t1 / in.t1.w)'), 'and divides by w');
+        assert.ok(pixelModule.code.includes('select(in.t1 / in.t1.w, vec4f(0.0),'
+            + ' in.t1.w == 0.0)'), 'and divides by w');
         assert.ok(pixelModule.code.includes('const _bump = 0;'));
 
         // The bump registers, two a stage from the first past the constants
@@ -417,8 +418,9 @@ test('a ps_1_1 projects by w whatever count the flags name,'
         assert.equal(h.device.release(), 0);
         return code;
     };
-    assert.ok((await divided(undefined)).includes('(in.t0 / in.t0.w)'), 'legacy, the default');
-    assert.ok((await divided('current')).includes('(in.t0 / in.t0.w)'), 'current');
+    const byW = 'select(in.t0 / in.t0.w, vec4f(0.0), in.t0.w == 0.0)';
+    assert.ok((await divided(undefined)).includes(byW), 'legacy, the default');
+    assert.ok((await divided('current')).includes(byW), 'current');
 });
 
 test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline for each',

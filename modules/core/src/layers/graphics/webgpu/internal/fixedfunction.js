@@ -124,12 +124,12 @@ export const generationOf = (/** @type {number} */ texCoordIndex)=>texCoordIndex
 
 /**
  * Whether the vertex stage computes a stage's coordinates: the three
- * camera-space modes. A sphere map is left to the set the vertex carries.
+ * camera-space modes and the sphere map.
  */
 export const generates = (/** @type {number} */ texCoordIndex)=>{
     const mode = generationOf(texCoordIndex);
     return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEPOSITION
-        || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
+        || mode === TCI.CAMERASPACEREFLECTIONVECTOR || mode === TCI.SPHEREMAP;
 };
 
 /**
@@ -138,8 +138,24 @@ export const generates = (/** @type {number} */ texCoordIndex)=>{
  */
 export const readsNormal = (/** @type {number} */ texCoordIndex)=>{
     const mode = generationOf(texCoordIndex);
-    return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
+    return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEREFLECTIONVECTOR
+        || mode === TCI.SPHEREMAP;
 };
+
+/**
+ * A sphere map's coordinate from the camera-space reflection vector: the
+ * vector's x and y over twice the length of (x, y, z - 1), moved to the
+ * middle of the map, and a zero third. Windows answers this (Wine's d3d9
+ * test_generated_texcoords: the reflection's z less one, the eye looking
+ * along +z).
+ *
+ * @param {string} reflection  a vec3f, read three times
+ * @returns {string}
+ */
+export function sphereMapOf(reflection){
+    return `vec3f(${reflection}.xy / (2.0 * length(vec3f(${reflection}.xy, ${reflection}.z - 1.0)))`
+        + ' + 0.5, 0.0)';
+}
 
 /**
  * The WGSL for one generated coordinate, from the camera-space position and
@@ -154,6 +170,8 @@ export function generatedCoordinate(texCoordIndex){
             return 'cameraNormal';
         case TCI.CAMERASPACEREFLECTIONVECTOR:
             return 'reflect(normalize(cameraPosition), cameraNormal)';
+        case TCI.SPHEREMAP:
+            return sphereMapOf('reflect(normalize(cameraPosition), cameraNormal)');
         default:
             return 'cameraPosition';
     }

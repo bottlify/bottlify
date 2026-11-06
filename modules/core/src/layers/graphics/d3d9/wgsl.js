@@ -67,7 +67,7 @@ import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import {
     clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, processedCoordinate,
-    sampledWithOnes,
+    sampledWithOnes, sphereMapOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
@@ -997,7 +997,10 @@ export function translateShader(parsed, options = {}){
     const stageCoordinates = stage=>{
         pixelCoordinates.add(stage);
         const by = options.projectedBy?.[stage] ?? '';
-        return by ? `(in.t${stage} / in.t${stage}.${by})` : `in.t${stage}`;
+        // A zero divisor reads at the origin, as Windows does (Wine's d3d9
+        // test_texture_transform_flags).
+        return by ? `select(in.t${stage} / in.t${stage}.${by}, vec4f(0.0),`
+            + ` in.t${stage}.${by} == 0.0)` : `in.t${stage}`;
     };
 
     /**
@@ -2188,6 +2191,7 @@ export function translateShader(parsed, options = {}){
 /** D3DTSS_TCI_ modes a hybrid's vertex stage generates a coordinate under. */
 const TCI_CAMERASPACENORMAL = 0x10000;
 const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
+const TCI_SPHEREMAP = 0x40000;
 
 /**
  * A vertex stage for a draw that binds a pixel shader and no vertex shader:
@@ -2356,7 +2360,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         const coordinate = mode === TCI_CAMERASPACENORMAL ? 'cameraNormal'
             : mode === TCI_CAMERASPACEREFLECTIONVECTOR
                 ? 'reflect(d3dNrm(cameraPosition), cameraNormal)'
-                : 'cameraPosition';
+                : mode === TCI_SPHEREMAP
+                    ? sphereMapOf('reflect(d3dNrm(cameraPosition), cameraNormal)')
+                    : 'cameraPosition';
         body.push(`    let generated${set} = vec4f(${coordinate}, 0.0);`,
             `    out.o${location} = ${processedCoordinate(`generated${set}`, 3,
                 carried[set]?.transform ?? 0, transformColumn(set))};`);

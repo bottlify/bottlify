@@ -1006,11 +1006,20 @@ export function packColour(format, colour){
     if (wide)
     {
         // Each channel the colour's fraction of 255, red first, as many as the
-        // format has.
+        // format has, in the format's own precision: a 32-bit float keeps all
+        // of it and a 16-bit fraction spreads the byte over both of its bytes
+        // (Wine's d3d9 test_colorfill), where through a half each lost bits.
         const channels = [16, 8, 0, 24].slice(0, wide.channels)
-            .map(shift=>toHalf(((colour >>> shift) & 0xff) / 0xff));
-        return halvesToStored(wide.stored, new Uint8Array(Uint16Array.from(channels).buffer),
-            wide.channels);
+            .map(shift=>(colour >>> shift) & 0xff);
+        if (wide.stored === 'float')
+        {
+            return new Uint8Array(Float32Array.from(channels, byte=>byte / 0xff).buffer);
+        }
+        if (wide.stored === 'unorm16')
+        {
+            return new Uint8Array(Uint16Array.from(channels, byte=>byte * 0x101).buffer);
+        }
+        return new Uint8Array(Uint16Array.from(channels, byte=>toHalf(byte / 0xff)).buffer);
     }
     const width = FORMAT_INFO[format]?.bytesPerPixel ?? 4;
     const bits = packBits(format, colour);
