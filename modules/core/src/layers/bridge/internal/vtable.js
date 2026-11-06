@@ -590,7 +590,10 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         }
 
         const wanted = readGuid(riid >>> 0);
-        const record = object.interfaceFor(wanted);
+        // An object may answer QueryInterface for less than it is published
+        // as (`queryFor`): an effect is handed out as ID3D10Effect and is
+        // asked for it in vain.
+        const record = object.queryFor ? object.queryFor(wanted) : object.interfaceFor(wanted);
         if (!record)
         {
             // Zeroed on failure: a program checks the pointer, not only the

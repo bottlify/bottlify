@@ -20,7 +20,7 @@ import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import { CONSTANT_TYPE, D3D10_SVC, D3D10_SVT, parseEffect } from './effect.js';
 import { FX_KIND, effectBinary } from './effect-fixtures.js';
 import {
-    D3D10_EFFECT_VARIABLE, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
+    D3D10_EFFECT_VARIABLE, EffectRefused, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
 } from './effect-object.js';
 import { D3DERR_INVALIDCALL, containerOf } from './reflection.js';
 import {
@@ -139,6 +139,108 @@ test('an effect describes itself and finds variables by index, name and semantic
     held.device.release();
     assert.equal(effect.release(), 0);
     assert.equal(device.release(), 0, 'the effect gave its reference to the device back');
+});
+
+test('a pool flags what it holds POOLED, and a child finds its shared buffers and variables'
+    + ' there, its own first (test_effect_pool)', ()=>{
+    const TEXTURE2D = { name: 'Texture2D', object: FX_KIND.TEXTURE2D };
+    const device = createDevice();
+    const poolData = parseEffect(effectBinary({
+        buffers: [{ name: 's_cb', size: 16, annotations: [{ name: 's', type: STRING,
+            strings: ['value'] }], variables: [
+            { name: 'f1', offset: 0, semantic: 'COLOR0', type: FLOAT },
+            { name: 'f2', offset: 4, semantic: 'COLOR1', type: FLOAT }] }],
+        objects: [{ name: 's_texture', type: TEXTURE2D }],
+    }));
+    assert.ok('effect' in poolData);
+    const pool = createEffect(poolData.effect, { device, isPool: true });
+    assert.equal(pool.IsPool(), true);
+    const shared = pool.GetConstantBufferByName('s_cb');
+    assert.equal(descOf(shared).Flags, D3D10_EFFECT_VARIABLE.POOLED);
+    assert.equal(descOf(shared.GetAnnotationByIndex(0)).Flags,
+        D3D10_EFFECT_VARIABLE.POOLED | D3D10_EFFECT_VARIABLE.ANNOTATION);
+    assert.equal(descOf(pool.GetVariableByName('s_texture')).Flags,
+        D3D10_EFFECT_VARIABLE.POOLED);
+
+    const childData = parseEffect(effectBinary({
+        buffers: [{ name: 'l_cb', size: 16, variables: [
+            { name: 'f0', offset: 0, semantic: 'COLOR0', type: FLOAT }] }],
+        sharedBuffers: [{ name: 's_cb', size: 16, variables: [
+            { name: 'f1', offset: 0, type: FLOAT }, { name: 'f2', offset: 4, type: FLOAT }] }],
+        sharedObjects: [{ name: 's_texture', type: TEXTURE2D }],
+    }));
+    assert.ok('effect' in childData);
+    const child = createEffect(childData.effect, { device, pool });
+    assert.deepEqual(descOf(child), { IsChildEffect: true, ConstantBuffers: 1,
+        SharedConstantBuffers: 1, GlobalVariables: 1, SharedGlobalVariables: 3, Techniques: 0 });
+    assert.equal(child.GetConstantBufferByIndex(1), shared, 'the pool\'s own, after the child\'s');
+    assert.equal(child.GetConstantBufferByName('s_cb'), shared);
+    assert.equal(child.GetVariableByIndex(1), pool.GetVariableByName('f1'));
+    assert.equal(child.GetVariableBySemantic('COLOR0'), child.GetVariableByIndex(0),
+        'the child\'s own first');
+    assert.equal(child.GetVariableBySemantic('COLOR1'), pool.GetVariableByName('f2'));
+    assert.equal(child.GetVariableByName('s_texture'), pool.GetVariableByName('s_texture'));
+    assert.equal(child.release(), 0);
+
+    // A child sharing what its pool lacks is no effect.
+    const orphanData = parseEffect(effectBinary({
+        sharedObjects: [{ name: 'missing', type: TEXTURE2D }],
+    }));
+    assert.ok('effect' in orphanData);
+    assert.throws(()=>createEffect(orphanData.effect, { device, pool }), EffectRefused);
+    assert.equal(pool.release(), 0, 'the child gave back its reference to the pool');
+    assert.equal(device.release(), 0);
+});
+
+test('Optimize drops annotations, technique and pass names and shader bytecode, and keeps'
+    + ' variable names (test_effect_optimize, test_effect_annotations)', ()=>{
+    const { device, effect } = made({
+        buffers: [{ name: 'cb', size: 16, annotations: [{ name: 's', type: STRING,
+            strings: ['a'] }], variables: [{ name: 'f', offset: 0, type: FLOAT }] }],
+        techniques: [{ name: 'Render', annotations: [{ name: 's', type: STRING, strings: ['b'] }],
+            passes: [{ name: 'P0', annotations: [{ name: 's', type: STRING, strings: ['c'] }] }] }],
+    });
+    const technique = effect.GetTechniqueByIndex(0);
+    const pass = technique.GetPassByIndex(0);
+    const cb = effect.GetConstantBufferByName('cb');
+    assert.equal(descOf(cb).Annotations, 1);
+    assert.equal(cb.GetAnnotationByName('s').IsValid(), true);
+    assert.equal(effect.Optimize(), S_OK);
+    assert.equal(effect.IsOptimized(), true);
+    assert.equal(descOf(cb).Annotations, 0);
+    assert.equal(cb.GetAnnotationByName('s').IsValid(), false);
+    assert.equal(descOf(technique).Name, null);
+    assert.equal(descOf(technique).Annotations, 0);
+    assert.equal(descOf(pass).Name, null);
+    assert.equal(descOf(pass).Annotations, 0);
+    assert.equal(effect.GetTechniqueByName('Render').IsValid(), false);
+    assert.equal(technique.GetPassByName('P0').IsValid(), false);
+    assert.equal(effect.GetTechniqueByIndex(0), technique);
+    assert.equal(effect.GetVariableByName('f').IsValid(), true, 'variables keep their names');
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0);
+});
+
+test('two annotations holding one string each hand out a pointer of their own', ()=>{
+    // fxc writes a string once however many hold it; the runtime copies it
+    // for each (Wine's test_effect_constant_buffer_type).
+    const { device, effect } = made({
+        buffers: [{ name: 'cb', size: 16, annotations: [
+            { name: 'a', type: STRING, strings: ['STRING'] },
+            { name: 'b', type: STRING, strings: ['STRING'] }],
+        variables: [{ name: 'f', offset: 0, type: FLOAT }] }],
+    });
+    const cb = effect.GetConstantBufferByName('cb');
+    const [first] = cb.GetAnnotationByIndex(0).As(VARIABLE_KIND.STRING).GetStrings(0, 1);
+    const [second] = cb.GetAnnotationByIndex(1).As(VARIABLE_KIND.STRING).GetStrings(0, 1);
+    assert.notEqual(first.at, second.at);
+    const image = effect.image();
+    const text = (/** @type {number} */ at)=>String.fromCharCode(...image.subarray(at,
+        image.indexOf(0, at)));
+    assert.equal(text(first.at), 'STRING');
+    assert.equal(text(second.at), 'STRING');
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0);
 });
 
 test('a variable describes itself, and a structure its members and an array its elements', ()=>{

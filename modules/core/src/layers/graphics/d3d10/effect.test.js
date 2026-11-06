@@ -195,8 +195,10 @@ test('an effect this runtime cannot read says why rather than answering half of 
     const cut = container([{ name: 'FX10', bytes: chunk.slice(0, chunk.length - 8) }]);
     assert.match(errorOf(cut), /cut short/);
 
+    // A header that says the effect shares a buffer with a pool, over a
+    // structured part that holds none.
     const pooled = chunk.slice();
     new DataView(pooled.buffer).setUint32(16, 1, true);
-    assert.match(errorOf(container([{ name: 'FX10', bytes: pooled }])), /pool/,
-        'a child of a pool');
+    assert.match(errorOf(container([{ name: 'FX10', bytes: pooled }])), /cut short/,
+        'a shared buffer the structured part does not hold');
 });

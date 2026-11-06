@@ -168,6 +168,19 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
         forgotten(pointer){
             onForgotten(adapter, pointer >>> 0);
         },
+        /**
+         * What QueryInterface answers for `id`: the interface, unless the
+         * object says it answers less than it is published as (`answers`).
+         *
+         * @param {string} id
+         */
+        queryFor(id){
+            if (typeof api.answers === 'function' && !api.answers(id))
+            {
+                return null;
+            }
+            return adapter.interfaceFor(id);
+        },
         /** @param {string} id */
         interfaceFor(id){
             // IUnknown is every object's, and answers with one record whichever

@@ -4541,6 +4541,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     });
 
     const effects = createEffectSeam({
+        sync: syncRings,
         publisher, fields, memory, allocate, free, report, constantString, readCString, handBack,
         writeObjects, deviceInterfaces: ()=>deviceInterfaces,
         children: {
@@ -4866,8 +4867,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
          * HRESULT D3D10CreateEffectPoolFromMemory(void*, SIZE_T, UINT, ID3D10Device*,
          *     ID3D10EffectPool**)
          */
-        D3D10CreateEffectPoolFromMemory: refusal(20, 4, 'D3D10CreateEffectPoolFromMemory:'
-            + ' effect pools are not implemented, nor the effects that share their variables'),
+        D3D10CreateEffectPoolFromMemory: { argBytes: 20, handler: effects.poolFromMemory },
         /** HRESULT D3D10DisassembleEffect(ID3D10Effect*, BOOL, ID3D10Blob**) */
         D3D10DisassembleEffect: refusal(12, 2, 'D3D10DisassembleEffect: no disassembler is'
             + ' kept here'),

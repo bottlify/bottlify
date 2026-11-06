@@ -1267,8 +1267,8 @@ test('D3D10CompileShader compiles, and a compile that fails says why in the erro
 
         assert.equal(h.d3d10.D3D10DisassembleShader.argBytes, 20);
         assert.equal(h.d3d10.D3D10DisassembleShader.handler([0, 0, 0, 0, outs]) >>> 0, E_NOTIMPL);
-        // An effect without a device is D3DERR_INVALIDCALL, with the out pointer
-        // cleared; a pool is refused, as its child would be.
+        // An effect or a pool without a device is D3DERR_INVALIDCALL, with the
+        // out pointer cleared.
         const effectAt = h.box.place([0xdeadbeef]);
         assert.equal(h.d3d10.D3D10CreateEffectFromMemory.argBytes, 24);
         assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([0, 0, 0, 0, 0, effectAt])
@@ -1277,9 +1277,8 @@ test('D3D10CompileShader compiles, and a compile that fails says why in the erro
         h.box.memory.writeU32(effectAt, 0xdeadbeef);
         assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.argBytes, 20);
         assert.equal(h.d3d10.D3D10CreateEffectPoolFromMemory.handler([0, 0, 0, 0, effectAt])
-            >>> 0, E_NOTIMPL);
+            >>> 0, 0x8876086c);
         assert.equal(h.box.memory.readU32(effectAt), 0);
-        assert.ok(h.divergences.some(line=>line.includes('effect pools')));
     });
 
 test('D3D10CompileEffectFromMemory compiles an effect D3D10CreateEffectFromMemory makes',
@@ -1836,6 +1835,54 @@ function effectOn(spec){
     };
 }
 
+test('an effect pool is its effect, and an effect answers a query for ID3D10EffectPool alone'
+    + ' (test_effect_pool)', ()=>{
+    const E_NOINTERFACE = 0x80004002;
+    const FLOAT_TYPE = { name: 'float', numeric: /** @type {const} */ ({ layout: 'scalar',
+        base: 'float' }) };
+    const e = effectOn({ buffers: [{ name: 's_cb', size: 16, variables: [
+        { name: 'f1', offset: 0, type: FLOAT_TYPE }] }] });
+    const { h, at, bytes, device } = e;
+    const out = h.box.place([0]);
+    const query = (/** @type {number} */ pointer, /** @type {string} */ id)=>
+        h.box.call(pointer, 0, [h.box.placeGuid(id), out]) >>> 0;
+    // The regular effect: not as itself nor IUnknown, as a pool with itself.
+    assert.equal(query(e.effect, IID.IUnknown), E_NOINTERFACE);
+    assert.equal(query(e.effect, IID.ID3D10Effect), E_NOINTERFACE);
+    assert.equal(query(e.effect, IID.ID3D10EffectPool), S_OK);
+    assert.equal(h.box.memory.readU32(out), e.effect);
+    h.box.call(e.effect, 2);
+
+    const poolAt = h.box.place([0]);
+    assert.equal(h.seam.effects.poolFromMemory([at, bytes.length, 0, device, poolAt]) >>> 0,
+        S_OK);
+    const pool = h.box.memory.readU32(poolAt);
+    const asEffect = h.box.call(pool, 3);
+    assert.notEqual(asEffect, 0);
+    assert.equal(h.box.call(asEffect, slot(ID3D10EFFECT_SLOTS, 'IsPool')), 1);
+    assert.equal(h.box.call(asEffect, 1), 2, 'one count: the effect is the pool');
+    h.box.call(asEffect, 2);
+    assert.equal(query(asEffect, IID.ID3D10EffectPool), S_OK);
+    assert.equal(h.box.memory.readU32(out), pool);
+    h.box.call(pool, 2);
+
+    // A child needs both its pool and D3D10_EFFECT_COMPILE_CHILD_EFFECT.
+    const childAt = h.box.place([0]);
+    const child = (/** @type {number} */ flags, /** @type {number} */ withPool)=>
+        h.seam.effects.fromMemory([at, bytes.length, flags, device, withPool, childAt]) >>> 0;
+    assert.equal(child(0, pool), E_INVALIDARG);
+    assert.equal(child(1, 0), E_INVALIDARG);
+    assert.equal(child(1, pool), S_OK);
+    const made = h.box.memory.readU32(childAt);
+    const desc = h.box.allocate(24);
+    assert.equal(h.box.call(made, slot(ID3D10EFFECT_SLOTS, 'GetDesc'), [desc]), S_OK);
+    assert.equal(h.box.memory.readU32(desc), 1, 'IsChildEffect');
+    assert.equal(h.box.call(pool, 1), 3, 'the child holds its pool');
+    h.box.call(pool, 2);
+    assert.equal(h.box.call(made, 2), 0);
+    assert.equal(h.box.call(pool, 2), 0);
+});
+
 test('an effect is made on a device and walked through its interfaces', ()=>{
     // Wine's d3d10 effect tests, through the vtables a program calls.
     const E_FAIL = 0x80004005;
@@ -1958,7 +2005,8 @@ test('an effect is made on a device and walked through its interfaces', ()=>{
     assert.equal(e.references(), e.baseline);
     const pool = h.box.place([0]);
     assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([e.at, e.bytes.length, 0, e.device,
-        pool, e.outAt]) >>> 0, E_NOTIMPL, 'the child of a pool is refused');
+        pool, e.outAt]) >>> 0, E_INVALIDARG,
+    'a pool without D3D10_EFFECT_COMPILE_CHILD_EFFECT, as Windows refuses it (test_effect_pool)');
     assert.equal(h.box.memory.readU32(e.outAt), 0);
     assert.equal((/** @type {Record<string, any>} */ (h.seam.libraries['D3D10_1.dll']))
         .D3D10CreateEffectFromMemory, h.d3d10.D3D10CreateEffectFromMemory,

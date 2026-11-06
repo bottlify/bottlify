@@ -81,6 +81,11 @@ import { FX_VERSION } from './effect.js';
  * @property {{ name: string, annotations?: FixtureAnnotation[],
  *              passes: { name: string, annotations?: FixtureAnnotation[],
  *                        assignments?: FixtureAssignment[] }[] }[]} [techniques]
+ * @property {{ name: string, size: number,
+ *              variables: { name: string, type: FixtureEffectType, offset: number,
+ *                           semantic?: string }[] }[]} [sharedBuffers]
+ *     What a child effect shares with its pool, as fxc writes a `shared` buffer.
+ * @property {{ name: string, type: FixtureEffectType }[]} [sharedObjects]
  */
 
 /** The numeric type's sizes, laid out in 16-byte registers as a constant buffer is. */
@@ -299,6 +304,23 @@ export function effectBinary(spec){
         }
         putAnnotations(object.annotations);
     }
+    const sharedBuffers = spec.sharedBuffers ?? [];
+    const sharedObjects = spec.sharedObjects ?? [];
+    let sharedNumeric = 0;
+    for (const buffer of sharedBuffers)
+    {
+        put([stringAt(buffer.name), buffer.size, 0, buffer.variables.length, 0xffffffff]);
+        for (const variable of buffer.variables)
+        {
+            sharedNumeric++;
+            put([stringAt(variable.name), typeAt(variable.type),
+                variable.semantic ? stringAt(variable.semantic) : 0, variable.offset, 0, 0]);
+        }
+    }
+    for (const object of sharedObjects)
+    {
+        put([stringAt(object.name), typeAt(object.type), 0, 0xffffffff]);
+    }
     for (const technique of techniques)
     {
         put([stringAt(technique.name), technique.passes.length]);
@@ -316,7 +338,8 @@ export function effectBinary(spec){
     }
 
     const header = [spec.version ?? FX_VERSION.FX_4_0, buffers.length, numericVariables,
-        objects.length, 0, 0, 0, techniques.length, block.length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        objects.length, sharedBuffers.length, sharedNumeric, sharedObjects.length,
+        techniques.length, block.length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     const words = [...header];
     const bytes = new Uint8Array(words.length * 4 + block.length + structured.length * 4);
     const view = new DataView(bytes.buffer);

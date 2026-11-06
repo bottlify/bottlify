@@ -37,7 +37,7 @@
 import { attachCom } from './com.js';
 import { D3D10_BIND, D3D10_USAGE, E_FAIL, E_INVALIDARG, IID, S_OK } from './constants.js';
 import { ASSIGNMENT, CONSTANT_TYPE, D3D10_SVC, D3D10_SVT } from './effect.js';
-import { stateDesc } from './effect-states.js';
+import { SAMPLER_TEXTURE, stateDesc } from './effect-states.js';
 import {
     getComponents, getMatrices, setComponents, setMatrices,
 } from './effect-values.js';
@@ -270,11 +270,18 @@ function unpackInto(type, packed, into, at, cursor = { read: 0 }){
     }
 }
 
+/** A child effect whose pool lacks what it shares: no effect is made. */
+export class EffectRefused extends Error {}
+
 /**
  * @typedef {Object} EffectServices
  * @property {any} device   The ID3D10Device the effect was made on.
  * @property {(detail: string) => void} [report]  Where a divergence is said.
  * @property {() => void} [onLastRef]
+ * @property {boolean} [isPool]  Made by D3D10CreateEffectPoolFromMemory: every
+ *     variable, buffer and annotation of it is flagged POOLED.
+ * @property {any} [pool]  The pool a child effect takes its shared buffers and
+ *     variables from, by name.
  */
 
 /**
@@ -284,6 +291,29 @@ function unpackInto(type, packed, into, at, cursor = { read: 0 }){
 export function createEffect(data, services){
     const { device } = services;
     const report = services.report ?? (()=>{});
+    const pooled = services.isPool ? D3D10_EFFECT_VARIABLE.POOLED : 0;
+    const pool = services.pool ?? null;
+    // What a child effect shares, the pool's own objects, found by name: a
+    // name its pool lacks makes no effect.
+    const sharedBuffers = (data.sharedBuffers ?? []).map(shared=>{
+        const found = pool?.GetConstantBufferByName(shared.name);
+        if (!found || found.invalid)
+        {
+            throw new EffectRefused(`the pool has no constant buffer ${shared.name}`);
+        }
+        return found;
+    });
+    const sharedObjects = (data.sharedObjects ?? []).map(shared=>{
+        const found = pool?.GetVariableByName(shared.name);
+        if (!found || found.invalid)
+        {
+            throw new EffectRefused(`the pool has no variable ${shared.name}`);
+        }
+        return found;
+    });
+    /** @type {any[]} */
+    const sharedVariables = [...sharedBuffers.flatMap(buffer=>buffer.variables()),
+        ...sharedObjects];
     /**
      * The effect, made first so that everything built below can name it;
      * its methods are attached at the end.
@@ -291,7 +321,24 @@ export function createEffect(data, services){
      * @type {any}
      */
     const self = {};
+    // Optimize drops what only reflection reads, as Windows does (Wine's
+    // test_effect_optimize, test_effect_annotations): every annotation, the
+    // names of techniques and passes, and a shader's bytecode, stream output
+    // declaration and signature counts; variables keep their names.
     let optimized = false;
+    /**
+     * An object's annotations as reflection sees them: none once optimized.
+     *
+     * @param {(index: number) => any} at @param {readonly { name: string }[]} list
+     */
+    const annotationsOf = (at, list)=>({
+        count: ()=>(optimized ? 0 : list.length),
+        /** @param {number} index */
+        byIndex: index=>(optimized ? INVALID.variables.variable : at(index)),
+        /** @param {string | null} name */
+        byName: name=>(optimized ? INVALID.variables.variable
+            : at(list.findIndex(entry=>entry.name === name))),
+    });
     /** Everything made for this effect that is not the effect. @type {object[]} */
     const made = [];
     /**
@@ -422,8 +469,8 @@ export function createEffect(data, services){
 
     /** @param {VariableShape} shape @returns {any} */
     const variableObject = shape=>{
-        const annotationAt = objectsOf(shape.fxAnnotations, annotationVariable,
-            INVALID.variables.variable);
+        const annotations = annotationsOf(objectsOf(shape.fxAnnotations, annotationVariable,
+            INVALID.variables.variable), shape.fxAnnotations);
         /** @type {any[] | null} */
         let members = null;
         const memberList = ()=>(members ??= shape.members ? shape.members() : []);
@@ -447,14 +494,12 @@ export function createEffect(data, services){
                 Name: shape.name,
                 Semantic: shape.semanticAt >= 0 ? { at: shape.semanticAt } : null,
                 Flags: shape.flags,
-                Annotations: shape.fxAnnotations.length,
+                Annotations: annotations.count(),
                 BufferOffset: shape.bufferOffset,
                 ExplicitBindPoint: shape.explicitBindPoint,
             })),
-            GetAnnotationByIndex: annotationAt,
-            /** @param {string | null} name */
-            GetAnnotationByName: name=>annotationAt(shape.fxAnnotations.findIndex(entry=>
-                entry.name === name)),
+            GetAnnotationByIndex: annotations.byIndex,
+            GetAnnotationByName: annotations.byName,
             GetMemberByIndex: memberAt,
             /** @param {string | null} name */
             GetMemberByName: name=>findMember(member=>member.shape.memberName === name),
@@ -670,16 +715,19 @@ export function createEffect(data, services){
                             const shader = slot.shader ?? null;
                             const signature = shader ? signatures.get(shader) : null;
                             const reflected = shader ? reflectionOf(shader) : null;
+                            const whole = shader && !optimized ? shader : null;
                             return {
                                 InputSignature: signature ? { at: signature.at } : null,
                                 IsInline: Boolean(slot.inline),
-                                Bytecode: shader ? { at: shader.at } : null,
-                                BytecodeLength: shader ? shader.bytecode.length : 0,
-                                SODecl: shader && shader.streamOutputAt >= 0
-                                    ? { at: shader.streamOutputAt }
+                                Bytecode: whole ? { at: whole.at } : null,
+                                BytecodeLength: whole ? whole.bytecode.length : 0,
+                                SODecl: whole && whole.streamOutputAt >= 0
+                                    ? { at: whole.streamOutputAt }
                                     : null,
-                                NumInputSignatureEntries: reflected?.inputs.length ?? 0,
-                                NumOutputSignatureEntries: reflected?.outputs.length ?? 0,
+                                NumInputSignatureEntries: whole ? reflected?.inputs.length ?? 0
+                                    : 0,
+                                NumOutputSignatureEntries: whole ? reflected?.outputs.length ?? 0
+                                    : 0,
                             };
                         });
                     },
@@ -833,7 +881,8 @@ export function createEffect(data, services){
             name: { at: fx.nameAt },
             semantic: fx.semantic,
             semanticAt: fx.semanticAt,
-            flags: slot < 0 && fx.bindPoint >= 0 ? D3D10_EFFECT_VARIABLE.EXPLICIT_BIND_POINT : 0,
+            flags: slot < 0 ? (fx.bindPoint >= 0 ? D3D10_EFFECT_VARIABLE.EXPLICIT_BIND_POINT : 0)
+                | pooled : 0,
             bufferOffset: 0,
             explicitBindPoint: slot < 0 && fx.bindPoint >= 0 ? fx.bindPoint : 0,
             type: ()=>(slot >= 0 ? elementTypeOf(fx.type) : typeOf(fx.type)),
@@ -873,18 +922,18 @@ export function createEffect(data, services){
             }
             variable = numericVariable({
                 name: { at: fx.nameAt }, memberName: fx.name, semantic: null, semanticAt: -1,
-                flags: D3D10_EFFECT_VARIABLE.ANNOTATION, fxAnnotations: [], type: fx.type,
-                element: false, buffer: null, storage: { bytes, at: 0 },
+                flags: D3D10_EFFECT_VARIABLE.ANNOTATION | pooled, fxAnnotations: [],
+                type: fx.type, element: false, buffer: null, storage: { bytes, at: 0 },
             });
         }
         else
         {
-            const slots = fx.strings.map(at=>({ stringAt: at }));
+            const slots = (annotationStrings.get(fx) ?? fx.strings).map(at=>({ stringAt: at }));
             variable = objectVariable({
                 name: fx.name, nameAt: fx.nameAt, semantic: null, semanticAt: -1, bindPoint: -1,
                 type: fx.type, annotations: [], elements: slots,
             }, slots, -1);
-            variable.shape.flags = D3D10_EFFECT_VARIABLE.ANNOTATION;
+            variable.shape.flags = D3D10_EFFECT_VARIABLE.ANNOTATION | pooled;
         }
         return variable;
     };
@@ -904,7 +953,7 @@ export function createEffect(data, services){
             return ()=>numericVariable({
                 name: { at: variable.nameAt }, memberName: variable.name,
                 semantic: variable.semantic, semanticAt: variable.semanticAt,
-                flags: variable.flags & D3D10_EFFECT_VARIABLE.EXPLICIT_BIND_POINT,
+                flags: (variable.flags & D3D10_EFFECT_VARIABLE.EXPLICIT_BIND_POINT) | pooled,
                 fxAnnotations: variable.annotations, type: variable.type, element: false,
                 buffer, storage: { bytes, at: variable.bufferOffset },
             });
@@ -928,7 +977,7 @@ export function createEffect(data, services){
             name: { at: fx.nameAt },
             semantic: null,
             semanticAt: -1,
-            flags: fx.bindPoint >= 0 ? D3D10_EFFECT_VARIABLE.EXPLICIT_BIND_POINT : 0,
+            flags: (fx.bindPoint >= 0 ? D3D10_EFFECT_VARIABLE.EXPLICIT_BIND_POINT : 0) | pooled,
             bufferOffset: 0,
             explicitBindPoint: fx.bindPoint >= 0 ? fx.bindPoint : 0,
             type: ()=>cbufferType,
@@ -973,6 +1022,16 @@ export function createEffect(data, services){
             owned.push(buffer.gpu);
         }
         buffer.dirty = true;
+        // What a shader that reads it is bound to, uploaded first if it
+        // changed: a child effect binds its pool's buffers through this.
+        buffer.uploaded = ()=>{
+            if (buffer.override)
+            {
+                return buffer.override;
+            }
+            upload(buffer);
+            return buffer.gpu;
+        };
     }
 
     /** @type {WeakMap<object, import('./reflection.js').ShaderReflection | null>} */
@@ -1012,6 +1071,43 @@ export function createEffect(data, services){
             imageLength += Math.ceil(bytes.length / 4) * 4;
         }
     };
+
+    /**
+     * A string of the unstructured block copied into the image, its own:
+     * fxc writes a string once however many annotations or variables hold
+     * it, and the runtime hands each holder a pointer of its own (Wine's
+     * test_effect_constant_buffer_type).
+     *
+     * @param {number} at @returns {number}  where the copy lies
+     */
+    const ownString = at=>{
+        const source = data.unstructured;
+        let end = at;
+        while (end < source.length && source[end] !== 0)
+        {
+            end++;
+        }
+        const bytes = source.slice(at, Math.min(end + 1, source.length));
+        const placed = imageLength;
+        appendix.push(bytes);
+        imageLength += Math.ceil(bytes.length / 4) * 4;
+        return placed;
+    };
+    /** Each annotation's strings, copied. @type {Map<import('./effect.js').FxAnnotation, number[]>} */
+    const annotationStrings = new Map();
+    for (const annotation of [
+        ...data.buffers.flatMap(buffer=>[...buffer.annotations,
+            ...buffer.variables.flatMap(variable=>variable.annotations)]),
+        ...data.objects.flatMap(object=>object.annotations),
+        ...data.techniques.flatMap(technique=>[...technique.annotations,
+            ...technique.passes.flatMap(pass=>pass.annotations)]),
+    ])
+    {
+        if (annotation.strings.length > 0)
+        {
+            annotationStrings.set(annotation, annotation.strings.map(ownString));
+        }
+    }
 
     /**
      * A shader an effect holds, made on the device when the effect is. A
@@ -1057,7 +1153,8 @@ export function createEffect(data, services){
 
     const objects = data.objects.map(fx=>{
         /** @type {any[]} */
-        const slots = fx.elements.map(element=>({ ...element }));
+        const slots = fx.elements.map(element=>(element.stringAt === undefined ? { ...element }
+            : { ...element, stringAt: ownString(element.stringAt) }));
         const kind = kindOf(fx.type);
         const stateBlock = STATE_BLOCKS[kind];
         for (const slot of slots)
@@ -1188,7 +1285,8 @@ export function createEffect(data, services){
     }
 
     /** @param {string} name */
-    const variableNamed = name=>globals().find(variable=>variable.shape.memberName === name)
+    const variableNamed = name=>[...globals(), ...sharedVariables]
+        .find(variable=>variable.shape.memberName === name)
         ?? null;
 
     /**
@@ -1216,9 +1314,13 @@ export function createEffect(data, services){
                 : fxType.svt === D3D10_SVT.INT ? CONSTANT_TYPE.INT : CONSTANT_TYPE.UINT;
         /** @type {import('./effect.js').FxConstant[]} */
         const values = [];
+        // A scalar stands for every component a state takes, as a vector's
+        // components do one each (Wine's test_effect_dynamic_numeric_field:
+        // a blend factor set from one float).
+        const scalar = fxType.rows * fxType.columns <= 1;
         for (let index = 0; index < count; index++)
         {
-            const at = storage.at + (from + index) * 4;
+            const at = storage.at + (from + (scalar ? 0 : index)) * 4;
             values.push({
                 type, bits: at + 4 <= storage.bytes.length ? view.getUint32(at, true) : 0,
             });
@@ -1291,8 +1393,8 @@ export function createEffect(data, services){
 
     /** @param {import('./effect.js').FxPass} fx */
     const passObject = fx=>{
-        const annotationAt = objectsOf(fx.annotations, annotationVariable,
-            INVALID.variables.variable);
+        const annotations = annotationsOf(objectsOf(fx.annotations, annotationVariable,
+            INVALID.variables.variable), fx.annotations);
         /** @type {Map<number, { variable: any, index: number }>} */
         const shaders = new Map();
         /** @param {number} state */
@@ -1387,19 +1489,34 @@ export function createEffect(data, services){
          * @param {import('./effect.js').FxShader} shader
          */
         const bindFor = (stage, shader)=>{
+            /**
+             * The view a sampler's Texture state names, or null for NULL or none.
+             *
+             * @param {any} slot
+             */
+            const samplerTexture = slot=>{
+                const assignment = (slot?.assignments ?? [])
+                    .find((/** @type {any} */ entry)=>entry.state === SAMPLER_TEXTURE);
+                if (assignment?.kind !== ASSIGNMENT.VARIABLE
+                    && assignment?.kind !== ASSIGNMENT.CONSTANT_INDEX)
+                {
+                    return null;
+                }
+                const texture = variableNamed(assignment.variable ?? '');
+                return texture?.kind === VARIABLE_KIND.SHADER_RESOURCE
+                    ? texture.shape.slots[assignment.element ?? 0]?.resource ?? null
+                    : null;
+            };
             for (const binding of bindingsOf(shader))
             {
                 if (binding.type === SHADER_INPUT.CBUFFER)
                 {
-                    const buffer = buffers.find(entry=>entry.shape.memberName === binding.name);
-                    if (buffer?.override)
+                    const buffer = [...buffers, ...sharedBuffers]
+                        .find(entry=>entry.shape.memberName === binding.name);
+                    const bound = buffer?.uploaded?.();
+                    if (bound)
                     {
-                        device[`${stage}SetConstantBuffers`](binding.bindPoint, [buffer.override]);
-                    }
-                    else if (buffer?.gpu)
-                    {
-                        upload(buffer);
-                        device[`${stage}SetConstantBuffers`](binding.bindPoint, [buffer.gpu]);
+                        device[`${stage}SetConstantBuffers`](binding.bindPoint, [bound]);
                     }
                     continue;
                 }
@@ -1411,6 +1528,15 @@ export function createEffect(data, services){
                 {
                     device[`${stage}SetShaderResources`](binding.bindPoint,
                         Array.from({ length: count }, (_, index)=>slots[index]?.resource ?? null));
+                }
+                else if (binding.type === SHADER_INPUT.TEXTURE
+                    && named?.kind === VARIABLE_KIND.SAMPLER)
+                {
+                    // A shader compiled from Direct3D 9's tex2D reads the
+                    // texture its sampler's Texture state names, NULL
+                    // included (Wine's test_effect_state_groups).
+                    device[`${stage}SetShaderResources`](binding.bindPoint,
+                        Array.from({ length: count }, (_, index)=>samplerTexture(slots[index])));
                 }
                 else if (binding.type === SHADER_INPUT.SAMPLER
                     && named?.kind === VARIABLE_KIND.SAMPLER)
@@ -1478,8 +1604,8 @@ export function createEffect(data, services){
                 const signature = inputSignature();
                 const factor = stateValues(PASS_STATE.BLEND_FACTOR, 4);
                 return {
-                    Name: { at: fx.nameAt },
-                    Annotations: fx.annotations.length,
+                    Name: optimized ? null : { at: fx.nameAt },
+                    Annotations: annotations.count(),
                     IAInputSignature: signature ? { at: signature.at } : null,
                     IAInputSignatureSize: signature ? signature.size : 0,
                     StencilRef: convert(stateValues(PASS_STATE.STENCIL_REF, 1)?.[0], 'uint'),
@@ -1499,10 +1625,8 @@ export function createEffect(data, services){
                 out.desc = shaderOf(state);
                 return S_OK;
             },
-            GetAnnotationByIndex: annotationAt,
-            /** @param {string | null} name */
-            GetAnnotationByName: name=>annotationAt(fx.annotations.findIndex(entry=>
-                entry.name === name)),
+            GetAnnotationByIndex: annotations.byIndex,
+            GetAnnotationByName: annotations.byName,
             /**
              * Sets what the pass assigns, in its order, and binds what each
              * shader it sets reads; what it does not assign is left as it is.
@@ -1548,8 +1672,11 @@ export function createEffect(data, services){
                         case PASS_STATE.GEOMETRY_SHADER: {
                             const stage = STAGE_OF[assignment.state];
                             const { variable } = shaderOf(assignment.state);
+                            // A pass that assigns NULL takes the stage's
+                            // shader away (Wine's test_effect_local_shader).
                             if (variable.invalid)
                             {
+                                device[`${stage}SetShader`](null);
                                 break;
                             }
                             const slot = shaderSlotOf(assignment.state);
@@ -1576,8 +1703,8 @@ export function createEffect(data, services){
     };
 
     const techniques = data.techniques.map(fx=>{
-        const annotationAt = objectsOf(fx.annotations, annotationVariable,
-            INVALID.variables.variable);
+        const annotations = annotationsOf(objectsOf(fx.annotations, annotationVariable,
+            INVALID.variables.variable), fx.annotations);
         const passAt = objectsOf(fx.passes, passObject, INVALID.pass);
         return kept({
             invalid: false,
@@ -1586,16 +1713,15 @@ export function createEffect(data, services){
             IsValid: ()=>true,
             /** @param {{ desc?: Record<string, any> } | null} out */
             GetDesc: out=>describeInto(out, ()=>({
-                Name: { at: fx.nameAt }, Passes: fx.passes.length,
-                Annotations: fx.annotations.length,
+                Name: optimized ? null : { at: fx.nameAt }, Passes: fx.passes.length,
+                Annotations: annotations.count(),
             })),
-            GetAnnotationByIndex: annotationAt,
-            /** @param {string | null} name */
-            GetAnnotationByName: name=>annotationAt(fx.annotations.findIndex(entry=>
-                entry.name === name)),
+            GetAnnotationByIndex: annotations.byIndex,
+            GetAnnotationByName: annotations.byName,
             GetPassByIndex: passAt,
             /** @param {string | null} name */
-            GetPassByName: name=>passAt(fx.passes.findIndex(pass=>pass.name === name)),
+            GetPassByName: name=>(optimized ? INVALID.pass
+                : passAt(fx.passes.findIndex(pass=>pass.name === name))),
             /** @param {Uint8Array | null} mask */
             ComputeStateBlockMask: mask=>{
                 if (!mask)
@@ -1610,13 +1736,18 @@ export function createEffect(data, services){
 
     // --- the effect ---
 
+    // A child effect's own buffers and variables come first, then the ones
+    // it shares with its pool (Wine's test_effect_pool).
+    const allBuffers = ()=>[...buffers, ...sharedBuffers];
+    const allVariables = ()=>[...globals(), ...sharedVariables];
     /** @param {number} index */
-    const bufferAt = index=>(index >= 0 && index < buffers.length
-        ? buffers[index]
-        : INVALID.variables.constantBuffer);
+    const bufferAt = index=>{
+        const list = allBuffers();
+        return index >= 0 && index < list.length ? list[index] : INVALID.variables.constantBuffer;
+    };
     /** @param {number} index */
     const variableAt = index=>{
-        const list = globals();
+        const list = allVariables();
         return index >= 0 && index < list.length ? list[index] : INVALID.variables.variable;
     };
     /** @param {number} index */
@@ -1625,10 +1756,17 @@ export function createEffect(data, services){
         : INVALID.technique);
 
     device.addRef?.();
+    pool?.addRef?.();
     return attachCom(Object.assign(self, {
         data,
+        // QueryInterface answers ID3D10EffectPool alone, IUnknown and
+        // ID3D10Effect not: a pool's effect is the pool, and an effect that
+        // is no pool answers with itself (Wine's test_effect_pool, as
+        // Windows answers).
+        /** @param {string} id */
+        answers: id=>id === IID.ID3D10EffectPool,
         IsValid: ()=>true,
-        IsPool: ()=>false,
+        IsPool: ()=>services.isPool === true,
         /** @param {{ device?: any }} out */
         GetDevice(out){
             device.addRef?.();
@@ -1637,29 +1775,27 @@ export function createEffect(data, services){
         },
         /** @param {{ desc?: Record<string, any> } | null} out */
         GetDesc: out=>describeInto(out, ()=>({
-            IsChildEffect: false,
+            IsChildEffect: pool !== null,
             ConstantBuffers: buffers.length,
-            SharedConstantBuffers: 0,
+            SharedConstantBuffers: sharedBuffers.length,
             GlobalVariables: globals().length,
-            SharedGlobalVariables: 0,
+            SharedGlobalVariables: sharedVariables.length,
             Techniques: techniques.length,
         })),
         GetConstantBufferByIndex: bufferAt,
         /** @param {string | null} name */
-        GetConstantBufferByName: name=>bufferAt(buffers.findIndex(buffer=>
+        GetConstantBufferByName: name=>bufferAt(allBuffers().findIndex(buffer=>
             buffer.shape.memberName === name)),
         GetVariableByIndex: variableAt,
         /** @param {string | null} name */
         GetVariableByName: name=>variableNamed(name ?? '\0') ?? INVALID.variables.variable,
         /** @param {string | null} semantic */
-        GetVariableBySemantic: semantic=>globals().find(variable=>
+        GetVariableBySemantic: semantic=>allVariables().find(variable=>
             sameSemantic(variable.shape.semantic, semantic)) ?? INVALID.variables.variable,
         GetTechniqueByIndex: techniqueAt,
         /** @param {string | null} name */
-        GetTechniqueByName: name=>techniqueAt(techniques.findIndex(technique=>
-            technique.fx.name === name)),
-        // Optimizing lets the runtime drop what only reflection reads; this
-        // one keeps it, which a program that goes on asking cannot tell.
+        GetTechniqueByName: name=>(optimized ? INVALID.technique
+            : techniqueAt(techniques.findIndex(technique=>technique.fx.name === name))),
         Optimize: ()=>{
             optimized = true;
             return S_OK;
@@ -1682,7 +1818,7 @@ export function createEffect(data, services){
         /** The constant buffers, with their bytes. */
         buffers: ()=>buffers,
     }), {
-        interfaces: [IID.ID3D10Effect],
+        interfaces: [IID.ID3D10Effect, IID.ID3D10EffectPool],
         onLastRef: ()=>{
             for (const buffer of buffers)
             {
@@ -1700,6 +1836,7 @@ export function createEffect(data, services){
                 object.release?.();
             }
             device.release?.();
+            pool?.release?.();
             services.onLastRef?.();
         },
     });
