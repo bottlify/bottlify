@@ -1265,6 +1265,39 @@ test('recorded: a lock with neither flag sends only the locked range when no dra
         out.buffer.release();
     });
 
+test('recorded: a managed buffer\'s first lock sends all of it, the next only the range',
+    async()=>{
+        // Wine's test_max_index16 locks four vertices of a managed buffer and
+        // writes the 65 536th: Direct3D's first copy of the buffer is its whole
+        // system copy, so the draw reads that vertex.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(1024, 0, FVF_QUAD, D3DPOOL.MANAGED, out), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(0, 64, locked, 0), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits) + 1000, Uint8Array.of(7, 8, 9));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        await h.present();
+        const vertices = ()=>gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('vertices'));
+        const [first] = vertices();
+        assert.ok(first.bufferOffset <= 1000 && first.bufferOffset + first.size >= 1003,
+            'the bytes past the lock went');
+        assert.deepEqual([...first.bytes.subarray(1000 - first.bufferOffset,
+            1003 - first.bufferOffset)], [7, 8, 9]);
+
+        assert.equal(out.buffer.Lock(0, 64, locked, 0), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits) + 900, Uint8Array.of(1));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        await h.present();
+        const [, second] = vertices();
+        assert.ok(!second || second.bufferOffset + second.size <= 64, 'then the range alone');
+        out.buffer.release();
+    });
+
 test('recorded: a lock with neither flag after a draw renames, and carries the rest on the GPU',
     async()=>{
         // The draw already recorded reads the bytes the lock overwrites, so the

@@ -5675,6 +5675,9 @@ export function createRenderer(options){
                 label: index ? 'indices' : 'vertices',
             }),
             held: null,
+            // A managed or system-memory buffer: what Direct3D first copies
+            // where the GPU reads it is the whole of its system copy.
+            fresh: buffer.pool === D3DPOOL.MANAGED || buffer.pool === D3DPOOL.SYSTEMMEM,
         };
         buffers.set(buffer, made);
         // The last release gives the buffer's GPU memory back, as a texture's
@@ -9809,6 +9812,17 @@ export function createRenderer(options){
                 lockedBuffers.set(buffer, counted);
             }
             verify?.locked(buffer, flags, offset, length);
+            // A managed buffer's first lock sends all of it: the first time
+            // Direct3D puts its system copy where the GPU reads it, it puts
+            // the whole of it, and a program that wrote past the range it
+            // locked is drawn with those bytes (Wine's test_max_index16 locks
+            // four vertices and writes the 65 536th).
+            if (entry.fresh)
+            {
+                entry.fresh = false;
+                offset = 0;
+                length = buffer.length;
+            }
             // `app.debug.bufferLocks('rename')`: every lock renames, so what a
             // queued draw reads is never written over -- for telling a defect
             // in following what draws read apart from one elsewhere.
