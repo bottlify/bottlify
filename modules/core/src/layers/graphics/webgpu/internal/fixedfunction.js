@@ -1372,7 +1372,9 @@ function fragmentBody(state, specularEnable, position = 'input.position',
             + ' - 0.055, 12.92 * saturate(current.rgb), saturate(current.rgb) <= vec3f(0.0031308)),'
             + ' current.a);'
         : '';
-    return `${stages}${highlight}${fog}${alphaTest}${colourKey}${encode}`;
+    // A luminance target keeps red for all three colours.
+    const luminance = state.luminance ? '\n    current = vec4f(current.rrr, current.a);' : '';
+    return `${stages}${highlight}${fog}${alphaTest}${colourKey}${encode}${luminance}`;
 }
 
 /**

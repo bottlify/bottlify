@@ -612,6 +612,7 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, srgbWrite?: boolean,
+ *     luminance?: boolean,
  *     nanProbe?: boolean,
  *     tableFogOverDepth?: boolean, rectangleBump?: boolean, ones?: readonly number[],
  *     sampling?: readonly (SamplerVariant | undefined)[],
@@ -2121,6 +2122,13 @@ export function translateShader(parsed, options = {}){
                     `    oC${target} = vec4f(select(1.055 * pow(${c}, vec3f(1.0 / 2.4)) - 0.055,`
                     + ` 12.92 * ${c}, ${c} <= vec3f(0.0031308)), oC${target}.a);`);
             }
+        }
+        // A luminance target keeps red for all three colours (Wine's d3d9
+        // pixelshader_blending_test, L8).
+        if (options.luminance === true && pixelOutputs.has(0))
+        {
+            const at = body.indexOf('    out.oC0 = oC0;');
+            body.splice(at < 0 ? body.length : at, 0, '    oC0 = vec4f(oC0.rrr, oC0.a);');
         }
         entry = 'ps_main';
     }

@@ -1873,6 +1873,31 @@ test('a clear under SRGBWRITEENABLE writes its colour encoded, as a draw does', 
     assert.equal(device.SetRenderState(D3DRS.SRGBWRITEENABLE, 0), D3D_OK);
 });
 
+test('a draw into a luminance target writes its red into all three colours', async()=>{
+    // Wine's d3d9 pixelshader_blending_test, L8: the GPU's copy has four
+    // channels, read back and sampled as one.
+    const h = harness();
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const target = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.L8, false, target), D3D_OK);
+    assert.equal(device.SetRenderTarget(0, target.surface), D3D_OK);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        /** @type {string} */ (call.descriptor.code)).join('\n');
+    assert.ok(code.includes('current = vec4f(current.rrr, current.a);'));
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    back.surface.release();
+    target.surface.release();
+});
+
 test('StretchRect scales an offscreen plain surface into a target, from its bytes', async()=>{
     // Wine's d3d9 stretchrect_test: offscreenplain into a render target,
     // scaling, is allowed. The plain surface's pixels are its guest bytes,

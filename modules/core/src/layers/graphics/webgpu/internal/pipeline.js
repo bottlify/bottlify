@@ -232,6 +232,8 @@ function lookUp(table, value, what){
  * @property {number} alphaFunc
  * @property {boolean} [srgbWrite]       D3DRS_SRGBWRITEENABLE into an eight-bit target:
  *     the fragment stage encodes its colour to sRGB.
+ * @property {boolean} [luminance]       A luminance target: the fragment stage writes its
+ *     red into all three colours.
  * @property {number} fogMode            D3DFOG, the curve; NONE is 0.
  * @property {number} [fogSource]
  *     FOG_SOURCE, where the factor comes from; absent is vertex fog for a
@@ -368,6 +370,7 @@ export function pipelineKey(state){
         ...(state.vertexLayoutKey === undefined ? [] : [state.vertexLayoutKey]),
         ...(state.normalizeNormals ? ['normalize'] : []),
         ...(state.srgbWrite ? ['srgb'] : []),
+        ...(state.luminance ? ['lum'] : []),
         ...(state.flatShading ? ['flat'] : []),
         ...(state.rangeFog ? ['range'] : []),
         ...(state.points

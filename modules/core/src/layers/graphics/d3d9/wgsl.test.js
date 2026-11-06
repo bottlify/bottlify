@@ -1524,3 +1524,14 @@ test('a vertex shader below model 3 leaves the diffuse it does not write one', (
     const written = code.indexOf('out.oD0 = vec4f(_t.x, out.oD0.y');
     assert.ok(written > code.indexOf('out.oD0 = vec4f(1.0);'), 'before the shader writes its part');
 });
+
+test('a pixel shader writing a luminance target writes its red into all three colours', ()=>{
+    // Wine's d3d9 pixelshader_blending_test, L8.
+    const parsed = parseShader([PS_2_0, ...dclSampler(0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.CONST, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const code = translateShader(parsed, { luminance: true }).wgsl ?? '';
+    assert.ok(code.indexOf('oC0 = vec4f(oC0.rrr, oC0.a);') >= 0, code);
+    assert.ok(code.indexOf('oC0 = vec4f(oC0.rrr, oC0.a);') < code.indexOf('out.oC0 = oC0;'));
+    assert.ok(!(translateShader(parsed).wgsl ?? '').includes('oC0.rrr'));
+});

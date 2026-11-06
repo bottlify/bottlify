@@ -2090,6 +2090,21 @@ export const srgbEncode = linear=>(linear <= 0.0031308 ? linear * 12.92
 const encodesSrgb = (model, targetFormat)=>srgbHonoured.value && writesSrgb(model)
     && targetFormat !== undefined && srgbViewFormats(targetFormat).length > 0;
 
+/** Luminance formats a target can be: one channel kept for all three colours. */
+/** @type {ReadonlySet<number>} */
+const LUMINANCE_TARGETS = new Set([D3DFMT.L8, D3DFMT.A8L8, D3DFMT.A4L4, D3DFMT.L16]);
+
+/**
+ * Whether the target keeps one luminance for the three colours: the GPU's
+ * copy is four channels, so a draw writes its red into all three, which is
+ * what reading the target back or sampling it gives (Wine's d3d9
+ * pixelshader_blending_test, L8).
+ *
+ * @param {RenderModel} model
+ */
+const writesLuminance = model=>model.renderTarget !== undefined && model.renderTarget !== null
+    && LUMINANCE_TARGETS.has(describe(model.renderTarget).Format);
+
 /**
  * A draw's sRGB states as a dump writes them: `w` for a target written as
  * sRGB, then each stage sampled as sRGB; nothing when neither: what the
@@ -2676,6 +2691,7 @@ export function pipelineStateOf(model, shape){
         targetFormat: shape.targetFormat,
         depthFormat: shape.depthFormat,
         ...(encodesSrgb(model, shape.targetFormat) ? { srgbWrite: true } : {}),
+        ...(writesLuminance(model) ? { luminance: true } : {}),
         topology: shape.topology === POINT_QUADS ? 'point-list' : shape.topology,
         depthTest,
         depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
@@ -7069,10 +7085,11 @@ export function createRenderer(options){
         // whose format Direct3D 9 writes as sRGB, the eight-bit ones; a
         // floating-point target takes the value as it is.
         const srgbWrite = encodesSrgb(model, surfaceFor(model.renderTarget).format);
+        const luminance = writesLuminance(model);
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${sampling.pixelKey}`
                 + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : '')
-                + (srgbWrite ? '|srgb' : '')
+                + (srgbWrite ? '|srgb' : '') + (luminance ? '|lum' : '')
                 + (rectangleBump ? '|rb' : '')
                 + (discards ? `|k${planes.count}` : ''),
             ()=>translateShader(
@@ -7086,6 +7103,7 @@ export function createRenderer(options){
                     ...(sampling.pixelVariants ? { sampling: sampling.pixelVariants } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                     ...(srgbWrite ? { srgbWrite } : {}),
+                    ...(luminance ? { luminance } : {}),
                     ...(nanProbe ? { nanProbe } : {}),
                     ...(rectangleBump ? { rectangleBump } : {}),
                     ...(discards ? { clip: planes } : {}),

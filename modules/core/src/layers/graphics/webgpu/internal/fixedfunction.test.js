@@ -209,6 +209,11 @@ test('the colour-plus-alpha forms, the signed dot product and ARG0 as a third op
     // Its result is the stage's alpha too, whatever ALPHAOP says (Wine's d3d9
     // dp3_alpha_test): the stage writes all four channels of the product.
     assert.ok(codeOf(D3DTOP.DOTPRODUCT3).includes('    current = saturate(vec4f(saturate(4.0'));
+    // A luminance target keeps red for all three colours (Wine's d3d9
+    // pixelshader_blending_test, L8).
+    assert.ok(generate(baseState({ fvf, luminance: true })).code
+        .includes('current = vec4f(current.rrr, current.a);'));
+    assert.ok(!generate(baseState({ fvf })).code.includes('current.rrr'));
     // ARG0 is the addend and the interpolant, and defaults to CURRENT: ARG1 * ARG2 + ARG0,
     // as Windows draws it (Wine's wined3d says MSDN has the order wrong).
     assert.ok(codeOf(D3DTOP.MULTIPLYADD).includes(`(${T}) * (input.diffuse) + (current)`));
