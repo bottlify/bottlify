@@ -1446,7 +1446,23 @@ export function createCorkHost(config){
             const entry = runtime.entryOf(at, x87Top());
             if (entry >= 0)
             {
+                // With `timings`: what the tier ran in place of the run's misses,
+                // shared among the starts it noted (`interpretedAt`).
+                const tierWatched = timings && tierInstalled && wasmTier !== null;
+                const tierBefore = tierWatched ? wasmTier?.entered() ?? 0 : 0;
+                const startsBefore = tierWatched ? wasmTier?.startIndex() ?? 0 : 0;
                 const exit = runtime.run(entry, remaining);
+                if (tierWatched)
+                {
+                    const inTier = ((wasmTier?.entered() ?? 0) - tierBefore) >>> 0;
+                    const noted = Math.min(256,
+                        ((wasmTier?.startIndex() ?? 0) - startsBefore) >>> 0);
+                    const share = noted > 0 ? Math.round(inTier / noted) : 0;
+                    for (let i = share > 0 ? 1 : noted + 1; i <= noted; i++)
+                    {
+                        runtime.interpretedAt?.(starts[(startsBefore + noted - i) & 255], share);
+                    }
+                }
                 jumpedIn = exit.kind === 'untranslated';
                 remaining -= exit.retired;
                 ran += exit.retired;
