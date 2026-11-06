@@ -450,7 +450,49 @@ export function validateShader(tokens, kind, supported){
     {
         return D3DERR_INVALIDCALL;
     }
+    // A constant register past the version's last is refused (Wine's
+    // test_vertex_shader_constant and test_pixel_shader_constant).
+    const limits = constantLimits(kind, major, parsed.version.minor);
+    for (const instruction of parsed.instructions)
+    {
+        for (const operand of [instruction.dest, ...instruction.sources])
+        {
+            const limit = operand ? limits[operand.type] : undefined;
+            if (operand && limit !== undefined && operand.relative === null
+                && operand.index >= limit)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+        }
+    }
     return D3D_OK;
+}
+
+/**
+ * How many float, integer and boolean constants a version has, by register
+ * type: vertex shaders 256 floats and 16 of each other kind; pixel shaders 8
+ * floats in 1.x, 32 in 2.0 with no integer or boolean ones (2_x has 16 of
+ * each), and 224 floats in 3.0.
+ *
+ * @param {string} kind @param {number} major @param {number} minor
+ * @returns {Record<number, number>}
+ */
+function constantLimits(kind, major, minor){
+    if (kind === SHADER_KIND.VERTEX)
+    {
+        return { [REGISTER.CONST]: 256, [REGISTER.CONSTINT]: 16, [REGISTER.CONSTBOOL]: 16 };
+    }
+    if (major < 2)
+    {
+        return { [REGISTER.CONST]: 8, [REGISTER.CONSTINT]: 0, [REGISTER.CONSTBOOL]: 0 };
+    }
+    if (major === 2)
+    {
+        const extended = minor === 1;
+        return { [REGISTER.CONST]: 32, [REGISTER.CONSTINT]: extended ? 16 : 0,
+            [REGISTER.CONSTBOOL]: extended ? 16 : 0 };
+    }
+    return { [REGISTER.CONST]: 224, [REGISTER.CONSTINT]: 16, [REGISTER.CONSTBOOL]: 16 };
 }
 
 /**
