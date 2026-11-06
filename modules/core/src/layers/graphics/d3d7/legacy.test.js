@@ -141,6 +141,29 @@ const zeros = (count, stride)=>new Uint8Array(count * stride);
 
 // --- the object ---
 
+test('material and matrix handles are the process\'s: one DirectDraw object\'s name the same'
+    + ' through another\'s (ddraw1 test_multiple_devices)', ()=>{
+    const f = fixture(1);
+    const root = createDirectDraw({ version: 4, screenWidth: 64, screenHeight: 48 });
+    root.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const other = createLegacyDirect3D(createDirect3D7(root), f.textures);
+    const material = f.legacy.createMaterial();
+    const handle = material.getHandle(f.device);
+    assert.equal(other.createViewport().setBackground(handle), D3D_OK);
+    const matrix = f.device.createMatrix();
+    assert.equal(f.device.setMatrix(matrix, [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]),
+        D3D_OK);
+    const target = surface(root);
+    const second = other.createDevice(DEVICE_IDS.HAL, target, 1).device;
+    assert.deepEqual([...second.getMatrix(matrix)],
+        [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]);
+    assert.equal(second.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(material.release(), 0);
+    assert.equal(root.release('IDirectDraw4'), 0);
+    f.done();
+});
+
 test('the older versions make the software and hardware devices, and no T&L one', ()=>{
     const f = fixture();
     assert.deepEqual(f.legacy.devices().map((/** @type {any} */ device)=>device.id),

@@ -324,6 +324,14 @@ export function createTextureHandles(){
 
     return {
         existing,
+        // Material and matrix handles are the process's as well: a handle
+        // from one DirectDraw object's device names the same material or
+        // matrix through another's (Wine's ddraw1 test_multiple_devices).
+        /** @type {Map<number, any>} */
+        materials: new Map(),
+        /** @type {Map<number, Float32Array>} */
+        matrices: new Map(),
+        next: { material: 1, matrix: 1 },
 
         /**
          * A surface's handle, made on first asking. Nothing keeps a surface
@@ -700,16 +708,15 @@ function createLight(){
 
 /**
  * The Direct3D object of the older versions, over one Direct3D 7 object.
- * Material handles are the object's: a handle is a small number a program
- * passes back in a light state, a background or an execute buffer.
+ * Its materials' handles are small numbers a program passes back in a light
+ * state, a background or an execute buffer, from the process's table.
  *
  * @param {any} d3d7  What createDirect3D7 made for the same DirectDraw object.
- * @param {ReturnType<typeof createTextureHandles>} textures  The surfaces' handles.
+ * @param {ReturnType<typeof createTextureHandles>} textures  The process's handles:
+ *        surfaces', materials' and matrices'.
  */
 export function createLegacyDirect3D(d3d7, textures){
-    /** @type {Map<number, any>} */
-    const materials = new Map();
-    let nextMaterial = 1;
+    const materials = textures.materials;
 
     /** @param {number} handle @returns {any | null} */
     const materialOf = handle=>materials.get(handle >>> 0) ?? null;
@@ -765,7 +772,7 @@ export function createLegacyDirect3D(d3d7, textures){
                     let handle = handles.get(device);
                     if (handle === undefined)
                     {
-                        handle = nextMaterial++;
+                        handle = textures.next.material++;
                         handles.set(device, handle);
                         materials.set(handle, material);
                     }
@@ -919,9 +926,8 @@ function createLegacyDevice(inner, version, legacy){
     /** Draws, by kind, for GetStats. */
     const stats = { triangles: 0, lines: 0, points: 0, vertices: 0 };
 
-    /** @type {Map<number, Float32Array>} the first generation's matrices, by handle */
-    const matrices = new Map();
-    let nextMatrix = 1;
+    /** The first generation's matrices, by handle: the process's (`createTextureHandles`). */
+    const matrices = textures.matrices;
     /**
      * The handle each transform was last set from by an execute buffer: the
      * transform is that matrix, and SetMatrix on it moves the transform with
@@ -1677,7 +1683,7 @@ function createLegacyDevice(inner, version, legacy){
         // --- the first generation's matrices ---
 
         createMatrix(){
-            const handle = nextMatrix++;
+            const handle = textures.next.matrix++;
             matrices.set(handle, Float32Array.from(IDENTITY));
             return handle;
         },
