@@ -931,9 +931,13 @@ function differences(version, options, steps){
     });
     // Every refusal is reported (`refusals.js`), and a program refused alike
     // down both paths is told so alike: only what the guest path alone said counts.
-    const said = [...plain.divergences];
+    // Matched by method and code: a refusal's arguments are guest pointers, and
+    // the two paths' heaps place a surface apart.
+    /** @param {string} line */
+    const bare = line=>line.replace(/\([^)]*\) answered /, ' answered ');
+    const said = plain.divergences.map(bare);
     const divergences = guest.divergences.filter(line=>{
-        const at = said.indexOf(line);
+        const at = said.indexOf(bare(line));
         if (at < 0)
         {
             return true;
