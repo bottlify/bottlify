@@ -23,7 +23,8 @@ import { createGraphicsLibraries } from './exports.js';
 import { createDirectDrawSeam } from './ddraw.js';
 import { displayModes } from '../../win32/user32/display.js';
 import {
-    IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE7_SLOTS,
+    IDIRECTDRAW7_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS,
+    IDIRECTDRAWSURFACE7_SLOTS,
     IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
 import {
@@ -499,6 +500,19 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
         [hdc, 0x5508]), DD_OK);
     assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5508)), model);
     h.release(h.box.memory.readU32(0x5508));
+    // IDirectDraw4's hands back the first generation's interface.
+    const riid4 = h.box.putGuid(0x4000, IID_IDirectDraw4);
+    assert.equal(h.box.call(ddraw, 0, [riid4, 0x550c]), DD_OK);
+    const fourth = h.box.memory.readU32(0x550c);
+    assert.equal(h.box.call(fourth, slot(IDIRECTDRAW4_SLOTS, 'GetSurfaceFromDC'),
+        [hdc, 0x5508]), DD_OK);
+    const first = h.box.memory.readU32(0x5508);
+    const riid1 = h.box.putGuid(0x4000, IID_IDirectDrawSurface);
+    assert.equal(h.box.call(surface, 0, [riid1, 0x5510]), DD_OK);
+    assert.equal(first, h.box.memory.readU32(0x5510), 'the IDirectDrawSurface pointer');
+    h.release(first);
+    h.release(h.box.memory.readU32(0x5510));
+    h.release(fourth);
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
         width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
         format: '555', sizeImage: 0,

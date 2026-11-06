@@ -2196,9 +2196,13 @@ export function createDirectDraw(options = {}){
         // is refused (Wine's test_caps, DDCREATE_EMULATIONONLY).
         if (options.emulated)
         {
-            if ((request.caps & DDSCAPS_ZBUFFER) !== 0
-                && (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0
-                && request.zBufferBitDepth !== 16 && request.zBufferBitDepth !== 32)
+            const depthBits = (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0
+                ? request.zBufferBitDepth
+                : (request.flags & DDSD_PIXELFORMAT) !== 0
+                    && ((request.pixelFormat?.flags ?? 0) & DDPF_ZBUFFER) !== 0
+                    ? request.pixelFormat?.bitCount : undefined;
+            if ((request.caps & DDSCAPS_ZBUFFER) !== 0 && depthBits !== undefined
+                && depthBits !== 16 && depthBits !== 32)
             {
                 return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
             }

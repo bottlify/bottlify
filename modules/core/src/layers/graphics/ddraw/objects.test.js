@@ -1947,3 +1947,16 @@ test('before IDirectDraw4 a surface is never made over the program\'s memory'
         assert.equal(made.hr, DDERR_INVALIDPARAMS, `version ${version}`);
     }
 });
+
+test('without hardware a depth buffer named by its pixel format is 16 or 32 bits too'
+    + ' (test_caps, ddraw4)', ()=>{
+    const ddraw = createDirectDraw({ version: 4, emulated: true });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const depth = (/** @type {number} */ bits)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT, caps: DDSCAPS_ZBUFFER, width: 8, height: 8,
+        pixelFormat: { size: 0x20, flags: 0x400, fourCC: 0, bitCount: bits, redMask: 0,
+            greenMask: 0xffffffff >>> (32 - bits), blueMask: 0, alphaMask: 0 } },
+    { version: 4 }).hr >>> 0;
+    assert.equal(depth(24), 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(depth(16), DD_OK);
+});

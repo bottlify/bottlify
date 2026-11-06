@@ -2215,7 +2215,11 @@ export function createDirectDrawSeam(
                 return DDERR_NOTFOUND;
             }
             surface.addRef();
-            handBack(surface, surfaceInterfaces, generation.surface, out >>> 0);
+            // IDirectDraw4 hands back the first generation's interface, as
+            // DDRAW.dll's export does; IDirectDraw7 its own (Wine's ddraw4 and
+            // ddraw7 test_get_surface_from_dc).
+            handBack(surface, surfaceInterfaces, generation.surface === IID_IDirectDrawSurface4
+                ? IID_IDirectDrawSurface : generation.surface, out >>> 0);
             return DD_OK;
         },
 
