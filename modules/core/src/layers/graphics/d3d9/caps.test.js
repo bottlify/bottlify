@@ -42,6 +42,9 @@ test('no reserved bit is set in the words a conformance test masks', ()=>{
     // The pipeline blends alpha with its own factors under
     // D3DRS_SEPARATEALPHABLENDENABLE, so the device says so.
     assert.equal(words.PrimitiveMiscCaps & 0x00020000, 0x00020000);
+    // Pre-transformed vertices are clipped under D3DRS_CLIPPING, so the
+    // device says D3DPMISCCAPS_CLIPTLVERTS (Wine's d3d9 depth_clamp_test).
+    assert.equal(words.PrimitiveMiscCaps & 0x00000200, 0x00000200);
     // Each D3DDTCAPS bit claimed is a type the programmable path has a vertex
     // format for: bit 0 is UBYTE4 (5), bit n past it is D3DDECLTYPE 7 + n.
     assert.notEqual(words.DeclTypes & 0x2, 0, 'UBYTE4N');

@@ -56,6 +56,7 @@ const D3DPMISCCAPS_CULLNONE = 0x00000010;
 const D3DPMISCCAPS_CULLCW = 0x00000020;
 const D3DPMISCCAPS_CULLCCW = 0x00000040;
 const D3DPMISCCAPS_COLORWRITEENABLE = 0x00000080;
+const D3DPMISCCAPS_CLIPTLVERTS = 0x00000200;
 const D3DPMISCCAPS_TSSARGTEMP = 0x00000400;
 const D3DPMISCCAPS_BLENDOP = 0x00000800;
 const D3DPMISCCAPS_PERSTAGECONSTANT = 0x00008000;
@@ -196,10 +197,11 @@ export function capabilityWords(caps, identity = {}){
             | D3DDEVCAPS_PUREDEVICE,
         // The stages' temporary register and constants are the generated
         // cascade's own.
+        // Pre-transformed vertices are clipped as the rest are, under D3DRS_CLIPPING.
         PrimitiveMiscCaps: D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
             | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP
             | D3DPMISCCAPS_SEPARATEALPHABLEND | D3DPMISCCAPS_TSSARGTEMP
-            | D3DPMISCCAPS_PERSTAGECONSTANT,
+            | D3DPMISCCAPS_PERSTAGECONSTANT | D3DPMISCCAPS_CLIPTLVERTS,
         // Depth bias and anisotropy are the pipeline's and the sampler's; the
         // level bias, which no WebGPU sampler takes, is the shader's.
         RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX

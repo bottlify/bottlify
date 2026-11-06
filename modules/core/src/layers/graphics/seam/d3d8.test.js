@@ -1850,6 +1850,8 @@ test('every capability claimed is one the renderer honours', ()=>{
         'a border colour and mirror-once, which the shader makes over a clamping sampler');
     assert.equal(caps.PrimitiveMiscCaps & 0x00000400, 0x00000400,
         'D3DPMISCCAPS_TSSARGTEMP, the generated cascade\'s temporary register');
+    assert.equal(caps.PrimitiveMiscCaps & 0x00000200, 0x00000200,
+        'D3DPMISCCAPS_CLIPTLVERTS: pre-transformed vertices are clipped (depth_clamp_test)');
     assert.equal(caps.RasterCaps & 0x00010000, 0x00010000,
         'D3DPRASTERCAPS_FOGRANGE: range fog fades by the distance from the eye');
 

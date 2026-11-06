@@ -176,6 +176,7 @@ const D3DPMISCCAPS_CULLNONE = 0x00000010;
 const D3DPMISCCAPS_CULLCW = 0x00000020;
 const D3DPMISCCAPS_CULLCCW = 0x00000040;
 const D3DPMISCCAPS_COLORWRITEENABLE = 0x00000080;
+const D3DPMISCCAPS_CLIPTLVERTS = 0x00000200;
 const D3DPMISCCAPS_TSSARGTEMP = 0x00000400;
 const D3DPMISCCAPS_BLENDOP = 0x00000800;
 
@@ -2825,9 +2826,11 @@ export function createDirect3D8Seam(
                 | D3DDEVCAPS_TEXTUREVIDEOMEMORY | D3DDEVCAPS_TEXTURENONLOCALVIDMEM
                 | D3DDEVCAPS_CANRENDERAFTERFLIP,
             // The stages' temporary register is the generated cascade's own.
+            // Pre-transformed vertices are clipped as the rest are, under D3DRS_CLIPPING.
             PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
                 | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
-                | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP | D3DPMISCCAPS_TSSARGTEMP,
+                | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP | D3DPMISCCAPS_TSSARGTEMP
+                | D3DPMISCCAPS_CLIPTLVERTS,
             // D3DRS_ZBIAS and MAXANISOTROPY are read, and the level bias, which
             // the shader adds where no WebGPU sampler takes one.
             RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
