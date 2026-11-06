@@ -1338,7 +1338,9 @@ export function createDirectDraw(options = {}){
              * @param {ColorKey | null} key  Null removes the key.
              */
             setColorKey(which, key){
-                if (sublevel)
+                // As with a palette, a level below the top keys on its own
+                // before DirectDraw 7 (Wine's test_ck_complex, each version).
+                if (sublevel && spec.version === 7)
                 {
                     return DDERR_NOTONMIPMAPSUBLEVEL;
                 }

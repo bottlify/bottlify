@@ -1181,7 +1181,7 @@ test('before IDirectDraw7 a full mip chain ends when the shorter side reaches on
     }
 });
 
-test('before IDirectDraw7 a mip sublevel holds a palette of its own', ()=>{
+test('before IDirectDraw7 a mip sublevel holds a palette and a colour key of its own', ()=>{
     // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap_palette set one on every level.
     for (const version of /** @type {const} */ ([1, 2, 4]))
     {
@@ -1193,6 +1193,10 @@ test('before IDirectDraw7 a mip sublevel holds a palette of its own', ()=>{
             new Array(256).fill(0)).palette);
         assert.equal(level1.getPalette().hr, DDERR_NOPALETTEATTACHED);
         assert.equal(level1.setPalette(palette), DD_OK, `version ${version}`);
+        // And a colour key of its own (test_ck_complex).
+        assert.equal(level1.setColorKey(DDCKEY_SRCBLT, { low: 0xff, high: 0xff }), DD_OK);
+        assert.equal(level1.getColorKey(DDCKEY_SRCBLT).key?.low, 0xff);
+        assert.equal(top.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY, 'the top has none');
         const got = level1.getPalette();
         assert.equal(got.palette, palette);
         got.palette.release();
