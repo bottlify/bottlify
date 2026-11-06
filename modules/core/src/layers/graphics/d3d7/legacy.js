@@ -1451,7 +1451,8 @@ function createLegacyDevice(inner, version, legacy){
          *
          * @param {number} state
          */
-        answersFor: (/** @type {number} */ state)=>ownStates.has(state >>> 0),
+        answersFor: (/** @type {number} */ state)=>ownStates.has(state >>> 0)
+            || state >>> 0 === RS.LOCALVIEWER,
 
         /**
          * A call a routine wrote into the Direct3D 7 device's ring, told as the

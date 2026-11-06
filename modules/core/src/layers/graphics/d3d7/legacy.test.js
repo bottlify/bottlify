@@ -512,6 +512,7 @@ test('these versions light as Direct3D 1-6: lights by the range left, no LOCALVI
     const mark = f.calls.length;
     assert.equal(f.device.setRenderState(142, 0), D3D_OK, 'LOCALVIEWER is taken');
     assert.equal(f.since('SetRenderState', mark).length, 0, 'and changes nothing');
+    assert.ok(f.device.answersFor(142), 'nor reaches the device through a guest ring');
     f.device.EndScene();
     assert.equal(viewport.deleteLight(light), D3D_OK);
     assert.equal(light.release(), 0);
