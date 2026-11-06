@@ -210,7 +210,11 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells, settle
          * @returns {number | undefined}
          */
         refusal(id){
-            return declared.get(id)?.refuses?.(api)
+            // An interface the object has not at all is refused for that, before
+            // why this one could not make it (a seventh-generation surface asked
+            // for a first-generation device: test_surface_qi).
+            const has = typeof api.supports !== 'function' || api.supports(id);
+            return (has ? declared.get(id)?.refuses?.(api) : undefined)
                 ?? (typeof api.refusal === 'function' ? api.refusal(id) : undefined);
         },
         /** @param {string} id */
