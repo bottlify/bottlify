@@ -453,6 +453,9 @@ export function createWgl(options){
                 height: record.size?.height ?? drawable.height,
                 doubleBuffered: record.doubleBuffered,
                 depthBits: record.depthBits,
+                // A window's buffers are the window's (`gpu.js` attach); a
+                // bitmap's context draws on the processor, into its own.
+                key: record.size ? undefined : drawable.key,
             });
             current.set(thread, { context, hdc });
             if (record.size)

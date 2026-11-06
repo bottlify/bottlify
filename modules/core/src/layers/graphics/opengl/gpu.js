@@ -439,6 +439,13 @@ export function createGpuRenderer(services){
      */
     /** @type {WeakMap<object, DrawableSurfaces>} context -> its drawable's surfaces */
     const drawables = new WeakMap();
+    /**
+     * The buffers of each window a context was made current on, by its
+     * drawable's key: the window's, whichever context draws.
+     *
+     * @type {Map<string, DrawableSurfaces>}
+     */
+    const windows = new Map();
 
     /**
      * @typedef {Object} Recording
@@ -3394,14 +3401,24 @@ export function createGpuRenderer(services){
 
         /**
          * Backs a context's drawable with a colour pair and a depth-stencil
-         * surface of its size.
+         * surface of its size. A window's buffers are the window's, as on
+         * Windows: every context made current on it draws into and reads the
+         * same ones, and they outlive the contexts; a drawable of another
+         * size gets new ones.
          *
          * @param {object} context
-         * @param {{ width: number, height: number }} drawable
+         * @param {{ width: number, height: number, key?: string }} drawable  `key`
+         *     names the window; without one the buffers are the context's alone
          */
         attach(context, drawable){
             const width = Math.max(1, drawable.width);
             const height = Math.max(1, drawable.height);
+            const held = drawable.key === undefined ? undefined : windows.get(drawable.key);
+            if (held && held.width === width && held.height === height)
+            {
+                drawables.set(context, held);
+                return;
+            }
             const usage = TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
                 | TextureUsage.COPY_SRC;
             drawables.set(context, {
@@ -3426,6 +3443,10 @@ export function createGpuRenderer(services){
                 formats: [COLOUR_FORMAT], masks: [0xf], depth: surfaces.depth,
                 depthFormat: DEPTH_FORMAT, attached: new Set(),
             };
+            if (drawable.key !== undefined)
+            {
+                windows.set(drawable.key, surfaces);
+            }
         },
 
         /** @param {object} context */

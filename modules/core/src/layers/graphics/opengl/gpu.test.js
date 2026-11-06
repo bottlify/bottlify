@@ -2287,3 +2287,25 @@ test('glReadPixels on the device reads a framebuffer object\'s texture the way G
         assert.equal(copy.source.mipLevel, 1);
         assert.deepEqual([copy.size.width, copy.size.height], [1, 1]);
     });
+
+test('a window\'s buffers are the window\'s: another context on it reads what the first drew',
+    async()=>{
+        const r = rig();
+        /** @type {any} */
+        const second = createGlContext({ gpu: r.renderer });
+        const window = { width: 8, height: 4, doubleBuffered: true, key: 'window:1' };
+        r.context.attach(window);
+        second.attach(window);
+        const colour = textureLabelled(r, /gl-colour/);
+        colour.bytes.set([0, 0, 255, 255], 0);
+        assert.deepEqual([...await second.glReadPixels(0, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE)],
+            [255, 0, 0, 255], 'one colour surface for the window');
+        assert.deepEqual([...await r.context.glReadPixels(0, 3, 1, 1, GL.RGBA,
+            GL.UNSIGNED_BYTE)], [255, 0, 0, 255], 'and the first context moved onto it');
+        assert.equal(r.gpu.of('createTexture').filter((/** @type {any} */ call)=>
+            /gl-colour/.test(call.texture.descriptor.label)).length, 2,
+        'the rig\'s own drawable, and the window\'s once');
+        // Another size is other buffers.
+        second.attach({ ...window, width: 16 });
+        assert.notEqual(textureLabelled(r, /gl-colour/), colour);
+    });

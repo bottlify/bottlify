@@ -218,6 +218,8 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {number} height
  * @property {boolean} doubleBuffered
  * @property {number} [depthBits]
+ * @property {string} [key]  the window it is: every context made current on it shares
+ *           its buffers on a device
  */
 
 /** @typedef {import('./kernel.js').ContextMemory} ContextMemory */
@@ -465,6 +467,14 @@ export function createGlContext(options = {}){
         attach(drawable){
             if (attached)
             {
+                if (gpu && drawable.key !== undefined)
+                {
+                    // Made current on a window: its buffers, whichever they are.
+                    gpu.attach(context, drawable);
+                    framebuffer = { ...framebuffer, width: drawable.width,
+                        height: drawable.height };
+                    return;
+                }
                 context.resize(drawable.width, drawable.height);
                 return;
             }
