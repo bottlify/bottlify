@@ -485,6 +485,9 @@ function sameRect(a, b){
  *           object, ChangeDisplaySettings) changes under this one: its
  *           surfaces in the display's memory are lost then, as by its own
  *           SetDisplayMode. Absent, only this object changes the mode.
+ * @property {(gone: { window: number, mode: { width: number, height: number } }) => void}
+ *           [onPrimaryGone]  Told when a primary surface's last reference goes,
+ *           with the cooperative window and the mode the display is in.
  * @property {() => { width: number, height: number }} [registryMode]
  *           The mode RestoreDisplayMode goes back to: the registry's, read
  *           when it is called. Absent, the screen this object was made on.
@@ -1226,6 +1229,11 @@ export function createDirectDraw(options = {}){
             if (gammaRamp && (caps & DDSCAPS_PRIMARYSURFACE) !== 0)
             {
                 options.gamma?.set(surface, null);
+            }
+            if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+            {
+                noticeScreen();
+                options.onPrimaryGone?.({ window: cooperativeWindow, mode: { ...displayMode } });
             }
             // Whatever the surface holds now: a flip moves buffers between a
             // chain's members, and each member gives back the one it ends with.

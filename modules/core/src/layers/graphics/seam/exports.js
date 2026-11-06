@@ -445,6 +445,7 @@ export function createGraphicsLibraries(
         resolution,
         windowClient,
         user32,
+        focus,
     }));
 
     /** What a program has actually asked us to make, for a report. */

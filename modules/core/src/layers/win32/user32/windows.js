@@ -2478,6 +2478,28 @@ export function createWindowFunctions(host){
                 told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, foreignThread]);
             }
         }
+        else if (programs(previous) && programs(gained))
+        {
+            // Between two threads of the program, each thread's top-level
+            // windows hear that their thread lost or gained the activation,
+            // the other thread named (Wine's ddraw test_coop_level_activateapp:
+            // a window of the test's second thread had the foreground).
+            const lost = live(previous) ? creatorOf(live(previous)) : null;
+            const won = live(gained) ? creatorOf(live(gained)) : null;
+            if (lost !== null && won !== null && lost !== won)
+            {
+                const tops = [...windows.values()]
+                    .filter(each=>!each.destroyed && !isChild(each)).reverse();
+                for (const [whose, flag, other] of /** @type {const} */ ([[lost, 0, won],
+                    [won, 1, lost]]))
+                {
+                    for (const top of tops.filter(each=>creatorOf(each) === whose))
+                    {
+                        told.push([top.hwnd, WM_ACTIVATEAPP, flag, other]);
+                    }
+                }
+            }
+        }
         if (gained !== 0)
         {
             told.push([gained, WM_NCACTIVATE, 1, 0],
@@ -7017,8 +7039,27 @@ export function createWindowFunctions(host){
             const SWP_NOSIZE_NOMOVE = 0x0003;
             record.normalPlace = (record.style & (WS_MINIMIZE | WS_MAXIMIZE)) !== 0
                 ? normal : null;
-            return placeWindow([record.hwnd, 0, place.x, place.y, place.width, place.height,
-                (flags & ~SWP_NOSIZE_NOMOVE) | SWP_FRAMECHANGED], thread);
+            // A top-level window minimised with the focus in it gives the
+            // focus up before it moves (Wine's ddraw test_coop_level_mode_set:
+            // WM_KILLFOCUS, then the minimising WM_WINDOWPOSCHANGING).
+            // It is told with the rest of what the minimising sends, where
+            // they are sent; the focus another thread's activation took from
+            // it already is let go of here too, where the activation would
+            // tell it later.
+            const focus = minimising && !isChild(record)
+                ? [focusWindow(), detached].map(live).find(each=>each && insideOf(each, record))
+                : null;
+            if (focus)
+            {
+                if (focusWindow() === focus.hwnd)
+                {
+                    holdFocus(0);
+                }
+                detached = detached === focus.hwnd ? 0 : detached;
+            }
+            return andThen(focus ? send(focus.hwnd, WM_KILLFOCUS, 0, 0, thread) : 0,
+                ()=>placeWindow([record.hwnd, 0, place.x, place.y, place.width, place.height,
+                    (flags & ~SWP_NOSIZE_NOMOVE) | SWP_FRAMECHANGED], thread));
         }));
         if (hide && isChild(record))
         {

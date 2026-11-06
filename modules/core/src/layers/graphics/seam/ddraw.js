@@ -81,7 +81,7 @@ import {
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PALETTE,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
-    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSD_BACKBUFFERCOUNT,
+    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NOWINDOWCHANGES, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_LINEARSIZE, DDSD_MIPMAPCOUNT,
     DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
@@ -424,6 +424,9 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {(name: string) => { handler: (args: number[]) => unknown } | undefined} [deps.user32]
  *     user32's exports, through which a mode set here is told to every window
  *     (WM_DISPLAYCHANGE), as ChangeDisplaySettings tells it
+ * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
+ *     The full-screen windows Direct3D 8 and 9 hold, which an exclusive
+ *     full-screen DirectDraw object holds the same way
  * @param {<T>(call: () => T) => T} [deps.aroundCall]  runs each method of a surface or
  *     the DirectDraw object: Direct3D 7's command rings made first, and what their
  *     routines check said again after
@@ -434,7 +437,7 @@ export function createDirectDrawSeam(
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
-        aroundCall, windowClient, user32 },
+        aroundCall, windowClient, user32, focus },
 )
 {
     const fields = createFields(memory);
@@ -565,6 +568,7 @@ export function createDirectDrawSeam(
             if (root.destroyed && !ended.has(root))
             {
                 ended.add(root);
+                focus?.release(holderOf(facade));
                 publisher.owe?.(()=>leaveScreen(root));
             }
             return left;
@@ -932,6 +936,58 @@ export function createDirectDrawSeam(
         }
     };
 
+    /**
+     * Each object as the full-screen window mechanism holds it: no device
+     * state of its own to lose (its surfaces are lost by the activation), and
+     * the mode it last set, set again as the application is active again.
+     *
+     * @type {WeakMap<any, import('./focus.js').FocusDevice>}
+     */
+    const holders = new WeakMap();
+    /** @type {WeakMap<any, { width: number, height: number, bitCount: number, rate: number }>} */
+    const modesSet = new WeakMap();
+    /** @param {any} root */
+    const holderOf = root=>{
+        let holder = holders.get(root);
+        if (!holder)
+        {
+            holder = { injectDeviceLoss: ()=>{}, deviceState: 'ddraw' };
+            holders.set(root, holder);
+        }
+        return holder;
+    };
+    /**
+     * Takes the cooperative window as the level now asks, or gives it back.
+     *
+     * @param {any} root @param {number} window @param {number} flags  As asked.
+     */
+    const holdWindow = (root, window, flags)=>{
+        if (!focus)
+        {
+            return 0;
+        }
+        const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+        if ((flags & both) !== both || window === 0)
+        {
+            return focus.take(holderOf(root), { focus: 0, window: 0, fullscreen: false,
+                noWindowChanges: (flags & DDSCL_NOWINDOWCHANGES) !== 0, extended: false,
+                width: 0, height: 0, created: false });
+        }
+        const mode = root.displayMode;
+        return focus.take(holderOf(root), { focus: window, window, fullscreen: true,
+            noWindowChanges: (flags & DDSCL_NOWINDOWCHANGES) !== 0, extended: false,
+            width: mode.width, height: mode.height, created: true, announce: true,
+            regain: ()=>{
+                const set = modesSet.get(root);
+                if (!set || !root.modeSet)
+                {
+                    return 0;
+                }
+                root.setDisplayMode(set.width, set.height, set.bitCount, set.rate);
+                return showMode(root);
+            } });
+    };
+
     /** The objects whose last reference went, and that let go of the screen. */
     const ended = new WeakSet();
 
@@ -966,7 +1022,8 @@ export function createDirectDrawSeam(
         const mode = root.ownMode;
         const display = screen();
         const changed = display.width !== mode.width || display.height !== mode.height;
-        if ((root.cooperativeLevel & both) === both && root.cooperativeWindow)
+        // A held window follows the mode as it hears of it (`focus.js`).
+        if ((root.cooperativeLevel & both) === both && root.cooperativeWindow && !focus)
         {
             coverScreen(root);
         }
@@ -2012,25 +2069,31 @@ export function createDirectDrawSeam(
         /** @param {any} root @param {number[]} args */
         SetCooperativeLevel: (root, [window, flags])=>{
             const wasExclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
-            const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
-            if (hr === DD_OK)
-            {
-                coverScreen(root);
-            }
-            const exclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
-            if (exclusive)
-            {
-                exclusiveHolders.add(root);
-            }
-            else
-            {
-                exclusiveHolders.delete(root);
-            }
-            // Giving the screen back puts back the mode it was given in, from
-            // IDirectDraw2 on; the first generation keeps it (Wine's
-            // test_coop_level_mode_set, each version).
-            return hr === DD_OK && wasExclusive && !exclusive && version !== 1
-                ? andThen(leaveScreen(root), ()=>hr) : hr;
+            // The window is taken before the level is: a program that sets
+            // another level from the WM_ACTIVATEAPP taking it sends is
+            // answered, and then this level is the object's (Wine's
+            // test_coop_level_activateapp).
+            return andThen(holdWindow(root, window >>> 0, flags >>> 0), ()=>{
+                const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
+                if (!focus)
+                {
+                    coverScreen(root);
+                }
+                const exclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
+                if (exclusive)
+                {
+                    exclusiveHolders.add(root);
+                }
+                else
+                {
+                    exclusiveHolders.delete(root);
+                }
+                // Giving the screen back puts back the mode it was given in,
+                // from IDirectDraw2 on; the first generation keeps it (Wine's
+                // test_coop_level_mode_set, each version).
+                return hr === DD_OK && wasExclusive && !exclusive && version !== 1
+                    ? andThen(leaveScreen(root), ()=>hr) : hr;
+            });
         },
 
         // The first generation takes width, height and depth; every later one
@@ -2039,6 +2102,11 @@ export function createDirectDrawSeam(
         SetDisplayMode: (root, [width, height, depth, rate])=>{
             const hr = root.setDisplayMode(
                 width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (rate >>> 0));
+            if (hr === DD_OK && root.modeSet)
+            {
+                modesSet.set(root, { width: width >>> 0, height: height >>> 0,
+                    bitCount: depth >>> 0, rate: version === 1 ? 0 : (rate >>> 0) });
+            }
             return hr === DD_OK ? andThen(showMode(root), ()=>hr) : hr;
         },
 
@@ -2335,6 +2403,17 @@ export function createDirectDrawSeam(
             options.screenHeight = display.height;
             options.screenMode = ()=>screen();
             options.registryMode = ()=>registryMode(screen());
+            // The primary gone in a mode other than the registry's, its window
+            // is drawn again (Wine's test_coop_level_mode_set: WM_PAINT then,
+            // and not in the registry's mode).
+            options.onPrimaryGone = ({ window, mode })=>{
+                const registry = registryMode(screen());
+                if (window !== 0 && (mode.width !== registry.width
+                    || mode.height !== registry.height))
+                {
+                    user32?.('InvalidateRect')?.handler([window, 0, 1]);
+                }
+            };
             return options;
         },
 

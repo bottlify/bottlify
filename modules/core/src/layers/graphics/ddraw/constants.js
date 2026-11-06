@@ -217,6 +217,7 @@ export const DDPCAPS_2BIT = 0x00000200;
 /** SetCooperativeLevel flags. */
 export const DDSCL_FULLSCREEN = 0x00000001;
 export const DDSCL_NORMAL = 0x00000008;
+export const DDSCL_NOWINDOWCHANGES = 0x00000004;
 export const DDSCL_EXCLUSIVE = 0x00000010;
 export const DDSCL_SETFOCUSWINDOW = 0x00000080;
 export const DDSCL_ALLOWMODEX = 0x00000040;
