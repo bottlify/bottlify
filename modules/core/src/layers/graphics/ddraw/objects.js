@@ -225,6 +225,29 @@ const SETTABLE_FIELDS = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH |
     | DDSD_CAPS;
 
 /**
+ * The depth buffer DDSD_ZBUFFERBITDEPTH makes: depth only, at that many bits,
+ * and 24 of them in a 32-bit pixel whose top byte is unused (X8D24), which is
+ * how a program that asked for 24 steps through it (Wine's ddraw2
+ * test_depth_readback: 16, 24 and 32 bits with masks 0xffff, 0xffffff and
+ * 0xffffffff, read four bytes apart above 16).
+ *
+ * @param {number} bitDepth
+ * @returns {import("./structs.js").PixelFormatFields}
+ */
+export function depthFormatOfBitDepth(bitDepth){
+    return {
+        size: 0x20,
+        flags: DDPF_ZBUFFER,
+        fourCC: 0,
+        bitCount: bitDepth === 24 ? 32 : bitDepth,
+        redMask: 0,
+        greenMask: 0xffffffff >>> (32 - bitDepth),
+        blueMask: 0,
+        alphaMask: 0,
+    };
+}
+
+/**
  * The pixel format of a depth buffer asked for by bit depth alone, which is
  * how the older descriptor describes one: a depth of sixteen is depth only,
  * thirty-two is twenty-four bits of depth and eight of stencil, the way the
@@ -2200,7 +2223,7 @@ export function createDirectDraw(options = {}){
         // not, and the surface is in the display mode's format.
         const named = (request.flags & DDSD_PIXELFORMAT) !== 0 ? request.pixelFormat : undefined;
         const pixelFormat = depthRequest
-            ? depthFormatForDepth(request.zBufferBitDepth ?? 16)
+            ? depthFormatOfBitDepth(request.zBufferBitDepth ?? 16)
             : (primary || !named ? modeFormat : named);
         const levels = mipLevelCount({
             caps: validity.caps,

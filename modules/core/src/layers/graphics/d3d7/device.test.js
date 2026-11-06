@@ -28,7 +28,7 @@ import { FVF } from '../webgpu/internal/vertexformat.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
-import { createDirectDraw } from '../ddraw/objects.js';
+import { createDirectDraw, depthFormatForDepth } from '../ddraw/objects.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDPF_STENCILBUFFER, DDSCAPS_3DDEVICE,
     DDSCAPS_COMPLEX,
@@ -1383,7 +1383,9 @@ test('recorded: a stencil test the caps claim is drawn, over the depth format wi
     async()=>{
         const f = recorded();
         const { device, gpu, root, target } = f;
-        const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 32 });
+        // The format EnumZBufferFormats offers with stencil, named whole.
+        const depth = surface(root, { caps: DDSCAPS_ZBUFFER,
+            pixelFormat: depthFormatForDepth(32) });
         assert.equal(depth.pixelFormat.flags & DDPF_STENCILBUFFER, DDPF_STENCILBUFFER,
             'a depth format with stencil says so, as a program picks one by the flag');
         assert.equal(target.addAttachedSurface(depth), D3D_OK);

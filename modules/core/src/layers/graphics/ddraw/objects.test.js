@@ -1889,3 +1889,19 @@ test('blocks in the program\'s memory are named by their whole size, never a pit
     assert.equal(older(LINEARSIZE, 31), DDERR_INVALIDPARAMS);
     assert.equal(older(0, 32), DDERR_INVALIDPARAMS);
 });
+
+test('a depth buffer asked for by bits alone is depth only, 24 of them in a 32-bit pixel'
+    + ' (test_depth_readback, ddraw2)', ()=>{
+    const ddraw = withLevel();
+    for (const [bits, bytes, mask] of [[16, 2, 0xffff], [24, 4, 0xffffff], [32, 4, 0xffffffff]])
+    {
+        const made = ddraw.createSurface({ flags: SIZED | 0x40, caps: 0x20000, width: 4, height: 4,
+            zBufferBitDepth: bits });
+        assert.equal(made.hr, DD_OK);
+        const surface = /** @type {NonNullable<typeof made.surface>} */ (made.surface);
+        assert.equal(surface.bytesPerPixel, bytes, `${bits} bits`);
+        assert.equal(surface.pixelFormat.greenMask >>> 0, mask, 'the depth mask');
+        assert.equal(surface.pixelFormat.flags, 0x400, 'DDPF_ZBUFFER, no stencil');
+        assert.equal(surface.release(), 0);
+    }
+});
