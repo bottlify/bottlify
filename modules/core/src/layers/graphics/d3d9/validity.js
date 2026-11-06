@@ -21,7 +21,11 @@
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
 } from './constants.js';
-import { PRESENTATION_INTERVALS } from './caps.js';
+
+const D3DPRESENT_INTERVAL_ONE = 0x00000001;
+const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+/** The present intervals a device offers: once a refresh, or at once. */
+export const PRESENTATION_INTERVALS = D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE;
 
 /** What the pool/usage table distinguishes about a format, and nothing more. */
 export const FORMAT_KIND = Object.freeze({ COLOUR: 'colour', DEPTH: 'depth' });
