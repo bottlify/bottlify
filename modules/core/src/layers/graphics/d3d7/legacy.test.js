@@ -513,6 +513,12 @@ test('these versions light as Direct3D 1-6: lights by the range left, no LOCALVI
     assert.equal(f.device.setRenderState(142, 0), D3D_OK, 'LOCALVIEWER is taken');
     assert.equal(f.since('SetRenderState', mark).length, 0, 'and changes nothing');
     assert.ok(f.device.answersFor(142), 'nor reaches the device through a guest ring');
+    // Normals are of unit length in these versions (test_lighting, a singular world).
+    assert.ok(f.since('SetRenderState', 0).some(call=>call[1] === 143 && call[2] === 1),
+        'NORMALIZENORMALS is on');
+    assert.equal(f.device.setRenderState(143, 0), D3D_OK);
+    assert.equal(f.since('SetRenderState', mark).length, 0, 'and stays on');
+    assert.ok(f.device.answersFor(143));
     f.device.EndScene();
     assert.equal(viewport.deleteLight(light), D3D_OK);
     assert.equal(light.release(), 0);
