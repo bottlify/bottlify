@@ -2905,3 +2905,29 @@ test('a blit keys by the surface\'s key or the override, never both, and by a ke
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
+
+test('between two DirectDraw objects a copy that converts the format is not made'
+    + ' (test_cross_device_blt)', ()=>{
+    const h = seamed();
+    const first = h.create7();
+    const second = h.create7();
+    const sysmem = DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN;
+    const dest = h.createSurface7(first, { caps: sysmem, width: 4, height: 4 });
+    const alike = h.createSurface7(second, { caps: sysmem, width: 4, height: 4 });
+    const narrow = h.createSurface7(second, { caps: sysmem, width: 4, height: 4,
+        pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16, redMask: 0x7c00,
+            greenMask: 0x3e0, blueMask: 0x1f, alphaMask: 0 } });
+    const local = h.createSurface7(first, { caps: sysmem, width: 4, height: 4,
+        pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16, redMask: 0x7c00,
+            greenMask: 0x3e0, blueMask: 0x1f, alphaMask: 0 } });
+    assert.equal(h.surface7(dest, 'Blt', [0, narrow, 0, 0, 0]) >>> 0, 0x80004001);
+    assert.equal(h.surface7(dest, 'Blt', [0, alike, 0, 0, 0]), DD_OK, 'the same format copies');
+    assert.equal(h.surface7(dest, 'Blt', [0, local, 0, 0, 0]), DD_OK, 'within one it converts');
+    for (const surface of [dest, alike, narrow, local])
+    {
+        assert.equal(h.release(surface), 0);
+    }
+    assert.equal(h.release(first), 0);
+    assert.equal(h.release(second), 0);
+    h.assertAllReleased();
+});

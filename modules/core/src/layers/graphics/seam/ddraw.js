@@ -728,6 +728,14 @@ export function createDirectDrawSeam(
     };
 
     /**
+     * @param {import('../ddraw/structs.js').PixelFormatFields} a
+     * @param {import('../ddraw/structs.js').PixelFormatFields} b
+     */
+    const samePixelFormat = (a, b)=>a.flags === b.flags && a.fourCC === b.fourCC
+        && a.bitCount === b.bitCount && a.redMask === b.redMask && a.greenMask === b.greenMask
+        && a.blueMask === b.blueMask && a.alphaMask === b.alphaMask;
+
+    /**
      * Why a clipper has no list to clip by, or DD_OK: a window it was bound to
      * that is gone (E_FAIL), or neither a window nor a list (DDERR_NOCLIPLIST).
      *
@@ -1094,6 +1102,14 @@ export function createDirectDrawSeam(
                 if (surface.clipper && clipperWindowGone(surface.clipper) === DDERR_NOCLIPLIST)
                 {
                     return DDERR_NOCLIPLIST;
+                }
+                // Between two DirectDraw objects a copy moves bytes as they are:
+                // one that converts the format is not made (Wine's
+                // test_cross_device_blt).
+                if (from && from.directDraw !== surface.directDraw
+                    && !samePixelFormat(from.pixelFormat, surface.pixelFormat))
+                {
+                    return DDERR_UNSUPPORTED;
                 }
                 // A key is the surface's or the override's, never both; an
                 // override is read from the DDBLTFX there has to be; a key
@@ -1634,18 +1650,12 @@ export function createDirectDrawSeam(
      *
      * @param {import('../ddraw/structs.js').SurfaceDescFields} asked @param {any} surface
      */
-    const describes = (asked, surface)=>{
-        const format = asked.pixelFormat;
-        const own = surface.pixelFormat;
-        return ((asked.flags & DDSD_CAPS) === 0 || ((asked.caps & ~surface.caps) === 0
-                && ((asked.caps2 ?? 0) & ~surface.caps2) === 0))
-            && ((asked.flags & DDSD_WIDTH) === 0 || asked.width === surface.width)
-            && ((asked.flags & DDSD_HEIGHT) === 0 || asked.height === surface.height)
-            && ((asked.flags & DDSD_PIXELFORMAT) === 0 || (format.flags === own.flags
-                && format.fourCC === own.fourCC && format.bitCount === own.bitCount
-                && format.redMask === own.redMask && format.greenMask === own.greenMask
-                && format.blueMask === own.blueMask && format.alphaMask === own.alphaMask));
-    };
+    const describes = (asked, surface)=>((asked.flags & DDSD_CAPS) === 0
+            || ((asked.caps & ~surface.caps) === 0 && ((asked.caps2 ?? 0) & ~surface.caps2) === 0))
+        && ((asked.flags & DDSD_WIDTH) === 0 || asked.width === surface.width)
+        && ((asked.flags & DDSD_HEIGHT) === 0 || asked.height === surface.height)
+        && ((asked.flags & DDSD_PIXELFORMAT) === 0
+            || samePixelFormat(asked.pixelFormat, surface.pixelFormat));
 
     /**
      * The surfaces that could be made as a descriptor asks, each named to the
