@@ -797,6 +797,14 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
     const EXIT_TARGETS_CAP = 4096;
     /**
+     * With `timings`: the instructions interpreted from each address the host
+     * began interpreting at (a chunk's first), and the first and last time -
+     * which code a frame spent interpreted, and when. Bounded: past the cap a
+     * new address is not counted.
+     * @type {Map<number, { count: number, first: number, last: number }>}
+     */
+    const interpretedFrom = new Map();
+    /**
      * How often the machine stood at an address that has a region for another
      * top (or a block with no entry of its own), per key(eip, top): the heat a
      * variant is noted with, so one the machine keeps arriving at climbs the
@@ -5505,6 +5513,25 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
          * instruction they say which window a region found closed (a `held` leave).
          * @param {number} [at] @param {number} [top] @param {string} [why]
          * @param {() => number[]} [registers] */
+        /** Instructions interpreted from `at` on (`interpretedFrom`), with `timings`.
+         * @param {number} at @param {number} instructions */
+        interpretedAt(at, instructions){
+            if (settings.timings !== true || instructions === 0)
+            {
+                return;
+            }
+            const now = Math.round(performance.now() - bornAt);
+            const one = interpretedFrom.get(at);
+            if (one !== undefined)
+            {
+                one.count += instructions;
+                one.last = now;
+            }
+            else if (interpretedFrom.size < EXIT_TARGETS_CAP)
+            {
+                interpretedFrom.set(at, { count: instructions, first: now, last: now });
+            }
+        },
         forcedStep(at, top, why, registers){
             forcedSteps++;
             if (at !== undefined && (forcedAt.size < FORCED_KEPT || forcedAt.has(at)))
@@ -5715,6 +5742,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // misbehaves only without `precise` is looked for here first.
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
+                // Where the interpreted instructions went, busiest first.
+                interpretedFrom: [...interpretedFrom].sort((a, b)=>b[1].count - a[1].count)
+                    .slice(0, 24).map(([address, one])=>({ address, ...one })),
                 // The addresses most forced, busiest first, as "0x401000 x5000 top 3 why".
                 forcedAt: [...forcedAt].sort((a, b)=>b[1].count - a[1].count).slice(0, 10)
                     .map(([at, one])=>`0x${at.toString(16)} x${one.count}`

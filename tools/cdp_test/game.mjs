@@ -1053,6 +1053,17 @@ function describeCork(cork, say){
             say(`      ${why.map(([reason, count])=>`${reason} x${count}`).join('; ')}`);
         }
     }
+    // Where the host's interpreter spent its instructions, by where it began.
+    const from = cork.interpretedFrom ?? [];
+    if (from.length > 0)
+    {
+        say(`    interpreted from:`);
+        for (const { address, count, first, last } of from)
+        {
+            say(`      0x${(address >>> 0).toString(16).padStart(8, '0')}`
+                + ` ${(count / 1e6).toFixed(2)} M  ${(first / 1000).toFixed(1)}-${(last / 1000).toFixed(1)} s`);
+        }
+    }
     const byTarget = cork.exitsByTarget ?? [];
     if (byTarget.length > 0)
     {

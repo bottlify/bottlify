@@ -1546,6 +1546,7 @@ export function createCorkHost(config){
                 jumpedIn);
             interpretMs += clock() - interpretAt;
             interpreted += stepped;
+            runtime.interpretedAt?.(at, stepped);
             jumpedIn = false;
             remaining -= stepped;
             ran += stepped;
