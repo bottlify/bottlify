@@ -2110,6 +2110,24 @@ test('a windowed device takes the screen at its first frame, and one that shows 
         assert.equal(h.resolutions.length, 1, 'once');
     });
 
+test('a fullscreen device gives the display back to the registry mode at its last release', ()=>{
+    // Wine's test_mode_change: whatever mode was set since, and only for a
+    // device that set one.
+    const h = seamed();
+    const root = h.create();
+    const windowed = h.createDevice(root);
+    assert.equal(h.release(windowed), 0);
+    assert.deepEqual(h.resolutions, [], 'a windowed device set no mode, and restores none');
+    const device = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: HWND });
+    assert.notEqual(device, 0);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
+    assert.equal(h.release(device), 0);
+    assert.deepEqual(h.resolutions.at(-1), [800, 600, undefined, undefined]);
+    assert.equal(h.resolutions.length, 2);
+    h.release(root);
+});
+
 test('a fullscreen device names the window it takes with it', ()=>{
     // The real device places its window at the mode's size; the window is
     // named so whoever answers can do the same, and fullscreen is the signal.
@@ -2152,8 +2170,8 @@ test('a reset that changes the mode names the window it presents into', ()=>{
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true],
-        'back to windowed, the screen waits for a frame');
+    assert.deepEqual(h.resolutions.at(-1), [800, 600, undefined, undefined],
+        'back to windowed, the display is the registry mode until a frame');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
         'and the frame names the window');

@@ -46,7 +46,7 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
-import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -3069,10 +3069,30 @@ export function createDirect3D8Seam(
      */
     const unshown = new WeakMap();
 
+    /** The devices that set a display mode and have not left it. @type {WeakSet<any>} */
+    const fullScreen = new WeakSet();
+    /** The devices whose last Release is watched for that. @type {WeakSet<any>} */
+    const releaseWatched = new WeakSet();
+
+    /**
+     * A full-screen device leaving its mode, reset to a window or released:
+     * the display goes back to the registry's mode, whatever was set since
+     * (Wine's test_reset and test_mode_change).
+     *
+     * @param {any} device
+     */
+    const leaveFullScreen = device=>{
+        if (fullScreen.delete(device))
+        {
+            const mode = registryMode(screen());
+            resolution?.(mode.width, mode.height);
+        }
+    };
+
     /**
      * What a created or reset device does to the screen: a fullscreen one
-     * takes it now, at its mode, with its window; a windowed one at its first
-     * frame.
+     * takes it now, at its mode, with its window, and gives it back when it
+     * goes (`leaveFullScreen`); a windowed one takes it at its first frame.
      *
      * @param {any} device @param {any} parameters @param {number} window
      */
@@ -3081,8 +3101,23 @@ export function createDirect3D8Seam(
         const height = parameters.backBufferHeight >>> 0;
         if (parameters.windowed)
         {
+            leaveFullScreen(device);
             unshown.set(device, { width, height, window });
             return;
+        }
+        fullScreen.add(device);
+        if (!releaseWatched.has(device))
+        {
+            releaseWatched.add(device);
+            const release = device.release;
+            device.release = ()=>{
+                const left = release();
+                if (left === 0)
+                {
+                    leaveFullScreen(device);
+                }
+                return left;
+            };
         }
         unshown.delete(device);
         resolution?.(width, height, { window, fullscreen: true });
