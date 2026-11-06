@@ -31,7 +31,8 @@ import {
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
     IDXGIRESOURCE_SLOTS, IDXGISURFACE1_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS,
-    createDirect3D10Seam,
+    IDXGIADAPTER3_SLOTS, IDXGIFACTORY2_SLOTS, IDXGIFACTORY4_SLOTS, IDXGISWAPCHAIN1_SLOTS,
+    IDXGISWAPCHAIN3_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -487,6 +488,67 @@ test('a map hands the program guest memory and the unmap reads it back', async()
     assert.equal(words[0], 0x11223344, 'the first dword the program wrote');
     assert.equal(words[3], 0x55667788, 'and the last');
     object.Unmap(0);
+});
+
+test('DXGI 1.2 and later: every factory version, a window\'s swap chain from two halves of a'
+    + ' description, and descriptions that grow by version', ()=>{
+    const h = seamed();
+    const { device, swapChain } = h.createDeviceAndSwapChain();
+    const factoryAt = h.box.place([0]);
+    assert.equal(h.dxgi.CreateDXGIFactory2.handler([0, h.box.placeGuid(IID.IDXGIFactory2),
+        factoryAt]) >>> 0, S_OK);
+    const factory = h.box.memory.readU32(factoryAt);
+    const latest = h.box.place([0]);
+    assert.equal(h.box.call(factory, 0, [h.box.placeGuid(IID.IDXGIFactory7), latest]), S_OK);
+    assert.equal(h.dxgi.CreateDXGIFactory2.handler([2, h.box.placeGuid(IID.IDXGIFactory2),
+        factoryAt]) >>> 0, E_INVALIDARG, 'a flag past DXGI_CREATE_FACTORY_DEBUG');
+
+    // DXGI_SWAP_CHAIN_DESC1, its size the window's.
+    const desc1 = h.box.place([0, 0, DXGI_FORMAT.R8G8B8A8_UNORM, 0, 1, 0,
+        DXGI_USAGE.RENDER_TARGET_OUTPUT, 2, 0, 3, 0, 0]);
+    const chainAt = h.box.place([0]);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY2_SLOTS, 'CreateSwapChainForHwnd'),
+        [device, 0x1234, desc1, 0, 0, chainAt]), S_OK);
+    const chain = h.box.memory.readU32(chainAt);
+    const hwndAt = h.box.place([0]);
+    assert.equal(h.box.call(chain, slot(IDXGISWAPCHAIN1_SLOTS, 'GetHwnd'), [hwndAt]), S_OK);
+    assert.equal(h.box.memory.readU32(hwndAt), 0x1234);
+    const readDesc1 = h.box.allocate(48);
+    assert.equal(h.box.call(chain, slot(IDXGISWAPCHAIN1_SLOTS, 'GetDesc1'), [readDesc1]), S_OK);
+    const words = Array.from({ length: 12 }, (_, index)=>h.box.memory.readU32(readDesc1
+        + index * 4));
+    assert.ok(words[0] > 0 && words[1] > 0, 'the window\'s size');
+    assert.deepEqual([...words.slice(2, 6), ...words.slice(7)], [DXGI_FORMAT.R8G8B8A8_UNORM, 0,
+        1, 0, 2, 0, 3, 0, 0], 'format, stereo, samples, count, scaling, effect, alpha, flags');
+    assert.ok(words[6] & DXGI_USAGE.RENDER_TARGET_OUTPUT);
+    const third = h.box.place([0]);
+    assert.equal(h.box.call(chain, 0, [h.box.placeGuid(IID.IDXGISwapChain3), third]), S_OK);
+    assert.equal(h.box.call(h.box.memory.readU32(third),
+        slot(IDXGISWAPCHAIN3_SLOTS, 'GetCurrentBackBufferIndex'), []), 0,
+    'Direct3D 10 and 11 draw into buffer 0');
+
+    // A swap chain of the first version's entry point answers the later ones.
+    const first = h.box.place([0]);
+    assert.equal(h.box.call(swapChain, 0, [h.box.placeGuid(IID.IDXGISwapChain1), first]), S_OK);
+
+    // The first adapter description stops where it ends; DESC1 has its flags after it.
+    const adapterAt = h.box.place([0]);
+    const factory7 = h.box.memory.readU32(latest);
+    assert.equal(h.box.call(factory7, slot(IDXGIFACTORY4_SLOTS, 'EnumAdapterByLuid'),
+        [1, 0, h.box.placeGuid(IID.IDXGIAdapter3), adapterAt]), S_OK);
+    const adapter = h.box.memory.readU32(adapterAt);
+    const descAt = h.box.allocate(0x130);
+    h.box.memory.writeU32(descAt + 0x124, 0xcafe);
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'GetDesc'), [descAt]), S_OK);
+    assert.equal(h.box.memory.readU32(descAt + 0x124), 0xcafe, 'nothing written past DESC');
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER1_SLOTS, 'GetDesc1'), [descAt]), S_OK);
+    assert.equal(h.box.memory.readU32(descAt + 0x124), 0, 'DXGI_ADAPTER_DESC1\'s flags');
+    assert.equal(h.box.call(factory7, slot(IDXGIFACTORY4_SLOTS, 'EnumAdapterByLuid'),
+        [7, 0, h.box.placeGuid(IID.IDXGIAdapter), adapterAt]) >>> 0, 0x887a0002, 'NOT_FOUND');
+    const infoAt = h.box.allocate(32);
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER3_SLOTS, 'QueryVideoMemoryInfo'),
+        [0, 0, infoAt]), S_OK);
+    assert.equal(h.box.memory.readU32(infoAt), 1 << 30, 'the local budget, the adapter\'s memory');
 });
 
 test('DXGI: a factory enumerates its adapter and outputs, and parents lead back', ()=>{

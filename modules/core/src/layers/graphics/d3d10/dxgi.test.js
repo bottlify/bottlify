@@ -12,7 +12,8 @@ import {
     IID, S_OK,
 } from './constants.js';
 import {
-    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc, outputModes,
+    CreateDXGIFactory, CreateDXGIFactory1, CreateDXGIFactory2, createFactory,
+    defaultSwapChainDesc, outputModes,
 } from './dxgi.js';
 import { D3D10CreateDevice } from './device.js';
 
@@ -38,6 +39,58 @@ function swapChainDesc(overrides = {}){
 }
 
 // --- the factory ---
+
+test('a later factory is asked of any entry point, the first one\'s too, and DXGI 1.3\'s takes'
+    + ' flags (test_create_factory)', ()=>{
+    /** @type {{ object?: any }} */
+    const out = {};
+    assert.equal(CreateDXGIFactory(IID.IDXGIFactory2, out), S_OK);
+    assert.ok(out.object.supports(IID.IDXGIFactory7));
+    out.object.release();
+    assert.equal(CreateDXGIFactory(IID.IDXGIFactory, out), S_OK);
+    assert.ok(!out.object.supports(IID.IDXGIFactory2), 'a first-version factory stays one');
+    out.object.release();
+    assert.equal(CreateDXGIFactory1(IID.IDXGIFactory5, out), S_OK);
+    out.object.release();
+    assert.equal(CreateDXGIFactory2(1, IID.IDXGIFactory3, out), S_OK);
+    assert.equal(out.object.GetCreationFlags(), 1);
+    out.object.release();
+    assert.equal(CreateDXGIFactory2(2, IID.IDXGIFactory3, out), E_INVALIDARG);
+    assert.equal(CreateDXGIFactory2(0, IID.IDXGIDevice, out), E_NOINTERFACE);
+});
+
+test('a swap chain answers DXGI 1.2 to 1.5: its frame latency only with the flag that asks for'
+    + ' one, a rotation only on a flip chain', ()=>{
+    /** @type {number[]} */
+    const events = [];
+    const device = createDevice({ factoryOptions: { createEvent: ()=>{
+        events.push(1);
+        return 0x88;
+    } } });
+    /** @type {{ swapChain?: any }} */
+    const plain = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), plain), S_OK);
+    assert.ok(plain.swapChain.supports(IID.IDXGISwapChain4));
+    assert.equal(plain.swapChain.GetFrameLatencyWaitableObject(), 0);
+    assert.equal(plain.swapChain.SetMaximumFrameLatency(2), DXGI_ERROR_INVALID_CALL);
+    assert.equal(plain.swapChain.SetRotation(1), DXGI_ERROR_INVALID_CALL);
+    plain.swapChain.release();
+    /** @type {{ swapChain?: any }} */
+    const waitable = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc({ bufferCount: 2,
+        swapEffect: DXGI_SWAP_EFFECT.FLIP_DISCARD, flags: 0x40 }), waitable), S_OK);
+    assert.equal(waitable.swapChain.GetFrameLatencyWaitableObject(), 0x88);
+    assert.equal(events.length, 1);
+    assert.equal(waitable.swapChain.SetMaximumFrameLatency(3), S_OK);
+    /** @type {{ frames?: number }} */
+    const latency = {};
+    assert.equal(waitable.swapChain.GetMaximumFrameLatency(latency), S_OK);
+    assert.equal(latency.frames, 3);
+    assert.equal(waitable.swapChain.SetRotation(1), S_OK);
+    assert.equal(waitable.swapChain.GetCurrentBackBufferIndex(), 0);
+    waitable.swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
 
 /**
  * `CreateDXGIFactory` is the first version of the entry point, and refusing

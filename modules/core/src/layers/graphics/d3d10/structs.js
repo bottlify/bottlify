@@ -123,6 +123,9 @@ export function writeU32(memory, address, value){
  * @property {boolean} windowed
  * @property {number} swapEffect
  * @property {number} flags
+ * @property {boolean} [stereo]     DXGI_SWAP_CHAIN_DESC1's: a stereo chain.
+ * @property {number} [scaling1]    DXGI_SWAP_CHAIN_DESC1's DXGI_SCALING.
+ * @property {number} [alphaMode]   DXGI_SWAP_CHAIN_DESC1's DXGI_ALPHA_MODE.
  */
 
 /**
@@ -215,6 +218,59 @@ export function writeSwapChainDesc(memory, address, desc){
     writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Windowed, desc.windowed ? 1 : 0);
     writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.SwapEffect, desc.swapEffect);
     writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Flags, desc.flags);
+}
+
+/**
+ * DXGI 1.2's two halves of a swap chain's description -- DXGI_SWAP_CHAIN_DESC1
+ * and the optional DXGI_SWAP_CHAIN_FULLSCREEN_DESC -- as the first version's
+ * fields: the window is the call's, and a chain with no fullscreen half is
+ * windowed.
+ *
+ * @param {GuestMemory} memory
+ * @param {number} address  DXGI_SWAP_CHAIN_DESC1: width, height, format, stereo,
+ *     sample count and quality, usage, count, scaling, swap effect, alpha mode, flags
+ * @param {number} fullscreenAt  DXGI_SWAP_CHAIN_FULLSCREEN_DESC, or zero: refresh
+ *     numerator and denominator, scanline order, scaling, windowed
+ * @returns {SwapChainFields}
+ */
+export function readSwapChainDesc1(memory, address, fullscreenAt){
+    const word = (/** @type {number} */ at)=>readU32(memory, address + at);
+    const full = (/** @type {number} */ at)=>(fullscreenAt ? readU32(memory, fullscreenAt + at)
+        : 0);
+    return {
+        bufferDesc: { width: word(0), height: word(4), refreshNumerator: full(0),
+            refreshDenominator: full(4), format: word(8), scanlineOrdering: full(8),
+            scaling: full(12) },
+        sampleDesc: { count: word(16), quality: word(20) },
+        bufferUsage: word(24),
+        bufferCount: word(28),
+        outputWindow: 0,
+        windowed: fullscreenAt ? full(16) !== 0 : true,
+        swapEffect: word(36),
+        flags: word(44),
+        stereo: word(12) !== 0,
+        scaling1: word(32),
+        alphaMode: word(40),
+    };
+}
+
+/**
+ * @param {GuestMemory} memory @param {number} address @param {SwapChainFields} desc
+ */
+export function writeSwapChainDesc1(memory, address, desc){
+    [desc.bufferDesc.width, desc.bufferDesc.height, desc.bufferDesc.format, desc.stereo ? 1 : 0,
+        desc.sampleDesc.count, desc.sampleDesc.quality, desc.bufferUsage, desc.bufferCount,
+        desc.scaling1 ?? 0, desc.swapEffect, desc.alphaMode ?? 0, desc.flags]
+        .forEach((value, index)=>writeU32(memory, address + index * 4, value));
+}
+
+/**
+ * @param {GuestMemory} memory @param {number} address @param {SwapChainFields} desc
+ */
+export function writeFullscreenDesc(memory, address, desc){
+    [desc.bufferDesc.refreshNumerator, desc.bufferDesc.refreshDenominator,
+        desc.bufferDesc.scanlineOrdering, desc.bufferDesc.scaling, desc.windowed ? 1 : 0]
+        .forEach((value, index)=>writeU32(memory, address + index * 4, value));
 }
 
 /**

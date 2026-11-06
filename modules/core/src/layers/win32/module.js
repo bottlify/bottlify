@@ -4587,6 +4587,27 @@ export function createWin32Module(){
                 libraries: ()=>libraries,
 
                 /**
+                 * Kernel events by handle, for a library that hands one to the
+                 * program or sets one the program gave it (DXGI's swap chain
+                 * frame latency object, IDXGIDevice2::EnqueueSetEvent).
+                 */
+                events: ()=>({
+                    /** @param {{ manualReset: boolean, signalled: boolean }} options */
+                    create: options=>kernel.handles.open('event', kernel.createEvent(options)),
+                    /** @param {number} handle */
+                    set: handle=>{
+                        // A stale handle is the program's mistake.
+                        try
+                        {
+                            kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                        }
+                        catch (e){
+                            void e;
+                        }
+                    },
+                }),
+
+                /**
                  * The process's variables as they are now, as SetEnvironmentVariable
                  * left them: what the loader reads PATH from.
                  *

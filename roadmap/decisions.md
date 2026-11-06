@@ -811,6 +811,14 @@ program did wrong is said in the journal instead, as a divergence), and a device
 flag and without the interfaces the layer adds would be one a program could not tell from a
 broken one. *2026-11-05.*
 
+**A82. Temporary: a swap chain for composition is refused with DXGI_ERROR_UNSUPPORTED, and one
+for a core window with DXGI_ERROR_INVALID_CALL.** IDXGIFactory2::CreateSwapChainForComposition
+makes a swap chain that DirectComposition places into a window's visual tree, which nothing here
+has yet; a desktop program has no CoreWindow, and Windows answers it so too. A program that
+draws through composition (a launcher, a browser engine inside a game) is told its swap chain
+cannot be made and falls back to a window's, or says so; the refusal is said in the journal. It
+stands until DirectComposition's visuals are drawn into the window's surface. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

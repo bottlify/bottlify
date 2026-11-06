@@ -100,6 +100,17 @@ const DRIVER_VERSION = Object.freeze({ high: 0x00010000, low: 0 });
 /** DXGI_PRESENT_TEST: a present that only asks whether it would be shown. */
 const DXGI_PRESENT_TEST = 0x1;
 
+/** DXGI_MODE_ROTATION_IDENTITY: buffers shown as they are. */
+const DXGI_MODE_ROTATION_IDENTITY = 1;
+/** DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709: sRGB, the one a present shows. */
+const DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 = 0;
+/** DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT. */
+const FRAME_LATENCY_WAITABLE = 0x40;
+/** The most frames SetMaximumFrameLatency takes (DXGI_MAX_SWAP_CHAIN_BUFFERS). */
+const MAX_FRAME_LATENCY = 16;
+/** The flip model's swap effects: FLIP_SEQUENTIAL and FLIP_DISCARD. */
+const FLIP_EFFECTS = new Set([3, 4]);
+
 /**
  * @typedef {Object} OutputConfig
  * @property {string} deviceName
@@ -117,6 +128,7 @@ const DXGI_PRESENT_TEST = 0x1;
  * @property {number | (() => number)} [vendorId]
  * @property {number} [deviceId]
  * @property {OutputConfig[]} [outputs]
+ * @property {boolean} [software]  A software rasteriser (DXGI_ADAPTER_FLAG_SOFTWARE).
  */
 
 /**
@@ -128,6 +140,10 @@ const DXGI_PRESENT_TEST = 0x1;
  *     The desktop the machine's one output shows, as user32 reports it.
  * @property {() => number} [vendorId]
  *     The PCI vendor of the machine's one adapter, as Direct3D 9 reports it.
+ * @property {number} [creationFlags]  What CreateDXGIFactory2 was given (GetCreationFlags).
+ * @property {(options: { manualReset: boolean, signalled: boolean }) => number} [createEvent]
+ *     A kernel event, as the handle a program waits on: a swap chain's frame
+ *     latency object.
  * @property {(width: number, height: number,
  *             where: { window: number, fullscreen: boolean, announce?: boolean }) => void}
  *     [resolution]
@@ -175,12 +191,47 @@ function machineAdapters(options){
 export function CreateDXGIFactory(iid, out, options = {}){
     // Deliberately not IDXGIFactory1: this entry point is the first version of
     // DXGI, and a program uses exactly this refusal to tell the two apart.
-    if (iid !== IID.IUnknown && iid !== IID.IDXGIObject && iid !== IID.IDXGIFactory)
+    // Asked for a later one, it makes the factory of today's DXGI
+    // (test_create_factory).
+    const later = LATER_FACTORIES.includes(iid);
+    if (iid !== IID.IUnknown && iid !== IID.IDXGIObject && iid !== IID.IDXGIFactory && !later)
     {
         out.object = null;
         return E_NOINTERFACE;
     }
-    out.object = createFactory(options);
+    out.object = createFactory(options, later);
+    return S_OK;
+}
+
+/** The factories after the first two, which today's DXGI's factory is all of. */
+const LATER_FACTORIES = /** @type {readonly string[]} */ (Object.freeze([IID.IDXGIFactory2, IID.IDXGIFactory3, IID.IDXGIFactory4,
+    IID.IDXGIFactory5, IID.IDXGIFactory6, IID.IDXGIFactory7]));
+
+/** DXGI_CREATE_FACTORY_DEBUG: the one flag CreateDXGIFactory2 takes. */
+const DXGI_CREATE_FACTORY_DEBUG = 0x1;
+
+/**
+ * DXGI 1.3's entry point: the factory of every version, made with flags.
+ *
+ * @param {number} flags
+ * @param {string} iid
+ * @param {{ object?: any }} out
+ * @param {FactoryOptions} [options]
+ * @returns {number}
+ */
+export function CreateDXGIFactory2(flags, iid, out, options = {}){
+    if ((flags & ~DXGI_CREATE_FACTORY_DEBUG) !== 0)
+    {
+        out.object = null;
+        return E_INVALIDARG;
+    }
+    if (iid !== IID.IUnknown && iid !== IID.IDXGIObject && iid !== IID.IDXGIFactory
+        && iid !== IID.IDXGIFactory1 && !LATER_FACTORIES.includes(iid))
+    {
+        out.object = null;
+        return E_NOINTERFACE;
+    }
+    out.object = createFactory({ ...options, creationFlags: flags }, true);
     return S_OK;
 }
 
@@ -196,7 +247,7 @@ export function CreateDXGIFactory(iid, out, options = {}){
  */
 export function CreateDXGIFactory1(iid, out, options = {}){
     if (iid !== IID.IUnknown && iid !== IID.IDXGIObject && iid !== IID.IDXGIFactory
-        && iid !== IID.IDXGIFactory1)
+        && iid !== IID.IDXGIFactory1 && !LATER_FACTORIES.includes(iid))
     {
         out.object = null;
         return E_NOINTERFACE;
@@ -207,7 +258,9 @@ export function CreateDXGIFactory1(iid, out, options = {}){
 
 /**
  * @param {FactoryOptions} [options]
- * @param {boolean} [secondVersion]  Whether it answers as IDXGIFactory1.
+ * @param {boolean} [secondVersion]  Whether it answers as IDXGIFactory1 and every
+ *     version after it, as today's DXGI's does: a first-version factory is one
+ *     only CreateDXGIFactory makes.
  */
 export function createFactory(options = {}, secondVersion = false){
     const configs = options.adapters ?? machineAdapters(options);
@@ -273,6 +326,7 @@ export function createFactory(options = {}, secondVersion = false){
             }
             out.swapChain = createSwapChain(desc, device, factory, {
                 windowClientSize, resolution: options.resolution, display: options.display,
+                createEvent: options.createEvent,
             });
             return S_OK;
         },
@@ -300,21 +354,139 @@ export function createFactory(options = {}, secondVersion = false){
         adapterCount(){
             return adapters.length;
         },
+
+        /**
+         * DXGI 1.2's swap chain of a window: the description in two halves,
+         * put together as the first version's, and a size of zero the
+         * window's own.
+         *
+         * @param {any} device
+         * @param {number} window
+         * @param {import('./structs.js').SwapChainFields | null} desc
+         * @param {any} restrict  the output it is held to, or null
+         * @param {{ swapChain?: any }} out
+         * @returns {number}
+         */
+        CreateSwapChainForHwnd(device, window, desc, restrict, out){
+            out.swapChain = null;
+            if (!device || !desc || window === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            // Stereo needs a display that shows it; a window's alpha is not
+            // blended with the desktop (DXGI_ALPHA_MODE_UNSPECIFIED or IGNORE).
+            if (desc.stereo || ((desc.alphaMode ?? 0) !== 0 && desc.alphaMode !== 3))
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            const sized = { ...desc, outputWindow: window, bufferDesc: { ...desc.bufferDesc,
+                ...extentFromWindow(desc.bufferDesc.width, desc.bufferDesc.height,
+                    ()=>windowClientSize(window)) } };
+            const hr = factory.CreateSwapChain(device, sized, out);
+            if (hr === S_OK)
+            {
+                out.swapChain.restrictedTo(restrict);
+            }
+            return hr;
+        },
+
+        /** @returns {number} what CreateDXGIFactory2 was given */
+        GetCreationFlags(){
+            return options.creationFlags ?? 0;
+        },
+
+        /**
+         * DXGI_FEATURE_PRESENT_ALLOW_TEARING, the one feature there is: a
+         * present without vsync is shown at once here.
+         *
+         * @param {number} feature @param {number} size
+         * @returns {{ hr: number, value?: number }}
+         */
+        CheckFeatureSupport(feature, size){
+            return feature === 0 && size === 4 ? { hr: S_OK, value: 1 } : { hr: E_INVALIDARG };
+        },
+
+        /**
+         * The adapter whose locally unique identifier this is.
+         *
+         * @param {number} low @param {number} high @param {{ adapter?: any }} out
+         * @returns {number}
+         */
+        EnumAdapterByLuid(low, high, out){
+            const index = adapters.findIndex((_, at)=>adapterLuid(at).low === low
+                && adapterLuid(at).high === high);
+            if (index < 0)
+            {
+                out.adapter = null;
+                return DXGI_ERROR_NOT_FOUND;
+            }
+            return factory.EnumAdapters(index, out);
+        },
+
+        /**
+         * The software rasteriser every Windows has: here it draws through
+         * the same GPU as the rest.
+         *
+         * @param {{ adapter?: any }} out
+         * @returns {number}
+         */
+        EnumWarpAdapter(out){
+            warp ??= createAdapter(WARP_ADAPTER, factory, adapterLuid(adapters.length));
+            warp.addRef();
+            out.adapter = warp;
+            return S_OK;
+        },
+
+        /**
+         * Notices of stereo, occlusion and adapter changes, by cookie: none of
+         * them ever happens here, so a registration is kept and never fired.
+         *
+         * @returns {number} the cookie
+         */
+        register(){
+            return nextCookie++;
+        },
+
+        /** @returns {boolean} whether a window shows stereo: none does */
+        IsWindowedStereoEnabled(){
+            return false;
+        },
     }, {
         interfaces: [IID.IDXGIObject, IID.IDXGIFactory,
-            ...(secondVersion ? [IID.IDXGIFactory1] : [])],
+            ...(secondVersion ? [IID.IDXGIFactory1, ...LATER_FACTORIES] : [])],
         parent: null,
     });
+    /** @type {any} */
+    let warp = null;
+    let nextCookie = 1;
 
-    adapters = configs.map(config=>createAdapter(config, factory));
+    adapters = configs.map((config, index)=>createAdapter(config, factory, adapterLuid(index)));
     return factory;
 }
 
 /**
+ * An adapter's locally unique identifier, by its place: the first is the
+ * one every description has reported (1, 0).
+ *
+ * @param {number} index
+ * @returns {{ low: number, high: number }}
+ */
+export function adapterLuid(index){
+    return { low: index + 1, high: 0 };
+}
+
+/** Windows's software rasteriser, as its description names it. */
+const WARP_ADAPTER = Object.freeze({ description: 'Microsoft Basic Render Driver',
+    vendorId: 0x1414, deviceId: 0x8c, outputs: [], software: true });
+
+/**
  * @param {AdapterConfig} config
  * @param {any} factory
+ * @param {{ low: number, high: number }} luid
  */
-function createAdapter(config, factory){
+function createAdapter(config, factory, luid){
+    /** What a program reserved of each memory segment group (QueryVideoMemoryInfo). */
+    const reserved = [0, 0];
     /** @type {any[]} */
     let outputs = [];
 
@@ -336,8 +508,48 @@ function createAdapter(config, factory){
                 DeviceId: config.deviceId ?? 0,
                 SubSysId: 0,
                 Revision: 0,
+                AdapterLuid: { ...luid },
+                // DXGI_ADAPTER_FLAG_SOFTWARE for the software rasteriser.
+                Flags: config.software ? 2 : 0,
             };
             return S_OK;
+        },
+
+        /**
+         * A memory segment group's budget: the local one is what the adapter
+         * reports as its own memory, the other none.
+         *
+         * @param {number} node @param {number} group
+         * @param {number} memory  the adapter's own, in bytes
+         * @returns {{ hr: number, info?: { budget: number, usage: number,
+         *     reservable: number, reserved: number } }}
+         */
+        QueryVideoMemoryInfo(node, group, memory){
+            if (node !== 0 || group > 1)
+            {
+                return { hr: E_INVALIDARG };
+            }
+            const budget = group === 0 ? memory : 0;
+            return { hr: S_OK, info: { budget, usage: 0, reservable: Math.floor(budget / 2),
+                reserved: reserved[group] } };
+        },
+
+        /**
+         * @param {number} node @param {number} group @param {number} bytes
+         * @returns {number}
+         */
+        SetVideoMemoryReservation(node, group, bytes){
+            if (node !== 0 || group > 1)
+            {
+                return E_INVALIDARG;
+            }
+            reserved[group] = bytes;
+            return S_OK;
+        },
+
+        /** @returns {number} a notice's cookie: none is ever sent */
+        register(){
+            return factory.register();
         },
 
         /**
@@ -378,7 +590,8 @@ function createAdapter(config, factory){
             return S_OK;
         },
     }, {
-        interfaces: [IID.IDXGIObject, IID.IDXGIAdapter, IID.IDXGIAdapter1],
+        interfaces: [IID.IDXGIObject, IID.IDXGIAdapter, IID.IDXGIAdapter1, IID.IDXGIAdapter2,
+            IID.IDXGIAdapter3, IID.IDXGIAdapter4],
         parent: factory,
         implicit: true,
         onFirstRef: ()=>factory.addRef(),
@@ -500,7 +713,8 @@ function createOutput(config, adapter){
             return S_OK;
         },
     }, {
-        interfaces: [IID.IDXGIObject, IID.IDXGIOutput],
+        interfaces: [IID.IDXGIObject, IID.IDXGIOutput, IID.IDXGIOutput1, IID.IDXGIOutput2,
+            IID.IDXGIOutput3, IID.IDXGIOutput4, IID.IDXGIOutput5, IID.IDXGIOutput6],
         parent: adapter,
         implicit: true,
         onFirstRef: ()=>adapter.addRef(),
@@ -532,6 +746,10 @@ function copySwapChainDesc(desc){
         windowed: desc.windowed,
         swapEffect: desc.swapEffect,
         flags: desc.flags,
+        // DXGI 1.2's description says three things more.
+        ...(desc.stereo !== undefined ? { stereo: desc.stereo } : {}),
+        ...(desc.scaling1 !== undefined ? { scaling1: desc.scaling1 } : {}),
+        ...(desc.alphaMode !== undefined ? { alphaMode: desc.alphaMode } : {}),
     };
 }
 
@@ -563,7 +781,8 @@ function extentFromWindow(width, height, client){
  * @param {any} factory
  * @param {{ windowClientSize: (window: number) => { width: number, height: number },
  *           resolution?: FactoryOptions['resolution'],
- *           display?: FactoryOptions['display'] }} services
+ *           display?: FactoryOptions['display'],
+ *           createEvent?: FactoryOptions['createEvent'] }} services
  */
 function createSwapChain(requested, device, factory, services){
     const { windowClientSize } = services;
@@ -669,6 +888,14 @@ function createSwapChain(requested, device, factory, services){
         }
         device.CopyResource(bufferFor(last), parked);
     };
+
+    /** @type {any} */
+    let restriction = null;
+    let background = [0, 0, 0, 0];
+    let rotation_ = DXGI_MODE_ROTATION_IDENTITY;
+    /** @type {{ width: number, height: number } | null} */
+    let source = null;
+    let frameLatency = 1;
 
     const swapChain = attachCom({
         factory,
@@ -888,12 +1115,185 @@ function createSwapChain(requested, device, factory, services){
             return currentBuffer;
         },
 
+        // --- DXGI 1.2 to 1.5 ---
+
+        /** @param {{ desc?: any }} out */
+        GetDesc1(out){
+            out.desc = { ...copySwapChainDesc(desc), stereo: !!desc.stereo,
+                scaling1: desc.scaling1 ?? 0, alphaMode: desc.alphaMode ?? 0 };
+            return S_OK;
+        },
+
+        /** @param {any} output  the output a swap chain is held to, or null */
+        restrictedTo(output){
+            restriction = output ?? null;
+        },
+
+        /** @param {{ output?: any }} out */
+        GetRestrictToOutput(out){
+            restriction?.addRef();
+            out.output = restriction;
+            return S_OK;
+        },
+
+        /** @returns {boolean} whether a stereo chain could show one eye: none is stereo */
+        IsTemporaryMonoSupported(){
+            return false;
+        },
+
+        /** @param {number[] | null} rgba */
+        SetBackgroundColor(rgba){
+            if (!rgba)
+            {
+                return E_INVALIDARG;
+            }
+            background = [...rgba];
+            return S_OK;
+        },
+
+        /** @param {{ rgba?: number[] }} out */
+        GetBackgroundColor(out){
+            out.rgba = [...background];
+            return S_OK;
+        },
+
+        /**
+         * A flip chain's buffers turned for the display: only as they are
+         * here; a blit chain's never (DXGI_ERROR_INVALID_CALL).
+         *
+         * @param {number} rotation
+         */
+        SetRotation(rotation){
+            if (!FLIP_EFFECTS.has(desc.swapEffect))
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            if (rotation !== DXGI_MODE_ROTATION_IDENTITY)
+            {
+                device.diverge('a flip swap chain turned for its display is shown unturned');
+            }
+            rotation_ = rotation;
+            return S_OK;
+        },
+
+        /** @param {{ rotation?: number }} out */
+        GetRotation(out){
+            out.rotation = rotation_;
+            return S_OK;
+        },
+
+        /**
+         * The part of the buffers a present shows, from their top left.
+         *
+         * @param {number} width @param {number} height
+         */
+        SetSourceSize(width, height){
+            if (width === 0 || height === 0 || width > desc.bufferDesc.width
+                || height > desc.bufferDesc.height)
+            {
+                return E_INVALIDARG;
+            }
+            if (width !== desc.bufferDesc.width || height !== desc.bufferDesc.height)
+            {
+                device.diverge('a swap chain\'s source size smaller than its buffers is shown'
+                    + ' whole');
+            }
+            source = { width, height };
+            return S_OK;
+        },
+
+        /** @param {{ width?: number, height?: number }} out */
+        GetSourceSize(out){
+            out.width = source?.width ?? desc.bufferDesc.width;
+            out.height = source?.height ?? desc.bufferDesc.height;
+            return S_OK;
+        },
+
+        /**
+         * How many frames a program may queue before its waitable object
+         * holds it: a chain made with one only.
+         *
+         * @param {number} frames
+         */
+        SetMaximumFrameLatency(frames){
+            if ((desc.flags & FRAME_LATENCY_WAITABLE) === 0 || frames === 0
+                || frames > MAX_FRAME_LATENCY)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            frameLatency = frames;
+            return S_OK;
+        },
+
+        /** @param {{ frames?: number }} out */
+        GetMaximumFrameLatency(out){
+            if ((desc.flags & FRAME_LATENCY_WAITABLE) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            out.frames = frameLatency;
+            return S_OK;
+        },
+
+        /**
+         * The event a program waits on before it draws a frame: signalled, as
+         * a present here already waits for the GPU to take the frame
+         * (`webgpu/internal/latency.js`), so a wait on it never holds.
+         *
+         * @returns {number} its handle, or zero for a chain made without one
+         */
+        GetFrameLatencyWaitableObject(){
+            if ((desc.flags & FRAME_LATENCY_WAITABLE) === 0 || !services.createEvent)
+            {
+                return 0;
+            }
+            return services.createEvent({ manualReset: true, signalled: true });
+        },
+
+        /** @returns {number} the buffer drawn into: Direct3D 10 and 11 draw into buffer 0 */
+        GetCurrentBackBufferIndex(){
+            return 0;
+        },
+
+        /**
+         * The colour spaces a present shows: sRGB only.
+         *
+         * @param {number} colorSpace
+         * @returns {number} DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT flags
+         */
+        CheckColorSpaceSupport(colorSpace){
+            return colorSpace === DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ? 1 : 0;
+        },
+
+        /** @param {number} colorSpace */
+        SetColorSpace1(colorSpace){
+            return colorSpace === DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 ? S_OK : E_INVALIDARG;
+        },
+
+        /**
+         * HDR metadata for the display: none is shown in HDR here.
+         *
+         * @param {number} type  DXGI_HDR_METADATA_TYPE
+         */
+        SetHDRMetaData(type){
+            if (type > 1)
+            {
+                return E_INVALIDARG;
+            }
+            if (type !== 0)
+            {
+                device.diverge('HDR10 metadata is kept, and the picture shown in SDR');
+            }
+            return S_OK;
+        },
+
         /** @returns {number} how many back-buffer references are outstanding */
         outstandingBuffers(){
             return outstanding;
         },
     }, {
-        interfaces: [IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGISwapChain],
+        interfaces: [IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGISwapChain,
+            IID.IDXGISwapChain1, IID.IDXGISwapChain2, IID.IDXGISwapChain3, IID.IDXGISwapChain4],
         parent: factory,
         onFirstRef: ()=>{
             factory.addRef();

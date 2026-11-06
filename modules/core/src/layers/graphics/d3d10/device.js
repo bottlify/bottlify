@@ -2355,7 +2355,8 @@ export function createDevice(options = {}){
         also: iid=>stateEmulation && (iid === IID.ID3D10Device || iid === IID.ID3D10Device1),
         interfaces: [...(d3d11 ? [IID.ID3D11Device1] : [IID.ID3D10Device, IID.ID3D10Device1]),
             IID.ID3D11Device,
-            IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice, IID.IDXGIDevice1],
+            IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice, IID.IDXGIDevice1,
+            IID.IDXGIDevice2, IID.IDXGIDevice3, IID.IDXGIDevice4],
         parent: adapter,
         // The adapter is the device's to hold: a program that releases its own
         // reference to the adapter and keeps the device must still be able to
