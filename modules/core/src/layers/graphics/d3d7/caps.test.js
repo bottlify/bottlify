@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import {
-    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DPRASTERCAPS_FOGRANGE,
+    D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT,
+    D3DPRASTERCAPS_FOGRANGE,
     D3DPRASTERCAPS_FOGTABLE, D3DPRASTERCAPS_FOGVERTEX, D3DPRASTERCAPS_WFOG, D3DPRASTERCAPS_ZBIAS,
     D3DPRASTERCAPS_ZFOG, D3DPRASTERCAPS_ZTEST, D3DPTFILTERCAPS_MIPFLINEAR,
     D3DPTFILTERCAPS_MIPFPOINT,
@@ -19,15 +20,18 @@ import {
 test('the three devices differ only in where the work is said to happen', ()=>{
     const [rgb, hal, tnl] = DEVICE_DESCRIPTIONS;
     assert.deepEqual([rgb.id, hal.id, tnl.id], [DEVICE_IDS.RGB, DEVICE_IDS.HAL, DEVICE_IDS.TNLHAL]);
-    // Strip the two placement bits and the identity, and nothing is left to tell apart.
+    // Strip the two placement bits and the identity, and nothing is left to tell apart:
+    // the software device has no DrawPrimitives2 extensions (ddraw7 test_enum_devices).
     const same = (/** @type {any} */ caps)=>({
         ...caps,
-        devCaps: caps.devCaps & ~(D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_HWTRANSFORMANDLIGHT),
+        devCaps: caps.devCaps & ~(D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_HWTRANSFORMANDLIGHT
+            | D3DDEVCAPS_DRAWPRIMITIVES2EX),
         deviceGuid: '',
     });
     assert.deepEqual(same(rgb.caps), same(hal.caps));
     assert.deepEqual(same(hal.caps), same(tnl.caps));
     assert.equal(rgb.caps.devCaps & D3DDEVCAPS_HWRASTERIZATION, 0);
+    assert.equal(rgb.caps.devCaps & D3DDEVCAPS_DRAWPRIMITIVES2EX, 0);
     assert.equal(hal.caps.devCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT, 0);
     assert.equal(tnl.caps.devCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DDEVCAPS_HWTRANSFORMANDLIGHT);
 });

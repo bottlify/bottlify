@@ -49,10 +49,10 @@ import { readGuid } from './ddraw.js';
 import { DDSURFACEDESC, writeSurfaceDesc } from '../ddraw/structs.js';
 import { guidBytes } from './d3d7.js';
 import {
-    D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_FLOATTLVERTEX,
+    D3DCOLOR_MONO, D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_FLOATTLVERTEX,
     D3DDEB_BUFSIZE, D3DDEB_LPDATA, D3DERR_INVALIDVERTEXTYPE, D3DERR_MATRIX_GETDATA_FAILED,
     D3DFVF_LVERTEX, D3DFVF_TLVERTEX, D3DFVF_VERTEX, D3DVT,
-    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DFDS_GUID, D3DFDS_HARDWARE,
+    D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DFDS_GUID, D3DFDS_HARDWARE,
     D3DLIGHTCAPS_DIRECTIONAL, D3DLIGHTCAPS_PARALLELPOINT, D3DLIGHTCAPS_POINT, D3DLIGHTCAPS_SPOT,
     D3DLIGHTINGMODEL_RGB, D3DPTEXTURECAPS_POW2, D3DTRANSFORMCAPS_CLIP, D3D_OK,
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS,
@@ -103,6 +103,17 @@ const MAX_VERTEX_COUNT = 0xffff;
 
 /** Every D3DDD bit: which fields a full description fills. */
 const ALL_FIELDS = Object.values(D3DDD).reduce((all, bit)=>all | bit, 0);
+
+/**
+ * The software devices' own capabilities, as Windows describes them to the
+ * versions before 7 (Wine's ddraw1, ddraw2 and ddraw4 test_enum_devices):
+ * before IDirect3D3 they also sort, and leave the line capabilities out.
+ */
+const SOFTWARE_DEVCAPS = Object.freeze({
+    older: 0x55b,
+    third: 0x551,
+});
+const OLDER_SOFTWARE_FIELDS = ALL_FIELDS & ~D3DDD.LINECAPS;
 
 /** The fields the software side of the hardware device fills. */
 const HEL_OF_HAL_FIELDS = D3DDD.COLORMODEL | D3DDD.DEVCAPS | D3DDD.TRANSFORMCAPS
@@ -258,6 +269,7 @@ export function createLegacyDirect3DSeam(
         }
         const caps = device.caps;
         const software = device.id !== DEVICE_IDS.HAL;
+        const older = declared < D3DDEVICEDESC.SIZE;
         const lighting = (/** @type {number} */ lights)=>{
             fields.writeU32(at + TRANSFORM_CAPS + 4, D3DTRANSFORMCAPS_CLIP);
             fields.writeU32(at + D3DDEVICEDESC.bClipping, 1);
@@ -274,12 +286,13 @@ export function createLegacyDirect3DSeam(
             return;
         }
         // DirectX 7's own capabilities, and the hardware ones on the software
-        // device, are not this device's to claim.
-        const devCaps = caps.devCaps & ~D3DDEVCAPS_HWTRANSFORMANDLIGHT
-            & ~(software ? D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_DRAWPRIMITIVES2EX : 0);
+        // devices, are not this device's to claim.
+        const devCaps = software
+            ? (older ? SOFTWARE_DEVCAPS.older : SOFTWARE_DEVCAPS.third)
+            : caps.devCaps & ~D3DDEVCAPS_HWTRANSFORMANDLIGHT;
         fields.writeStruct(at, D3DDEVICEDESC, {
-            dwFlags: ALL_FIELDS,
-            dcmColorModel: D3DCOLOR_RGB,
+            dwFlags: software && older ? OLDER_SOFTWARE_FIELDS : ALL_FIELDS,
+            dcmColorModel: device.id === DEVICE_IDS.RAMP ? D3DCOLOR_MONO : D3DCOLOR_RGB,
             dwDevCaps: devCaps,
             dwDeviceRenderBitDepth: caps.deviceRenderBitDepth,
             dwDeviceZBufferBitDepth: caps.deviceZBufferBitDepth,
@@ -352,8 +365,32 @@ export function createLegacyDirect3DSeam(
     };
 
     /**
-     * EnumDevices of any version: the software device, then the hardware
-     * one, each with its descriptions at the size this version's header has.
+     * The devices a version lists and finds, in its order: IDirect3D the ramp
+     * emulation before the RGB one and the HAL, IDirect3D2 the MMX emulation
+     * after them too, IDirect3D3 neither (Wine's test_enum_devices and
+     * test_find_device, every version). The emulations are described as the
+     * RGB device is, the ramp one in the mono colour model.
+     *
+     * @param {any} root @param {number} declared  The version's description size.
+     * @returns {any[]}
+     */
+    const devicesOf = (root, declared)=>{
+        const own = legacyFor(root).devices();
+        if (declared === D3DDEVICEDESC.SIZE)
+        {
+            return own;
+        }
+        const rgb = own.find((/** @type {any} */ device)=>device.id === DEVICE_IDS.RGB);
+        const ramp = { ...rgb, id: DEVICE_IDS.RAMP, name: 'Ramp Emulation',
+            text: 'Microsoft Direct3D Mono(Ramp) Software Emulation' };
+        const mmx = { ...rgb, id: DEVICE_IDS.MMX, name: 'MMX Emulation',
+            text: 'Microsoft Direct3D MMX Software Emulation' };
+        return declared === D3DDEVICEDESC.SIZE_V1 ? [ramp, ...own] : [ramp, ...own, mmx];
+    };
+
+    /**
+     * EnumDevices of any version: its devices (`devicesOf`), each with its
+     * descriptions at the size this version's header has.
      *
      * @param {any} root @param {number} callback @param {number} context @param {number} size
      */
@@ -370,7 +407,7 @@ export function createLegacyDirect3DSeam(
         // Whose call this is, before the loop awaits anything: only the first
         // callback of an enumeration runs on the thread standing here.
         const asked = currentThread?.();
-        const devices = legacyFor(root).devices();
+        const devices = devicesOf(root, size);
         return (async()=>{
             for (const device of devices)
             {
@@ -421,7 +458,7 @@ export function createLegacyDirect3DSeam(
         const hardware = (flags & D3DFDS_HARDWARE) !== 0
             ? fields.readU32((search >>> 0) + D3DFINDDEVICESEARCH.bHardware) !== 0
             : null;
-        const device = legacyFor(root).devices().find((/** @type {any} */ candidate)=>
+        const device = devicesOf(root, declared).find((/** @type {any} */ candidate)=>
             (guid === null || candidate.id === guid)
             && (hardware === null || (candidate.id === DEVICE_IDS.HAL) === hardware));
         if (!device)

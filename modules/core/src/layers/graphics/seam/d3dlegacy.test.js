@@ -1128,12 +1128,12 @@ test('IDirect3D2 describes its devices at DirectX 5\'s size, and names formats b
         const d3d = h.query(ddraw, IID_IDirect3D2).pointer;
         assert.equal(await h.box.callRaw(d3d, slot(IDIRECT3D2_SLOTS, 'EnumDevices'),
             [0x1234, 0]), D3D_OK);
-        assert.equal(h.callbacks.length, 2);
-        // The fourth and fifth arguments are the two descriptions; each
-        // reads its own size first.
+        // The ramp emulation, the RGB one, the HAL and the MMX emulation
+        // (ddraw2 test_enum_devices). The fourth and fifth arguments are the
+        // two descriptions; each reads its own size first.
+        assert.equal(h.callbacks.length, 4);
         assert.deepEqual(h.callbacks.map(call=>call.seen.slice(3, 5)),
-            [[D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2],
-                [D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2]]);
+            Array.from({ length: 4 }, ()=>[D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2]));
 
         const search = 0x6000;
         const result = 0x6100;
@@ -1270,13 +1270,73 @@ test('IDirect3D is a query away from IDirectDraw, makes no device, and initializ
         {
             seen.push([h.box.memory.readU32(args[3]), h.box.memory.readU32(args[4])]);
         }
-        assert.deepEqual(seen, [[D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1],
-            [D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1]], 'DirectX 3\'s description size');
+        assert.deepEqual(seen, Array.from({ length: 3 },
+            ()=>[D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1]),
+        'the ramp emulation, the RGB one and the HAL, at DirectX 3\'s description size');
 
         h.release(d3d.pointer);
         h.release(ddraw);
         h.assertAllReleased();
     });
+
+test('each version lists and finds its own devices: the ramp emulation before IDirect3D3, the'
+    + ' MMX one in IDirect3D2, described as Windows describes its software devices', async()=>{
+    // ddraw1, ddraw2 and ddraw4 test_enum_devices and test_find_device.
+    const h = seamed((box, args)=>{
+        const bytes = box.bytes.slice(args[2], args[2] + 32);
+        const hel = args[4];
+        return { name: new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0))),
+            colourModel: box.memory.readU32(hel + D3DDEVICEDESC.dcmColorModel),
+            devCaps: box.memory.readU32(hel + D3DDEVICEDESC.dwDevCaps),
+            flags: box.memory.readU32(hel + D3DDEVICEDESC.dwFlags) };
+    });
+    const versions = [
+        { make: ()=>h.create1(), iid: IID_IDirect3D, slots: IDIRECT3D_SLOTS,
+            size: D3DDEVICEDESC.SIZE_V1 },
+        { make: ()=>h.create2(), iid: IID_IDirect3D2, slots: IDIRECT3D2_SLOTS,
+            size: D3DDEVICEDESC.SIZE_V2 },
+        { make: ()=>h.create4(), iid: IID_IDirect3D3, slots: IDIRECT3D3_SLOTS,
+            size: D3DDEVICEDESC.SIZE },
+    ];
+    /** @type {any[][]} */
+    const listed = [];
+    /** @type {number[][]} */
+    const found = [];
+    for (const version of versions)
+    {
+        const ddraw = version.make();
+        const d3d = h.query(ddraw, version.iid).pointer;
+        h.callbacks.length = 0;
+        assert.equal(await h.box.callRaw(d3d, slot(version.slots, 'EnumDevices'), [0x1234, 0]),
+            D3D_OK);
+        listed.push(h.callbacks.map(call=>call.seen));
+        found.push([DEVICE_IDS.RAMP, DEVICE_IDS.MMX].map(id=>{
+            const search = 0x6000;
+            const result = 0x6100;
+            h.box.bytes.fill(0, search, search + 0x400);
+            h.box.memory.writeU32(search, D3DFINDDEVICESEARCH.SIZE);
+            h.box.memory.writeU32(search + D3DFINDDEVICESEARCH.dwFlags, D3DFDS_GUID);
+            h.box.putGuid(search + D3DFINDDEVICESEARCH.guid, id);
+            h.box.memory.writeU32(result, D3DFINDDEVICERESULT.ddHwDesc + 2 * version.size);
+            return h.box.call(d3d, slot(version.slots, 'FindDevice'), [search, result]) >>> 0;
+        }));
+        h.release(d3d);
+        h.release(ddraw);
+    }
+    assert.deepEqual(listed.map(devices=>devices.map(device=>device.name)), [
+        ['Ramp Emulation', 'RGB Emulation', 'Direct3D HAL'],
+        ['Ramp Emulation', 'RGB Emulation', 'Direct3D HAL', 'MMX Emulation'],
+        ['RGB Emulation', 'Direct3D HAL'],
+    ]);
+    assert.deepEqual(found, [[D3D_OK, DDERR_NOTFOUND >>> 0], [D3D_OK, D3D_OK],
+        [DDERR_NOTFOUND >>> 0, DDERR_NOTFOUND >>> 0]]);
+    const [ramp, rgb] = listed[1];
+    assert.deepEqual([ramp.colourModel, rgb.colourModel], [1, 2], 'mono, then RGB');
+    assert.deepEqual([rgb.flags, rgb.devCaps], [0x7df, 0x55b], 'before IDirect3D3');
+    assert.deepEqual([listed[2][0].flags, listed[2][0].devCaps], [0x7ff, 0x551],
+        'through IDirect3D3');
+    h.assertAllReleased();
+});
 
 test('a surface asked for a device is one, with the surface\'s interfaces and count', ()=>{
     const h = seamed();

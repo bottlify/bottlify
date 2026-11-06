@@ -193,7 +193,9 @@ export const DEVICE_DESCRIPTIONS = Object.freeze([
         id: DEVICE_IDS.RGB,
         name: 'RGB Emulation',
         text: 'Microsoft Direct3D RGB Software Emulation',
-        caps: description(DEVICE_IDS.RGB, SHARED_DEVCAPS),
+        // The software device has no DrawPrimitives2 extensions
+        // (ddraw7 test_enum_devices).
+        caps: description(DEVICE_IDS.RGB, SHARED_DEVCAPS & ~D3DDEVCAPS_DRAWPRIMITIVES2EX),
     },
     {
         id: DEVICE_IDS.HAL,
