@@ -246,6 +246,8 @@ export const WGL_EXTENSIONS = Object.freeze({
         'wglGetPixelFormatAttribivARB', 'wglGetPixelFormatAttribfvARB', 'wglChoosePixelFormatARB',
     ],
     WGL_EXT_swap_control: ['wglSwapIntervalEXT', 'wglGetSwapIntervalEXT'],
+    WGL_ARB_create_context: ['wglCreateContextAttribsARB'],
+    WGL_ARB_create_context_profile: [],
 });
 
 /** How many stack words a value of each GL type letter takes. */
@@ -429,6 +431,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
     ],
     3: [
+        'wglCreateContextAttribsARB',
         'glMultiTexCoord1dARB', 'glMultiTexCoord2fARB', 'glMultiTexCoord2iARB',
         'glMultiTexCoord2sARB', 'glGetCompressedTexImageARB', 'glGetBufferParameterivARB',
         'glGetBufferPointervARB', 'glSecondaryColor3bEXT', 'glSecondaryColor3fEXT',

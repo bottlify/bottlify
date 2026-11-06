@@ -40,6 +40,9 @@ import {
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
 import { createDefaultState, readState, settleDrawableState } from './state.js';
+import {
+    DEFAULT_VERSION, shadingLanguageVersion, versionState, versionString,
+} from './version.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -56,15 +59,15 @@ import { createSceneBuilder } from './context-scene.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
 
-/** What this implementation answers glGetString with. */
+/**
+ * What this implementation answers glGetString with, but for the versions,
+ * which are the context's (`version.js`): what its core entry points
+ * implement, every one of them through wglGetProcAddress past 1.1; everything
+ * past it is reported as an extension.
+ */
 const STRINGS = Object.freeze({
     [GL.VENDOR]: 'Bottlify Project',
     [GL.RENDERER]: VIDEO_ADAPTER_NAME,
-    // The version is what the core entry points implement, every one of
-    // them through wglGetProcAddress past 1.1; everything past it is
-    // reported as an extension.
-    [GL.VERSION]: '2.1',
-    [GL.SHADING_LANGUAGE_VERSION]: '1.20',
 });
 
 /**
@@ -89,7 +92,7 @@ const CLEAR_BITS = GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT | GL.STENCIL_BUFFER
  * would be meaningless later.
  */
 const NOT_COMPILABLE = new Set([
-    'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString',
+    'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString', 'glGetStringi',
     'glGetPointerv', 'glGetTexParameteriv', 'glGetTexParameterfv', 'glGetTexLevelParameteriv',
     'glGetTexEnviv', 'glGetTexEnvfv', 'glGetTexGenfv', 'glGetTexImage', 'glGetLightfv',
     'glGetMaterialfv', 'glGetClipPlane', 'glIsEnabled', 'glIsTexture', 'glIsList',
@@ -223,6 +226,8 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @typedef {Object} GlContextOptions
  * @property {ReturnType<typeof createShareGroup>} [shareGroup]
  * @property {readonly string[]} [extensions]  what glGetString(GL_EXTENSIONS) reports
+ * @property {import('./version.js').ContextVersion} [version]  the version, profile and
+ *           flags the context was made for; `DEFAULT_VERSION` unless asked
  * @property {ContextMemory} [memory]
  * @property {(detail: string, severity?: 'loss') => void} [divergence]
  *           Told, once per distinct message, when a call was accepted but
@@ -264,7 +269,12 @@ export function createGlContext(options = {}){
     const raster = options.raster !== false;
 
     let attached = false;
+    const version = options.version ?? DEFAULT_VERSION;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
+    for (const { query, ...entry } of versionState(version, extensions.length))
+    {
+        state.set(query, entry);
+    }
     let framebuffer = createFramebuffer(0, 0);
 
     /** @type {number} */
@@ -650,13 +660,45 @@ export function createGlContext(options = {}){
             {
                 return kernel.side.programErrorString();
             }
-            const value = /** @type {any} */ (STRINGS)[name];
+            const value = name === GL.VERSION ? versionString(version)
+                : name === GL.SHADING_LANGUAGE_VERSION ? shadingLanguageVersion(version)
+                    : /** @type {any} */ (STRINGS)[name];
             if (value === undefined)
             {
                 setError(GL.INVALID_ENUM);
                 return null;
             }
             return value;
+        },
+
+        /**
+         * One extension's name by its index (OpenGL 3.0): a context of an
+         * earlier version has no such call to make.
+         *
+         * @param {number} name @param {number} index
+         * @returns {string | null}
+         */
+        glGetStringi(name, index){
+            if (!enter('glGetStringi', [name, index]))
+            {
+                return null;
+            }
+            if (name !== GL.EXTENSIONS)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (index < 0 || index >= extensions.length)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return extensions[index];
+        },
+
+        /** The version, profile and flags the context was made for. */
+        get version(){
+            return version;
         },
 
         /** @param {number} target @param {number} mode */

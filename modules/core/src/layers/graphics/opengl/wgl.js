@@ -51,6 +51,7 @@
 import { PFD, WIN32_ERROR } from './constants.js';
 import { CORE_FUNCTIONS, createGlContext } from './context.js';
 import { HIDDEN_GL_EXTENSIONS } from './extensions.js';
+import { chooseContextVersion } from './version.js';
 import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './pixelformat.js';
 import { createBitmapDrawables } from './wgl-bitmap.js';
 
@@ -103,7 +104,8 @@ import { createBitmapDrawables } from './wgl-bitmap.js';
  * @property {boolean} [keepPrimitives]
  *           Handed to every context: keep what each one draws for a test to
  *           read back (see `GlContextOptions.keepPrimitives`).
- * @property {(options: { extensions: string[], processor?: boolean }) => any} [createContext]
+ * @property {(options: { extensions: string[], processor?: boolean,
+ *     version?: import('./version.js').ContextVersion }) => any} [createContext]
  *           Makes a context in place of this module, which then hands it none of
  *           the above but the extensions: a root's (`root.js`), whose memory and
  *           renderer are its own.
@@ -288,8 +290,13 @@ export function createWgl(options){
 
         // --- contexts ---
 
-        /** @param {number} hdc @returns {any | null} */
-        wglCreateContext(hdc){
+        /**
+         * @param {number} hdc
+         * @param {import('./version.js').ContextVersion} [version]  what
+         *     wglCreateContextAttribsARB chose; wglCreateContext's otherwise
+         * @returns {any | null}
+         */
+        wglCreateContext(hdc, version){
             const drawable = gdi.describeDrawable(hdc);
             if (!drawable)
             {
@@ -312,9 +319,10 @@ export function createWgl(options){
             // processor, into a buffer the bitmap meets (`wgl-bitmap.js`).
             const processor = drawable.memory === true;
             const context = options.createContext
-                ? options.createContext({ extensions: contextExtensions, processor })
+                ? options.createContext({ extensions: contextExtensions, processor, version })
                 : createGlContext({
                     extensions: contextExtensions,
+                    version,
                     memory: contextMemory,
                     divergence: options.divergence,
                     gpu: processor ? undefined : options.gpu,
@@ -330,6 +338,43 @@ export function createWgl(options){
                 colorBits: format.cColorBits,
                 depth: processor ? bitmaps.depthAt(hdc) : format.cColorBits,
             });
+            return context;
+        },
+
+        /**
+         * WGL_ARB_create_context: a context of the version, profile and flags
+         * the attributes ask for, sharing the objects of `share` if one is
+         * given. An HDC that is no drawable fails as wglCreateContext's does;
+         * a share context that is none, with ERROR_INVALID_OPERATION.
+         *
+         * @param {number} hdc
+         * @param {any | null | undefined} share  null for none; undefined for
+         *     a handle that names no context
+         * @param {readonly number[]} attributes  name and value pairs
+         * @returns {any | null}
+         */
+        wglCreateContextAttribsARB(hdc, share, attributes){
+            if (!gdi.describeDrawable(hdc))
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return null;
+            }
+            if (share === undefined || (share !== null && !live.has(share)))
+            {
+                fail(WIN32_ERROR.INVALID_OPERATION);
+                return null;
+            }
+            const chosen = chooseContextVersion(attributes);
+            if ('error' in chosen)
+            {
+                fail(chosen.error);
+                return null;
+            }
+            const context = wgl.wglCreateContext(hdc, chosen.version);
+            if (context && share)
+            {
+                context.shareLists(share);
+            }
             return context;
         },
 

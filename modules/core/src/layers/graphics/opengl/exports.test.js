@@ -1156,3 +1156,52 @@ test('glCallLists reads GL_2_BYTES, GL_3_BYTES and GL_4_BYTES names two to four 
     assert.deepEqual(byteRunNames(bytes, 3, 2), [0x010203, 0x040506]);
     assert.deepEqual(byteRunNames(bytes.subarray(0, 4), 4, 1), [0x01020304]);
 });
+
+test('wglCreateContextAttribsARB refuses what WGL_ARB_create_context refuses and makes the rest',
+    ()=>{
+        /** @type {number[]} */
+        const errors = [];
+        const box = machine();
+        const opengl = createOpengl({
+            readMemory: box.readMemory,
+            writeMemory: box.writeMemory,
+            screen: ()=>({ width: 4, height: 4 }),
+            scratch: box.scratch,
+            describeDrawable: (/** @type {number} */ hdc)=>(hdc === 0x900d
+                ? { key: `dc:${hdc}`, width: 4, height: 4 } : null),
+            setLastError: (/** @type {number} */ code)=>errors.push(code),
+        });
+        const table = /** @type {Table} */ (opengl.table);
+        /** @param {number} at @param {number[]} words */
+        const put = (at, words)=>box.writeMemory(at,
+            new Uint8Array(Uint32Array.from(words).buffer));
+        const create = (/** @type {number} */ hdc, /** @type {number} */ share,
+            /** @type {number} */ list)=>table.wglCreateContextAttribsARB.handler([hdc, share, list]);
+        assert.equal(table.wglSetPixelFormat.handler([0x900d, 1, 0]), 1);
+
+        assert.equal(create(0xdeadbeef, 0, 0), 0);
+        assert.equal(create(0x900d, 0xdeadbeef, 0), 0);
+        put(0x2000, [0x2099, 1, 0]);
+        assert.equal(create(0x900d, 0, 0x2000), 0);
+        put(0x2000, [0x2091, 4, 0x2092, 6, 0]);
+        assert.equal(create(0x900d, 0, 0x2000), 0, 'a version past this implementation\'s');
+        assert.deepEqual(errors, [6, 4317, 87, 0x2095]);
+
+        // An earlier version: this implementation's, and the share list taken.
+        const first = create(0x900d, 0, 0);
+        assert.notEqual(first, 0);
+        put(0x2000, [0x2091, 2, 0x2092, 0, 0x2094, 1, 0]);
+        const second = create(0x900d, first, 0x2000);
+        assert.notEqual(second, 0);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, second]), 1);
+        const shared = opengl.withContext((/** @type {any} */ context)=>{
+            context.glNewList(1, GL.COMPILE);
+            context.glEndList();
+            return context.version;
+        });
+        assert.deepEqual(shared, { major: 2, minor: 1,
+            profile: GL.CONTEXT_COMPATIBILITY_PROFILE_BIT, flags: GL.CONTEXT_FLAG_DEBUG_BIT });
+        assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
+        assert.equal(opengl.withContext((/** @type {any} */ context)=>context.glIsList(1)),
+            GL.TRUE, 'the two share their lists');
+    });

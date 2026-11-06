@@ -95,13 +95,15 @@ export function createOpenglRoot(services){
 
     return {
         /**
-         * @param {{ extensions?: readonly string[], processor?: boolean }} options
+         * @param {{ extensions?: readonly string[], processor?: boolean,
+         *     version?: import('./version.js').ContextVersion }} options
          *     `processor`: the context draws on the processor whatever the
          *     root has, as the generic renderer of a memory DC does.
          */
         CreateContext(options){
             return createGlContext({
                 extensions: options.extensions,
+                version: options.version,
                 memory,
                 divergence: services.divergence,
                 gpu: options.processor ? undefined : renderer() ?? undefined,

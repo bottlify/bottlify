@@ -1470,6 +1470,25 @@ export function createOpengl(services){
             return context ? handleFor(context) : 0;
         },
 
+        wglCreateContextAttribsARB: ([hdc, share, list])=>{
+            // The attributes end at a zero name; a null list asks for nothing.
+            /** @type {number[]} */
+            const attributes = [];
+            for (let at = list >>> 0; at !== 0 && attributes.length < 256; at += 8)
+            {
+                const pair = new DataView(services.readMemory(at, 8).slice().buffer);
+                const name = pair.getUint32(0, true);
+                if (name === 0)
+                {
+                    break;
+                }
+                attributes.push(name, pair.getInt32(4, true));
+            }
+            const shared = (share >>> 0) === 0 ? null : contexts.get(share >>> 0);
+            const context = wgl.wglCreateContextAttribsARB(hdc >>> 0, shared, attributes);
+            return context ? handleFor(context) : 0;
+        },
+
         wglDeleteContext: ([handle])=>{
             const context = contexts.get(handle >>> 0);
             // A handle already deleted, or never made, is WGL's to refuse, so
@@ -1622,6 +1641,8 @@ export function createOpengl(services){
         glGetError: ()=>current()?.glGetError() ?? GL.INVALID_OPERATION,
 
         glGetString: ([name])=>guestString(current()?.glGetString(name >>> 0)),
+        glGetStringi: ([name, index])=>guestString(
+            current()?.glGetStringi(name >>> 0, index >>> 0)),
 
         // --- capabilities and queries ---
 
