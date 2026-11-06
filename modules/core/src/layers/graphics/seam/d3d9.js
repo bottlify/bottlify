@@ -210,6 +210,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {(x: number, y: number) => void} [deps.placeCursor]  The cursor put on the screen, as
  *     SetCursorPos puts it: SetCursorPosition's, for a device with a cursor set.
  * @param {() => { x: number, y: number } | null} [deps.cursorAt]  Where the cursor is.
+ * @param {(pointer: number) => void} [deps.devicePublished]  Told of every device a
+ *     create hands out, by its interface pointer.
  *     Where the program's cursor goes; without a taker the call is refused.
  * @param {(width: number, height: number,
  *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
@@ -254,7 +256,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  */
 export function createDirect3D9Seam(
     { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, placeCursor,
-        cursorAt, resolution,
+        cursorAt, devicePublished, resolution,
         identity, callGuest, currentThread,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
@@ -3692,6 +3694,7 @@ export function createDirect3D9Seam(
         if (result === D3D_OK)
         {
             lastDevice = held.device;
+            devicePublished?.(fields.readU32(out >>> 0));
         }
         return andThen(taken, ()=>result);
     };

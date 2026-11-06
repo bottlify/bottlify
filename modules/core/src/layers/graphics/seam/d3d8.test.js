@@ -2689,3 +2689,21 @@ test('SetCursorPosition puts the system\'s cursor there for a device with a curs
     cursorMoved(device, 125, 125, cursorAt, placeCursor);
     assert.deepEqual(placed, [[75, 75], [125, 125]]);
 });
+
+test('d3d9.dll\'s Direct3DCreate9 carries the store a device\'s constructor makes, naming a copy'
+    + ' of the device\'s vtable (test_device_vtbl_initialization_assembly_hook)', ()=>{
+    const h = seamed();
+    const create = h.libraries.libraries['D3D9.dll'].Direct3DCreate9;
+    /** @type {{ at: number, target: number }[]} */
+    const jumps = [];
+    const code = create.code({ register: ()=>0x1234,
+        jump: (at, target)=>jumps.push({ at, target }) });
+    assert.equal(code[0], 0xe9, 'a jump to the handler first');
+    assert.deepEqual(jumps, [{ at: 1, target: 0x1234 }]);
+    // What a program searching the image looks for: c7 06 imm32, 89 86, 89 86.
+    assert.deepEqual([code[5], code[6], code[11], code[12], code[17], code[18]],
+        [0xc7, 0x06, 0x89, 0x86, 0x89, 0x86]);
+    assert.deepEqual(create.pointers, [{ at: 7, to: 'D3D9DeviceVtable' }]);
+    const copy = h.libraries.libraries['D3D9.dll'].D3D9DeviceVtable;
+    assert.equal(copy.data().length, 119 * 4, 'IDirect3DDevice9\'s 119 methods');
+});

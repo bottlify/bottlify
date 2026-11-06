@@ -1198,6 +1198,7 @@ export function createGraphicsModule(){
                 // The address of one of OPENGL32's own exports, which only the
                 // assembling caller knows once the module is placed.
                 exportAddress: config?.exportAddress,
+                moduleExportAddress: config?.moduleExportAddress,
                 // Where a program's cursor goes, when the host shows one.
                 cursor: config?.cursor,
                 // SetCursorPosition's: the system's cursor, put and read.

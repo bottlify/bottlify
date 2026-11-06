@@ -4896,6 +4896,9 @@ async function buildApp(options){
             // itself: the export's own address, the one an import bound to.
             /** @param {string} name */
             exportAddress: name=>findModule('OPENGL32.dll')?.addressOf(name) ?? 0,
+            // Any module's export, for a seam that writes into its own code.
+            /** @param {string} module @param {string} name */
+            moduleExportAddress: (module, name)=>findModule(module)?.addressOf(name) ?? 0,
             // And back again when the last reference to a resource goes. The
             // arena is the same one the program's own allocator draws from, and
             // GlobalMemoryStatus reports what is left of it -- so a texture

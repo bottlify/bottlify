@@ -80,6 +80,17 @@ const REGISTER_CONSTANT = 2;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 
 /** The libraries the Direct3D 10 and 11 seam answers: either version's, and DXGI's. */
+/**
+ * The stores a Direct3D 9 device's constructor begins with: its vtable into
+ * the object, then two fields from EAX. `mov dword [esi], imm32` (the table,
+ * written once a device exists, `vtableDecoy`), `mov [esi+disp32], eax` twice.
+ */
+const VTABLE_STORE = /** @type {number[]} */ ([0xc7, 0x06, 0, 0, 0, 0, 0x89, 0x86, 4, 0, 0, 0, 0x89, 0x86, 8, 0, 0, 0]);
+/** IDirect3DDevice9's methods, IUnknown's three among them. */
+const DEVICE_VTABLE_WORDS = 119;
+/** The export the copy of a device's vtable is, which no program imports. */
+const DEVICE_VTABLE_COPY = 'D3D9DeviceVtable';
+
 const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
     'D3DCompiler_43.dll', 'D3DCOMPILER_47.dll'];
 
@@ -128,6 +139,8 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  * @param {(name: string) => number} [deps.exportAddress]
  *        The guest address of one of OPENGL32's own exports, which is what
  *        wglGetProcAddress answers for a core name.
+ * @param {(module: string, name: string) => number} [deps.moduleExportAddress]
+ *        The guest address of any module's export, once the module is placed.
  * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  * @param {(x: number, y: number) => void} [deps.placeCursor]  The system's cursor put somewhere.
@@ -215,7 +228,7 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
 export function createGraphicsLibraries(
     { graphics, only, memory, publishInterface, unpublishInterface, screen, gdi, present,
         flipQueued, publisher: shared, callGuest,
-        free, exportAddress, processHeapAllocate,
+        free, exportAddress, moduleExportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, placeCursor, cursorAt,
         resolution, windowClientSize,
@@ -378,7 +391,7 @@ export function createGraphicsLibraries(
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, placeCursor, cursorAt, resolution,
-        windowClientSize, gdi, now,
+        windowClientSize, gdi, now, devicePublished: pointer=>vtableDecoy(pointer),
         focus, callGuest, currentThread,
         waitUntil, presented, refresh, phases, allocate: guestAllocate,
         allocateCode: guestAllocateCode,
@@ -526,6 +539,35 @@ export function createGraphicsLibraries(
         });
     }
 
+    /** IDirect3D9* Direct3DCreate9(UINT SDKVersion) */
+    const d3d9Create = ()=>{
+        const root = graphics.create('d3d9');
+        if (!root)
+        {
+            return 0;
+        }
+        created.push('d3d9');
+        return d3d9.publishRoot(root);
+    };
+    /**
+     * A device's vtable copied into the table the store in `Direct3DCreate9`'s
+     * code names: a program may find the device's table by searching d3d9.dll
+     * for the instructions its constructor stores it with, and take a method
+     * from there (Wine's d3d9 test_device_vtbl_initialization_assembly_hook:
+     * Battle for Middle-earth's online lobby hooks Present). The table is data,
+     * written as devices are made; the code is not written into.
+     *
+     * @param {number} pointer  The device's interface pointer.
+     */
+    const vtableDecoy = pointer=>{
+        const at = moduleExportAddress?.('D3D9.dll', DEVICE_VTABLE_COPY) ?? 0;
+        if (at !== 0 && pointer !== 0)
+        {
+            memory.writeMemory(at, memory.readMemory(fields.readU32(pointer),
+                DEVICE_VTABLE_WORDS * 4));
+        }
+    };
+
     const table = {
         'OPENGL32.dll': openglTable,
 
@@ -615,16 +657,22 @@ export function createGraphicsLibraries(
             /** IDirect3D9* Direct3DCreate9(UINT SDKVersion) */
             Direct3DCreate9: {
                 argBytes: 4,
-                handler: ()=>{
-                    const root = graphics.create('d3d9');
-                    if (!root)
-                    {
-                        return 0;
-                    }
-                    created.push('d3d9');
-                    return d3d9.publishRoot(root);
+                handler: d3d9Create,
+                // A jump to the handler, and after it, never run, the
+                // sequence d3d9's device constructor stores its vtable with,
+                // naming the copy of one (`vtableDecoy`).
+                /** @param {import('../../win32/msvcrt/guest-code.js').CodeBuilder} builder */
+                code: builder=>{
+                    const trap = builder.register({ convention: 'stdcall', argBytes: 4,
+                        lastError: false, handler: d3d9Create });
+                    builder.jump(1, trap);
+                    return Uint8Array.of(0xe9, 0, 0, 0, 0, ...VTABLE_STORE);
                 },
+                pointers: [{ at: 5 + 2, to: DEVICE_VTABLE_COPY }],
             },
+            // The device's vtable as the store above names it, filled in as
+            // devices are made.
+            [DEVICE_VTABLE_COPY]: { data: ()=>new Uint8Array(DEVICE_VTABLE_WORDS * 4) },
 
             /**
              * IDirect3DShaderValidator9 *Direct3DShaderValidatorCreate9(void)
