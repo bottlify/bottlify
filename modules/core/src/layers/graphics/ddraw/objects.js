@@ -2315,6 +2315,12 @@ export function createDirectDraw(options = {}){
             {
                 return { hr: DDERR_INVALIDCAPS, surface: null };
             }
+            // The program's own memory is taken from IDirectDraw4 on (Wine's
+            // ddraw1 and ddraw2 test_create_surface_pitch).
+            if (version < 4)
+            {
+                return { hr: DDERR_INVALIDPARAMS, surface: null };
+            }
             const given = (request.pitch ?? 0) | 0;
             const blockRow = blockRowBytes(pixelFormat, width);
             const row = blockRow ?? rowBytes(pixelFormat, width, bytesPerPixel(pixelFormat));

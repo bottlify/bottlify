@@ -1935,3 +1935,15 @@ test('a texture in a format the device does not offer is made in system memory, 
     const offered = make(0, RGB32);
     assert.ok((/** @type {any} */ (offered.surface).caps & DDSCAPS_VIDEOMEMORY) !== 0);
 });
+
+test('before IDirectDraw4 a surface is never made over the program\'s memory'
+    + ' (test_create_surface_pitch, ddraw1 and ddraw2)', ()=>{
+    for (const version of /** @type {const} */ ([1, 2]))
+    {
+        const ddraw = withLevel({ version });
+        const made = ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT | 0x800 | 0x8,
+            caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN, width: 63, height: 63,
+            pixelFormat: RGB32, pitch: 0x100, surfacePointer: 0x7000 }, { version });
+        assert.equal(made.hr, DDERR_INVALIDPARAMS, `version ${version}`);
+    }
+});
