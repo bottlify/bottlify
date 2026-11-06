@@ -199,17 +199,19 @@ function describedBy(size){
 }
 
 /**
- * What a Lock writes into. A texture in system memory takes a descriptor of
- * any size, written as the newer one from its size up and as the older below
- * (Windows sets the texture stage of a 248-byte one and leaves a 12-byte one's
- * alone; nothing past the newer layout is touched).
+ * What a Lock writes into. A texture in system memory made through
+ * IDirectDraw7 takes a descriptor of any size, written as the newer one from
+ * its size up and as the older below (Windows sets the texture stage of a
+ * 248-byte one and leaves a 12-byte one's alone; nothing past the newer layout
+ * is touched); one made through an older generation does not.
  *
- * @param {{ caps: number }} surface
+ * @param {{ caps: number, generation: string }} surface
  * @param {number} size
  */
 function lockLayoutOf(surface, size){
     const named = describedBy(size);
-    if (named || (surface.caps & (DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY)) !== DDSCAPS_TEXTURE)
+    if (named || surface.generation !== '7'
+        || (surface.caps & (DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY)) !== DDSCAPS_TEXTURE)
     {
         return named;
     }

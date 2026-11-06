@@ -339,6 +339,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {(other: Surface, via?: string) => number} addAttachedSurface
  *           `via` the interface called through (`surfaceCountOf`'s key).
  * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
+ * @property {string} generation  The generation it was created through: '1', '4' or '7'.
  * @property {string | undefined} attachedVia  What its flip successor was attached through.
  * @property {boolean} attachedImplicitly  Whether the runtime made the link to its successor.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
@@ -1436,6 +1437,10 @@ export function createDirectDraw(options = {}){
             },
             get flipPrev(){
                 return flipPrev;
+            },
+            /** The generation it was created through: '1', '4' or '7'. */
+            get generation(){
+                return own;
             },
             /** The interface the buffer behind it was attached through. */
             get attachedVia(){

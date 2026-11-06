@@ -2591,6 +2591,24 @@ test('Lock takes either descriptor through any generation and keeps the program\
         assert.equal(h.release(first), 0);
         assert.equal(h.release(surface), 0);
     }
+    // Made through an older generation, the same texture wants a size it knows.
+    assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+    const older = h.box.memory.readU32(0x4100);
+    assert.equal(h.box.call(older, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_NORMAL]), DD_OK);
+    h.box.bytes.fill(0, 0x5000, 0x5000 + DDSURFACEDESC.SIZE);
+    h.box.memory.writeU32(0x5000, DDSURFACEDESC.SIZE);
+    h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwFlags, DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT);
+    h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwWidth, 8);
+    h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwHeight, 8);
+    h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwCaps, DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY);
+    assert.equal(h.box.call(older, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'), [0x5000, 0x5100, 0]),
+        DD_OK);
+    const olderTexture = h.box.memory.readU32(0x5100);
+    assert.equal(lockAs(olderTexture, 12).hr, DDERR_INVALIDPARAMS);
+    assert.equal(lockAs(olderTexture, DDSURFACEDESC2.SIZE).hr, DD_OK);
+    assert.equal(h.release(olderTexture), 0);
+    assert.equal(h.release(older), 0);
 
     // GetDisplayMode takes either size, clears what it was given, writes nothing
     // past it and names its own generation's size.
