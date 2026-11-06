@@ -211,11 +211,13 @@ test('a partial lock reports the pixel it names, at an unchanged pitch', ()=>{
     assertFullyReleased(device);
 });
 
-test('a malformed lock rectangle is refused by this version, and the record left alone', ()=>{
+test('a malformed lock rectangle is refused in video memory, and the record left alone; in'
+    + ' other pools it is taken (test_surface_blocks, test_lockrect_invalid)', ()=>{
     /**
      * Shapes the later runtime rejects: empty, inverted, off either edge. A
-     * Direct3D 9 device refuses them before the lock is taken, so the caller's
-     * record keeps whatever it held and no unlock is owed.
+     * Direct3D 9 device refuses them in video memory before the lock is
+     * taken, so the caller's record keeps whatever it held and no unlock is
+     * owed; system, scratch and managed memory take them, as Windows XP did.
      */
     const malformed = [
         { left: 60, top: 60, right: 60, bottom: 68 },
@@ -229,9 +231,23 @@ test('a malformed lock rectangle is refused by this version, and the record left
     ];
     const device = createDevice();
     /** @type {{ surface?: any }} */
+    const scratch = {};
+    assert.equal(device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8,
+        D3DPOOL.SCRATCH, scratch), D3D_OK);
+    for (const rect of malformed)
+    {
+        const locked = { pBits: 7, Pitch: 7 };
+        assert.equal(scratch.surface.LockRect(locked, rect, 0), D3D_OK);
+        assert.equal(locked.pBits - scratch.surface.base,
+            rect.top * PITCH + rect.left * BYTES_PER_PIXEL, 'located as it was given');
+        assert.equal(scratch.surface.UnlockRect(), D3D_OK);
+    }
+    scratch.surface.release();
+
+    /** @type {{ surface?: any }} */
     const out = {};
     assert.equal(
-        device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out),
+        device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out),
         D3D_OK);
 
     for (const rect of malformed)

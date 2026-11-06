@@ -730,7 +730,10 @@ export function createSurface(options){
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (rect && rejectsMalformedRects
+            // Only video memory checks the rectangle: a lock of system,
+            // scratch or managed memory takes any, as Windows does
+            // (test_surface_blocks, test_lockrect_invalid).
+            if (rect && rejectsMalformedRects && options.pool === D3DPOOL.DEFAULT
                 && !(rect.left >= 0 && rect.top >= 0 && rect.left < rect.right
                     && rect.top < rect.bottom && rect.right <= options.width
                     && rect.bottom <= options.height))
@@ -741,7 +744,7 @@ export function createSurface(options){
             // rectangle that cuts one is refused there, and taken in every
             // other pool (test_surface_blocks).
             const block = FORMAT_INFO[options.format]?.blockSize ?? 1;
-            if (rect && block > 1 && options.pool === D3DPOOL.DEFAULT
+            if (rect && block > 1
                 && options.format !== D3DFMT.ATI1 && options.format !== D3DFMT.ATI2
                 && ((rect.left | rect.top) % block !== 0
                     || (rect.right % block !== 0 && rect.right !== options.width)
