@@ -219,6 +219,8 @@ export function miscFlagsOut(desc){
 
 /** D3D11_MAP_FLAG_DO_NOT_WAIT. */
 const MAP_DO_NOT_WAIT = 0x100000;
+/** A deferred context's WRITE_NO_OVERWRITE before its first WRITE_DISCARD of the buffer. */
+const D3D11_ERROR_DEFERRED_CONTEXT_MAP_WITHOUT_INITIAL_DISCARD = 0x887c0004 | 0;
 
 /** D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE. */
 const VIEWPORT_SLOTS = 16;
@@ -626,8 +628,8 @@ export function createDirect3D11Seam(describe, kit, guests){
         CreateInputLayout: (device, [elements, count, code, length, out])=>{
             /** @type {{ layout?: any }} */
             const held = {};
-            const hr = device.CreateInputLayout(k().readInputElements(elements, count >>> 0),
-                bytecodeAt(code, length), held);
+            const hr = device.CreateInputLayout(isNull(elements) ? null
+                : k().readInputElements(elements, count >>> 0), bytecodeAt(code, length), held);
             return hr === S_OK
                 ? k().handBack(held.layout, k().lists.inputLayout, IID.ID3D11InputLayout, out)
                 : failed(out, hr);
@@ -1002,7 +1004,10 @@ export function createDirect3D11Seam(describe, kit, guests){
         if (type !== D3D10_MAP.WRITE_DISCARD
             && !(type === D3D10_MAP.WRITE_NO_OVERWRITE && last))
         {
-            return E_INVALIDARG;
+            // A refused map hands out no pointer; the pitches stay as they were.
+            k().fields.writeU32(out, 0);
+            return type === D3D10_MAP.WRITE_NO_OVERWRITE
+                ? D3D11_ERROR_DEFERRED_CONTEXT_MAP_WITHOUT_INITIAL_DISCARD : E_INVALIDARG;
         }
         const bytes = resource.desc.ByteWidth >>> 0;
         if (type === D3D10_MAP.WRITE_DISCARD)
@@ -1051,9 +1056,11 @@ export function createDirect3D11Seam(describe, kit, guests){
             }
             return k().mapInto(resource, subresource >>> 0, type >>> 0, flags & MAP_DO_NOT_WAIT,
                 mapped=>{
+                    // A refused map clears the pointer and leaves the pitches
+                    // as they were (test_resource_map).
                     if (mapped.hr !== S_OK)
                     {
-                        k().memory.writeMemory(out >>> 0, new Uint8Array(12));
+                        k().fields.writeU32(out, 0);
                         return mapped.hr;
                     }
                     const whole = resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
@@ -1542,6 +1549,12 @@ export function createDirect3D11Seam(describe, kit, guests){
             /** @type {{ list?: any }} */
             const held = {};
             const hr = target.FinishCommandList(restore !== 0, isNull(out) ? null : held);
+            // A list ends its maps: the next one starts with a discard again.
+            for (const mapped of deferredMaps.get(target)?.values() ?? [])
+            {
+                k().free?.(mapped.address);
+            }
+            deferredMaps.delete(target);
             return hr === S_OK ? k().handBack(held.list, commandList, IID.ID3D11CommandList, out)
                 : failed(out, hr);
         },

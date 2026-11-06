@@ -493,6 +493,8 @@ export function createBackend(options){
                     : null;
             return {
                 view: target.view,
+                // A slice of a volume is drawn into through a view of it whole.
+                ...(target.depthSlice !== undefined ? { depthSlice: target.depthSlice } : {}),
                 loadOp: clearValue ? 'clear' : 'load',
                 storeOp: 'store',
                 clearValue: clearValue ?? descriptor.clearValue ?? OPAQUE_BLACK,
@@ -1070,6 +1072,16 @@ export function createBackend(options){
                 },
 
                 /**
+                 * A texture's texels into a buffer, outside any pass.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 */
+                copyTextureToBuffer(source, destination, size){
+                    closeCurrentPass();
+                    encoder.copyTextureToBuffer(source, destination, size);
+                },
+
+                /**
                  * A region of one texture into another, outside any pass.
                  * The two must share a format; the copy is what a program
                  * that reads its own render target back into a texture asks
@@ -1080,6 +1092,27 @@ export function createBackend(options){
                 copyTexture(source, destination, size){
                     closeCurrentPass();
                     encoder.copyTextureToTexture(source, destination, size);
+                },
+
+                /**
+                 * A region of one texture into another of a different format
+                 * with texels of the same size, byte for byte: WebGPU copies
+                 * texture to texture only within one format, but a buffer
+                 * between the two carries bytes of any.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 * @param {number} texelBytes
+                 */
+                copyThroughBuffer(source, destination, size, texelBytes){
+                    closeCurrentPass();
+                    const bytesPerRow = Math.ceil(size.width * texelBytes / 256) * 256;
+                    const layout = { bytesPerRow, rowsPerImage: size.height };
+                    const buffer = device.createBuffer({ label: 'reinterpreted',
+                        size: bytesPerRow * size.height * (size.depthOrArrayLayers ?? 1),
+                        usage: BufferUsage.COPY_SRC | BufferUsage.COPY_DST });
+                    encoder.copyTextureToBuffer(source, { buffer, ...layout }, size);
+                    encoder.copyBufferToTexture({ buffer, ...layout }, destination, size);
+                    stagingBuffers.push(buffer);
                 },
 
                 /**

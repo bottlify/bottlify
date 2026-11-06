@@ -749,8 +749,9 @@ expands, culls or routes them, so it is not drawn at all; the renderer counts it
 (`skipped.stage`) and says so once. A geometry shader with stream output is made in the same
 way, its declaration checked as Windows checks it; one made of a vertex shader's bytecode, which
 only streams out, is no stage, so its draws are drawn. *2026-10-31.* Hull and domain shaders
-are drawn since 2026-11-05 (the tessellator as compute, `d3d10/tessellation.js`): this holds for
-the geometry stage alone.
+are drawn since 2026-11-05 (the tessellator as compute, `d3d10/tessellation.js`), and geometry
+shaders and stream output since the same day (`d3d10/geometry.js`): this no longer holds for any
+stage.
 
 **A76. IDirect3DDevice7 keeps the earlier interfaces' texture filter, address and border render
 states and does not apply them.** D3DRENDERSTATE_TEXTUREMAG, TEXTUREMIN, TEXTUREADDRESS,
@@ -787,6 +788,28 @@ mixer thread reads NULL+0x54 before its creator sets the pointer, and faulted he
 reads do not test their page (`emit/memory.js`), so a read faulting only where an interpreter
 happened to run it would answer the same instruction two ways; it reads zeros everywhere instead.
 Revisit if a program is found that relies on a read of the null range faulting. *2026-11-05.*
+
+**A80. Temporary: D3D11CreateDevice refuses D3D11_CREATE_DEVICE_VIDEO_SUPPORT with
+DXGI_ERROR_UNSUPPORTED.** A game that plays its videos through Media Foundation or D3D11 video
+decoding asks for this flag, so this stands only until an ID3D11VideoDevice over the engine's own
+decoder exists. Windows makes a hardware device with video support, and that device answers ID3D11VideoDevice with
+the decoder profiles of the GPU. Nothing here decodes video on the GPU; a device made with the flag
+and no ID3D11VideoDevice behind it is a promise a program calls through (Wine's d3d11
+test_video_support called a method of the null interface and the test process died). Windows
+answers DXGI_ERROR_UNSUPPORTED itself for drivers without video support (reference, null, WARP
+when named), and Media Foundation and the players built on it fall back to decoding on the
+processor then. The one check that expects a hardware device with the flag fails, on purpose,
+until then; so does the one that expects every context to answer ID3D11VideoContext, which no
+context here does for the same reason. *2026-11-05.*
+
+**A81. A device asked for with the debug layer is refused with
+DXGI_ERROR_SDK_COMPONENT_MISSING.** D3D10_CREATE_DEVICE_DEBUG and D3D11_CREATE_DEVICE_DEBUG
+load the SDK layers, which Windows has only with its Graphics Tools installed, and a program
+asking for them on an end user's Windows gets this answer and makes its device without the flag.
+Nothing here validates calls as the layer does or keeps its ID3D11InfoQueue of messages (what a
+program did wrong is said in the journal instead, as a divergence), and a device made with the
+flag and without the interfaces the layer adds would be one a program could not tell from a
+broken one. *2026-11-05.*
 
 ## B. From measured optimisation work
 

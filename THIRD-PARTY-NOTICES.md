@@ -217,3 +217,25 @@ Joliet specification.
   AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Microsoft's BC6H and BC7 specification: used as a specification
+
+- Source: the Direct3D 11.3 functional specification (19.5.13 BC6H, 19.5.14 BC7),
+  https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm, and the
+  Direct3D 11 documentation's "BC6H Format" and "BC7 Format" pages (repository
+  `MicrosoftDocs/win32`, `desktop-src/direct3d11/`): the mode tables, BC6H's header bit fields,
+  the partition and fix-up tables (read off the specification's figures) and the unquantize and
+  interpolate steps
+- Location in this repository: `modules/core/src/layers/graphics/d3d10/bc67.js`, written from
+  them; no code of either is copied
+- License: the specification's (Microsoft, MIT for `microsoft/DirectX-Specs`; CC-BY 4.0 for the
+  documentation's text)
+
+## bcdec: an independent BC6H and BC7 decoder, the test corpus's oracle
+
+- Source: https://github.com/iOrange/bcdec (`bcdec.h`), built locally into a driver that
+  `tools/bc-corpus.mjs` asks to decode seeded blocks
+- Location in this repository: only its output, `modules/core/src/layers/graphics/d3d10/bc67-corpus.json.gz`,
+  which `bc67.test.js` holds `bc67.js` to; none of its code is in the repository
+- License: MIT or the Unlicense, at the user's choice (MIT: Copyright (c) 2022 Sergii
+  Kudlai)

@@ -5732,11 +5732,12 @@ export function createGdiFunctions(host){
          *
          * @param {{ width: number, height: number, pitch: number,
          *           bitCount: number, bits: number, palette?: number[] | null,
-         *           format?: string }} attributes
+         *           format?: string, sizeImage?: number }} attributes  `sizeImage`: what
+         *     GetObject says the image's size is, where it is not its rows'
          * @returns {number} A device context handle, or zero.
          */
         createSurfaceDc(attributes){
-            const { width, height, pitch, bitCount, bits, palette, format } = attributes;
+            const { width, height, pitch, bitCount, bits, palette, format, sizeImage } = attributes;
             // An indexed surface without its palette has no colours at all, and
             // a drawing routine given one would have to invent them. The three
             // depths are what a surface of this era actually is.
@@ -5761,6 +5762,7 @@ export function createGdiFunctions(host){
                 pitch,
                 palette,
                 format,
+                ...(sizeImage === undefined ? {} : { sizeImage }),
             });
             select(dc, dc.defaultBitmap);
             return dc.hdc;

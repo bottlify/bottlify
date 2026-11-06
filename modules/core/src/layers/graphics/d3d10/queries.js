@@ -29,8 +29,9 @@
  *   guest's, in an assembled build -- not the GPU's, and the disjoint query
  *   that brackets it says so the documented way: `Disjoint` is TRUE, which
  *   tells a program to discard what it measured.
- * - Nothing is ever written to a stream-output buffer, so stream-output counts
- *   are zero and nothing overflows.
+ * - Stream-output statistics are the GPU's counts (`geometry.js`): what each
+ *   stream wrote and what it needed room for, read back where the query
+ *   begins and ends.
  */
 
 import { attachCom } from './com.js';
@@ -214,6 +215,9 @@ export function createDrawStatistics(){
  * @property {(detail: string) => void} diverge
  * @property {boolean} [eleven]  Whether Direct3D 11 made it: its pipeline statistics
  *     count the stages that version added.
+ * @property {() => ({ words: Uint32Array | null, failed: boolean } | null)} [streams]
+ *     A read-back of the streams' counters where it is called: each stream's
+ *     primitives written and needed, two words a stream, once it is back.
  * @property {{ begin: () => any, end: (counter: any) => void }} [occlusion]
  *     Where an occlusion query's draws are counted on the GPU. A counter
  *     answers `samples` once `settled`, unless it `failed`; with no counter,
@@ -240,6 +244,14 @@ export function createQueryObject(desc, interfaces, services, owner){
 
     const occlusion = kind === D3D10_QUERY.OCCLUSION
         || kind === D3D10_QUERY.OCCLUSION_PREDICATE;
+    // Stream N's statistics are 8 + 2N and its overflow 9 + 2N; the first two
+    // kinds are stream 0's statistics and an overflow of any stream.
+    const streamed = kind === D3D10_QUERY.SO_STATISTICS
+        || kind === D3D10_QUERY.SO_OVERFLOW_PREDICATE || (kind >= 8 && kind <= 15);
+    /** @type {{ words: Uint32Array | null, failed: boolean } | null} */
+    let streamsBegun = null;
+    /** @type {{ words: Uint32Array | null, failed: boolean } | null} */
+    let streamsEnded = null;
     /** @type {any} */
     let counter = null;
     let estimated = false;
@@ -293,9 +305,29 @@ export function createQueryObject(desc, interfaces, services, owner){
                 u64(56, to.psInvocations - from.psInvocations);
                 break;
             }
-            default:
-                // Stream-output statistics and overflow: nothing is written.
+            default: {
+                if (!streamed)
+                {
+                    break;
+                }
+                const before = streamsBegun?.words;
+                const after = streamsEnded?.words;
+                /** @param {number} stream @param {number} which 0 written, 1 needed */
+                const span = (stream, which)=>(before && after
+                    ? (after[stream * 2 + which] - before[stream * 2 + which]) >>> 0 : 0);
+                if (kind === D3D10_QUERY.SO_STATISTICS || kind % 2 === 0)
+                {
+                    const stream = kind === D3D10_QUERY.SO_STATISTICS ? 0 : (kind - 8) / 2;
+                    u64(0, span(stream, 0));
+                    u64(8, span(stream, 1));
+                    break;
+                }
+                const streams = kind === D3D10_QUERY.SO_OVERFLOW_PREDICATE ? [0, 1, 2, 3]
+                    : [(kind - 9) / 2];
+                view.setUint32(0, streams.some(stream=>span(stream, 1) > span(stream, 0))
+                    ? 1 : 0, true);
                 break;
+            }
         }
         return bytes;
     };
@@ -305,6 +337,10 @@ export function createQueryObject(desc, interfaces, services, owner){
 
     /** The answer, from the GPU's count when there is one. */
     const answerOf = ()=>{
+        if (streamsEnded)
+        {
+            return measure(/** @type {DrawTotals} */ (begun), /** @type {DrawTotals} */ (ended));
+        }
         if (counter && !counter.failed)
         {
             return measure(/** @type {DrawTotals} */ (begun), /** @type {DrawTotals} */ (ended),
@@ -336,6 +372,8 @@ export function createQueryObject(desc, interfaces, services, owner){
             answer = null;
             begun = services.totals();
             counter = occlusion ? services.occlusion?.begin() ?? null : null;
+            streamsBegun = streamed ? services.streams?.() ?? null : null;
+            streamsEnded = null;
         },
 
         End(){
@@ -349,6 +387,7 @@ export function createQueryObject(desc, interfaces, services, owner){
             }
             state = 'issued';
             ended = services.totals();
+            streamsEnded = streamed && streamsBegun ? services.streams?.() ?? null : null;
             answer = measure(/** @type {DrawTotals} */ (begun), ended);
             if (counter)
             {
@@ -392,7 +431,7 @@ export function createQueryObject(desc, interfaces, services, owner){
                 }
             }
             // Sent, and counted once the frames holding its draws come back.
-            if (counter && !counter.settled)
+            if ((counter && !counter.settled) || (streamsEnded && !streamsEnded.words))
             {
                 return S_FALSE;
             }

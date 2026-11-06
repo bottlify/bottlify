@@ -64,6 +64,10 @@ export const o = (index, components)=>register(OPERAND.OUTPUT, [index], componen
  *  @param {string} [components] */
 export const vicp = (point, index, components)=>
     register(OPERAND.INPUT_CONTROL_POINT, [point, index], components);
+/** A hull shader's input control point as its control point phase names it: v[point][index].
+ *  @param {number} point @param {number} index @param {string} [components] */
+export const vPoint = (point, index, components)=>
+    register(OPERAND.INPUT, [point, index], components);
 /** A hull shader's output control point, as a later phase reads it.
  *  @param {number} point @param {number} index @param {string} [components] */
 export const vocp = (point, index, components)=>
@@ -90,6 +94,9 @@ export const t = (slot, components)=>register(OPERAND.RESOURCE, [slot], componen
 export const s = slot=>({ type: OPERAND.SAMPLER, indices: [slot] });
 export const nullDest = ()=>({ type: OPERAND.NULL, indices: [] });
 export const oDepth = ()=>({ type: OPERAND.OUTPUT_DEPTH, indices: [] });
+export const oMask = ()=>({ type: OPERAND.OUTPUT_COVERAGE_MASK, indices: [] });
+/** @param {string} [components] */
+export const vCoverage = components=>register(OPERAND.INPUT_COVERAGE_MASK, [], components);
 
 /**
  * @param {AsmOperand} operand
@@ -137,6 +144,12 @@ function encodeOperand(operand, destination){
     {
         const count = /** @type {number[]} */ (operand.immediate).length;
         token |= count === 1 ? 1 : 2;
+    }
+    else if (operand.type === OPERAND.SAMPLER && operand.swizzle)
+    {
+        // A gather's sampler selects the channel it gathers.
+        token |= 2 | (SELECTION.SELECT1 << 2)
+            | (COMPONENT_INDEX[/** @type {'x'|'y'|'z'|'w'} */ (operand.swizzle[0])] << 4);
     }
     else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER
         || operand.type === OPERAND.LABEL)
@@ -211,6 +224,7 @@ function encodeOperand(operand, destination){
  * @property {boolean} [saturate]
  * @property {boolean} [nonZero]
  * @property {number} [destinations]   How many leading operands are destinations; one by default.
+ * @property {number[]} [offset]       An immediate texel offset (`aoffimmi`), u, v, w.
  */
 
 /**
@@ -236,8 +250,17 @@ function encodeInstruction(instruction){
     {
         token |= 0x40000;
     }
-    token |= (words.length + 1) << 24;
-    return [token >>> 0, ...words];
+    // An immediate texel offset is an extended token of sample controls.
+    const extended = instruction.offset
+        ? [(1 | ((instruction.offset[0] & 0xf) << 9) | ((instruction.offset[1] & 0xf) << 13)
+            | ((instruction.offset[2] & 0xf) << 17)) >>> 0]
+        : [];
+    if (extended.length > 0)
+    {
+        token |= 0x80000000;
+    }
+    token |= (words.length + extended.length + 1) << 24;
+    return [token >>> 0, ...extended, ...words];
 }
 
 // --- the instructions, as a test spells them ---
@@ -251,6 +274,16 @@ const arithmetic = opcode=>
         op(opcode, [dest, ...sources]);
 
 export const mov = arithmetic(OPCODE.MOV);
+/** The rasterizer, which `sampleinfo` and `samplepos` read the sample count of. */
+export const rasterizer = ()=>register(OPERAND.RASTERIZER, [], 'xyzw');
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} resource  a texture or the rasterizer
+ * @param {boolean} [integer]  `_uint`
+ */
+export const sampleInfo = (dest, resource, integer = false)=>
+    op(OPCODE.SAMPLE_INFO, [dest, resource], integer ? { control: 1 } : {});
+/** @param {AsmOperand} dest @param {AsmOperand} resource @param {AsmOperand} index */
+export const samplePos = (dest, resource, index)=>op(OPCODE.SAMPLE_POS, [dest, resource, index]);
 export const movc = arithmetic(OPCODE.MOVC);
 export const add = arithmetic(OPCODE.ADD);
 export const mul = arithmetic(OPCODE.MUL);
@@ -343,6 +376,18 @@ export const sampleD = (dest, coordinate, texture, sampler, ddx, ddy)=>
  */
 export const gather4 = (dest, coordinate, texture, sampler)=>
     op(OPCODE.GATHER4, [dest, coordinate, texture, sampler]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler @param {AsmOperand} reference
+ */
+export const gather4C = (dest, coordinate, texture, sampler, reference)=>
+    op(OPCODE.GATHER4_C, [dest, coordinate, texture, sampler, reference]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} offset
+ * @param {AsmOperand} texture @param {AsmOperand} sampler
+ */
+export const gather4Po = (dest, coordinate, offset, texture, sampler)=>
+    op(OPCODE.GATHER4_PO, [dest, coordinate, offset, texture, sampler]);
 /** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture */
 export const ld = (dest, address, texture)=>op(OPCODE.LD, [dest, address, texture]);
 /**
@@ -408,6 +453,9 @@ export const dclInputPs = (input, interpolation = 2)=>
 /** @param {AsmOperand} input @param {number} systemValue */
 export const dclInputPsSiv = (input, systemValue)=>
     op(OPCODE.DCL_INPUT_PS_SIV, [input], { control: 2, extra: [systemValue] });
+/** @param {AsmOperand} input @param {number} systemValue */
+export const dclInputPsSgv = (input, systemValue)=>
+    op(OPCODE.DCL_INPUT_PS_SGV, [input], { extra: [systemValue] });
 /** @param {AsmOperand} output */
 export const dclOutput = output=>op(OPCODE.DCL_OUTPUT, [output]);
 /** @param {AsmOperand} output @param {number} systemValue */
@@ -423,7 +471,11 @@ export const dclResource = (slot, dimension, returnType)=>op(OPCODE.DCL_RESOURCE
 });
 /** @param {number} slot @param {number} [mode] */
 export const dclSampler = (slot, mode = 0)=>op(OPCODE.DCL_SAMPLER, [s(slot)], { control: mode });
-export const dclGlobalFlags = ()=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: 1 });
+/** @param {AsmOperand} first @param {number} count */
+export const dclIndexRange = (first, count)=>
+    op(OPCODE.DCL_INDEX_RANGE, [first], { extra: [count] });
+/** @param {number} [flags]  D3D10_SB_GLOBAL_FLAGS: 1 refactoring allowed, 4 early depth tests. */
+export const dclGlobalFlags = (flags = 1)=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: flags });
 
 /** @param {number[][]} rows */
 export const immediateConstantBuffer = rows=>({ customData: rows.flat() });
@@ -464,6 +516,24 @@ export const dclTessPartitioning = partitioning=>
 /** @param {number} output */
 export const dclTessOutputPrimitive = output=>
     op(OPCODE.DCL_TESS_OUTPUT_PRIMITIVE, [], { control: output });
+// A geometry shader's: its input primitive (1 point, 2 line, 3 triangle, 6 line
+// with adjacency, 7 triangle with adjacency), output topology (1 point list, 3
+// line strip, 5 triangle strip), vertices it may emit, and its vertices.
+/** @param {number} primitive */
+export const dclGsInputPrimitive = primitive=>
+    op(OPCODE.DCL_GS_INPUT_PRIMITIVE, [], { control: primitive });
+/** @param {number} topology */
+export const dclGsOutputTopology = topology=>
+    op(OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, [], { control: topology });
+/** @param {number} count */
+export const dclMaxOutputVertexCount = count=>
+    op(OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT, [], { extra: [count] });
+/** A geometry shader's input: a register of one vertex of its primitive.
+ *  @param {number} vertex @param {number} index @param {string} [components] */
+export const vgs = (vertex, index, components)=>
+    register(OPERAND.INPUT, [vertex, index], components);
+export const emit = ()=>op(OPCODE.EMIT, []);
+export const cut = ()=>op(OPCODE.CUT, []);
 /** @param {number} count */
 export const dclHsForkPhaseInstanceCount = count=>
     op(OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT, [], { extra: [count] });
@@ -676,6 +746,31 @@ export function passThroughVertexShader(){
             dclInput(v(0)),
             dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
             mov(o(0), v(0)),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A geometry shader that passes each triangle on as a strip of its three
+ * vertices: SV_POSITION in and out.
+ */
+export function triangleGeometryShader(){
+    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    return assemble({
+        kind: SHADER_KIND.GEOMETRY,
+        inputs: [position],
+        outputs: [position],
+        instructions: [
+            dclGsInputPrimitive(3),
+            dclGsOutputTopology(5),
+            dclMaxOutputVertexCount(3),
+            dclInputSiv(vgs(3, 0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            mov(o(0), vgs(0, 0)), emit(),
+            mov(o(0), vgs(1, 0)), emit(),
+            mov(o(0), vgs(2, 0)), emit(),
+            cut(),
             ret(),
         ],
     });

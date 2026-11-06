@@ -78,7 +78,10 @@ export function createShaderCache(options){
                 if (message.type === 'error')
                 {
                     errors++;
-                    fatal.push(`${message.lineNum}:${message.linePos} ${message.message}`);
+                    // The line it names, so that a report says what was refused.
+                    const line = request.code.split('\n')[message.lineNum - 1]?.trim() ?? '';
+                    fatal.push(`${message.lineNum}:${message.linePos} ${message.message}`
+                        + (line ? ` in \`${line.slice(0, 160)}\`` : ''));
                 }
                 else if (message.type === 'warning')
                 {

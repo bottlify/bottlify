@@ -68,6 +68,9 @@ export const SYSTEM_VALUE = Object.freeze({
     LINE_DENSITY_TESSFACTOR: 16,
     TARGET: 64,
     DEPTH: 65,
+    COVERAGE: 66,
+    DEPTH_GREATER_EQUAL: 67,
+    DEPTH_LESS_EQUAL: 68,
 });
 
 /**

@@ -83,7 +83,10 @@ export function validStreamOutput({ outputs, entries, strides, rasterizedStream,
         const name = entry.SemanticName.toUpperCase();
         const element = outputs.find(output=>output.name.toUpperCase() === name
             && output.index === entry.SemanticIndex && (output.stream ?? 0) === entry.Stream);
-        const width = element ? 32 - Math.clz32(element.mask & 0xf) : 0;
+        // An entry's components count from its element's first: COLOR2 in
+        // .zw has two, ATTRIB4 in .z one (test_stream_output).
+        const width = element ? [0, 1, 2, 3].filter(c=>(element.mask & (1 << c)) !== 0).length
+            : 0;
         if (!element || entry.StartComponent + entry.ComponentCount > width)
         {
             return false;

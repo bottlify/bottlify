@@ -2828,7 +2828,9 @@ try
     {
         console.error(answer.reason);
     }
-    process.exit(answer.ok ? 0 : 1);
+    // Into a pipe stdout is written later: an exit now loses what is still
+    // queued, the report's path among it after a long report.
+    process.stdout.write('', ()=>process.exit(answer.ok ? 0 : 1));
 }
 catch (e){
     console.error(`game scenario failed: ${e.stack ?? e.message}`);

@@ -355,7 +355,8 @@ export function createResource(options){
             }
             const bind = options.desc.BindFlags ?? 0;
             return ((bind & D3D10_BIND.SHADER_RESOURCE) !== 0 ? DXGI_USAGE.SHADER_INPUT : 0)
-                | ((bind & D3D10_BIND.RENDER_TARGET) !== 0 ? DXGI_USAGE.RENDER_TARGET_OUTPUT : 0);
+                | ((bind & D3D10_BIND.RENDER_TARGET) !== 0 ? DXGI_USAGE.RENDER_TARGET_OUTPUT : 0)
+                | ((bind & D3D11_BIND_UNORDERED_ACCESS) !== 0 ? DXGI_USAGE.UNORDERED_ACCESS : 0);
         },
     }, {
         interfaces: options.interfaces,
@@ -709,7 +710,8 @@ function resolveBufferViewDesc(resource, desc, dimensions){
         ElementWidth: width,
         FirstElement: offset,
         NumElements: width,
-        ...(extended ? { Flags: flags } : {}),
+        // 10.1's extended view and 11's unordered-access view carry flags.
+        ...(extended || desc.Flags !== undefined ? { Flags: flags } : {}),
         elementBytes: size,
     };
 }
@@ -735,6 +737,8 @@ export function createView(options){
     return attachCom({
         dimensionName: options.dimensionName,
         range: options.range,
+        /** What it views, for the runtime's own bookkeeping: no reference is taken. */
+        resource: options.resource,
         /** An append or counter view's hidden count, as a binding last set it. */
         counter: 0,
         /** Whether that count is newer than the one the GPU holds. */

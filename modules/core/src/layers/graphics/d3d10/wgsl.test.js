@@ -20,7 +20,8 @@ import assert from 'node:assert/strict';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import { MODIFIER, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE } from './sm4.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, HELPERS, STAGE, linkCompute, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, HELPERS, NO_PIXEL_SHADER, STAGE, linkCompute, linkProgram,
+    translateShader,
 } from './wgsl.js';
 import { DXGI_FORMAT } from './constants.js';
 import {
@@ -29,13 +30,17 @@ import {
     dclConstantBuffer, dclIndexableTemp, dclInput, dclInputPs, dclInputPsSiv, dclInputSiv,
     dclOutput, dclOutputSiv, dclResource, dclSampler, dclTemps, discardNz, div, dp3, dp4,
     elseBranch, endif, endloop, eq, exp, frc, ftoi, ftou, gather4, ge, iadd, ieq, ifNz, ifZ, ige,
-    ilt, imad, ldMs, resinfoRcp, sampleD,
+    ilt, imad, ldMs, resinfoRcp, sampleD, gather4C, gather4Po,
     imul,
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
+    rasterizer, sampleInfo, samplePos, dclInputPsSgv,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
-    atomicIadd, dclThreadGroup, dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
+    atomicIadd, dclGlobalFlags, dclIndexRange, oMask, vCoverage, dclUavTyped, ldUavTyped,
+    storeUavTyped,
+    dclThreadGroup,
+    dclTgsmRaw, dclUavRaw, dclUavStructured, g, immAtomicImax, ldRaw,
     storeRaw, storeStructured, sync, u, vThreadID, vThreadIDInGroupFlattened,
 } from './shader-fixtures.js';
 
@@ -201,8 +206,13 @@ test('integer arithmetic reads and writes through the signed bitcast', ()=>{
     assert.equal(emitted([ineg(r(0), r(1))]), `r0 = ${U}((-${I}(r1.xyzw)));`);
     assert.equal(emitted([itof(r(0), r(1))]), `r0 = ${U}(vec4<f32>(${I}(r1.xyzw)));`);
     assert.equal(emitted([utof(r(0), r(1))]), `r0 = ${U}(vec4<f32>(r1.xyzw));`);
-    assert.equal(emitted([ftoi(r(0), r(1))]), `r0 = ${U}(vec4<i32>(${F}(r1.xyzw)));`);
-    assert.equal(emitted([ftou(r(0), r(1))]), `r0 = vec4<u32>(${F}(r1.xyzw));`);
+    // Saturated to the type's top, which WGSL's conversion stops short of.
+    assert.equal(emitted([ftoi(r(0), r(1))]), `let held0 = ${F}(r1.xyzw);\n`
+        + `r0 = ${U}(select(vec4<i32>(held0), vec4<i32>(2147483647),`
+        + ' held0 >= vec4<f32>(2147483648.0)));');
+    assert.equal(emitted([ftou(r(0), r(1))]), `let held0 = ${F}(r1.xyzw);\n`
+        + 'r0 = select(vec4<u32>(held0), vec4<u32>(0xffffffffu),'
+        + ' held0 >= vec4<f32>(4294967296.0));');
     assert.equal(emitted([umin(r(0), r(1), r(2))]), 'r0 = min(r1.xyzw, r2.xyzw);');
     assert.equal(emitted([umax(r(0), r(1), r(2))]), 'r0 = max(r1.xyzw, r2.xyzw);');
 });
@@ -506,14 +516,40 @@ test('a float texture bound to a depth buffer is declared as depth and read as (
         assert.equal(plain.textures[0].depth, undefined, 'only where a depth buffer is bound');
     });
 
+test('a plain sampler that reads a depth texture is declared non-filtering, and a stencil view'
+    + ' is read in green (test_depth_stencil_sampling, d3d11.c:10676)', ()=>{
+    const sampled = translate([sample(r(0), v(0, 'xy'), t(0), s(0))],
+        { declarations: TEXTURE, options: { depth: [0] } });
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, sampled);
+    assert.deepEqual(linked.groups[1].find(entry=>entry.sampler)?.sampler,
+        { type: 'non-filtering' });
+    const plain = linkProgram(vs, translate([sample(r(0), v(0, 'xy'), t(0), s(0))],
+        { declarations: TEXTURE }));
+    assert.deepEqual(plain.groups[1].find(entry=>entry.sampler)?.sampler, { type: 'filtering' });
+    const stencil = translate([ld(r(0), r(1), t(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT)],
+        options: { stencil: [0] } });
+    assert.match(bodyOf(stencil), /\(vec4<u32>\(0u, \(textureLoad\(t0, held0, held1\)\)\.x, 0u, 1u\)\)/);
+});
+
 test('ld fetches a texel by integer address with the level in w', ()=>{
     const translated = translate([ld(r(0), r(1), t(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT)],
     });
-    assert.equal(bodyOf(translated),
-        `r0 = (textureLoad(t0, ${I}(r1.xyzw).xy, ${I}(r1.xyzw).w)).xyzw;`);
+    assert.equal(bodyOf(translated), [`let held0 = ${I}(r1.xyzw).xy;`,
+        `let held1 = ${I}(r1.xyzw).w;`,
+        'r0 = select(vec4<u32>(0u), (textureLoad(t0, held0, held1)).xyzw, u32(held1)'
+            + ' < textureNumLevels(t0) && all(vec2<u32>(held0) < textureDimensions(t0,'
+            + ' u32(held1))));'].join('\n'),
+    'an address past the level or the levels reads zero (test_texture, d3d11.c:9385)');
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
     assert.match(linkProgram(vs, translated).fragment, /var t0: texture_2d<u32>;/);
+    const array = translate([ld(r(0), r(1), t(0))], {
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DARRAY, RETURN_TYPE.UINT)],
+    });
+    assert.match(bodyOf(array), / && u32\(held2\) < textureNumLayers\(t0\)\);$/,
+        'and a layer past the last');
 });
 
 test('a 3D texture samples with three coordinates and an array with a layer', ()=>{
@@ -582,8 +618,8 @@ test('a one-dimensional texture is read as a row of a two-dimensional one', ()=>
         `, vec2<f32>\\(bitcast<vec4<f32>>\\(r1\\.xyzw\\)\\.x, 0\\.0\\), `
         + 'vec2<f32>\\(bitcast<vec4<f32>>\\(r2\\.xyzw\\)\\.x, 0\\.0\\)\\)'));
     const loaded = translate([ld(r(0), r(1), t(0))], { declarations: ONE_D });
-    assert.equal(bodyOf(loaded), `r0 = ${U}((textureLoad(t0, vec2<i32>(${I}(r1.xyzw).x, 0), `
-        + `${I}(r1.xyzw).w)).xyzw);`);
+    assert.match(bodyOf(loaded), new RegExp('^let held0 = vec2<i32>\\(bitcast<vec4<i32>>'
+        + '\\(r1\\.xyzw\\)\\.x, 0\\);'));
     const array = translate([sample(r(0), v(0), t(0), s(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE1DARRAY, RETURN_TYPE.FLOAT),
             dclSampler(0)],
@@ -599,15 +635,15 @@ test('ld_ms reads the one sample every texture here has, and zero for any other'
     const translated = translate([ldMs(r(0), r(1), t(0), r(2, 'x'))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT)],
     });
-    assert.equal(bodyOf(translated), `r0 = select(${U}((textureLoad(t0, ${I}(r1.xyzw).xy, 0))`
-        + '.xyzw), vec4<u32>(0u), r2.xxxx.x != 0u);');
+    assert.match(bodyOf(translated), /\nlet held1 = 0;\nr0 = select\(select\(vec4<u32>\(0u\),/);
+    assert.match(bodyOf(translated), /, vec4<u32>\(0u\), r2\.xxxx\.x != 0u\);$/);
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
     assert.match(linkProgram(vs, translated).fragment, /var t0: texture_2d<f32>;/);
     const plain = translate([ld(r(0), r(1), t(0))], {
         declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMSARRAY, RETURN_TYPE.FLOAT)],
     });
-    assert.equal(bodyOf(plain), `r0 = ${U}((textureLoad(t0, ${I}(r1.xyzw).xy, `
-        + `${I}(r1.xyzw).z, 0)).xyzw);`);
+    assert.match(bodyOf(plain), /textureLoad\(t0, held0, held2, held1\)/);
+    assert.match(bodyOf(plain), /^let held0 = bitcast<vec4<i32>>\(r1\.xyzw\)\.xy;\nlet held1 = 0;/);
 });
 
 test('ld from a buffer view reads storage, checked against the view and decoded by it', ()=>{
@@ -669,6 +705,33 @@ test('gather4 gathers the first component of four texels', ()=>{
     });
     assert.deepEqual(integer.unsupported,
         ['gather4 on an integer, one- or three-dimensional texture']);
+});
+
+test('a gather takes the channel its sampler selects, an immediate offset as WGSL\'s, a'
+    + ' register\'s by moving the address, and a reference as a compare (test_gather,'
+    + ' test_gather_c, d3d11.c:28200)', ()=>{
+    const declarations = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+        dclSampler(0)];
+    const green = translate([{ ...gather4(r(0), v(0), t(0), { ...s(0), swizzle: 'yyyy' }),
+        offset: [1, -1, 0] }], { declarations });
+    assert.equal(bodyOf(green), `r0 = ${U}((textureGather(1, t0, s0, ${F}(v0.xyzw).xy`
+        + ', vec2<i32>(1, -1))).xyzw);');
+    const programmed = bodyOf(translate([gather4Po(r(0), v(0), r(1), t(0), s(0))],
+        { declarations }));
+    assert.match(programmed, /vec2<f32>\(bitcast<vec4<i32>>\(r1\.xyzw\)\.xy\) \/ vec2<f32>\(textureDimensions\(t0, 0\)\.xy\)/);
+    const compared = translate([gather4C(r(0), v(0), t(0), s(0), r(2, 'x'))],
+        { declarations });
+    assert.match(bodyOf(compared), /textureGatherCompare\(t0, s0, [^;]*, bitcast<vec4<f32>>\(r2\.xxxx\)\.x\)/);
+    assert.equal(compared.textures[0].comparison, true);
+});
+
+test('a sample and a load move by their immediate offset (test_texture, d3d11.c)', ()=>{
+    const declarations = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+        dclSampler(0)];
+    assert.match(bodyOf(translate([{ ...sample(r(0), v(0), t(0), s(0)), offset: [-2, 3, 0] }],
+        { declarations })), /textureSample\(t0, s0, [^;]*\.xy, vec2<i32>\(-2, 3\)\)/);
+    assert.match(bodyOf(translate([{ ...ld(r(0), v(0), t(0)), offset: [1, 0, 0] }],
+        { declarations })), /\.xy \+ vec2<i32>\(1, 0\);/);
 });
 
 test('an instruction with no translation is named, and nothing plausible is emitted', ()=>{
@@ -740,9 +803,56 @@ test('a pass-through vertex shader and a solid pixel shader link into two entry 
     assert.deepEqual(linked.groups, [[], []]);
 });
 
-test('a varying is matched by semantic, not by register', ()=>{
+test('a pixel shader\'s coverage is the fragment\'s sample mask, read and written'
+    + ' (test_sample_mask)', ()=>{
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 },
+            { name: 'SV_Coverage', register: 0xffffffff, mask: 0x1 }],
+        instructions: [dclOutput(o(0)), mov(o(0), l(1, 1, 1, 1)),
+            iadd(oMask(), vCoverage('xxxx'), lu(5)), ret()],
+    }))));
+    assert.deepEqual(ps.unsupported, []);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, ps);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.fragment, /@builtin\(sample_mask\) mask: u32,/);
+    assert.match(linked.fragment, /@builtin\(sample_mask\) coverage: u32,/);
+    assert.match(linked.fragment, /let vCoverage = in\.coverage;/);
+    assert.match(linked.fragment, /var oMask: u32 = 0xffffffffu;/);
+    assert.match(linked.fragment, /oMask = \(.*vec4<u32>\(vCoverage\).*\)\.x;/);
+    assert.match(linked.fragment, /return FragmentOut\(.*, oMask\);/);
+    assert.doesNotMatch(linked.fragment, /@location\(4294967295\)/);
+});
+
+test('a varying is passed by register, as the hardware does, whatever the names say there'
+    + ' (test_shader_stage_input_output_matching)', ()=>{
+    const COLOURS = [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+        { name: 'COLOR', index: 0, register: 1 }, { name: 'COLOR', index: 1, register: 2 }];
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX, outputs: COLOURS,
+        instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), dclOutput(o(1)),
+            dclOutput(o(2)), mov(o(0), l(0, 0, 0, 1)), mov(o(1), l(1, 0, 0, 1)),
+            mov(o(2), l(0, 1, 0, 1)), ret()],
+    }))));
+    // The pixel shader names its registers the other way round.
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [COLOURS[0], { name: 'COLOR', index: 1, register: 1 },
+            { name: 'COLOR', index: 0, register: 2 }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPs(v(1)), dclInputPs(v(2)), dclOutput(o(0)), mov(o(0), v(2)),
+            ret()],
+    }))));
+    const linked = linkProgram(vs, ps);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.vertex, /@location\(0\) o1: vec4<f32>,\s+@location\(1\) o2/);
+    assert.match(linked.fragment, /@location\(0\) v1: vec4<f32>,\s+@location\(1\) v2/);
+});
+
+test('a pixel input at a register the vertex shader did not write is looked for by name', ()=>{
     // The vertex shader writes COLOR in o1; a pixel shader that reads it in v3
-    // still finds it, at the location the vertex output was given.
+    // finds it, at the location the vertex output was given.
     const vs = translateShader(/** @type {any} */ (parseDxbc(colouredVertexShader())));
     const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
         kind: SHADER_KIND.PIXEL,
@@ -762,6 +872,15 @@ test('a pixel input the vertex shader never writes is reported', ()=>{
     const ps = translateShader(/** @type {any} */ (parseDxbc(colouredPixelShader())));
     assert.deepEqual(linkProgram(vs, ps).unsupported,
         ['pixel input COLOR0 has no vertex output']);
+    // One the pixel shader declares and never reads needs none
+    // (test_input_assembler, d3d11.c:19498).
+    const unread = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'COLOR', register: 0, readWriteMask: 0 }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclOutput(o(0)), mov(o(0), l(1, 1, 1, 1)), ret()],
+    }))));
+    assert.deepEqual(linkProgram(vs, unread).unsupported, []);
 });
 
 test('integer varyings are flat, and integer attributes keep their type', ()=>{
@@ -822,6 +941,57 @@ test('the system values a stage can read arrive as builtins', ()=>{
     assert.match(linked.fragment, /oDepth = bitcast<f32>\(\(v1.xxxx\).x\);/);
     assert.match(linked.fragment, /return FragmentOut\(bitcast<vec4<f32>>\(o0\), oDepth\);/);
     assert.deepEqual(linked.attributes, [], 'a builtin is not a vertex attribute');
+});
+
+test('a depth written with a promise of its direction is the nearer of it and the rasterized'
+    + ' depth (test_conservative_depth_output, d3d11.c:29380)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    /** @param {string} name @param {number} systemValue @param {number} type */
+    const promising = (name, systemValue, type)=>translateShader(/** @type {any} */ (parseDxbc(
+        assemble({
+            kind: SHADER_KIND.PIXEL,
+            outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 },
+                { name, systemValue, register: 0xffffffff }],
+            instructions: [dclOutput(o(0)), mov(o(0), l(0, 1, 0, 1)),
+                mov({ type, indices: [], mask: 1, swizzle: 'x' }, l(0.25)), ret()],
+        }))));
+    const greater = linkProgram(vs, promising('SV_DepthGreaterEqual',
+        SYSTEM_VALUE.DEPTH_GREATER_EQUAL, 38));
+    assert.deepEqual(greater.unsupported, []);
+    assert.match(greater.fragment, /@builtin\(position\) depthPosition: vec4<f32>,/);
+    assert.match(greater.fragment, /max\(oDepth, in\.depthPosition\.z\)\);/);
+    // As a compiler writes the signature: by name alone, no system value.
+    const less = linkProgram(vs, promising('SV_DepthLessEqual', 0, 39));
+    assert.match(less.fragment, /min\(oDepth, in\.depthPosition\.z\)\);/);
+    assert.doesNotMatch(less.fragment, /@location\(4294967295\)/);
+});
+
+test('clip distances clip on the device or by the fragment stage; a cull distance discards a'
+    + ' primitive all of whose vertices are on its far side (test_combined_clip_and_cull_distances,'
+    + ' d3d11.c:30460)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_CLIPDISTANCE', systemValue: SYSTEM_VALUE.CLIP_DISTANCE, register: 1,
+                mask: 0x7 },
+            { name: 'SV_CULLDISTANCE', systemValue: SYSTEM_VALUE.CULL_DISTANCE, register: 2,
+                mask: 0x1 }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'xyz'), SYSTEM_VALUE.CLIP_DISTANCE),
+            dclOutputSiv(o(2, 'x'), SYSTEM_VALUE.CULL_DISTANCE),
+            mov(o(0), v(0)), mov(o(1, 'xyz'), v(0, 'xyz')), mov(o(2, 'x'), v(0, 'x')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const device = linkProgram(vs, ps, { clipDistances: true });
+    assert.deepEqual(device.unsupported, []);
+    assert.match(device.vertex, /^enable clip_distances;/);
+    assert.match(device.vertex, /@builtin\(clip_distances\) clipDistances: array<f32, 3>,/);
+    assert.match(device.fragment, /if \(any\(in\.cullKept0 == vec4<f32>\(0\.0\)\)\) \{ discard; \}/);
+    const fragmentCut = linkProgram(vs, ps);
+    assert.doesNotMatch(fragmentCut.vertex, /clip_distances/);
+    assert.match(fragmentCut.fragment, /if \(any\(in\.clipDistance0 < vec4<f32>\(0\.0\)\)\) \{ discard; \}/);
+    assert.match(fragmentCut.vertex, /select\(0\.0, 1\.0, bitcast<f32>\(o2\.x\) >= 0\.0\)/);
 });
 
 test('a vertex shader that writes no position cannot be linked', ()=>{
@@ -913,4 +1083,236 @@ test('a compute shader is a module of its own: its group\'s size, its thread ids
         [BINDING.UAV + 1, STAGE.COMPUTE, 'storage'],
         [BINDING.UAV_VIEW + 1, STAGE.COMPUTE, 'uniform'],
     ]);
+});
+
+test('a range of input registers indexed into is read out of an array of them, a range of'
+    + ' outputs written through a switch (test_vs_input_relative_addressing)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [0, 1, 2, 3].map(register=>({ name: 'COLOR', index: register, register })),
+        outputs: [0, 1, 2].map(register=>({ name: 'COLOR', index: register, register })),
+        instructions: [
+            ...[0, 1, 2, 3].map(register=>dclInput(v(register))),
+            ...[0, 1, 2].map(register=>dclOutput(o(register))),
+            dclIndexRange(v(1), 3),
+            dclIndexRange(o(1), 2),
+            dclTemps(1),
+            mov(r(0, 'x'), cb(0, 0, 'x')),
+            mov(o(0), indexedBy(v(2), r(0, 'x'))),
+            mov(indexedBy(o(1, 'xy'), r(0, 'x')), v(0)),
+            ret(),
+        ],
+    }))));
+    assert.deepEqual(vs.unsupported, []);
+    const text = vs.body.filter(line=>typeof line === 'string').join('\n');
+    assert.match(text, /var vr1 = array<vec4<u32>, 3>\(v1, v2, v3\);/);
+    // v[r0.x + 2] is the range's second place on.
+    assert.match(text, /o0 = vr1\[\(1u \+ r0\.x+\.x\)\]\.xyzw;/);
+    assert.match(text, /switch \(r0\.x+\.x\) \{\s+case 0u: \{\s+let (held\d+) = held\d+;\s+o1\.x = \1\.x;\s+o1\.y = \1\.y;/);
+    assert.match(text, /case 1u: \{\s+let held\d+ = held\d+;\s+o2\.x = /);
+    assert.equal(vs.outputRegisters, 3);
+});
+
+test('a typed texture view an atomic touches is the words of its texels in a buffer, every'
+    + ' access to it through them; early depth tests are the fragment\'s own', ()=>{
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        major: 5,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclGlobalFlags(1 | 4),
+            dclUavTyped(1, RESOURCE_DIMENSION.TEXTURE2DARRAY, RETURN_TYPE.SINT),
+            dclUavTyped(2, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)),
+            dclTemps(1),
+            atomicIadd(u(1, 'x'), lu(3, 4, 5, 0), lu(1)),
+            ldUavTyped(r(0, 'x'), lu(1, 2, 0, 0), u(1, 'xxxx')),
+            storeUavTyped(u(1, 'xyzw'), lu(6, 7, 8, 0), r(0, 'xxxx')),
+            storeUavTyped(u(2, 'xyzw'), lu(0, 0, 0, 0), r(0, 'xxxx')),
+            mov(o(0), l(1, 1, 1, 1)),
+            ret(),
+        ],
+    }))), { uavFormats: { 2: 'r32float' } });
+    assert.deepEqual(ps.unsupported, []);
+    assert.equal(ps.earlyDepth, true);
+    assert.deepEqual(ps.uavs.map(uav=>!!uav.words), [true, false], 'only the one atomics touch');
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, ps, { earlyDepth: { compare: '<=', multisampled: false } });
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.fragment, /var<storage, read_write> u1: array<atomic<u32>>;/);
+    assert.match(linked.fragment, /var u2: texture_storage_2d<r32float, write>;/);
+    // Words a row, rows a layer, width, layers: layer z, row y, texel x.
+    assert.match(linked.fragment, /return \(c\.z \* u1view\.y \+ c\.y\) \* u1view\.x \+ c\.x;/);
+    assert.match(linked.fragment, /u1_atomic_iadd\(u1_index\(vec4<u32>\(vec4<u32>\(3u, 4u, 5u, 0u\)\.xyz,/);
+    assert.match(linked.fragment, /if \(i >= arrayLength\(&u1\)\) \{ return 0u; \}/);
+    assert.match(linked.fragment, /u1_load\(u1_index\(/);
+    assert.match(linked.fragment, /u1_store\(u1_index\(/);
+    assert.doesNotMatch(linked.fragment, /textureLoad\(u1|textureStore\(u1/);
+    assert.match(linked.fragment, /var earlyDepth: texture_depth_2d;/);
+    assert.match(linked.fragment, /if \(!\(in\.\w+\.z <= textureLoad\(earlyDepth,/);
+    assert.deepEqual(linked.groups[1].filter(entry=>entry.binding === BINDING.EARLY_DEPTH
+        || entry.binding === BINDING.UAV + 1 || entry.binding === BINDING.UAV_VIEW + 1)
+        .map(entry=>entry.texture?.sampleType ?? entry.buffer?.type),
+    ['storage', 'uniform', 'depth']);
+});
+
+test('a sampler\'s MipLODBias is added to every level the shader samples by: WebGPU\'s samplers'
+    + ' have none (test_texture, d3d11.c:9385)', ()=>{
+    const TEX = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT), dclSampler(0)];
+    const two = 'bitcast<f32>(1073741824u)';
+    /** @param {any} instruction */
+    const biased = instruction=>bodyOf(translate([instruction], { declarations: TEX,
+        options: { samplerBias: { 0: 2 } } }));
+    assert.match(biased(sample(r(0), v(0), t(0), s(0))),
+        new RegExp(`textureSampleBias\\(t0, s0, [^;]*, ${two.replace(/[()]/g, '\\$&')}\\)`));
+    assert.match(biased(sampleL(r(0), v(0), t(0), s(0), r(1, 'x'))),
+        /textureSampleLevel\(t0, s0, [^;]*\.x \+ bitcast<f32>\(1073741824u\)\)/);
+    assert.match(biased(sampleD(r(0), v(0), t(0), s(0), r(1), r(2))),
+        /\* exp2\(bitcast<f32>\(1073741824u\)\)/);
+    assert.doesNotMatch(bodyOf(translate([sample(r(0), v(0), t(0), s(0))], { declarations: TEX })),
+        /Bias/, 'none without one');
+});
+
+test('a depth bias the fragment stage applies itself writes the rasterized depth plus the clamped'
+    + ' bias, and leaves a shader-written depth alone (test_depth_bias, d3d11.c:28695)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([1, 0, 0, 1]))));
+    const bias = { units: -(2 ** -14), slope: 2, clamp: -1e-5 };
+    const linked = linkProgram(vs, ps, { depthBias: bias });
+    assert.match(linked.fragment, /@builtin\(position\) biasPosition: vec4<f32>,/);
+    assert.match(linked.fragment, /@builtin\(frag_depth\) depth: f32,/);
+    assert.match(linked.fragment, new RegExp('let biasRaw = bitcast<f32>\\(3095396352u\\) \\+ '
+        + 'bitcast<f32>\\(1073741824u\\) \\* max\\(abs\\(dpdx\\(biasZ\\)\\), '
+        + 'abs\\(dpdy\\(biasZ\\)\\)\\);'));
+    assert.match(linked.fragment, /let biasedDepth = biasZ \+ max\(biasRaw, /,
+        'a negative clamp bounds a negative bias from below');
+    assert.doesNotMatch(linkProgram(vs, ps).fragment, /frag_depth/, 'none without one');
+    // No pixel shader bound: Direct3D still biases the depth it writes.
+    const alone = linkProgram(vs, NO_PIXEL_SHADER,
+        { depthBias: { units: -1e-3, slope: 0, clamp: 0 } });
+    assert.match(alone.fragment, /return FragmentOut\(biasedDepth\);/);
+});
+
+test('a primitive\'s render target array index travels flat to the pixel stage, and a drawing'
+    + ' of one layer keeps the fragments routed there, those past the views going to the first'
+    + ' (test_layered_rendering, d3d11.c:11754)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_RenderTargetArrayIndex', systemValue:
+                SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX, register: 1, mask: 0x1,
+            componentType: COMPONENT_TYPE.UINT }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'x'), SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX),
+            mov(o(0), v(0)), mov(o(1, 'x'), v(0, 'x')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'SV_RenderTargetArrayIndex', systemValue:
+            SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX, register: 0, mask: 0x1,
+        componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPsSiv(v(0, 'x'), SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX),
+            dclOutput(o(0)), mov(o(0), v(0)), ret()],
+    }))));
+    const whole = linkProgram(vs, ps);
+    assert.deepEqual(whole.unsupported, []);
+    assert.match(whole.vertex, /@location\(0\) @interpolate\(flat\) rtLayer: u32,/);
+    assert.match(whole.fragment, /v0\.x = in\.rtLayer;/);
+    assert.doesNotMatch(whole.fragment, /discard/);
+    const second = linkProgram(vs, ps, { layerPass: { index: 1, count: 4 } });
+    assert.match(second.fragment,
+        /if \(in\.rtLayer != 1u && \(1u != 0u \|\| in\.rtLayer < 4u\)\) \{ discard; \}/);
+    const unwritten = linkProgram(translateShader(/** @type {any} */ (parseDxbc(
+        passThroughVertexShader()))), ps);
+    assert.match(unwritten.fragment, /v0\.x = 0u;/, 'an index no vertex wrote reads zero');
+});
+
+test('the vertex ID counts neither the first vertex nor the base vertex: the vertex stage takes'
+    + ' the draw\'s off its vertex index (test_vertex_id, d3d11.c:13910)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VertexID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            mask: 0x1, componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0, 'x'), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0, 'xxxx')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const linked = linkProgram(vs, ps, { vertexPull: { streams: [], attributes: [],
+        vertexBase: true } });
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.vertex, /v0\.x = in\.vsVertexIndex - vsPulls\[0\]\.x;/);
+    assert.ok(linked.groups[0].some(entry=>entry.binding === BINDING.VERTEX_PULL_PARAMS));
+});
+
+test('alpha to coverage on one sample keeps a fragment where the first target\'s alpha reaches'
+    + ' half (test_alpha_to_coverage, d3d11.c:30988)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 0.25]))));
+    const covered = linkProgram(vs, ps, { alphaCoverage: true });
+    assert.match(covered.fragment,
+        /\{ if \(bitcast<f32>\(o0\.w\) < 0\.5\) \{ discard; \} return FragmentOut\(/);
+    assert.doesNotMatch(linkProgram(vs, ps).fragment, /discard/);
+});
+
+test('a primitive\'s viewport index travels flat, and a drawing through one viewport keeps the'
+    + ' fragments routed there (test_multiple_viewports, d3d11.c:31295)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', register: 0 }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'SV_ViewportArrayIndex', systemValue: SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX,
+                register: 1, mask: 0x1, componentType: COMPONENT_TYPE.UINT }],
+        instructions: [dclInput(v(0)), dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(1, 'x'), SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX),
+            mov(o(0), v(0)), mov(o(1, 'x'), v(0, 'x')), ret()],
+    }))));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const second = linkProgram(vs, ps, { viewportPass: { index: 1, count: 2 } });
+    assert.deepEqual(second.unsupported, []);
+    assert.match(second.vertex, /@interpolate\(flat\) rtViewport: u32,/);
+    assert.match(second.fragment,
+        /if \(in\.rtViewport != 1u\) \{ discard; \}/);
+});
+
+test('sampleinfo and samplepos read the rasterizer\'s sample count, fixed at link, or the'
+    + ' texture\'s, and the standard positions (test_sampleinfo_instruction, d3d11.c:24561)',
+()=>{
+    const MS = [dclResource(0, RESOURCE_DIMENSION.TEXTURE2DMS, RETURN_TYPE.FLOAT)];
+    const info = translate([sampleInfo(r(0), rasterizer()), sampleInfo(r(1), t(0), true)],
+        { declarations: MS, options: { multisampled: [0] } });
+    assert.equal(info.rasterizerSamples, true);
+    assert.match(bodyOf(info), /r0 = vec4<u32>\(bitcast<u32>\(f32\(rasterSamples\)\), 0u, 0u, 0u\)/);
+    assert.match(bodyOf(info), /r1 = vec4<u32>\(textureNumSamples\(t0\), 0u, 0u, 0u\)/);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    assert.match(linkProgram(vs, info, { sampleCount: 4 }).fragment,
+        /const rasterSamples: u32 = 4u;/);
+    const position = translate([samplePos(r(0), rasterizer(), l(1, 1, 1, 1))]);
+    assert.ok(position.helpers.includes('samplePosition'));
+    assert.match(bodyOf(position), /samplePosition\(rasterSamples, /);
+});
+
+test('a pixel input is interpolated as declared, at its centroid or each sample, with or without'
+    + ' perspective, both stages alike; SV_SampleIndex is the sample shaded'
+    + ' (test_sample_shading, d3d11.c:31751)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(colouredVertexShader())));
+    /** @param {number} mode */
+    const linked = mode=>linkProgram(vs, translateShader(/** @type {any} */ (parseDxbc(assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'COLOR', register: 1 }, { name: 'SV_SampleIndex', systemValue:
+            SYSTEM_VALUE.SAMPLE_INDEX, register: 2, mask: 0x1, componentType:
+            COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclInputPs(v(1), mode), dclInputPsSgv(v(2, 'x'), SYSTEM_VALUE.SAMPLE_INDEX),
+            dclOutput(o(0)), mov(o(0), v(1)), ret()],
+    })))));
+    const sampled = linked(6);
+    assert.deepEqual(sampled.unsupported, []);
+    assert.match(sampled.vertex, /@location\(0\) @interpolate\(perspective, sample\) o1/);
+    assert.match(sampled.fragment, /@location\(0\) @interpolate\(perspective, sample\) v1/);
+    assert.match(sampled.fragment, /@builtin\(sample_index\) v2: u32,/);
+    assert.match(linked(5).fragment, /@interpolate\(linear, centroid\) v1/);
+    assert.match(linked(2).fragment, /@location\(0\) v1: vec4<f32>/);
 });

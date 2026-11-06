@@ -20,12 +20,14 @@
  * stored in a float is not required to keep its payload.
  *
  * The other decision worth stating is how a vertex shader meets a pixel
- * shader. Direct3D links the two by semantic name, never by register: `COLOR0`
- * in one is `COLOR0` in the other whatever register each compiler chose. So a
- * shader is translated to a body that reads and writes named registers, and the
- * entry point around it -- the struct with the `@location` attributes -- is
- * written when a pair is linked, giving both halves the same numbering. The
- * body is the shader's; the interface is the pair's.
+ * shader. Direct3D 10 and 11 hand register n of one to register n of the
+ * other: the signatures name the registers, and a pair whose names disagree
+ * at a register reads what the register carries, not the name
+ * (test_shader_stage_input_output_matching). So a shader is translated to a
+ * body that reads and writes numbered registers, and the entry point around
+ * it -- the struct with the `@location` attributes -- is written when a pair
+ * is linked, giving both halves the same numbering. The body is the shader's;
+ * the interface is the pair's.
  *
  * What a first cut does not carry is listed rather than approximated: an
  * instruction this file has no translation for makes the whole shader
@@ -60,7 +62,17 @@ export const BINDING = Object.freeze({
     UAV: 288,
     UAV_VIEW: 352,
     UAV_COUNTER: 416,
+    // A vertex stream the vertex stage reads as words itself (`VertexPull`):
+    // its buffer, and where each stream starts, its stride and its length.
+    VERTEX_PULL: 480,
+    VERTEX_PULL_PARAMS: 512,
+    // The depth buffer a pixel shader that asks for early depth tests itself
+    // against (`earlyDepth` in `linkProgram`).
+    EARLY_DEPTH: 544,
 });
+
+/** The global flags a shader declares, in its declaration's control bits. */
+const GLOBAL_FLAG = Object.freeze({ FORCE_EARLY_DEPTH_STENCIL: 0x4 });
 
 /** WebGPU's `GPUShaderStage` bits, spelled out so nothing here reads a global. */
 export const STAGE = Object.freeze({ VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 });
@@ -235,6 +247,33 @@ export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
  * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
  */
 export const HELPERS = Object.freeze({
+    // Direct3D's standard sample positions, in sixteenths of a pixel from
+    // its centre; an index past the count is at the centre.
+    samplePosition: {
+        needs: [],
+        text: [
+            'fn samplePosition(count: u32, index: u32) -> vec2<f32> {',
+            '    if (index >= count) { return vec2<f32>(0.0); }',
+            '    var two = array<vec2<i32>, 2>(vec2<i32>(4, 4), vec2<i32>(-4, -4));',
+            '    var four = array<vec2<i32>, 4>(vec2<i32>(-2, -6), vec2<i32>(6, -2),'
+                + ' vec2<i32>(-6, 2), vec2<i32>(2, 6));',
+            '    var eight = array<vec2<i32>, 8>(vec2<i32>(1, -3), vec2<i32>(-1, 3),'
+                + ' vec2<i32>(5, 1), vec2<i32>(-3, -5), vec2<i32>(-5, 5), vec2<i32>(-7, -1),'
+                + ' vec2<i32>(3, 7), vec2<i32>(7, -7));',
+            '    var sixteen = array<vec2<i32>, 16>(vec2<i32>(1, 1), vec2<i32>(-1, -3),'
+                + ' vec2<i32>(-3, 2), vec2<i32>(4, -1), vec2<i32>(-5, -2), vec2<i32>(2, 5),'
+                + ' vec2<i32>(5, 3), vec2<i32>(3, -5), vec2<i32>(-2, 6), vec2<i32>(0, -7),'
+                + ' vec2<i32>(-4, -6), vec2<i32>(-6, 4), vec2<i32>(-8, 0), vec2<i32>(7, -4),'
+                + ' vec2<i32>(6, 7), vec2<i32>(-7, -8));',
+            '    var at = vec2<i32>(0, 0);',
+            '    if (count == 2u) { at = two[index]; }',
+            '    else if (count == 4u) { at = four[index]; }',
+            '    else if (count == 8u) { at = eight[index]; }',
+            '    else if (count == 16u) { at = sixteen[index]; }',
+            '    return vec2<f32>(at) / 16.0;',
+            '}',
+        ],
+    },
     umulhi: {
         needs: [],
         text: [
@@ -271,6 +310,8 @@ export const HELPERS = Object.freeze({
  * @typedef {Object} ConstantBufferDecl
  * @property {number} slot
  * @property {number} size   In vec4 registers.
+ * @property {boolean} [indexed]  Read at a register the shader computes: such a
+ *     read reaches as far as the bound buffer, past the declared size.
  */
 
 /**
@@ -282,6 +323,9 @@ export const HELPERS = Object.freeze({
  * @property {boolean} [multisampled]  A TEXTURE2DMS bound to a texture of several samples.
  * @property {boolean} [depth]  A float texture bound to a depth buffer: declared as a depth
  *     texture, each read of it one float, made (d, 0, 0, 1) as Direct3D reads such a view.
+ * @property {boolean} [stencil]  An integer texture bound to a depth buffer's stencil, which
+ *     WebGPU reads in red and Direct3D's X24_TYPELESS_G8_UINT and X32_TYPELESS_G8X24_UINT in
+ *     green: each read made (0, s, 0, 1).
  * @property {'raw' | 'structured'} [structure]  A buffer read by bytes or by structures.
  * @property {number} [stride]    Bytes a structure.
  */
@@ -290,6 +334,8 @@ export const HELPERS = Object.freeze({
  * @typedef {Object} SamplerDecl
  * @property {number} slot
  * @property {boolean} comparison
+ * @property {boolean} [nonFiltering]  Read with a depth texture, which WebGPU filters only
+ *     when it compares it: declared non-filtering and bound as a point sampler.
  */
 
 /**
@@ -307,6 +353,15 @@ export const HELPERS = Object.freeze({
  * @property {number} inputRegisters               How many `v` registers the body reads.
  * @property {number} outputRegisters              How many `o` registers the body writes.
  * @property {boolean} writesDepth
+ * @property {boolean} [writesMask]   A pixel shader writes its coverage (`oMask`).
+ * @property {boolean} [readsMask]    A pixel shader reads its coverage (`vCoverage`).
+ * @property {boolean} [earlyDepth]  The shader asks for the depth and stencil
+ *     tests before it runs (`[earlydepthstencil]`), so that what it writes
+ *     through views is not written by a fragment the tests reject.
+ * @property {Record<number, number>} [interpolation]  A pixel shader's interpolation mode
+ *     by input register, as its declarations give it (D3D10_SB_INTERPOLATION_MODE).
+ * @property {boolean} [rasterizerSamples]  Whether the body reads the rasterizer's sample
+ *     count (`sampleinfo`, `samplepos` of the rasterizer), `rasterSamples` at link.
  * @property {string[]} unsupported                Opcode names with no translation.
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
  * @property {number[]} threadGroup                A compute shader's group, x by y by z.
@@ -325,6 +380,8 @@ export const HELPERS = Object.freeze({
  * @property {boolean} atomic     Whether the shader adds, swaps or compares in it.
  * @property {boolean} loaded     Whether the shader reads it as well as writes it.
  * @property {string} [format]    A typed texture's storage format (`uavFormats`).
+ * @property {boolean} [words]    A typed texture view held as its texels' words
+ *     in a buffer, for the atomics made on it.
  * @property {Set<string>} [atomicOps]  The atomic operations made on it.
  * @property {boolean} [counted]  Whether its append counter is used.
  */
@@ -343,7 +400,8 @@ export const HELPERS = Object.freeze({
  * rasterises such a draw -- a depth pre-pass or a shadow map is drawn this way
  * -- and writes depth and stencil, but no render target; this stage reads
  * nothing and writes nothing, so linked with any vertex shader its fragment
- * entry point is empty and every target's write mask is zero.
+ * entry point returns at once (with the depth when the link applies a bias)
+ * and every target's write mask is zero.
  *
  * @type {Readonly<TranslatedShader>}
  */
@@ -357,7 +415,8 @@ export const NO_PIXEL_SHADER = Object.freeze({
     temps: 0,
     indexableTemps: [],
     immediateConstants: [],
-    body: [],
+    // A pixel stage the link may still give outputs (a depth bias it applies).
+    body: [Object.freeze({ ret: /** @type {true} */ (true) })],
     inputRegisters: 0,
     outputRegisters: 0,
     writesDepth: false,
@@ -380,6 +439,9 @@ function swizzleText(swizzle){
 
 /** @param {number} dword @returns {string} a WGSL u32 literal */
 const u32Literal = dword=>`${dword >>> 0}u`;
+/** A float exactly, as WGSL spells one: its bits. @param {number} value */
+const floatLiteral = value=>
+    `bitcast<f32>(${new Uint32Array(new Float32Array([value]).buffer)[0]}u)`;
 
 /**
  * Translates one shader's instruction stream. The entry point is not written
@@ -407,9 +469,17 @@ const u32Literal = dword=>`${dword >>> 0}u`;
  * its outputs are written into.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
+ * `samplerBias` is the MipLODBias of the sampler bound at each slot that has
+ * one: WebGPU's samplers have none, so the shader adds it to every level it
+ * samples by. `constantSizes`: the registers a constant buffer read at a
+ * computed register has bound at its slot, where more than it declares.
+ *
+ * @param {import('./dxbc.js').DxbcContainer} container
  * @param {{ multisampled?: readonly number[], depth?: readonly number[],
- *     uavFormats?: Readonly<Record<number, string>>, tokens?: Uint32Array,
- *     outputName?: string }} [options]
+ *     stencil?: readonly number[], uavFormats?: Readonly<Record<number, string>>,
+ *     tokens?: Uint32Array,
+ *     outputName?: string, samplerBias?: Readonly<Record<number, number>>,
+ *     constantSizes?: Readonly<Record<number, number>> }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
@@ -422,6 +492,9 @@ export function translateShader(container, options = {}){
     // the one its linker names (`hull.js`).
     const isHull = program.kind === SHADER_KIND.HULL;
     const outputArray = options.outputName ?? 'o';
+    // A geometry shader reads its inputs a vertex at a time, v[vertex][register],
+    // out of the primitive its linker assembles (`vgs`, `linkGeometry`).
+    const isGeometry = program.kind === SHADER_KIND.GEOMETRY;
 
     /** @type {TranslatedShader} */
     const result = {
@@ -444,6 +517,18 @@ export function translateShader(container, options = {}){
         uavs: [],
         sharedMemory: [],
     };
+    // WebGPU has no atomics on a storage texture: a typed texture view an
+    // atomic touches is bound as the words of its texels in a buffer, rows
+    // padded as a copy lays them out, and every access to it, plain loads
+    // and stores too, goes through them (`words`, the device's word mirror).
+    const atomicViews = new Set(instructions.filter(instruction=>
+        instruction.opcode >= OPCODE.ATOMIC_AND && instruction.opcode <= OPCODE.IMM_ATOMIC_UMIN
+        && instruction.opcode !== OPCODE.IMM_ATOMIC_ALLOC
+        && instruction.opcode !== OPCODE.IMM_ATOMIC_CONSUME)
+        .map(instruction=>instruction.operands[instruction.opcode >= OPCODE.IMM_ATOMIC_IADD
+            ? 1 : 0])
+        .filter(operand=>operand?.type === OPERAND.UNORDERED_ACCESS_VIEW)
+        .map(operand=>operand.indices[0]?.value));
     let nextTemp = 0;
     let depth = 1;
     // Not `t`: that is a texture's name, and a `let` of the same name would
@@ -457,6 +542,30 @@ export function translateShader(container, options = {}){
 
     /** @param {number} slot */
     const textureOf = slot=>result.textures.find(texture=>texture.slot === slot) ?? null;
+
+    /**
+     * The input and output registers a shader indexes into, by range
+     * (`dcl_index_range`): an input range is read out of an array of its
+     * registers, `vr<first>`, an output range written through a switch.
+     *
+     * @type {{ type: number, first: number, count: number }[]}
+     */
+    const indexRanges = [];
+    /** @param {number} type @param {number} register */
+    const rangeOf = (type, register)=>indexRanges.find(range=>range.type === type
+        && register >= range.first && register < range.first + range.count) ?? null;
+    /**
+     * A relative register's place in the range it falls in.
+     *
+     * @param {import('./sm4.js').Operand} operand @param {{ first: number }} range
+     */
+    const placeIn = (operand, range)=>{
+        const index = operand.indices[0];
+        const relative = `${untyped(/** @type {any} */ (index.relative))}`
+            + `.${COMPONENT[/** @type {any} */ (index.relative).swizzle[0]]}`;
+        return index.value === range.first ? relative
+            : `(${u32Literal(index.value - range.first)} + ${relative})`;
+    };
 
     /**
      * @param {import('./sm4.js').Operand} operand
@@ -491,6 +600,27 @@ export function translateShader(container, options = {}){
             case OPERAND.TEMP:
                 return `r${operand.indices[0].value}.${swizzle}`;
             case OPERAND.INPUT:
+                if (isGeometry && operand.indices.length > 1)
+                {
+                    return `vgs[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
+                        + `.${swizzle}`;
+                }
+                // A hull shader's control point phase names its input points
+                // as v[point][register] (test_clip_distance).
+                if (isHull && operand.indices.length > 1)
+                {
+                    return `vicp[${indexExpression(operand, 0)}][${indexExpression(operand, 1)}]`
+                        + `.${swizzle}`;
+                }
+                if (operand.indices[0].relative)
+                {
+                    const range = rangeOf(OPERAND.INPUT, operand.indices[0].value);
+                    if (range)
+                    {
+                        return `vr${range.first}[${placeIn(operand, range)}].${swizzle}`;
+                    }
+                    result.unsupported.push('an input register indexed outside a declared range');
+                }
                 return `v${operand.indices[0].value}.${swizzle}`;
             case OPERAND.OUTPUT:
                 return isHull ? `${outputArray}[${indexExpression(operand, 0)}].${swizzle}`
@@ -509,7 +639,7 @@ export function translateShader(container, options = {}){
             case OPERAND.INPUT_JOIN_INSTANCE_ID:
                 return `${REG}(hsInstance).${swizzle}`;
             case OPERAND.INPUT_PRIMITIVE_ID:
-                if (isHull || program.kind === SHADER_KIND.DOMAIN)
+                if (isHull || isGeometry || program.kind === SHADER_KIND.DOMAIN)
                 {
                     return `${REG}(primitiveId).${swizzle}`;
                 }
@@ -517,9 +647,23 @@ export function translateShader(container, options = {}){
                 return `${REG}(0u)`;
             case OPERAND.INPUT_DOMAIN_POINT:
                 return `dsDomain.${swizzle}`;
+            case OPERAND.INPUT_COVERAGE_MASK:
+                result.readsMask = true;
+                return `${REG}(vCoverage).${swizzle}`;
+            case OPERAND.INPUT_GS_INSTANCE_ID:
+                return `${REG}(gsInstance).${swizzle}`;
             case OPERAND.INDEXABLE_TEMP:
                 return `x${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.CONSTANT_BUFFER:
+                if (operand.indices[1]?.relative)
+                {
+                    const declared = result.constantBuffers.find(buffer=>
+                        buffer.slot === operand.indices[0].value);
+                    if (declared)
+                    {
+                        declared.indexed = true;
+                    }
+                }
                 return `cb${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
             case OPERAND.IMMEDIATE_CONSTANT_BUFFER:
                 return `icb[${indexExpression(operand, 0)}].${swizzle}`;
@@ -592,10 +736,42 @@ export function translateShader(container, options = {}){
         {
             return;
         }
-        if (dest.type === OPERAND.OUTPUT_DEPTH)
+        // A depth written with a promise of its direction is a depth written.
+        if (dest.type === OPERAND.OUTPUT_DEPTH || dest.type === OPERAND.OUTPUT_DEPTH_GREATER_EQUAL
+            || dest.type === OPERAND.OUTPUT_DEPTH_LESS_EQUAL)
         {
             result.writesDepth = true;
             emit(`oDepth = bitcast<f32>((${value}).x);`);
+            return;
+        }
+        if (dest.type === OPERAND.OUTPUT_COVERAGE_MASK)
+        {
+            result.writesMask = true;
+            emit(`oMask = (${value}).x;`);
+            return;
+        }
+        const range = dest.type === OPERAND.OUTPUT && !isHull && dest.indices[0]?.relative
+            ? rangeOf(OPERAND.OUTPUT, dest.indices[0].value) : null;
+        if (range)
+        {
+            // Each register of the range a switch case of its own: WGSL
+            // names the outputs one by one.
+            const written = held();
+            emit(`let ${written} = ${value};`);
+            emit(`switch (${placeIn(dest, range)}) {`);
+            depth++;
+            for (let place = 0; place < range.count; place++)
+            {
+                emit(`case ${place}u: {`);
+                depth++;
+                store({ ...dest, indices: [{ value: range.first + place, relative: null }] },
+                    written);
+                depth--;
+                emit('}');
+            }
+            emit('default: {}');
+            depth--;
+            emit('}');
             return;
         }
         const target = untyped({ ...dest, swizzle: [0, 1, 2, 3] }).replace(/\.xyzw$/, '');
@@ -725,7 +901,8 @@ export function translateShader(container, options = {}){
      * @param {string} sampled
      */
     const sampledBits = (texture, operand, sampled)=>{
-        const swizzled = `(${sampled}).${swizzleText(operand.swizzle)}`;
+        const read = texture.stencil ? `vec4<u32>(0u, (${sampled}).x, 0u, 1u)` : sampled;
+        const swizzled = `(${read}).${swizzleText(operand.swizzle)}`;
         if (texture.returnType === RETURN_TYPE.UINT)
         {
             return swizzled;
@@ -734,25 +911,51 @@ export function translateShader(container, options = {}){
     };
 
     /**
+     * A texture read through a sampler. `shaped.offset` is the instruction's
+     * immediate texel offset as the last argument WGSL takes it (a cube has
+     * none), or nothing.
+     *
      * @param {import('./sm4.js').Instruction} instruction
      * @param {(texture: TextureDecl, coordinate: { coordinate: string, layer: string | null,
-     *          width: number, row: boolean }, sampler: string) => string} call
+     *          width: number, row: boolean, offset: string }, sampler: string,
+     *          bias: string | null) => string} call  `bias` the sampler's MipLODBias as a
+     *     WGSL float, null for none
+     * @param {{ resource: number, sampler: number }} [at]  where the resource and
+     *     sampler operands are
      */
-    const sampleWith = (instruction, call)=>{
-        const [dest, coordinate, resource, sampler] = instruction.operands;
+    const sampleWith = (instruction, call, at = { resource: 2, sampler: 3 })=>{
+        const [dest, coordinate] = instruction.operands;
+        const resource = instruction.operands[at.resource];
+        const sampler = instruction.operands[at.sampler];
+        const bias = sampler ? options.samplerBias?.[sampler.indices[0].value] ?? 0 : 0;
         const texture = textureOf(resource.indices[0].value);
-        const shaped = texture ? coordinateFor(texture, f(coordinate)) : null;
-        if (!texture || !shaped)
+        const found = texture ? coordinateFor(texture, f(coordinate)) : null;
+        if (!texture || !found)
         {
             result.unsupported.push(`${instruction.name} on an undeclared or unsupported texture`);
             return;
         }
+        const offset = instruction.offset;
+        const cube = texture.dimension === RESOURCE_DIMENSION.TEXTURECUBE
+            || texture.dimension === RESOURCE_DIMENSION.TEXTURECUBEARRAY;
+        const shaped = { ...found, offset: !offset || cube ? ''
+            : found.width === 3 ? `, vec3<i32>(${offset[0]}, ${offset[1]}, ${offset[2]})`
+                : `, vec2<i32>(${offset[0]}, ${found.row ? 0 : offset[1]})` };
         if (shaped.layer !== null)
         {
             shaped.layer = `i32(${shaped.layer})`;
         }
         const samplerName = sampler ? `s${sampler.indices[0].value}` : '';
-        store(dest, sampledBits(texture, resource, call(texture, shaped, samplerName)));
+        // WebGPU reads a depth texture through no filtering sampler but a
+        // comparing one: a plain one used with it is declared non-filtering.
+        const declared = sampler ? result.samplers.find(one=>one.slot
+            === sampler.indices[0].value) : null;
+        if (declared && texture.depth && !declared.comparison)
+        {
+            declared.nonFiltering = true;
+        }
+        const read = call(texture, shaped, samplerName, bias ? floatLiteral(bias) : null);
+        store(dest, sampledBits(texture, resource, read));
     };
 
     /** @param {string} name */
@@ -1028,6 +1231,21 @@ export function translateShader(container, options = {}){
         }
     };
 
+    /**
+     * The word of a typed texture view held as words (`words`) an address
+     * names: its texel, layer or slice; out of the view, an index past them.
+     *
+     * @param {string} name @param {UavDecl} uav @param {string} address
+     */
+    const wordIndex = (name, uav, address)=>{
+        const at = /** @type {Record<number, string>} */ ({
+            [RESOURCE_DIMENSION.TEXTURE1D]: `${address}.x, 0u, 0u`,
+            [RESOURCE_DIMENSION.TEXTURE1DARRAY]: `${address}.x, 0u, ${address}.y`,
+            [RESOURCE_DIMENSION.TEXTURE2D]: `${address}.xy, 0u`,
+        })[uav.dimension] ?? `${address}.xyz`;
+        return `${name}_index(${REG}(${at}, 0u))`;
+    };
+
     /** The scalar a storage format's texels are. @param {string} format */
     const storageScalar = format=>(/uint$/.test(format) ? 'u32'
         : /sint$/.test(format) ? 'i32' : 'f32');
@@ -1065,6 +1283,11 @@ export function translateShader(container, options = {}){
             // The tessellation stages' declarations (what the stage is, which
             // the hull linker reads from the stream itself) and the global flags.
             case OPCODE.DCL_GLOBAL_FLAGS:
+                if ((instruction.control & GLOBAL_FLAG.FORCE_EARLY_DEPTH_STENCIL) !== 0)
+                {
+                    result.earlyDepth = true;
+                }
+                break;
             case OPCODE.HS_DECLS:
             case OPCODE.HS_CONTROL_POINT_PHASE:
             case OPCODE.HS_FORK_PHASE:
@@ -1077,9 +1300,12 @@ export function translateShader(container, options = {}){
             case OPCODE.DCL_HS_MAX_TESSFACTOR:
             case OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT:
             case OPCODE.DCL_HS_JOIN_PHASE_INSTANCE_COUNT:
-            case OPCODE.DCL_INPUT_SGV:
-            case OPCODE.DCL_INPUT_PS_SGV:
             case OPCODE.DCL_OUTPUT_SGV:
+            case OPCODE.DCL_GS_INPUT_PRIMITIVE:
+            case OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
+            case OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT:
+            case OPCODE.DCL_GS_INSTANCE_COUNT:
+            case OPCODE.DCL_STREAM:
             case OPCODE.NOP:
                 break;
             case OPCODE.DCL_TEMPS:
@@ -1093,7 +1319,8 @@ export function translateShader(container, options = {}){
             case OPCODE.DCL_CONSTANT_BUFFER:
                 result.constantBuffers.push({
                     slot: dest.indices[0].value,
-                    size: dest.indices[1] ? dest.indices[1].value : 0,
+                    size: Math.max(dest.indices[1] ? dest.indices[1].value : 0,
+                        options.constantSizes?.[dest.indices[0].value] ?? 0),
                 });
                 break;
             case OPCODE.DCL_SAMPLER:
@@ -1114,6 +1341,8 @@ export function translateShader(container, options = {}){
                         : {}),
                     ...((options.depth ?? []).includes(dest.indices[0].value)
                         ? { depth: true } : {}),
+                    ...((options.stencil ?? []).includes(dest.indices[0].value)
+                        ? { stencil: true } : {}),
                 });
                 if ((instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -1122,12 +1351,19 @@ export function translateShader(container, options = {}){
                 break;
             case OPCODE.DCL_INPUT:
             case OPCODE.DCL_INPUT_SIV:
+            case OPCODE.DCL_INPUT_SGV:
             case OPCODE.DCL_INPUT_PS:
             case OPCODE.DCL_INPUT_PS_SIV:
+            case OPCODE.DCL_INPUT_PS_SGV:
                 if (dest.type === OPERAND.INPUT)
                 {
                     result.inputRegisters = Math.max(result.inputRegisters,
-                        dest.indices[0].value + 1);
+                        dest.indices[isGeometry && dest.indices.length > 1 ? 1 : 0].value + 1);
+                    if (instruction.opcode !== OPCODE.DCL_INPUT_PS_SGV)
+                    {
+                        result.interpolation = { ...result.interpolation,
+                            [dest.indices[0].value]: instruction.control & 0xf };
+                    }
                 }
                 break;
             case OPCODE.DCL_OUTPUT:
@@ -1147,6 +1383,8 @@ export function translateShader(container, options = {}){
                 const slot = dest.indices[0].value;
                 const isTyped = instruction.opcode === OPCODE.DCL_UAV_TYPED;
                 const format = isTyped ? options.uavFormats?.[slot] : undefined;
+                const words = isTyped && (instruction.control & 0x1f) !== RESOURCE_DIMENSION.BUFFER
+                    && atomicViews.has(slot);
                 result.uavs.push({
                     slot,
                     structure: isTyped ? 'typed'
@@ -1160,6 +1398,7 @@ export function translateShader(container, options = {}){
                     atomic: false,
                     loaded: false,
                     ...(format ? { format } : {}),
+                    ...(words ? { words } : {}),
                 });
                 if (isTyped && (instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -1386,12 +1625,23 @@ export function translateShader(container, options = {}){
             case OPCODE.UTOF:
                 store(dest, fromFloat(`vec4<f32>(${u(a)})`, sat));
                 break;
-            case OPCODE.FTOI:
-                store(dest, fromInt(`vec4<i32>(${f(a)})`));
+            // WGSL saturates to the largest integer a float holds below the
+            // type's top (0xffffff00 unsigned, 0x7fffff80 signed); Direct3D
+            // to the top itself (test_uint_shader_instructions).
+            case OPCODE.FTOI: {
+                const value = held();
+                emit(`let ${value} = ${f(a)};`);
+                store(dest, fromInt(`select(vec4<i32>(${value}), vec4<i32>(2147483647),`
+                    + ` ${value} >= vec4<f32>(2147483648.0))`));
                 break;
-            case OPCODE.FTOU:
-                store(dest, `${REG}(${f(a)})`);
+            }
+            case OPCODE.FTOU: {
+                const value = held();
+                emit(`let ${value} = ${f(a)};`);
+                store(dest, `select(${REG}(${value}), ${REG}(0xffffffffu),`
+                    + ` ${value} >= vec4<f32>(4294967296.0))`);
                 break;
+            }
 
             // --- flow control ---
             case OPCODE.IF:
@@ -1514,17 +1764,21 @@ export function translateShader(container, options = {}){
                     unsupported('sample outside a pixel shader');
                     break;
                 }
-                sampleWith(instruction, (texture, shaped, sampler)=>depthRead(texture,
-                    `textureSample(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`));
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>depthRead(texture,
+                    `${bias && !texture.depth ? 'textureSampleBias' : 'textureSample'}`
+                    + `(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
+                    + `${bias && !texture.depth ? `, ${bias}` : ''}${shaped.offset})`));
                 break;
             case OPCODE.SAMPLE_L:
                 // A depth texture's level is a whole number.
-                sampleWith(instruction, (texture, shaped, sampler)=>depthRead(texture,
-                    `textureSampleLevel(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${texture.depth ? `i32(round(${f(instruction.operands[4])}.x))`
-                        : `${f(instruction.operands[4])}.x`})`));
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>{
+                    const lod = `${f(instruction.operands[4])}.x${bias ? ` + ${bias}` : ''}`;
+                    return depthRead(texture,
+                        `textureSampleLevel(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
+                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
+                        + `, ${texture.depth ? `i32(round(${lod}))` : lod}${shaped.offset})`);
+                });
                 break;
             case OPCODE.SAMPLE_B:
                 if (!isPixel)
@@ -1532,30 +1786,33 @@ export function translateShader(container, options = {}){
                     unsupported('sample_b outside a pixel shader');
                     break;
                 }
-                sampleWith(instruction, (texture, shaped, sampler)=>(texture.depth
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>(texture.depth
                     ? depthRead(texture, `textureSample(t${texture.slot}, ${sampler}`
                         + `, ${shaped.coordinate}`
-                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`)
+                        + `${shaped.layer === null ? '' : `, ${shaped.layer}`}${shaped.offset})`)
                     : `textureSampleBias(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x)`));
+                    + `, ${f(instruction.operands[4])}.x${bias ? ` + ${bias}` : ''}`
+                    + `${shaped.offset})`));
                 break;
             case OPCODE.SAMPLE_D:
-                sampleWith(instruction, (texture, shaped, sampler)=>{
+                sampleWith(instruction, (texture, shaped, sampler, bias)=>{
                     if (texture.depth)
                     {
                         return depthRead(texture, `textureSampleLevel(t${texture.slot}`
                             + `, ${sampler}, ${shaped.coordinate}`
-                            + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, 0)`);
+                            + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, 0`
+                            + `${shaped.offset})`);
                     }
                     /** @param {import('./sm4.js').Operand} operand */
-                    const gradient = operand=>(shaped.row
+                    // A bias of b is gradients 2^b as long.
+                    const gradient = operand=>`${shaped.row
                         ? `vec2<f32>(${f(operand)}.x, 0.0)`
-                        : floats(operand, shaped.width));
+                        : floats(operand, shaped.width)}${bias ? ` * exp2(${bias})` : ''}`;
                     return `textureSampleGrad(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                         + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
                         + `, ${gradient(instruction.operands[4])}`
-                        + `, ${gradient(instruction.operands[5])})`;
+                        + `, ${gradient(instruction.operands[5])}${shaped.offset})`;
                 });
                 break;
             case OPCODE.SAMPLE_C:
@@ -1577,7 +1834,7 @@ export function translateShader(container, options = {}){
                     `vec4<f32>(${level ? 'textureSampleCompareLevel' : 'textureSampleCompare'}`
                     + `(t${texture.slot}, ${sampler}, ${shaped.coordinate}`
                     + `${shaped.layer === null ? '' : `, ${shaped.layer}`}`
-                    + `, ${f(instruction.operands[4])}.x))`);
+                    + `, ${f(instruction.operands[4])}.x${shaped.offset}))`);
                 break;
             }
             case OPCODE.LD:
@@ -1615,18 +1872,72 @@ export function translateShader(container, options = {}){
                 const multisample = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
                     || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY;
                 const level = multisample ? '0' : `${i(address)}.w`;
+                // An address past the level, the layers or the levels reads
+                // zero in Direct3D; WebGPU answers any texel or zero.
+                const name = `t${texture.slot}`;
+                const at = held();
+                const mip = held();
+                // An immediate offset moves the texel read, before the range test.
+                const offset = instruction.offset;
+                const stepped = !offset ? '' : shaped.width === 3
+                    ? ` + vec3<i32>(${offset[0]}, ${offset[1]}, ${offset[2]})`
+                    : ` + vec2<i32>(${offset[0]}, ${shaped.row ? 0 : offset[1]})`;
+                emit(`let ${at} = ${shaped.coordinate}${stepped};`);
+                emit(`let ${mip} = ${level};`);
+                const layer = shaped.layer === null ? null : held();
+                if (layer)
+                {
+                    emit(`let ${layer} = ${shaped.layer};`);
+                }
+                const inside = [`u32(${mip}) < textureNumLevels(${name})`,
+                    `all(vec${shaped.width}<u32>(${at}) < textureDimensions(${name}, u32(${mip})))`,
+                    ...(layer ? [`u32(${layer}) < textureNumLayers(${name})`] : [])].join(' && ');
                 const loaded = sampledBits(texture, resource, depthRead(texture,
-                    `textureLoad(t${texture.slot}, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`}, ${level})`));
+                    `textureLoad(${name}, ${at}${layer === null ? '' : `, ${layer}`}, ${mip})`));
+                const kept = `select(${REG}(0u), ${loaded}, ${inside})`;
                 store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
-                    ? `select(${loaded}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
-                    : loaded);
+                    ? `select(${kept}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
+                    : kept);
+                break;
+            }
+            case OPCODE.SAMPLE_INFO:
+            case OPCODE.SAMPLE_POS: {
+                const [target, resource, index] = instruction.operands;
+                // The rasterizer's sample count, or the texture's: one for a
+                // texture of one sample, none where none is declared.
+                const rasterizer = resource.type === OPERAND.RASTERIZER;
+                const texture = rasterizer ? null : textureOf(resource.indices[0].value);
+                const count = rasterizer ? 'rasterSamples' : !texture ? '0u'
+                    : texture.multisampled ? `textureNumSamples(t${texture.slot})` : '1u';
+                result.rasterizerSamples ||= rasterizer;
+                if (instruction.opcode === OPCODE.SAMPLE_INFO)
+                {
+                    // The count as a float, or as an integer with _uint.
+                    const value = (instruction.control & 1) !== 0 ? count
+                        : `bitcast<u32>(f32(${count}))`;
+                    store(target,
+                        `vec4<u32>(${value}, 0u, 0u, 0u).${swizzleText(resource.swizzle)}`);
+                    break;
+                }
+                need('samplePosition');
+                store(target, `bitcast<vec4<u32>>(vec4<f32>(samplePosition(${count},`
+                    + ` ${u(index)}.x), 0.0, 0.0)).${swizzleText(resource.swizzle)}`);
                 break;
             }
             case OPCODE.RESINFO: {
                 const [target, level, resource] = instruction.operands;
-                const texture = textureOf(resource.indices[0].value);
-                const name = texture ? `t${texture.slot}` : '';
+                // A view written through is one level, measured without naming it.
+                const written = resource.type === OPERAND.UNORDERED_ACCESS_VIEW
+                    ? memoryOf(resource) : null;
+                const view = written?.uav && written.uav.dimension !== RESOURCE_DIMENSION.BUFFER
+                    ? written : null;
+                const texture = view
+                    ? /** @type {TextureDecl} */ ({ slot: resource.indices[0].value,
+                        dimension: view.uav?.dimension ?? 0, returnType: RETURN_TYPE.FLOAT,
+                        comparison: false, multisampled: true })
+                    : resource.type === OPERAND.UNORDERED_ACCESS_VIEW ? null
+                        : textureOf(resource.indices[0].value);
+                const name = view ? view.name : texture ? `t${texture.slot}` : '';
                 // A multisampled texture has one level and is measured without
                 // naming it.
                 const levels = texture?.multisampled ? '1u' : `textureNumLevels(${name})`;
@@ -1675,24 +1986,59 @@ export function translateShader(container, options = {}){
                 store(target, `(${value}).${swizzleText(resource.swizzle)}`);
                 break;
             }
-            case OPCODE.GATHER4: {
-                const gathered = textureOf(instruction.operands[2].indices[0].value);
+            case OPCODE.GATHER4:
+            case OPCODE.GATHER4_C:
+            case OPCODE.GATHER4_PO:
+            case OPCODE.GATHER4_PO_C: {
+                // gather4_po and gather4_po_c take a register's offset after the
+                // address; the _c forms a reference after the sampler.
+                const programmed = instruction.opcode === OPCODE.GATHER4_PO
+                    || instruction.opcode === OPCODE.GATHER4_PO_C;
+                const compared = instruction.opcode === OPCODE.GATHER4_C
+                    || instruction.opcode === OPCODE.GATHER4_PO_C;
+                const at = { resource: programmed ? 3 : 2, sampler: programmed ? 4 : 3 };
+                const resource = instruction.operands[at.resource];
+                const gathered = textureOf(resource.indices[0].value);
                 if (gathered && (gathered.returnType === RETURN_TYPE.UINT
                     || gathered.returnType === RETURN_TYPE.SINT
                     || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1D
                     || gathered.dimension === RESOURCE_DIMENSION.TEXTURE1DARRAY
                     || gathered.dimension === RESOURCE_DIMENSION.TEXTURE3D))
                 {
-                    unsupported('gather4 on an integer, one- or three-dimensional texture');
+                    unsupported(`${instruction.name} on an integer, one- or three-dimensional`
+                        + ' texture');
                     break;
                 }
-                // The four texels' first components, in the order WGSL and
-                // Direct3D agree on.
-                // A depth texture gathers its one channel, named by no component.
-                sampleWith(instruction, (texture, shaped, sampler)=>
-                    `textureGather(${texture.depth ? '' : '0, '}t${texture.slot}, ${sampler}`
-                    + `, ${shaped.coordinate}`
-                    + `${shaped.layer === null ? '' : `, ${shaped.layer}`})`);
+                if (compared && gathered)
+                {
+                    gathered.comparison = true;
+                }
+                // WGSL's offset is a constant: a register's moves the address
+                // by that many texels of level 0, which a gather reads.
+                const shift = programmed ? held() : null;
+                if (shift && gathered)
+                {
+                    emit(`let ${shift} = vec2<f32>(${i(instruction.operands[2])}.xy)`
+                        + ` / vec2<f32>(textureDimensions(t${gathered.slot}, 0).xy);`);
+                }
+                // The sampler's selected component is the channel gathered; the
+                // resource's swizzle orders the four texels, as for any read.
+                const channel = instruction.operands[at.sampler].swizzle?.[0] ?? 0;
+                const reference = compared ? f(instruction.operands[at.sampler + 1]) : null;
+                // The four texels in the order WGSL and Direct3D agree on; a
+                // depth texture gathers its one channel, named by no component.
+                sampleWith(instruction, (texture, shaped, sampler)=>{
+                    const coordinate = shift ? `(${shaped.coordinate} + ${shift})`
+                        : shaped.coordinate;
+                    const layer = shaped.layer === null ? '' : `, ${shaped.layer}`;
+                    if (reference)
+                    {
+                        return `textureGatherCompare(t${texture.slot}, ${sampler}, ${coordinate}`
+                            + `${layer}, ${reference}.x${shaped.offset})`;
+                    }
+                    return `textureGather(${texture.depth ? '' : `${channel}, `}t${texture.slot}`
+                        + `, ${sampler}, ${coordinate}${layer}${shaped.offset})`;
+                }, at);
                 break;
             }
 
@@ -1750,6 +2096,12 @@ export function translateShader(container, options = {}){
                     store(dest, `${memory.name}_element(${u(a)}.x).${swizzleText(b.swizzle)}`);
                     break;
                 }
+                if (uav.words)
+                {
+                    store(dest, `${REG}(${memory.name}_load(${wordIndex(memory.name, uav, u(a))}),`
+                        + ` 0u, 0u, 1u).${swizzleText(b.swizzle)}`);
+                    break;
+                }
                 const at = storageCoordinate(uav, u(a));
                 if (!at || !uav.format || !/^r32/.test(uav.format))
                 {
@@ -1773,6 +2125,11 @@ export function translateShader(container, options = {}){
                 if (uav.dimension === RESOURCE_DIMENSION.BUFFER)
                 {
                     emit(`${memory.name}_storeElement(${u(a)}.x, ${u(b)});`);
+                    break;
+                }
+                if (uav.words)
+                {
+                    emit(`${memory.name}_store(${wordIndex(memory.name, uav, u(a))}, ${u(b)}.x);`);
                     break;
                 }
                 const at = storageCoordinate(uav, u(a));
@@ -1820,10 +2177,12 @@ export function translateShader(container, options = {}){
                 const address = rest[0];
                 const structured = memory.stride > 0;
                 const typedView = memory.uav?.structure === 'typed';
-                // A typed view's address is an element: a dword, its format one
-                // channel of 32 bits.
-                const word = typedView ? `${u(address)}.x`
-                    : wordOf(memory, `${u(address)}.x`, structured ? `${u(address)}.y` : null);
+                // A typed buffer view's address is an element: a dword, its
+                // format one channel of 32 bits; a typed texture's, a texel.
+                const element = typedView ? `${u(address)}.x` : null;
+                const word = memory.uav?.words ? wordIndex(memory.name, memory.uav, u(address))
+                    : element ?? wordOf(memory, `${u(address)}.x`,
+                        structured ? `${u(address)}.y` : null);
                 const compare = op === 'cmp_exch' ? `${u(rest[1])}.x` : '0u';
                 const value = `${u(rest[op === 'cmp_exch' ? 2 : 1])}.x`;
                 const old = atomicOn(memory, op, word, value, compare);
@@ -1839,8 +2198,11 @@ export function translateShader(container, options = {}){
             }
             case OPCODE.IMM_ATOMIC_ALLOC:
             case OPCODE.IMM_ATOMIC_CONSUME: {
+                // An append or consume buffer's declaration carries no flag
+                // (fxc sets one only for an order-preserving counter): any
+                // structured view counts through the view's hidden counter.
                 const memory = memoryOf(a);
-                if (!memory?.uav || !memory.uav.counter)
+                if (!memory?.uav || memory.uav.structure !== 'structured')
                 {
                     unsupported(`${instruction.name} on a view with no counter`);
                     break;
@@ -1871,6 +2233,15 @@ export function translateShader(container, options = {}){
                 break;
             }
             case OPCODE.BUFINFO: {
+                // A typed buffer view answers its element count, which its
+                // view uniform holds.
+                const viewed = a.type === OPERAND.RESOURCE ? textureOf(a.indices[0]?.value ?? -1)
+                    : null;
+                if (viewed && !viewed.structure && viewed.dimension === RESOURCE_DIMENSION.BUFFER)
+                {
+                    store(dest, `${REG}(t${viewed.slot}view.z)`);
+                    break;
+                }
                 const memory = memoryOf(a);
                 const uav = memory?.uav;
                 if (!memory || (uav && uav.dimension !== RESOURCE_DIMENSION.BUFFER))
@@ -1974,15 +2345,62 @@ export function translateShader(container, options = {}){
                 store(dest, fromFloat(`dpdyFine(${f(a)})`, sat));
                 break;
 
-            // A range of registers indexed into: a hull shader's outputs are an
-            // array already; anywhere else a relative input or output is not
-            // carried, and is refused here rather than read at its base.
-            case OPCODE.DCL_INDEX_RANGE:
-                if (!isHull)
+            // A geometry shader's vertices: what its outputs hold is a vertex of
+            // the stream (`gsEmit`), and a cut ends the strip it is building.
+            case OPCODE.EMIT:
+            case OPCODE.EMITTHENCUT:
+            case OPCODE.CUT:
+            case OPCODE.EMIT_STREAM:
+            case OPCODE.EMITTHENCUT_STREAM:
+            case OPCODE.CUT_STREAM: {
+                if (!isGeometry)
                 {
                     unsupported(instruction.name);
+                    break;
+                }
+                const streamed = instruction.opcode >= OPCODE.EMIT_STREAM;
+                const stream = streamed ? dest.indices[0].value : 0;
+                if (instruction.opcode !== OPCODE.CUT && instruction.opcode !== OPCODE.CUT_STREAM)
+                {
+                    emit(`gsEmit(${stream}u);`);
+                }
+                if (instruction.opcode !== OPCODE.EMIT && instruction.opcode !== OPCODE.EMIT_STREAM)
+                {
+                    emit(`gsCut(${stream}u);`);
                 }
                 break;
+            }
+
+            // A range of registers indexed into: a hull shader's outputs and a
+            // geometry shader's vertices are arrays already; another stage's
+            // inputs are copied into one once they are loaded, its outputs
+            // written through a switch (`indexRanges`).
+            case OPCODE.DCL_INDEX_RANGE: {
+                const count = instruction.extra[0] ?? 0;
+                if (isHull || (isGeometry && dest.type === OPERAND.INPUT
+                    && dest.indices.length > 1))
+                {
+                    break;
+                }
+                if (dest.type === OPERAND.INPUT && dest.indices.length === 1)
+                {
+                    const first = dest.indices[0].value;
+                    indexRanges.push({ type: OPERAND.INPUT, first, count });
+                    result.inputRegisters = Math.max(result.inputRegisters, first + count);
+                    emit(`var vr${first} = array<${REG}, ${count}>(${Array.from({ length: count },
+                        (_, place)=>`v${first + place}`).join(', ')});`);
+                    break;
+                }
+                if (dest.type === OPERAND.OUTPUT && dest.indices.length === 1)
+                {
+                    const first = dest.indices[0].value;
+                    indexRanges.push({ type: OPERAND.OUTPUT, first, count });
+                    result.outputRegisters = Math.max(result.outputRegisters, first + count);
+                    break;
+                }
+                unsupported(instruction.name);
+                break;
+            }
 
             default:
                 unsupported(instruction.name);
@@ -2151,13 +2569,39 @@ function declarations(shader, group, visibility){
         text.push(`@group(${group}) @binding(${binding}) var s${sampler.slot}: `
             + `${sampler.comparison ? 'sampler_comparison' : 'sampler'};`);
         entries.push({
-            binding, visibility, sampler: { type: sampler.comparison ? 'comparison' : 'filtering' },
+            binding, visibility, sampler: { type: sampler.comparison ? 'comparison'
+                : sampler.nonFiltering ? 'non-filtering' : 'filtering' },
         });
     }
     for (const uav of shader.uavs ?? [])
     {
         const name = `u${uav.slot}`;
         const binding = BINDING.UAV + uav.slot;
+        if (uav.words)
+        {
+            // Its view uniform: words a row, rows a layer, width, layers.
+            text.push(`@group(${group}) @binding(${binding}) var<storage, read_write> ${name}: `
+                + 'array<atomic<u32>>;',
+            `@group(${group}) @binding(${BINDING.UAV_VIEW + uav.slot}) var<uniform> ${name}view:`
+                + ` ${REG};`,
+            `fn ${name}_index(c: ${REG}) -> u32 {`,
+            `    if (c.x >= ${name}view.z || c.y >= ${name}view.y || c.z >= ${name}view.w)`
+                + ' { return 0xffffffffu; }',
+            `    return (c.z * ${name}view.y + c.y) * ${name}view.x + c.x;`,
+            '}',
+            `fn ${name}_load(i: u32) -> u32 {`,
+            `    if (i >= arrayLength(&${name})) { return 0u; }`,
+            `    return atomicLoad(&${name}[i]);`,
+            '}',
+            `fn ${name}_store(i: u32, value: u32) {`,
+            `    if (i < arrayLength(&${name})) { atomicStore(&${name}[i], value); }`,
+            '}',
+            ...[...uav.atomicOps ?? []].flatMap(op=>atomicAccessor(name, op, true, null, -1)));
+            entries.push({ binding, visibility, buffer: { type: 'storage' } });
+            entries.push({ binding: BINDING.UAV_VIEW + uav.slot, visibility,
+                buffer: { type: 'uniform' } });
+            continue;
+        }
         if (uav.dimension !== RESOURCE_DIMENSION.BUFFER)
         {
             const shape = /** @type {Record<number, string[]>} */ (STORAGE_SHAPE)[uav.dimension];
@@ -2286,13 +2730,14 @@ function wordAccessors(name, atomic, view, words = 0){
  * either swapped or found another value.
  *
  * @param {string} name @param {string} op @param {boolean} atomic
- * @param {string | null} view @param {number} [words]
+ * @param {string | null} view @param {number} [words]  negative: the array's length
  * @returns {string[]}
  */
 function atomicAccessor(name, op, atomic, view, words = 0){
     void atomic;
     const bounds = view === null
-        ? [`    if (i >= ${words}u) { return 0u; }`, '    let at = i;']
+        ? [`    if (i >= ${words < 0 ? `arrayLength(&${name})` : `${words}u`}) { return 0u; }`,
+            '    let at = i;']
         : [`    if (i >= (${view}.z * ${view}.w) / 4u) { return 0u; }`,
             `    let at = (${view}.y * ${view}.w) / 4u + i;`,
             `    if (at >= arrayLength(&${name})) { return 0u; }`];
@@ -2399,12 +2844,14 @@ function registerDeclarations(shader){
 /**
  * @param {TranslatedShader} shader
  * @param {string | null} returnExpression  Null for an entry point that returns nothing.
+ * @param {string} [beforeReturn]  A statement made at each return, before it.
  * @returns {string[]}
  */
-function bodyText(shader, returnExpression){
+function bodyText(shader, returnExpression, beforeReturn = ''){
     return shader.body.map(line=>(typeof line === 'string'
         ? line
-        : `    return${returnExpression === null ? '' : ` ${returnExpression}`};`));
+        : `    ${beforeReturn ? `{ ${beforeReturn} ` : ''}return${returnExpression === null ? ''
+            : ` ${returnExpression}`};${beforeReturn ? ' }' : ''}`));
 }
 
 /** @param {import('./dxbc.js').SignatureElement} element */
@@ -2422,6 +2869,123 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  */
 
 /**
+ * WGSL's interpolation of a float varying, by Direct3D's interpolation mode:
+ * constant, linear, its centroid, without perspective, its centroid, at each
+ * sample, without perspective at each sample.
+ */
+const INTERPOLATION = Object.freeze(/** @type {Record<number, string>} */ ({
+    1: ' @interpolate(flat)',
+    3: ' @interpolate(perspective, centroid)',
+    4: ' @interpolate(linear)',
+    5: ' @interpolate(linear, centroid)',
+    6: ' @interpolate(perspective, sample)',
+    7: ' @interpolate(linear, sample)',
+}));
+
+/** The members a primitive's render target array index and viewport index travel as. */
+const ROUTES = Object.freeze(/** @type {Record<number, string>} */ ({
+    [SYSTEM_VALUE.RENDER_TARGET_ARRAY_INDEX]: 'rtLayer',
+    [SYSTEM_VALUE.VIEWPORT_ARRAY_INDEX]: 'rtViewport',
+}));
+
+/**
+ * Vertex streams the vertex stage reads from storage as words, where WebGPU
+ * cannot fetch them as vertex buffers: a stride or element offset it does
+ * not align, or per-instance data stepping once every several instances.
+ * Each stream is bound at `BINDING.VERTEX_PULL` + its index, and
+ * `BINDING.VERTEX_PULL_PARAMS` holds a vec4 a stream: the byte where element
+ * zero starts, the stride, the bytes the buffer holds, and the draw's first
+ * instance.
+ *
+ * @typedef {Object} VertexPull
+ * @property {{ stepMode: 'vertex' | 'instance', rate: number }[]} streams
+ *     `rate`: the instances each per-instance element serves; 0 serves them all.
+ * @property {{ semantic: string, index: number, stream: number, offset: number,
+ *     format: string }[]} attributes
+ * @property {boolean} [vertexBase]  The vertex ID is the vertex index less the vec4 past
+ *     the streams' x: the draw's first vertex, or its base vertex where it has indices -
+ *     Direct3D's ID counts neither, WebGPU's index both.
+ */
+
+/**
+ * The declarations, loads and layout entries of the streams a vertex stage
+ * reads itself, filling the registers of the inputs they carry.
+ *
+ * @param {VertexPull} pull
+ * @param {import('./dxbc.js').SignatureElement[]} inputs
+ * @param {number} registers  the vertex shader's input registers
+ * @returns {{ text: string[], load: string[], entries: BindGroupLayoutEntry[],
+ *     pulled: Set<number>, unsupported: string[] }}
+ */
+function vertexPullOf(pull, inputs, registers){
+    /** @type {string[]} */
+    const unsupported = [];
+    const count = Math.max(1, pull.streams.length + (pull.vertexBase ? 1 : 0));
+    const text = [
+        `@group(0) @binding(${BINDING.VERTEX_PULL_PARAMS}) var<uniform> vsPulls:`
+            + ` array<${REG}, ${count}>;`,
+    ];
+    /** @type {BindGroupLayoutEntry[]} */
+    const entries = [{ binding: BINDING.VERTEX_PULL_PARAMS, visibility: STAGE.VERTEX,
+        buffer: { type: 'uniform' } }];
+    /** @type {string[]} */
+    const load = [];
+    pull.streams.forEach((stream, k)=>{
+        text.push(`@group(0) @binding(${BINDING.VERTEX_PULL + k}) var<storage, read> vsPull${k}:`
+            + ' array<u32>;',
+        `fn vsPullWord${k}(b: u32) -> u32 {`,
+        `    let w = b >> 2u;`,
+        `    let n = arrayLength(&vsPull${k});`,
+        '    if (w >= n) { return 0u; }',
+        '    let s = (b & 3u) * 8u;',
+        `    let lo = vsPull${k}[w];`,
+        '    if (s == 0u) { return lo; }',
+        `    let hi = select(0u, vsPull${k}[min(w + 1u, n - 1u)], w + 1u < n);`,
+        '    return (lo >> s) | (hi << (32u - s));',
+        '}');
+        entries.push({ binding: BINDING.VERTEX_PULL + k, visibility: STAGE.VERTEX,
+            buffer: { type: 'read-only-storage' } });
+        // Direct3D counts per-instance elements from the first instance
+        // (.w), which the instance index does not count.
+        const element = stream.stepMode === 'vertex' ? 'in.vsVertexIndex'
+            : stream.rate === 0 ? `vsPulls[${k}].w`
+                : `(vsPulls[${k}].w + in.vsInstanceIndex / ${stream.rate}u)`;
+        load.push(`    let vsPullAt${k} = vsPulls[${k}].x + ${element} * vsPulls[${k}].y;`);
+    });
+    /** @type {Set<number>} */
+    const pulled = new Set();
+    for (const element of inputs)
+    {
+        if (element.systemValue !== SYSTEM_VALUE.UNDEFINED || element.register >= registers)
+        {
+            continue;
+        }
+        const attribute = pull.attributes.find(candidate=>
+            candidate.semantic.toUpperCase() === element.name.toUpperCase()
+            && candidate.index === element.index);
+        if (!attribute)
+        {
+            continue;
+        }
+        pulled.add(element.register);
+        const decoder = vertexFetch(attribute.format);
+        if (!decoder)
+        {
+            unsupported.push(`vertex format ${attribute.format}`);
+            continue;
+        }
+        const k = attribute.stream;
+        const at = `vsPullAt${k} + ${attribute.offset}u`;
+        const words = Array.from({ length: Math.ceil(decoder.bytes / 4) },
+            (_, index)=>`vsPullWord${k}(${at} + ${index * 4}u)`);
+        // Past the buffer's end an element reads zeros, as Direct3D's does.
+        load.push(`    if (${at} + ${decoder.bytes}u <= vsPulls[${k}].z) {`,
+            `        v${element.register} = ${decoder.register(words)};`, '    }');
+    }
+    return { text, load, entries, pulled, unsupported };
+}
+
+/**
  * Writes the two entry points around a vertex and a pixel shader body, with the
  * interface between them numbered once for both.
  *
@@ -2431,10 +2995,30 @@ const semanticKey = element=>`${element.name.toUpperCase()}${element.index}`;
  *
  * @param {TranslatedShader} vs
  * @param {TranslatedShader} ps
- * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad }} [options]  `targets`:
+ * @param {{ targets?: readonly number[], vertexLoad?: VertexLoad, clipDistances?: boolean,
+ *     depthBias?: { units: number, slope: number, clamp: number },
+ *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
+ *     alphaCoverage?: boolean, sampleCount?: number,
+ *     earlyDepth?: { compare: string, multisampled: boolean }, dualSource?: boolean,
+ *     viewportPass?: { index: number, count: number } }} [options]  `dualSource`:
+ *     the first target is blended by the second output as well (D3D11_BLEND_SRC1_*):
+ *     both go to location 0, the second as its second blend source. `earlyDepth`: the
+ *     fragment tests itself against the depth buffer, bound read-only at
+ *     `BINDING.EARLY_DEPTH`, before the shader runs (`compare` the operator a
+ *     fragment's depth passes by, against what the buffer holds), so a rejected
+ *     one writes nothing through views. `layerPass`,
+ *     `viewportPass`: the one of `count` layers or viewports this drawing of a draw
+ *     whose primitives say which goes to; their other fragments are discarded.
+ *     `vertexPull`: the streams the vertex stage
+ *     reads itself, their inputs taken from no vertex buffer. `targets`:
  *     the locations with a target bound; every location the shader writes when
  *     absent. `vertexLoad`: how the vertex stage fills its registers when they do not
- *     come from vertex buffers (a domain shader's, `linkDomain`).
+ *     come from vertex buffers (a domain shader's, `linkDomain`). `depthBias`: a
+ *     rasterizer's depth bias the fragment stage applies itself, writing the
+ *     fragment's depth (`units` the constant bias already in depth, `slope` the
+ *     slope scale, `clamp` the clamp, as Direct3D adds them); not where the pixel
+ *     shader writes its depth, which no bias touches. `clipDistances`: the device clips
+ *     by the distances a vertex writes (WebGPU's `clip-distances`).
  * @returns {LinkedProgram}
  */
 export function linkProgram(vs, ps, options = {}){
@@ -2456,22 +3040,44 @@ export function linkProgram(vs, ps, options = {}){
         vsLoad.push(`    var v${index}: ${REG} = ${REG}(0u);`);
     }
     vsLoad.push(...options.vertexLoad?.load ?? []);
+    const pull = options.vertexPull && (options.vertexPull.streams.length > 0
+        || options.vertexPull.vertexBase) && !options.vertexLoad
+        ? vertexPullOf(options.vertexPull, vs.inputs, vs.inputRegisters) : null;
+    if (pull)
+    {
+        // The streams read here find their element by the vertex and
+        // instance indices, which a struct may name once each.
+        vsIn.push('    @builtin(vertex_index) vsVertexIndex: u32,',
+            '    @builtin(instance_index) vsInstanceIndex: u32,');
+        vsLoad.push(...pull.load);
+        unsupported.push(...pull.unsupported);
+    }
     for (const element of options.vertexLoad ? [] : vs.inputs)
     {
-        if (element.register >= vs.inputRegisters)
+        if (element.register >= vs.inputRegisters || pull?.pulled.has(element.register))
         {
             continue;
         }
         const scalar = scalarOf(element.componentType);
         if (element.systemValue === SYSTEM_VALUE.VERTEX_ID)
         {
-            vsIn.push(`    @builtin(vertex_index) v${element.register}: u32,`);
-            vsLoad.push(`    v${element.register}.x = in.v${element.register};`);
+            if (!pull)
+            {
+                vsIn.push(`    @builtin(vertex_index) v${element.register}: u32,`);
+            }
+            vsLoad.push(`    v${element.register}.x = ${pull ? `in.vsVertexIndex${
+                options.vertexPull?.vertexBase
+                    ? ` - vsPulls[${options.vertexPull.streams.length}].x` : ''}`
+                : `in.v${element.register}`};`);
         }
         else if (element.systemValue === SYSTEM_VALUE.INSTANCE_ID)
         {
-            vsIn.push(`    @builtin(instance_index) v${element.register}: u32,`);
-            vsLoad.push(`    v${element.register}.x = in.v${element.register};`);
+            if (!pull)
+            {
+                vsIn.push(`    @builtin(instance_index) v${element.register}: u32,`);
+            }
+            vsLoad.push(`    v${element.register}.x = in.${pull ? 'vsInstanceIndex'
+                : `v${element.register}`};`);
         }
         else if (element.systemValue === SYSTEM_VALUE.UNDEFINED)
         {
@@ -2493,13 +3099,16 @@ export function linkProgram(vs, ps, options = {}){
     }
 
     // --- the interface between the stages, numbered by the vertex outputs ---
-    /** @type {Map<string, { location: number, scalar: string }>} */
+    /** @type {Map<string, { location: number, scalar: string, interpolate: string }>} */
     const varyings = new Map();
+    /** The pixel shader's interpolation mode of each input, by register. */
+    const psModes = new Map(ps.inputs.map(element=>[element.register,
+        ps.interpolation?.[element.register] ?? 0]));
     /**
      * The varying each output register is passed as: two semantics packed
      * into one register (TEXCOORD0 in .xy, TEXCOORD1 in .zw) are one varying.
      *
-     * @type {Map<number, { location: number, scalar: string }>}
+     * @type {Map<number, { location: number, scalar: string, interpolate: string }>}
      */
     const byRegister = new Map();
     /** @type {string[]} */
@@ -2507,15 +3116,43 @@ export function linkProgram(vs, ps, options = {}){
     /** @type {string[]} */
     const vsReturn = [];
     let position = false;
+    /**
+     * The render target array index and viewport index the vertices carry,
+     * by the member they travel as. @type {Map<string, string>}
+     */
+    const routes = new Map();
+    /** Each clip and cull distance a vertex writes, a component each. @type {string[]} */
+    const clips = [];
+    /** @type {string[]} */
+    const culls = [];
     for (const element of vs.outputs)
     {
         const register = `o${element.register}`;
         const value = element.register < vs.outputRegisters ? register : `${REG}(0u)`;
+        if (element.systemValue === SYSTEM_VALUE.CLIP_DISTANCE
+            || element.systemValue === SYSTEM_VALUE.CULL_DISTANCE)
+        {
+            const into = element.systemValue === SYSTEM_VALUE.CLIP_DISTANCE ? clips : culls;
+            for (let c = 0; c < 4; c++)
+            {
+                if ((element.mask & (1 << c)) !== 0)
+                {
+                    into.push(`bitcast<f32>(${value}.${COMPONENT[c]})`);
+                }
+            }
+            continue;
+        }
         if (element.systemValue === SYSTEM_VALUE.POSITION)
         {
             position = true;
             vsOut.push('    @builtin(position) position: vec4<f32>,');
             vsReturn.push(`bitcast<vec4<f32>>(${value})`);
+            continue;
+        }
+        const route = ROUTES[element.systemValue];
+        if (route)
+        {
+            routes.set(route, `${value}.${COMPONENT[firstComponent(element.mask)]}`);
             continue;
         }
         if (element.systemValue !== SYSTEM_VALUE.UNDEFINED)
@@ -2536,12 +3173,15 @@ export function linkProgram(vs, ps, options = {}){
         }
         const scalar = scalarOf(element.componentType);
         const location = byRegister.size;
-        const varying = { location, scalar };
+        // An integer varying cannot be interpolated and WGSL says so; a
+        // float one is interpolated as the pixel shader declares the input
+        // it arrives as, both stages saying it alike as WebGPU requires.
+        const interpolate = scalar === 'f32'
+            ? INTERPOLATION[psModes.get(element.register) ?? 0] ?? ''
+            : ' @interpolate(flat)';
+        const varying = { location, scalar, interpolate };
         varyings.set(key, varying);
         byRegister.set(element.register, varying);
-        // An integer varying cannot be interpolated and WGSL says so; a
-        // float one is interpolated the way the rasteriser always did.
-        const interpolate = scalar === 'f32' ? '' : ' @interpolate(flat)';
         vsOut.push(`    @location(${location})${interpolate} ${register}: vec4<${scalar}>,`);
         vsReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
     }
@@ -2549,8 +3189,68 @@ export function linkProgram(vs, ps, options = {}){
     {
         unsupported.push('a vertex shader that writes no SV_Position');
     }
+    // Clip distances clip where the device does (clip-distances); elsewhere
+    // they travel, interpolated, and the fragment stage discards where one
+    // is negative: the same cut, the distance being linear across a
+    // primitive. A cull distance travels as whether each vertex is on the
+    // kept side, and a primitive all of whose vertices are not is a primitive
+    // whose fragments read zero there: those are discarded.
+    /** @type {string[]} */
+    const cutLoad = [];
+    /** @type {string[]} */
+    const cutIn = [];
+    /** @param {string[]} values @param {string} name @param {string} test */
+    const travelling = (values, name, test)=>{
+        for (let group = 0; group * 4 < values.length; group++)
+        {
+            const location = byRegister.size + cutIn.length;
+            const four = [0, 1, 2, 3].map(c=>values[group * 4 + c] ?? '1.0');
+            vsOut.push(`    @location(${location}) ${name}${group}: vec4<f32>,`);
+            vsReturn.push(`vec4<f32>(${four.join(', ')})`);
+            cutIn.push(`    @location(${location}) ${name}${group}: vec4<f32>,`);
+            cutLoad.push(`    if (any(${test.replace('$', `in.${name}${group}`)})) { discard; }`);
+        }
+    };
+    const deviceClips = clips.length > 0 && options.clipDistances === true;
+    if (deviceClips)
+    {
+        vsOut.push(`    @builtin(clip_distances) clipDistances: array<f32, ${clips.length}>,`);
+        vsReturn.push(`array<f32, ${clips.length}>(${clips.join(', ')})`);
+    }
+    else
+    {
+        travelling(clips, 'clipDistance', '$ < vec4<f32>(0.0)');
+    }
+    travelling(culls.map(value=>`select(0.0, 1.0, ${value} >= 0.0)`), 'cullKept',
+        '$ == vec4<f32>(0.0)');
+    // The layer and viewport a primitive goes to, from its first vertex as
+    // Direct3D takes them from its leading one. WebGPU draws a pass into one
+    // layer through one viewport, so a draw that routes primitives is drawn
+    // once a layer or viewport (`layerPass`, `viewportPass`), keeping the
+    // fragments routed there.
+    for (const [name, value] of routes)
+    {
+        const location = byRegister.size + cutIn.length;
+        vsOut.push(`    @location(${location}) @interpolate(flat) ${name}: u32,`);
+        vsReturn.push(value);
+        cutIn.push(`    @location(${location}) @interpolate(flat) ${name}: u32,`);
+    }
+    /** @type {[string, { index: number, count: number } | undefined][]} */
+    const passes = [['rtLayer', options.layerPass], ['rtViewport', options.viewportPass]];
+    for (const [name, pass] of passes)
+    {
+        if (pass && routes.has(name))
+        {
+            // A layer past the views' goes to the first; a viewport past the
+            // viewports set to none (test_multiple_viewports).
+            cutLoad.push(name === 'rtLayer'
+                ? `    if (in.${name} != ${pass.index}u && (${pass.index}u != 0u`
+                    + ` || in.${name} < ${pass.count}u)) { discard; }`
+                : `    if (in.${name} != ${pass.index}u) { discard; }`);
+        }
+    }
 
-    // --- the pixel stage's inputs, found by semantic among the vertex outputs ---
+    // --- the pixel stage's inputs, found by register among the vertex outputs ---
     /** @type {string[]} */
     const psIn = [];
     /** @type {string[]} */
@@ -2580,18 +3280,38 @@ export function linkProgram(vs, ps, options = {}){
             psLoad.push(`    ${name}.x = select(0u, 0xffffffffu, in.${name});`);
             continue;
         }
+        // Reading it runs the shader once a sample, in WebGPU as in Direct3D.
+        if (element.systemValue === SYSTEM_VALUE.SAMPLE_INDEX)
+        {
+            psIn.push(`    @builtin(sample_index) ${name}: u32,`);
+            psLoad.push(`    ${name}.${COMPONENT[firstComponent(element.mask)]} = in.${name};`);
+            continue;
+        }
+        const route = ROUTES[element.systemValue];
+        if (route)
+        {
+            // What the vertices did not write reads zero.
+            psLoad.push(`    ${name}.${COMPONENT[firstComponent(element.mask)]} = ${
+                routes.has(route) ? `in.${route}` : '0u'};`);
+            continue;
+        }
         if (element.systemValue !== SYSTEM_VALUE.UNDEFINED)
         {
             unsupported.push(`pixel input system value ${element.systemValue}`);
             continue;
         }
-        const varying = varyings.get(semanticKey(element));
+        // Register n of the vertex outputs, as the hardware passes it; a
+        // register the vertex shader did not write is looked for by name.
+        const varying = byRegister.get(element.register) ?? varyings.get(semanticKey(element));
         if (!varying)
         {
-            // The vertex shader wrote nothing under this name, which Direct3D
-            // refuses at draw time; here the register reads as zero and the
-            // pair says why.
-            unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
+            // An input the shader never reads (its signature's read mask
+            // empty) needs no output; one it reads where the vertex shader
+            // wrote nothing reads as zero, and the pair says why.
+            if (element.readWriteMask !== 0)
+            {
+                unsupported.push(`pixel input ${semanticKey(element)} has no vertex output`);
+            }
             continue;
         }
         // A register two semantics share comes in once, as the first named it.
@@ -2599,7 +3319,7 @@ export function linkProgram(vs, ps, options = {}){
         if (!arrived.has(varying.location))
         {
             arrived.set(varying.location, name);
-            const interpolate = varying.scalar === 'f32' ? '' : ' @interpolate(flat)';
+            const interpolate = varying.interpolate;
             psIn.push(`    @location(${varying.location})${interpolate} ${name}: `
                 + `vec4<${varying.scalar}>,`);
         }
@@ -2615,8 +3335,16 @@ export function linkProgram(vs, ps, options = {}){
     const psReturn = [];
     /** @type {number[]} */
     const targets = [];
-    for (const element of ps.outputs)
+    // A compiler writes the depth outputs' signature with no system value,
+    // only their names and no register: they are named here.
+    const DEPTH_NAMES = /** @type {Record<string, number>} */ ({ SV_DEPTH: SYSTEM_VALUE.DEPTH,
+        SV_DEPTHGREATEREQUAL: SYSTEM_VALUE.DEPTH_GREATER_EQUAL,
+        SV_DEPTHLESSEQUAL: SYSTEM_VALUE.DEPTH_LESS_EQUAL, SV_COVERAGE: SYSTEM_VALUE.COVERAGE });
+    for (const output of ps.outputs)
     {
+        const element = output.systemValue === SYSTEM_VALUE.UNDEFINED
+            && DEPTH_NAMES[output.name.toUpperCase()] !== undefined
+            ? { ...output, systemValue: DEPTH_NAMES[output.name.toUpperCase()] } : output;
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
@@ -2628,11 +3356,19 @@ export function linkProgram(vs, ps, options = {}){
             const slot = element.systemValue === SYSTEM_VALUE.TARGET
                 ? element.index : element.register;
             targets.push(slot);
+            const scalar = scalarOf(element.componentType);
+            // The second output is the first target's second blend source,
+            // whatever is bound at the second.
+            if (options.dualSource && slot <= 1)
+            {
+                psOut.push(`    @location(0) @blend_src(${slot}) target${slot}: vec4<${scalar}>,`);
+                psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
+                continue;
+            }
             if (options.targets && !options.targets.includes(slot))
             {
                 continue;
             }
-            const scalar = scalarOf(element.componentType);
             psOut.push(`    @location(${slot}) target${slot}: vec4<${scalar}>,`);
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
@@ -2643,13 +3379,62 @@ export function linkProgram(vs, ps, options = {}){
             psReturn.push('oDepth');
             continue;
         }
+        // The samples the fragment covers, and'ed with the rasterizer's.
+        if (element.systemValue === SYSTEM_VALUE.COVERAGE)
+        {
+            psOut.push('    @builtin(sample_mask) mask: u32,');
+            psReturn.push(ps.writesMask ? 'oMask' : '0xffffffffu');
+            continue;
+        }
+        // A depth written with a promise of its direction keeps it: the
+        // hardware takes the nearer of it and the rasterized depth.
+        if (element.systemValue === SYSTEM_VALUE.DEPTH_GREATER_EQUAL
+            || element.systemValue === SYSTEM_VALUE.DEPTH_LESS_EQUAL)
+        {
+            const named = psIn.find(line=>line.includes('@builtin(position)'));
+            const member = named ? /\) (\w+):/.exec(named)?.[1] : 'depthPosition';
+            if (!named)
+            {
+                psIn.push('    @builtin(position) depthPosition: vec4<f32>,');
+            }
+            psOut.push('    @builtin(frag_depth) depth: f32,');
+            psReturn.push(`${element.systemValue === SYSTEM_VALUE.DEPTH_GREATER_EQUAL ? 'max'
+                : 'min'}(oDepth, in.${member}.z)`);
+            continue;
+        }
         unsupported.push(`pixel output system value ${element.systemValue}`);
     }
 
+    // A bias the fragment stage applies: Direct3D's, on the rasterized depth,
+    // from the depth's slope across the primitive.
+    const biased = options.depthBias && !ps.writesDepth ? options.depthBias : null;
+    /** @type {string[]} */
+    const biasLoad = [];
+    if (biased)
+    {
+        const named = psIn.find(line=>line.includes('@builtin(position)'));
+        const member = named ? /\) (\w+):/.exec(named)?.[1] : 'biasPosition';
+        if (!named)
+        {
+            psIn.push('    @builtin(position) biasPosition: vec4<f32>,');
+        }
+        const bound = biased.clamp > 0 ? `min(biasRaw, ${floatLiteral(biased.clamp)})`
+            : biased.clamp < 0 ? `max(biasRaw, ${floatLiteral(biased.clamp)})` : 'biasRaw';
+        biasLoad.push(`    let biasZ = in.${member}.z;`,
+            `    let biasRaw = ${floatLiteral(biased.units)} + ${floatLiteral(biased.slope)}`
+                + ' * max(abs(dpdx(biasZ)), abs(dpdy(biasZ)));',
+            `    let biasedDepth = biasZ + ${bound};`);
+        psOut.push('    @builtin(frag_depth) depth: f32,');
+        psReturn.push('biasedDepth');
+    }
+
+    psIn.push(...cutIn);
     // WGSL has no empty struct, so a stage that reads nothing takes nothing.
     const vertex = [
+        ...(deviceClips ? ['enable clip_distances;'] : []),
         ...vsDecl.text,
         ...options.vertexLoad?.text ?? [],
+        ...pull?.text ?? [],
         ...(vsIn.length > 0 ? ['struct VertexIn {', ...vsIn, '};'] : []),
         'struct VertexOut {',
         ...vsOut,
@@ -2662,30 +3447,71 @@ export function linkProgram(vs, ps, options = {}){
         '}',
     ].join('\n');
 
+    // Alpha to coverage on one sample: Direct3D covers the pixel by the
+    // first target's alpha, WebGPU only with several samples; the fragment
+    // is kept where that alpha reaches half (`alphaCoverage`).
+    const first = ps.outputs.find(element=>element.register < ps.outputRegisters
+        && (element.systemValue === SYSTEM_VALUE.TARGET ? element.index === 0
+            : element.systemValue === SYSTEM_VALUE.UNDEFINED && element.register === 0));
+    const coverage = options.alphaCoverage && first
+        ? `if (bitcast<f32>(o${first.register}.w) < 0.5) { discard; }` : '';
+
     // Direct3D leaves a derivative taken in divergent flow undefined rather
     // than refusing the shader, and compilers emit sample instructions inside
     // branches and loops that WGSL's uniformity analysis would reject.
     // A fragment stage with nothing to write -- depth alone, no target bound
     // -- still runs, for what it discards, and returns nothing.
     const writes = psOut.length > 0;
+    // The samples the fragment covers, as the shader reads them (vCoverage).
+    if (ps.readsMask)
+    {
+        psIn.push('    @builtin(sample_mask) coverage: u32,');
+        psLoad.push('    let vCoverage = in.coverage;');
+    }
+    /** @type {string[]} */
+    const early = [];
+    if (options.earlyDepth)
+    {
+        const named = psIn.find(line=>line.includes('@builtin(position)'));
+        const member = named ? /\) (\w+):/.exec(named)?.[1] : 'earlyPosition';
+        if (!named)
+        {
+            psIn.push('    @builtin(position) earlyPosition: vec4<f32>,');
+        }
+        const { compare, multisampled } = options.earlyDepth;
+        psDecl.text.push(`@group(1) @binding(${BINDING.EARLY_DEPTH}) var earlyDepth: `
+            + `texture_depth${multisampled ? '_multisampled' : ''}_2d;`);
+        psDecl.entries.push({ binding: BINDING.EARLY_DEPTH, visibility: STAGE.FRAGMENT,
+            texture: { sampleType: 'depth', viewDimension: '2d',
+                ...(multisampled ? { multisampled: true } : {}) } });
+        early.push(`    if (!(in.${member}.z ${compare} textureLoad(earlyDepth,`
+            + ` vec2<i32>(in.${member}.xy), 0))) { discard; }`);
+    }
     const fragment = [
+        ...(options.dualSource ? ['enable dual_source_blending;'] : []),
         'diagnostic(off, derivative_uniformity);',
+        ...(ps.rasterizerSamples ? [`const rasterSamples: u32 = ${options.sampleCount ?? 1}u;`]
+            : []),
         ...psDecl.text,
         ...(psIn.length > 0 ? ['struct FragmentIn {', ...psIn, '};'] : []),
         ...(writes ? ['struct FragmentOut {', ...psOut, '};'] : []),
         `@fragment fn fragmentMain(${psIn.length > 0 ? 'in: FragmentIn' : ''})`
             + `${writes ? ' -> FragmentOut' : ''} {`,
+        ...early,
+        ...cutLoad,
+        ...biasLoad,
         ...psLoad,
         ...registerDeclarations(ps),
         ...(ps.writesDepth ? ['    var oDepth: f32 = 0.0;'] : []),
-        ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null),
+        ...(ps.writesMask ? ['    var oMask: u32 = 0xffffffffu;'] : []),
+        ...bodyText(ps, writes ? `FragmentOut(${psReturn.join(', ')})` : null, coverage),
         '}',
     ].join('\n');
 
     return {
         vertex,
         fragment,
-        groups: [vsDecl.entries, psDecl.entries],
+        groups: [pull ? [...vsDecl.entries, ...pull.entries] : vsDecl.entries, psDecl.entries],
         attributes,
         targets,
         unsupported,
@@ -2963,6 +3789,287 @@ export function linkHull(container){
     };
 }
 
+/** D3D10_SB_PRIMITIVE: the vertices a geometry shader's input primitive has. */
+const GS_INPUT_VERTICES = Object.freeze(/** @type {Record<number, number>} */ ({
+    1: 1, 2: 2, 3: 3, 6: 4, 7: 6,
+}));
+
+/**
+ * @typedef {Object} GeometryStage
+ * @property {number} inputVertices  The vertices of each primitive it takes.
+ * @property {number} outputVertices The vertices of each primitive it makes:
+ *     1 points, 2 lines, 3 triangles (a strip it builds is made a list).
+ * @property {number} maxOut         The vertices it may emit, a stream.
+ * @property {number} instances      Its invocations a primitive.
+ * @property {number[]} streams      The streams it emits to, in order.
+ * @property {number} inputRegisters
+ * @property {number} outputRegisters
+ */
+
+/**
+ * What a geometry shader's declarations say of it.
+ *
+ * @param {import('./dxbc.js').DxbcContainer} container
+ * @param {TranslatedShader} gs  Its translation.
+ * @returns {GeometryStage}
+ */
+export function geometryStage(container, gs){
+    const program = /** @type {import('./dxbc.js').ShaderProgram} */ (container.shader);
+    const stage = { inputVertices: 1, outputVertices: 1, maxOut: 1, instances: 1,
+        streams: /** @type {number[]} */ ([]), inputRegisters: Math.max(1, gs.inputRegisters),
+        outputRegisters: Math.max(1, gs.outputRegisters) };
+    for (const instruction of decodeSm4(program.tokens))
+    {
+        switch (instruction.opcode)
+        {
+            case OPCODE.DCL_GS_INPUT_PRIMITIVE: {
+                const primitive = instruction.control & 0x3f;
+                // A patch of n control points is primitive 7 + n.
+                stage.inputVertices = GS_INPUT_VERTICES[primitive]
+                    ?? (primitive >= 8 ? primitive - 7 : 1);
+                break;
+            }
+            case OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY: {
+                const topology = instruction.control & 0x7f;
+                stage.outputVertices = topology === 1 ? 1 : topology <= 3 ? 2 : 3;
+                break;
+            }
+            case OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT:
+                stage.maxOut = Math.max(1, instruction.extra[0] ?? 1);
+                break;
+            case OPCODE.DCL_GS_INSTANCE_COUNT:
+                stage.instances = Math.max(1, instruction.extra[0] ?? 1);
+                break;
+            case OPCODE.DCL_STREAM:
+                stage.streams.push(instruction.operands[0].indices[0].value);
+                break;
+            default:
+                break;
+        }
+    }
+    if (stage.streams.length === 0)
+    {
+        stage.streams.push(0);
+    }
+    return stage;
+}
+
+/**
+ * A vertex shader's bytecode made a geometry shader to stream its vertices
+ * out: the stage that passes each primitive the input assembler made on as it
+ * came, its vertices in order.
+ *
+ * @param {TranslatedShader} vs
+ * @param {number} vertices  The input assembler's primitive: 1, 2 or 3.
+ * @returns {{ shader: TranslatedShader, stage: GeometryStage }}
+ */
+export function passThroughGeometry(vs, vertices){
+    const registers = Math.max(1, vs.outputRegisters);
+    /** @type {TranslatedShader['body']} */
+    const body = [];
+    for (let vertex = 0; vertex < vertices; vertex++)
+    {
+        for (let register = 0; register < registers; register++)
+        {
+            body.push(`    o${register} = vgs[${vertex}][${register}];`);
+        }
+        body.push('    gsEmit(0u);');
+    }
+    body.push({ ret: true });
+    return {
+        shader: { ...NO_PIXEL_SHADER, kind: SHADER_KIND.GEOMETRY, inputs: vs.outputs,
+            outputs: vs.outputs, body, inputRegisters: registers, outputRegisters: registers },
+        stage: { inputVertices: vertices, outputVertices: vertices, maxOut: vertices,
+            instances: 1, streams: [0], inputRegisters: registers, outputRegisters: registers },
+    };
+}
+
+/** Group 1 of a geometry shader run as compute (`linkGeometry`). */
+export const GEOMETRY_BINDING = Object.freeze({
+    inputs: 0, indices: 1, vertices: 2, starts: 3, counts: 4, params: 5,
+});
+
+/** The topologies whose primitives share vertices, as Direct3D numbers them. */
+const STRIP_TOPOLOGIES = Object.freeze([3, 5, 11, 13]);
+
+/**
+ * A geometry shader as one compute program, one invocation a primitive and
+ * instance of the shader: the primitive's vertices found as the input
+ * assembler finds them (a strip's from its position, an odd triangle's first
+ * two swapped so that every triangle keeps the strip's winding; a strip's
+ * primitive that holds a cut index is none), each read out of what the vertex
+ * shader wrote for its position (`gsIn`) into `vgs`, the body run, and each
+ * vertex it emits stored at the next of its stream's places (`gsVertices`,
+ * `maxOut` a stream an invocation), with whether it starts a strip
+ * (`gsStarts`); `gsCounts` takes each stream's primitives and vertices.
+ *
+ * `gsParams`: the invocations, the primitives an instance of the draw, its
+ * topology, the positions an instance, the index size in bytes (0 for none),
+ * the index buffer's byte offset and the first index.
+ *
+ * @param {TranslatedShader} gs
+ * @param {GeometryStage} stage
+ * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
+ */
+export function linkGeometry(gs, stage){
+    const declared = declarations(gs, 0, STAGE.COMPUTE);
+    const unsupported = [...gs.unsupported, ...declared.unsupported];
+    const vertices = stage.inputVertices;
+    const inputs = stage.inputRegisters;
+    const outputs = stage.outputRegisters;
+    const streams = stage.streams.length;
+    const most = stage.maxOut;
+    const code = [
+        ...declared.text,
+        'struct GsParams { invocations: u32, prims: u32, topology: u32, points: u32,',
+        '    indexBytes: u32, indexOffset: u32, first: u32, pad: u32, }',
+        `@group(1) @binding(${GEOMETRY_BINDING.inputs}) var<storage, read> gsIn: array<${REG}>;`,
+        `@group(1) @binding(${GEOMETRY_BINDING.indices}) var<storage, read> gsIndices: `
+            + 'array<u32>;',
+        `@group(1) @binding(${GEOMETRY_BINDING.vertices}) var<storage, read_write> gsVertices: `
+            + `array<${REG}>;`,
+        `@group(1) @binding(${GEOMETRY_BINDING.starts}) var<storage, read_write> gsStarts: `
+            + 'array<u32>;',
+        `@group(1) @binding(${GEOMETRY_BINDING.counts}) var<storage, read_write> gsCounts: `
+            + 'array<vec4<u32>>;',
+        `@group(1) @binding(${GEOMETRY_BINDING.params}) var<uniform> gsParams: GsParams;`,
+        `var<private> vgs: array<array<${REG}, ${inputs}>, ${vertices}>;`,
+        ...Array.from({ length: outputs }, (_, index)=>`var<private> o${index}: ${REG};`),
+        'var<private> primitiveId: u32;',
+        'var<private> gsInstance: u32;',
+        'var<private> gsInvocation: u32;',
+        'var<private> gsEmitted: vec4<u32>;',
+        'var<private> gsMade: vec4<u32>;',
+        'var<private> gsStrip: vec4<u32>;',
+        // The place a stream's vertices take among the shader's streams.
+        'fn gsSlot(stream: u32) -> u32 {',
+        '    switch (stream) {',
+        ...stage.streams.map((stream, slot)=>`        case ${stream}u: { return ${slot}u; }`),
+        `        default: { return ${streams}u; }`,
+        '    }',
+        '}',
+        'fn gsEmit(stream: u32) {',
+        '    let s = gsSlot(stream);',
+        `    if (s >= ${streams}u || gsEmitted[s] >= ${most}u) { return; }`,
+        `    let at = (gsInvocation * ${streams}u + s) * ${most}u + gsEmitted[s];`,
+        ...Array.from({ length: outputs }, (_, index)=>
+            `    gsVertices[at * ${outputs}u + ${index}u] = o${index};`),
+        '    gsStarts[at] = select(0u, 1u, gsStrip[s] == 0u);',
+        '    gsEmitted[s] += 1u;',
+        '    gsStrip[s] += 1u;',
+        `    if (gsStrip[s] >= ${stage.outputVertices}u) { gsMade[s] += 1u; }`,
+        '}',
+        'fn gsCut(stream: u32) {',
+        '    let s = gsSlot(stream);',
+        `    if (s < ${streams}u) { gsStrip[s] = 0u; }`,
+        '}',
+        // The index at a position of the draw, for a strip's cuts.
+        'fn gsCutAt(position: u32) -> bool {',
+        '    if (gsParams.indexBytes == 0u) { return false; }',
+        '    let b = gsParams.indexOffset + (gsParams.first + position) * gsParams.indexBytes;',
+        '    if ((b >> 2u) >= arrayLength(&gsIndices)) { return false; }',
+        '    let word = gsIndices[b >> 2u];',
+        '    if (gsParams.indexBytes == 2u) {',
+        '        return extractBits(word, (b & 2u) * 8u, 16u) == 0xffffu;',
+        '    }',
+        '    return word == 0xffffffffu;',
+        '}',
+        'fn gsBody() {',
+        ...Array.from({ length: gs.temps }, (_, index)=>`    var r${index}: ${REG};`),
+        ...gs.indexableTemps.map(temp=>`    var x${temp.index}: array<${REG}, ${temp.size}>;`),
+        ...bodyText(gs, null),
+        '}',
+        '@compute @workgroup_size(64)',
+        'fn geometryMain(@builtin(global_invocation_id) id: vec3<u32>) {',
+        '    if (id.x >= gsParams.invocations) { return; }',
+        '    gsInvocation = id.x;',
+        `    gsInstance = id.x % ${stage.instances}u;`,
+        `    let gsFlat = id.x / ${stage.instances}u;`,
+        '    let gsDrawn = gsFlat / max(1u, gsParams.prims);',
+        '    let gsPrim = gsFlat % max(1u, gsParams.prims);',
+        '    primitiveId = gsPrim;',
+        `    var gsAt: array<u32, ${vertices}>;`,
+        '    var gsWhole = true;',
+        `    let gsStripped = ${STRIP_TOPOLOGIES.map(t=>`gsParams.topology == ${t}u`)
+            .join(' || ')};`,
+        `    for (var j = 0u; j < ${vertices}u; j++) {`,
+        `        gsAt[j] = select(gsPrim * ${vertices}u + j, gsPrim + j, gsStripped);`,
+        '        if (gsStripped && gsCutAt(gsAt[j])) { gsWhole = false; }',
+        '    }',
+        ...(vertices === 3 ? [
+            '    if (gsWhole && gsParams.topology == 5u) {',
+            // The strip's first triangle: after the last cut index, or the first.
+            '        var gsFrom = 0u;',
+            '        if (gsParams.indexBytes != 0u) {',
+            '            gsFrom = gsPrim;',
+            '            loop {',
+            '                if (gsFrom == 0u || gsCutAt(gsFrom - 1u)) { break; }',
+            '                gsFrom -= 1u;',
+            '            }',
+            '        }',
+            '        if (((gsPrim - gsFrom) & 1u) == 1u) {',
+            '            let gsFirst = gsAt[0];',
+            '            gsAt[0] = gsAt[1];',
+            '            gsAt[1] = gsFirst;',
+            '        }',
+            '    }',
+        ] : []),
+        '    if (gsWhole) {',
+        `        for (var j = 0u; j < ${vertices}u; j++) {`,
+        `            for (var reg = 0u; reg < ${inputs}u; reg++) {`,
+        `                vgs[j][reg] = gsIn[(gsDrawn * gsParams.points + gsAt[j]) * ${inputs}u`
+            + ' + reg];',
+        '            }',
+        '        }',
+        '        gsBody();',
+        '    }',
+        `    gsCounts[id.x * 2u] = gsMade;`,
+        `    gsCounts[id.x * 2u + 1u] = gsEmitted;`,
+        '}',
+    ].join('\n');
+    return { code, entries: declared.entries, unsupported: [...new Set(unsupported)] };
+}
+
+/** Group 2 of a draw of what a geometry shader made (`linkGeometryDraw`). */
+export const GEOMETRY_DRAW_BINDING = Object.freeze({ vertices: 0 });
+
+/**
+ * What a geometry shader made, drawn: the vertex stage reads each vertex the
+ * index list names out of the shader's places (`gsVertices`) into the
+ * registers its outputs are, and the pixel shader reads those by semantic as
+ * from a vertex shader. Only the rasterized stream's outputs are drawn.
+ *
+ * @param {TranslatedShader} gs
+ * @param {GeometryStage} stage
+ * @param {number} stream  The rasterized stream.
+ * @param {TranslatedShader} ps
+ * @param {{ targets?: readonly number[], clipDistances?: boolean,
+ *     depthBias?: { units: number, slope: number, clamp: number } }} [options]
+ * @returns {LinkedProgram}
+ */
+export function linkGeometryDraw(gs, stage, stream, ps, options = {}){
+    const outputs = stage.outputRegisters;
+    /** @type {TranslatedShader} */
+    const drawn = {
+        ...NO_PIXEL_SHADER,
+        kind: SHADER_KIND.VERTEX,
+        inputs: [],
+        outputs: gs.outputs.filter(element=>(element.stream ?? 0) === stream),
+        outputRegisters: outputs,
+        body: [
+            ...Array.from({ length: outputs }, (_, index)=>
+                `    o${index} = gsVertices[gsVertex * ${outputs}u + ${index}u];`),
+            { ret: true },
+        ],
+    };
+    return linkProgram(drawn, ps, { ...options, vertexLoad: {
+        text: [`@group(2) @binding(${GEOMETRY_DRAW_BINDING.vertices}) var<storage, read> `
+            + `gsVertices: array<${REG}>;`],
+        params: '@builtin(vertex_index) gsVertex: u32',
+        load: [],
+    } });
+}
+
 /**
  * @typedef {Object} VertexLoad
  * @property {string[]} text    Module-scope declarations the load reads.
@@ -3142,7 +4249,7 @@ export function linkVertexPatches(vs, inputs, registers, streams){
     {
         if (element.systemValue === SYSTEM_VALUE.VERTEX_ID)
         {
-            fetch.push(`    v${element.register}.x = vsVertex;`);
+            fetch.push(`    v${element.register}.x = vsVertexId;`);
         }
         else if (element.systemValue === SYSTEM_VALUE.INSTANCE_ID)
         {
@@ -3199,9 +4306,13 @@ export function linkVertexPatches(vs, inputs, registers, streams){
         '    let vsInstance = id.x / max(1u, vsParams.perInstance);',
         '    let vsPoint = id.x % max(1u, vsParams.perInstance);',
         '    var vsVertex = vsParams.first + vsPoint;',
+        // Direct3D's vertex ID counts from zero in a draw without indices
+        // and is the index itself in one with them: neither the first
+        // vertex nor the base vertex is in it (test_vertex_id).
+        '    var vsVertexId = vsPoint;',
         '    if (vsParams.indexBytes != 0u) {',
-        '        vsVertex = bitcast<u32>(bitcast<i32>(vsIndex(vsParams.first + vsPoint))'
-            + ' + vsParams.baseVertex);',
+        '        vsVertexId = vsIndex(vsParams.first + vsPoint);',
+        '        vsVertex = bitcast<u32>(bitcast<i32>(vsVertexId) + vsParams.baseVertex);',
         '    }',
         ...fetch,
         '    vsBody();',
@@ -3237,7 +4348,8 @@ export const DOMAIN_BINDING = Object.freeze({
  * @param {TranslatedShader} ps
  * @param {import('./dxbc.js').DxbcContainer} hull
  * @param {LinkedHull['stage']} stage
- * @param {{ targets?: readonly number[] }} [options]
+ * @param {{ targets?: readonly number[], clipDistances?: boolean,
+ *     depthBias?: { units: number, slope: number, clamp: number } }} [options]
  * @returns {LinkedProgram}
  */
 export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){

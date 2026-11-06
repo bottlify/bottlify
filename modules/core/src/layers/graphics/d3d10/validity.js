@@ -396,7 +396,8 @@ export function levelExtent(size, level){
  * @returns {number} S_OK or E_INVALIDARG
  */
 export function bufferCreateResult(desc, hasInitialData, rules = NO_RULES){
-    if (desc.ByteWidth === 0)
+    // A buffer has no levels to generate (test_generate_mips).
+    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.GENERATE_MIPS) !== 0)
     {
         return E_INVALIDARG;
     }
@@ -477,6 +478,18 @@ function maxExtentFor(dimension, rules){
 }
 
 /**
+ * Whether a device of a feature level knows a format: BC6H and BC7 only from
+ * level 11 (a level 10 device has neither, as Direct3D 10's runtime did not).
+ *
+ * @param {number} format @param {number | undefined} featureLevel
+ */
+export function levelHasFormat(format, featureLevel){
+    const family = FORMAT_INFO[format]?.family;
+    return (family !== DXGI_FORMAT.BC6H_TYPELESS && family !== DXGI_FORMAT.BC7_TYPELESS)
+        || (featureLevel ?? 0) >= 0xb000;
+}
+
+/**
  * @param {TextureDesc} desc
  * @param {number} dimension  A D3D10_RESOURCE_DIMENSION.
  * @param {DeviceCaps} caps
@@ -500,6 +513,11 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
 
     if (desc.Width < 1 || height < 1 || depth < 1
         || desc.Width > limit || height > limit || depth > limit)
+    {
+        return E_INVALIDARG;
+    }
+    // BC6H and BC7 are feature level 11's (test_texture skips them below it).
+    if (!levelHasFormat(desc.Format, rules.featureLevel))
     {
         return E_INVALIDARG;
     }
@@ -547,6 +565,17 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
     const mipGeneration = D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE;
     if ((desc.MiscFlags & D3D10_RESOURCE_MISC.GENERATE_MIPS) !== 0
         && (desc.BindFlags & mipGeneration) !== mipGeneration)
+    {
+        return E_INVALIDARG;
+    }
+    // A texture GDI draws into is a default render target of BGRA's eight bits
+    // with alpha (test_getdc).
+    if ((desc.MiscFlags & D3D10_RESOURCE_MISC.GDI_COMPATIBLE) !== 0
+        && ((desc.Usage ?? D3D10_USAGE.DEFAULT) !== D3D10_USAGE.DEFAULT
+            || (desc.BindFlags & D3D10_BIND.RENDER_TARGET) === 0
+            || !(/** @type {number[]} */ ([DXGI_FORMAT.B8G8R8A8_UNORM,
+                DXGI_FORMAT.B8G8R8A8_TYPELESS, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB]))
+                .includes(desc.Format)))
     {
         return E_INVALIDARG;
     }

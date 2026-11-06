@@ -34,11 +34,13 @@ export const E_FAIL = 0x80004005;
 export const E_INVALIDARG = 0x80070057;
 export const E_NOINTERFACE = 0x80004002;
 export const E_OUTOFMEMORY = 0x8007000e;
+export const E_UNEXPECTED = 0x8000ffff;
 export const DXGI_STATUS_OCCLUDED = 0x087a0001;
 export const DXGI_ERROR_INVALID_CALL = 0x887a0001;
 export const DXGI_ERROR_NOT_FOUND = 0x887a0002;
 export const DXGI_ERROR_MORE_DATA = 0x887a0003;
 export const DXGI_ERROR_UNSUPPORTED = 0x887a0004;
+export const DXGI_ERROR_SDK_COMPONENT_MISSING = 0x887a002d;
 export const DXGI_ERROR_WAS_STILL_DRAWING = 0x887a000a;
 
 /**
@@ -184,6 +186,12 @@ export const DXGI_FORMAT = Object.freeze({
     B8G8R8A8_UNORM_SRGB: 0x5b,
     B8G8R8X8_TYPELESS: 0x5c,
     B8G8R8X8_UNORM_SRGB: 0x5d,
+    BC6H_TYPELESS: 0x5e,
+    BC6H_UF16: 0x5f,
+    BC6H_SF16: 0x60,
+    BC7_TYPELESS: 0x61,
+    BC7_UNORM: 0x62,
+    BC7_UNORM_SRGB: 0x63,
 });
 
 /** What the validity tables distinguish about a format, and nothing more. */
@@ -317,6 +325,8 @@ export const FORMAT_INFO = Object.freeze(Object.fromEntries([
     ...family(F.BC3_TYPELESS, 16, { [F.BC3_UNORM]: COLOUR, [F.BC3_UNORM_SRGB]: COLOUR }, BLOCK),
     ...family(F.BC4_TYPELESS, 8, { [F.BC4_UNORM]: COLOUR, [F.BC4_SNORM]: COLOUR }, BLOCK),
     ...family(F.BC5_TYPELESS, 16, { [F.BC5_UNORM]: COLOUR, [F.BC5_SNORM]: COLOUR }, BLOCK),
+    ...family(F.BC6H_TYPELESS, 16, { [F.BC6H_UF16]: COLOUR, [F.BC6H_SF16]: COLOUR }, BLOCK),
+    ...family(F.BC7_TYPELESS, 16, { [F.BC7_UNORM]: COLOUR, [F.BC7_UNORM_SRGB]: COLOUR }, BLOCK),
     ...family(F.B8G8R8A8_TYPELESS, 4, {
         [F.B8G8R8A8_UNORM]: COLOUR, [F.B8G8R8A8_UNORM_SRGB]: COLOUR,
     }),

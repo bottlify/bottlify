@@ -71,6 +71,14 @@ export function createPrivateData(){
     };
 
     return {
+        /** Lets every entry go, an interface's reference with it: the object is gone. */
+        clear(){
+            for (const guid of [...entries.keys()])
+            {
+                drop(guid);
+            }
+        },
+
         /**
          * @param {string} guid
          * @param {number} size
@@ -198,6 +206,12 @@ export function attachCom(target, options){
             if (count === 0)
             {
                 options.onLastRef?.();
+                // Gone, unless a context still keeps it bound: what it held
+                // as private data goes with it (test_private_data).
+                if (!(/** @type {any} */ (target).bound > 0))
+                {
+                    privateData.clear();
+                }
             }
             return count;
         },

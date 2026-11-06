@@ -18,8 +18,10 @@
  */
 
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { decodeBc67 } from './bc67.js';
 
-/** @typedef {'bc1' | 'bc2' | 'bc3' | 'bc4u' | 'bc4s' | 'bc5u' | 'bc5s' | 'a8'} Conversion */
+/** @typedef {'bc1' | 'bc2' | 'bc3' | 'bc4u' | 'bc4s' | 'bc5u' | 'bc5s' | 'bc6hu' | 'bc6hs'
+ *     | 'bc7' | 'a8'} Conversion */
 
 /**
  * The eight values a BC4 block's endpoints stand for: eight interpolated when
@@ -98,6 +100,9 @@ export function convertedTexelBytes(conversion){
         case 'bc5u':
         case 'bc5s':
             return 2;
+        case 'bc6hu':
+        case 'bc6hs':
+            return 8;
         default:
             return 4;
     }
@@ -121,6 +126,10 @@ export function convertTexels(conversion, bytes, width, height){
             return decodeS3tc(bytes, 'dxt3', width, height);
         case 'bc3':
             return decodeS3tc(bytes, 'dxt5', width, height);
+        case 'bc6hu':
+        case 'bc6hs':
+        case 'bc7':
+            return decodeBc67(bytes, conversion, width, height);
         case 'a8': {
             if (bytes.length < width * height)
             {

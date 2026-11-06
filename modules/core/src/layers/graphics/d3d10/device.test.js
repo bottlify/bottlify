@@ -14,7 +14,7 @@ import {
     D3D10_MAP, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_SRV_DIMENSION, D3D10_STENCIL_OP,
     D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
-    E_INVALIDARG, IID, S_FALSE, S_OK,
+    E_INVALIDARG, IID, S_FALSE, S_OK, D3D11_DSV_FLAG,
 } from './constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
@@ -1841,7 +1841,13 @@ test('private data is kept per object and an interface entry holds a reference',
     assert.equal(texture.SetPrivateData(guid, 2, Uint8Array.from([7, 8])), S_OK);
     assert.deepEqual(texture.GetPrivateData(guid, { size: 2, wantsData: true }),
         { hr: S_OK, size: 2, data: Uint8Array.from([7, 8]) });
+    // An object gone lets go of the interfaces it held (test_private_data).
+    const kept = other.refCount;
+    assert.equal(texture.SetPrivateDataInterface('{87654321-1234-1234-1234-123456789ABC}',
+        other), S_OK);
+    assert.equal(other.refCount, kept + 1);
     texture.release();
+    assert.equal(other.refCount, kept, 'the texture gone, its reference with it');
 
     assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
     assert.equal(other.refCount, before);
@@ -2189,6 +2195,35 @@ test('a layout of no elements feeds a vertex shader that reads only system value
     assertFullyReleased(device);
 });
 
+test('Direct3D 11 refuses a null element array, and a slot fed both per vertex and per'
+    + ' instance (test_create_input_layout)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    const device = out.device;
+    const vertexId = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0)), ret()],
+    });
+    /** @type {{ layout?: any }} */
+    const made = {};
+    assert.equal(device.CreateInputLayout(null, vertexId, made), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([], vertexId, made), S_OK);
+    made.layout.release();
+    const element = { SemanticName: 'TEXCOORD', SemanticIndex: 0, Format: 6, InputSlot: 0,
+        AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 };
+    assert.equal(device.CreateInputLayout([element, { ...element, SemanticIndex: 1,
+        AlignedByteOffset: 12, InputSlotClass: 1 }], vertexId, made), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([element, { ...element, SemanticIndex: 1,
+        InputSlot: 1, InputSlotClass: 1 }], vertexId, made), S_OK, 'each slot its own');
+    made.layout.release();
+    device.release();
+});
+
 test('a layout made against a pixel shader feeds its position too: the vertex and instance'
     + ' ids alone are made by the input assembler', ()=>{
     const device = createDevice();
@@ -2425,4 +2460,178 @@ test('a Direct3D 10 device keeps the rasterizer state it binds past the last rel
     assert.deepEqual(samplers.samplers, [null], 'a sampler goes with its last release');
     device.ClearState();
     assertFullyReleased(device);
+});
+
+test('a device asked for video support is refused as one without it: no video device stands'
+    + ' behind it yet (decision A80, temporary; test_video_support, d3d11.c:37722)', ()=>{
+    for (const [adapter, driverType] of /** @type {[any, number][]} */ ([[null, 1], [{}, 0]]))
+    {
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: true };
+        assert.equal(D3D11CreateDevice(adapter, driverType, null, 0x800, null, out, {}),
+            0x887a0004);
+        assert.equal(out.device, null);
+    }
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, {}), 0x80070057,
+        'an unknown driver with no adapter is a bad argument before anything else');
+});
+
+test('a device asked for with the debug layer is refused as on a Windows without its Graphics'
+    + ' Tools (decision A81)', ()=>{
+    /** @type {any} */
+    const eleven = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0x2, null, eleven, {}), 0x887a002d);
+    assert.equal(eleven.device, null);
+    /** @type {any} */
+    const ten = {};
+    assert.equal(D3D10CreateDevice(null, 0, null, 0x2, 29, ten, {}), 0x887a002d);
+    assert.equal(ten.device, null);
+});
+
+test('from level 10.1 a copy moves compressed blocks into texels as big, and back, each counted'
+    + ' in its own format (test_compressed_format_compatibility, d3d11.c:29631)', ()=>{
+    /** @type {any} */
+    const made = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], made, {}), S_OK);
+    const device = made.device;
+    /**
+     * @param {number} format @param {number} width @param {number} height
+     * @param {Uint8Array} bytes
+     */
+    const texture = (format, width, height, bytes)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2D, Width: width, Height: height, Format: format,
+            Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+        }, [{ pSysMem: bytes }], out), S_OK);
+        return out.resource;
+    };
+    /** @param {any} resource */
+    const contents = resource=>{
+        /** @type {{ data?: Uint8Array | null }} */
+        const mapped = {};
+        assert.equal(resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+        const bytes = [.../** @type {Uint8Array} */ (mapped.data)];
+        resource.Unmap(0);
+        return bytes;
+    };
+    const texels = Uint8Array.from({ length: 32 }, (_, at)=>at + 1);
+    const zeros = new Uint8Array(32);
+    // 8x8 texels of BC1 are 2x2 blocks of 8 bytes, as 2x2 texels of R16G16B16A16 are.
+    const blocks = texture(DXGI_FORMAT.BC1_UNORM, 8, 8, texels);
+    const plain = texture(DXGI_FORMAT.R16G16B16A16_UINT, 2, 2, zeros);
+    device.CopyResource(plain, blocks);
+    assert.deepEqual(contents(plain), [...texels], 'the whole resource, block for texel');
+    const back = texture(DXGI_FORMAT.BC1_TYPELESS, 8, 8, zeros);
+    device.CopySubresourceRegion(back, 0, 4, 4, 0, plain, 0,
+        { left: 0, top: 0, front: 0, right: 1, bottom: 1, back: 1 });
+    assert.deepEqual(contents(back), [...zeros.subarray(0, 24), ...texels.subarray(0, 8)],
+        'one texel into the last block, at (4, 4) in the target\'s texels');
+    const narrow = texture(DXGI_FORMAT.R8G8B8A8_UINT, 4, 2, zeros);
+    device.CopyResource(narrow, blocks);
+    assert.deepEqual(contents(narrow), [...zeros], 'a texel smaller than a block takes none');
+    for (const resource of [blocks, plain, back, narrow])
+    {
+        resource.release();
+    }
+});
+
+test('a shader resource view over a subresource bound as a target is set as none and unbound'
+    + ' when the target is bound; another level of the texture, or a depth aspect the depth view'
+    + ' keeps read-only, stays (test_sample_attached_rtv, d3d11.c:32684)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    const { device, context } = out;
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 2, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    const texture = made.resource;
+    assert.equal(device.CreateRenderTargetView(texture, { Format: DXGI_FORMAT.R8G8B8A8_UNORM,
+        ViewDimension: 4, MipSlice: 0 }, made), S_OK);
+    const target = made.view;
+    /** @param {number} mip */
+    const levelView = mip=>{
+        assert.equal(device.CreateShaderResourceView(texture, { Format:
+            DXGI_FORMAT.R8G8B8A8_UNORM, ViewDimension: 4, MostDetailedMip: mip, MipLevels: 1 },
+        made), S_OK);
+        return made.view;
+    };
+    const top = levelView(0);
+    const second = levelView(1);
+    /** @returns {any[]} */
+    const bound = ()=>{
+        /** @type {any} */
+        const got = {};
+        context.PSGetShaderResources(0, 2, got);
+        const views = got.views;
+        views.forEach((/** @type {any} */ view)=>view?.Release?.());
+        return views;
+    };
+    context.PSSetShaderResources(0, [top, second]);
+    context.OMSetRenderTargets([target], null);
+    assert.deepEqual(bound(), [null, second], 'level 0 unbound with its target; level 1 kept');
+    context.PSSetShaderResources(0, [top, second]);
+    assert.deepEqual(bound(), [null, second], 'set while a target, set as none');
+    context.OMSetRenderTargets([], null);
+    context.PSSetShaderResources(0, [top]);
+    assert.deepEqual(bound(), [top, second]);
+
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R24G8_TYPELESS, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.DEPTH_STENCIL, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    const depthTexture = made.resource;
+    /** @param {number} format */
+    const aspectView = format=>{
+        assert.equal(device.CreateShaderResourceView(depthTexture, { Format: format,
+            ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 }, made), S_OK);
+        return made.view;
+    };
+    const depthRead = aspectView(DXGI_FORMAT.R24_UNORM_X8_TYPELESS);
+    const stencilRead = aspectView(DXGI_FORMAT.X24_TYPELESS_G8_UINT);
+    for (const [flags, kept] of /** @type {[number, any[]][]} */ ([
+        [0, [null, null]],
+        [D3D11_DSV_FLAG.READ_ONLY_DEPTH, [depthRead, null]],
+        [D3D11_DSV_FLAG.READ_ONLY_STENCIL, [null, stencilRead]],
+        [D3D11_DSV_FLAG.READ_ONLY_DEPTH | D3D11_DSV_FLAG.READ_ONLY_STENCIL,
+            [depthRead, stencilRead]],
+    ]))
+    {
+        assert.equal(device.CreateDepthStencilView(depthTexture, { Format:
+            DXGI_FORMAT.D24_UNORM_S8_UINT, ViewDimension: 3, Flags: flags, MipSlice: 0 },
+        made), S_OK);
+        context.OMSetRenderTargets([], null);
+        context.PSSetShaderResources(0, [depthRead, stencilRead]);
+        context.OMSetRenderTargets([], made.view);
+        assert.deepEqual(bound(), kept, `flags ${flags}`);
+    }
+});
+
+test('an input element\'s offset is a whole number of its channels, up to a word'
+    + ' (test_input_layout_alignment, d3d11.c:19406)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    /** @param {number} first @param {number} second @param {number} offset */
+    const made = (first, second, offset)=>out.device.CreateInputLayout([
+        { SemanticName: 'POSITION', SemanticIndex: 0, Format: first, InputSlot: 0,
+            AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 },
+        { SemanticName: 'COLOR', SemanticIndex: 0, Format: second, InputSlot: 0,
+            AlignedByteOffset: offset, InputSlotClass: 0, InstanceDataStepRate: 0 },
+    ], passThroughVertexShader(), {});
+    const F = DXGI_FORMAT;
+    assert.equal(made(F.R8_UINT, F.R16_UINT, 2), S_OK);
+    assert.equal(made(F.R8_UINT, F.R16_UINT, 1), E_INVALIDARG);
+    assert.equal(made(F.R8_UINT, F.R8_UINT, 1), S_OK);
+    assert.equal(made(F.R16_UINT, F.R32_UINT, 2), E_INVALIDARG);
+    assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 17), E_INVALIDARG);
+    assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 20), S_OK);
 });

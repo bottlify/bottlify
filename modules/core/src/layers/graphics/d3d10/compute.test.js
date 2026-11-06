@@ -17,12 +17,14 @@ import {
     D3D11_BUFFER_UAV_FLAG, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_OK,
 } from './constants.js';
 import { D3D11CreateDevice } from './device.js';
-import { SHADER_KIND } from './dxbc.js';
+import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import {
-    assemble, dclTemps, dclThreadGroup, dclUavRaw, dclUavStructured, dclUavTyped,
-    immAtomicAlloc, ishl, lu, r, ret, storeRaw, storeUavTyped, u, vThreadID,
+    assemble, atomicIadd, dclGlobalFlags, dclOutput, dclOutputSiv, dclTemps, dclThreadGroup,
+    dclUavRaw, dclUavStructured, dclUavTyped, immAtomicAlloc, ishl, l, lu, mov, o, r, ret,
+    storeRaw, storeUavTyped, u, vThreadID,
 } from './shader-fixtures.js';
+import { BINDING } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
@@ -177,7 +179,8 @@ test('the program\'s bytes for a buffer a shader writes land after the dispatche
 });
 
 test('an append view counts on the GPU from the count its binding gave, and the count is'
-    + ' copied by the GPU', async()=>{
+    + ' copied by the GPU; its declaration carries no counter flag, as fxc writes an append'
+    + ' buffer\'s (test_dispatch_indirect, d3d11.c:25572)', async()=>{
     const h = harness();
     const buffer = uavBuffer(h, null, { MiscFlags11: D3D11_RESOURCE_MISC.BUFFER_STRUCTURED,
         StructureByteStride: 4 });
@@ -186,7 +189,7 @@ test('an append view counts on the GPU from the count its binding gave, and the 
         Flags: D3D11_BUFFER_UAV_FLAG.APPEND });
     h.context.CSSetShader(computeShader(h, [
         dclThreadGroup(4, 1, 1),
-        dclUavStructured(0, 4, true),
+        dclUavStructured(0, 4),
         dclTemps(1),
         immAtomicAlloc(r(0, 'x'), u(0)),
         ret(),
@@ -241,6 +244,179 @@ test('a texture a shader writes is a storage texture, viewed at the view\'s leve
         .bindGroupLayouts[0].descriptor.entries[0];
     assert.deepEqual(layout.storageTexture,
         { access: 'write-only', format: 'r32float', viewDimension: '2d' });
+});
+
+/** @param {ReturnType<typeof harness>} h @param {number} format @param {number} bind */
+function texture2D(h, format, bind, width = 8, height = 4){
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateTexture2D({
+        Width: width, Height: height, MipLevels: 1, ArraySize: 1, Format: format,
+        SampleDesc: { Count: 1, Quality: 0 }, Usage: D3D10_USAGE.DEFAULT, BindFlags: bind,
+        CPUAccessFlags: 0, MiscFlags: 0,
+    }, null, made), S_OK);
+    return made.resource;
+}
+
+test('a texture an atomic is made on is written as the words of its texels in a buffer, given'
+    + ' its texels before the dispatch and giving them back after', async()=>{
+    const h = harness();
+    const texture = texture2D(h, DXGI_FORMAT.R32_UINT, D3D11_BIND_UNORDERED_ACCESS);
+    const view = uavOf(h, texture, { Format: DXGI_FORMAT.R32_UINT,
+        ViewDimension: UAV_TEXTURE2D, MipSlice: 0 });
+    h.context.CSSetShader(computeShader(h, [
+        dclThreadGroup(8, 4, 1),
+        dclUavTyped(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.UINT),
+        atomicIadd(u(0, 'x'), vThreadID('xyyy'), lu(1)),
+        ret(),
+    ]), null, 0);
+    h.context.CSSetUnorderedAccessViews(0, [view], null);
+    h.context.Dispatch(1, 1, 1);
+    h.context.Flush();
+    await h.device.idle();
+    assert.deepEqual(h.divergences, []);
+    const ops = h.gpu.calls.map((/** @type {any} */ call)=>call.op).filter((/** @type {string} */
+        op)=>['copyTextureToBuffer', 'dispatchWorkgroups', 'copyBufferToTexture'].includes(op));
+    assert.deepEqual(ops, ['copyTextureToBuffer', 'dispatchWorkgroups', 'copyBufferToTexture']);
+    const [given] = h.gpu.of('copyTextureToBuffer');
+    // Rows padded to 256 bytes, as a copy lays them out.
+    assert.equal(given.destination.bytesPerRow, 256);
+    assert.deepEqual(given.size, { width: 8, height: 4, depthOrArrayLayers: 1 });
+    const [dispatch] = h.gpu.of('dispatchWorkgroups');
+    const words = dispatch.group.descriptor.entries.find((/** @type {any} */ entry)=>
+        entry.binding === BINDING.UAV).resource;
+    assert.equal(words.buffer, given.destination.buffer, 'the shader writes the words');
+    assert.equal(h.gpu.of('copyBufferToTexture').at(-1).source.buffer, words.buffer);
+});
+
+test('a pixel shader that asks for early depth tests tests itself against the depth buffer,'
+    + ' attached read-only, a clear waiting for it made first', async()=>{
+    const h = harness();
+    const target = texture2D(h, DXGI_FORMAT.R8G8B8A8_UNORM, D3D10_BIND.RENDER_TARGET, 4, 4);
+    const depth = texture2D(h, DXGI_FORMAT.D32_FLOAT, D3D10_BIND.DEPTH_STENCIL, 4, 4);
+    const counted = texture2D(h, DXGI_FORMAT.R32_SINT, D3D11_BIND_UNORDERED_ACCESS, 1, 1);
+    /** @type {{ view?: any, shader?: any, state?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateRenderTargetView(target, null, made), S_OK);
+    const rtv = made.view;
+    assert.equal(h.device.CreateDepthStencilView(depth, null, made), S_OK);
+    const dsv = made.view;
+    const uav = uavOf(h, counted, null);
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    assert.equal(h.device.CreateVertexShader(assemble({ kind: SHADER_KIND.VERTEX, outputs:
+        [POSITION], instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+        mov(o(0), l(0, 0, 0.5, 1)), ret()] }), made), S_OK);
+    h.context.VSSetShader(made.shader, null, 0);
+    assert.equal(h.device.CreatePixelShader(assemble({ kind: SHADER_KIND.PIXEL, major: 5,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclGlobalFlags(1 | 4),
+            dclUavTyped(1, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.SINT), dclOutput(o(0)),
+            atomicIadd(u(1, 'x'), lu(0, 0, 0, 0), lu(1)), mov(o(0), l(1, 1, 1, 1)), ret()] }),
+    made), S_OK);
+    h.context.PSSetShader(made.shader, null, 0);
+    const KEEP = { StencilFailOp: 1, StencilDepthFailOp: 1, StencilPassOp: 1, StencilFunc: 8 };
+    assert.equal(h.device.CreateDepthStencilState({ DepthEnable: 1, DepthWriteMask: 0,
+        DepthFunc: 4, StencilEnable: 0, StencilReadMask: 255, StencilWriteMask: 255,
+        FrontFace: KEEP, BackFace: KEEP }, made), S_OK);
+    h.context.OMSetDepthStencilState(made.state, 0);
+    h.context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 4, Height: 4, MinDepth: 0,
+        MaxDepth: 1 }]);
+    h.context.OMSetRenderTargetsAndUnorderedAccessViews(1, [rtv], dsv, 1, 1, [uav], null);
+    h.context.IASetPrimitiveTopology(4);
+    h.context.ClearDepthStencilView(dsv, 1, 0.6, 0);
+    h.context.Draw(3, 0);
+    h.context.Flush();
+    await h.device.idle();
+    assert.deepEqual(h.divergences, []);
+    const passes = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>
+        call.descriptor.depthStencilAttachment);
+    assert.equal(passes.length, 2);
+    assert.equal(passes[0].depthLoadOp, 'clear', 'the clear, by a pass of its own');
+    assert.equal(passes[0].depthClearValue, 0.6);
+    assert.equal(passes[1].depthReadOnly, true);
+    const group = h.gpu.of('setBindGroup').filter((/** @type {any} */ call)=>call.index === 1)
+        .at(-1).group;
+    const tested = group.descriptor.entries.find((/** @type {any} */ entry)=>
+        entry.binding === BINDING.EARLY_DEPTH).resource;
+    assert.equal(tested.viewDescriptor.aspect, 'depth-only');
+    assert.equal(h.gpu.count('draw'), 1);
+});
+
+test('from level 11_0 a viewport corner left of or above the target is floored to a whole'
+    + ' pixel (test_negative_viewports)', async()=>{
+    const h = harness();
+    const target = texture2D(h, DXGI_FORMAT.R8G8B8A8_UNORM, D3D10_BIND.RENDER_TARGET, 4, 4);
+    /** @type {{ view?: any, shader?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateRenderTargetView(target, null, made), S_OK);
+    h.context.OMSetRenderTargets([made.view], null);
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    assert.equal(h.device.CreateVertexShader(assemble({ kind: SHADER_KIND.VERTEX, outputs:
+        [POSITION], instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+        mov(o(0), l(0, 0, 0.5, 1)), ret()] }), made), S_OK);
+    h.context.VSSetShader(made.shader, null, 0);
+    h.context.IASetPrimitiveTopology(4);
+    h.context.RSSetViewports([{ TopLeftX: -0.4, TopLeftY: -1 / 128, Width: 4, Height: 4,
+        MinDepth: 0, MaxDepth: 1 }]);
+    h.context.Draw(3, 0);
+    h.context.RSSetViewports([{ TopLeftX: 0.25, TopLeftY: 0, Width: 4, Height: 4,
+        MinDepth: 0, MaxDepth: 1 }]);
+    h.context.Draw(3, 0);
+    h.context.Flush();
+    await h.device.idle();
+    const rects = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect.slice(0, 2));
+    assert.deepEqual(rects.at(-2), [-1, -1]);
+    assert.deepEqual(rects.at(-1), [0.25, 0], 'a corner inside the target is kept as it is');
+});
+
+test('a command list finished keeping its context\'s bindings starts from them where it plays;'
+    + ' one with nowhere to go is dropped (test_deferred_context_rendering)', async()=>{
+    const h = harness();
+    const target = texture2D(h, DXGI_FORMAT.R8G8B8A8_UNORM, D3D10_BIND.RENDER_TARGET, 4, 4);
+    /** @type {{ view?: any, views?: any[], shader?: any, context?: any, list?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateRenderTargetView(target, null, made), S_OK);
+    const rtv = made.view;
+    const POSITION = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    assert.equal(h.device.CreateVertexShader(assemble({ kind: SHADER_KIND.VERTEX, outputs:
+        [POSITION], instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+        mov(o(0), l(0, 0, 0.5, 1)), ret()] }), made), S_OK);
+    const vs = made.shader;
+    assert.equal(h.device.CreateDeferredContext(0, made), S_OK);
+    const deferred = made.context;
+    deferred.OMSetRenderTargets([rtv], null);
+    deferred.VSSetShader(vs, null, 0);
+    deferred.IASetPrimitiveTopology(4);
+    deferred.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 4, Height: 4, MinDepth: 0,
+        MaxDepth: 1 }]);
+    assert.equal(deferred.FinishCommandList(true, made), S_OK);
+    made.list.release();
+    deferred.Draw(3, 0);
+    assert.equal(deferred.FinishCommandList(false, made), S_OK);
+    const drawing = made.list;
+    deferred.Draw(3, 0);
+    assert.equal(deferred.FinishCommandList(false, null), 0x8000ffff, 'E_UNEXPECTED');
+    assert.equal(deferred.FinishCommandList(false, made), S_OK);
+    const dropped = made.list;
+    assert.deepEqual(dropped.calls, [], 'what was recorded went with the refused list');
+    h.context.ExecuteCommandList(drawing, false);
+    h.context.ExecuteCommandList(dropped, false);
+    h.context.Flush();
+    await h.device.idle();
+    assert.equal(h.gpu.count('draw'), 1, 'drawn with the bindings the list started from');
+    // A list played into a deferred context leaves its bindings cleared,
+    // unless it is asked to keep them (test_deferred_context_state).
+    deferred.OMSetRenderTargets([rtv], null);
+    deferred.ExecuteCommandList(dropped, true);
+    deferred.OMGetRenderTargets(1, made, null);
+    assert.equal(made.views?.[0], rtv);
+    deferred.ExecuteCommandList(dropped, false);
+    /** @type {any} */
+    const after = {};
+    deferred.OMGetRenderTargets(1, after, null);
+    assert.equal(after.views?.[0], null);
+    drawing.release();
+    dropped.release();
 });
 
 test('a clear of a buffer view writes its range in turn; of a texture, by a dispatch over it',

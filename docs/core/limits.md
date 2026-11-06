@@ -195,11 +195,15 @@ event, an error. Neither stops the program.
   indirect draw through the tessellator is not drawn (its patch count is on the GPU, and the passes
   are sized by it), and the patches of a frame past the room its buffers have (grown, up to 8 M
   points and 16 M indices, after the first frame that needs more) are not drawn and said.
-- Direct3D 10 and 11 have no geometry stage and no stream output: WebGPU has neither and neither is
-  emulated. A geometry shader is made, and a draw with one bound is skipped and counted
-  (`roadmap/decisions.md`, A75). `CreateGeometryShaderWithStreamOutput` takes or refuses the
-  declaration as Windows does and streams nothing out; one made of a vertex shader's bytecode is
-  no stage, and its draws go on (or rasterize nothing, with no stream rasterized).
+- Direct3D 10 and 11 geometry shaders and stream output run as compute passes before the draw:
+  the vertex shader over the draw's vertices, the geometry shader a primitive and instance an
+  invocation, the strips it builds made lists, stream output into the bound buffers (whole
+  primitives, stopping at the first that does not fit; each buffer's filled size kept on the GPU
+  for the next draw, `DrawAuto` and the stream-output queries), and the rasterized stream drawn
+  indexed and indirect. Not drawn, and said: a draw through both the tessellator and a geometry
+  shader, an indirect draw or `DrawAuto` through a geometry shader (their counts are on the GPU,
+  and the passes are sized by them), a triangle strip with adjacency through one, and a draw
+  whose output could pass 128 MB between the passes.
 - Direct3D 10 multisamples at four samples only, the count WebGPU has:
   `CheckMultisampleQualityLevels` answers one quality level at four for the colour and depth
   formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture

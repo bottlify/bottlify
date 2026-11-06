@@ -168,3 +168,11 @@ jobs:
       - run: npm run cdp:tess
         env:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # Geometry shaders and stream output against what Direct3D writes.
+      - run: npm run cdp:gs
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # Vertex streams the vertex stage reads itself against WebGPU's fetch.
+      - run: npm run cdp:pull
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}

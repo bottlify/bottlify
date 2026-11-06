@@ -25,22 +25,59 @@ import {
     D3D11_LIMITS, DXGI_FORMAT,
 } from './constants.js';
 
+/** A depth format's views that read its stencil; every other view of one reads depth. */
+const STENCIL_VIEWS = new Set([DXGI_FORMAT.X24_TYPELESS_G8_UINT,
+    DXGI_FORMAT.X32_TYPELESS_G8X24_UINT]);
+
 /**
- * Whether a depth view writes nothing: read-only in depth and, where its
- * format has one, in stencil. Its resource may be read by a shader while it
- * is bound, as a shadow map or soft particles read the depth they test.
+ * Whether two views reach a subresource in common: a buffer's views reach
+ * all of it, a volume's every slice.
  *
- * @param {any} view
+ * @param {any} one @param {any} other
  */
-export function readOnlyDepthView(view){
+function sharesSubresources(one, other){
+    if (!one.resource || one.resource !== other.resource)
+    {
+        return false;
+    }
+    const a = one.range;
+    const b = other.range;
+    if (!a || !b)
+    {
+        return true;
+    }
+    const levels = a.mip < b.mip + b.levels && b.mip < a.mip + a.levels;
+    const volume = one.dimensionName === 'TEXTURE3D' || other.dimensionName === 'TEXTURE3D';
+    return levels && (volume || (a.first < b.first + b.count && b.first < a.first + a.count));
+}
+
+/**
+ * Whether a shader reading through `view` would read what `output` writes:
+ * the same subresources, and of a depth view, an aspect it does not keep
+ * read-only (test_sample_attached_rtv).
+ *
+ * @param {any} view  a shader resource view @param {any} output
+ * @param {boolean} depth  whether `output` is a depth stencil view
+ */
+function readsOutput(view, output, depth){
+    if (!sharesSubresources(view, output))
+    {
+        return false;
+    }
+    if (!depth)
+    {
+        return true;
+    }
     /** @type {{ desc?: any }} */
-    const out = {};
-    view.GetDesc?.(out);
-    const flags = out.desc?.Flags ?? 0;
-    const stencil = out.desc?.Format === DXGI_FORMAT.D24_UNORM_S8_UINT
-        || out.desc?.Format === DXGI_FORMAT.D32_FLOAT_S8X24_UINT;
-    return (flags & D3D11_DSV_FLAG.READ_ONLY_DEPTH) !== 0
-        && (!stencil || (flags & D3D11_DSV_FLAG.READ_ONLY_STENCIL) !== 0);
+    const read = {};
+    view.GetDesc?.(read);
+    /** @type {{ desc?: any }} */
+    const written = {};
+    output.GetDesc?.(written);
+    const flags = written.desc?.Flags ?? 0;
+    return STENCIL_VIEWS.has(read.desc?.Format)
+        ? (flags & D3D11_DSV_FLAG.READ_ONLY_STENCIL) === 0
+        : (flags & D3D11_DSV_FLAG.READ_ONLY_DEPTH) === 0;
 }
 
 /** @param {number} count @returns {any[]} */
@@ -148,6 +185,50 @@ function emptyPipeline(){
 /** @typedef {ReturnType<typeof emptyPipeline>} Pipeline */
 
 /**
+ * The bindings as they stand, apart from the ones a context goes on to
+ * change: what a command list starts from (`d3d11/context.js`). The objects
+ * are shared, not held.
+ *
+ * @param {Pipeline} bound
+ * @returns {Pipeline}
+ */
+export function copyPipeline(bound){
+    return {
+        ...bound,
+        stages: /** @type {Pipeline['stages']} */ (Object.fromEntries(Object.entries(bound.stages)
+            .map(([name, stage])=>[name, { shader: stage.shader,
+                constantBuffers: [...stage.constantBuffers],
+                shaderResources: [...stage.shaderResources], samplers: [...stage.samplers] }]))),
+        vertexBuffers: [...bound.vertexBuffers],
+        vertexStrides: [...bound.vertexStrides],
+        vertexOffsets: [...bound.vertexOffsets],
+        renderTargets: [...bound.renderTargets],
+        pixelViews: [...bound.pixelViews],
+        computeViews: [...bound.computeViews],
+        blendFactor: [...bound.blendFactor],
+        viewports: bound.viewports.map(viewport=>({ ...viewport })),
+        scissorRects: bound.scissorRects.map(rect=>({ ...rect })),
+        streamOutput: [...bound.streamOutput],
+        streamOutputOffsets: [...bound.streamOutputOffsets],
+    };
+}
+
+/**
+ * Every object a pipeline binds, once per binding.
+ *
+ * @param {Pipeline} bound
+ * @returns {any[]}
+ */
+export function bindingsOf(bound){
+    return [...Object.values(bound.stages).flatMap(stage=>[stage.shader,
+        ...stage.constantBuffers, ...stage.shaderResources, ...stage.samplers]),
+    bound.inputLayout, ...bound.vertexBuffers, bound.indexBuffer, ...bound.renderTargets,
+    bound.depthStencilView, ...bound.pixelViews, ...bound.computeViews, bound.blendState,
+    bound.depthStencilState, bound.rasterizerState, ...bound.streamOutput, bound.predicate]
+        .filter(Boolean);
+}
+
+/**
  * A context's bindings and the methods over them.
  *
  * @param {{ diverge: (detail: string) => void, uavSlots?: number, keepsBound?: boolean,
@@ -240,32 +321,26 @@ export function createPipelineState(services){
     };
 
     /**
-     * The resources bound as targets: the render targets' and the depth
-     * view's. A resource is not read by a shader while it is one -- the
-     * runtime unbinds it from every stage's shader resources, with a warning,
-     * and WebGPU refuses a pass that samples what it renders into, and with it
-     * the frame.
+     * Whether a shader resource view reads what is bound as a target: a
+     * subresource is not read by a shader while it is drawn into -- the
+     * runtime sets such a view as none, or unbinds it from every stage when
+     * the target is bound, with a warning -- and WebGPU refuses a pass that
+     * samples what it renders into, and with it the frame.
      *
-     * @returns {Set<any>}
+     * @param {any} view
      */
-    const targetResources = ()=>new Set([...pipeline.renderTargets,
-        pipeline.depthStencilView && !readOnlyDepthView(pipeline.depthStencilView)
-            ? pipeline.depthStencilView : null]
-        .filter(Boolean).map(view=>view.resource).filter(Boolean));
+    const readsTarget = view=>pipeline.renderTargets.some(target=>target
+        && readsOutput(view, target, false))
+        || (!!pipeline.depthStencilView && readsOutput(view, pipeline.depthStencilView, true));
 
     /** Every stage's shader resources over a target, unbound, and said once. */
     const unbindTargetsFromStages = ()=>{
-        const targets = targetResources();
-        if (targets.size === 0)
-        {
-            return;
-        }
         for (const stage of STAGES)
         {
             const slots = pipeline.stages[stage].shaderResources;
             for (let slot = 0; slot < slots.length; slot++)
             {
-                if (slots[slot] && targets.has(slots[slot].resource))
+                if (slots[slot] && readsTarget(slots[slot]))
                 {
                     slots[slot] = swap(slots[slot], null);
                     diverge('a shader resource bound as a target is unbound from the shader'
@@ -295,12 +370,11 @@ export function createPipelineState(services){
         },
         /** @param {number} startSlot @param {readonly any[]} views */
         [`${prefix}SetShaderResources`](startSlot, views){
-            // A view of a resource bound as a target is set as none, as the
+            // A view of what is bound as a target is set as none, as the
             // runtime forces it to.
-            const targets = targetResources();
             writeSlots(pipeline.stages[stage].shaderResources, startSlot,
                 (views ?? []).map(view=>{
-                    if (view && targets.has(view.resource))
+                    if (view && readsTarget(view))
                     {
                         diverge('a shader resource of a resource bound as a target is set as'
                             + ' none, as the runtime forces it to');
@@ -551,10 +625,6 @@ export function createPipelineState(services){
 
         /** @param {readonly any[]} buffers @param {readonly number[]} offsets */
         SOSetTargets(buffers, offsets){
-            if (buffers && buffers.some(buffer=>buffer))
-            {
-                diverge('a stream-output target is bound and never written');
-            }
             pipeline.streamOutput = replaced(pipeline.streamOutput,
                 emptySlots(D3D10_LIMITS.SO_BUFFER_SLOTS));
             writeSlots(pipeline.streamOutput, 0, (buffers ?? []).slice(0,
@@ -629,6 +699,7 @@ export function createPipelineState(services){
                 rasterizerState: stillAlive(pipeline.rasterizerState),
                 viewports: pipeline.viewports,
                 scissorRects: pipeline.scissorRects,
+                streamOutput: live(pipeline.streamOutput),
             };
         },
         /**

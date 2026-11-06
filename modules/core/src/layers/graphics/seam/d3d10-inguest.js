@@ -927,6 +927,8 @@ export function BufferMap({ u32, setU32, compareExchange, host }, self, type, fl
  * HRESULT ID3D11DeviceContext::Map(this, ID3D11Resource*, UINT subresource,
  * D3D11_MAP, UINT flags, D3D11_MAPPED_SUBRESOURCE*): a dynamic buffer's map
  * as `BufferMap`, its pitches the buffer's length as the host answers them.
+ * A deferred context has no ring (the word past its pointer is zero): its
+ * maps are the host's, kept apart for its command list.
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} self @param {u32} resource @param {u32} subresource
@@ -936,7 +938,7 @@ export function BufferMap({ u32, setU32, compareExchange, host }, self, type, fl
 export function ContextMap({ u32, setU32, compareExchange, host }, self, resource, subresource,
     type, flags, out)
 {
-    const storage = out === 0 || resource === 0 || subresource !== 0 ? 0
+    const storage = out === 0 || resource === 0 || subresource !== 0 || u32(self + 4) === 0 ? 0
         : mapStorage({ u32, setU32, compareExchange }, resource, type);
     if (storage === 0)
     {
@@ -1037,7 +1039,7 @@ export function BufferUnmap({ u32, setU32, compareExchange, host }, self){
 export function ContextUnmap({ u32, setU32, compareExchange, host }, self, resource,
     subresource)
 {
-    if (resource === 0 || subresource !== 0
+    if (resource === 0 || subresource !== 0 || u32(self + 4) === 0
         || unmapStorage({ u32, setU32, compareExchange }, resource) !== 0)
     {
         return host();

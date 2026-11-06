@@ -36,11 +36,13 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK, D3D10_DRIVER_TYPE,
+    D3D10_APPEND_ALIGNED_ELEMENT, D3D10_BIND, D3D10_CREATE_DEVICE, D3D10_CREATE_DEVICE_MASK,
+    D3D10_DRIVER_TYPE,
     D3D10_DRIVER_TYPES, D3D10_LIMITS, D3D10_QUERY,
     D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_1_SDK_VERSION,
     D3D10_USAGE, D3D11_RESOURCE_MISC, D3D11_TWIN,
-    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_SDK_COMPONENT_MISSING, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
+    D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
@@ -50,17 +52,18 @@ import {
     gpuRenderable, multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
+import { channelsOf } from './uavclear.js';
 import { D3D10_COMMANDS } from './commands.js';
 import { createRenderer } from './render.js';
 import { validStreamOutput } from './streamout.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
-import { createPipelineState } from './pipeline.js';
+import { copyPipeline, createPipelineState } from './pipeline.js';
 import { createDeferredContext, createImmediateContext } from '../d3d11/context.js';
 import { STATE_KIND, createStateStore } from './states.js';
 import {
-    DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, resolveViewFormat,
+    DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, levelHasFormat, resolveViewFormat,
     textureCreateResult,
 } from './validity.js';
 
@@ -179,6 +182,10 @@ export function D3D10CreateDevice(adapter, driverType, software, flags, sdkVersi
     if ((driverType === D3D10_DRIVER_TYPE.SOFTWARE) !== !!software)
     {
         return E_INVALIDARG;
+    }
+    if ((flags & CREATE_DEVICE_DEBUG) !== 0)
+    {
+        return DXGI_ERROR_SDK_COMPONENT_MISSING;
     }
     out.device = createDevice({ ...options, adapter, flags });
     return S_OK;
@@ -340,6 +347,52 @@ const D3D11_DRIVER_TYPE = Object.freeze({
 });
 
 /** D3D11_CREATE_DEVICE_* : every bit a program may pass. */
+/**
+ * The uncompressed families a compressed texture's blocks are copied to and
+ * from, by the bytes of one texel: the D3D 10.1 rule ("Format Conversion
+ * using Direct3D 10.1") Wine's test_compressed_format_compatibility checks.
+ */
+const BLOCK_COPY_FAMILIES = new Set(/** @type {number[]} */ ([DXGI_FORMAT.R32G32B32A32_TYPELESS,
+    DXGI_FORMAT.R16G16B16A16_TYPELESS, DXGI_FORMAT.R32G32_TYPELESS]));
+
+/**
+ * Whether a copy between two formats moves blocks into texels or back: one
+ * compressed, one uncompressed of an allowed family, a block the size of a texel.
+ *
+ * @param {number} a @param {number} b
+ */
+export function blockCopyable(a, b){
+    const one = FORMAT_INFO[a];
+    const other = FORMAT_INFO[b];
+    if (!one || !other || (one.blockEdge === 1) === (other.blockEdge === 1))
+    {
+        return false;
+    }
+    const plain = one.blockEdge === 1 ? one : other;
+    return one.bytesPerPixel === other.bytesPerPixel && BLOCK_COPY_FAMILIES.has(plain.family);
+}
+
+/**
+ * Whether a copy moves R9G9B9E5_SHAREDEXP texels into a 32-bit family's or
+ * back, which Windows makes (test_format_compatibility, d3d11.c:29476).
+ *
+ * @param {number} a @param {number} b
+ */
+function sharedExponentCopyable(a, b){
+    const R9G9B9E5 = DXGI_FORMAT.R9G9B9E5_SHAREDEXP;
+    return (a === R9G9B9E5 && FORMAT_INFO[b]?.family === DXGI_FORMAT.R32_TYPELESS)
+        || (b === R9G9B9E5 && FORMAT_INFO[a]?.family === DXGI_FORMAT.R32_TYPELESS);
+}
+
+/**
+ * D3D10_CREATE_DEVICE_DEBUG and D3D11_CREATE_DEVICE_DEBUG: the debug layer,
+ * which is not here, as it is not on a Windows without its Graphics Tools
+ * (decision A81).
+ */
+const CREATE_DEVICE_DEBUG = 0x2;
+
+/** D3D11_CREATE_DEVICE_VIDEO_SUPPORT. */
+const D3D11_CREATE_DEVICE_VIDEO_SUPPORT = 0x800;
 const D3D11_CREATE_DEVICE_MASK = 0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x40 | 0x80 | 0x100 | 0x800;
 
 /**
@@ -403,6 +456,16 @@ export function D3D11CreateDevice(adapter, driverType, software, flags, levels, 
         || (flags & ~D3D11_CREATE_DEVICE_MASK) !== 0)
     {
         return E_INVALIDARG;
+    }
+    // No video device stands behind a device yet (decision A80, temporary): a
+    // program that asks for one decodes its video another way.
+    if ((flags & D3D11_CREATE_DEVICE_VIDEO_SUPPORT) !== 0)
+    {
+        return DXGI_ERROR_UNSUPPORTED;
+    }
+    if ((flags & CREATE_DEVICE_DEBUG) !== 0)
+    {
+        return DXGI_ERROR_SDK_COMPONENT_MISSING;
     }
     const asked = levels && levels.length > 0 ? levels : DEFAULT_LEVELS_11;
     if (asked.some(level=>!KNOWN_LEVELS.has(level)))
@@ -554,10 +617,26 @@ function featureSupport(feature, input, level, device){
             return bytesOf([0]);
         case 13: // D3D9_OPTIONS1
             return bytesOf([1, 1, 1, 1]);
+        case 14: // D3D11_OPTIONS2: none of its eight
+            return new Uint8Array(8 * 4);
+        case 15: // D3D11_OPTIONS3: a layer and viewport index from any stage
+            return bytesOf([1]);
         default:
             void level;
             return null;
     }
+}
+
+/**
+ * The bytes an input element's offset is a multiple of: its channel's size,
+ * at most a word; a word for a format of packed channels.
+ *
+ * @param {number} format
+ */
+function elementAlignment(format){
+    const bits = channelsOf(format)?.channels.map(channel=>channel.bits) ?? [];
+    return bits.length > 0 && bits.every(one=>one === bits[0] && one % 8 === 0)
+        ? Math.min(4, bits[0] / 8) : 4;
 }
 
 /**
@@ -626,6 +705,7 @@ export function createDevice(options = {}){
         formatsTier1: options.formatsTier1,
         rg11b10Renderable: options.rg11b10Renderable,
         guest: options.guest,
+        featureLevel: options.featureLevel,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */
@@ -915,6 +995,7 @@ export function createDevice(options = {}){
                 now: options.now ?? (()=>performance.now()),
                 diverge,
                 eleven: d3d11,
+                streams: ()=>renderer.streamStatistics(),
                 occlusion: {
                     begin: ()=>renderer.beginOcclusion(),
                     end: counter=>renderer.endOcclusion(counter),
@@ -948,12 +1029,21 @@ export function createDevice(options = {}){
      * @returns {boolean}
      */
     const copyable = (destination, source, call)=>{
-        if (!destination || !source || destination === source)
+        // One subresource of a texture copies into another of it; a resource
+        // whole never into itself.
+        if (!destination || !source || (destination === source
+            && (call !== 'CopySubresourceRegion'
+                || destination.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)))
         {
             diverge(`${call} between a resource and itself, or with a null resource, is ignored`);
             return false;
         }
-        if (destination.dimension !== source.dimension)
+        // A region moves between textures of any shape: a slice of a volume
+        // to or from a 2D texture's (test_copy_subresource_region_3d).
+        const textures = destination.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER
+            && source.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER;
+        if (destination.dimension !== source.dimension
+            && !(textures && call === 'CopySubresourceRegion'))
         {
             diverge(`${call} between resources of different kinds is ignored`);
             return false;
@@ -963,12 +1053,16 @@ export function createDevice(options = {}){
             diverge(`${call} into an immutable resource is ignored`);
             return false;
         }
-        // Bits move between formats of one family and no others: a copy
-        // between two families -- a compressed block and a texel among them --
-        // has no meaning and the runtime leaves the destination as it was.
+        // Bits move between formats of one family, and from level 10.1 between
+        // a compressed format and an uncompressed one whose texel is as big
+        // as its block; a copy between any other two families has no meaning
+        // and the runtime leaves the destination as it was.
         if (destination.dimension !== D3D10_RESOURCE_DIMENSION.BUFFER
             && FORMAT_INFO[destination.desc.Format]?.family
-                !== FORMAT_INFO[source.desc.Format]?.family)
+                !== FORMAT_INFO[source.desc.Format]?.family
+            && !(featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1
+                && blockCopyable(destination.desc.Format, source.desc.Format))
+            && !sharedExponentCopyable(destination.desc.Format, source.desc.Format))
         {
             diverge(`${call} between formats of different families is ignored`);
             return false;
@@ -1343,16 +1437,15 @@ export function createDevice(options = {}){
             {
                 return E_INVALIDARG;
             }
-            if (declaration)
-            {
-                diverge('a geometry shader streams nothing out: no stream-output buffer is'
-                    + ' written');
-            }
             const hr = createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, null,
                 container);
             if (out.shader)
             {
                 out.shader.rasterizedStream = rasterizedStream;
+                out.shader.streamOutput = declaration
+                    ? { entries: declaration.map(entry=>({ ...entry })),
+                        strides: strides ? [...strides] : null }
+                    : null;
             }
             return hr;
         },
@@ -1378,13 +1471,33 @@ export function createDevice(options = {}){
             // system values -- a full-screen pass built from SV_VertexID --
             // is fed by it.
             const given = elements ?? [];
-            if (given.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode)
+            // Direct3D 11 takes an empty array, not a null one (test_create_input_layout).
+            if (given.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode
+                || (d3d11 && elements === null))
             {
                 return E_INVALIDARG;
+            }
+            // One slot's elements are all per vertex or all per instance.
+            const classes = new Map();
+            for (const element of given)
+            {
+                const slotClass = element.InputSlotClass ?? 0;
+                if ((classes.get(element.InputSlot) ?? slotClass) !== slotClass)
+                {
+                    return E_INVALIDARG;
+                }
+                classes.set(element.InputSlot, slotClass);
             }
             for (const element of given)
             {
                 if (!element.SemanticName || element.InputSlot >= D3D10_LIMITS.VERTEX_INPUT_SLOTS)
+                {
+                    return E_INVALIDARG;
+                }
+                // An element's offset is a whole number of its channels, up to
+                // a word (test_input_layout_alignment).
+                if (element.AlignedByteOffset !== D3D10_APPEND_ALIGNED_ELEMENT
+                    && (element.AlignedByteOffset >>> 0) % elementAlignment(element.Format) !== 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1479,7 +1592,7 @@ export function createDevice(options = {}){
             }
             out.support = 0;
             const info = FORMAT_INFO[format];
-            if (!info)
+            if (!info || !levelHasFormat(format, featureLevel))
             {
                 return E_FAIL;
             }
@@ -1594,9 +1707,15 @@ export function createDevice(options = {}){
                 instanceCount, startInstance });
         },
 
+        /** A draw of what stream output last left in the buffer at the first vertex slot. */
         DrawAuto(){
-            options.divergence?.('Direct3D 10', 'lost: DrawAuto draws nothing: there is no'
-                + ' stream-output buffer to count', 'loss');
+            renderer.drawAuto(snapshot());
+        },
+
+        /** @param {readonly any[]} buffers @param {readonly number[]} offsets */
+        SOSetTargets(buffers, offsets){
+            state.methods.SOSetTargets(buffers, offsets);
+            renderer.streamTargets(buffers ?? [], offsets ?? []);
         },
 
         /**
@@ -1725,6 +1844,11 @@ export function createDevice(options = {}){
             }
             const kept = state.capture();
             state.clear();
+            // A list finished keeping its context's bindings starts from them.
+            if (list.start)
+            {
+                state.restore(copyPipeline(list.start));
+            }
             for (const [name, args] of list.calls)
             {
                 if (name === 'Begin' || name === 'End')
@@ -1839,8 +1963,15 @@ export function createDevice(options = {}){
             {
                 return;
             }
+            // A compressed resource and an uncompressed one are of one extent
+            // when they have as many blocks as the other has texels.
+            const edge = (/** @type {any} */ desc)=>FORMAT_INFO[desc.Format]?.blockEdge ?? 1;
             const extent = ['ByteWidth', 'Width', 'Height', 'Depth', 'MipLevels', 'ArraySize'];
-            if (extent.some(field=>destination.desc[field] !== source.desc[field]))
+            /** @param {any} desc @param {string} field */
+            const measure = (desc, field)=>((field === 'Width' || field === 'Height')
+                && desc[field] !== undefined ? Math.ceil(desc[field] / edge(desc)) : desc[field]);
+            if (extent.some(field=>measure(destination.desc, field)
+                !== measure(source.desc, field)))
             {
                 diverge('CopyResource between resources of different extents is ignored');
                 return;
@@ -1860,8 +1991,25 @@ export function createDevice(options = {}){
             {
                 return;
             }
+            if (destination === source && destinationSubresource === sourceSubresource)
+            {
+                diverge('CopySubresourceRegion of a subresource into itself is ignored');
+                return;
+            }
             if (box && (box.right <= box.left || box.bottom <= box.top || box.back <= box.front))
             {
+                return;
+            }
+            // A depth stencil or multisampled resource is copied whole or not
+            // at all: no box, no offset (test_format_compatibility).
+            const whole = (/** @type {any} */ resource)=>resource.dimension
+                !== D3D10_RESOURCE_DIMENSION.BUFFER
+                && ((resource.desc.BindFlags & D3D10_BIND.DEPTH_STENCIL) !== 0
+                    || (resource.desc.SampleDesc?.Count ?? 1) > 1);
+            if ((whole(source) || whole(destination)) && (box || x || y || z))
+            {
+                diverge('CopySubresourceRegion of a part of a depth stencil or multisampled'
+                    + ' resource is ignored, as the runtime ignores it');
                 return;
             }
             renderer.copySubresourceRegion(destination, destinationSubresource, { x, y, z },
@@ -1888,7 +2036,7 @@ export function createDevice(options = {}){
             {
                 return;
             }
-            renderer.generateMips(resource);
+            renderer.generateMips(resource, view.range ?? null);
         },
 
         /**

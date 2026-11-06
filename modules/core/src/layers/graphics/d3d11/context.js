@@ -24,10 +24,10 @@
  */
 
 import {
-    D3D11_DEVICE_CONTEXT, DXGI_ERROR_INVALID_CALL, E_INVALIDARG, IID, S_OK,
+    D3D11_DEVICE_CONTEXT, DXGI_ERROR_INVALID_CALL, E_UNEXPECTED, IID, S_OK,
 } from '../d3d10/constants.js';
 import { attachCom } from '../d3d10/com.js';
-import { createPipelineState } from '../d3d10/pipeline.js';
+import { bindingsOf, copyPipeline, createPipelineState } from '../d3d10/pipeline.js';
 
 /**
  * The calls a context makes on the pipeline and its resources, past the
@@ -166,13 +166,15 @@ function objectsIn(args, each){
 
 /**
  * A finished command list: the calls in order, and the objects they name
- * held until it is released.
+ * held until it is released, with the bindings it starts from (held too).
  *
  * @param {ContextServices} services @param {[string, any[]][]} calls
+ * @param {import('../d3d10/pipeline.js').Pipeline | null} [start]  null for a cleared pipeline
  */
-function createCommandList(services, calls){
+function createCommandList(services, calls, start = null){
     return attachCom({
         calls,
+        start,
         GetContextFlags: ()=>0,
         /** @param {{ device?: any }} out */
         GetDevice(out){
@@ -187,6 +189,10 @@ function createCommandList(services, calls){
             for (const [, args] of calls)
             {
                 objectsIn(args, object=>object.release());
+            }
+            if (start)
+            {
+                bindingsOf(start).forEach(object=>object.release());
             }
             services.releaseDevice();
         },
@@ -219,12 +225,24 @@ export function createDeferredContext(services, flags){
                 record(name, args);
             };
     }
+    /**
+     * The bindings the next list starts from: the context's as a list was
+     * finished keeping them, held for that list; null for a cleared pipeline.
+     *
+     * @type {import('../d3d10/pipeline.js').Pipeline | null}
+     */
+    let start = null;
     const released = ()=>{
         for (const [, args] of calls)
         {
             objectsIn(args, object=>object.release());
         }
         calls = [];
+        if (start)
+        {
+            bindingsOf(start).forEach(object=>object.release());
+            start = null;
+        }
     };
     return attachCom({
         ...setters,
@@ -260,6 +278,20 @@ export function createDeferredContext(services, flags){
         Begin(query){
             record('Begin', [query]);
         },
+        /**
+         * A list played into this one is recorded; the bindings here are
+         * then kept, or cleared, as on the immediate context
+         * (test_deferred_context_state).
+         *
+         * @param {any} list @param {boolean} restore
+         */
+        ExecuteCommandList(list, restore){
+            record('ExecuteCommandList', [list, restore]);
+            if (!restore)
+            {
+                state.clear();
+            }
+        },
         /** @param {any} query */
         End(query){
             record('End', [query]);
@@ -271,16 +303,27 @@ export function createDeferredContext(services, flags){
          * @param {boolean} restore @param {{ list?: any }} out
          */
         FinishCommandList(restore, out){
-            if (!out)
-            {
-                return E_INVALIDARG;
-            }
-            out.list = createCommandList(services, calls);
+            const list = createCommandList(services, calls, start);
             calls = [];
-            if (!restore)
+            start = null;
+            // The bindings kept are what the next list starts from where it
+            // plays (test_deferred_context_rendering).
+            if (restore)
+            {
+                start = copyPipeline(state.capture());
+                bindingsOf(start).forEach(object=>object.addRef());
+            }
+            else
             {
                 state.clear();
             }
+            // Nowhere to put the list: what was recorded is dropped all the same.
+            if (!out)
+            {
+                list.release();
+                return E_UNEXPECTED;
+            }
+            out.list = list;
             return S_OK;
         },
     }, {
