@@ -439,7 +439,7 @@ const LIST_TYPES = new Map([
  *           find the block of the context current on it. Absent, every call
  *           is a trap.
  * @property {(code: number) => void} [setLastError]
- * @property {{ allocate: (bytes: number) => number }} [scratch]
+ * @property {{ allocate: (bytes: number) => number, free?: (address: number) => void }} [scratch]
  *           Guest memory, for what must live there: the strings glGetString
  *           answers with, the frame SwapBuffers presents, a mapped buffer.
  * @property {(surface: any, window?: number, exclusive?: boolean) => void} [present]
@@ -551,6 +551,7 @@ export function createOpengl(services){
         windowMemory: services.windowMemory,
         writeMemory: services.writeMemory,
         allocate: services.scratch?.allocate,
+        free: services.scratch?.free,
         backend: services.backend,
         createSampler: services.createSampler,
         frameQueued: services.frameQueued,
@@ -582,6 +583,7 @@ export function createOpengl(services){
             windowMemory: services.windowMemory,
             writeMemory: services.writeMemory,
             allocate: services.scratch?.allocate,
+            free: services.scratch?.free,
         },
         // No way to hand out an address, no extension: the string and the
         // lookup are one promise, and both are kept or neither is.

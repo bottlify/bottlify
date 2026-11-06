@@ -200,6 +200,8 @@ export const GL_EXTENSIONS = Object.freeze({
         ...VERTEX_ATTRIB_ARB,
     ],
     GL_ARB_fragment_shader: [],
+    GL_ARB_map_buffer_range: ['glMapBufferRange', 'glFlushMappedBufferRange'],
+    GL_ARB_copy_buffer: ['glCopyBufferSubData'],
     GL_ARB_vertex_array_object: [
         'glBindVertexArray', 'glDeleteVertexArrays', 'glGenVertexArrays', 'glIsVertexArray',
     ],

@@ -126,7 +126,7 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *          => Promise<number>} [deps.callGuest]
  * @param {() => any} [deps.currentThread]
  *        The bridge's way into guest code, which the DirectDraw enumerations need.
- * @param {{ allocate: (bytes: number) => number }} [deps.scratch]
+ * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void }} [deps.scratch]
  *        Guest memory for what a callback is shown.
  * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
  *        What a Direct3D 7 device draws with, reached when one is first made.

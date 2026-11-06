@@ -24,6 +24,7 @@ import { createModelRenderer } from './gpu-model.js';
  * @property {(address: number, length: number) => Uint8Array} [windowMemory]
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  * @property {(bytes: number) => number} [allocate]  guest memory a mapped buffer is put in
+ * @property {(address: number) => void} [free]  gives a mapped buffer's memory back
  * @property {() => any} [backend]  with `createSampler`, a device every context draws on
  * @property {(descriptor: any) => any} [createSampler]
  * @property {boolean} [model]  the renderer only keeps state: a twin elsewhere draws
@@ -51,6 +52,7 @@ export function createOpenglRoot(services){
             window: services.windowMemory,
             write: services.writeMemory,
             allocate: services.allocate,
+            free: services.free,
         }
         : undefined;
 

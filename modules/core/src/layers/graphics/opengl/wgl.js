@@ -84,7 +84,8 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  * @property {{ readMemory: (address: number, length: number) => Uint8Array,
  *              windowMemory?: (address: number, length: number) => Uint8Array,
  *              writeMemory: (address: number, bytes: Uint8Array) => void,
- *              allocate?: (bytes: number) => number }} [memory]
+ *              allocate?: (bytes: number) => number,
+ *              free?: (address: number) => void }} [memory]
  *           DescribePixelFormat writes through it when given an address, and
  *           every context made here reads its pixels and arrays through it.
  * @property {(detail: string, severity?: 'loss') => void} [divergence]
@@ -142,6 +143,7 @@ export function createWgl(options){
             window: options.memory.windowMemory,
             write: options.memory.writeMemory,
             allocate: options.memory.allocate,
+            free: options.memory.free,
         }
         : undefined;
 

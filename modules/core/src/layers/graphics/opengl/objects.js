@@ -106,6 +106,11 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} access
  * @property {Uint8Array} data
  * @property {number} mapped  the guest address it is mapped at, or zero
+ * @property {number} accessFlags  the MAP_*_BIT a map asked for, zero when not mapped
+ * @property {number} mapOffset  where the mapped range starts in the store
+ * @property {number} mapLength  how many bytes are mapped
+ * @property {{ start: number, end: number }[]} flushed  the ranges of an explicitly
+ *           flushed map written back so far, relative to the store
  * @property {{ start: number, end: number } | null} written   the bytes the
  *           program has rewritten since a copy kept elsewhere last read them
  * @property {number} version  raised on every glBufferDataARB, glBufferSubDataARB
@@ -254,7 +259,8 @@ export function markDirty(texture, key, rect){
  */
 export function createBufferObject(name){
     return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
-        mapped: 0, written: null, version: 1 };
+        mapped: 0, accessFlags: 0, mapOffset: 0, mapLength: 0, flushed: [], written: null,
+        version: 1 };
 }
 
 /**

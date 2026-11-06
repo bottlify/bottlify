@@ -214,6 +214,16 @@ export function laterEntryPoints(h){
             }
         }),
 
+        // --- buffer ranges ---
+
+        glMapBufferRange: ([target, offset, length, access])=>current()?.glMapBufferRange(
+            target >>> 0, offset | 0, length | 0, access >>> 0) ?? 0,
+        glFlushMappedBufferRange: ([target, offset, length])=>answer(
+            current()?.glFlushMappedBufferRange(target >>> 0, offset | 0, length | 0)),
+        glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
+            current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
+                writeOffset | 0, size | 0)),
+
         // --- vertex array objects ---
 
         glGenVertexArrays: generator((context, count)=>context.glGenVertexArrays(count)),

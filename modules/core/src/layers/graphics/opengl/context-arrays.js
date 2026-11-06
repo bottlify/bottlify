@@ -65,7 +65,17 @@ const BINDING_QUERIES = new Map([
     [GL.ELEMENT_ARRAY_BUFFER, GL.ELEMENT_ARRAY_BUFFER_BINDING],
     [GL.PIXEL_PACK_BUFFER, GL.PIXEL_PACK_BUFFER_BINDING],
     [GL.PIXEL_UNPACK_BUFFER, GL.PIXEL_UNPACK_BUFFER_BINDING],
+    [GL.COPY_READ_BUFFER, GL.COPY_READ_BUFFER],
+    [GL.COPY_WRITE_BUFFER, GL.COPY_WRITE_BUFFER],
 ]);
+
+/** The access bits glMapBufferRange takes (OpenGL 3.0 section 2.9.3). */
+const MAP_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_RANGE_BIT
+    | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_FLUSH_EXPLICIT_BIT | GL.MAP_UNSYNCHRONIZED_BIT;
+
+/** BUFFER_ACCESS for a map's bits: what glMapBuffer's enum would have said. @param {number} bits */
+const accessOfBits = bits=>((bits & GL.MAP_READ_BIT) === 0 ? GL.WRITE_ONLY
+    : (bits & GL.MAP_WRITE_BIT) === 0 ? GL.READ_ONLY : GL.READ_WRITE);
 
 /** @type {Set<number>} */
 const INDEX_TYPES = new Set([GL.UNSIGNED_BYTE, GL.UNSIGNED_SHORT, GL.UNSIGNED_INT]);
@@ -718,6 +728,79 @@ export function installArrayCalls(context, kernel){
     const aliasEnabled = index=>index >= 8 && index < 8 + TEXTURE_UNITS
         ? texCoordEnabled[index - 8]
         : record(ARRAYS[/** @type {string} */ (conventionalName(index))].enable).values[0];
+
+    /**
+     * Bytes of the store the program changed, for the copies kept elsewhere.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {number} size
+     */
+    const noteWritten = (buffer, offset, size)=>{
+        buffer.written = buffer.written
+            ? { start: Math.min(buffer.written.start, offset),
+                end: Math.max(buffer.written.end, offset + size) }
+            : { start: offset, end: offset + size };
+        buffer.version++;
+    };
+
+    /**
+     * Maps part of a store into guest memory: a copy of the bytes there, as
+     * the range's own allocation, unless the map discards them anyway.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {number} length @param {number} bits  MAP_*_BIT @param {string} call
+     * @returns {number}
+     */
+    const mapRange = (buffer, offset, length, bits, call)=>{
+        const memory = kernel.memory();
+        const address = memory?.allocate ? memory.allocate(Math.max(1, length)) : 0;
+        if (address === 0)
+        {
+            lose(`${call} could not map a buffer into guest memory: a program that`
+                + ' fills its buffers by mapping gets null and draws nothing from them');
+            setError(GL.OUT_OF_MEMORY);
+            return 0;
+        }
+        const discards = (bits
+            & (GL.MAP_INVALIDATE_RANGE_BIT | GL.MAP_INVALIDATE_BUFFER_BIT)) !== 0;
+        if (!discards && length > 0)
+        {
+            /** @type {NonNullable<typeof memory>} */ (memory).write(address,
+                buffer.data.subarray(offset, offset + length));
+        }
+        buffer.mapped = address;
+        buffer.access = accessOfBits(bits);
+        buffer.accessFlags = bits;
+        buffer.mapOffset = offset;
+        buffer.mapLength = length;
+        return address;
+    };
+
+    /**
+     * Copies what the program wrote in a mapped range back into the store.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {number} length  in the store
+     */
+    const writeBack = (buffer, offset, length)=>{
+        const memory = kernel.memory();
+        if (!memory || length <= 0)
+        {
+            return;
+        }
+        buffer.data.set(memory.read(buffer.mapped + offset - buffer.mapOffset, length), offset);
+        noteWritten(buffer, offset, length);
+    };
+
+    /** The map ended: its memory given back and its state the unmapped one. */
+    /** @param {import('./objects.js').BufferObject} buffer */
+    const unmap = buffer=>{
+        kernel.memory()?.free?.(buffer.mapped);
+        buffer.mapped = 0;
+        buffer.accessFlags = 0;
+        buffer.mapOffset = 0;
+        buffer.mapLength = 0;
+    };
 
     Object.assign(kernel.side, {
         pointers,
@@ -1374,19 +1457,76 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return 0;
             }
-            const memory = kernel.memory();
-            const address = memory?.allocate ? memory.allocate(Math.max(1, buffer.size)) : 0;
-            if (address === 0)
+            const bits = access === GL.READ_ONLY ? GL.MAP_READ_BIT
+                : access === GL.WRITE_ONLY ? GL.MAP_WRITE_BIT : GL.MAP_READ_BIT | GL.MAP_WRITE_BIT;
+            return mapRange(buffer, 0, buffer.size, bits, 'glMapBuffer');
+        },
+
+        /**
+         * glMapBufferRange (OpenGL 3.0 section 2.9.3): part of the store, with
+         * the access the bits say. Its errors are checked in the order the
+         * specification lists them.
+         *
+         * @param {number} target @param {number} offset @param {number} length
+         * @param {number} access  MAP_*_BIT
+         * @returns {number} the guest address of the range, or zero
+         */
+        glMapBufferRange(target, offset, length, access){
+            if (!enter('glMapBufferRange', [target, offset, length, access]))
             {
-                lose('glMapBuffer could not map a buffer into guest memory: a program that'
-                    + ' fills its buffers by mapping gets null and draws nothing from them');
-                setError(GL.OUT_OF_MEMORY);
                 return 0;
             }
-            /** @type {NonNullable<typeof memory>} */ (memory).write(address, buffer.data);
-            buffer.mapped = address;
-            buffer.access = access;
-            return address;
+            const buffer = boundBuffer(target);
+            if (!buffer)
+            {
+                return 0;
+            }
+            if (offset < 0 || length < 0 || offset + length > buffer.size
+                || (access & ~MAP_BITS) !== 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return 0;
+            }
+            const reads = (access & GL.MAP_READ_BIT) !== 0;
+            const writes = (access & GL.MAP_WRITE_BIT) !== 0;
+            if (length === 0 || buffer.mapped !== 0 || (!reads && !writes)
+                || (reads && (access & (GL.MAP_INVALIDATE_RANGE_BIT
+                    | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_UNSYNCHRONIZED_BIT)) !== 0)
+                || ((access & GL.MAP_FLUSH_EXPLICIT_BIT) !== 0 && !writes))
+            {
+                setError(GL.INVALID_OPERATION);
+                return 0;
+            }
+            return mapRange(buffer, offset, length, access, 'glMapBufferRange');
+        },
+
+        /**
+         * Writes back part of an explicitly flushed map, relative to the range
+         * mapped; what is not flushed by the unmap is not written back.
+         *
+         * @param {number} target @param {number} offset @param {number} length
+         */
+        glFlushMappedBufferRange(target, offset, length){
+            if (!enter('glFlushMappedBufferRange', [target, offset, length]))
+            {
+                return;
+            }
+            const buffer = boundBuffer(target);
+            if (!buffer)
+            {
+                return;
+            }
+            if (offset < 0 || length < 0 || offset + length > buffer.mapLength)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (buffer.mapped === 0 || (buffer.accessFlags & GL.MAP_FLUSH_EXPLICIT_BIT) === 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            writeBack(buffer, buffer.mapOffset + offset, length);
         },
 
         /** @param {number} target @returns {number} GL_TRUE when the data survived */
@@ -1405,15 +1545,54 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return GL.FALSE;
             }
-            const memory = kernel.memory();
-            if (memory && buffer.access !== GL.READ_ONLY && buffer.size > 0)
+            if ((buffer.accessFlags & GL.MAP_WRITE_BIT) !== 0
+                && (buffer.accessFlags & GL.MAP_FLUSH_EXPLICIT_BIT) === 0)
             {
-                buffer.data.set(memory.read(buffer.mapped, buffer.size));
-                buffer.written = { start: 0, end: buffer.size };
-                buffer.version++;
+                writeBack(buffer, buffer.mapOffset, buffer.mapLength);
             }
-            buffer.mapped = 0;
+            unmap(buffer);
             return GL.TRUE;
+        },
+
+        /**
+         * glCopyBufferSubData (OpenGL 3.1, GL_ARB_copy_buffer): bytes of one
+         * bound buffer into another, or within one where the ranges do not
+         * overlap.
+         *
+         * @param {number} readTarget @param {number} writeTarget
+         * @param {number} readOffset @param {number} writeOffset @param {number} size
+         */
+        glCopyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size){
+            if (!enter('glCopyBufferSubData',
+                [readTarget, writeTarget, readOffset, writeOffset, size]))
+            {
+                return;
+            }
+            const source = boundBuffer(readTarget);
+            const destination = source ? boundBuffer(writeTarget) : null;
+            if (!source || !destination)
+            {
+                return;
+            }
+            if (readOffset < 0 || writeOffset < 0 || size < 0
+                || readOffset + size > source.size || writeOffset + size > destination.size
+                || (source === destination && readOffset < writeOffset + size
+                    && writeOffset < readOffset + size))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (source.mapped !== 0 || destination.mapped !== 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (size > 0)
+            {
+                destination.data.set(source.data.subarray(readOffset, readOffset + size),
+                    writeOffset);
+                noteWritten(destination, writeOffset, size);
+            }
         },
 
         /**
@@ -1441,6 +1620,12 @@ export function installArrayCalls(context, kernel){
                     return [buffer.access];
                 case GL.BUFFER_MAPPED:
                     return [buffer.mapped !== 0 ? 1 : 0];
+                case GL.BUFFER_ACCESS_FLAGS:
+                    return [buffer.accessFlags];
+                case GL.BUFFER_MAP_OFFSET:
+                    return [buffer.mapOffset];
+                case GL.BUFFER_MAP_LENGTH:
+                    return [buffer.mapLength];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

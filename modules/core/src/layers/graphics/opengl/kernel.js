@@ -22,6 +22,7 @@
  * @property {(address: number, bytes: Uint8Array) => void} write
  * @property {(bytes: number) => number} [allocate]  guest memory a program
  *           can write through, for a mapped buffer; absent when there is none
+ * @property {(address: number) => void} [free]  gives back what `allocate` gave
  */
 
 /**

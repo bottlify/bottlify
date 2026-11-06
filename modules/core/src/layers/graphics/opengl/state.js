@@ -815,6 +815,9 @@ export const DEFAULT_STATE = Object.freeze([
     },
     { query: GL.RENDERBUFFER_BINDING, name: 'GL_RENDERBUFFER_BINDING', kind: 'int', value: [0] },
     { query: GL.VERTEX_ARRAY_BINDING, name: 'GL_VERTEX_ARRAY_BINDING', kind: 'int', value: [0] },
+    // A copy's two bindings answer under the target's own name (OpenGL 3.1).
+    { query: GL.COPY_READ_BUFFER, name: 'GL_COPY_READ_BUFFER_BINDING', kind: 'int', value: [0] },
+    { query: GL.COPY_WRITE_BUFFER, name: 'GL_COPY_WRITE_BUFFER_BINDING', kind: 'int', value: [0] },
     {
         query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],

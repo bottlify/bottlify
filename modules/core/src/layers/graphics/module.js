@@ -1310,6 +1310,8 @@ export function createGraphicsModule(){
                 scratch: {
                     /** @param {number} bytes */
                     allocate: bytes=>win32.heap().allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>win32.heap().free(address),
                 },
             });
 
