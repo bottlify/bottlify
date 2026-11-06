@@ -23,7 +23,6 @@
 import { D3D_OK, DDERR_INVALIDPARAMS } from './constants.js';
 import { D3DFOG, D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS, dwordToFloat } from '../d3d8/constants.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
-import { normalMatrixOf } from '../d3d8/render.js';
 
 /** D3DVOP: what ProcessVertices is asked to do. */
 export const D3DVOP = Object.freeze({
@@ -82,11 +81,6 @@ function multiply(a, b){
 function transform(v, m){
     return [0, 1, 2, 3].map(column=>
         v[0] * m[column] + v[1] * m[4 + column] + v[2] * m[8 + column] + v[3] * m[12 + column]);
-}
-
-/** @param {ArrayLike<number>} m @returns {number[]} */
-function transposed(m){
-    return Array.from({ length: 16 }, (_, at)=>m[(at % 4) * 4 + Math.floor(at / 4)]);
 }
 
 /**
@@ -289,11 +283,7 @@ export function processVertices(request){
     // What only lighting reads, made only for a lit draw: inverting matrices
     // and carrying lights into camera space for an unlit one was work nothing
     // saw, every call.
-    // A matrix with no inverse carries a normal by its adjugate, as a draw
-    // does (`normalMatrixOf`): the cofactors, whose direction is what
-    // lighting reads (Wine's ddraw2 and ddraw4 test_lighting, a singular world).
-    const normalMatrices = lighting ? worldViews.map(matrix=>invert(matrix)
-        ?? transposed(normalMatrixOf(matrix))) : [];
+    const normalMatrices = lighting ? worldViews.map(matrix=>invert(matrix)) : [];
     const lights = lighting ? state.lights.map(light=>({
         ...light,
         cameraDirection: transform([light.Direction.x, light.Direction.y, light.Direction.z, 0],

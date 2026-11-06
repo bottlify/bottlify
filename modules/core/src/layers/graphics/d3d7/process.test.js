@@ -209,16 +209,6 @@ test('lighting uses the camera-space normal the inverse transpose carries, at it
     };
     const transf = [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 10, 10, 10, 1];
     assert.equal(colour(lit, [-1, -1, 0, 0, 0, -1, 0xff0000ff], {}), 0xff0000ff, 'facing it');
-    // A singular world carries the normal by its adjugate: here (1, 0, -1),
-    // at 45 degrees to the light once normalised (ddraw4 test_lighting).
-    const singular = s.buffer(lit, 1);
-    s.fill(singular, [[-1, -1, 0, 0, 0, -1, 0xff0000ff]]);
-    assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
-        dest, destIndex: 0, count: 1, source: s.source(singular), flags: 0,
-        state: device({ lights: [light], states: { [D3DRS.NORMALIZENORMALS]: 1 },
-            transforms: { [D3DTS.WORLD]: [1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1] } }) }),
-    D3D_OK);
-    assert.equal(s.dword(dest.base + 16), 0xff0000b4, 'a singular world');
     assert.equal(colour(lit, [-10, -11, 11, -1, 0, 0, 0xff0000ff],
         { [D3DTS.WORLD]: transf }), 0xff0000ff, 'turned to face it');
     assert.equal(colour(lit, [-11, -11, -10, 0, 0, -1, 0xff0000ff],

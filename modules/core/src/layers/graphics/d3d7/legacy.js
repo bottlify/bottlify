@@ -61,7 +61,6 @@ const RS = Object.freeze({
     FOGVERTEXMODE: 140,
     COLORVERTEX: 141,
     LOCALVIEWER: 142,
-    NORMALIZENORMALS: 143,
 });
 
 /** D3DTADDRESS_WRAP, and D3DWRAP_U / _V in D3DRENDERSTATE_WRAP0. */
@@ -869,11 +868,6 @@ function createLegacyDevice(inner, version, legacy){
     // Specular highlights start on through IDirect3DDevice2 and off through
     // the third (Wine's ddraw2.c and ddraw4.c test_lighting_interface_versions).
     inner.SetRenderState(RS.SPECULARENABLE, version < 3 ? 1 : 0);
-    // These versions light by a normal of unit length whatever the world
-    // matrix did to it (Wine's ddraw2 and ddraw4 test_lighting: a singular
-    // world lights at 45 degrees, where Direct3D 7 without the state lights
-    // fully).
-    inner.SetRenderState(RS.NORMALIZENORMALS, 1);
 
     /**
      * Whether stage zero's texture is the one TEXTUREHANDLE names, looked up
@@ -1302,10 +1296,9 @@ function createLegacyDevice(inner, version, legacy){
 
         /** @param {number} state @param {number} value */
         setRenderState(state, value){
-            // These versions have no LOCALVIEWER or NORMALIZENORMALS: they
-            // light as Direct3D 7 does with both on, whatever is set (ddraw4
-            // test_specular_lighting and test_lighting).
-            if (state === RS.LOCALVIEWER || state === RS.NORMALIZENORMALS)
+            // These versions have no LOCALVIEWER: they light as Direct3D 7 does
+            // with it on, whatever is set (ddraw4 test_specular_lighting).
+            if (state === RS.LOCALVIEWER)
             {
                 return D3D_OK;
             }
@@ -1478,7 +1471,7 @@ function createLegacyDevice(inner, version, legacy){
          * @param {number} state
          */
         answersFor: (/** @type {number} */ state)=>ownStates.has(state >>> 0)
-            || state >>> 0 === RS.LOCALVIEWER || state >>> 0 === RS.NORMALIZENORMALS,
+            || state >>> 0 === RS.LOCALVIEWER,
 
         /**
          * A call a routine wrote into the Direct3D 7 device's ring, told as the
