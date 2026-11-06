@@ -291,6 +291,25 @@ test('a present interval is DEFAULT or one the caps offer, and reads back as giv
     }
 });
 
+test('a full-screen device makes no additional swap chain, a windowed one does', ()=>{
+    // Wine's test_swapchain.
+    const d3d = createDirect3D9();
+    for (const windowed of [false, true])
+    {
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, windowed,
+            backBufferWidth: 640, backBufferHeight: 480 }, out), D3D_OK);
+        /** @type {{ swapChain?: any }} */
+        const chain = {};
+        assert.equal(out.device.CreateAdditionalSwapChain({ swapEffect: D3DSWAPEFFECT.DISCARD,
+            windowed: true, backBufferWidth: 32, backBufferHeight: 32 }, chain),
+        windowed ? D3D_OK : D3DERR_INVALIDCALL, `windowed ${windowed}`);
+        chain.swapChain?.release();
+        assertFullyReleased(out.device);
+    }
+});
+
 test('a zero back-buffer count is reported back as one', ()=>{
     const device = createDevice();
     /** @type {{ swapChain?: any }} */

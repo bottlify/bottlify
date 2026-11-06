@@ -4531,7 +4531,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ swapChain?: any }} out
          */
         CreateAdditionalSwapChain(asked, out){
-            if (!asked || asked.windowed === false
+            // A full-screen device has its one swap chain, windowed or not
+            // the one asked for (Wine's test_swapchain).
+            if (!asked || asked.windowed === false || presentParameters.windowed === false
                 || validatePresentParameters(asked, extended) !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
