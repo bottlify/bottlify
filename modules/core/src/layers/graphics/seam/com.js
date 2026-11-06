@@ -123,9 +123,11 @@ function methodsFor(descriptor){
  * @param {(adapter: any, pointer: number) => void} onForgotten
  *        Called when the bridge forgets one of the object's pointers.
  * @param {CountCells | null} cells
+ * @param {() => unknown} settleOwed  Makes the calls into the program a
+ *        release left owing (`createPublisher`'s `owe`).
  * @returns {any} something the bridge's publisher will accept
  */
-function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
+function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells, settleOwed){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
     /**
@@ -156,6 +158,9 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
         // Where the guest's AddRef and Release find the object's count, or
         // nothing for an object that keeps it on the host.
         countCell: ()=>(cells ? cells.of(api.counter) : 0),
+        // The calls into the program a release left owing (`owe`), which the
+        // bridge makes and waits for before it answers the Release.
+        afterRelease: ()=>settleOwed?.(),
         /**
          * Every pointer this object has been published as, so the map back can
          * be given up all at once when the object dies.
@@ -376,15 +381,47 @@ export function createCountCells({ allocate, memory }){
  *        given back leaves only this file's way back to it.
  * @param {CountCells} [deps.cells]  Where objects that can keep their count in
  *        the guest keep it; on the host, without.
+ * @param {() => unknown} [deps.currentThread]  The thread whose call is being answered.
  * @returns {{ publish: (api: any, interfaces: InterfaceDescriptor[], id: string) => number,
+ *             owe: (call: (thread: unknown) => unknown) => void,
  *             unpublish: (api: any) => void,
  *             objectAt: (pointer: number) => any,
  *             adapterFor: (api: any) => any, count: () => number,
  *             countCell: (api: any) => number }}
  */
-export function createPublisher({ publishInterface, unpublishInterface, cells }){
+export function createPublisher({ publishInterface, unpublishInterface, cells, currentThread }){
     /** Keyed by the API object, so one object is one identity. */
     const adapters = new WeakMap();
+
+    /**
+     * Calls into the program that an object going owes it -- the Release of
+     * an interface of the program's that its private data held -- made one
+     * after another on the releasing thread once the Release that ended it
+     * is done, and waited for before the program hears its answer.
+     *
+     * @type {((thread: unknown) => unknown)[]}
+     */
+    const owed = [];
+    /** @returns {unknown} a promise while the calls are made */
+    const settleOwed = ()=>{
+        if (owed.length === 0)
+        {
+            return undefined;
+        }
+        const thread = currentThread?.();
+        /** @returns {unknown} */
+        const next = ()=>{
+            const call = owed.shift();
+            if (!call)
+            {
+                return 0;
+            }
+            const made = call(thread);
+            return typeof (/** @type {any} */ (made))?.then === 'function'
+                ? /** @type {Promise<unknown>} */ (made).then(next) : next();
+        };
+        return next();
+    };
 
     /**
      * @param {any} api
@@ -394,7 +431,8 @@ export function createPublisher({ publishInterface, unpublishInterface, cells })
         let adapter = adapters.get(api);
         if (!adapter)
         {
-            adapter = adapt(api, interfaces, forget, remember, forgetPointer, cells ?? null);
+            adapter = adapt(api, interfaces, forget, remember, forgetPointer, cells ?? null,
+                settleOwed);
             adapters.set(api, adapter);
         }
         return adapter;
@@ -465,6 +503,15 @@ export function createPublisher({ publishInterface, unpublishInterface, cells })
     const byPointer = new Map();
 
     return {
+        /**
+         * A call into the program to make once the Release being answered is
+         * done (`settleOwed`).
+         *
+         * @param {(thread: unknown) => unknown} call
+         */
+        owe(call){
+            owed.push(call);
+        },
         /**
          * @param {any} api
          * @param {InterfaceDescriptor[]} interfaces

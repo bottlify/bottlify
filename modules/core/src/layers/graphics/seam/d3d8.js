@@ -324,6 +324,10 @@ const E_FAIL = 0x80004005 | 0;
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [deps.callGuest]  A call into the program: its own objects' AddRef and
+ *     Release, which private data holds them by.
+ * @param {() => any} [deps.currentThread]
  * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
  *        A full-screen device's focus and device windows (`focus.js`).
  *        The hardware behind the device, as the assembling caller knows it.
@@ -344,7 +348,7 @@ const E_FAIL = 0x80004005 | 0;
  */
 export function createDirect3D8Seam(
     { focus: focusWindows = null, publisher, memory, screen, allocate, allocateCode,
-        divergence, cursor, resolution, identity,
+        divergence, cursor, resolution, identity, callGuest, currentThread,
         windowClientSize, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         traps = new Set(), phases, ringBytes },
@@ -417,7 +421,8 @@ export function createDirect3D8Seam(
         const wait = presents.present(now(), interval);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
-    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA,
+        callGuest, currentThread });
 
     /**
      * Each device's block (`shadow.js`): its command ring, the buffers its
@@ -2637,7 +2642,8 @@ export function createDirect3D8Seam(
     }));
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests,
-            undefined, IN_PLACE),
+            (/** @type {any} */ device)=>privateData.sweep(holder=>ownerOf(holder) === device),
+            IN_PLACE),
     ];
 
     /**

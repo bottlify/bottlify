@@ -203,6 +203,10 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [deps.callGuest]  A call into the program: its own objects' AddRef and
+ *     Release, which private data holds them by.
+ * @param {() => any} [deps.currentThread]
  * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
  *        A full-screen device's focus and device windows (`focus.js`).
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
@@ -234,7 +238,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  */
 export function createDirect3D9Seam(
     { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, resolution,
-        identity,
+        identity, callGuest, currentThread,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
@@ -280,7 +284,8 @@ export function createDirect3D9Seam(
         : D3DDEVICE_CREATION_PARAMETERS;
     const LOCKED_RECT = long ? D3DLOCKED_RECT64 : D3DLOCKED_RECT;
     const LOCKED_BOX = long ? D3DLOCKED_BOX64 : D3DLOCKED_BOX;
-    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA,
+        callGuest, currentThread });
     /**
      * The rate of the mode the device runs in: the one a full-screen device
      * asked for, when the display lists it, else the display's own. A program
@@ -3101,7 +3106,9 @@ export function createDirect3D9Seam(
         }));
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, synced(deviceMethods), deviceGuests,
-            undefined, IN_PLACE),
+            (/** @type {any} */ device)=>privateData.sweep(holder=>(owners.get(holder)
+                ?? (holder.container ? owners.get(holder.container) : null)) === device),
+            IN_PLACE),
     ];
 
     /**

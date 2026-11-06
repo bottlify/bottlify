@@ -437,3 +437,46 @@ test('an interface counted in the host keeps AddRef and Release at their traps',
     assert.equal(addRef.handler([inHost]), 2);
     assert.equal(addRef.handler([0xdeadbeef]), 0, 'no references: refused, not followed');
 });
+
+test('what an object that went owes the program is made before its Release is answered',
+    async()=>{
+        // A program's object its private data held is let go of by its own
+        // Release, waited for, on the releasing thread (Wine's test_fpu_setup).
+        /** @type {Map<string, any>} */
+        const handlers = new Map();
+        let next = 0x2000;
+        const vtables = createVtables({
+            memory: { writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+                /** @type {number} */ length)=>new Uint8Array(length) },
+            register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
+                handlers.set(name, fn);
+                return 0x1000 + handlers.size * 0x10;
+            },
+            heap: { allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes;
+                return at;
+            } },
+        });
+        const THREAD = { name: 'main' };
+        const seam = createPublisher({
+            publishInterface: (object, id)=>vtables.publish(object, id),
+            unpublishInterface: (object, id)=>vtables.unpublish(object, id),
+            currentThread: ()=>THREAD,
+        });
+        /** @type {string[]} */
+        const heard = [];
+        const api = counted();
+        const pointer = seam.publish(api, DESCRIPTORS, IID_ONE);
+        seam.owe(async thread=>{
+            assert.equal(thread, THREAD);
+            heard.push('Release of the program\'s object');
+        });
+        const answer = handlers.get(`${IID_ONE}::Release`).handler([pointer]);
+        assert.equal(typeof answer?.then, 'function', 'the answer waits');
+        assert.deepEqual(heard, ['Release of the program\'s object']);
+        assert.equal(await answer, 0);
+        const other = seam.publish(counted(2), DESCRIPTORS, IID_ONE);
+        assert.equal(handlers.get(`${IID_ONE}::Release`).handler([other]), 1,
+            'with nothing owed, at once');
+    });

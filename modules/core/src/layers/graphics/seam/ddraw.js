@@ -374,7 +374,8 @@ export function createDirectDrawSeam(
      */
     const exclusiveHolders = new Set();
 
-    const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA });
+    const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA,
+        callGuest, currentThread });
 
     /**
      * Objects CoCreateInstance made, which wait for Initialize as COM leaves them.

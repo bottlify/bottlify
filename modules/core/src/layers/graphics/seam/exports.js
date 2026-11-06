@@ -228,7 +228,7 @@ export function createGraphicsLibraries(
 {
     const guestCode = guestCodeAsked && pointerSize === 4;
     const publisher = shared ?? createPublisher({
-        publishInterface, unpublishInterface,
+        publishInterface, unpublishInterface, currentThread,
         cells: guestCode && !guestTraps.includes('counts') && allocate && memory?.readU32
             && memory.writeU32
             ? createCountCells({ allocate, memory }) : undefined,
@@ -369,12 +369,12 @@ export function createGraphicsLibraries(
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, resolution, ringBytes,
-        windowClientSize, now, waitUntil, presented, refresh, phases, focus,
-        identity: ()=>graphics.adapter?.() ?? null,
+        windowClientSize, now, waitUntil, presented, refresh, phases, focus, callGuest,
+        currentThread, identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
-        focus,
+        focus, callGuest, currentThread,
         waitUntil, presented, refresh, phases, allocate: guestAllocate,
         allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), ringBytes, pointerSize, floatResult,
