@@ -66,7 +66,8 @@ import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { capabilityWords } from '../d3d9/caps.js';
-import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, PALETTE_BYTES } from '../d3d9/device.js';
+import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, EX_SURFACE_USAGE, PALETTE_BYTES }
+    from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
@@ -3092,13 +3093,16 @@ export function createDirect3D9Seam(
      * nothing here shares a resource across devices.
      *
      * @param {string} method
-     * @param {(args: number[]) => { out: number, shared: number,
+     * @param {(args: number[]) => { out: number, shared: number, usage?: number,
      *     call: (device: any, held: { surface?: any }) => number }} read
+     *     `usage` given: a usage the create takes no part of is refused before the
+     *     pointer is touched (Wine's d3d9ex test_create_depth_stencil_surface_ex)
      */
     const exSurfaceCreate = (method, read)=>
         (/** @type {any} */ device, /** @type {number[]} */ args)=>{
-            const { out, shared, call } = read(args);
-            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            const { out, shared, usage, call } = read(args);
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0
+                || ((usage ?? 0) & ~EX_SURFACE_USAGE) !== 0)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3164,7 +3168,7 @@ export function createDirect3D9Seam(
         CheckDeviceState: (device, [window])=>device.CheckDeviceState(window >>> 0),
         CreateRenderTargetEx: exSurfaceCreate('CreateRenderTargetEx',
             ([width, height, format, samples, , lockable, out, shared, usage])=>({
-                out, shared,
+                out, shared, usage,
                 call: (device, held)=>singleSampled(samples)
                     ?? device.CreateRenderTargetEx(width >>> 0, height >>> 0,
                         format >>> 0, lockable !== 0, usage >>> 0, held),
@@ -3177,7 +3181,7 @@ export function createDirect3D9Seam(
             })),
         CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
             ([width, height, format, samples, , , out, shared, usage])=>({
-                out, shared,
+                out, shared, usage,
                 call: (device, held)=>singleSampled(samples)
                     ?? device.CreateDepthStencilSurfaceEx(width >>> 0,
                         height >>> 0, format >>> 0, usage >>> 0, held),

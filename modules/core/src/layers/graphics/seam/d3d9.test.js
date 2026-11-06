@@ -1790,14 +1790,15 @@ test('IDirect3D9Ex answers modes as D3DDISPLAYMODEEX, its LUID, and makes Ex dev
     assert.equal(deviceCall('ResetEx', [parameters, mode]), D3DERR_INVALIDCALL,
         'a window takes no mode');
 
-    // The depth stencil Ex create hands back through the pointer, and clears
-    // it when it refuses, as the plain creates do (Wine's d3d9ex
-    // test_format_unknown).
+    // The depth stencil Ex create hands back through the pointer, leaves it
+    // alone when it refuses a usage (Wine's d3d9ex
+    // test_create_depth_stencil_surface_ex), and clears it when it refuses
+    // anything else, as the plain creates do (test_format_unknown).
     const surface = 0x71c0;
     h.box.memory.writeU32(surface, 0xdeadbeef);
     assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
         surface, 0, 2]), D3DERR_INVALIDCALL);
-    assert.equal(h.box.memory.readU32(surface), 0);
+    assert.equal(h.box.memory.readU32(surface), 0xdeadbeef);
     for (const [name, args] of /** @type {[string, number[]][]} */ ([
         ['CreateRenderTargetEx', [64, 64, 0, 0, 0, 0, surface, 0, 0]],
         ['CreateDepthStencilSurfaceEx', [64, 64, 0, 0, 0, 1, surface, 0, 0]],
