@@ -39,6 +39,7 @@ import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields, D3DCAPS8 } from './structs.js';
 import { GL_COMMANDS } from '../opengl/commands.js';
 import { commandCode } from './shadow.js';
+import { createShaderValidator } from './shader-validator.js';
 
 const DD_OK = 0;
 /** DDERR_INVALIDPARAMS. */
@@ -607,28 +608,30 @@ export function createGraphicsLibraries(
             /**
              * IDirect3DShaderValidator9 *Direct3DShaderValidatorCreate9(void)
              *
-             * The validator a shader assembler drives a token stream through:
-             * Begin, Instruction and End answer S_OK, judging nothing, but an
-             * instruction of no tokens fails. Windows names no interface
-             * identifier for it, so nothing can query its way to it.
+             * The validator a shader assembler drives a token stream through
+             * (`createShaderValidator`). Windows names no interface identifier
+             * for it, so nothing can query its way to it.
              */
             Direct3DShaderValidatorCreate9: {
                 argBytes: 0,
-                handler: ()=>publishInterface(createComObject(SHADER_VALIDATOR, {
-                    interfaces: [{
-                        id: SHADER_VALIDATOR,
-                        methods: [
-                            { name: 'Begin', argBytes: 16, invoke: ()=>S_OK },
-                            {
-                                name: 'Instruction',
-                                argBytes: 20,
-                                invoke: (/** @type {any} */ _, /** @type {number[]} */ args)=>
-                                    ((args[3] >>> 0) === 0 ? E_FAIL : S_OK),
-                            },
-                            { name: 'End', argBytes: 4, invoke: ()=>S_OK },
-                        ],
-                    }],
-                }), SHADER_VALIDATOR),
+                handler: ()=>{
+                    const validator = createShaderValidator({ memory, callGuest, currentThread,
+                        allocate: processHeapAllocate });
+                    /** @param {'Begin' | 'Instruction' | 'End'} name */
+                    const method = name=>(/** @type {any} */ _, /** @type {number[]} */ args)=>
+                        validator[name](args);
+                    return publishInterface(createComObject(SHADER_VALIDATOR, {
+                        interfaces: [{
+                            id: SHADER_VALIDATOR,
+                            methods: [
+                                { name: 'Begin', argBytes: 16, invoke: method('Begin') },
+                                { name: 'Instruction', argBytes: 20,
+                                    invoke: method('Instruction') },
+                                { name: 'End', argBytes: 4, invoke: method('End') },
+                            ],
+                        }],
+                    }), SHADER_VALIDATOR);
+                },
             },
 
             /**

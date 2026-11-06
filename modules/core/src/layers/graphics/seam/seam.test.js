@@ -808,9 +808,14 @@ test('Direct3DShaderValidatorCreate9 hands out a validator that answers the stre
     assert.notEqual(validator, 0);
     // Begin(callback, context, arg3), Instruction(file, line, tokens, count), End().
     assert.deepEqual([3, 4, 5].map(slot=>box.argBytesOf(validator, slot)), [16, 20, 4]);
+    // A ps_3_0 version token, then the end token (shader-validator.test.js
+    // holds what it judges).
+    box.memory.writeU32(0x100, 0xffff0300);
+    box.memory.writeU32(0x104, 0x0000ffff);
     assert.equal(box.call(validator, 3, [0, 0, 0]), 0);
-    assert.equal(box.call(validator, 4, [0, 0, 0x100, 3]), 0);
+    assert.equal(box.call(validator, 4, [0, 0, 0x100, 1]), 0);
     assert.equal(box.call(validator, 4, [0, 0, 0x100, 0]) >>> 0, 0x80004005, 'no tokens');
+    assert.equal(box.call(validator, 4, [0, 0, 0x104, 1]), 0);
     assert.equal(box.call(validator, 5), 0);
     assert.equal(box.call(validator, 2), 0, 'the last reference released');
 });
