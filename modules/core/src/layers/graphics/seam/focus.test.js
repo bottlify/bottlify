@@ -21,6 +21,14 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
     /** @type {Map<number, number>} */
     const procs = new Map([[FOCUS, PROGRAM_PROC]]);
     let style = visible ? 0x10000000 : 0;
+    let exStyle = 0;
+    /** The thread timers set, by id: their period and procedure. */
+    /** @type {Map<number, { ms: number, proc: number }>} */
+    const timers = new Map();
+    let nextTimer = 1;
+    /** The procedures made other than the focus window's, by their address. */
+    /** @type {Map<number, (args: number[]) => unknown>} */
+    const procedures = new Map();
     let iconic = false;
     /** @type {((args: number[]) => unknown) | null} */
     let hook = null;
@@ -36,7 +44,13 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
             }
             return before;
         },
-        GetWindowLongA: ([hwnd, index])=>(index === -4 ? procs.get(hwnd) ?? 0 : style),
+        GetWindowLongA: ([hwnd, index])=>(index === -4 ? procs.get(hwnd) ?? 0
+            : index === -20 ? exStyle : style),
+        SetTimer: ([, , ms, proc])=>{
+            timers.set(nextTimer, { ms, proc });
+            return nextTimer++;
+        },
+        KillTimer: ([, id])=>(timers.delete(id) ? 1 : 0),
         CallWindowProcA: ()=>0,
         DefWindowProcA: ()=>0,
         SetForegroundWindow: ()=>1,
@@ -56,10 +70,14 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
             nested?.([FOCUS, 0x7e, 0, 0]);
             return 1;
         },
-        SetWindowPos: ([, , , , , , flags])=>{
+        SetWindowPos: ([, after, , , , , flags])=>{
             if ((flags & 0x40) !== 0)
             {
                 style |= 0x10000000;
+            }
+            if ((flags & 0x4) === 0 && (after === 0xffffffff || after === 0xfffffffe))
+            {
+                exStyle = after === 0xffffffff ? exStyle | 0x8 : exStyle & ~0x8;
             }
             return 1;
         },
@@ -76,7 +94,13 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
             calls.push([name, args]);
             return table[name](args);
         } }),
-        procedure: (_, handler)=>{
+        procedure: (name, handler)=>{
+            if (name !== 'd3d focus window')
+            {
+                const at = STUB + 0x100 * (procedures.size + 1);
+                procedures.set(at, handler);
+                return at;
+            }
             hook = handler;
             nested = handler;
             return STUB;
@@ -103,8 +127,19 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
     const hide = ()=>{
         style &= ~0x10000000;
     };
-    return { windows, device, calls, procs, send, covered, hide, losses,
-        names: ()=>calls.map(([name])=>name) };
+    /** Every thread timer set runs its procedure once, as its period passes. */
+    const tick = ()=>{
+        for (const [id, { proc }] of timers)
+        {
+            procedures.get(proc)?.([0, 0x113, id, 0]);
+        }
+    };
+    /** @param {number} bits */
+    const setExStyle = bits=>{
+        exStyle = bits;
+    };
+    return { windows, device, calls, procs, send, covered, hide, losses, timers, tick, setExStyle,
+        exStyle: ()=>exStyle, names: ()=>calls.map(([name])=>name) };
 }
 
 const HOW = { focus: FOCUS, window: DEVICE_WINDOW, fullscreen: true, noWindowChanges: false,
@@ -378,4 +413,33 @@ test('a device that never lost the activation takes nothing back when told it ha
     h.send(0x1c, 1);
     assert.ok(h.names().includes('SetWindowPos') || h.names().includes('ShowWindow'),
         'once lost, it is taken back');
+});
+
+test('an exclusive DirectDraw window is put back above the others every 1.5 seconds, while the'
+    + ' level is held (ddraw test_window_style)', ()=>{
+    const DDRAW = { ...HOW, focus: FOCUS, window: FOCUS, announce: true };
+    const h = harness({ foreground: FOCUS });
+    h.windows.take(h.device, DDRAW);
+    assert.deepEqual([...h.timers.values()].map(({ ms })=>ms), [1500], 'one thread timer');
+    assert.equal(h.exStyle() & 0x8, 0x8);
+    h.setExStyle(0);
+    h.hide();
+    h.calls.length = 0;
+    h.tick();
+    assert.equal(h.exStyle() & 0x8, 0x8, 'above the others again');
+    assert.deepEqual(h.calls.filter(([name])=>name === 'SetWindowPos').map(([, args])=>args),
+        [[FOCUS, 0xffffffff, 0, 0, 0, 0, 0x1 | 0x2 | 0x10]], 'and nothing else: not shown');
+    h.calls.length = 0;
+    h.tick();
+    assert.ok(!h.names().includes('SetWindowPos'), 'a window still above is left alone');
+
+    h.windows.take(h.device, { ...DDRAW, fullscreen: false });
+    assert.equal(h.timers.size, 0, 'the level given back stops it');
+    const kept = harness({ foreground: FOCUS });
+    kept.windows.take(kept.device, { ...DDRAW, noWindowChanges: true });
+    assert.equal(kept.timers.size, 0, 'a program that keeps its windows has none');
+    const released = harness({ foreground: FOCUS });
+    released.windows.take(released.device, DDRAW);
+    released.windows.release(released.device);
+    assert.equal(released.timers.size, 0, 'nor does an object gone');
 });

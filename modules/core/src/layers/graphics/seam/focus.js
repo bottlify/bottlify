@@ -38,8 +38,11 @@
  * activates it after, above the others and shown only when it was the
  * foreground window, its frame kept; and a mode set while it is held, by
  * anyone, brings the window to the new size before the program hears of the
- * mode. Losing the activation loses the surfaces in video memory, the
- * activation going to another thread's window as well; regaining it sets the
+ * mode. While it holds the window, a timer of the thread that took the level
+ * puts the window back above the others every 1.5 seconds when something took
+ * it from there, and leaves it hidden if it was hidden. Losing the
+ * activation loses the surfaces in video memory, the activation going to
+ * another thread's window as well; regaining it sets the
  * object's own mode again, and giving the level back takes the window from
  * above the others (Wine's ddraw test_wndproc, test_window_style,
  * test_coop_level_mode_set, test_lost_device).
@@ -47,6 +50,10 @@
 
 const GWLP_WNDPROC = -4;
 const GWL_STYLE = -16;
+const GWL_EXSTYLE = -20;
+const WS_EX_TOPMOST = 0x00000008;
+/** How often an exclusive DirectDraw window is put back above the others. */
+const TOPMOST_CHECK_MS = 1500;
 const WS_VISIBLE = 0x10000000;
 
 const WM_ACTIVATEAPP = 0x001c;
@@ -104,6 +111,8 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  *           DirectDraw's: sets the object's mode again as the application is
  *           active again, telling every window itself.
  * @property {boolean} away  whether the activation was lost since it was held
+ * @property {number} [watch]  DirectDraw's: the thread timer that keeps the
+ *           window above the others, or 0
  */
 
 /**
@@ -126,6 +135,36 @@ export function createFocusWindows({ user32, procedure, cover, states }){
     /** @type {Map<FocusDevice, Held>} */
     const held = new Map();
     let stub = 0;
+    let watcher = 0;
+    /**
+     * The thread timer's procedure: every DirectDraw window held is put back
+     * above the others, where something took it from there.
+     */
+    const keepAbove = ()=>inTurn([...held.values()]
+        .filter(one=>one.announce && one.changes
+            && (Number(call('GetWindowLongA', [one.window, GWL_EXSTYLE])) & WS_EX_TOPMOST) === 0)
+        .map(one=>()=>call('SetWindowPos', [one.window, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE])));
+    /** @param {Held} one */
+    const watch = one=>{
+        if (one.announce && one.changes && !one.watch)
+        {
+            watcher ||= procedure('ddraw topmost check', ()=>andThen(keepAbove(), ()=>0));
+            one.watch = Number(call('SetTimer', [0, 0, TOPMOST_CHECK_MS, watcher])) >>> 0;
+        }
+        else if ((!one.announce || !one.changes) && one.watch)
+        {
+            unwatch(one);
+        }
+    };
+    /** @param {Held} one */
+    const unwatch = one=>{
+        if (one.watch)
+        {
+            call('KillTimer', [0, one.watch]);
+            one.watch = 0;
+        }
+    };
     /** The device windows an extended device has been made on. */
     /** @type {Set<number>} */
     const madeOn = new Set();
@@ -410,6 +449,7 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 if (before)
                 {
                     unhook(before);
+                    unwatch(before);
                     held.delete(device);
                     // DirectDraw's window comes down from above the others,
                     // unless the program keeps its windows.
@@ -435,6 +475,7 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 reapply: how.reapply, announce: how.announce === true, regain: how.regain });
             held.set(device, one);
             hook(focus).devices.add(one);
+            watch(one);
             if (one.announce)
             {
                 // Over the mode, frame and all. Unless another window of its
@@ -497,6 +538,7 @@ export function createFocusWindows({ user32, procedure, cover, states }){
             {
                 held.delete(device);
                 unhook(one);
+                unwatch(one);
             }
         },
     };
