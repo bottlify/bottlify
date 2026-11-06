@@ -7580,3 +7580,37 @@ test('a top-level window minimised with the focus in it lets it go before it mov
     assert.deepEqual(order.slice(0, 2), [WM_KILLFOCUS, WM_WINDOWPOSCHANGING]);
     assert.equal(fns.GetFocus.handler(), 0);
 });
+
+test('a window goes inside another process\'s window, and both ask the tree across them', ()=>{
+    // opengl32's test_other_process_parent: a program reparents its window
+    // into a child another process made, and back out.
+    const GA_PARENT = 1;
+    const GA_ROOT = 2;
+    const directory = createWindowDirectory();
+    const first = setup({ directory, processId: 0x100,
+        caller: { current: { name: 'main', id: 0x104 } } });
+    const second = setup({ directory, processId: 0x200,
+        caller: { current: { name: 'other', id: 0x204 } } });
+    for (const each of [first, second])
+    {
+        putClass(each.memory);
+        each.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    }
+    const toplevel = createWindow(first.fns, first.memory);
+    const child = createWindow(first.fns, first.memory, { style: WS_CHILD, parent: toplevel });
+    const mine = createWindow(second.fns, second.memory);
+    const desktop = second.fns.GetDesktopWindow.handler();
+    second.fns.SetWindowLongA.handler([mine, -16, WS_CHILD | WS_VISIBLE]);
+    assert.equal(second.fns.SetParent.handler([mine, child]), desktop);
+    assert.equal(second.fns.GetParent.handler([mine]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_PARENT]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), toplevel,
+        'the root is found through the other process\'s windows');
+    assert.equal(second.fns.GetParent.handler([child]), toplevel,
+        'another process\'s window, as it describes itself');
+    assert.equal(second.fns.GetAncestor.handler([child, GA_ROOT]), toplevel);
+    // Nor can another process's window go inside one inside it.
+    assert.equal(first.fns.SetParent.handler([child, mine]), 0);
+    assert.equal(second.fns.SetParent.handler([mine, 0]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), mine);
+});

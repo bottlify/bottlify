@@ -7326,7 +7326,9 @@ export function createWindowFunctions(host){
         describe: hwnd=>{
             const record = live(hwnd);
             return record ? { threadId: creatorOf(record) ?? 0,
-                className: String(record.className), title: record.title } : null;
+                className: String(record.className), title: record.title,
+                parent: record.parent ?? 0, owner: record.owner ?? 0,
+                style: record.style >>> 0 } : null;
         },
         post: (hwnd, message, wParam, lParam)=>{
             if (!live(hwnd))

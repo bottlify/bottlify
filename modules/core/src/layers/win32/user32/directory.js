@@ -98,6 +98,10 @@ const WINDOW_STRIDE = 4;
  * @property {number} threadId
  * @property {string} className
  * @property {string} title
+ * @property {number} [parent]  the window it is inside, zero for the desktop: one of
+ *     any process's (SetParent takes another process's window as a parent)
+ * @property {number} [owner]
+ * @property {number} [style]
  */
 
 /**
