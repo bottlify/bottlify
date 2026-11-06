@@ -66,7 +66,8 @@ export function direct3D7Root(ddraw, services, surfaces = null){
  * @property {boolean} palette
  * @property {number} mipMapCount
  * @property {{ buffer: number, width: number, height: number, pitch: number,
- *     uniqueness: number }[]} levels  the surface and each of its mip levels
+ *     bytesPerPixel: number, uniqueness: number }[]} levels  the surface and each of its
+ *     mip levels
  * @property {number | null} colorKey  the source blit key's low colour
  * @property {any} depth  the depth buffer attached, a surface already described
  */
@@ -108,10 +109,11 @@ export function createStandIns(){
         level.width = described.width;
         level.height = described.height;
         level.pitch = described.pitch;
+        level.bytesPerPixel = described.bytesPerPixel;
         level.uniqueness = described.uniqueness;
     };
     const level = ()=>({
-        buffer: 0, width: 0, height: 0, pitch: 0, uniqueness: 0,
+        buffer: 0, width: 0, height: 0, pitch: 0, bytesPerPixel: 0, uniqueness: 0,
         /** @type {any} */
         mipNext: null,
         uniquenessValue(){
@@ -267,7 +269,8 @@ export function recordedDirect3D7(ddraw, services, transport){
         palette: surface.palette !== null,
         mipMapCount: surface.mipMapCount,
         levels: levelsOf(surface).map(level=>({ buffer: level.buffer, width: level.width,
-            height: level.height, pitch: level.pitch, uniqueness: level.uniquenessValue() })),
+            height: level.height, pitch: level.pitch, bytesPerPixel: level.bytesPerPixel,
+            uniqueness: level.uniquenessValue() })),
         colorKey: surface.getColorKey(DDCKEY_SRCBLT).key?.low ?? null,
         depth,
     });
@@ -357,10 +360,20 @@ export function recordedDirect3D7(ddraw, services, transport){
         return null;
     };
 
+    /**
+     * The device that draws into a surface, or tests against it: a depth
+     * buffer is read back and written as a target is.
+     *
+     * @param {any} surface
+     */
+    const userOf = surface=>((surface.caps & DDSCAPS_ZBUFFER) === 0
+        ? drawingInto(surface)
+        : [...devices].find(device=>depthOf(device.target) === surface) ?? null);
+
     // What DirectDraw tells a device of its surfaces, told the played one.
     const stopWatchingPixels = ddraw.watchPixels?.({
         readBack: (/** @type {any} */ surface)=>{
-            const device = (surface.caps & DDSCAPS_ZBUFFER) === 0 ? drawingInto(surface) : null;
+            const device = userOf(surface);
             if (!device)
             {
                 return null;
@@ -370,7 +383,7 @@ export function recordedDirect3D7(ddraw, services, transport){
             return answer instanceof Promise ? answer.then(()=>undefined) : null;
         },
         written: (/** @type {any} */ surface)=>{
-            const device = (surface.caps & DDSCAPS_ZBUFFER) === 0 ? drawingInto(surface) : null;
+            const device = userOf(surface);
             if (device)
             {
                 ship(surface.buffer, surface.pitch * surface.height);
