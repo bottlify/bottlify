@@ -68,7 +68,8 @@ import {
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
 import {
-    DEVICE_STATE, LIGHT_ENABLED, answerViewport, createPalettes, depthWordsOf, rebound,
+    DEVICE_STATE, DISPLAY_MODE_FORMATS, LIGHT_ENABLED, answerViewport, createPalettes,
+    depthWordsOf, rebound,
 } from '../d3d9/device.js';
 import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -416,6 +417,23 @@ function reportPresentParameters(parameters){
     parameters.backBufferCount = reportedBackBufferCount(parameters);
 }
 
+/** The display format a question names when none is given. @type {number} */
+const D3D8_DEFAULT_ADAPTER = D3DFMT.X8R8G8B8;
+
+/** The formats a Direct3D 8 display can be in. @type {ReadonlySet<number>} */
+const D3D8_DISPLAY_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.X8R8G8B8]));
+
+/**
+ * Whether a buffer can be made with this usage in this pool: none is a render
+ * target or a depth-stencil, and none lives in the scratch pool (Wine's d3d8
+ * test_resource_access).
+ *
+ * @param {number} usage @param {number} pool
+ */
+const bufferTakes = (usage, pool)=>pool !== D3DPOOL.SCRATCH
+    && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) === 0;
+
 /**
  * The object a program gets from Direct3DCreate8. It exists here for one
  * reason: device creation can fail on its parameters, and the caller has to be
@@ -468,9 +486,17 @@ export function createDirect3D8(options = {}){
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
          * @param {number} format
-         * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
+         * @param {number} [adapterFormat]  The display format asked about.
+         * @returns {number} D3D_OK, D3DERR_NOTAVAILABLE, or D3DERR_INVALIDCALL for
+         *     no adapter format at all
          */
-        CheckDeviceFormat(usage, resourceType, format){
+        CheckDeviceFormat(usage, resourceType, format, adapterFormat = D3D8_DEFAULT_ADAPTER){
+            // Asked against no display format, the question is not one
+            // (Wine's d3d8 test_check_device_format).
+            if (adapterFormat === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if (resourceType === D3DRTYPE.VOLUMETEXTURE)
             {
                 return volumeCreateResult({
@@ -497,8 +523,18 @@ export function createDirect3D8(options = {}){
          * @param {number} backBufferFormat
          * @returns {number}
          */
-        CheckDeviceType(adapterFormat, backBufferFormat){
-            return isColourFormat(adapterFormat) && isColourFormat(backBufferFormat)
+        CheckDeviceType(adapterFormat, backBufferFormat, windowed = true){
+            // One of the three display formats, with modes in it full screen,
+            // and a back buffer of it or its alpha twin: Direct3D 8 converts
+            // none when it presents, windowed or not (Wine's d3d8
+            // test_display_formats).
+            const back = windowed && backBufferFormat === D3DFMT.UNKNOWN ? adapterFormat
+                : backBufferFormat;
+            const twin = { [D3DFMT.X8R8G8B8]: D3DFMT.A8R8G8B8,
+                [D3DFMT.X1R5G5B5]: D3DFMT.A1R5G5B5 }[adapterFormat];
+            return D3D8_DISPLAY_FORMATS.has(adapterFormat)
+                && (windowed || DISPLAY_MODE_FORMATS.has(adapterFormat))
+                && (back === adapterFormat || back === twin)
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
@@ -3105,6 +3141,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ buffer?: any }} out
          */
         CreateVertexBuffer(length, usage, fvf, pool, out){
+            if (!bufferTakes(usage, pool))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             out.buffer = createBuffer({ length, usage, pool, fvf, type: D3DRTYPE.VERTEXBUFFER });
             return D3D_OK;
         },
@@ -3117,6 +3157,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ buffer?: any }} out
          */
         CreateIndexBuffer(length, usage, format, pool, out){
+            if (!bufferTakes(usage, pool))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             out.buffer = createBuffer({ length, usage, pool, format, type: D3DRTYPE.INDEXBUFFER });
             return D3D_OK;
         },

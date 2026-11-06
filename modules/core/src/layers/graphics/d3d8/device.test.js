@@ -8,9 +8,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
-    D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER, D3DPOOL, D3DPT, D3DRS,
-    D3DRS_MAX,
-    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
+    D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER,
+    D3DPOOL, D3DPT, D3DRS, D3DRS_MAX,
+    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DRTYPE, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS,
+    D3DTSS,
     D3DUSAGE, D3D_OK,
     dwordToFloat, floatToDword, isShaderHandle, surfaceBytes,
 } from './constants.js';
@@ -2339,6 +2340,32 @@ test('an image surface and a cube face check a lock rectangle in every pool, a l
     image.surface.release();
     cube.texture.release();
     flat.texture.release();
+    assertFullyReleased(device);
+});
+
+test('Direct3D 8 answers display formats, buffers and intervals as Windows does', ()=>{
+    // Wine's d3d8 test_display_formats, test_check_device_format,
+    // test_resource_access and test_swapchain_parameters.
+    const d3d = createDirect3D8();
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8, false), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X1R5G5B5, true), D3DERR_NOTAVAILABLE,
+        'no conversion when a windowed chain presents');
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.X1R5G5B5, false),
+        D3DERR_NOTAVAILABLE, 'no modes in X1R5G5B5');
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.UNKNOWN, true), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.UNKNOWN),
+        D3DERR_INVALIDCALL);
+    for (const interval of [2, 3, 0x80000001])
+    {
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD,
+            fullScreenPresentationInterval: interval }, {}), D3DERR_INVALIDCALL, `${interval}`);
+    }
+    const device = createDevice();
+    for (const [usage, pool] of [[1, D3DPOOL.DEFAULT], [2, D3DPOOL.MANAGED], [0, 3]])
+    {
+        assert.equal(device.CreateVertexBuffer(16, usage, 0, pool, {}), D3DERR_INVALIDCALL);
+        assert.equal(device.CreateIndexBuffer(16, usage, 101, pool, {}), D3DERR_INVALIDCALL);
+    }
     assertFullyReleased(device);
 });
 

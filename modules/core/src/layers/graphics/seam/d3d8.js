@@ -56,7 +56,7 @@ import { createCursorTeller } from './cursor.js';
 import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
-import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
+import { PRESENTATION_INTERVALS, TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
@@ -148,7 +148,6 @@ const D3DCURSORCAPS_LOWRES = 0x00000002;
 const D3DCAPS2_CANRENDERWINDOWED = 0x00080000;
 const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 
-const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
 /** A windowed chain that waits for the retrace before its copy. */
 const D3DSWAPEFFECT_COPY_VSYNC = 4;
@@ -2730,7 +2729,7 @@ export function createDirect3D8Seam(
             // A full-screen device's ramp is claimed where the display shows it.
             Caps2: D3DCAPS2_CANRENDERWINDOWED
                 | (caps.fullscreenGamma === true ? D3DCAPS2_FULLSCREENGAMMA : 0),
-            PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
+            PresentationIntervals: PRESENTATION_INTERVALS,
             CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
             DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION
                 | D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2
@@ -2881,12 +2880,14 @@ export function createDirect3D8Seam(
         // is answered by the object behind this from the same tables its own
         // creates consult, so a format approved here is one that can be made.
         /** @param {any} root @param {number[]} args */
-        CheckDeviceType: (root, [, , adapterFormat, backBufferFormat])=>
-            root.CheckDeviceType(adapterFormat >>> 0, backBufferFormat >>> 0),
+        CheckDeviceType: (root, [, , adapterFormat, backBufferFormat, windowed])=>
+            root.CheckDeviceType(adapterFormat >>> 0, backBufferFormat >>> 0,
+                (windowed >>> 0) !== 0),
 
         /** @param {any} root @param {number[]} args */
-        CheckDeviceFormat: (root, [, , , usage, resourceType, format])=>
-            root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0),
+        CheckDeviceFormat: (root, [, , adapterFormat, usage, resourceType, format])=>
+            root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0,
+                adapterFormat >>> 0),
 
         /** @param {any} root @param {number[]} args */
         CheckDeviceMultiSampleType: (root, [, , , , type])=>
