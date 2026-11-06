@@ -945,6 +945,13 @@ surface, its memory and its GPU copy alive to the end of the process; a program 
 can only be one that releases a surface once more than it holds it, which here frees the surface
 early instead. *2026-11-06.*
 
+**A95. An indexed draw of nothing from a vertex buffer succeeds every time.** Wine's ddraw7
+test_draw_primitive finds Windows answering E_FAIL to the first `DrawIndexedPrimitiveVB` of no
+indices from a buffer, and D3D_OK to the same call made again at once (Wine marks it todo). What
+makes the first one fail is not known: the buffer, the device and the arguments are the same both
+times. A draw of nothing draws nothing, and every other draw of nothing in the same test
+succeeds, so here it succeeds too. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
