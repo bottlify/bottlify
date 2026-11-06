@@ -2031,7 +2031,8 @@ test('a managed texture keeps a priority; other textures refuse one and other su
     ()=>{
         // ddraw7.c test_resource_priority (11094-11175, 11201): managed
         // textures start at zero and read back what was set; an unmanaged
-        // texture and a mip sublevel are DDERR_INVALIDPARAMS, a surface
+        // texture, a mip sublevel and a cube face beside the one handed back
+        // are DDERR_INVALIDPARAMS, a surface
         // that is no texture DDERR_INVALIDOBJECT, and a refusal leaves the
         // caller's variable alone.
         const DDSCAPS2_TEXTUREMANAGE = 0x10;
@@ -2077,6 +2078,24 @@ test('a managed texture keeps a priority; other textures refuse one and other su
 
         assert.equal(h.release(sublevel), 1);
         assert.equal(h.release(top), 0);
+
+        // A managed cube map keeps one priority, on the face handed back.
+        const DDSCAPS2_CUBEMAP = 0x200;
+        const DDSCAPS2_CUBEMAP_ALLFACES = 0xfc00;
+        const DDSCAPS2_CUBEMAP_NEGATIVEZ = 0x8000;
+        const cube = h.createSurface7(ddraw, { caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX
+            | DDSCAPS_MIPMAP, caps2: DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_ALLFACES
+            | DDSCAPS2_TEXTUREMANAGE, width: 32, height: 32 });
+        assert.equal(h.surface7(cube, 'SetPriority', [1]), DD_OK);
+        h.box.bytes.fill(0, 0x5b00, 0x5b10);
+        h.box.memory.writeU32(0x5b04, DDSCAPS2_CUBEMAP_NEGATIVEZ);
+        assert.equal(h.surface7(cube, 'GetAttachedSurface', [0x5b00, 0x5b20]), DD_OK);
+        const face = h.box.memory.readU32(0x5b20);
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.surface7(face, 'GetPriority', [out]), DDERR_INVALIDPARAMS);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef);
+        assert.equal(h.release(face), 1);
+        assert.equal(h.release(cube), 0);
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });

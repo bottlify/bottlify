@@ -1176,8 +1176,11 @@ export function createDirectDraw(options = {}){
             {
                 return DDERR_INVALIDOBJECT;
             }
+            // The manager evicts a texture whole: a mip level or a cube face
+            // the runtime made beside the one handed back has no priority of
+            // its own (test_resource_priority).
             return (spec.caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0
-                || sublevel
+                || sublevel || ((spec.caps2 & DDSCAPS2_CUBEMAP) !== 0 && spec.implicit)
                 ? DDERR_INVALIDPARAMS
                 : DD_OK;
         };
