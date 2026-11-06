@@ -935,6 +935,16 @@ from them. No one scale of the radius or the distance gives those answers and th
 together, so the rule behind them is not known; a program that culls by the answer draws, at
 most, an object Windows would have culled. It stands until the rule is found. *2026-11-06.*
 
+**A94. A surface taken out of a flip chain gives no reference to the surface after it.** On
+Windows, `DeleteAttachedSurface` of a buffer in a flip chain leaves the surface that followed it
+with one reference more than before, which nothing gives back: Wine's ddraw1 test_flip (the
+front buffer, after a back buffer is taken from behind another) and test_surface_attachment (the
+first back buffer, after the second is taken from the front) expect it, Wine itself marks both
+todo, and the test's own comment calls it a DirectDraw bug. Reproducing it would keep that
+surface, its memory and its GPU copy alive to the end of the process; a program that counts on it
+can only be one that releases a surface once more than it holds it, which here frees the surface
+early instead. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

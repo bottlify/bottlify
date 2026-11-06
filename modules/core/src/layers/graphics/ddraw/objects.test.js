@@ -802,6 +802,48 @@ test('a chain the program attaches gives its head FRONTBUFFER, the buffer behind
     }
 });
 
+test('a front buffer attached to a lone buffer leads their chain (ddraw1 test_flip)', ()=>{
+    const ddraw = withLevel({ version: 1 });
+    const back = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER });
+    const front = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_FRONTBUFFER });
+
+    assert.equal(back.addAttachedSurface(front), DD_OK);
+    assert.equal(front.refCount, 2, 'the surface attached is held, as any attachment');
+    assert.equal(back.refCount, 1);
+    assert.equal(front.flip(null), DD_OK, 'and it is the one that flips');
+    assert.equal(front.deleteAttachedSurface(back), DDERR_CANNOTDETACHSURFACE,
+        'it cannot let go of the buffer from its own end');
+    assert.equal(back.deleteAttachedSurface(front), DD_OK);
+    assert.equal(back.refCount, 1);
+    assert.equal(front.refCount, 1);
+
+    assert.equal(front.caps & DDSCAPS_FRONTBUFFER, 0, 'the chain took its FRONTBUFFER with it');
+    assert.equal(back.release(), 0);
+    assert.equal(front.release(), 0);
+
+    const behind = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER });
+    const leader = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_FRONTBUFFER });
+    assert.equal(behind.addAttachedSurface(leader), DD_OK);
+    assert.equal(behind.release(), 0, 'the buffer behind going lets go of the front it holds');
+    assert.equal(leader.refCount, 1);
+    assert.equal(leader.caps & DDSCAPS_FLIP, 0, 'and the front is out of the chain');
+    assert.equal(leader.release(), 0);
+});
+
+test('a primary in video memory takes a buffer only under exclusive mode', ()=>{
+    const ddraw = withLevel({ version: 1, level: DDSCL_NORMAL });
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE },
+        { version: 1 });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    const back = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER,
+        width: primary.width, height: primary.height });
+
+    assert.equal(primary.addAttachedSurface(back), DDERR_NOEXCLUSIVEMODE);
+    assert.equal(back.refCount, 1);
+    assert.equal(back.release(), 0);
+    assert.equal(primary.release(), 0);
+});
+
 test('the seventh generation attaches only a depth buffer, no generation one of another size, and'
     + ' an attachment is the generation\'s it was made through (test_surface_attachment)', ()=>{
     const SEVENTH = 'surface 7';

@@ -363,8 +363,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {(value: number) => void} setBuffer
  * @property {(value: number) => void} setCaps
  * @property {(previous: Surface | null) => void} setFlipPrev
- * @property {(next: Surface | null, isImplicit: boolean, via?: string, held?: string) => void}
- *           setFlipNext
+ * @property {(next: Surface | null, isImplicit: boolean, via?: string, held?: string,
+ *     reversed?: boolean) => void} setFlipNext
  * @property {() => void} markLost
  * @property {() => number} isLost
  * @property {() => number} restore
@@ -388,6 +388,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {boolean} attachedImplicitly  Whether the runtime made the link to its successor.
  * @property {string | undefined} attachedHeld  The interface the reference on its
  *           successor is held on.
+ * @property {boolean} reversedLink  Whether its successor attached it, a front buffer.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
  *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
@@ -1277,6 +1278,10 @@ export function createDirectDraw(options = {}){
         let depthHeld;
         /** @type {string | undefined} */
         let flipHeld;
+        // Whether the link to the buffer behind is that buffer's attachment of
+        // this one, a front buffer attached to it: this surface leads the
+        // chain, and the reference is the one behind's (ddraw1 test_flip).
+        let flipReversed = false;
         // The counts its interfaces keep, by `surfaceCountOf`'s name: the one
         // it was created through holds the creation's reference and every
         // reference the model takes itself.
@@ -1297,8 +1302,22 @@ export function createDirectDraw(options = {}){
             if (flipNext)
             {
                 flipNext.setFlipPrev(null);
-                flipNext.release(flipHeld);
+                if (!flipReversed)
+                {
+                    flipNext.release(flipHeld);
+                }
                 flipNext = null;
+                flipReversed = false;
+            }
+            // A front buffer this one attached lets go of it as it goes.
+            if (flipPrev && flipPrev.reversedLink && flipPrev.flipNext === surface)
+            {
+                const front = flipPrev;
+                const heldOn = front.attachedHeld;
+                front.setFlipNext(null, false);
+                flipPrev = null;
+                front.release(heldOn);
+                leaveChain(front);
             }
             if (depth)
             {
@@ -1606,16 +1625,21 @@ export function createDirectDraw(options = {}){
             get attachedHeld(){
                 return flipHeld;
             },
+            /** Whether the buffer behind it attached it (`flipReversed`). */
+            get reversedLink(){
+                return flipReversed;
+            },
             /**
              * @param {Surface | null} next @param {boolean} isImplicit
              * @param {string} [via]  The interface the link was made through.
              * @param {string} [held]  The interface its reference is held on.
              */
-            setFlipNext(next, isImplicit, via = undefined, held = via){
+            setFlipNext(next, isImplicit, via = undefined, held = via, reversed = false){
                 flipNext = next;
                 flipImplicit = isImplicit;
                 flipVia = via;
                 flipHeld = held;
+                flipReversed = reversed;
             },
             markLost(){
                 lost = true;
@@ -1916,6 +1940,13 @@ export function createDirectDraw(options = {}){
                     other.addRef(held);
                     return DD_OK;
                 }
+                // The screen takes a buffer behind it only from the exclusive
+                // owner of the screen (ddraw1 test_flip, windowed).
+                if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0 && (caps & DDSCAPS_SYSTEMMEMORY) === 0
+                    && !exclusive())
+                {
+                    return DDERR_NOEXCLUSIVEMODE;
+                }
                 // A flip chain is a line: the one being attached must be in no
                 // chain at all. Attached to a surface with a buffer behind it,
                 // it goes in between, and the link it takes over keeps how it
@@ -1928,6 +1959,17 @@ export function createDirectDraw(options = {}){
                 if (other.width !== width || other.height !== height)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
+                }
+                // A front buffer attached to a lone buffer leads the chain the
+                // two make: it is the one that flips (ddraw1 test_flip).
+                if ((other.caps & DDSCAPS_FRONTBUFFER) !== 0
+                    && flipNext === null && flipPrev === null)
+                {
+                    other.setFlipNext(surface, false, via, held, true);
+                    flipPrev = other;
+                    other.addRef(held);
+                    restyleChain(other);
+                    return DD_OK;
                 }
                 const after = flipNext;
                 if (after !== null)
@@ -1984,6 +2026,21 @@ export function createDirectDraw(options = {}){
                     return DD_OK;
                 }
                 if (mipNext === other)
+                {
+                    return DDERR_CANNOTDETACHSURFACE;
+                }
+                // A front buffer this one attached comes away from this end alone.
+                if (other.flipNext === surface && other.reversedLink)
+                {
+                    const heldOn = other.attachedHeld;
+                    other.setFlipNext(null, false);
+                    flipPrev = null;
+                    other.release(heldOn);
+                    leaveChain(other);
+                    leaveChain(surface);
+                    return DD_OK;
+                }
+                if (flipNext === other && flipReversed)
                 {
                     return DDERR_CANNOTDETACHSURFACE;
                 }
