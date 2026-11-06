@@ -1772,6 +1772,49 @@ test('a present moves the back buffers\' contents one place down', async()=>{
     buffers.forEach(surface=>surface.release());
 });
 
+test('StretchRect copies a depth surface whole into another on the GPU, and refuses a part',
+    async()=>{
+        // Wine's d3d9 depth_blit_test: whole into whole of one size, filtered
+        // or not; a part, a flip or another size refused.
+        const h = harness({ width: 8, height: 8 });
+        const { device } = h;
+        /** @type {{ surface?: any }} */
+        const into = {};
+        assert.equal(device.GetDepthStencilSurface(into), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const from = {};
+        assert.equal(device.CreateDepthStencilSurface(8, 8, D3DFMT.D24S8, from), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const small = {};
+        assert.equal(device.CreateDepthStencilSurface(4, 4, D3DFMT.D24S8, small), D3D_OK);
+        // The device's depth made first, on the GPU.
+        assert.equal(device.Clear(0, null, D3DCLEAR.ZBUFFER, 0, 1, 0), D3D_OK);
+        const half = { left: 0, top: 0, right: 4, bottom: 4 };
+        assert.equal(device.StretchRect(from.surface, half, into.surface, half, D3DTEXF.POINT),
+            D3DERR_INVALIDCALL, 'a part');
+        assert.equal(device.StretchRect(from.surface, null, into.surface,
+            { left: 0, top: 8, right: 8, bottom: 0 }, D3DTEXF.POINT), D3DERR_INVALIDCALL, 'a flip');
+        assert.equal(device.StretchRect(small.surface, null, into.surface, null, D3DTEXF.POINT),
+            D3DERR_INVALIDCALL, 'another size');
+        assert.equal(device.StretchRect(from.surface, null, into.surface, null, D3DTEXF.LINEAR),
+            D3D_OK);
+        await h.present();
+        const [deviceDepth, madeDepth] = h.gpu.of('createTexture')
+            .filter((/** @type {any} */ call)=>call.descriptor.label === 'depth')
+            .map((/** @type {any} */ call)=>call.texture);
+        // Whole, both aspects: what WebGPU copies of a depth and stencil texture.
+        const copies = h.gpu.of('copyTextureToTexture');
+        assert.equal(copies.length, 1);
+        assert.equal(copies[0].source.texture, madeDepth);
+        assert.equal(copies[0].destination.texture, deviceDepth);
+        assert.equal(copies[0].source.aspect ?? 'all', 'all');
+        assert.deepEqual([copies[0].size.width, copies[0].size.height], [8, 8]);
+        assert.deepEqual(h.gpu.errors, []);
+        from.surface.release();
+        small.surface.release();
+        into.surface.release();
+    });
+
 test('StretchRect scales an offscreen plain surface into a target, from its bytes', async()=>{
     // Wine's d3d9 stretchrect_test: offscreenplain into a render target,
     // scaling, is allowed. The plain surface's pixels are its guest bytes,

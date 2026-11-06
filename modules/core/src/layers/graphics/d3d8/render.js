@@ -5396,8 +5396,10 @@ export function createRenderer(options){
                 // that blits a decoded frame onto its target, or locks the
                 // target and writes it, puts bytes into it that a draw never
                 // did.
+                // A depth surface is copied whole by StretchRect.
                 usage: depth
-                    ? TextureUsage.RENDER_ATTACHMENT
+                    ? TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC
+                        | TextureUsage.COPY_DST
                     : TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
                         | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
             });
@@ -10098,6 +10100,28 @@ export function createRenderer(options){
                 width: rect.right - rect.left,
                 height: rect.bottom - rect.top,
             });
+            return true;
+        },
+
+        /**
+         * One depth surface's depths and stencil into another of the same
+         * size and format, on the GPU: StretchRect between depth surfaces.
+         *
+         * @param {any} source @param {any} destination
+         * @returns {boolean}
+         */
+        copyDepth(source, destination){
+            const from = surfaceFor(source);
+            const into = surfaceFor(destination);
+            if (from === into || from.width !== into.width || from.height !== into.height
+                || from.format !== into.format)
+            {
+                return false;
+            }
+            // WebGPU copies a depth and stencil texture whole, both aspects.
+            ensureFrame().commands.push({ kind: 'copy', source: from, destination: into,
+                sourceOrigin: { x: 0, y: 0 }, destinationOrigin: { x: 0, y: 0 },
+                width: into.width, height: into.height });
             return true;
         },
 

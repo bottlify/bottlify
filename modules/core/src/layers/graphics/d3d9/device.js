@@ -4816,6 +4816,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             const stretched = rect.right - rect.left !== target.right - target.left
                 || rect.bottom - rect.top !== target.bottom - target.top;
+            if (depth)
+            {
+                // Depth goes whole surface to whole surface of its size, or
+                // not at all (Wine's d3d9 depth_blit_test).
+                const whole = (/** @type {Rect} */ r, /** @type {any} */ d)=>r.left === 0
+                    && r.top === 0 && r.right === d.Width && r.bottom === d.Height;
+                if (stretched || !whole(rect, from) || !whole(target, to))
+                {
+                    return refuse('depth',
+                        'a depth surface copies only whole, into one of its size');
+                }
+                if (renderer?.copyDepth?.(source, destination)
+                    || services.renderedElsewhere === true || services.drawsNothing === true)
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
+                services.divergence?.('Direct3D 9', 'StretchRect between depth surfaces: the'
+                    + ' depths are not copied without a renderer', 'loss');
+                return D3D_OK;
+            }
             // A stretch, or two formats the GPU stores apart, is drawn on the GPU: a program
             // that renders its interface small and stretches it over the screen is shown it
             // there, filtered as it asked.

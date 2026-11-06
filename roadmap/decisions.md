@@ -900,6 +900,15 @@ would mean sampling every cube as a six-layer array with the face, the coordinat
 four taps worked out in the shader, on every draw that reads a cube; the seamless result differs
 only within a texel of an edge, where it is the smoother one. *2026-11-06.*
 
+**A90. Temporary: Direct3D 9's DEPTHBIAS is made as WebGPU's depth bias, a count of the depth
+format's smallest steps, counted as 2^-24 for a 24-bit format.** WebGPU keeps depth24plus as a
+24-bit integer on some GPUs and as a 32-bit float on others (SwiftShader, Vulkan on AMD), where
+the step is a power of two by the polygon's largest depth: from 0.5 to 1 it is 2^-24 as counted,
+and a polygon that reaches 1.0 gets twice the bias asked for (Wine's d3d9 test_depthbias draws
+a quad from depth 0 to 1). The bias a program puts on a decal over a wall, at depths below 1, is
+the one asked for. It stands until the constant part of the bias is added in the vertex stage,
+in depth units, whatever the format. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
