@@ -1471,6 +1471,25 @@ test('a mode set through the first generation is what the seventh reads back', (
     // Each surface generation counts apart (Wine's test_surface_qi).
     assert.equal(h.release(seventh), 0);
 
+    // A palette the program takes the primary's reference back from is no
+    // longer the primary's; after a mode change the primary names the mode's
+    // depth (test_primary_palette).
+    h.box.bytes.fill(0, 0x5400, 0x5400 + 1024);
+    assert.equal(h.box.call(first, slot(IDIRECTDRAW_SLOTS, 'CreatePalette'),
+        [DDPCAPS_8BIT | 0x40, 0x5400, 0x5300, 0]), DD_OK);
+    const palette = h.box.memory.readU32(0x5300);
+    assert.equal(h.box.call(primary, slot(IDIRECTDRAWSURFACE_SLOTS, 'SetPalette'), [palette]),
+        DD_OK);
+    assert.equal(h.release(palette), 1);
+    assert.equal(h.release(palette), 0);
+    assert.equal(h.box.call(primary, slot(IDIRECTDRAWSURFACE_SLOTS, 'GetPalette'), [0x5300]),
+        DDERR_NOPALETTEATTACHED);
+    assert.equal(h.box.call(first, slot(IDIRECTDRAW_SLOTS, 'SetDisplayMode'), [8, 4, 32]), DD_OK);
+    h.box.memory.writeU32(0x5200, DDSURFACEDESC.SIZE);
+    assert.equal(h.box.call(primary, slot(IDIRECTDRAWSURFACE_SLOTS, 'GetSurfaceDesc'), [0x5200]),
+        DD_OK);
+    assert.equal(h.box.memory.readU32(0x5200 + DDSURFACEDESC.ddpfPixelFormat + 0x0c), 32);
+
     assert.equal(h.release(primary), 0);
     assert.equal(h.release(first), 0);
     h.assertAllReleased();

@@ -369,6 +369,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => number} isLost
  * @property {() => number} restore
  * @property {(next: Palette | null) => number} setPalette
+ * @property {(gone: Palette) => void} forgetPalette  The palette is gone: held, it is not now.
  * @property {() => { hr: number, palette: Palette | null }} getPalette
  * @property {(next: Clipper | null) => number} setClipper
  * @property {() => { hr: number, clipper: Clipper | null }} getClipper
@@ -943,6 +944,13 @@ export function createDirectDraw(options = {}){
         const held = Array.from({ length: size }, (_, index)=>(entries[index] ?? 0) >>> 0);
         const pixels = held.map(paletteEntryToPixel);
         const life = counted(()=>{
+            // A palette the program let go of while a surface held it - its
+            // reference taken back by an extra Release - is no longer that
+            // surface's (test_primary_palette).
+            for (const surface of surfaces)
+            {
+                surface.forgetPalette(palette);
+            }
             if (owner)
             {
                 release(owner);
@@ -1684,6 +1692,14 @@ export function createDirectDraw(options = {}){
                     surface.present();
                 }
                 return DD_OK;
+            },
+
+            /** @param {Palette} gone */
+            forgetPalette(gone){
+                if (palette === gone)
+                {
+                    palette = null;
+                }
             },
 
             getPalette(){

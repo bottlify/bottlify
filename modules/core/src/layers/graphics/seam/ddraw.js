@@ -1600,7 +1600,17 @@ export function createDirectDrawSeam(
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                writeSurfaceDesc(memory, out >>> 0, layout, descriptorOf(surface));
+                const described = descriptorOf(surface);
+                // The primary is the screen: after a mode change it names the
+                // mode's depth, though it was made in another and is lost
+                // (test_primary_palette).
+                const mode = (surface.caps & DDSCAPS_PRIMARYSURFACE) !== 0
+                    ? surface.directDraw?.displayMode : null;
+                if (mode && mode.bitCount !== surface.pixelFormat.bitCount)
+                {
+                    described.pixelFormat = pixelFormatForDepth(mode.bitCount);
+                }
+                writeSurfaceDesc(memory, out >>> 0, layout, described);
                 return DD_OK;
             },
 
