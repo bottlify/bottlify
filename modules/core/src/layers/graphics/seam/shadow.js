@@ -419,7 +419,12 @@ export const SURFACE = {
     CONTAINER: 4 + 8 * 4,
     /** Its block as a level the guest locks (`LEVEL`), zero for none. */
     LEVEL: 4 + 8 * 4 + 4,
-    SIZE: 4 + 8 * 4 + 8,
+    /**
+     * The block of the device that made it: a command routine binds only a
+     * surface of its own device (Wine's test_render_target_device_mismatch).
+     */
+    OWNER: 4 + 8 * 4 + 8,
+    SIZE: 4 + 8 * 4 + 12,
 };
 
 /**
@@ -2556,6 +2561,8 @@ function commandChecks(shape, at){
             [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x3b, 0x48, SURFACE.OWNER],                         // cmp ecx, [eax+OWNER]
+            { jcc: 0x75, to: 'out', near: true },                // jne out: another device's
             // test dword [eax + DESC + Usage], mask
             [0xf7, 0x80, ...dword(SURFACE.DESC + 8), ...dword(mask)],
             { jcc: 0x74, to: 'out', near: true },                // jz out
@@ -5007,6 +5014,7 @@ export function createShadow(deps){
             deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
             describe(block + SURFACE.DESC);
             deps.writeMemory(block + SURFACE.LEVEL, dwordBytes(levelBlocks.get(surface) ?? 0));
+            deps.writeMemory(block + SURFACE.OWNER, dwordBytes(address));
             const container = /** @type {{ container?: object }} */ (surface).container;
             if (container)
             {
@@ -5832,7 +5840,8 @@ function recordCommand(m, shape, mirror, block, a){
         const surface = a[usage.arg];
         const owner = surface === 0 ? 0 : m.u32(surface + 4);
         if (surface === 0 ? !usage.nullable
-            : owner === 0 || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+            : owner === 0 || m.u32(owner + SURFACE.OWNER) !== block
+                || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
         {
             return undefined;
         }

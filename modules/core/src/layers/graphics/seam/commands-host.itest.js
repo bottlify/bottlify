@@ -153,6 +153,7 @@ function gate(version, list){
             put(block + SURFACE.DESC + 24, 1 + next() % 2048);
             put(block + SURFACE.DESC + 28, 1 + next() % 2048);
             put(block + SURFACE.CONTAINER, next() % 3);
+            put(block + SURFACE.OWNER, next() % 4 === 0 ? BLOCK + 0x40 : BLOCK);
         });
         put(BLOCK + SHADOW.ELSEWHERE, next() % 4 === 0 ? 0 : 1);
         surfaceArgs.forEach((arg, index)=>{
