@@ -69,7 +69,7 @@ test('every format of tables 8.12 and 8.13 is there, with its base and bits', ()
 });
 
 test('a format lives on the device in the WebGPU format of its bytes', ()=>{
-    const tier = { formatsTier1: true, compressed: true };
+    const tier = { formatsTier1: true, compressed: true, depth32Stencil: true };
     /** @type {[number, string, string][]} */
     const rows = [
         [TEX.R8, 'r8unorm', 'float'],
@@ -83,12 +83,12 @@ test('a format lives on the device in the WebGPU format of its bytes', ()=>{
         [TEX.RGB9_E5, 'rgb9e5ufloat', 'float'],
         [TEX.SRGB8, 'rgba8unorm-srgb', 'float'],
         [TEX.R16, 'r16unorm', 'float'],
-        [TEX.DEPTH_COMPONENT16, 'depth16unorm', 'depth'],
-        [TEX.DEPTH_COMPONENT24, 'depth24plus', 'depth'],
-        [TEX.DEPTH_COMPONENT32F, 'depth32float', 'depth'],
+        [TEX.DEPTH_COMPONENT16, 'depth24plus-stencil8', 'depth'],
+        [TEX.DEPTH_COMPONENT24, 'depth24plus-stencil8', 'depth'],
+        [TEX.DEPTH_COMPONENT32F, 'depth32float-stencil8', 'depth'],
         [TEX.DEPTH24_STENCIL8, 'depth24plus-stencil8', 'depth'],
         [TEX.DEPTH32F_STENCIL8, 'depth32float-stencil8', 'depth'],
-        [TEX.STENCIL_INDEX8, 'stencil8', 'uint'],
+        [TEX.STENCIL_INDEX8, 'depth24plus-stencil8', 'uint'],
         [TEX.COMPRESSED_RED_RGTC1, 'bc4-r-unorm', 'float'],
         [TEX.COMPRESSED_RGBA_BPTC_UNORM, 'bc7-rgba-unorm', 'float'],
     ];
@@ -113,6 +113,16 @@ test('what a device lacks changes where a format lives, and says how', ()=>{
     assert.equal(gpuStorageOf(format(TEX.R32F), { float32Filterable: true })?.filterable, true);
     assert.equal(gpuStorageOf(format(TEX.R32F), { float32Filterable: true })?.sampleType,
         'float');
+});
+
+test('a depth format keeps a stencil aspect, and float depth only where the device can', ()=>{
+    assert.equal(gpuStorageOf(format(TEX.DEPTH_COMPONENT32F), {})?.format,
+        'depth24plus-stencil8');
+    assert.equal(gpuStorageOf(format(TEX.DEPTH_COMPONENT32F), { depth32Stencil: true })?.format,
+        'depth32float-stencil8');
+    assert.equal(gpuStorageOf(format(TEX.DEPTH_COMPONENT16), { depth32Stencil: true })?.format,
+        'depth24plus-stencil8');
+    assert.equal(gpuStorageOf(format(TEX.DEPTH_COMPONENT24), {})?.renderable, true);
 });
 
 test('integer and depth formats are never filtered', ()=>{

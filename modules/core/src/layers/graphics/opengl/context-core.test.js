@@ -127,13 +127,13 @@ test('an occlusion query answers at once, and its errors are the specification\'
     assert.deepEqual(gl.glGetQueryiv(GL.SAMPLES_PASSED, GL.QUERY_COUNTER_BITS), [32]);
 });
 
-test('3D textures: the minimum size is taken, past it is a value error', ()=>{
+test('3D textures: OpenGL 3.0\'s minimum size is taken, past it is a value error', ()=>{
     const gl = fixture();
-    gl.texImage3D('glTexImage3D', GL.TEXTURE_3D, 0, 16, 16, 16);
+    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 256, 16, 16, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
-    gl.texImage3D('glTexImage3D', GL.TEXTURE_3D, 0, 32, 16, 16);
+    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 257, 16, 16, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
-    gl.texImage3D('glTexImage3D', GL.TEXTURE_2D, 0, 1, 1, 1);
+    gl.glTexImage3D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
-    assert.deepEqual(gl.glGetIntegerv(GL.MAX_3D_TEXTURE_SIZE), [16]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_3D_TEXTURE_SIZE), [256]);
 });

@@ -63,11 +63,14 @@ export const TEX = Object.freeze({
     MAX_ARRAY_TEXTURE_LAYERS: 0x88ff,
     TEXTURE_RED_TYPE: 0x8c10, TEXTURE_GREEN_TYPE: 0x8c11, TEXTURE_BLUE_TYPE: 0x8c12,
     TEXTURE_ALPHA_TYPE: 0x8c13, TEXTURE_LUMINANCE_TYPE: 0x8c14, TEXTURE_INTENSITY_TYPE: 0x8c15,
-    TEXTURE_DEPTH_TYPE: 0x8c16, TEXTURE_SHARED_SIZE: 0x8c3f, TEXTURE_STENCIL_SIZE: 0x88f1,
+    TEXTURE_DEPTH_TYPE: 0x8c16, TEXTURE_LUMINANCE_SIZE: 0x8060, TEXTURE_INTENSITY_SIZE: 0x8061,
+    TEXTURE_SHARED_SIZE: 0x8c3f, TEXTURE_STENCIL_SIZE: 0x88f1,
     TEXTURE_DEPTH_SIZE: 0x884a, TEXTURE_DEPTH: 0x8071, TEXTURE_WRAP_R: 0x8072,
     TEXTURE_COMPARE_MODE: 0x884c, TEXTURE_COMPARE_FUNC: 0x884d, COMPARE_REF_TO_TEXTURE: 0x884e,
     DEPTH_TEXTURE_MODE: 0x884b, SIGNED_NORMALIZED: 0x8f9c,
     FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING: 0x8210, FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE: 0x8211,
+    PACK_SKIP_IMAGES: 0x806b, PACK_IMAGE_HEIGHT: 0x806c, UNPACK_SKIP_IMAGES: 0x806d,
+    UNPACK_IMAGE_HEIGHT: 0x806e,
 });
 
 /**
@@ -294,7 +297,17 @@ export function gpuStorageOf(format, device = {}){
     let gpu;
     /** @type {GpuStorage['conversion']} */
     let conversion = null;
-    if (format.gpu)
+    if (format.kind === 'depth' || format.kind === 'stencil')
+    {
+        // Every depth and stencil format is kept with both aspects: a texture
+        // a framebuffer draws into is its depth-stencil attachment, whose
+        // pipelines have a stencil state, and WebGPU refuses one on a format
+        // without a stencil. A float depth keeps its floats where the device
+        // has depth32float-stencil8.
+        const float = format.depth === 32 && device.depth32Stencil === true;
+        gpu = float ? 'depth32float-stencil8' : 'depth24plus-stencil8';
+    }
+    else if (format.gpu)
     {
         gpu = format.gpu;
     }

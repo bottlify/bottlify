@@ -372,14 +372,15 @@ export function laterEntryPoints(h){
         glGetQueryObjectuiv: ([name, pname, out])=>call(context=>writeQuery(out,
             context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
 
-        // --- 3D textures, by their target and size ---
+        // --- 3D textures and texture arrays ---
 
-        glTexImage3D: a=>answer(current()?.texImage3D('glTexImage3D', a[0] >>> 0, a[1] | 0,
-            a[3] | 0, a[4] | 0, a[5] | 0)),
-        glTexSubImage3D: a=>answer(current()?.texImage3D('glTexSubImage3D', a[0] >>> 0,
-            a[1] | 0, a[5] | 0, a[6] | 0, a[7] | 0)),
-        glCopyTexSubImage3D: a=>answer(current()?.texImage3D('glCopyTexSubImage3D', a[0] >>> 0,
-            a[1] | 0, a[7] | 0, a[8] | 0, 1)),
+        glTexImage3D: a=>answer(current()?.glTexImage3D(a[0] >>> 0, a[1] | 0, a[2] | 0,
+            a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] >>> 0, a[8] >>> 0, a[9] >>> 0)),
+        glTexSubImage3D: a=>answer(current()?.glTexSubImage3D(a[0] >>> 0, a[1] | 0, a[2] | 0,
+            a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] >>> 0, a[9] >>> 0,
+            a[10] >>> 0)),
+        glCopyTexSubImage3D: a=>answer(current()?.glCopyTexSubImage3D(a[0] >>> 0, a[1] | 0,
+            a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] | 0)),
     };
 
     /**

@@ -1884,6 +1884,15 @@ export function createOpengl(services){
             a[0] >>> 0, a[1] | 0, a[2] | 0, 0, a[3] | 0, a[4] | 0, a[5] | 0, 1)),
         glGetTexImage: ([target, level, format, type, out])=>call(context=>{
             const texels = context.glGetTexImage(target >>> 0, level | 0, format >>> 0, type >>> 0);
+            // A level kept as a sized format comes back packed already.
+            if (texels && !(texels instanceof Uint8Array))
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    services.writeMemory(out >>> 0, texels.packed);
+                }
+                return;
+            }
             const shape = texels && context.glGetTexLevelParameteriv(
                 target >>> 0, level | 0, GL.TEXTURE_WIDTH);
             const height = texels && context.glGetTexLevelParameteriv(
@@ -1915,11 +1924,13 @@ export function createOpengl(services){
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] >>> 0, a[7] | 0,
             a[8] >>> 0)),
         glCompressedTexImage1DARB: a=>answer(current()?.glCompressedTexImage1DARB(a[0] >>> 0)),
-        glCompressedTexImage3DARB: a=>answer(current()?.glCompressedTexImage3DARB(a[0] >>> 0)),
+        glCompressedTexImage3DARB: a=>answer(current()?.glCompressedTexImage3DARB(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] >>> 0)),
         glCompressedTexSubImage1DARB: a=>
             answer(current()?.glCompressedTexSubImage1DARB(a[0] >>> 0)),
-        glCompressedTexSubImage3DARB: a=>
-            answer(current()?.glCompressedTexSubImage3DARB(a[0] >>> 0)),
+        glCompressedTexSubImage3DARB: a=>answer(current()?.glCompressedTexSubImage3DARB(
+            a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0,
+            a[8] >>> 0, a[9] | 0, a[10] >>> 0)),
         glGetCompressedTexImageARB: ([target, level])=>
             answer(current()?.glGetCompressedTexImageARB(target >>> 0, level | 0)),
 
