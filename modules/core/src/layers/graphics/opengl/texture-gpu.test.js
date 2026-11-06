@@ -300,6 +300,31 @@ test('a framebuffer draws into a half float colour texture and a depth texture',
     assert.deepEqual(r.gpu.errors ?? [], []);
 });
 
+test('an attachment of a sized format answers its sizes, component type and encoding', ()=>{
+    const { context } = rig();
+    const [colour, depth] = context.glGenTextures(2);
+    context.glBindTexture(GL.TEXTURE_2D, colour);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, TEX.SRGB8_ALPHA8, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        null);
+    context.glBindTexture(GL.TEXTURE_2D, depth);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, TEX.DEPTH32F_STENCIL8, 4, 4, 0, GL.DEPTH_STENCIL,
+        TEX.FLOAT_32_UNSIGNED_INT_24_8_REV, null);
+    const [fbo] = context.glGenFramebuffers(1);
+    context.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, colour, 0);
+    context.framebufferTexture(GL.FRAMEBUFFER, GL.DEPTH_ATTACHMENT, GL.TEXTURE_2D, depth, 0);
+    /** @param {number} point @param {number} pname */
+    const ask = (point, pname)=>context.glGetFramebufferAttachmentParameteriv(GL.FRAMEBUFFER,
+        point, pname)[0];
+    assert.equal(ask(GL.COLOR_ATTACHMENT0, TEX.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING), 0x8c40);
+    assert.equal(ask(GL.COLOR_ATTACHMENT0, TEX.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE),
+        GL.UNSIGNED_NORMALIZED);
+    assert.equal(ask(GL.DEPTH_ATTACHMENT, TEX.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE), GL.FLOAT);
+    assert.equal(ask(GL.DEPTH_ATTACHMENT, GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE), 32);
+    assert.equal(ask(GL.DEPTH_ATTACHMENT, GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE), 8);
+    assert.equal(ask(GL.DEPTH_ATTACHMENT, GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE), 0);
+});
+
 test('an integer texture as an attachment is a framebuffer this renderer does not draw', ()=>{
     const r = rig();
     const { context } = r;

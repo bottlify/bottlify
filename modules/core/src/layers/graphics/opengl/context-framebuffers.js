@@ -33,6 +33,7 @@
 
 import { GL } from './constants.js';
 import { RENDERBUFFER_FORMATS, attachmentImage, levelKey } from './objects.js';
+import { componentTypeOf } from './formats.js';
 
 /**
  * @typedef {import('./objects.js').RenderbufferObject} RenderbufferObject
@@ -587,6 +588,17 @@ export function installFramebufferCalls(context, kernel){
             }
             const image = attachmentImage(attached);
             const colour = image?.holds === 'colour';
+            // A texture kept as a sized format answers from its format.
+            const sized = attached.kind === 'texture'
+                ? attached.texture.levels.get(levelKey(attached.level, attached.face))?.sized
+                : null;
+            const bits = /** @type {number[]} */ ([GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE]).indexOf(pname);
+            if (sized && bits >= 0)
+            {
+                return [sized.bits[bits]];
+            }
             switch (pname)
             {
                 case GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
@@ -608,15 +620,18 @@ export function installFramebufferCalls(context, kernel){
                 case GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
                     return [colour ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-                    return [image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
-                        : 0];
+                    return [sized ? sized.depth
+                        : image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
+                            : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-                    return [image && (image.holds === 'stencil' || image.holds === 'depthStencil')
-                        ? 8 : 0];
+                    return [sized ? sized.stencil
+                        : image && (image.holds === 'stencil' || image.holds === 'depthStencil')
+                            ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-                    return [GL.UNSIGNED_NORMALIZED];
+                    return [sized ? componentTypeOf(sized, colour ? 'colour' : 'depth')
+                        : GL.UNSIGNED_NORMALIZED];
                 case GL.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-                    return [GL.LINEAR_COLOR];
+                    return [sized?.srgb ? GL.SRGB : GL.LINEAR_COLOR];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
