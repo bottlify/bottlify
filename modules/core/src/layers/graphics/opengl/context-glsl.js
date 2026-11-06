@@ -33,12 +33,41 @@
  */
 
 import { GL } from './constants.js';
-import { preprocess } from './glsl-preprocess.js';
-import { GlslSyntaxError, parse } from './glsl-parse.js';
-import { GlslCompileError, checkShader } from './glsl-check.js';
+import { compileFront } from './glsl-front.js';
+import { GLSL_CONSTANTS } from './glsl-library.js';
 import { linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
+
+/**
+ * The GLSL versions a shader may name: those the WGSL emitter writes whole
+ * (`glsl-wgsl.js`). A later one fails to compile with the specification's
+ * message for a version the implementation does not support.
+ */
+export const EMITTED_VERSIONS = Object.freeze([110, 120]);
+
+/**
+ * The built-in constants of 1.30 and later as this implementation answers
+ * them: the limits 1.10 and 1.20 already report (`GLSL_LIMITS`) and the
+ * specification's minimums for the rest, so that a shader sizing an array by
+ * gl_MaxDrawBuffers and a program asking GL_MAX_DRAW_BUFFERS agree.
+ */
+export const CONTEXT_CONSTANTS = Object.freeze({
+    ...GLSL_CONSTANTS,
+    gl_MaxVertexAttribs: GLSL_LIMITS.vertexAttribs,
+    gl_MaxVertexUniformComponents: GLSL_LIMITS.vertexUniformComponents,
+    gl_MaxFragmentUniformComponents: GLSL_LIMITS.fragmentUniformComponents,
+    gl_MaxVaryingFloats: GLSL_LIMITS.varyingFloats,
+    gl_MaxVaryingComponents: GLSL_LIMITS.varyingFloats,
+    gl_MaxVertexTextureImageUnits: GLSL_LIMITS.vertexTextureImageUnits,
+    gl_MaxCombinedTextureImageUnits: GLSL_LIMITS.combinedTextureImageUnits,
+    gl_MaxTextureImageUnits: GLSL_LIMITS.textureImageUnits,
+    gl_MaxDrawBuffers: GLSL_LIMITS.drawBuffers,
+    gl_MaxTextureUnits: GLSL_LIMITS.textureUnits,
+    gl_MaxTextureCoords: GLSL_LIMITS.textureCoords,
+    gl_MaxClipPlanes: GLSL_LIMITS.clipPlanes,
+    gl_MaxLights: GLSL_LIMITS.lights,
+});
 
 // GL_ARB_shader_objects' own enums; its other queries are the 2.0 ones.
 const PROGRAM_OBJECT_ARB = 0x8b40;
@@ -106,32 +135,8 @@ export function compileShader(sources, stage){
         COMPILED.set(key, known);
         return known;
     }
-    const pre = preprocess(sources);
-    const lines = pre.diagnostics.map(d=>`${d.severity === 'error' ? 'ERROR' : 'WARNING'}:`
-        + ` ${d.string}:${d.line}: ${d.message}`);
-    /** @type {{ ok: boolean, log: string, unit: ShaderUnit | null }} */
-    let result;
-    if (pre.diagnostics.some(d=>d.severity === 'error'))
-    {
-        result = { ok: false, log: `${lines.join('\n')}\n`, unit: null };
-    }
-    else
-    {
-        try
-        {
-            const unit = checkShader(parse(pre.tokens), { stage, version: pre.version });
-            result = { ok: true, log: lines.length > 0 ? `${lines.join('\n')}\n` : '', unit };
-        }
-        catch (e){
-            if (!(e instanceof GlslSyntaxError) && !(e instanceof GlslCompileError))
-            {
-                throw e;
-            }
-            const at = e.at;
-            lines.push(`ERROR: ${at.string}:${at.line}: ${e.message}`);
-            result = { ok: false, log: `${lines.join('\n')}\n`, unit: null };
-        }
-    }
+    const result = compileFront(sources, stage, { versions: EMITTED_VERSIONS,
+        constants: CONTEXT_CONSTANTS });
     COMPILED.set(key, result);
     if (COMPILED.size > COMPILED_KEPT)
     {
