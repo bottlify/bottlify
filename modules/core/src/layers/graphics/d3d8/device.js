@@ -1732,12 +1732,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * Nothing here is managed on the device's behalf: a texture's storage
-         * is the guest's own memory and is uploaded when it changes, so there
-         * is nothing to discard however many bytes the caller asked for, and
-         * the call has already done all it can.
+         * A managed texture's storage is the guest's own memory: however many
+         * bytes the caller asked for, every one is discarded and taken up again
+         * from there.
          */
         ResourceManagerDiscardBytes(){
+            // Evicted, a managed texture is taken up again from guest memory
+            // at its next use, with what locks without a dirty update wrote.
+            renderer?.evictManaged?.();
             return D3D_OK;
         },
 
@@ -3323,8 +3325,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // memory -- system memory, a managed texture's copy there, a
             // dynamic one: copied into on the GPU alone, a lock of it read what
             // was there before, and its unlock sent that up over the copy.
+            // A managed source is copied from memory too: its copy there is the
+            // one the program wrote, which a lock without a dirty update kept
+            // from the GPU's (Wine's d3d8 add_dirty_rect_test).
             const lockable = to.Pool === D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.MANAGED
-                || (to.Usage & D3DUSAGE.DYNAMIC) !== 0;
+                || (to.Usage & D3DUSAGE.DYNAMIC) !== 0 || from.Pool === D3DPOOL.MANAGED;
             if (renderer?.copySurface && !lockable
                 && copies.every(copy=>
                     renderer.copySurface(source, copy.rect, destination, copy.at)))

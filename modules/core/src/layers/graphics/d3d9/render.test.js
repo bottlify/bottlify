@@ -38,6 +38,7 @@ import { FVF } from '../webgpu/internal/vertexformat.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
 import { commandSlot } from './commands.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
+import { D3DLOCK_NO_DIRTY_UPDATE } from './resources.js';
 import {
     blendPixel, clear as referenceClear, createReferenceSurface, toBase64,
 } from '../webgpu/internal/reference.js';
@@ -1814,6 +1815,49 @@ test('StretchRect copies a depth surface whole into another on the GPU, and refu
         small.surface.release();
         into.surface.release();
     });
+
+test('a managed texture takes up only the rectangle AddDirtyRect names, and all of it again'
+    + ' after EvictManagedResources', async()=>{
+    // Wine's d3d9 add_dirty_rect_test: writes under D3DLOCK_NO_DIRTY_UPDATE
+    // reach the GPU through the rectangle the program adds, or an eviction.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ texture?: any }} */
+    const made = {};
+    assert.equal(device.CreateTexture(8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, made),
+        D3D_OK);
+    const triangle = Uint8Array.from([
+        ...vertex(0, 0, argb(255, 0, 0)), ...vertex(8, 0, argb(255, 0, 0)),
+        ...vertex(0, 8, argb(255, 0, 0)),
+    ]);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.SetTexture(0, made.texture), D3D_OK);
+    const drawn = async()=>{
+        const before = h.gpu.of('writeTexture').length;
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return h.gpu.of('writeTexture').slice(before).map((/** @type {any} */ call)=>[
+            call.destination.origin?.x ?? 0, call.destination.origin?.y ?? 0,
+            call.size.width ?? call.size[0], call.size.height ?? call.size[1]]);
+    };
+    assert.deepEqual(await drawn(), [[0, 0, 8, 8]], 'the first use takes it all up');
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(made.texture.LockRect(0, locked, null, D3DLOCK_NO_DIRTY_UPDATE), D3D_OK);
+    assert.equal(made.texture.UnlockRect(0), D3D_OK);
+    assert.deepEqual(await drawn(), [], 'no dirty update');
+    assert.equal(made.texture.AddDirtyRect({ left: 2, top: 2, right: 4, bottom: 5 }), D3D_OK);
+    assert.deepEqual(await drawn(), [[2, 2, 2, 3]], 'the rectangle alone');
+    assert.equal(made.texture.LockRect(0, locked, null, D3DLOCK_NO_DIRTY_UPDATE), D3D_OK);
+    assert.equal(made.texture.UnlockRect(0), D3D_OK);
+    assert.equal(device.EvictManagedResources(), D3D_OK);
+    assert.deepEqual(await drawn(), [[0, 0, 8, 8]], 'evicted: all of it again');
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    made.texture.release();
+});
 
 test('StretchRect scales an offscreen plain surface into a target, from its bytes', async()=>{
     // Wine's d3d9 stretchrect_test: offscreenplain into a render target,

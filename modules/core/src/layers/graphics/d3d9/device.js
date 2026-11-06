@@ -2520,11 +2520,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
-         * Nothing here is managed on the device's behalf: a texture's storage
-         * is the guest's own memory and is uploaded when it changes, so there
-         * is nothing to evict and the call has already done all it can.
+         * A managed texture's storage is the guest's own memory: evicting it
+         * takes every level up again from there on its next use, which is
+         * what the program's locks without a dirty update wrote.
          */
         EvictManagedResources(){
+            renderer?.evictManaged?.();
             return D3D_OK;
         },
 

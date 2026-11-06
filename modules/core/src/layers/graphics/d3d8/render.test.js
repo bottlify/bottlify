@@ -4906,3 +4906,60 @@ test('every stage\'s sampler state is in the block, the fourth to the eighth in 
         assert.deepEqual([...words.subarray(UNIFORM_AT.stagesHigh, UNIFORM_AT.stagesHigh + 5)],
             [14, 15, 16, 17, 18]);
     });
+
+test('a managed texture is copied from its memory, and taken up again when the manager'
+    + ' discards', async()=>{
+    // Wine's d3d8 add_dirty_rect_test: CopyRects from a managed level copies
+    // what the program wrote, a lock without a dirty update included, not the
+    // GPU's copy; ResourceManagerDiscardBytes takes every managed level up.
+    const h = harness();
+    const { device, gpu } = h;
+    /** @type {{ texture?: any }} */
+    const managed = {};
+    assert.equal(device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, managed),
+        D3D_OK);
+    /** @type {{ texture?: any }} */
+    const plain = {};
+    assert.equal(device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plain),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const from = {};
+    assert.equal(managed.texture.GetSurfaceLevel(0, from), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const into = {};
+    assert.equal(plain.texture.GetSurfaceLevel(0, into), D3D_OK);
+    /** A draw from each, the managed one last. */
+    const drawBoth = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        for (const texture of [plain.texture, managed.texture])
+        {
+            assert.equal(device.SetTexture(0, texture), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+                D3D_OK);
+        }
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+    };
+    await drawBoth();
+    h.write(from.surface.base, new Uint8Array(64).fill(0x42));
+    assert.equal(device.CopyRects(from.surface, null, 0, into.surface, null), D3D_OK);
+    const texelsUp = ()=>gpu.calls.filter((/** @type {any} */ call)=>
+        call.op === 'writeTexture' || call.op === 'copyBufferToTexture');
+    const uploads = texelsUp().length;
+    assert.equal(device.ResourceManagerDiscardBytes(0), D3D_OK);
+    await drawBoth();
+    assert.equal(gpu.of('copyTextureToTexture').length, 0, 'not the GPU\'s copy');
+    const after = texelsUp().slice(uploads).map((/** @type {any} */ call)=>
+        (call.op === 'writeTexture' ? call.destination : call.destination).texture);
+    const textureOf = (/** @type {string} */ label, /** @type {number} */ index)=>
+        gpu.of('createTexture').filter((/** @type {any} */ call)=>
+            call.descriptor.label === label)[index]?.texture;
+    assert.ok(after.includes(textureOf('texture', 1)), 'the managed level again');
+    assert.ok(after.includes(textureOf('texture', 0)), 'the copy\'s destination, from memory');
+    device.SetTexture(0, null);
+    from.surface.release();
+    into.surface.release();
+    managed.texture.release();
+    plain.texture.release();
+});

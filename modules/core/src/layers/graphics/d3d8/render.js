@@ -5605,8 +5605,10 @@ export function createRenderer(options){
      *
      * @param {any} surface a backend surface
      * @param {{ format: string, mipLevel: number, width: number, height: number,
-     *           texels: Uint8Array, layer?: number, depth?: number }} upload
-     *        `layer` is a cube's face; `depth` a volume level's slices, one after another.
+     *           texels: Uint8Array, layer?: number, depth?: number, x?: number,
+     *           y?: number }} upload
+     *        `layer` is a cube's face; `depth` a volume level's slices, one after another;
+     *        `x` and `y` where a rectangle of the level goes.
      * @param {boolean} ordered
      */
     const uploadTexels = (surface, upload, ordered)=>{
@@ -5622,7 +5624,8 @@ export function createRenderer(options){
             width: upload.width,
             height: upload.height,
             data: upload.texels,
-            ...(upload.layer ? { origin: { x: 0, y: 0, z: upload.layer } } : {}),
+            ...(upload.layer || upload.x || upload.y ? { origin: { x: upload.x ?? 0,
+                y: upload.y ?? 0, z: upload.layer ?? 0 } } : {}),
             ...(upload.depth ? { depthOrArrayLayers: upload.depth } : {}),
         });
     };
@@ -5934,9 +5937,30 @@ export function createRenderer(options){
                         ? decodeCompressed(bytes, record.format, width, height, room)
                         : expandTexels(record.format, tightRows(bytes, record.format, width,
                             height, held.surface.pitch), width * height, float32);
-                uploadTexels(record.gpu,
-                    { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
-                    ordered);
+                const part = isCompressed(record.format) ? undefined
+                    : record.dirtyRects.get(subresource);
+                if (part && part.right > part.left && part.bottom > part.top)
+                {
+                    // The rectangle alone: what lies around it on the GPU is
+                    // what was uploaded before.
+                    const texel = texels.byteLength / (width * height);
+                    const across = (part.right - part.left) * texel;
+                    const rows = new Uint8Array(across * (part.bottom - part.top));
+                    for (let y = part.top; y < part.bottom; y++)
+                    {
+                        rows.set(texels.subarray((y * width + part.left) * texel,
+                            (y * width + part.left) * texel + across), (y - part.top) * across);
+                    }
+                    uploadTexels(record.gpu, { format: gpuFormat, mipLevel: level,
+                        width: part.right - part.left, height: part.bottom - part.top,
+                        texels: rows, layer: face, x: part.left, y: part.top }, ordered);
+                }
+                else
+                {
+                    uploadTexels(record.gpu,
+                        { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
+                        ordered);
+                }
                 if (level === 0)
                 {
                     markMips(record);
@@ -5966,6 +5990,7 @@ export function createRenderer(options){
                 }
             }
             record.dirtyLevels.clear();
+            record.dirtyRects.clear();
             record.dirty = false;
         }
         record.usedIn = counters.frames;
@@ -9854,6 +9879,16 @@ export function createRenderer(options){
                 // 22 MB of zeroes went up for them each frame.
                 dirtyLevels: target ? new Set()
                     : new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
+                /**
+                 * The part of a dirty level AddDirtyRect named, where only a
+                 * part is: the rest of it is not uploaded (Wine's d3d8 and
+                 * d3d9 add_dirty_rect_test). A level dirty and absent here is
+                 * dirty whole.
+                 *
+                 * @type {Map<number, { left: number, top: number, right: number,
+                 *     bottom: number }>}
+                 */
+                dirtyRects: new Map(),
                 serial: nextTextureId,
                 id: `t${nextTextureId++}`,
                 // The frame whose draws counted it (`frameStats.textures`).
@@ -9888,8 +9923,26 @@ export function createRenderer(options){
                 };
             }
 
-            /** @param {number} level */
-            const soiled = level=>{
+            /**
+             * @param {number} level
+             * @param {{ left: number, top: number, right: number, bottom: number }} [part]
+             *     of the level alone; absent, all of it
+             */
+            const soiled = (level, part)=>{
+                const before = entry.dirtyRects.get(level);
+                if (part && (!entry.dirtyLevels.has(level) || before))
+                {
+                    entry.dirtyRects.set(level, before ? {
+                        left: Math.min(before.left, part.left),
+                        top: Math.min(before.top, part.top),
+                        right: Math.max(before.right, part.right),
+                        bottom: Math.max(before.bottom, part.bottom),
+                    } : part);
+                }
+                else
+                {
+                    entry.dirtyRects.delete(level);
+                }
                 entry.dirtyLevels.add(level);
                 entry.dirty = true;
                 entry.soil++;
@@ -9935,7 +9988,15 @@ export function createRenderer(options){
                     {
                         for (let level = 0; level < levels; level++)
                         {
-                            soiled(face * levels + level);
+                            // The top level's rectangle, as it covers each
+                            // level below: rounded outwards.
+                            soiled(face * levels + level, rect ? {
+                                left: rect.left >> level, top: rect.top >> level,
+                                right: Math.min(levelExtent(desc.width, level),
+                                    Math.ceil(rect.right / (1 << level))),
+                                bottom: Math.min(levelExtent(desc.height, level),
+                                    Math.ceil(rect.bottom / (1 << level))),
+                            } : undefined);
                         }
                     }
                     return hr;
@@ -10105,6 +10166,30 @@ export function createRenderer(options){
                 height: rect.bottom - rect.top,
             });
             return true;
+        },
+
+        /**
+         * Every managed texture's levels taken up again from guest memory, as
+         * EvictManagedResources has the runtime do: what a lock that asked for
+         * no dirty update wrote reaches the GPU then (Wine's d3d9
+         * add_dirty_rect_test).
+         */
+        evictManaged(){
+            for (const entry of roster)
+            {
+                if (entry.texture.pool !== D3DPOOL.MANAGED || entry.volume)
+                {
+                    continue;
+                }
+                for (let index = 0; index < entry.levels * entry.faces; index++)
+                {
+                    entry.dirtyLevels.add(index);
+                }
+                entry.dirtyRects.clear();
+                entry.dirty = true;
+                entry.soil++;
+                contentVersion++;
+            }
         },
 
         /**
@@ -11652,7 +11737,8 @@ export function createRenderer(options){
                     height: command.height,
                     data: command.texels,
                     staging: true,
-                    ...(command.layer ? { origin: { x: 0, y: 0, z: command.layer } } : {}),
+                    ...(command.layer || command.x || command.y ? { origin: { x: command.x ?? 0,
+                        y: command.y ?? 0, z: command.layer ?? 0 } } : {}),
                     ...(command.depth ? { depthOrArrayLayers: command.depth } : {}),
                 });
                 pass = null;
