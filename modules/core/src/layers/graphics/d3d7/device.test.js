@@ -948,6 +948,43 @@ test('recorded: a colour fill of the device\'s target clears it on the GPU, no r
         assert.equal(root.release('IDirectDraw7'), 0);
     });
 
+test('a surface made without DDSCAPS_TEXTURE: Direct3D 7 binds nothing, an earlier device keeps it'
+    + ' and only its software rasteriser samples it (test_texture_wrong_caps)', async()=>{
+    for (const [id, legacy, keeps, samples] of /** @type {[string, boolean, boolean, boolean][]} */ ([
+        [DEVICE_IDS.TNLHAL, false, false, false],
+        [DEVICE_IDS.RGB, false, false, false],
+        [DEVICE_IDS.HAL, true, true, false],
+        [DEVICE_IDS.RGB, true, true, true],
+    ]))
+    {
+        const f = recorded();
+        assert.equal(f.device.release(), 0);
+        const made = f.d3d.createDevice(id, f.target, { legacy });
+        assert.equal(made.hr, D3D_OK);
+        const device = made.device;
+        const plain = surface(f.root, { caps: DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2,
+            pixelFormat: ARGB32 });
+        assert.equal(device.SetTexture(0, plain), D3D_OK, `${id} ${legacy}`);
+        /** @type {{ surface?: any }} */
+        const bound = {};
+        assert.equal(device.GetTexture(0, bound), D3D_OK);
+        assert.equal(bound.surface, keeps ? plain : null, `${id} ${legacy} keeps it bound`);
+        bound.surface?.release();
+        assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+        const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(f.target.buffer);
+        await device.idle();
+        assert.equal(f.gpu.count('writeTexture'), samples ? 1 : 0, `${id} ${legacy} samples it`);
+        assert.equal(device.release(), 0);
+        assert.equal(plain.release(), 0);
+        assert.equal(f.target.release(), 0);
+    }
+});
+
 test('recorded: a texture goes up once, and again only after the program wrote it', async()=>{
     const f = recorded();
     const { device, gpu, root, ram, target } = f;

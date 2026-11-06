@@ -62,7 +62,7 @@ import { packDepths, unpackDepths } from './depth.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DXT_CODES, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER,
     DDSCAPS_ZBUFFER, DDERR_INVALIDCAPS, DDERR_INVALIDPIXELFORMAT, DDSCAPS_3DDEVICE,
-    DDSCAPS_SYSTEMMEMORY, E_FAIL,
+    DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, E_FAIL,
 } from '../ddraw/constants.js';
 
 /**
@@ -387,7 +387,8 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return { hr, device: null };
             }
-            return { hr: D3D_OK, device: createDevice(description, surface) };
+            return { hr: D3D_OK,
+                device: createDevice(description, surface, options.legacy === true) };
         },
 
         /**
@@ -584,8 +585,15 @@ export function createDirect3D7(ddraw, services = {}){
     /**
      * @param {typeof DEVICE_DESCRIPTIONS[number]} description
      * @param {any} target
+     * @param {boolean} legacy  Made for an IDirect3DDevice of an earlier version.
      */
-    function createDevice(description, target){
+    function createDevice(description, target, legacy){
+        // A surface made without DDSCAPS_TEXTURE: a seventh-generation device
+        // binds nothing for it; an earlier one keeps it bound, and only the
+        // software rasteriser samples it (Wine's test_texture_wrong_caps).
+        const hardware = description.id !== DEVICE_IDS.RGB;
+        /** @param {any} surface */
+        const notTexture = surface=>surface !== null && (surface.caps & DDSCAPS_TEXTURE) === 0;
         let inScene = false;
         /** @type {Map<number, number>} */
         let renderStates = createDefaultRenderStates({
@@ -808,8 +816,9 @@ export function createDirect3D7(ddraw, services = {}){
         const rendererTextures = {
             /** @param {number} stage */
             get: stage=>{
-                const surface = textures.get(stage);
-                return surface ? refreshedTexture(surface) : null;
+                const surface = textures.get(stage) ?? null;
+                return surface && !(hardware && notTexture(surface))
+                    ? refreshedTexture(surface) : null;
             },
         };
 
@@ -1515,6 +1524,10 @@ export function createDirect3D7(ddraw, services = {}){
                 if (stage < 0 || stage >= STAGE_COUNT)
                 {
                     return DDERR_INVALIDPARAMS;
+                }
+                if (!legacy && surface && notTexture(surface))
+                {
+                    surface = null;
                 }
                 const previous = textures.get(stage);
                 if (previous === surface)
