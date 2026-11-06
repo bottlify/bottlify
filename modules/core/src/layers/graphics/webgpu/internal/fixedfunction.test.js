@@ -107,6 +107,9 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
     // coordinate's first two components.
     const sampler = position.slice(position.indexOf('fn sampleStage0'));
     assert.ok(sampler.startsWith('fn sampleStage0(carried: vec4f)'));
+    // With no mip filter the level is the texture's own level of detail,
+    // from the top byte of the stage's flags (Wine's d3d9 maxmip_test).
+    assert.ok(sampler.includes('var level = min(f32(flags >> 24u), max(levels - 1.0, 0.0));'));
     assert.ok(sampler.slice(0, sampler.indexOf('}')).includes('let raw = carried.xy;'));
 
     // Through a count of three, (x, y, z, 1) goes through the matrix's first

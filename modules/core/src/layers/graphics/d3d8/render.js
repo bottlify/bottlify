@@ -2959,7 +2959,9 @@ fn fs_main(in: Corner) -> @location(0) vec4f {
 export function samplerDescriptorOf(states, mips = true, lod = 0){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
     const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
-    const finest = Math.max(get(D3DTSS.MAXMIPLEVEL), lod);
+    // With no mip filter the texture's own level of detail alone picks the
+    // level (Wine's d3d9 maxmip_test).
+    const finest = mipFilter === D3DTEXF.NONE ? lod : Math.max(get(D3DTSS.MAXMIPLEVEL), lod);
     return {
         magFilter: FILTER[get(D3DTSS.MAGFILTER)] ?? 'nearest',
         minFilter: FILTER[get(D3DTSS.MINFILTER)] ?? 'nearest',
@@ -3024,8 +3026,10 @@ const ADDRESS_BITS = Object.freeze({
  * whole mip chain -- and the state a program set per stage is carried in the
  * uniform block instead: address mode per axis (bits 0-3, and 16-17 for a
  * volume's third), point filtering for magnification and minification (bits
- * 4-5), the mip mode (bits 6-7: none, point, linear) and the most detailed
- * level allowed (bits 8-15).
+ * 4-5), the mip mode (bits 6-7: none, point, linear), the most detailed
+ * level allowed (bits 8-15) and the texture's own level of detail (bits
+ * 24-31): the one level sampled with no mip filter, where D3DSAMP_MAXMIPLEVEL
+ * does not count (Wine's d3d9 maxmip_test).
  * Measured reason: a device was seen to keep one sampler in force for every
  * draw of a run regardless of the group each draw bound, for stretches of
  * frames at a time, so a picture whose sampling depends on which sampler is
@@ -3042,13 +3046,14 @@ export function samplerFlagsOf(states, mips = true, lod = 0){
     const mipMode = mipFilter === D3DTEXF.LINEAR ? 2 : mipFilter === D3DTEXF.NONE ? 0 : 1;
     const point = (/** @type {number} */ filter)=>
         filter === D3DTEXF.LINEAR || filter === D3DTEXF.ANISOTROPIC ? 0 : 1;
-    return (ADDRESS_BITS[get(D3DTSS.ADDRESSU)] ?? 0)
+    return ((ADDRESS_BITS[get(D3DTSS.ADDRESSU)] ?? 0)
         | ((ADDRESS_BITS[get(D3DTSS.ADDRESSV)] ?? 0) << 2)
         | (point(get(D3DTSS.MAGFILTER)) << 4)
         | (point(get(D3DTSS.MINFILTER)) << 5)
         | (mipMode << 6)
         | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL), lod)) & 0xff) << 8)
-        | ((ADDRESS_BITS[get(D3DTSS.ADDRESSW)] ?? 0) << 16);
+        | ((ADDRESS_BITS[get(D3DTSS.ADDRESSW)] ?? 0) << 16)
+        | ((Math.min(255, Math.max(0, lod)) & 0xff) << 24)) >>> 0;
 }
 
 /** The one sampler every draw samples through; the state is in the shader. */

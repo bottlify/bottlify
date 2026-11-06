@@ -1563,6 +1563,14 @@ test('the sampler state packs as the shader unpacks it', ()=>{
     assert.equal(samplerFlagsOf(new Map()), 1 << 4 | 1 << 5, 'the defaults: wrap, point, no mips');
     assert.equal(samplerFlagsOf(new Map([[D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP]])) >>> 16, 2,
         'a volume\'s third address mode above the rest');
+    // The texture's own level of detail in the top byte: with no mip filter it
+    // alone picks the level, MAXMIPLEVEL not counting (Wine's d3d9 maxmip_test).
+    const none = new Map([[D3DTSS.MIPFILTER, D3DTEXF.NONE], [D3DTSS.MAXMIPLEVEL, 2]]);
+    assert.equal(samplerFlagsOf(none, true, 1) >>> 24, 1);
+    assert.deepEqual([samplerDescriptorOf(none, true, 1).lodMinClamp,
+        samplerDescriptorOf(none, true, 1).lodMaxClamp], [1, 1]);
+    assert.equal(samplerDescriptorOf(new Map([[D3DTSS.MIPFILTER, D3DTEXF.POINT],
+        [D3DTSS.MAXMIPLEVEL, 2]]), true, 1).lodMinClamp, 2, 'with mips, the larger of the two');
 });
 
 test('border and mirror-once clamp on the GPU and are the sample\'s variant, by axis', ()=>{

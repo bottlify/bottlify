@@ -1657,7 +1657,7 @@ function sampleFunctions(count, keys = [], dimensions = [], ones = [], stages = 
     let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
-    var level = 0.0;
+    var level = min(f32(flags >> 24u), max(levels - 1.0, 0.0));
     if (mipMode == 1u) {
         level = round(lod);
     } else if (mipMode == 2u) {
@@ -1708,7 +1708,7 @@ function cubeSample(index, flags, ones, lod = levelOfDetail()){
     let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
-    var level = f32((flags >> 8u) & 0xffu);
+    var level = min(f32(flags >> 24u), max(levels - 1.0, 0.0));
     if (mipMode == 1u) {
         level = round(lod);
     } else if (mipMode == 2u) {
@@ -1757,7 +1757,7 @@ function volumeSample(index, flags, ones, lod = levelOfDetail(), stage = undefin
     let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
-    var level = f32((flags >> 8u) & 0xffu);
+    var level = min(f32(flags >> 24u), max(levels - 1.0, 0.0));
     if (mipMode == 1u) {
         level = round(lod);
     } else if (mipMode == 2u) {
