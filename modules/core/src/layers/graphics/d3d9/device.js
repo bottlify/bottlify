@@ -4169,7 +4169,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             out.texture = makeTexture({
                 width, height, format, pool, usage,
                 ...chainOf(usage, format, levels, fullMipCount(width, height)),
-                ...userMemory === 0 ? {} : { allocate: ()=>userMemory, free: ()=>{} },
+                ...userMemory === 0 ? {} : { allocate: ()=>userMemory, free: ()=>{}, tight: true },
             });
             return D3D_OK;
         },
@@ -4347,6 +4347,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool,
                 usage,
                 base: userMemory || allocate(surfaceBytes(format, width, height)),
+                tight: userMemory !== 0,
                 // The program's own memory stays the program's.
                 count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
                     : renderer?.retire(surface)), surfaceBytes(format, width, height)),

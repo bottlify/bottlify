@@ -373,3 +373,28 @@ for (const { format, gpu, channels, name } of WHOLE)
             out.texture.release();
         });
 }
+
+test('a narrow format\'s rows go up without the gap its pitch leaves', async()=>{
+    // An L8 row of three texels takes four bytes (test_surface_alignment);
+    // the texture is given the three, not the byte between rows.
+    const h = harness();
+    const { device } = h;
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture(3, 2, 1, 0, D3DFMT.L8, D3DPOOL.MANAGED, out), D3D_OK);
+    /** @type {{ pBits?: number, Pitch?: number }} */
+    const locked = {};
+    assert.equal(out.texture.LockRect(0, locked, null, 0), D3D_OK);
+    assert.equal(locked.Pitch, 4);
+    h.write(/** @type {number} */ (locked.pBits), Uint8Array.of(10, 20, 30, 0xee, 40, 50, 60, 0xee));
+    assert.equal(out.texture.UnlockRect(0), D3D_OK);
+    assert.equal(device.SetTexture(0, out.texture), D3D_OK);
+    await h.drawTextured();
+    const made = h.gpu.of('createTexture').find((/** @type {any} */ call)=>
+        call.descriptor.label === 'texture');
+    const upload = h.gpu.of('writeTexture').find((/** @type {any} */ call)=>
+        call.destination.texture === made.texture);
+    const bytes = /** @type {Uint8Array} */ (upload.bytes);
+    assert.deepEqual(Array.from({ length: 6 }, (_, texel)=>bytes[texel * 4]),
+        [10, 20, 30, 40, 50, 60]);
+});
