@@ -1304,6 +1304,18 @@ test('a device whose last reference a state block held still lets go of its Dire
     assert.equal(h.release(root), 0, 'and the device held the root no longer');
 });
 
+test('a loss the device is told of reaches the guest\'s TestCooperativeLevel at once', ()=>{
+    // The focus window's hook loses the device (`focus.js`); the guest
+    // answers D3D_OK from the block only while the block says so.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const block = h.box.memory.readU32(device + 4);
+    assert.equal(h.box.memory.readU32(block + SHADOW.COOPERATIVE), 0);
+    h.object(device).injectDeviceLoss(false);
+    assert.notEqual(h.box.memory.readU32(block + SHADOW.COOPERATIVE), 0, 'the host\'s to answer');
+});
+
 test('a state block is recorded, handed back, and applied through its own vtable', ()=>{
     const h = seamed();
     const root = h.create();

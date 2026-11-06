@@ -3641,6 +3641,17 @@ export function createDirect3D9Seam(
         // window is kept for a later Reset, whose present parameters need
         // not repeat it.
         deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
+        // A loss the focus window's hook makes is the guest's to see at once:
+        // TestCooperativeLevel answers from the block while it says D3D_OK.
+        const made = held.device;
+        const lose = made.injectDeviceLoss?.bind(made);
+        if (lose)
+        {
+            made.injectDeviceLoss = (/** @type {boolean | undefined} */ restorable)=>{
+                lose(restorable);
+                shadowOf(made)?.remirror();
+            };
+        }
         windowsOf.set(held.device, { focus: focus >>> 0,
             noWindowChanges: ((behaviourFlags >>> 0) & D3DCREATE_NOWINDOWCHANGES) !== 0,
             extended: held.device.extended === true });
