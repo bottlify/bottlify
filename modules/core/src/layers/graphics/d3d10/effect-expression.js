@@ -12,9 +12,9 @@
  * fxc writes each as a container of its own with three chunks: CTAB, the
  * effect variables the expression reads and the registers they are read
  * into (Direct3D 9's constant table); CLI4, its literals, 32-bit floats; and
- * FXLC, its instructions. An instruction is a token -- the operation in bits
+ * FXLC, its instructions. An instruction is a token (the operation in bits
  * 20-30, the components it runs over in the low bits, and bit 31 when its
- * first input is one component for all of them -- the count of its inputs,
+ * first input is one component for all of them), the count of its inputs,
  * and that many operands and one more for the result, each three words: a
  * relative index (zero, none), the table and the component offset in it.
  * The tables are the literals (1), the inputs (2), the result (4) and the
@@ -22,8 +22,8 @@
  * operator, and their results are what Windows answers (Wine's d3d10
  * test_effect_value_expression and test_effect_index_expression).
  *
- * Values are 32-bit words: what an operation reads them as -- float, int or
- * uint -- is the operation's.
+ * Values are 32-bit words: what an operation reads them as (float, int or
+ * uint) is the operation's.
  */
 
 import { parseDxbc } from './dxbc.js';
