@@ -647,6 +647,12 @@ export function createDirect3D7(ddraw, services = {}){
                 renderStates.set(state, 0);
             }
         }
+        // Direct3D 1 to 6 make every normal unit length; they have no state
+        // to say otherwise (Wine's ddraw1, 2 and 4 test_lighting).
+        if (legacy)
+        {
+            renderStates.set(D3DRENDERSTATE.NORMALIZENORMALS, 1);
+        }
         /**
          * TEXTUREHANDLE and TEXTUREMAPBLEND are the earlier interfaces' and
          * refused on IDirect3DDevice7 both ways (ddraw7 test_set_render_state);
@@ -934,6 +940,7 @@ export function createDirect3D7(ddraw, services = {}){
             get clipsTransformed(){
                 return clipsTransformed;
             },
+            normalsByWorld: legacy,
         };
 
         /**
@@ -1721,6 +1728,7 @@ export function createDirect3D7(ddraw, services = {}){
                     transform: type=>transforms.get(type) ?? IDENTITY,
                     viewport: viewport.rect,
                     renderState: state=>renderStates.get(state) ?? 0,
+                    normalsByWorld: legacy,
                     lights: [...lights.values()].filter(entry=>entry.enabled)
                         .map(entry=>entry.light),
                     // A material of no shininess highlights by the last power

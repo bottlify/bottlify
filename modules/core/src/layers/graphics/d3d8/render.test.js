@@ -35,7 +35,7 @@ import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
     gpuFormatOf,
-    normalMatrixOf, viewerDirection,
+    normalMatrixFor, normalMatrixOf, viewerDirection,
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
@@ -2691,6 +2691,16 @@ test('a normal goes through the inverse transpose of the world matrix', ()=>{
     // would not.
     assert.deepEqual(through([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], [1, 0, 0]),
         [-1, 0, 0]);
+    // Direct3D 1 to 6 move it by the world's own upper 3x3, which turns the
+    // singular case's normal aside (Wine's ddraw4 test_lighting: 1/sqrt(2)
+    // once made unit length) and lights the non-affine one.
+    const legacy = (/** @type {number[]} */ world)=>
+        normalMatrixFor(/** @type {any} */ ({ normalsByWorld: true }), world);
+    assert.deepEqual([...legacy([1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1])],
+        [1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1]);
+    assert.deepEqual([...legacy([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1, 10, 10, 10, 0])],
+        [...IDENTITY]);
+    assert.deepEqual([...normalMatrixFor(/** @type {any} */ ({}), [...IDENTITY])], [...IDENTITY]);
 });
 
 test('a light is packed into the rows the shader declares', ()=>{

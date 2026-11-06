@@ -1556,6 +1556,34 @@ export function normalMatrixOf(m, out = new Float32Array(16)){
 }
 
 /**
+ * What a draw's normal is carried into world space by: the inverse
+ * transpose (`normalMatrixOf`), or, for a device of Direct3D 1 to 6, the
+ * world matrix's own upper 3x3 -- those versions move a normal as they move a
+ * direction, and a singular world still lights (Wine's ddraw1, 2 and 4
+ * test_lighting).
+ *
+ * @param {RenderModel} model @param {ArrayLike<number>} world
+ * @param {Float32Array} [out]
+ * @returns {Float32Array}
+ */
+export function normalMatrixFor(model, world, out = new Float32Array(16)){
+    if (!model.normalsByWorld)
+    {
+        return normalMatrixOf(world, out);
+    }
+    out.fill(0);
+    for (let row = 0; row < 3; row++)
+    {
+        for (let column = 0; column < 3; column++)
+        {
+            out[row * 4 + column] = world[row * 4 + column];
+        }
+    }
+    out[15] = 1;
+    return out;
+}
+
+/**
  * For each of the sixteen cells, the nine others outside its row and column,
  * row by row: the 3x3 whose determinant is that cell's minor.
  */
@@ -1715,6 +1743,9 @@ function inverseRotation(view){
  *     that bindings do not reach is built once per such change rather than
  *     once per draw. Whoever keys a preparation by a binding names it apart.
  * @property {Material} material
+ * @property {boolean} [normalsByWorld]
+ *     A device of Direct3D 1 to 6: its normals move by the world matrix itself
+ *     (`normalMatrixFor`). Absent, false.
  * @property {boolean} [clipsTransformed]
  *     The draw's pre-transformed vertices came from a vertex buffer the
  *     runtime clips: Direct3D 7's and 6's, transformed by ProcessVertices with
@@ -2001,7 +2032,7 @@ export function uniformsOf(model, lighting, take, mips = true, tail = undefined)
         material: model.material,
         ambient: rs('AMBIENT'),
         eye: lighting?.localViewer === false ? viewerDirection(view) : eyePosition(view),
-        ...(lighting ? { normalMatrix: normalMatrixOf(world, NORMAL_MATRIX) } : {}),
+        ...(lighting ? { normalMatrix: normalMatrixFor(model, world, NORMAL_MATRIX) } : {}),
         ...(generatesFromNormal(model)
             ? { cameraNormalMatrix: normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX) }
             : {}),
@@ -7779,7 +7810,7 @@ export function createRenderer(options){
         {
             const at = vertex.lightingRegister * 4;
             floats.set(asFloats(world), at + HYBRID_LIGHTING.WORLD * 4);
-            floats.set(asFloats(normalMatrixOf(world, NORMAL_MATRIX)),
+            floats.set(asFloats(normalMatrixFor(model, world, NORMAL_MATRIX)),
                 at + HYBRID_LIGHTING.NORMAL_MATRIX * 4);
             const material = model.material ?? NO_MATERIAL;
             const colours = [material.Diffuse, material.Ambient, material.Specular,
@@ -9180,7 +9211,7 @@ export function createRenderer(options){
         {
             if (!normalFormed)
             {
-                normalMatrixOf(formedWorld, formedNormal);
+                normalMatrixFor(model, formedWorld, formedNormal);
                 normalFormed = true;
             }
             block.set(formedNormal, UNIFORM_AT.normalMatrix);

@@ -250,6 +250,37 @@ test('a Direct3D 1-6 point light falls off by the share of its range left', ()=>
     assert.equal(lit({ ...point, Legacy: true, Range: 1.5 }), 0, 'and nothing past the range');
 });
 
+test('a Direct3D 1-6 device moves a normal by the world matrix itself and makes it unit length,'
+    + ' so a singular world still lights', ()=>{
+    // Wine's ddraw4 test_lighting: rows one and three of the world the same,
+    // a normal of (0, 0, -1) under a light along +z: 1/sqrt(2) of the light.
+    const s = space();
+    const directional = {
+        Type: D3DLIGHTTYPE.DIRECTIONAL, Diffuse: { r: 0, g: 0, b: 1, a: 0 },
+        Specular: { r: 0, g: 0, b: 0, a: 0 }, Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Position: { x: 0, y: 0, z: 0 }, Direction: { x: 0, y: 0, z: 1 },
+        Range: 0, Falloff: 0, Attenuation0: 0, Attenuation1: 0, Attenuation2: 0,
+        Theta: 0, Phi: 0,
+    };
+    const dest = s.buffer(FVF.XYZRHW | FVF.DIFFUSE, 1);
+    const src = s.buffer(FVF.XYZ | FVF.NORMAL, 1);
+    s.fill(src, [[0, 0, 0, 0, 0, -1]]);
+    const white = { r: 1, g: 1, b: 1, a: 1 };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    const singular = [1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1];
+    /** @param {boolean} legacy @returns {number} the diffuse's blue */
+    const blue = legacy=>{
+        const state = { ...device({ lights: [directional], transforms: { [D3DTS.WORLD]: singular },
+            states: { [D3DRS.NORMALIZENORMALS]: legacy ? 1 : 0 },
+            material: { Diffuse: white, Ambient: black, Specular: black, Emissive: black,
+                Power: 0 } }), normalsByWorld: legacy };
+        assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
+            dest, destIndex: 0, count: 1, source: s.source(src), flags: 0, state }), D3D_OK);
+        return s.dword(dest.base + 16) & 0xff;
+    };
+    assert.equal(blue(true), 0xb4);
+});
+
 test('with no light, a lit vertex is black in its own alpha, an unlit one keeps its colour', ()=>{
     // Wine's ddraw7 test_lighting: lit and unlit quads with and without normals.
     const s = space();

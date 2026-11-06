@@ -48,6 +48,8 @@ const DEGENERATE_DEPTH = 0.001;
  * @property {{ x: number, y: number, width: number, height: number,
  *   minDepth: number, maxDepth: number }} viewport
  * @property {(state: number) => number} renderState
+ * @property {boolean} [normalsByWorld]  A device of Direct3D 1 to 6: a normal moves
+ *           by the world and view matrices themselves, not their inverse transpose.
  * @property {any[]} lights    The enabled ones, as D3DLIGHT7.
  * @property {any} material
  *
@@ -283,7 +285,13 @@ export function processVertices(request){
     // What only lighting reads, made only for a lit draw: inverting matrices
     // and carrying lights into camera space for an unlit one was work nothing
     // saw, every call.
-    const normalMatrices = lighting ? worldViews.map(matrix=>invert(matrix)) : [];
+    // A matrix laid out as the inverse is read below: for Direct3D 1 to 6
+    // the transpose of the matrix itself, which moves a row vector as the
+    // matrix moves a direction (`normalMatrixFor`).
+    const normalMatrices = !lighting ? [] : state.normalsByWorld
+        ? worldViews.map(matrix=>Array.from({ length: 16 },
+            (_, at)=>matrix[(at % 4) * 4 + Math.floor(at / 4)]))
+        : worldViews.map(matrix=>invert(matrix));
     const lights = lighting ? state.lights.map(light=>({
         ...light,
         cameraDirection: transform([light.Direction.x, light.Direction.y, light.Direction.z, 0],
