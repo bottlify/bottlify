@@ -27,7 +27,8 @@ import {
 } from './vtables.js';
 import {
     IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface4,
-    IID_IDirectDrawSurface7,
+    IID_IDirectDrawSurface7, IID_IDirectDrawSurface2, IID_IDirectDrawColorControl,
+    IID_IDirect3DDevice7, IID_IDirect3DTexture2,
 } from './iids.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
@@ -682,11 +683,12 @@ test('before the seventh generation GetAttachedSurface matches dwCaps alone, wha
     h.box.memory.writeU32(caps, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
     assert.equal(h.box.call(top4, slot(IDIRECTDRAWSURFACE4_SLOTS, 'GetAttachedSurface'),
         [caps, out]), DD_OK, 'the level below, found by dwCaps');
-    assert.equal(h.release(h.box.memory.readU32(out)), 1);
+    // Its fourth generation's count: the chain's reference is the seventh's.
+    assert.equal(h.release(h.box.memory.readU32(out)), 0);
     assert.equal(h.surface7(top7, 'GetAttachedSurface', [caps, out]), DDERR_NOTFOUND,
         'the seventh generation wants every bit of dwCaps2 as well');
 
-    assert.equal(h.release(top4), 1);
+    assert.equal(h.release(top4), 0);
     assert.equal(h.release(top7), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
@@ -1320,7 +1322,8 @@ test('a mode set through the first generation is what the seventh reads back', (
     h.box.memory.writeU32(0x5200, DDSURFACEDESC2.SIZE);
     assert.equal(h.surface7(seventh, 'GetSurfaceDesc', [0x5200]), DD_OK);
     assert.equal(h.box.memory.readU32(0x5200 + DDSURFACEDESC2.dwWidth), 8);
-    assert.equal(h.release(seventh), 1);
+    // Each surface generation counts apart (Wine's test_surface_qi).
+    assert.equal(h.release(seventh), 0);
 
     assert.equal(h.release(primary), 0);
     assert.equal(h.release(first), 0);
@@ -2482,5 +2485,58 @@ test('a blit of a surface whose pixels share bytes is refused, not moved a byte 
     assert.equal(h.release(other), 0);
     assert.equal(h.release(nibbles), 0);
     assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('a surface\'s interfaces each keep a count of their own, and an older surface refuses what'
+    + ' it has not with E_INVALIDARG (test_surface_qi)', ()=>{
+    const h = seamed();
+    for (const seventh of [false, true])
+    {
+        const ddraw = seventh ? h.create7() : (()=>{
+            assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+            const made = h.box.memory.readU32(0x4100);
+            assert.equal(h.box.call(made, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+                [HWND, DDSCL_NORMAL]), DD_OK);
+            return made;
+        })();
+        const surface = seventh
+            ? h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8 })
+            : (()=>{
+                writeSurfaceDesc(h.box.services, 0x5000, DDSURFACEDESC, {
+                    flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, width: 8, height: 8, pitch: 0,
+                    backBufferCount: 0, mipMapCount: 0, caps: DDSCAPS_OFFSCREENPLAIN, caps2: 0,
+                    pixelFormat: { size: 0x20, flags: 0, fourCC: 0, bitCount: 0, redMask: 0,
+                        greenMask: 0, blueMask: 0, alphaMask: 0 },
+                });
+                assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+                    [0x5000, 0x5100, 0]), DD_OK);
+                return h.box.memory.readU32(0x5100);
+            })();
+        const query = (/** @type {number} */ through, /** @type {string} */ iid)=>{
+            const riid = h.box.putGuid(0x4000, iid);
+            h.box.memory.writeU32(0x6200, 0xdeadbeef);
+            const hr = h.box.call(through, 0, [riid, 0x6200]);
+            return { hr: hr | 0, pointer: h.box.memory.readU32(0x6200) };
+        };
+        const second = query(surface, IID_IDirectDrawSurface2);
+        assert.equal(second.hr, DD_OK);
+        const gamma = query(second.pointer, IID_IDirectDrawGammaControl);
+        assert.equal(gamma.hr, DD_OK);
+        assert.equal(h.release(gamma.pointer), 0, 'the gamma control\'s own');
+        assert.equal(h.release(second.pointer), 0, 'the second generation\'s own');
+        const refused = query(surface, IID_IDirect3DDevice7);
+        assert.equal(refused.hr, seventh ? 0x80004002 | 0 : 0x80070057 | 0);
+        assert.equal(refused.pointer, 0);
+        assert.equal(query(surface, IID_IDirectDrawColorControl).hr, 0x80004002 | 0,
+            'the colour control is E_NOINTERFACE in every generation');
+        if (seventh)
+        {
+            assert.equal(query(surface, IID_IDirect3DTexture2).hr, 0x80004002 | 0,
+                'a seventh-generation surface is no Direct3D texture');
+        }
+        assert.equal(h.release(surface), 0, 'the creation\'s count alone held it');
+        assert.equal(h.release(ddraw), 0);
+    }
     h.assertAllReleased();
 });

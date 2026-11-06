@@ -601,8 +601,10 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         {
             // Zeroed on failure: a program checks the pointer, not only the
             // result, and a stale value there is a pointer it will follow.
+            // An object may refuse with a word of its own (DirectDraw's
+            // older surfaces answer E_INVALIDARG: Wine's test_surface_qi).
             writeWord(ppv >>> 0, 0);
-            return E_NOINTERFACE;
+            return object.refusal?.(wanted) ?? E_NOINTERFACE;
         }
 
         const pointer = publish(object, record.sharedWith ?? wanted, record.methods);

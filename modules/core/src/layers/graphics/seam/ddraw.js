@@ -47,12 +47,13 @@ import {
     IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
+import { IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import {
     IID_IDirectDraw, IID_IDirectDraw2, IID_IDirectDraw4, IID_IDirectDraw7,
     IID_IDirectDrawSurface, IID_IDirectDrawSurface2, IID_IDirectDrawSurface3,
     IID_IDirectDrawSurface4, IID_IDirectDrawSurface7, IID_IDirectDrawPalette,
     IID_IDirectDrawClipper, IID_IDirectDrawGammaControl, IID_IDirect3D, IID_IDirect3D2,
-    IID_IDirect3D3,
+    IID_IDirect3D3, IID_IDirect3DTexture, IID_IDirect3DTexture2, IID_IDirectDrawColorControl,
 } from './iids.js';
 import {
     DDBLTFX, DDCAPS, DDCAPS_SIZES, DDCOLORKEY, DDSCAPS2, RECT, createFields,
@@ -209,6 +210,52 @@ const SURFACE_GENERATIONS = Object.freeze([
     { id: IID_IDirectDrawSurface7, slots: IDIRECTDRAWSURFACE7_SLOTS, layout: DDSURFACEDESC2,
         ddraw: 'IDirectDraw7' },
 ]);
+
+/** Each surface interface's own count (`surfaceCountOf`). */
+const SURFACE_COUNTS = Object.freeze({
+    [IID_IDirectDrawSurface]: '1', [IID_IDirectDrawSurface2]: '2',
+    [IID_IDirectDrawSurface3]: '3', [IID_IDirectDrawSurface4]: '4',
+    [IID_IDirectDrawSurface7]: '7', [IID_IDirectDrawGammaControl]: 'gamma',
+});
+
+/**
+ * Which of a surface's counts an interface keeps: each surface generation
+ * and the gamma control their own; the texture interfaces the count of the
+ * surface they were made beside (the fourth's, or the first's), and IUnknown
+ * the first's (Wine's ddraw test_surface_qi, every version).
+ *
+ * @param {string} key  An interface identifier, or a count's name.
+ * @param {string} own  The generation the surface was created as.
+ * @returns {string}
+ */
+const surfaceCountOf = (key, own)=>{
+    if (key === IID_IDirect3DTexture || key === IID_IDirect3DTexture2)
+    {
+        return own === '4' ? '4' : '1';
+    }
+    return /** @type {Record<string, string>} */ (SURFACE_COUNTS)[key]
+        ?? (key === IID_IUNKNOWN ? '1' : key);
+};
+
+/**
+ * Whether a surface answers QueryInterface for an interface: a surface of the
+ * seventh generation is no Direct3D texture (test_surface_qi).
+ *
+ * @param {string} key @param {string} own
+ */
+const surfaceSupports = (key, own)=>own !== '7'
+    || (key !== IID_IDirect3DTexture && key !== IID_IDirect3DTexture2);
+
+/**
+ * What a surface's QueryInterface answers for an interface it has not: a
+ * surface of the generations Direct3D textures live beside refuses with
+ * E_INVALIDARG, the colour control aside; a seventh-generation one with
+ * E_NOINTERFACE (test_surface_qi).
+ *
+ * @param {string} key @param {string} own
+ */
+const surfaceRefusal = (key, own)=>(own !== '7' && key !== IID_IDirectDrawColorControl
+    ? E_INVALIDARG : E_NOINTERFACE);
 
 /**
  * A GUID as the braced string the interface tables are keyed by: three
@@ -504,6 +551,7 @@ export function createDirectDrawSeam(
      */
     const handBack = (object, interfaces, id, out)=>{
         settlesDevices(object);
+        object.handedAs?.(id);
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer;
@@ -1424,6 +1472,7 @@ export function createDirectDrawSeam(
         for (const surface of list)
         {
             surface.addRef();
+            surface.handedAs(generation.id);
             settlesDevices(surface);
             const pointer = publisher.publish(surface, surfaceInterfaces, generation.id);
             const desc = descriptorScratch();
@@ -2115,6 +2164,9 @@ export function createDirectDrawSeam(
             /** @type {import('../ddraw/objects.js').DirectDrawOptions} */
             const options = {
                 version,
+                surfaceCountOf,
+                surfaceRefusal,
+                surfaceSupports,
                 onPresent: (surface, window, exclusive)=>{
                     if (present)
                     {

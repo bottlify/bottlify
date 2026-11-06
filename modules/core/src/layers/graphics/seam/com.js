@@ -192,6 +192,16 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells, settle
             }
             return adapter.interfaceFor(id);
         },
+        /**
+         * What QueryInterface answers for an interface it has not: the
+         * object's own word (`refusal`), or E_NOINTERFACE.
+         *
+         * @param {string} id
+         * @returns {number | undefined}
+         */
+        refusal(id){
+            return typeof api.refusal === 'function' ? api.refusal(id) : undefined;
+        },
         /** @param {string} id */
         interfaceFor(id){
             // IUnknown is every object's, and answers with one record whichever

@@ -277,11 +277,14 @@ export function depthFormatForDepth(bitDepth){
  * @property {number} pitch
  *
  * @typedef {Object} Surface
- * @property {number} refCount
+ * @property {number} refCount  Every interface's references together.
  * @property {boolean} destroyed
  * @property {any} directDraw  The DirectDraw object that made it.
- * @property {() => number} addRef
- * @property {() => number} release
+ * @property {(key?: string) => number} addRef  Through an interface (`surfaceCountOf`).
+ * @property {(key?: string) => number} release
+ * @property {(key: string) => number | undefined} refusal
+ * @property {(key: string) => boolean} supports
+ * @property {(key: string) => void} handedAs  A reference the model took, handed out as `key`.
  * @property {number} caps
  * @property {number} caps2
  * @property {number} width
@@ -449,6 +452,16 @@ function sameRect(a, b){
 /**
  * @typedef {Object} DirectDrawOptions
  * @property {1 | 2 | 4 | 7} [version]  The generation the object was created through.
+ * @property {(key: string, own: string) => string} [surfaceCountOf]
+ *           Which of a surface's counts an interface it is called through keeps:
+ *           each surface generation and the gamma control count apart (Wine's
+ *           test_surface_qi), `own` being the one it was created as ('1', '4'
+ *           or '7'). Without it every interface keeps the one count.
+ * @property {(key: string, own: string) => boolean} [surfaceSupports]
+ *           Whether a surface created as `own` answers QueryInterface for `key`.
+ * @property {(key: string, own: string) => number | undefined} [surfaceRefusal]
+ *           What a surface's QueryInterface answers for an interface it does not
+ *           have, by the generation it was created as; E_NOINTERFACE without it.
  * @property {number} [screenWidth]
  * @property {number} [screenHeight]
  * @property {(bytes: number) => number} [allocate]
@@ -952,6 +965,23 @@ export function createDirectDraw(options = {}){
     }
 
     /**
+     * The surface generation a creation through `version` makes.
+     *
+     * @param {number | undefined} version @returns {1 | 4 | 7}
+     */
+    function countVersion(version){
+        const made = version ?? options.version ?? 7;
+        return made === 7 ? 7 : made === 4 ? 4 : 1;
+    }
+
+    /**
+     * The version a surface being made was asked through, while `createSurface` runs.
+     *
+     * @type {number | undefined}
+     */
+    let creating;
+
+    /**
      * @param {{ caps: number, caps2: number, width: number, height: number,
      *   backBufferCount: number, pixelFormat: import("./structs.js").PixelFormatFields,
      *   owner: string | null, implicit: boolean, mipMapCount?: number,
@@ -1024,6 +1054,15 @@ export function createDirectDraw(options = {}){
             }
         };
 
+        // The counts its interfaces keep, by `surfaceCountOf`'s name: the one
+        // it was created through holds the creation's reference and every
+        // reference the model takes itself.
+        const own = String(countVersion(spec.version ?? creating));
+        /** @type {Map<string, number>} */
+        const interfaceCounts = new Map([[own, 1]]);
+        /** @param {string | undefined} key */
+        const countOf = key=>(key === undefined || !options.surfaceCountOf ? own
+            : options.surfaceCountOf(key, own));
         const life = counted(()=>{
             surfaces.delete(surface);
             // Releasing a surface sheds everything it holds: the palette set on
@@ -1081,8 +1120,45 @@ export function createDirectDraw(options = {}){
             get directDraw(){
                 return directDraw;
             },
-            addRef: ()=>life.addRef(),
-            release: ()=>life.release(),
+            /** @param {string} key  An interface asked for and not had. */
+            refusal: key=>options.surfaceRefusal?.(key, own),
+            /** @param {string} key */
+            supports: key=>options.surfaceSupports?.(key, own) ?? true,
+            /**
+             * A reference the model took for the program, handed out through
+             * `key`: it is that interface's to release, not the creation's.
+             *
+             * @param {string} key
+             */
+            handedAs(key){
+                const name = countOf(key);
+                const held = interfaceCounts.get(own) ?? 0;
+                if (name !== own && held > 0)
+                {
+                    interfaceCounts.set(own, held - 1);
+                    interfaceCounts.set(name, (interfaceCounts.get(name) ?? 0) + 1);
+                }
+            },
+            /** @param {string} [key]  The interface called through. */
+            addRef(key){
+                const name = countOf(key);
+                const count = (interfaceCounts.get(name) ?? 0) + 1;
+                interfaceCounts.set(name, count);
+                life.addRef();
+                return count;
+            },
+            /** @param {string} [key] */
+            release(key){
+                const name = countOf(key);
+                const count = interfaceCounts.get(name) ?? 0;
+                if (count === 0 || life.dead)
+                {
+                    return 0;
+                }
+                interfaceCounts.set(name, count - 1);
+                life.release();
+                return count - 1;
+            },
 
             get caps(){
                 return caps;
@@ -1831,6 +1907,23 @@ export function createDirectDraw(options = {}){
      */
     function createSurface(request, callOptions = {}){
         const version = callOptions.version ?? 7;
+        creating = version;
+        try
+        {
+            return createSurfaceAs(request, callOptions, version);
+        }
+        finally
+        {
+            creating = undefined;
+        }
+    }
+
+    /**
+     * @param {SurfaceRequest | null} request
+     * @param {{ version?: 1 | 2 | 4 | 7, outer?: number }} callOptions
+     * @param {1 | 2 | 4 | 7} version
+     */
+    function createSurfaceAs(request, callOptions, version){
         const generation = GENERATION_OF[version];
 
         // Order matters and is observable. Aggregation is refused before the
