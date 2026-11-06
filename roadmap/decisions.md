@@ -848,6 +848,16 @@ binds 50 of each). It stands until buffer views past the limit are packed into o
 textures past it are bound through WebGPU's binding arrays where a browser has them.
 *2026-11-06.*
 
+**A85. Temporary: Direct3D 8 and 9 make a multisampled target with one sample a pixel.**
+CheckDeviceMultiSampleType answers D3DERR_NOTAVAILABLE for every type but none, so a program
+that asks first renders single-sampled as it chose to. One that asks a create for samples
+anyway (CreateRenderTarget, CreateDepthStencilSurface, their Ex forms, present parameters)
+is not refused, as Windows refuses a type its caps deny (Wine's test_invalid_multisample):
+every card a program of the era meets draws multisampled, and a program that never asked
+would stop at a refusal no real machine gave it. The target is drawn and read with one
+sample, and the journal says so once. It stands until targets are drawn multisampled and resolved where a
+program reads or presents them. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

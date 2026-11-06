@@ -1472,6 +1472,22 @@ export function createDirect3D9Seam(
     };
 
     /**
+     * A target or depth-stencil asked for with samples is made with one, and
+     * said (decision A85).
+     *
+     * @param {number} samples  D3DMULTISAMPLE_TYPE.
+     * @returns {undefined}
+     */
+    const singleSampled = samples=>{
+        if ((samples >>> 0) !== 0)
+        {
+            divergence?.('Direct3D 9', 'a multisampled target or depth-stencil is made with one'
+                + ' sample a pixel');
+        }
+        return undefined;
+    };
+
+    /**
      * A present of part of the back buffer, or into part of the window, shows
      * the whole of it: said. The dirty region is a hint, and is not.
      *
@@ -2061,13 +2077,14 @@ export function createDirect3D9Seam(
         },
 
         // The multisample type and quality are dropped: this device renders
-        // one sample per pixel whatever it is asked for.
+        // one sample per pixel whatever it is asked for (decision A85).
         /** @param {any} device @param {number[]} args */
-        CreateRenderTarget: (device, [width, height, format, , , lockable, out, shared])=>{
+        CreateRenderTarget: (device, [width, height, format, samples, , lockable, out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateRenderTarget(
@@ -2081,11 +2098,12 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        CreateDepthStencilSurface: (device, [width, height, format, , , , out, shared])=>{
+        CreateDepthStencilSurface: (device, [width, height, format, samples, , , out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateDepthStencilSurface(
@@ -3062,10 +3080,11 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         CheckDeviceState: (device, [window])=>device.CheckDeviceState(window >>> 0),
         CreateRenderTargetEx: exSurfaceCreate('CreateRenderTargetEx',
-            ([width, height, format, , , lockable, out, shared, usage])=>({
+            ([width, height, format, samples, , lockable, out, shared, usage])=>({
                 out, shared,
-                call: (device, held)=>device.CreateRenderTargetEx(width >>> 0, height >>> 0,
-                    format >>> 0, lockable !== 0, usage >>> 0, held),
+                call: (device, held)=>singleSampled(samples)
+                    ?? device.CreateRenderTargetEx(width >>> 0, height >>> 0,
+                        format >>> 0, lockable !== 0, usage >>> 0, held),
             })),
         CreateOffscreenPlainSurfaceEx: exSurfaceCreate('CreateOffscreenPlainSurfaceEx',
             ([width, height, format, pool, out, shared, usage])=>({
@@ -3074,10 +3093,11 @@ export function createDirect3D9Seam(
                     height >>> 0, format >>> 0, pool >>> 0, usage >>> 0, held),
             })),
         CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
-            ([width, height, format, , , , out, shared, usage])=>({
+            ([width, height, format, samples, , , out, shared, usage])=>({
                 out, shared,
-                call: (device, held)=>device.CreateDepthStencilSurfaceEx(width >>> 0,
-                    height >>> 0, format >>> 0, usage >>> 0, held),
+                call: (device, held)=>singleSampled(samples)
+                    ?? device.CreateDepthStencilSurfaceEx(width >>> 0,
+                        height >>> 0, format >>> 0, usage >>> 0, held),
             })),
         /** @param {any} device @param {number[]} args */
         ResetEx: (device, [parameters, mode])=>((parameters >>> 0) === 0
@@ -3164,7 +3184,7 @@ export function createDirect3D9Seam(
             backBufferHeight: (raw.BackBufferHeight >>> 0) || taken.height,
             backBufferFormat: raw.BackBufferFormat || D3DFMT.X8R8G8B8,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: raw.MultiSampleType,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
             swapEffect: raw.SwapEffect,
             // None named is the window the device was made for, and what
             // GetPresentParameters then answers (test_swapchain_parameters).

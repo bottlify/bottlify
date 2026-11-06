@@ -689,6 +689,22 @@ export function createDirect3D8Seam(
     const chainWindows = new WeakMap();
 
     /**
+     * A target or depth-stencil asked for with samples is made with one, and
+     * said (decision A85).
+     *
+     * @param {number} samples  D3DMULTISAMPLE_TYPE.
+     * @returns {undefined}
+     */
+    const singleSampled = samples=>{
+        if ((samples >>> 0) !== 0)
+        {
+            divergence?.('Direct3D 8', 'a multisampled target or depth-stencil is made with one'
+                + ' sample a pixel');
+        }
+        return undefined;
+    };
+
+    /**
      * A present of part of the back buffer, or into part of the window, shows
      * the whole of it: said. The dirty region is a hint, and is not.
      *
@@ -1841,9 +1857,10 @@ export function createDirect3D8Seam(
         // The multisample type is dropped rather than refused, the same way the
         // presentation parameters' is: this device renders one sample per pixel
         // whatever it is asked for, and a target that differs from the back
-        // buffer only in that is still a target it can draw into.
+        // buffer only in that is still a target it can draw into (decision A85).
         /** @param {any} device @param {number[]} args */
-        CreateRenderTarget: (device, [width, height, format, , lockable, out])=>{
+        CreateRenderTarget: (device, [width, height, format, samples, lockable, out])=>{
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateRenderTarget(
@@ -1857,7 +1874,8 @@ export function createDirect3D8Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        CreateDepthStencilSurface: (device, [width, height, format, , out])=>{
+        CreateDepthStencilSurface: (device, [width, height, format, samples, out])=>{
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateDepthStencilSurface(
@@ -2539,7 +2557,7 @@ export function createDirect3D8Seam(
             backBufferHeight: asked.height === 0 ? taken.height : asked.height,
             backBufferFormat: raw.BackBufferFormat,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: raw.MultiSampleType,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
             swapEffect: raw.SwapEffect,
             hDeviceWindow: raw.hDeviceWindow,
             windowed: raw.Windowed !== 0,
