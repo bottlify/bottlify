@@ -6685,6 +6685,54 @@ test('a window minimised goes off the screen with no client area, and comes back
         assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [30, 40, 130, 90]);
     });
 
+test('a window made maximised or minimised is made in its place, then put in that state',
+    async()=>{
+        // msg.c WmCreateMaxPopupSeq: WM_SIZE (SIZE_RESTORED) and WM_MOVE for
+        // the place it was made in, then the state: WM_WINDOWPOSCHANGED with
+        // SWP_STATECHANGED and the default procedure's WM_SIZE for it.
+        const WS_MAXIMIZE = 0x01000000;
+        const WS_MINIMIZE = 0x20000000;
+        const WS_POPUP = 0x80000000;
+        const SWP_STATECHANGED = 0x8000;
+        /** @type {any} */
+        let table = null;
+        /** @type {any[]} */
+        const heard = [];
+        const { fns, memory } = setup({ heap: true, reply: message=>{
+            if (message.message === WM_WINDOWPOSCHANGED)
+            {
+                heard.push(['changed', (memory.u32(message.lParam + 24) & SWP_STATECHANGED) !== 0]);
+                return table.DefWindowProcA.handler([message.hwnd, message.message,
+                    message.wParam, message.lParam]);
+            }
+            if (message.message === WM_SIZE)
+            {
+                heard.push(['size', message.wParam]);
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        } });
+        table = fns;
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const zoomed = await createWindow(fns, memory, { style: WS_POPUP | WS_MAXIMIZE });
+        assert.deepEqual(heard.splice(0), [['size', 0], ['changed', true], ['size', 2]],
+            'made restored, then maximised');
+        assert.equal(fns.IsZoomed.handler([zoomed]), 1);
+        await fns.GetWindowRect.handler([zoomed, 0x900]);
+        assert.deepEqual([0, 1].map(at=>memory.u32(0x900 + at * 4)), [0, 0],
+            'over the screen, a popup having no edges');
+
+        const iconic = await createWindow(fns, memory, { style: WS_POPUP | WS_MINIMIZE });
+        assert.deepEqual(heard.splice(0), [['size', 0], ['changed', true], ['size', 1]]);
+        assert.equal(fns.IsIconic.handler([iconic]), 1);
+        await fns.GetWindowRect.handler([iconic, 0x900]);
+        assert.equal(memory.u32(0x900) | 0, -32000);
+        await fns.ShowWindow.handler([iconic, 9]);
+        await fns.GetWindowRect.handler([iconic, 0x900]);
+        assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [10, 20, 310, 220],
+            'restored, where it was made');
+    });
+
 test('SetWindowPos with HWND_TOPMOST puts a window in the topmost band, HWND_NOTOPMOST out of it',
     async()=>{
         const GWL_EXSTYLE = -20;

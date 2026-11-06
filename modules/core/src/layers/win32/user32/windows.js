@@ -3920,6 +3920,39 @@ export function createWindowFunctions(host){
         /** EVENT_OBJECT_CREATE, once WM_CREATE has let the window be. */
         const made = ()=>winEvent(EVENT_OBJECT_CREATE, record.hwnd, OBJID_WINDOW, thread);
         /**
+         * A window made maximised or minimised is made in its normal place
+         * and then put in that state, as ShowWindow would, before its parent
+         * is told of it and before it is shown (win32u create_window; msg.c
+         * WmCreateMaxPopupSeq).
+         */
+        const minMaxed = ()=>{
+            const state = record.style & (WS_MINIMIZE | WS_MAXIMIZE);
+            if (state === 0 || !live(record.hwnd))
+            {
+                return 0;
+            }
+            record.style = (record.style & ~(WS_MINIMIZE | WS_MAXIMIZE)) >>> 0;
+            const minimising = (state & WS_MINIMIZE) !== 0;
+            return andThen(askCbt(HCBT_MINMAX, record.hwnd, minimising ? SW_MINIMIZE
+                : SW_SHOWMAXIMIZED, thread), refused=>{
+                if ((refused | 0) !== 0 || !live(record.hwnd))
+                {
+                    return 0;
+                }
+                const normal = placeOf(record);
+                return andThen(minimising ? (isChild(record) ? normal : iconPlace())
+                    : maximisedPlace(record, thread), place=>{
+                    record.style = (record.style | state) >>> 0;
+                    record.normalPlace = normal;
+                    const SWP_NOZORDER = 0x0004;
+                    const SWP_NOACTIVATE = 0x0010;
+                    return placeWindow([record.hwnd, 0, place.x, place.y, place.width,
+                        place.height, SWP_FRAMECHANGED | SWP_STATECHANGED | SWP_NOZORDER
+                        | SWP_NOACTIVATE], thread);
+                });
+            });
+        };
+        /**
          * The window, shown and then activated when it was created visible.
          * Made without being told its size, it is told when first shown.
          */
@@ -3932,7 +3965,8 @@ export function createWindowFunctions(host){
         // is on the record.
         /** EVENT_OBJECT_CREATE, then the parents told of the child. */
         const told = ()=>andThen(made(), ()=>parentNotify(record, WM_CREATE, thread));
-        const onThisSide = ()=>(record.wndProc === 0 ? andThen(told(), activated)
+        const onThisSide = ()=>(record.wndProc === 0
+            ? andThen(minMaxed(), ()=>andThen(told(), activated))
             : andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
             }, thread), created=>{
@@ -3940,7 +3974,7 @@ export function createWindowFunctions(host){
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
-                return andThen(told(), activated);
+                return andThen(minMaxed(), ()=>andThen(told(), activated));
             }));
         /** Whether the window's procedure is still one this side runs. */
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
@@ -4057,7 +4091,7 @@ export function createWindowFunctions(host){
                         if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
                         {
                             record.needsSize = true;
-                            return done(record.hwnd);
+                            return andThen(minMaxed(), ()=>done(record.hwnd));
                         }
                         const client = geometry.clientRect(record);
                         return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
@@ -4065,12 +4099,13 @@ export function createWindowFunctions(host){
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                         ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                             (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                        ()=>andThen(parentNotify(record, WM_CREATE, thread), ()=>(!visible
+                        ()=>andThen(minMaxed(), ()=>andThen(parentNotify(record, WM_CREATE,
+                            thread), ()=>(!visible
                             ? done(record.hwnd)
                             : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
                                 ()=>andThen(reveal(), ()=>andThen(activateCreated(record, thread),
                                     ()=>andThen(eraseShown(thread),
-                                        ()=>done(record.hwnd)))))))));
+                                        ()=>done(record.hwnd))))))))));
                     })))));
         });
     };

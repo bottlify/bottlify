@@ -23,8 +23,8 @@
  * SC_RESTORE is carried out by the default procedure before the program hears
  * it. An extended device is never lost. D3DCREATE_NOWINDOWCHANGES leaves both
  * windows to the program. What the runtime's own changes to the focus window
- * make goes to the default procedure, not the program's, a WM_DISPLAYCHANGE
- * aside. (Wine's d3d8 and d3d9 test_wndproc, test_window_style,
+ * make goes to the default procedure, not the program's, WM_DISPLAYCHANGE and
+ * WM_ACTIVATEAPP aside. (Wine's d3d8 and d3d9 test_wndproc, test_window_style,
  * test_lost_device.)
  *
  * The procedure given back at the device's last release is the program's,
@@ -114,8 +114,10 @@ export function createFocusWindows({ user32, procedure, cover, states }){
     const dispatch = ([hwnd, message, wParam, lParam])=>{
         const entry = hooked.get(hwnd >>> 0);
         // What the runtime's own changes to the window make is not the
-        // program's to hear, a mode change aside (wined3d filter_messages).
-        if (!entry || (entry.filtering > 0 && (message >>> 0) !== WM_DISPLAYCHANGE))
+        // program's to hear, but for a mode change and the application
+        // becoming active by them (test_reset_fullscreen).
+        if (!entry || (entry.filtering > 0 && (message >>> 0) !== WM_DISPLAYCHANGE
+            && (message >>> 0) !== WM_ACTIVATEAPP))
         {
             return call('DefWindowProcA', [hwnd, message, wParam, lParam]);
         }
