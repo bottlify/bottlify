@@ -263,6 +263,27 @@ const bytesHeldOf = (worker, seam)=>{
 
 const DISPLAY_RAMP = 'display';
 
+/**
+ * What a layer offers that graphics can go without, asked as it is built: a
+ * disabled layer's stub refuses every call, and that refusal means the layer
+ * has none to give, as a method it does not have does.
+ *
+ * @template T @param {() => T} ask @returns {T | undefined}
+ */
+const offered = ask=>{
+    try
+    {
+        return ask();
+    }
+    catch (e){
+        if (/** @type {{ code?: string }} */ (e)?.code === 'NOT_IMPLEMENTED')
+        {
+            return undefined;
+        }
+        throw e;
+    }
+};
+
 /** The graphics layer's module for one graph; see `defaultModules`. */
 export function createGraphicsModule(){
     /**
@@ -1154,9 +1175,9 @@ export function createGraphicsModule(){
                 pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 floatResult: config?.floatResult,
                 // DXGI's swap chain hands out a kernel event, and its device sets one.
-                events: win32.events?.(),
+                events: offered(()=>win32.events?.()),
                 // A shared resource's NT handle is a kernel object of the process.
-                sharedHandles: win32.sharedHandles?.(),
+                sharedHandles: offered(()=>win32.sharedHandles?.()),
                 guestTraps: config?.guestTraps,
                 // A full-screen Direct3D 8 or 9 device's windows: user32's own
                 // calls on them, and a window procedure of the device's.
