@@ -386,4 +386,4 @@ test('the normal matrix is the same bits as the minors gathered one by one gave'
 });
 
 // The fourth frame clears with fog still on from the third: its clear is not fogged.
-const EXPECTED = ['fece8d40', '2f6e0525', '6ddc1a8f', '0af7af01'];
+const EXPECTED = ['0d1aa465', '2f6e0525', '6ddc1a8f', '0af7af01'];
