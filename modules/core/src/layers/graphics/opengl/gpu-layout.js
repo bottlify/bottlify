@@ -73,6 +73,8 @@ export const ATTRIBUTE_NAMES = Object.freeze([
  * @property {number} buffer      the buffer object's name, or zero for client memory
  * @property {number} base        address or buffer offset of vertex zero
  * @property {number} stride
+ * @property {number} divisor     zero for a vertex's step; n for one element every n
+ *           instances (glVertexAttribDivisor)
  */
 
 /**
@@ -179,6 +181,7 @@ function widenedTriple(pointer, normalised){
  * @property {string} name
  * @property {import('./arrays.js').ArrayPointer} pointer
  * @property {boolean} normalised
+ * @property {number} [divisor]  glVertexAttribDivisor's, zero or absent per vertex
  */
 
 /**
@@ -203,6 +206,7 @@ export function planLayout(arrays){
             return null;
         }
         const stride = effectiveStride(pointer);
+        const divisor = array.divisor ?? pointer.divisor ?? 0;
         if (stride % 4 !== 0 || stride > 2048)
         {
             return null;
@@ -217,6 +221,7 @@ export function planLayout(arrays){
         {
             const candidate = slots[index];
             if (candidate.buffer === pointer.buffer && candidate.stride === stride
+                && candidate.divisor === divisor
                 && pointer.pointer >= candidate.base
                 && pointer.pointer - candidate.base + format.bytes <= stride
                 && (pointer.pointer - candidate.base) % align === 0)
@@ -237,7 +242,7 @@ export function planLayout(arrays){
             {
                 return null;
             }
-            slot = slots.push({ buffer: pointer.buffer, base, stride }) - 1;
+            slot = slots.push({ buffer: pointer.buffer, base, stride, divisor }) - 1;
         }
         attributes.push({
             name: array.name,
@@ -259,7 +264,7 @@ export const CANONICAL_STRIDE = 4 * (4 + 4 + 4 + 3 + 1 + 4 * 8);
 
 /** @type {DrawLayout} */
 export const CANONICAL_LAYOUT = Object.freeze({
-    slots: [{ buffer: 0, base: 0, stride: CANONICAL_STRIDE }],
+    slots: [{ buffer: 0, base: 0, stride: CANONICAL_STRIDE, divisor: 0 }],
     attributes: [
         { name: 'position', slot: 0, offset: 0, format: 'float32x4', components: 4, scalar: 'f32' },
         { name: 'color', slot: 0, offset: 16, format: 'float32x4', components: 4, scalar: 'f32' },
@@ -541,11 +546,49 @@ export function scanIndices(bytes, type, count){
 }
 
 /**
+ * The vertices a draw reaches: its range, or the range its indices reach
+ * moved by the base vertex (OpenGL 3.2's glDrawElementsBaseVertex adds it to
+ * every index before the arrays are read).
+ *
+ * @param {{ first: number, count: number, baseVertex?: number }} request
+ * @param {{ min: number, max: number } | null} scanned  the indices' own range
+ * @returns {{ min: number, max: number }}
+ */
+export function vertexRange(request, scanned){
+    if (!scanned)
+    {
+        return { min: request.first, max: request.first + request.count - 1 };
+    }
+    const base = request.baseVertex ?? 0;
+    return { min: scanned.min + base, max: scanned.max + base };
+}
+
+/**
+ * Where each instance's element of a per-instance slot is (glVertexAttribDivisor):
+ * instance i reads element floor(i / divisor) after the base instance, which
+ * GL adds after the division. Contiguous when the divisor is one.
+ *
+ * @param {DrawSlot} slot @param {number} instances @param {number} baseInstance
+ * @returns {{ at: number, length: number } | number[]}  one run, or each
+ *     instance's element offset from the slot's base
+ */
+export function instanceElements(slot, instances, baseInstance){
+    if (slot.divisor === 1)
+    {
+        return { at: slot.base + baseInstance * slot.stride,
+            length: instances * slot.stride };
+    }
+    return Array.from({ length: instances }, (_, i)=>
+        (Math.floor(i / slot.divisor) + baseInstance) * slot.stride);
+}
+
+/**
  * What of client memory a draw by arrays reads, one entry per slot -- null for
- * a slot in a buffer object: from the first vertex the draw reaches when every
- * slot is client memory, and from vertex zero when a buffer object shares the
- * draw, so that one index numbers every slot alike. The renderer copies these
- * ranges and a renderer elsewhere is sent them, so both ask here.
+ * a slot in a buffer object or one read by instance: from the first vertex
+ * the draw reaches when every slot is client memory, and from vertex zero
+ * when a buffer object shares the draw, so that one index numbers every slot
+ * alike. The renderer copies these ranges and a renderer elsewhere is sent
+ * them, so both ask here.
  *
  * @param {readonly DrawSlot[]} slots
  * @param {number} min @param {number} max  the vertices the draw reaches
@@ -553,8 +596,9 @@ export function scanIndices(bytes, type, count){
  *     `from` the vertex the client ranges begin at
  */
 export function clientReads(slots, min, max){
-    const from = slots.every(slot=>slot.buffer === 0) ? min : 0;
-    return { from, reads: slots.map(slot=>(slot.buffer !== 0 ? null
+    // A per-instance slot is read by instance (`instanceElements`), not here.
+    const from = slots.every(slot=>slot.buffer === 0 || slot.divisor > 0) ? min : 0;
+    return { from, reads: slots.map(slot=>(slot.buffer !== 0 || slot.divisor > 0 ? null
         : { at: slot.base + from * slot.stride, length: (max + 1 - from) * slot.stride })) };
 }
 

@@ -62,11 +62,13 @@ const ATTRIB_TYPES = new Set([
  * @property {number} stride
  * @property {number} pointer
  * @property {number} buffer  the ARRAY_BUFFER bound when the pointer was set
+ * @property {number} divisor  zero for an element a vertex, n for one every n instances
  */
 
 /** @returns {GenericAttribArray} */
 const createAttribArray = ()=>({
     enabled: 0, size: 4, type: GL.FLOAT, normalised: 0, stride: 0, pointer: 0, buffer: 0,
+    divisor: 0,
 });
 
 /**
@@ -161,7 +163,7 @@ export function installProgramCalls(context, kernel){
                         normalised: array.normalised !== 0,
                         pointer: {
                             size: array.size, type: array.type, stride: array.stride,
-                            pointer: array.pointer, buffer: array.buffer,
+                            pointer: array.pointer, buffer: array.buffer, divisor: array.divisor,
                         },
                     });
                 });
@@ -685,6 +687,29 @@ export function installProgramCalls(context, kernel){
             array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
         },
 
+        /**
+         * glVertexAttribDivisor (OpenGL 3.3, GL_ARB_instanced_arrays): how
+         * many instances read each element of a generic array; zero reads one
+         * a vertex. An aliased index divides its conventional array.
+         *
+         * @param {number} index @param {number} divisor
+         */
+        glVertexAttribDivisor(index, divisor){
+            if (!enter('glVertexAttribDivisor', [index, divisor]))
+            {
+                return;
+            }
+            if (!(index >= 0) || index >= GENERIC_ATTRIBS)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
+            array.divisor = divisor >>> 0;
+        },
+
         /** @param {number} index */
         glEnableVertexAttribArrayARB(index){
             setAttribEnable('glEnableVertexAttribArrayARB', index, 1);
@@ -728,6 +753,8 @@ export function installProgramCalls(context, kernel){
                     return [array.type];
                 case GL.VERTEX_ATTRIB_ARRAY_NORMALIZED_ARB:
                     return [array.normalised ?? 0];
+                case GL.VERTEX_ATTRIB_ARRAY_DIVISOR:
+                    return [array.divisor ?? 0];
                 case GL.CURRENT_VERTEX_ATTRIB_ARB:
                     return [...attribValues[index]];
                 default:

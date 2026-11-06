@@ -56,6 +56,8 @@ import { emitStage, interfaceStruct } from './glsl-wgsl.js';
  *     Everything a pipeline depends on. Every field here is in the key.
  * @property {import('./gpu-layout.js').DrawAttribute[]} attributes
  * @property {number[]} strides         per slot
+ * @property {string} [steps]   per slot, `i` where it steps by instance and `v` by
+ *           vertex; empty or absent when every slot steps by vertex
  * @property {'point-list' | 'line-list' | 'triangle-list'} topology
  * @property {string} targetFormat
  * @property {string} depthFormat
@@ -455,6 +457,7 @@ export function drawKey(state){
     return [
         attributes,
         state.strides.join(','),
+        state.steps ?? '',
         state.topology,
         state.targetFormat,
         state.depthFormat,
@@ -554,7 +557,7 @@ export function sameKeyInputs(a, b){
         || a.depthFormat !== b.depthFormat || !a.colourSum !== !b.colourSum
         || a.alphaFunc !== b.alphaFunc || !a.flat !== !b.flat || a.cull !== b.cull
         || !a.frontIsCcw !== !b.frontIsCcw || a.colourMask !== b.colourMask
-        || !sameItems(a.strides, b.strides)
+        || !sameItems(a.strides, b.strides) || (a.steps ?? '') !== (b.steps ?? '')
         || a.attributes.length !== b.attributes.length || a.units.length !== b.units.length)
     {
         return false;
@@ -1422,7 +1425,7 @@ export function drawDescriptor(state){
     /** @type {any[]} */
     const buffers = state.strides.map((stride, slot)=>({
         arrayStride: stride,
-        stepMode: 'vertex',
+        stepMode: state.steps?.[slot] === 'i' ? 'instance' : 'vertex',
         attributes: state.attributes
             .map((attribute, location)=>({ attribute, location }))
             .filter(({ attribute })=>attribute.slot === slot)

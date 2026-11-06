@@ -17,7 +17,9 @@
  * knows the bytes the twin's renderer will.
  */
 
-import { clientReads, lockedFor, planLayout, scanIndices } from './gpu-layout.js';
+import {
+    clientReads, instanceElements, lockedFor, planLayout, scanIndices, vertexRange,
+} from './gpu-layout.js';
 
 export function createModelRenderer(){
     /** @type {WeakMap<object, { width: number, height: number }>} */
@@ -68,15 +70,30 @@ export function createModelRenderer(){
             {
                 return false;
             }
-            if (layout.slots.every(slot=>slot.buffer !== 0))
+            if (layout.slots.every(slot=>slot.buffer !== 0) || (request.instances ?? 1) === 0)
             {
                 return true;
             }
             const indices = request.indices;
             const scanned = indices
                 ? scanIndices(indices.bytes, indices.type, request.count) : null;
-            const min = scanned ? scanned.min : request.first;
-            const max = scanned ? scanned.max : request.first + request.count - 1;
+            const { min, max } = vertexRange(request, scanned);
+            // What a per-instance slot in client memory reads, as `gpu.js` reads it.
+            for (const slot of layout.slots)
+            {
+                if (slot.divisor === 0 || slot.buffer !== 0)
+                {
+                    continue;
+                }
+                const elements = instanceElements(slot, request.instances ?? 1,
+                    request.baseInstance ?? 0);
+                for (const read of Array.isArray(elements)
+                    ? elements.map(at=>({ at: slot.base + at, length: slot.stride }))
+                    : [elements])
+                {
+                    request.read(read.at, read.length);
+                }
+            }
             const lock = lockedFor(request, min, max);
             const { reads } = lock
                 ? clientReads(layout.slots, lock.first, lock.first + lock.count - 1)

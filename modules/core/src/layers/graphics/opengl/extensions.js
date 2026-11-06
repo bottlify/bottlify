@@ -30,7 +30,7 @@
  * `GL_VERSIONS`, which the extension string does not name.
  */
 
-import { GL_SIGNATURES } from './registry.js';
+import { GL_FEATURE_COMMANDS, GL_SIGNATURES } from './registry.js';
 
 /**
  * A command's arguments as the registry declares them (`registry.js`), a
@@ -201,6 +201,19 @@ export const GL_EXTENSIONS = Object.freeze({
     ],
     GL_ARB_fragment_shader: [],
     GL_ARB_map_buffer_range: ['glMapBufferRange', 'glFlushMappedBufferRange'],
+    GL_ARB_draw_elements_base_vertex: [
+        'glDrawElementsBaseVertex', 'glDrawRangeElementsBaseVertex',
+        'glDrawElementsInstancedBaseVertex', 'glMultiDrawElementsBaseVertex',
+    ],
+    // Per-instance arrays read without the shader's instance number, which
+    // GL_ARB_draw_instanced brings with the GLSL that has it.
+    GL_ARB_instanced_arrays: [
+        'glVertexAttribDivisorARB', 'glDrawArraysInstancedARB', 'glDrawElementsInstancedARB',
+    ],
+    GL_ARB_base_instance: [
+        'glDrawArraysInstancedBaseInstance', 'glDrawElementsInstancedBaseInstance',
+        'glDrawElementsInstancedBaseVertexBaseInstance',
+    ],
     GL_ARB_copy_buffer: ['glCopyBufferSubData'],
     GL_ARB_vertex_array_object: [
         'glBindVertexArray', 'glDeleteVertexArrays', 'glGenVertexArrays', 'glIsVertexArray',
@@ -319,6 +332,26 @@ const VERSION_FUNCTIONS = Object.freeze({
         ['glUniformMatrix4x2fv', 4], ['glUniformMatrix3x4fv', 4], ['glUniformMatrix4x3fv', 4],
     ],
 });
+
+/**
+ * The commands of the versions past the one reported (3.0 to 4.6), sized from
+ * the registry and answered as each is implemented, but handed out by
+ * wglGetProcAddress only once their version is whole and reported: a version
+ * is a promise for all of its commands at once, as an extension is.
+ *
+ * @type {readonly string[]}
+ */
+export const PENDING_VERSION_FUNCTIONS = Object.freeze((()=>{
+    // A command a later version names again (4.3's glGetPointerv) is the
+    // earlier version's.
+    const earlier = new Set(Object.entries(GL_FEATURE_COMMANDS)
+        .filter(([version])=>/^GL_VERSION_[12]_/.test(version))
+        .flatMap(([, names])=>names.split(' ')));
+    return Object.entries(GL_FEATURE_COMMANDS)
+        .filter(([version])=>/^GL_VERSION_[34]_/.test(version))
+        .flatMap(([, names])=>names.split(' '))
+        .filter(name=>!earlier.has(name));
+})());
 
 /** The functions each version past 1.1 adds: obtainable, never in the extension string. */
 export const GL_VERSIONS = Object.freeze(Object.fromEntries(Object.entries(VERSION_FUNCTIONS)
@@ -451,9 +484,11 @@ export const EXTENSION_WORDS = (()=>{
     {
         (words[count] ??= []).push(name);
     }
-    // The rest of every extension's functions, as the registry sizes them.
+    // The rest of every extension's functions and the pending versions', as
+    // the registry sizes them.
     const sized = new Set(Object.values(words).flat());
-    for (const name of new Set(Object.values(GL_EXTENSIONS).flat()))
+    for (const name of new Set([...Object.values(GL_EXTENSIONS).flat(),
+        ...PENDING_VERSION_FUNCTIONS]))
     {
         const count = sized.has(name) ? undefined : registryWords(name);
         if (count !== undefined)
@@ -479,6 +514,7 @@ export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([]));
 
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),
+    ...PENDING_VERSION_FUNCTIONS,
     ...Object.values(WGL_EXTENSIONS).flat(),
     ...Object.values(GL_VERSIONS).flat(),
 ]));

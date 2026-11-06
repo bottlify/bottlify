@@ -77,6 +77,15 @@ const MAP_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_RANGE_BI
 const accessOfBits = bits=>((bits & GL.MAP_READ_BIT) === 0 ? GL.WRITE_ONLY
     : (bits & GL.MAP_WRITE_BIT) === 0 ? GL.READ_ONLY : GL.READ_WRITE);
 
+/**
+ * How many instances a draw makes and the first per-instance element.
+ *
+ * @typedef {{ instances: number, baseInstance: number }} Instancing
+ */
+
+/** @type {Instancing} */
+const ONE_INSTANCE = Object.freeze({ instances: 1, baseInstance: 0 });
+
 /** @type {Set<number>} */
 const INDEX_TYPES = new Set([GL.UNSIGNED_BYTE, GL.UNSIGNED_SHORT, GL.UNSIGNED_INT]);
 
@@ -196,7 +205,7 @@ const ARRAY_OF_CAP = new Map(Object.entries(ARRAYS).reverse()
  * @returns {import('./arrays.js').ArrayPointer}
  */
 function createPointer(size, type){
-    return { size, type, stride: 0, pointer: 0, buffer: 0, normalised: 0 };
+    return { size, type, stride: 0, pointer: 0, buffer: 0, normalised: 0, divisor: 0 };
 }
 
 /**
@@ -376,15 +385,20 @@ export function installArrayCalls(context, kernel){
      * arrays that are off.
      *
      * @param {number} index
+     * @param {number} [instance]  the instance it is drawn for
+     * @param {number} [baseInstance]
      * @returns {any | null} null when the vertex array itself cannot be read
      */
-    function gather(index){
+    function gather(index, instance = 0, baseInstance = 0){
         const vertex = kernel.currentVertex();
         const enabled = (/** @type {string} */ name)=>record(ARRAYS[name].enable).values[0] !== 0;
         const fetch = (/** @type {string} */ name, /** @type {number} */ unit)=>{
             const pointer = name === 'texCoord' ? texCoordPointers[unit] : pointers[name];
             const read = readerFor(pointer);
-            return read ? readElement(read, pointer, index, pointer.normalised !== 0) : null;
+            // A divided array reads by instance (glVertexAttribDivisor).
+            const element = pointer.divisor
+                ? Math.floor(instance / pointer.divisor) + baseInstance : index;
+            return read ? readElement(read, pointer, element, pointer.normalised !== 0) : null;
         };
         if (enabled('vertex'))
         {
@@ -530,10 +544,11 @@ export function installArrayCalls(context, kernel){
      * @param {number} mode
      * @param {number} first
      * @param {number} count
-     * @param {{ type: number, indices: number | Uint8Array } | null} indexed
+     * @param {{ type: number, indices: number | Uint8Array, baseVertex?: number } | null} indexed
+     * @param {Instancing} [instancing]
      * @returns {boolean}
      */
-    function drawFromArrays(mode, first, count, indexed){
+    function drawFromArrays(mode, first, count, indexed, instancing = ONE_INSTANCE){
         if (!kernel.drawArrays)
         {
             refusal = 'no device';
@@ -584,6 +599,9 @@ export function installArrayCalls(context, kernel){
             count,
             indices,
             arrays,
+            baseVertex: indexed?.baseVertex ?? 0,
+            instances: instancing.instances,
+            baseInstance: instancing.baseInstance,
             lock: locked,
             read: view ? (at, n)=>view(at, n) : ()=>new Uint8Array(0),
             bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
@@ -602,8 +620,9 @@ export function installArrayCalls(context, kernel){
      * @param {number} mode
      * @param {number[]} indices
      * @param {string} [why]  the refusal that sent the draw here
+     * @param {Instancing} [instancing]
      */
-    function drawIndexed(name, mode, indices, why = 'refused'){
+    function drawIndexed(name, mode, indices, why = 'refused', instancing = ONE_INSTANCE){
         if (kernel.inPrimitive())
         {
             setError(GL.INVALID_OPERATION);
@@ -623,16 +642,20 @@ export function installArrayCalls(context, kernel){
             lose(`${name} was called with no way to read the vertex array, and drew nothing`);
             return;
         }
-        const vertices = [];
-        for (const index of indices)
+        // Each instance a draw of its own, in order, as the GPU draws them.
+        for (let instance = 0; instance < instancing.instances; instance++)
         {
-            const vertex = gather(index);
-            if (vertex)
+            const vertices = [];
+            for (const index of indices)
             {
-                vertices.push(vertex);
+                const vertex = gather(index, instance, instancing.baseInstance);
+                if (vertex)
+                {
+                    vertices.push(vertex);
+                }
             }
+            kernel.drawVertices(mode, vertices, why);
         }
-        kernel.drawVertices(mode, vertices, why);
     }
 
     /**
@@ -896,6 +919,76 @@ export function installArrayCalls(context, kernel){
         },
     });
 
+    /**
+     * A draw by a range of the arrays, as many times as there are instances.
+     *
+     * @param {string} name @param {number} mode @param {number} first @param {number} count
+     * @param {Instancing} instancing
+     */
+    function drawArraysWith(name, mode, first, count, instancing){
+        if (count < 0 || first < 0 || instancing.instances < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (!PRIMITIVE_MODES.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (kernel.inPrimitive())
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (!hasVertexSource() || drawFromArrays(mode, first, count, null, instancing))
+        {
+            return;
+        }
+        drawIndexed(name, mode, Array.from({ length: count }, (unused, i)=>first + i), refusal,
+            instancing);
+    }
+
+    /**
+     * A draw by an index list, each index moved by the base vertex (OpenGL 3.2)
+     * before the arrays are read, as many times as there are instances.
+     *
+     * @param {string} name @param {number} mode @param {number} count @param {number} type
+     * @param {number | Uint8Array} indices  an address, an offset into the
+     *        bound element buffer, or the bytes themselves
+     * @param {number} baseVertex @param {Instancing} instancing
+     */
+    function drawElementsWith(name, mode, count, type, indices, baseVertex, instancing){
+        if (count < 0 || instancing.instances < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (!INDEX_TYPES.has(type) || !PRIMITIVE_MODES.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (kernel.inPrimitive())
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (!hasVertexSource()
+            || drawFromArrays(mode, 0, count, { type, indices, baseVertex }, instancing))
+        {
+            return;
+        }
+        const list = readIndices(count, type, indices);
+        if (!list)
+        {
+            lose(`${name} was called with no way to read its indices, and drew nothing`);
+            return;
+        }
+        drawIndexed(name, mode, baseVertex === 0 ? list : list.map(index=>index + baseVertex),
+            refusal, instancing);
+    }
+
     Object.assign(context, {
         /**
          * @param {number} size
@@ -1106,27 +1199,7 @@ export function installArrayCalls(context, kernel){
 
         /** @param {number} mode @param {number} first @param {number} count */
         glDrawArrays(mode, first, count){
-            if (count < 0 || first < 0)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            if (!PRIMITIVE_MODES.has(mode))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (kernel.inPrimitive())
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            if (!hasVertexSource() || drawFromArrays(mode, first, count, null))
-            {
-                return;
-            }
-            drawIndexed('glDrawArrays', mode,
-                Array.from({ length: count }, (unused, i)=>first + i), refusal);
+            drawArraysWith('glDrawArrays', mode, first, count, ONE_INSTANCE);
         },
 
         /**
@@ -1137,38 +1210,7 @@ export function installArrayCalls(context, kernel){
          *        bound element buffer, or the bytes themselves
          */
         glDrawElements(mode, count, type, indices){
-            if (count < 0)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            if (!INDEX_TYPES.has(type))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (!PRIMITIVE_MODES.has(mode))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (kernel.inPrimitive())
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            if (!hasVertexSource() || drawFromArrays(mode, 0, count, { type, indices }))
-            {
-                return;
-            }
-            const list = readIndices(count, type, indices);
-            if (!list)
-            {
-                lose('glDrawElements was called with no way to read its indices, and drew'
-                    + ' nothing');
-                return;
-            }
-            drawIndexed('glDrawElements', mode, list, refusal);
+            drawElementsWith('glDrawElements', mode, count, type, indices, 0, ONE_INSTANCE);
         },
 
         /**
@@ -1186,6 +1228,113 @@ export function installArrayCalls(context, kernel){
                 return;
             }
             context.glDrawElements(mode, count, type, indices);
+        },
+
+        // --- instances and base vertices (OpenGL 3.1, 3.2, 4.2) ---
+
+        /**
+         * @param {number} mode @param {number} first @param {number} count
+         * @param {number} instances
+         */
+        glDrawArraysInstanced(mode, first, count, instances){
+            drawArraysWith('glDrawArraysInstanced', mode, first, count,
+                { instances, baseInstance: 0 });
+        },
+
+        /**
+         * @param {number} mode @param {number} first @param {number} count
+         * @param {number} instances @param {number} baseInstance
+         */
+        glDrawArraysInstancedBaseInstance(mode, first, count, instances, baseInstance){
+            drawArraysWith('glDrawArraysInstancedBaseInstance', mode, first, count,
+                { instances, baseInstance: baseInstance >>> 0 });
+        },
+
+        /**
+         * @param {number} mode @param {number} count @param {number} type
+         * @param {number | Uint8Array} indices @param {number} instances
+         */
+        glDrawElementsInstanced(mode, count, type, indices, instances){
+            drawElementsWith('glDrawElementsInstanced', mode, count, type, indices, 0,
+                { instances, baseInstance: 0 });
+        },
+
+        /**
+         * @param {number} mode @param {number} count @param {number} type
+         * @param {number | Uint8Array} indices @param {number} baseVertex
+         */
+        glDrawElementsBaseVertex(mode, count, type, indices, baseVertex){
+            drawElementsWith('glDrawElementsBaseVertex', mode, count, type, indices, baseVertex,
+                ONE_INSTANCE);
+        },
+
+        /**
+         * The range is the program's promise of what the indices reach; it
+         * is checked and not otherwise used, as glDrawRangeElements' is.
+         *
+         * @param {number} mode @param {number} start @param {number} end
+         * @param {number} count @param {number} type @param {number | Uint8Array} indices
+         * @param {number} baseVertex
+         */
+        glDrawRangeElementsBaseVertex(mode, start, end, count, type, indices, baseVertex){
+            if (end < start)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            drawElementsWith('glDrawRangeElementsBaseVertex', mode, count, type, indices,
+                baseVertex, ONE_INSTANCE);
+        },
+
+        /**
+         * @param {number} mode @param {number} count @param {number} type
+         * @param {number | Uint8Array} indices @param {number} instances
+         * @param {number} baseVertex
+         */
+        glDrawElementsInstancedBaseVertex(mode, count, type, indices, instances, baseVertex){
+            drawElementsWith('glDrawElementsInstancedBaseVertex', mode, count, type, indices,
+                baseVertex, { instances, baseInstance: 0 });
+        },
+
+        /**
+         * @param {number} mode @param {number} count @param {number} type
+         * @param {number | Uint8Array} indices @param {number} instances
+         * @param {number} baseInstance
+         */
+        glDrawElementsInstancedBaseInstance(mode, count, type, indices, instances, baseInstance){
+            drawElementsWith('glDrawElementsInstancedBaseInstance', mode, count, type, indices, 0,
+                { instances, baseInstance: baseInstance >>> 0 });
+        },
+
+        /**
+         * @param {number} mode @param {number} count @param {number} type
+         * @param {number | Uint8Array} indices @param {number} instances
+         * @param {number} baseVertex @param {number} baseInstance
+         */
+        glDrawElementsInstancedBaseVertexBaseInstance(mode, count, type, indices, instances,
+            baseVertex, baseInstance)
+        {
+            drawElementsWith('glDrawElementsInstancedBaseVertexBaseInstance', mode, count, type,
+                indices, baseVertex, { instances, baseInstance: baseInstance >>> 0 });
+        },
+
+        /**
+         * One draw per list, each with its own count, indices and base vertex.
+         *
+         * @param {number} mode @param {number[]} counts @param {number} type
+         * @param {(number | Uint8Array)[]} indices @param {number} drawcount
+         * @param {number[]} baseVertices
+         */
+        glMultiDrawElementsBaseVertex(mode, counts, type, indices, drawcount, baseVertices){
+            if (drawcount < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            counts.forEach((count, k)=>{
+                drawElementsWith('glMultiDrawElementsBaseVertex', mode, count, type, indices[k],
+                    baseVertices[k] ?? 0, ONE_INSTANCE);
+            });
         },
 
         // --- GL_EXT_compiled_vertex_array ---

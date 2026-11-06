@@ -36,6 +36,8 @@ import { GL } from './constants.js';
  *                              set; zero means client memory
  * @property {number} [normalised]  whether what it reads is normalised on
  *                                  read; absent reads as no
+ * @property {number} [divisor]  glVertexAttribDivisor's: zero or absent for an
+ *                               element a vertex, n for one every n instances
  */
 
 /** @type {Map<number, number>} */

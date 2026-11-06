@@ -358,6 +358,40 @@ export function laterEntryPoints(h){
             }
         }),
 
+        // --- instances and base vertices ---
+
+        glDrawArraysInstanced: ([mode, first, count, instances])=>answer(
+            current()?.glDrawArraysInstanced(mode >>> 0, first | 0, count | 0, instances | 0)),
+        glDrawArraysInstancedBaseInstance: ([mode, first, count, instances, baseInstance])=>
+            answer(current()?.glDrawArraysInstancedBaseInstance(mode >>> 0, first | 0, count | 0,
+                instances | 0, baseInstance >>> 0)),
+        glDrawElementsInstanced: ([mode, count, type, indices, instances])=>answer(
+            current()?.glDrawElementsInstanced(mode >>> 0, count | 0, type >>> 0, indices >>> 0,
+                instances | 0)),
+        glDrawElementsBaseVertex: ([mode, count, type, indices, baseVertex])=>answer(
+            current()?.glDrawElementsBaseVertex(mode >>> 0, count | 0, type >>> 0, indices >>> 0,
+                baseVertex | 0)),
+        glDrawRangeElementsBaseVertex: ([mode, start, end, count, type, indices, baseVertex])=>
+            answer(current()?.glDrawRangeElementsBaseVertex(mode >>> 0, start >>> 0, end >>> 0,
+                count | 0, type >>> 0, indices >>> 0, baseVertex | 0)),
+        glDrawElementsInstancedBaseVertex: ([mode, count, type, indices, instances, baseVertex])=>
+            answer(current()?.glDrawElementsInstancedBaseVertex(mode >>> 0, count | 0,
+                type >>> 0, indices >>> 0, instances | 0, baseVertex | 0)),
+        glDrawElementsInstancedBaseInstance: a=>answer(
+            current()?.glDrawElementsInstancedBaseInstance(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
+                a[3] >>> 0, a[4] | 0, a[5] >>> 0)),
+        glDrawElementsInstancedBaseVertexBaseInstance: a=>answer(
+            current()?.glDrawElementsInstancedBaseVertexBaseInstance(a[0] >>> 0, a[1] | 0,
+                a[2] >>> 0, a[3] >>> 0, a[4] | 0, a[5] | 0, a[6] >>> 0)),
+        glMultiDrawElementsBaseVertex: ([mode, counts, type, indices, drawcount, bases])=>
+            call(context=>{
+                const n = Math.max(0, drawcount | 0);
+                context.glMultiDrawElementsBaseVertex(mode >>> 0, readTyped('i', counts, n),
+                    type >>> 0, readPointers(indices, n), drawcount | 0, readTyped('i', bases, n));
+            }),
+        glVertexAttribDivisor: ([index, divisor])=>answer(
+            current()?.glVertexAttribDivisor(index >>> 0, divisor >>> 0)),
+
         // --- occlusion queries ---
 
         glGenQueries: generator((context, count)=>context.glGenQueries(count)),

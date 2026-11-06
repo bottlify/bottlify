@@ -20,6 +20,7 @@ import {
     ARGUMENT_WORDS, byteRunNames, byteRunWidth, createOpengl, floatArguments,
 } from './exports.js';
 import { GL, PFD, WGL } from './constants.js';
+import { registryArguments } from './extensions.js';
 import { PIXELFORMATDESCRIPTOR, PIXEL_FORMATS, encodePixelFormat } from './pixelformat.js';
 
 /** The dword a guest pushes for a GLfloat. @param {number} value */
@@ -1120,8 +1121,10 @@ test('every export\'s floats and doubles are where its prototype puts them, in i
             typed.push(name);
         }
         // A name that reads as taking floats and declares none is one of
-        // the matrix calls, whose argument is a pointer.
-        else if (/[fd](ARB|EXT)?$/.test(name) && !/v(ARB|EXT)?$/.test(name))
+        // the matrix calls, whose argument is a pointer -- or one the
+        // registry declares, whose letters say what it takes.
+        else if (/[fd](ARB|EXT)?$/.test(name) && !/v(ARB|EXT)?$/.test(name)
+            && registryArguments(name) === undefined)
         {
             assert.match(name, /^gl(Load|Mult)(Transpose)?Matrix[fd]$|^gl(End|IsEnabled)$/,
                 name);

@@ -2160,3 +2160,63 @@ test('a level let go is carried on the device when its texture is given more lev
         'the new levels go up from their texels, after the carry');
     assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
 });
+
+test('an instanced draw with a divided array: a slot that steps by instance, moved to the base'
+    + ' instance, the indices moved by the base vertex, and no join with the next', async()=>{
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    // Two instances' colours after the vertices, four bytes each.
+    r.bytes.set([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255], 0x1000 + 0x200);
+    const [name] = context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, name);
+    context.glBufferDataARB(GL.ARRAY_BUFFER, 0x210, 0x1000, GL.STATIC_DRAW);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.COLOR_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0);
+    context.glColorPointer(4, GL.UNSIGNED_BYTE, 4, 0x200);
+    context.glVertexAttribDivisor(3, 1);
+    r.words(0x2000, [0, 1, 1]);
+    context.glDrawElementsInstancedBaseVertexBaseInstance(GL.TRIANGLES, 3, GL.UNSIGNED_INT,
+        0x2000, 2, 1, 1);
+    context.glDrawElementsInstancedBaseVertexBaseInstance(GL.TRIANGLES, 3, GL.UNSIGNED_INT,
+        0x2000, 2, 1, 1);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    await r.swap();
+
+    const indexed = r.gpu.of('drawIndexed');
+    assert.deepEqual(indexed.map(d=>d.args), [[3, 2, 0, 1], [3, 2, 0, 1]],
+        'two instances each, the base vertex as WebGPU\'s, and the draws kept apart');
+    const slots = r.gpu.of('setVertexBuffer').slice(0, 2);
+    assert.deepEqual(slots.map(s=>s.offset), [0, 0x204],
+        'the divided slot starts at the base instance\'s element');
+    const [pipeline] = r.gpu.of('createRenderPipeline').map(p=>p.descriptor)
+        .filter(d=>d.vertex.buffers.length === 2);
+    assert.deepEqual(pipeline.vertex.buffers.map((/** @type {any} */ b)=>b.stepMode),
+        ['vertex', 'instance']);
+    assert.equal(r.renderer.diagnostics().fallbacks, 0);
+});
+
+test('a divisor past one copies each instance\'s element out, and a draw of no instance draws'
+    + ' nothing', async()=>{
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    r.bytes.set([10, 0, 0, 255, 20, 0, 0, 255], 0x3000);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.COLOR_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    context.glColorPointer(4, GL.UNSIGNED_BYTE, 4, 0x3000);
+    context.glVertexAttribDivisor(3, 2);
+    context.glDrawArraysInstanced(GL.TRIANGLES, 0, 3, 0);
+    context.glDrawArraysInstanced(GL.TRIANGLES, 0, 3, 3);
+    context.glDrawArraysInstanced(GL.TRIANGLES, 0, 3, -1);
+    assert.equal(context.glGetError(), GL.INVALID_VALUE, 'a negative instance count');
+    await r.swap();
+    const draws = r.gpu.of('draw').filter(d=>d.args[0] === 3 && d.args[1] === 3);
+    assert.equal(draws.length, 1, 'only the draw of three instances');
+    // Instances 0 and 1 read element 0, instance 2 element 1.
+    const colour = r.gpu.of('setVertexBuffer')[1];
+    assert.deepEqual([...colour.buffer.bytes.subarray(colour.offset, colour.offset + 12)],
+        [10, 0, 0, 255, 10, 0, 0, 255, 20, 0, 0, 255], 'the elements copied out in instance order');
+});

@@ -52,8 +52,8 @@ import {
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import {
-    CANONICAL_LAYOUT, clientReads, expandIndices, isList, lockedFor, packVertices, planLayout,
-    scanIndices, topologyOf,
+    CANONICAL_LAYOUT, clientReads, expandIndices, instanceElements, isList, lockedFor,
+    packVertices, planLayout, scanIndices, topologyOf, vertexRange,
 } from './gpu-layout.js';
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
@@ -335,6 +335,9 @@ function describeCensus(texture){
  * @property {(name: number) => import('./objects.js').BufferObject | undefined} bufferObject
  * @property {{ first: number, count: number, epoch: number } | null} [lock]
  *     GL_EXT_compiled_vertex_array's locked range, while the arrays are locked
+ * @property {number} [baseVertex]  added to every index (glDrawElementsBaseVertex)
+ * @property {number} [instances]  how many instances, one when absent
+ * @property {number} [baseInstance]  the first per-instance element (GL 4.2)
  */
 
 /**
@@ -1385,6 +1388,8 @@ export function createGpuRenderer(services){
         return {
             attributes: layout.attributes,
             strides: layout.slots.map(slot=>slot.stride),
+            steps: layout.slots.some(slot=>slot.divisor > 0)
+                ? layout.slots.map(slot=>(slot.divisor > 0 ? 'i' : 'v')).join('') : '',
             topology,
             targetFormat: target.formats[0] || COLOUR_FORMAT,
             depthFormat: target.depthFormat,
@@ -2031,8 +2036,10 @@ export function createGpuRenderer(services){
         }
         const b = commands[commands.length - 1];
         const a = commands[commands.length - 2];
+        // Instances drawn one after another are not one draw's instances:
+        // joined, the second range of each would come before the first's next.
         if (a.kind !== 'draw' || b.kind !== 'draw' || !a.indices || !b.indices
-            || !shareEveryDependency(a, b)
+            || a.instances !== 1 || b.instances !== 1 || !shareEveryDependency(a, b)
             || b.indices.offset !== a.indices.offset + a.count * indexBytes(a.indices.format))
         {
             return;
@@ -2073,8 +2080,11 @@ export function createGpuRenderer(services){
      * @param {number} first
      * @param {number} baseVertex
      * @param {'point-list' | 'line-list' | 'triangle-list'} topology
+     * @param {number} [instances]  how many instances (glDrawArraysInstanced)
      */
-    const record = (context, scene, layout, slots, indices, count, first, baseVertex, topology)=>{
+    const record = (context, scene, layout, slots, indices, count, first, baseVertex, topology,
+        instances = 1)=>
+    {
         const surfaces = drawables.get(context);
         if (!surfaces)
         {
@@ -2271,6 +2281,7 @@ export function createGpuRenderer(services){
             count,
             first,
             baseVertex,
+            instances,
             bindings,
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
@@ -2720,8 +2731,13 @@ export function createGpuRenderer(services){
             // Too few vertices for one of its primitives: nothing is drawn.
             return true;
         }
-        const min = scanned ? scanned.min : request.first;
-        const max = scanned ? scanned.max : request.first + request.count - 1;
+        const instances = request.instances ?? 1;
+        if (instances === 0)
+        {
+            return true;
+        }
+        const baseInstance = request.baseInstance ?? 0;
+        const { min, max } = vertexRange(request, scanned);
         // A draw inside a locked range reads the whole range, once an epoch
         // and frame: the passes of a surface drawn from it bind that copy.
         const lock = lockedFor(request, min, max);
@@ -2729,6 +2745,10 @@ export function createGpuRenderer(services){
             ? clientReads(layout.slots, lock.first, lock.first + lock.count - 1)
             : clientReads(layout.slots, min, max);
         const slots = layout.slots.map((slot, index)=>{
+            if (slot.divisor > 0)
+            {
+                return instanceSlot(request, slot, instances, baseInstance);
+            }
             const read = reads[index];
             if (read && lock)
             {
@@ -2773,8 +2793,41 @@ export function createGpuRenderer(services){
         record(context, scene(), layout, slots,
             indices, indices ? indices.count : request.count,
             indices ? 0 : request.first - from,
-            (expanded && !scanned ? request.first : 0) - from, topologyOf(request.mode));
+            (expanded && !scanned ? request.first : 0) - from
+                + (scanned ? request.baseVertex ?? 0 : 0),
+            topologyOf(request.mode), instances);
         return true;
+    };
+
+    /**
+     * A per-instance slot's elements as the draw reads them: the buffer in
+     * place, moved to the base instance, when one element serves one instance;
+     * otherwise each instance's element copied out in turn, so that WebGPU's
+     * instance index is GL's instance number and its first instance zero.
+     *
+     * @param {DrawRequest} request @param {import('./gpu-layout.js').DrawSlot} slot
+     * @param {number} instances @param {number} baseInstance
+     * @returns {{ gpu: any, offset: number }}
+     */
+    const instanceSlot = (request, slot, instances, baseInstance)=>{
+        const elements = instanceElements(slot, instances, baseInstance);
+        const object = slot.buffer !== 0 ? request.bufferObject(slot.buffer) : null;
+        if (object && !Array.isArray(elements))
+        {
+            return { gpu: bufferFor(/** @type {any} */ (object)).gpu.gpu, offset: elements.at };
+        }
+        if (!Array.isArray(elements))
+        {
+            return scratchVertices.write(request.read(elements.at, elements.length));
+        }
+        const out = new Uint8Array(instances * slot.stride);
+        elements.forEach((at, i)=>{
+            const bytes = object
+                ? object.data.subarray(slot.base + at, slot.base + at + slot.stride)
+                : request.read(slot.base + at, slot.stride);
+            out.set(bytes.subarray(0, slot.stride), i * slot.stride);
+        });
+        return scratchVertices.write(out);
     };
 
     /**
@@ -3014,6 +3067,7 @@ export function createGpuRenderer(services){
             count: 3,
             first: 0,
             baseVertex: 0,
+            instances: 1,
             bindings: [],
             viewport: {
                 x: 0, y: 0, width: target.width, height: target.height, minDepth: 0, maxDepth: 1,
@@ -3248,11 +3302,12 @@ export function createGpuRenderer(services){
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                         command.indices.offset);
-                    pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+                    pass.drawIndexed(command.count, command.instances, command.first,
+                        command.baseVertex);
                 }
                 else
                 {
-                    pass.draw(command.count, 1, command.first);
+                    pass.draw(command.count, command.instances, command.first);
                 }
                 if (probeAt.has(at))
                 {
