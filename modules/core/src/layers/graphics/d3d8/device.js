@@ -74,10 +74,12 @@ import {
 import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
-    constantsWithin, declaredShader, parseDeclaration, readableByFixedFunction,
+    constantsWithin, declaredShader, parseDeclaration, readableByFixedFunction, registerOf,
 } from './declaration.js';
 import { elementsOfFvf, fixedFunctionLayoutOf } from '../d3d9/declaration.js';
-import { SHADER_KIND, createConstantFile, functionOf, parseShader } from '../d3d9/shader.js';
+import {
+    REGISTER, SHADER_KIND, createConstantFile, functionOf, parseShader,
+} from '../d3d9/shader.js';
 import { D3D8_COMMANDS } from './commands.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
@@ -3592,6 +3594,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 const read = parseShader(tokens);
                 if (!withinVersion(read, SHADER_KIND.VERTEX, caps.vertexShaderVersion)
                     || !constantsWithin(read, vertexConstants.floats.length / 4))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                // A register the shader reads that the declaration loads
+                // nothing into is refused (Wine's d3d8 test_vshader_input).
+                const loaded = new Set(declared.elements.map(registerOf));
+                const unloaded = read.instructions.some(instruction=>
+                    instruction.sources.some(operand=>operand.type === REGISTER.INPUT
+                        && operand.relative === null && !loaded.has(operand.index)));
+                if (unloaded)
                 {
                     return D3DERR_INVALIDCALL;
                 }

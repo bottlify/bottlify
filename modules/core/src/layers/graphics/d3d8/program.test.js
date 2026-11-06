@@ -15,7 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DPT, D3DSWAPEFFECT, D3DTOP, D3DTSS, D3D_OK } from './constants.js';
+import {
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DPT, D3DSWAPEFFECT, D3DTOP, D3DTSS, D3D_OK,
+} from './constants.js';
 import { createDirect3D8 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -50,13 +52,13 @@ const DECLARATION = [
  *
  *     m4x4 oPos, v0, c0
  *     mul oD0, v5, c4
- *     mov oT0, v7        ; a register the declaration does not load
+ *     mov oT0, v0
  */
 const SHADER = [
     0xfffe0101,
     0x00000014, 0xc00f0000, 0x90e40000, 0xa0e40000,
     0x00000005, 0xd00f0000, 0x90e40005, 0xa0e40004,
-    0x00000001, 0xe00f0000, 0x90e40000 | D3DVSDE_TEXCOORD0,
+    0x00000001, 0xe00f0000, 0x90e40000,
     0x0000ffff,
 ];
 
@@ -171,14 +173,13 @@ test('a vs_1_1 draws through its translation, reading the registers its declarat
         assert.equal(diagnostics.skipped.program, 0);
 
         // The module: v0 and v5 from the vertex buffers, as the declaration
-        // types them, and v7 -- loaded by nothing -- as the default vertex.
+        // types them.
         const vertexModule = h.gpu.of('createShaderModule').map(call=>call.descriptor)
             .find(module=>module.label.startsWith('vs:'));
         assert.ok(vertexModule);
         assert.match(vertexModule.code, /@location\(0\) v0: vec3<f32>,/);
         assert.match(vertexModule.code, /@location\(5\) v5: vec4<f32>,/);
         assert.match(vertexModule.code, /let v5 = in\.v5\.zyxw;/, 'a D3DCOLOR is B, G, R, A');
-        assert.match(vertexModule.code, /let v7 = vec4f\(0\.0, 0\.0, 0\.0, 1\.0\);/);
 
         // Two vertex buffers, one a stream, each at its own stride.
         const [pipeline] = h.gpu.of('createRenderPipeline').map(call=>call.descriptor);
@@ -201,6 +202,26 @@ test('a vs_1_1 draws through its translation, reading the registers its declarat
         assert.equal(h.device.DeleteVertexShader(made.handle), D3D_OK);
         h.release();
     });
+
+test('a vs_1_1 that reads an input register its declaration does not load is refused', ()=>{
+    const h = harness();
+    // Windows' answer (Wine's test_vshader_input): the shader's inputs are
+    // checked against the declaration when the pair is made, not at a draw.
+    const reads = (/** @type {number} */ register)=>[
+        0xfffe0101,
+        0x00000001, 0xc00f0000, 0x90e40000,
+        0x00000001, 0xd00f0000, (0x90e40000 | register) >>> 0,
+        0x0000ffff,
+    ];
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(h.device.CreateVertexShader(DECLARATION, reads(D3DVSDE_TEXCOORD0), made),
+        D3DERR_INVALIDCALL);
+    assert.equal(made.handle, undefined);
+    assert.equal(h.device.CreateVertexShader(DECLARATION, reads(D3DVSDE_DIFFUSE), made), D3D_OK);
+    assert.equal(h.device.DeleteVertexShader(made.handle), D3D_OK);
+    h.release();
+});
 
 test('a declaration made alone draws through the fixed-function stage, from both streams',
     async()=>{
