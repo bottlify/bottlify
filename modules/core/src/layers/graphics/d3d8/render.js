@@ -51,8 +51,8 @@ import {
     constantBlocks, createProgramCache, keptBlocks, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
-    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
-    varyingLocation,
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, HYBRID_LIGHTING, VERTEX_SAMPLER_BINDING, fixedVertexStage,
+    translateShader, varyingLocation,
 } from '../d3d9/wgsl.js';
 import {
     D3DSAMP, D3DTSS9, D3DVERTEXTEXTURESAMPLER0, SAMPLER_COUNT, SAMPLER_STATE_KEY,
@@ -7184,8 +7184,20 @@ export function createRenderer(options){
         const carried = program.vertex ? [] : hybridCarried(model, pixel.reads);
         // Where the made vertex stage takes each coordinate from, which the
         // pipeline's key has to say: its state names no stage of a shader draw.
+        // The fixed function lights the two colours it hands a pixel shader.
+        const hybridLighting = program.vertex ? null : lightingOf(model,
+            /** @type {import('../webgpu/internal/vertexformat.js').VertexLayout} */ (
+                /** @type {unknown} */ ({ preTransformed: program.declaration
+                    .some(element=>element.Usage === D3DDECLUSAGE.POSITIONT) })));
+        const specularEnable = (model.renderStates.get(D3DRS.SPECULARENABLE) ?? 0) !== 0;
+        const lightingKey = hybridLighting
+            ? `|L${hybridLighting.lights.join(',')}/${hybridLighting.colorVertex ? 1 : 0}`
+                + `${hybridLighting.diffuseSource}${hybridLighting.ambientSource}`
+                + `${hybridLighting.specularSource}${hybridLighting.emissiveSource}`
+                + `${hybridLighting.localViewer ? 'l' : ''}${specularEnable ? 's' : ''}`
+            : '';
         const hybridKey = program.vertex ? '' : `|g${generated.join(',')}|c${carried.map(
-            source=>(source ? `${source.set}t${source.transform}` : '')).join(',')}`;
+            source=>(source ? `${source.set}t${source.transform}` : '')).join(',')}${lightingKey}`;
         // The fog varyings a vertex shader's translation writes itself, below.
         const fogCarried = program.vertex && fog.source !== FOG_SOURCE.NONE
             ? [varyingLocation(D3DDECLUSAGE.FOG, 0), FOG_RANGE_LOCATION] : [];
@@ -7225,7 +7237,8 @@ export function createRenderer(options){
                 wanted, layout.shapes, missing, generated, fog,
                 { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}),
                     ...(planes ? { clip: planes } : {}), carried,
-                    ...(behindEyeAlways ? { clipsBehindEye: true } : {}) });
+                    ...(behindEyeAlways ? { clipsBehindEye: true } : {}),
+                    ...(hybridLighting ? { lighting: hybridLighting, specularEnable } : {}) });
         if (vertex.error)
         {
             skip('program');
@@ -7742,6 +7755,30 @@ export function createRenderer(options){
         {
             floats.set(clipPlanesOf(model, clipMaskOf(model), world, clipScratch),
                 vertex.clipRegister * 4);
+        }
+        // The lighting rows, as the fixed-function block carries the same values.
+        if (vertex.lightingRegister !== undefined)
+        {
+            const at = vertex.lightingRegister * 4;
+            floats.set(asFloats(world), at + HYBRID_LIGHTING.WORLD * 4);
+            floats.set(asFloats(normalMatrixOf(world, NORMAL_MATRIX)),
+                at + HYBRID_LIGHTING.NORMAL_MATRIX * 4);
+            const material = model.material ?? NO_MATERIAL;
+            const colours = [material.Diffuse, material.Ambient, material.Specular,
+                material.Emissive];
+            for (const [index, colour] of colours.entries())
+            {
+                putColour(floats, at + (HYBRID_LIGHTING.MATERIAL + index) * 4, colour);
+            }
+            putDword(floats, at + HYBRID_LIGHTING.AMBIENT * 4, rs('AMBIENT'));
+            const eye = (model.renderStates.get(D3DRS.LOCALVIEWER) ?? 1) === 0
+                ? viewerDirection(view) : eyePosition(view);
+            put4(floats, at + HYBRID_LIGHTING.EYE * 4, eye[0], eye[1], eye[2], material.Power);
+            for (const [index, light] of enabledLights(model).entries())
+            {
+                packLight(floats, at + (HYBRID_LIGHTING.LIGHTS
+                    + index * HYBRID_LIGHTING.LIGHT_ROWS) * 4, light);
+            }
         }
         return [floats, take(64), take(16)];
     };

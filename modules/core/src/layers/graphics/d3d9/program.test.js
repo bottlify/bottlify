@@ -25,7 +25,9 @@ import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js'
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
-import { FOG_RANGE_LOCATION, HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
+import {
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, HYBRID_LIGHTING, varyingLocation,
+} from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_FLOATS, multiplyMatrices, normalMatrixOf } from '../d3d8/render.js';
@@ -832,6 +834,8 @@ test('a screen quad in target pixels draws past a bound vertex shader, which run
 
 test('a pixel shader over fixed-function vertices gets a vertex stage of its own', async()=>{
     const h = harness();
+    // Unlit: the colours go through as the vertex carries them.
+    h.device.SetRenderState(D3DRS.LIGHTING, 0);
     /** @type {{ shader?: any }} */
     const ps = {};
     assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
@@ -1280,12 +1284,94 @@ test('a varying the pixel shader reads and the vertex shader never writes is wri
     assert.equal(h.device.release(), 0);
 });
 
+test('a pixel shader over lit fixed-function vertices reads the colours the lights made',
+    async()=>{
+        // Wine's d3d8 test_specular_shaders: under D3DRS_LIGHTING the fixed
+        // function lights the diffuse it hands a pixel shader, and the
+        // specular is the highlight only under D3DRS_SPECULARENABLE -- the
+        // vertex's own specular otherwise.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader([
+            versionToken(SHADER_KIND.PIXEL, 2, 0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.INPUT, 0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.INPUT, 1),
+            op(OPCODE.ADD, 3), dst(REGISTER.COLOROUT, 0), src(REGISTER.INPUT, 0),
+            src(REGISTER.INPUT, 1),
+            END_TOKEN,
+        ], ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        const colour = (/** @type {number} */ r, /** @type {number} */ g,
+            /** @type {number} */ b, /** @type {number} */ a)=>({ r, g, b, a });
+        const material = {
+            Diffuse: colour(0.5, 0.25, 0.125, 1), Ambient: colour(0.25, 0, 0, 1),
+            Specular: colour(0.75, 0.5, 0.25, 1), Emissive: colour(0, 0.125, 0, 1), Power: 6,
+        };
+        assert.equal(h.device.SetMaterial(material), D3D_OK);
+        const light = {
+            Type: 3, Diffuse: colour(1, 0.5, 0.25, 1), Specular: colour(0.5, 0.25, 0.125, 1),
+            Ambient: colour(0.125, 0.0625, 0.03125, 1), Position: { x: 1, y: 2, z: 3 },
+            Direction: { x: 0, y: 0, z: 2 }, Range: 50, Falloff: 1, Attenuation0: 1,
+            Attenuation1: 0, Attenuation2: 0, Theta: 0.5, Phi: 1,
+        };
+        assert.equal(h.device.SetLight(0, light), D3D_OK);
+        assert.equal(h.device.LightEnable(0, true), D3D_OK);
+        h.device.SetRenderState(D3DRS.AMBIENT, 0xff406080);
+        h.device.SetRenderState(D3DRS.SPECULARENABLE, 1);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const module = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .filter(made=>made.label.startsWith('vs:')).at(-1);
+        const diffuse = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+        const specular = varyingLocation(D3DDECLUSAGE.COLOR, 1);
+        const lit = module().code;
+        assert.ok(lit.includes(`out.o${diffuse} = litDiffuse;`), 'diffuse lit');
+        assert.ok(lit.includes(`out.o${specular} = vec4f(litSpecular.rgb, 1.0);`),
+            'the highlight, of the alpha the vertex has none of');
+        assert.ok(lit.includes('let worldNormal = vec3f(0.0);'), 'no normal: lit by none');
+
+        // The rows past the fixed stage's own: world, its inverse transpose,
+        // the material, the scene's ambient, the eye with the power, the light.
+        const groups = h.groupsOfDraw();
+        const floats = new Float32Array(h.boundBytes(groups.get(0), 0).buffer);
+        const at = HYBRID_CONSTANTS.COUNT * 4;
+        assert.equal(floats.length, at + (HYBRID_LIGHTING.LIGHTS + HYBRID_LIGHTING.LIGHT_ROWS) * 4);
+        const row = (/** @type {number} */ index)=>[...floats.subarray(at + index * 4,
+            at + index * 4 + 4)];
+        assert.deepEqual(row(HYBRID_LIGHTING.WORLD), [1, 0, 0, 0]);
+        assert.deepEqual(row(HYBRID_LIGHTING.MATERIAL), [0.5, 0.25, 0.125, 1]);
+        assert.deepEqual(row(HYBRID_LIGHTING.MATERIAL + 3), [0, 0.125, 0, 1]);
+        assert.deepEqual(row(HYBRID_LIGHTING.AMBIENT), [0x40 / 255, 0x60 / 255, 0x80 / 255, 1]
+            .map(Math.fround));
+        assert.equal(row(HYBRID_LIGHTING.EYE)[3], 6);
+        assert.deepEqual(row(HYBRID_LIGHTING.LIGHTS), [1, 0.5, 0.25, 1]);
+        assert.deepEqual(row(HYBRID_LIGHTING.LIGHTS + 4), [0, 0, 1, 0], 'direction, unit');
+
+        // The specular term off: the vertex's specular goes through, and a
+        // vertex with none hands on black of alpha one.
+        h.device.SetRenderState(D3DRS.SPECULARENABLE, 0);
+        await h.draw();
+        assert.ok(module().code.includes(`out.o${specular} = vec4f(0.0, 0.0, 0.0, 1.0);`));
+        assert.ok(module().code.includes(`out.o${diffuse} = litDiffuse;`));
+        // Lighting off: the colours as the vertex carries them.
+        h.device.SetRenderState(D3DRS.LIGHTING, 0);
+        await h.draw();
+        assert.ok(!module().code.includes('litDiffuse'));
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
 test('a pixel shader over a declaration that carries only a position is given what it reads',
     async()=>{
         // The fixed-function pipeline hands a pixel shader white where the
         // vertex has no colour and zero where it has no coordinate set; a
         // fragment input the vertex stage does not write fails the pipeline.
         const h = harness();
+        h.device.SetRenderState(D3DRS.LIGHTING, 0);
         /** @type {{ declaration?: any }} */
         const positionOnly = {};
         assert.equal(h.device.CreateVertexDeclaration([ELEMENTS[0]], positionOnly), D3D_OK);
@@ -1424,6 +1510,7 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         // from the vertex through world-view and the transform, and its
         // constants carry both, whatever set the declaration has.
         const h = harness();
+        h.device.SetRenderState(D3DRS.LIGHTING, 0);
         /** @type {{ shader?: any }} */
         const ps = {};
         assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);

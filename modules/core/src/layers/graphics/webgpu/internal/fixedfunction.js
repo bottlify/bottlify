@@ -388,7 +388,7 @@ export function clipStateOf(state){
  * rather than the angles: both are constant per light, and computing them once
  * on the processor keeps a transcendental out of every vertex.
  */
-const LIGHT_STRUCT = `struct Light {
+export const LIGHT_STRUCT = `struct Light {
     diffuse: vec4f,
     specular: vec4f,
     ambient: vec4f,
@@ -665,6 +665,34 @@ function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specu
 }
 
 /**
+ * Where the lighting equation reads its vertex and its uniforms, and where it
+ * writes its two colours: the fixed-function block's fields, or the rows of a
+ * constant array for the vertex stage made in front of a pixel shader.
+ *
+ * @typedef {{ position: string, normal: string, world: string, normalMatrix: string,
+ *     eye: string, ambient: string, light: (index: number) => string,
+ *     material: (name: string) => string, diffuse: string, specular: string,
+ *     specularOff: string }} LightingAccess
+ */
+
+/** @type {LightingAccess} */
+const UNIFORM_ACCESS = Object.freeze({
+    position: 'vertex.position',
+    normal: 'vertex.normal',
+    world: 'uniforms.world',
+    normalMatrix: 'uniforms.normalMatrix',
+    eye: 'uniforms.eye',
+    ambient: 'uniforms.ambient',
+    light: (/** @type {number} */ index)=>`uniforms.lights[${index}]`,
+    material: (/** @type {string} */ name)=>`uniforms.${name}`,
+    diffuse: 'out.diffuse',
+    specular: 'out.specular',
+    // A lit vertex with the specular term off has no highlight to carry,
+    // and its own specular colour is not a substitute for one.
+    specularOff: 'vec4f(0.0, 0.0, 0.0, 0.0)',
+});
+
+/**
  * Where one lighting term's colour comes from.
  *
  * A vertex colour is taken only when D3DRS_COLORVERTEX is on *and* the vertex
@@ -677,9 +705,10 @@ function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specu
  * @param {number} source  D3DMCS
  * @param {string} material  the uniform holding the material's own colour
  * @param {(name: string) => string} colour  A vertex colour as R, G, B, A (`vertexColour`).
+ * @param {LightingAccess} at
  * @returns {string}
  */
-function termColour(lighting, has, source, material, colour){
+function termColour(lighting, has, source, material, colour, at){
     if (lighting.colorVertex && source === D3DMCS.COLOR1 && has('diffuse'))
     {
         return colour('diffuse');
@@ -688,7 +717,7 @@ function termColour(lighting, has, source, material, colour){
     {
         return colour('specular');
     }
-    return `uniforms.${material}`;
+    return at.material(material);
 }
 
 /**
@@ -697,11 +726,12 @@ function termColour(lighting, has, source, material, colour){
  * @param {number} index
  * @param {number} type  D3DLIGHTTYPE
  * @param {boolean} specular  whether the specular term is computed at all
+ * @param {LightingAccess} at
  * @returns {string}
  */
-function lightContribution(index, type, specular){
+function lightContribution(index, type, specular, at){
     /** @type {string[]} */
-    const lines = ['    {', `        let light = uniforms.lights[${index}];`];
+    const lines = ['    {', `        let light = ${at.light(index)};`];
     if (type === D3DLIGHT.DIRECTIONAL)
     {
         // D3DLIGHT8.Direction is the direction the light travels, so the
@@ -741,7 +771,7 @@ function lightContribution(index, type, specular){
             // Only a face the light reaches has a highlight: behind it, a
             // power of zero would light every vertex at full.
             '        let highlight = select(0.0,',
-            '            pow(max(dot(worldNormal, halfNormal), 0.0), uniforms.eye.w),'
+            `            pow(max(dot(worldNormal, halfNormal), 0.0), ${at.eye}.w),`
                 + ' ndotl > 0.0);',
             '        lightSpecular += light.specular.rgb * (highlight * scale);');
     }
@@ -775,20 +805,23 @@ const normalized = (expression, normalizeNormals)=>
  * @param {boolean} specular
  * @param {boolean} normalizeNormals  D3DRS_NORMALIZENORMALS.
  * @param {(name: string) => string} colour  A vertex colour as R, G, B, A.
+ * @param {LightingAccess} [at]  Where it reads and writes: the fixed-function block's fields.
  * @returns {string}
  */
-function lightingBody(lighting, has, specular, normalizeNormals, colour){
+export function lightingBody(lighting, has, specular, normalizeNormals, colour,
+    at = UNIFORM_ACCESS)
+{
     // With no light enabled the specular sum is zero however it is written, and
     // emitting the terms anyway would leave the shader carrying an eye vector
     // and an accumulator nothing reads.
     const highlights = specular && lighting.lights.length > 0;
     /** @type {string[]} */
     const lines = [
-        '    let worldPosition = (uniforms.world * vec4f(vertex.position, 1.0)).xyz;',
+        `    let worldPosition = (${at.world} * vec4f(${at.position}, 1.0)).xyz;`,
         // A vertex with no normal is lit with a zero one, as Direct3D lights
         // it: its lights add nothing, and ambient and emissive light it whole.
         `    let worldNormal = ${has('normal') ? normalized(
-            '(uniforms.normalMatrix * vec4f(vertex.normal, 0.0)).xyz', normalizeNormals)
+            `(${at.normalMatrix} * vec4f(${at.normal}, 0.0)).xyz`, normalizeNormals)
             : 'vec3f(0.0)'};`,
     ];
     if (highlights)
@@ -796,8 +829,8 @@ function lightingBody(lighting, has, specular, normalizeNormals, colour){
         // D3DRS_LOCALVIEWER off puts the viewer at infinity: one direction
         // towards it for every vertex, carried in place of the eye.
         lines.push(lighting.localViewer === false
-            ? '    let toEye = uniforms.eye.xyz;'
-            : '    let toEye = normalize(uniforms.eye.xyz - worldPosition);');
+            ? `    let toEye = ${at.eye}.xyz;`
+            : `    let toEye = normalize(${at.eye}.xyz - worldPosition);`);
     }
     lines.push(
         '    var lightAmbient = vec3f(0.0, 0.0, 0.0);',
@@ -808,12 +841,15 @@ function lightingBody(lighting, has, specular, normalizeNormals, colour){
     }
     for (const [index, type] of lighting.lights.entries())
     {
-        lines.push(lightContribution(index, type, highlights));
+        lines.push(lightContribution(index, type, highlights, at));
     }
 
-    const diffuse = termColour(lighting, has, lighting.diffuseSource, 'materialDiffuse', colour);
-    const ambient = termColour(lighting, has, lighting.ambientSource, 'materialAmbient', colour);
-    const emissive = termColour(lighting, has, lighting.emissiveSource, 'materialEmissive', colour);
+    const diffuse =
+        termColour(lighting, has, lighting.diffuseSource, 'materialDiffuse', colour, at);
+    const ambient =
+        termColour(lighting, has, lighting.ambientSource, 'materialAmbient', colour, at);
+    const emissive =
+        termColour(lighting, has, lighting.emissiveSource, 'materialEmissive', colour, at);
     lines.push(
         `    let sourceDiffuse = ${diffuse};`,
         `    let sourceAmbient = ${ambient};`,
@@ -821,24 +857,22 @@ function lightingBody(lighting, has, specular, normalizeNormals, colour){
         // The whole scene's ambient light and every light's own ambient reach
         // the vertex through the material's ambient colour, not around it.
         '    let lit = sourceEmissive.rgb'
-            + ' + sourceAmbient.rgb * (uniforms.ambient.rgb + lightAmbient)'
+            + ` + sourceAmbient.rgb * (${at.ambient}.rgb + lightAmbient)`
             + ' + sourceDiffuse.rgb * lightDiffuse;',
         // The alpha is the diffuse source's, untouched by any of the above.
-        '    out.diffuse = vec4f(clamp(lit, vec3f(0.0), vec3f(1.0)), sourceDiffuse.a);');
+        `    ${at.diffuse} = vec4f(clamp(lit, vec3f(0.0), vec3f(1.0)), sourceDiffuse.a);`);
     if (highlights)
     {
         const specularSource =
-            termColour(lighting, has, lighting.specularSource, 'materialSpecular', colour);
+            termColour(lighting, has, lighting.specularSource, 'materialSpecular', colour, at);
         lines.push(
             `    let sourceSpecular = ${specularSource};`,
-            '    out.specular = vec4f(clamp(sourceSpecular.rgb * lightSpecular,'
+            `    ${at.specular} = vec4f(clamp(sourceSpecular.rgb * lightSpecular,`
                 + ' vec3f(0.0), vec3f(1.0)), 0.0);');
     }
     else
     {
-        // A lit vertex with the specular term off has no highlight to carry,
-        // and its own specular colour is not a substitute for one.
-        lines.push('    out.specular = vec4f(0.0, 0.0, 0.0, 0.0);');
+        lines.push(`    ${at.specular} = ${at.specularOff};`);
     }
     return lines.join('\n');
 }
@@ -1507,7 +1541,7 @@ ${fragmentBody(state, state.specularEnable === true, 'in.position', undefined, f
  * @param {number} fogMode  D3DFOG; NONE is 0.
  * @returns {string}
  */
-function functionDeclarations(lighting, fogMode, perVertex = false){
+export function functionDeclarations(lighting, fogMode, perVertex = false){
     // Only for geometry that has a distance to fog by: a pre-transformed vertex
     // carries its factor already and would leave this declared and uncalled.
     const fog = fogFunctionDeclaration(fogMode, undefined, perVertex);

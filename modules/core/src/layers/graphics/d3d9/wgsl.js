@@ -66,8 +66,8 @@
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import {
-    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, processedCoordinate,
-    sampledWithOnes, sphereMapOf,
+    LIGHT_STRUCT, clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration,
+    functionDeclarations, lightingBody, processedCoordinate, sampledWithOnes, sphereMapOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
@@ -143,6 +143,23 @@ export const HYBRID_CONSTANTS = Object.freeze({
     POINT: 47,
     POINT_SCALE: 48,
     COUNT: 49,
+});
+
+/**
+ * The rows a lit hybrid stage reads, from its `lightingRegister` on (past the
+ * clip planes): world and its inverse transpose as the fixed-function block
+ * packs them, the material's diffuse, ambient, specular and emissive, the
+ * scene's ambient, the eye with the specular power in w, then each enabled
+ * light's seven rows as `packLight` lays them.
+ */
+export const HYBRID_LIGHTING = Object.freeze({
+    WORLD: 0,
+    NORMAL_MATRIX: 4,
+    MATERIAL: 8,
+    AMBIENT: 12,
+    EYE: 13,
+    LIGHTS: 14,
+    LIGHT_ROWS: 7,
 });
 
 /** vs_1_x expp: 2^floor(x), the fraction of x, 2^x, and one. */
@@ -318,6 +335,9 @@ export function varyingLocation(usage, index){
  * @property {number} [clipRegister]
  *     A vertex stage that clips: the first of the registers its user clip
  *     planes travel in, one a plane, past every other it reads.
+ * @property {number} [lightingRegister]
+ *     A lit fixed vertex stage (`fixedVertexStage`): the first of its
+ *     lighting rows, past the clip planes (`HYBRID_LIGHTING`).
  * @property {number} [biasRegister]
  *     A stage whose samplers bias their level of detail: the first of four
  *     registers the biases travel in, sampler n in component n % 4 of register
@@ -2269,7 +2289,9 @@ const TCI_SPHEREMAP = 0x40000;
  *     points?: { sprite: boolean, scale: boolean },
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
  *     carried?: ({ set: number, transform: number } | null)[],
- *     clipsBehindEye?: boolean }} [options]
+ *     clipsBehindEye?: boolean,
+ *     lighting?: import('../webgpu/internal/pipeline.js').LightingState | null,
+ *     specularEnable?: boolean }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
@@ -2287,7 +2309,11 @@ const TCI_SPHEREMAP = 0x40000;
  *        hands a pixel shader each stage's coordinates, not the
  *        declaration's sets by number, made as `processedCoordinate` says. A
  *        pre-transformed vertex's set goes through as declared, through no
- *        matrix.
+ *        matrix. `lighting`: D3DRS_LIGHTING on, the lights and the colour
+ *        sources: the two colours the pixel shader reads are lit, in rows
+ *        from `lightingRegister` (`HYBRID_LIGHTING`); the specular is the
+ *        highlight only under `specularEnable` (D3DRS_SPECULARENABLE), the
+ *        vertex's own specular otherwise (Wine's d3d8 test_specular_shaders).
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -2311,6 +2337,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let pointBase = `c[${HYBRID_CONSTANTS.POINT}].x`;
     const carried = options.carried ?? [];
     const pretransformed = elements.some(element=>element.usage === D3DDECLUSAGE.POSITIONT);
+    let hasNormal = false;
+    /** The diffuse and specular the vertex carries, by index. @type {Map<number, string>} */
+    const colours = new Map();
     /** The stage's texture transform by columns. @param {number} stage */
     const transformColumn = stage=>(/** @type {number} */ axis)=>
         `c[${HYBRID_CONSTANTS.TRANSFORMS + stage * 4 + axis}]`;
@@ -2346,6 +2375,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         else if (element.usage === D3DDECLUSAGE.NORMAL)
         {
             normal = `${value}.xyz`;
+            hasNormal = true;
         }
         else if (element.usage === D3DDECLUSAGE.PSIZE)
         {
@@ -2370,6 +2400,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             if (element.usage === D3DDECLUSAGE.COLOR && element.usageIndex === 1)
             {
                 specularAlpha = `${value}.w`;
+            }
+            if (element.usage === D3DDECLUSAGE.COLOR && element.usageIndex < 2)
+            {
+                colours.set(element.usageIndex, value);
             }
             if (element.usage === D3DDECLUSAGE.TEXCOORD)
             {
@@ -2476,6 +2510,55 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         outputs.push(FOG_RANGE_LOCATION);
         body.push(`    out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
     }
+    const clipCount = options.clip && vertex ? options.clip.count : 0;
+    const lighting = options.lighting && vertex && !pretransformed ? options.lighting : null;
+    const lightingRegister = HYBRID_CONSTANTS.COUNT + clipCount;
+    if (lighting)
+    {
+        const row = (/** @type {number} */ offset)=>`c[${lightingRegister + offset}]`;
+        const matrix = (/** @type {number} */ offset)=>
+            `mat4x4f(${row(offset)}, ${row(offset + 1)}, ${row(offset + 2)}, ${row(offset + 3)})`;
+        const materials = ['materialDiffuse', 'materialAmbient', 'materialSpecular',
+            'materialEmissive'];
+        const name = (/** @type {string} */ colour)=>(colour === 'diffuse' ? 0 : 1);
+        body.push('    var litDiffuse = vec4f(0.0);', '    var litSpecular = vec4f(0.0);',
+            lightingBody(lighting,
+                colour=>(colour === 'normal' ? hasNormal : colours.has(name(colour))),
+                options.specularEnable === true, options.normalizeNormals === true,
+                colour=>/** @type {string} */ (colours.get(name(colour))), {
+                    position: /** @type {string} */ (vertex), normal,
+                    world: matrix(HYBRID_LIGHTING.WORLD),
+                    normalMatrix: matrix(HYBRID_LIGHTING.NORMAL_MATRIX),
+                    eye: row(HYBRID_LIGHTING.EYE), ambient: row(HYBRID_LIGHTING.AMBIENT),
+                    light: index=>{
+                        const first = HYBRID_LIGHTING.LIGHTS + index * HYBRID_LIGHTING.LIGHT_ROWS;
+                        return `Light(${Array.from({ length: HYBRID_LIGHTING.LIGHT_ROWS },
+                            (_, at)=>row(first + at)).join(', ')})`;
+                    },
+                    material: material=>row(HYBRID_LIGHTING.MATERIAL + materials.indexOf(material)),
+                    diffuse: 'litDiffuse', specular: 'litSpecular', specularOff: 'vec4f(0.0)',
+                }));
+        const lit = [
+            'litDiffuse',
+            options.specularEnable === true ? `vec4f(litSpecular.rgb, ${specularAlpha})`
+                : colours.get(1) ?? 'vec4f(0.0, 0.0, 0.0, 1.0)',
+        ];
+        for (const [index, value] of lit.entries())
+        {
+            const location = varyingLocation(D3DDECLUSAGE.COLOR, index);
+            if (!outputs.includes(location))
+            {
+                if (!alsoWrite.includes(location))
+                {
+                    continue;
+                }
+                outputFields.push(`    @location(${location})`
+                    + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
+                outputs.push(location);
+            }
+            body.push(`    out.o${location} = ${value};`);
+        }
+    }
     for (const location of alsoWrite)
     {
         if (!outputs.includes(location))
@@ -2523,12 +2606,16 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,
         `    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${HYBRID_CONSTANTS.VIEWPORT}].zw`
             + ' * 0.5, out.oPos.zw);');
+    const constants = lighting ? lightingRegister + HYBRID_LIGHTING.LIGHTS
+        + lighting.lights.length * HYBRID_LIGHTING.LIGHT_ROWS
+        : HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0);
     const wgsl = [
         ...moduleHeader({
-            vertex: true, constants: HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0), samplers: [],
+            vertex: true, constants, samplers: [],
             inputFields, outputFields, clipDistances: clip?.distances === true,
         }),
         D3D_MATH,
+        ...(lighting ? [LIGHT_STRUCT.trimEnd(), functionDeclarations(lighting, 0).trimEnd()] : []),
         // The fog curve over the fixed function's own range row.
         fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`, true).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
@@ -2551,8 +2638,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     ].join('\n');
     return {
         wgsl, entry: 'vs_main', inputs, outputs, reads: [], samplers: [],
-        constants: HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0),
+        constants,
         ...(clip ? { clipRegister: HYBRID_CONSTANTS.COUNT } : {}),
+        ...(lighting ? { lightingRegister } : {}),
         error: position ? null : 'the declaration carries no position',
     };
 }
