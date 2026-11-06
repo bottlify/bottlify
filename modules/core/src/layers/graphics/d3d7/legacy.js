@@ -875,6 +875,9 @@ function createLegacyDevice(inner, version, legacy){
     // Specular highlights start on through IDirect3DDevice2 and off through
     // the third (Wine's ddraw2.c and ddraw4.c test_lighting_interface_versions).
     inner.SetRenderState(RS.SPECULARENABLE, version < 3 ? 1 : 0);
+    // Colour keying starts on in the first version, keying only a texture
+    // that has a key, and off after it (Wine's ddraw1 and ddraw2 test_ck_default).
+    inner.SetRenderState(RS.COLORKEYENABLE, version === 1 ? 1 : 0);
 
     /**
      * Whether stage zero's texture is the one TEXTUREHANDLE names, looked up

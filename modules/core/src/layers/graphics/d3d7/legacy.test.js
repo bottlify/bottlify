@@ -164,6 +164,18 @@ test('material and matrix handles are the process\'s: one DirectDraw object\'s n
     f.done();
 });
 
+test('colour keying starts on through the first version and off after it (test_ck_default)', ()=>{
+    for (const [version, keyed] of /** @type {const} */ ([[1, 1], [2, 0], [3, 0]]))
+    {
+        const f = fixture(version);
+        /** @type {{ value?: number }} */
+        const out = {};
+        assert.equal(f.device.getRenderState(41, out), D3D_OK);
+        assert.equal(out.value, keyed, `version ${version}`);
+        f.done();
+    }
+});
+
 test('the older versions make the software and hardware devices, and no T&L one', ()=>{
     const f = fixture();
     assert.deepEqual(f.legacy.devices().map((/** @type {any} */ device)=>device.id),
