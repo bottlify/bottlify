@@ -1022,6 +1022,11 @@ test('GetAvailableTextureMem falls as default-pool resources are made and comes 
         assert.equal(ex.device.CreateTexture(1024, 1024, 1, D3DUSAGE.RENDERTARGET,
             D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, target), D3D_OK);
         assert.equal(ex.device.GetAvailableTextureMem(), before);
+        // And its scene outlives a reset (Wine's d3d9ex test_scene).
+        assert.equal(ex.device.BeginScene(), D3D_OK);
+        assert.equal(ex.device.Reset({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 64,
+            backBufferHeight: 64, backBufferFormat: D3DFMT.X8R8G8B8 }), D3D_OK);
+        assert.equal(ex.device.EndScene(), D3D_OK);
         assert.equal(target.texture.release(), 0);
         assert.equal(ex.device.release(), 0);
     });

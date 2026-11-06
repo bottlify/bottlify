@@ -2726,7 +2726,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 presentParameters = normalisePresentParameters(next);
             }
-            inScene = false;
+            // An extended device's scene outlives a reset (Wine's d3d9ex
+            // test_scene); a plain one's ends with it.
+            if (!extended)
+            {
+                inScene = false;
+            }
             recording = null;
             deviceState = DEVICE_STATE.OK;
             if (!extended)
