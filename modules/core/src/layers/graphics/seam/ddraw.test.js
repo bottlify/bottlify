@@ -2746,3 +2746,78 @@ test('blocks in the program\'s memory report no size of their own (test_block_fo
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('a blit keys by the surface\'s key or the override, never both, and by a key there is;'
+    + ' the destination key is the destination\'s in v7, the source\'s before'
+    + ' (test_ck_operation)', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const make = ()=>h.createSurface7(ddraw, { caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN,
+        width: 2, height: 1 });
+    const src = make();
+    const dst = make();
+    const pixels = (/** @type {number} */ surface, /** @type {number[] | null} */ values)=>{
+        const at = lockedAt(h, surface);
+        values?.forEach((value, i)=>h.box.memory.writeU32(at + i * 4, value));
+        return [0, 1].map(i=>h.box.memory.readU32(at + i * 4));
+    };
+    /** @param {number} surface @param {number} which @param {number | null} value */
+    const setKey = (surface, which, value)=>{
+        if (value !== null)
+        {
+            h.box.memory.writeU32(0x6100, value);
+            h.box.memory.writeU32(0x6104, value);
+        }
+        assert.equal(h.surface7(surface, 'SetColorKey', [which, value === null ? 0 : 0x6100]),
+            DD_OK);
+    };
+    const DESTBLT = 2;
+    const SRCBLT = 8;
+    const KEYDEST = 0x2000;
+    const KEYDESTOVERRIDE = 0x4000;
+    const KEYSRC = 0x8000;
+    const KEYSRCOVERRIDE = 0x10000;
+    h.box.bytes.fill(0, 0x5f00, 0x5f00 + 100);
+    h.box.memory.writeU32(0x5f00, 100);
+    const blt = (/** @type {number} */ through, /** @type {number} */ from,
+        /** @type {number} */ flags, fx = 0x5f00)=>h.box.call(through,
+        slot(IDIRECTDRAWSURFACE_SLOTS, 'Blt'), [0, from, 0, flags, fx]) >>> 0;
+    pixels(src, [0x11, 0x22]);
+    setKey(src, SRCBLT, 0x11);
+    setKey(src, DESTBLT, 0xaa);
+    setKey(dst, DESTBLT, 0xbb);
+    for (const flags of [KEYSRC | KEYSRCOVERRIDE, KEYDEST | KEYDESTOVERRIDE])
+    {
+        assert.equal(blt(dst, src, flags), DDERR_INVALIDPARAMS >>> 0);
+    }
+    for (const flags of [KEYSRCOVERRIDE, KEYDESTOVERRIDE])
+    {
+        assert.equal(blt(dst, src, flags, 0), DDERR_INVALIDPARAMS >>> 0, 'an override needs fx');
+    }
+    // Through the seventh generation the destination's own key decides.
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst, src, KEYDEST), DD_OK);
+    assert.deepEqual(pixels(dst, null), [0x11, 0xaa]);
+    // Through the first, the source's destination key.
+    const riid = h.box.putGuid(0x4000, IID_IDirectDrawSurface);
+    assert.equal(h.box.call(dst, 0, [riid, 0x6300]), DD_OK);
+    assert.equal(h.box.call(src, 0, [riid, 0x6304]), DD_OK);
+    const [dst1, src1] = [h.box.memory.readU32(0x6300), h.box.memory.readU32(0x6304)];
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst1, src1, KEYDEST), DD_OK);
+    assert.deepEqual(pixels(dst, null), [0xbb, 0x22]);
+    // A key the surface has none of is refused.
+    setKey(src, SRCBLT, null);
+    setKey(src, DESTBLT, null);
+    assert.equal(blt(dst, src, KEYSRC), DDERR_INVALIDPARAMS >>> 0);
+    assert.equal(blt(dst1, src1, KEYDEST), DDERR_INVALIDPARAMS >>> 0, 'the source has none');
+    assert.equal(blt(dst, src, KEYDEST), DD_OK, 'the destination still has its own');
+    setKey(dst, DESTBLT, null);
+    assert.equal(blt(dst, src, KEYDEST), DDERR_INVALIDPARAMS >>> 0);
+    for (const one of [dst1, src1, src, dst])
+    {
+        h.release(one);
+    }
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});

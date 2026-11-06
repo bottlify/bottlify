@@ -64,7 +64,7 @@ import {
 } from '../ddraw/structs.js';
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL,
-    DDBLT_KEYDESTOVERRIDE, DDBLT_WAIT, DDERR_DCALREADYCREATED,
+    DDBLT_KEYDEST, DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_WAIT, DDERR_DCALREADYCREATED,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
@@ -1065,6 +1065,24 @@ export function createDirectDrawSeam(
                     reportRefusal('Blt', surface, from ?? surface, hr);
                     return hr;
                 }
+                // A key is the surface's or the override's, never both; an
+                // override is read from the DDBLTFX there has to be; a key
+                // the surface has none of is refused. The destination key is
+                // the destination's own through IDirectDrawSurface7 and the
+                // source's through every older interface (Wine's
+                // test_ck_operation).
+                const destKeyOf = generation.id === IID_IDirectDrawSurface7 ? surface : from;
+                if (((flags & DDBLT_KEYSRC) !== 0 && (flags & DDBLT_KEYSRCOVERRIDE) !== 0)
+                    || ((flags & DDBLT_KEYDEST) !== 0 && (flags & DDBLT_KEYDESTOVERRIDE) !== 0)
+                    || ((flags & (DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) !== 0
+                        && (fx >>> 0) === 0)
+                    || ((flags & DDBLT_KEYSRC) !== 0
+                        && !from?.getColorKey(DDCKEY_SRCBLT).key)
+                    || ((flags & DDBLT_KEYDEST) !== 0
+                        && !destKeyOf?.getColorKey(DDCKEY_DESTBLT).key))
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
                 // dwFillDepth shares dwFillColor's place in the structure.
                 const fill = (fx >>> 0) === 0
                     ? 0
@@ -1084,8 +1102,10 @@ export function createDirectDrawSeam(
                             ? keyFor(from, DDCKEY_SRCBLT,
                                 (flags & DDBLT_KEYSRCOVERRIDE) !== 0, fx, DDBLTFX.ddckSrcColorkey)
                             : undefined,
-                        destColorKey: keyFor(surface, DDCKEY_DESTBLT,
-                            (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey),
+                        destColorKey: (flags & DDBLT_KEYDESTOVERRIDE) !== 0 || destKeyOf
+                            ? keyFor(destKeyOf ?? surface, DDCKEY_DESTBLT,
+                                (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey)
+                            : undefined,
                     },
                     clipList: clipListOf(surface),
                     fxGiven: (fx >>> 0) !== 0,
