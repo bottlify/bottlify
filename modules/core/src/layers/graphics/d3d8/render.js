@@ -4885,6 +4885,7 @@ export function createRenderer(options){
                 format: attribute.format,
                 shaderLocation: index,
                 ...(attribute.stream === 0 ? {} : { stream: attribute.stream }),
+                ...(attribute.rgba ? { rgba: true } : {}),
             })),
             preTransformed: declared.preTransformed,
             texCoordSets: declared.texCoordSets,
@@ -9210,7 +9211,7 @@ export function createRenderer(options){
             layout = declared;
             vertexLayoutKey = `d${stride}:${declared.attributes
                 .map(attribute=>`${attribute.name}@${attribute.stream ?? 0}.${attribute.offset}`
-                    + `:${attribute.format}`)
+                    + `:${attribute.format}${attribute.rgba ? 'r' : ''}`)
                 .join(',')}${streamsKey(declared)}`;
         }
         else

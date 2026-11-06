@@ -228,6 +228,20 @@ export function processedCoordinate(raw, count, transform, column){
 }
 
 /**
+ * A vertex colour as R, G, B, A: a D3DCOLOR's bytes swizzled back from B, G,
+ * R, A, and a colour of another declaration type (UBYTE4N, USHORT4N, the
+ * floats) red first as it is, its missing components zero and alpha one
+ * (Wine's d3d9 fixed_function_decl_test).
+ *
+ * @param {import('./vertexformat.js').VertexLayout} layout @param {string} name
+ * @returns {string}
+ */
+export function vertexColour(layout, name){
+    const attribute = layout.attributes.find(one=>one.name === name);
+    return attribute?.rgba ? filled(`vertex.${name}`, attribute.format) : `vertex.${name}.bgra`;
+}
+
+/**
  * How many components a vertex input of `format` carries.
  *
  * @param {string} format @returns {number}
@@ -660,16 +674,17 @@ function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specu
  * @param {(name: string)=>boolean} has
  * @param {number} source  D3DMCS
  * @param {string} material  the uniform holding the material's own colour
+ * @param {(name: string) => string} colour  A vertex colour as R, G, B, A (`vertexColour`).
  * @returns {string}
  */
-function termColour(lighting, has, source, material){
+function termColour(lighting, has, source, material, colour){
     if (lighting.colorVertex && source === D3DMCS.COLOR1 && has('diffuse'))
     {
-        return 'vertex.diffuse.bgra';
+        return colour('diffuse');
     }
     if (lighting.colorVertex && source === D3DMCS.COLOR2 && has('specular'))
     {
-        return 'vertex.specular.bgra';
+        return colour('specular');
     }
     return `uniforms.${material}`;
 }
@@ -757,9 +772,10 @@ const normalized = (expression, normalizeNormals)=>
  * @param {(name: string)=>boolean} has
  * @param {boolean} specular
  * @param {boolean} normalizeNormals  D3DRS_NORMALIZENORMALS.
+ * @param {(name: string) => string} colour  A vertex colour as R, G, B, A.
  * @returns {string}
  */
-function lightingBody(lighting, has, specular, normalizeNormals){
+function lightingBody(lighting, has, specular, normalizeNormals, colour){
     // With no light enabled the specular sum is zero however it is written, and
     // emitting the terms anyway would leave the shader carrying an eye vector
     // and an accumulator nothing reads.
@@ -793,9 +809,9 @@ function lightingBody(lighting, has, specular, normalizeNormals){
         lines.push(lightContribution(index, type, highlights));
     }
 
-    const diffuse = termColour(lighting, has, lighting.diffuseSource, 'materialDiffuse');
-    const ambient = termColour(lighting, has, lighting.ambientSource, 'materialAmbient');
-    const emissive = termColour(lighting, has, lighting.emissiveSource, 'materialEmissive');
+    const diffuse = termColour(lighting, has, lighting.diffuseSource, 'materialDiffuse', colour);
+    const ambient = termColour(lighting, has, lighting.ambientSource, 'materialAmbient', colour);
+    const emissive = termColour(lighting, has, lighting.emissiveSource, 'materialEmissive', colour);
     lines.push(
         `    let sourceDiffuse = ${diffuse};`,
         `    let sourceAmbient = ${ambient};`,
@@ -810,7 +826,7 @@ function lightingBody(lighting, has, specular, normalizeNormals){
     if (highlights)
     {
         const specularSource =
-            termColour(lighting, has, lighting.specularSource, 'materialSpecular');
+            termColour(lighting, has, lighting.specularSource, 'materialSpecular', colour);
         lines.push(
             `    let sourceSpecular = ${specularSource};`,
             '    out.specular = vec4f(clamp(sourceSpecular.rgb * lightSpecular,'
@@ -833,6 +849,7 @@ function lightingBody(lighting, has, specular, normalizeNormals){
 export function generateFixedFunction(state, layout){
     const has = (/** @type {string} */ name)=>
         layout.attributes.some(attribute=>attribute.name === name);
+    const colour = (/** @type {string} */ name)=>vertexColour(layout, name);
     const lighting = state.lighting ?? null;
     const specularEnable = state.specularEnable === true;
     const normalizeNormals = state.normalizeNormals === true;
@@ -859,16 +876,16 @@ export function generateFixedFunction(state, layout){
     }
     if (lighting)
     {
-        assignments.push(lightingBody(lighting, has, specularEnable, normalizeNormals));
+        assignments.push(lightingBody(lighting, has, specularEnable, normalizeNormals, colour));
     }
     else
     {
         assignments.push(has('diffuse')
             // The swizzle back from B,G,R,A. See the header.
-            ? '    out.diffuse = vertex.diffuse.bgra;'
+            ? `    out.diffuse = ${colour('diffuse')};`
             : '    out.diffuse = vec4f(1.0, 1.0, 1.0, 1.0);');
         assignments.push(has('specular')
-            ? '    out.specular = vertex.specular.bgra;'
+            ? `    out.specular = ${colour('specular')};`
             : '    out.specular = vec4f(0.0, 0.0, 0.0, 0.0);');
     }
 

@@ -61,10 +61,11 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS, ...TEXT
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2), c.arg(3)) },
     SetIndices: { args: 1, objects: [0], make: (d, c)=>d.SetIndices(c.object()) },
     // A stream's divider and its kind, as the device takes them by their bits
-    // alone: a divider of one or more, the indexed geometry's flag or the
-    // instances' but not both, and the instances' on any stream but the first.
+    // alone: a divider of one or more, or of any with the indexed geometry's
+    // flag or the instances' but not both, and the instances' on any stream
+    // but the first.
     SetStreamSourceFreq: { args: 2, within: [{ arg: 0, ranges: [[0, 15]] },
-        { arg: 1, ranges: [[1, 0x3fffffff], [0x40000001, 0x7fffffff], [0x80000001, 0xbfffffff]] }],
+        { arg: 1, ranges: [[1, 0x3fffffff], [0x40000000, 0x7fffffff], [0x80000000, 0xbfffffff]] }],
     refusedWhen: { arg: 0, equals: 0, flagsOf: 1, mask: 0x80000000 },
     make: (d, c)=>d.SetStreamSourceFreq(c.arg(0), c.arg(1)) },
     // The one target, of a surface made to be one; it resets the viewport, which the

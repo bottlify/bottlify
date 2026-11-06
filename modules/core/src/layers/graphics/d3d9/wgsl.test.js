@@ -1458,3 +1458,20 @@ test('a vs_1_1 expp and logp are the old four-part results, read from the source
     assertLine(logp.wgsl, 'r0 = logParts(c[0].w);');
     assert.ok(logp.wgsl.includes('fn logParts(x: f32) -> vec4f {'));
 });
+
+test('a model 3 vertex shader sizes its points by the output it declared PSIZE', ()=>{
+    // Wine's test_pointsize, vs_3_0 with dcl_psize o1: o1.x is the size,
+    // not the render state.
+    const dclOutput = (/** @type {number} */ usage, /** @type {number} */ register)=>[
+        op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.OUTPUT, register)];
+    const parsed = parseShader([VS_3_0, ...dclInput(D3DDECLUSAGE.POSITION, 0),
+        ...dclInput(D3DDECLUSAGE.PSIZE, 1),
+        ...dclOutput(D3DDECLUSAGE.POSITION, 0), ...dclOutput(D3DDECLUSAGE.PSIZE, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 1), src(REGISTER.INPUT, 1),
+        END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed, { points: { sprite: false } });
+    assert.equal(translated.error, null);
+    assert.ok(translated.wgsl?.includes('let pointSize = min(max(out.o1.x,'), translated.wgsl);
+});

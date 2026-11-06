@@ -227,8 +227,17 @@ test('fixed function reads a declaration by its offsets and refuses what it cann
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 28, { index: 1 })] }), null,
     'a gap in the sets');
+    // A colour of another type than D3DCOLOR is read red first (Wine's d3d9
+    // fixed_function_decl_test: UBYTE4N, USHORT4N, FLOAT4).
+    for (const [type, format] of /** @type {[number, string][]} */ ([[D3DDECLTYPE.UBYTE4N, 'unorm8x4'],
+        [D3DDECLTYPE.USHORT4N, 'unorm16x4'], [D3DDECLTYPE.FLOAT4, 'float32x4']]))
+    {
+        const colour = fixedFunctionLayoutOf({ id: 1, elements: [position,
+            element(D3DDECLUSAGE.COLOR, type, 28)] })?.attributes[1];
+        assert.deepEqual([colour?.name, colour?.format, colour?.rgba], ['diffuse', format, true]);
+    }
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
-        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 28)] }), null, 'a colour in R, G, B, A');
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UDEC3, 28)] }), null, 'a packed colour');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [
         element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 0)] }), null, 'no position');
 });

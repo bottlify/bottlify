@@ -260,8 +260,8 @@ test('a declaration the program made reports no format, even when it describes o
 });
 
 test('a draw through a declaration the fixed stage cannot read succeeds, reported once', ()=>{
-    // A colour of four bytes read R, G, B, A: the fixed-function stage reads
-    // D3DCOLOR alone. A declaration it can read -- a tangent beside the
+    // A colour packed in ten-bit fields (UDEC3): the fixed-function stage
+    // reads no packed colour. A declaration it can read -- a tangent beside the
     // position, a member in another stream -- is drawn, and not reported.
     /** @type {string[]} */
     const reports = [];
@@ -271,7 +271,7 @@ test('a draw through a declaration the fixed stage cannot read succeeds, reporte
     const made = {};
     device.CreateVertexDeclaration([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
-        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 12),
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UDEC3, 12),
     ], made);
     device.SetVertexDeclaration(made.declaration);
     /** @type {{ buffer?: any }} */
@@ -762,6 +762,10 @@ test('streams past the last are refused, and a frequency is checked for sense', 
         'instance data on stream zero');
     assert.equal(device.SetStreamSourceFreq(1, 0xc0000001), D3DERR_INVALIDCALL, 'both flags');
     assert.equal(device.SetStreamSourceFreq(1, 0x80000001), D3D_OK);
+    // A divider of zero goes with a flag (Wine's d3d9 stream_test).
+    assert.equal(device.SetStreamSourceFreq(1, 0x40000000), D3D_OK);
+    assert.equal(device.SetStreamSourceFreq(1, 0x80000000), D3D_OK);
+    assert.equal(device.SetStreamSourceFreq(1, 0), D3DERR_INVALIDCALL, 'and not alone');
     assert.equal(device.SetStreamSourceFreq(0, 0x40000004), D3D_OK);
     device.GetStreamSourceFreq(0, out);
     assert.equal(out.frequency, 0x40000004);

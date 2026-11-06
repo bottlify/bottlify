@@ -1202,15 +1202,15 @@ test('a fixed-function draw reads a declaration no format spells at its offsets'
 });
 
 test('a declaration the fixed-function stage cannot read is dropped, not raised', async()=>{
-    // A colour of four bytes read as R, G, B, A: this stage reads D3DCOLOR.
-    // The draw must not throw into the program's thread; it is counted and
+    // A colour packed in ten-bit fields (UDEC3): this stage reads no packed
+    // colour. The draw must not throw into the program's thread; it is counted and
     // said once.
     const h = harness();
     const { device } = h;
     /** @type {{ declaration?: any }} */
     const made = {};
     assert.equal(device.CreateVertexDeclaration([
-        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.UBYTE4N, Method: 0,
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.UDEC3, Method: 0,
             Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
         { Stream: 0, Offset: 4, Type: D3DDECLTYPE.FLOAT4, Method: 0,
             Usage: D3DDECLUSAGE.POSITIONT, UsageIndex: 0 },

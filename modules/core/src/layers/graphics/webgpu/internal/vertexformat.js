@@ -74,6 +74,8 @@ const floatFormat = count=>(count === 1 ? 'float32' : `float32x${count}`);
  * @property {string} format      A WebGPU vertex format.
  * @property {number} shaderLocation
  * @property {number} [stream]    The stream it is read from; zero when absent.
+ * @property {boolean} [rgba]     A colour red first, of a declaration type other than
+ *     D3DCOLOR, whose bytes come B, G, R, A.
  */
 
 /**

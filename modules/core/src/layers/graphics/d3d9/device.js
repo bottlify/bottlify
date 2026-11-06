@@ -3938,7 +3938,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const both = (STREAMSOURCE_INDEXEDDATA | STREAMSOURCE_INSTANCEDATA) >>> 0;
             const flags = (frequency & both) >>> 0;
             const divider = (frequency & ~both) >>> 0;
-            if (index < 0 || index >= MAX_STREAMS || divider === 0
+            // A divider of zero is refused alone and taken with a flag
+            // (Wine's d3d9 stream_test: INDEXEDDATA | 0, INSTANCEDATA | 0).
+            if (index < 0 || index >= MAX_STREAMS || (divider === 0 && flags === 0)
                 || flags === both
                 || (index === 0 && flags === STREAMSOURCE_INSTANCEDATA))
             {
@@ -4513,7 +4515,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const toInfo = FORMAT_INFO[to.Format];
             const sameBytes = from.Format === to.Format || (fromInfo !== undefined
                 && toInfo !== undefined && fromInfo.blockSize === undefined
-                && toInfo.blockSize === undefined && fromInfo.bytesPerPixel === toInfo.bytesPerPixel);
+                && toInfo.blockSize === undefined
+                && fromInfo.bytesPerPixel === toInfo.bytesPerPixel);
             if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool !== D3DPOOL.DEFAULT
                 || (from.Format !== to.Format
                     && (isCompressed(from.Format) || isCompressed(to.Format)))

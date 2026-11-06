@@ -24,6 +24,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { fromHalf, toHalf } from './half.js';
+import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;
@@ -397,4 +398,31 @@ test('a narrow format\'s rows go up without the gap its pitch leaves', async()=>
     const bytes = /** @type {Uint8Array} */ (upload.bytes);
     assert.deepEqual(Array.from({ length: 6 }, (_, texel)=>bytes[texel * 4]),
         [10, 20, 30, 40, 50, 60]);
+});
+
+test('a colour of a wide declaration type reaches the fixed-function stage red first', async()=>{
+    // Wine's fixed_function_decl_test: a FLOAT4 colour (1, 0, 0, 0) draws red,
+    // where a D3DCOLOR's bytes come blue first.
+    const h = harness();
+    const { device } = h;
+    /** @type {{ declaration?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT3, Method: 0,
+            Usage: D3DDECLUSAGE.POSITION, UsageIndex: 0 },
+        { Stream: 0, Offset: 12, Type: D3DDECLTYPE.FLOAT4, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+    ], made), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    assert.equal(device.Present(), D3D_OK);
+    await device.idle();
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        /** @type {string} */ (call.descriptor.code)).join('\n');
+    assert.match(code, /out\.diffuse = vertex\.diffuse;/);
+    assert.doesNotMatch(code, /vertex\.diffuse\.bgra/);
+    made.declaration.release();
 });

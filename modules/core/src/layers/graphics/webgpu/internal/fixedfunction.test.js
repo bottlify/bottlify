@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
     D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, fixedFragmentStage, fogFunctionDeclaration,
-    argumentsRead, generateFixedFunction, sampledWithOnes,
+    argumentsRead, generateFixedFunction, sampledWithOnes, vertexColour,
 } from './fixedfunction.js';
 import { FOG_SOURCE } from './pipeline.js';
 import { FVF, decodeFvf } from './vertexformat.js';
@@ -1268,4 +1268,25 @@ test('linear fog of no range is a step per pixel and whole fog at a vertex', ()=
     // entirely, where the table curve steps at that depth.
     assert.match(fogFunctionDeclaration(D3DFOG.LINEAR), /return select\(1\.0, 0\.0, dist >= end\);/);
     assert.match(fogFunctionDeclaration(D3DFOG.LINEAR, undefined, true), /return 0\.0;/);
+});
+
+test('a vertex colour red first is taken as it is, a D3DCOLOR swizzled back', ()=>{
+    // Wine's d3d9 fixed_function_decl_test: FLOAT4, UBYTE4N and USHORT4N
+    // colours are R, G, B, A; a D3DCOLOR's bytes come B, G, R, A.
+    /** @param {Partial<import('./vertexformat.js').VertexAttribute>} diffuse */
+    const layout = diffuse=>(/** @type {import('./vertexformat.js').VertexLayout} */ ({ stride: 32, preTransformed: false, texCoordSets: 0,
+        attributes: [
+            { name: 'position', offset: 0, format: 'float32x3', shaderLocation: 0 },
+            { name: 'diffuse', offset: 12, format: 'unorm8x4', shaderLocation: 1, ...diffuse },
+        ] }));
+    assert.equal(vertexColour(layout({}), 'diffuse'), 'vertex.diffuse.bgra');
+    assert.equal(vertexColour(layout({ rgba: true }), 'diffuse'), 'vertex.diffuse');
+    assert.equal(vertexColour(layout({ rgba: true, format: 'float32x3' }), 'diffuse'),
+        'vec4f(vertex.diffuse, 1.0)', 'a missing alpha is one');
+    const code = generateFixedFunction(/** @type {any} */ (baseState()),
+        /** @type {any} */ (layout({ rgba: true, format: 'float32x4' }))).code;
+    assert.ok(code.includes('out.diffuse = vertex.diffuse;'), code);
+    const lit = generateFixedFunction(/** @type {any} */ (baseState({ lighting: lighting() })),
+        /** @type {any} */ (layout({ rgba: true, format: 'float32x4' }))).code;
+    assert.ok(!lit.includes('vertex.diffuse.bgra'), 'nor when it is lit by');
 });

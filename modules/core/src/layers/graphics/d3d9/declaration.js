@@ -380,7 +380,7 @@ export function fvfOfElements(elements){
  * @typedef {Object} FixedFunctionLayout
  * @property {number} id           The declaration's, so two layouts are told apart.
  * @property {{ name: string, offset: number, format: string, bytes: number,
- *     stream: number }[]} attributes
+ *     stream: number, rgba?: boolean }[]} attributes
  * @property {boolean} preTransformed
  * @property {number} texCoordSets
  * @property {number[]} streams    The streams past zero it reads, in order.
@@ -398,6 +398,20 @@ const TEXCOORD_FORMATS = Object.freeze({
     [D3DDECLTYPE.FLOAT4]: 'float32x4',
     [D3DDECLTYPE.FLOAT16_2]: 'float16x2',
     [D3DDECLTYPE.FLOAT16_4]: 'float16x4',
+});
+
+/**
+ * A colour's declaration types beside D3DCOLOR, as the vertex formats that read them.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const COLOUR_FORMATS = Object.freeze({
+    ...TEXCOORD_FORMATS,
+    [D3DDECLTYPE.UBYTE4N]: 'unorm8x4',
+    [D3DDECLTYPE.SHORT2N]: 'snorm16x2',
+    [D3DDECLTYPE.SHORT4N]: 'snorm16x4',
+    [D3DDECLTYPE.USHORT2N]: 'unorm16x2',
+    [D3DDECLTYPE.USHORT4N]: 'unorm16x4',
 });
 
 /**
@@ -478,15 +492,22 @@ export function fixedFunctionLayoutOf(declaration){
                 }
                 add('pointSize', 'float32');
                 break;
-            case D3DDECLUSAGE.COLOR:
-                // B, G, R, A bytes, which is what the stage swizzles a
-                // format's colours from; a UBYTE4N colour is R, G, B, A.
-                if (element.UsageIndex > 1 || element.Type !== D3DDECLTYPE.D3DCOLOR)
+            case D3DDECLUSAGE.COLOR: {
+                // A D3DCOLOR's bytes come B, G, R, A, which the stage swizzles
+                // back; a colour of another type is R, G, B, A as it is, its
+                // missing components zero and alpha one (Wine's d3d9
+                // fixed_function_decl_test: UBYTE4N, USHORT4N, FLOAT4).
+                const format = element.Type === D3DDECLTYPE.D3DCOLOR ? 'unorm8x4'
+                    : COLOUR_FORMATS[element.Type];
+                if (element.UsageIndex > 1 || format === undefined)
                 {
                     return null;
                 }
-                add(element.UsageIndex === 0 ? 'diffuse' : 'specular', 'unorm8x4');
+                attributes.push({ name: element.UsageIndex === 0 ? 'diffuse' : 'specular',
+                    offset: element.Offset, format, bytes, stream: element.Stream,
+                    ...element.Type === D3DDECLTYPE.D3DCOLOR ? {} : { rgba: true } });
                 break;
+            }
             case D3DDECLUSAGE.TEXCOORD: {
                 const format = TEXCOORD_FORMATS[element.Type];
                 if (format === undefined || element.UsageIndex > 7 || sets.has(element.UsageIndex))

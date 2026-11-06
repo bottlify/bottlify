@@ -1965,8 +1965,14 @@ export function translateShader(parsed, options = {}){
                 ? [...emitted].filter(([location])=>isCoordinate(location))
                     .map(([, name])=>`out.${name}`)
                 : [];
-            body.push(...pointQuadLines('in.corner',
-                vertexOutputs.has(2) && major < 3 ? 'out.oPts.x' : `c[${pointRegister}].x`,
+            // A model 3 shader sizes its points through the output it
+            // declared PSIZE; below it, through oPts. Else the render state.
+            const sized = major >= 3
+                ? [...semantics].find(([, declaration])=>declaration.usage === D3DDECLUSAGE.PSIZE)
+                : undefined;
+            const size = sized ? `out.o${sized[0]}.x`
+                : vertexOutputs.has(2) && major < 3 ? 'out.oPts.x' : `c[${pointRegister}].x`;
+            body.push(...pointQuadLines('in.corner', size,
                 `c[${pointRegister}]`, `c[${viewportRegister}].xy`, sprites));
         }
         entry = 'vs_main';
