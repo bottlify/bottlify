@@ -1241,8 +1241,16 @@ test('vertex shader constants are a file of 256 registers a state block records 
         return [...out.values ?? []];
     };
     assert.equal(device.SetVertexShaderConstant(0, vs, 1), D3D_OK);
+    /** @type {{ handle?: number }} */
+    const earlier = {};
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, earlier), D3D_OK);
     assert.equal(device.BeginStateBlock(), D3D_OK);
     assert.equal(device.SetVertexShaderConstant(1, vs, 1), D3D_OK);
+    // No block is applied, captured or made while one is recorded (Wine's
+    // d3d8 test_begin_end_state_block).
+    assert.equal(device.ApplyStateBlock(earlier.handle ?? 0), D3DERR_INVALIDCALL);
+    assert.equal(device.CaptureStateBlock(earlier.handle ?? 0), D3DERR_INVALIDCALL);
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, {}), D3DERR_INVALIDCALL);
     /** @type {{ handle?: number }} */
     const block = {};
     assert.equal(device.EndStateBlock(block), D3D_OK);

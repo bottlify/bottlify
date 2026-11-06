@@ -2647,7 +2647,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /** @param {number} handle */
         ApplyStateBlock(handle){
             const block = stateBlocks.get(handle);
-            if (!block)
+            // Not while a block is being recorded (Wine's d3d8
+            // test_begin_end_state_block).
+            if (!block || recording)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2661,7 +2663,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /** @param {number} handle */
         CaptureStateBlock(handle){
             const block = stateBlocks.get(handle);
-            if (!block)
+            // Not while a block is being recorded (Wine's d3d8
+            // test_begin_end_state_block).
+            if (!block || recording)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2679,7 +2683,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ handle?: number }} out
          */
         CreateStateBlock(type, out){
-            if (!/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
+            if (recording || !/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
             {
                 return D3DERR_INVALIDCALL;
             }
