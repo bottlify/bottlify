@@ -859,6 +859,40 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const regions = new Set();
     /** @type {Map<number, RegionRecord>} entry index → the region that made it */
     const recordOf = new Map();
+    /**
+     * Blocks of a region that left held at their own start, entered there with nothing
+     * run, by eip * 16 + the entry's top (`heldOnEntry`): no entry of their region's
+     * from then on, but a region of their own.
+     * @type {Set<number>}
+     */
+    const heldStarts = new Set();
+    /**
+     * A region entered at one of its inner blocks left held there, nothing run: the
+     * windows the block takes from the blocks before it are tested at its start, and a
+     * callee formed into its caller takes the caller's -- a store through a register
+     * after the call returns. Another caller entering the callee there, with that
+     * register holding something else (a loop index of 0), leaves on every call for a
+     * store it never makes, its `ret` going elsewhere. The entry goes, and the block is
+     * a start of a region of its own (`noteStart`), which tests only its own windows.
+     * One that leaves at its own region's entry is left as it is: formed again, it would
+     * test the same windows (`missAt`).
+     *
+     * @param {number} index  the entry run @param {import('./entries.js').Entry} one
+     */
+    const heldOnEntry = (index, one)=>{
+        const record = recordOf.get(index);
+        if (record === undefined || record.entry === one.eip
+            || view().getUint32(layout.eip, true) !== one.eip)
+        {
+            return;
+        }
+        heldStarts.add(one.eip * 16 + one.top);
+        entries.remove(index);
+        recordOf.delete(index);
+        record.slots = record.slots.filter(slot=>slot !== index);
+        entries.noteStart(one.eip);
+        counts.heldEntries++;
+    };
     /** key(entry, top) of the x87 regions whose shape test kept failing: formed checked. */
     const checkedKeys = new Set();
     /** By the start of a block inside a structured region's loop that has no entry, the
@@ -1024,6 +1058,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         hitsFormedAgain: 0, formedAsRecorded: 0, toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
+        // Inner entries that left held at their start, nothing run (`heldOnEntry`).
+        heldEntries: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0, lookedUpInPart: 0,
         // Calls that formed part of a batch and left the rest to a later one
@@ -2561,6 +2597,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         const blockAt = new Map(region.blocks.map(block=>[block.start, block]));
         for (const [start, label] of starts)
         {
+            // A block that left held when entered at its start (`heldOnEntry`) is
+            // no entry of a region that formed it in, published again or relinked.
+            if (start !== region.entry && heldStarts.has(start * 16 + top))
+            {
+                entries.noteStart(start);
+                continue;
+            }
             // An address another region's entry already holds stays that
             // region's: the record keeps only the entries it made, or a relink
             // of it would put its function under the other's label (and a drop
@@ -5055,6 +5098,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             else if (kind === 'untranslated')
             {
+                if (code >>> 8 === HELD && retired === 0)
+                {
+                    heldOnEntry(entry, one);
+                }
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
                     code >>> 8 === HELD);
             }
@@ -5416,16 +5463,25 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         /** One turn the host forced an interpreted instruction through, for
          * the progress guarantee's diagnostics: where, at what x87 top, and why,
          * kept for the busiest addresses (`forcedAt`), with the registers the first one
-         * met there, which with the instruction say what it reached.
+         * met there before the step, and the flags of the page each points at: with the
+         * instruction they say which window a region found closed (a `held` leave).
          * @param {number} [at] @param {number} [top] @param {string} [why]
          * @param {() => number[]} [registers] */
         forcedStep(at, top, why, registers){
             forcedSteps++;
             if (at !== undefined && (forcedAt.size < FORCED_KEPT || forcedAt.has(at)))
             {
+                const values = forcedAt.has(at) ? [] : registers?.() ?? [];
+                // The region the entry is a block of, and the modes it was made in.
+                const owner = forcedAt.has(at) ? undefined
+                    : recordOf.get(entries.entryOf(at, (top ?? 0) & 7));
                 const one = forcedAt.get(at) ?? { count: 0, top: top ?? -1, why: why ?? '',
-                    registers: registers?.().map(value=>(value >>> 0).toString(16)).join(' ')
-                        ?? '' };
+                    registers: values.map(value=>`${(value >>> 0).toString(16)}`
+                        + `/${(pages.get(value >>> 12) ?? 0).toString(16)}`).join(' ')
+                        + (owner === undefined ? '' : ` in 0x${owner.entry.toString(16)}`
+                            + `@${owner.entryTop}${owner.loose ? ' loose' : ''}`
+                            + `${owner.wrapped ? ' wrapped' : ''}${owner.checked ? ' checked' : ''}`
+                            + ` ${owner.spans.length} blocks`) };
                 one.count++;
                 forcedAt.set(at, one);
             }
@@ -5553,6 +5609,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // often code on a stack switched that off (once at most).
                 looseStacks: loose,
                 stackCode: counts.stackCode,
+                heldEntries: counts.heldEntries,
                 // The x87 entries by the precision control they are compiled for.
                 precision: precisionCounts(),
                 // Entries that found the x87 stack in another shape than their

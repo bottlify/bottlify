@@ -344,6 +344,8 @@ export function createCorkHost(config){
     const block = new Uint8Array(memory.buffer, stateBase, blockSize);
     const blockView = new DataView(memory.buffer, stateBase, blockSize);
     const reg32 = new Int32Array(memory.buffer, layout.regs, 8);
+    /** The registers a region that ran nothing left, kept across its forced step. */
+    const forcedRegisters = new Int32Array(8);
     const reg64 = long ? new BigUint64Array(memory.buffer, layout.regs, 16) : null;
     /** A general register's low dword, either mode's. @param {number} index */
     const regLow = index=>(reg64 === null ? reg32[index] >>> 0
@@ -1523,10 +1525,13 @@ export function createCorkHost(config){
                     // The region at this (address, top) ran nothing -- it is
                     // compiled for another top, or leaves at its own entry.
                     // Force one interpreted instruction so the turn moves
-                    // rather than spinning on the same entry.
+                    // rather than spinning on the same entry. The registers
+                    // are read before it, as the region found them.
+                    forcedRegisters.set(reg32);
                     const forced = interpretRange(at, remaining, true);
                     runtime.forcedStep(at, x87Top(),
-                        `region ran nothing (${exit.kind} ${exit.vector})`, ()=>Array.from(reg32));
+                        `region ran nothing (${exit.kind} ${exit.vector})`,
+                        ()=>Array.from(forcedRegisters));
                     remaining -= forced;
                     ran += forced;
                     if (forced === 0 && eip() === at)

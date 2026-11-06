@@ -16,6 +16,9 @@ import { threadCpuMs } from '../../../../tools/cpu-time.mjs';
 
 const CODE = 0x1000;
 
+/** A little-endian dword's bytes. @param {number} value */
+const le32 = value=>[0, 8, 16, 24].map(shift=>value >>> shift & 0xff);
+
 /** A machine of 4 MiB with cork's own layout and a runtime over it. */
 function machine(config = {}, ramSize = 4 << 20, imports = {}){
     const layout = ownLayout({ ramSize, hashSlots: 1 << 16 });
@@ -301,6 +304,52 @@ test('a forced step is counted in the diagnostics', ()=>{
     m.runtime.forcedStep();
     m.runtime.forcedStep();
     assert.equal(m.runtime.diagnostics().forcedSteps, 2);
+});
+
+test('a forced step keeps the first registers met there, each with its page\'s flags', ()=>{
+    const m = machine();
+    m.runtime.pages.set(0x5000 >>> 12, 1);
+    m.runtime.forcedStep(CODE, 0, 'held', ()=>[0x5004, 0x10]);
+    m.runtime.forcedStep(CODE, 0, 'held', ()=>assert.fail('read only for the first'));
+    assert.deepEqual(m.runtime.diagnostics().forcedAt,
+        [`0x${CODE.toString(16)} x2 top 0 held [5004/1 10/0]`]);
+});
+
+test('a callee formed into its caller, entered by another, gets a region of its own', async()=>{
+    // caller: mov ebx, ecx; mov edx, [ebx+4]; push eax; call callee; dec dword [ebx+0x100]; hlt
+    // callee: mov eax, [esp+4]; ret 4. The caller's window through ebx, a store's, is
+    // tested at the callee's block: entered there with ebx null (another caller's
+    // loop index), it leaves before anything runs, every call.
+    const m = machine();
+    const CALLEE = CODE + 0x40, RETURN = CODE + 0x80, STACK = 0x3000;
+    m.write(CODE, [0x8b, 0xd9, 0x8b, 0x53, 0x04, 0x50,
+        0xe8, ...le32(CALLEE - (CODE + 11)), 0xff, 0x8b, 0x00, 0x01, 0x00, 0x00, 0xf4]);
+    m.write(CALLEE, [0x8b, 0x44, 0x24, 0x04, 0xc2, 0x04, 0x00]);
+    m.write(RETURN, [0xf4]);
+    m.runtime.pages.markRange(0, 0x1000, PageFlag.INACCESSIBLE);
+    const view = new DataView(m.memory.buffer);
+    const enterCallee = ()=>{
+        m.setReg(3, 0);
+        m.setReg(4, STACK);
+        view.setUint32(m.layout.ramBase + STACK, RETURN, true);
+        view.setUint32(m.layout.eip, CALLEE, true);
+    };
+    m.setReg(1, 0x2000);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    enterCallee();
+    const first = m.runtime.run(m.runtime.entryOf(CALLEE), 100);
+    assert.deepEqual([first.kind, first.retired, m.eip()], ['untranslated', 0, CALLEE],
+        'the caller\'s block leaves at once');
+    assert.equal(m.runtime.entryOf(CALLEE), -1, 'and is no entry for the callee from then on');
+    m.runtime.noteHot(CALLEE);
+    m.runtime.noteHot(CALLEE);
+    await m.runtime.translatePending();
+    enterCallee();
+    const own = m.runtime.run(m.runtime.entryOf(CALLEE), 100);
+    assert.equal(own.retired, 2, 'the callee\'s own region runs it');
+    assert.equal(m.eip(), RETURN);
 });
 
 test('a hot address becomes a region after translatePending, and runs under a budget', async()=>{
