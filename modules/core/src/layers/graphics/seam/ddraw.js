@@ -92,7 +92,7 @@ import { blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
-import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes, registryMode } from '../../win32/user32/display.js';
 
 /** The classes DDRAW.dll's DllGetClassObject makes. */
 const CLSID_DirectDraw = '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}';
@@ -170,6 +170,14 @@ const DDENUM_KNOWN = 0x00000007;
 const DDENUMSURFACES_ALL = 0x00000001;
 const DDENUMSURFACES_MATCH = 0x00000002;
 const DDENUMSURFACES_NOMATCH = 0x00000004;
+
+/** A message to every top-level window, and the one that tells them the display's size. */
+const HWND_BROADCAST = 0xffff;
+const WM_DISPLAYCHANGE = 0x007e;
+
+/** @param {unknown} value @param {(answer: any) => any} then */
+const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<unknown>} */ (value).then(then) : then(value));
 
 /** The depths a display mode can be set to; the sizes are the display's (user32/display.js). */
 const DEPTHS = Object.freeze([8, 16, 32]);
@@ -413,6 +421,9 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
+ * @param {(name: string) => { handler: (args: number[]) => unknown } | undefined} [deps.user32]
+ *     user32's exports, through which a mode set here is told to every window
+ *     (WM_DISPLAYCHANGE), as ChangeDisplaySettings tells it
  * @param {<T>(call: () => T) => T} [deps.aroundCall]  runs each method of a surface or
  *     the DirectDraw object: Direct3D 7's command rings made first, and what their
  *     routines check said again after
@@ -423,7 +434,7 @@ export function createDirectDrawSeam(
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
-        aroundCall, windowClient },
+        aroundCall, windowClient, user32 },
 )
 {
     const fields = createFields(memory);
@@ -547,7 +558,17 @@ export function createDirectDrawSeam(
         // hands out answers each method with its own recorded call.
         const facade = Object.create(root);
         facade.addRef = (/** @type {string} */ id)=>root.addRef(generationOf(id));
-        facade.release = (/** @type {string} */ id)=>root.release(generationOf(id));
+        facade.release = (/** @type {string} */ id)=>{
+            const left = root.release(generationOf(id));
+            // Gone, it puts back a mode it set and left, once the Release is
+            // done (test_coop_level_mode_set).
+            if (root.destroyed && !ended.has(root))
+            {
+                ended.add(root);
+                publisher.owe?.(()=>leaveScreen(root));
+            }
+            return left;
+        };
         facades.set(root, facade);
         roots.add(new WeakRef(root));
         return facade;
@@ -905,10 +926,29 @@ export function createDirectDrawSeam(
         const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
         if ((root.cooperativeLevel & both) === both && root.cooperativeWindow)
         {
-            const mode = root.displayMode;
+            const mode = root.ownMode;
             resolution?.(mode.width, mode.height,
                 { window: root.cooperativeWindow, fullscreen: true });
         }
+    };
+
+    /** The objects whose last reference went, and that let go of the screen. */
+    const ended = new WeakSet();
+
+    /**
+     * What an object gives back of the display as it goes: the registry's
+     * mode, when it set one and has not put it back.
+     *
+     * @param {any} root
+     * @returns {unknown}
+     */
+    const leaveScreen = root=>{
+        if (!root.modeSet)
+        {
+            return undefined;
+        }
+        root.restoreDisplayMode();
+        return showMode(root);
     };
 
     /**
@@ -923,13 +963,23 @@ export function createDirectDrawSeam(
      */
     const showMode = root=>{
         const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+        const mode = root.ownMode;
+        const display = screen();
+        const changed = display.width !== mode.width || display.height !== mode.height;
         if ((root.cooperativeLevel & both) === both && root.cooperativeWindow)
         {
             coverScreen(root);
-            return;
         }
-        const mode = root.displayMode;
-        resolution?.(mode.width, mode.height);
+        else
+        {
+            resolution?.(mode.width, mode.height);
+        }
+        // Every window hears of a new size, as of one ChangeDisplaySettings set
+        // (Wine's test_coop_level_mode_set: a normal-mode window hears this
+        // alone).
+        const size = ((mode.height & 0xffff) << 16 | (mode.width & 0xffff)) >>> 0;
+        return changed ? user32?.('SendMessageA')?.handler([HWND_BROADCAST, WM_DISPLAYCHANGE,
+            display.bitsPerPixel ?? 32, size]) ?? 0 : 0;
     };
 
     /**
@@ -1956,21 +2006,19 @@ export function createDirectDrawSeam(
         /** @param {any} root */
         RestoreDisplayMode: (/** @type {any} */ root)=>{
             const hr = root.restoreDisplayMode();
-            if (hr === DD_OK)
-            {
-                showMode(root);
-            }
-            return hr;
+            return hr === DD_OK ? andThen(showMode(root), ()=>hr) : hr;
         },
 
         /** @param {any} root @param {number[]} args */
         SetCooperativeLevel: (root, [window, flags])=>{
+            const wasExclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
             const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
             if (hr === DD_OK)
             {
                 coverScreen(root);
             }
-            if ((root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0)
+            const exclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
+            if (exclusive)
             {
                 exclusiveHolders.add(root);
             }
@@ -1978,7 +2026,11 @@ export function createDirectDrawSeam(
             {
                 exclusiveHolders.delete(root);
             }
-            return hr;
+            // Giving the screen back puts back the mode it was given in, from
+            // IDirectDraw2 on; the first generation keeps it (Wine's
+            // test_coop_level_mode_set, each version).
+            return hr === DD_OK && wasExclusive && !exclusive && version !== 1
+                ? andThen(leaveScreen(root), ()=>hr) : hr;
         },
 
         // The first generation takes width, height and depth; every later one
@@ -1987,11 +2039,7 @@ export function createDirectDrawSeam(
         SetDisplayMode: (root, [width, height, depth, rate])=>{
             const hr = root.setDisplayMode(
                 width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (rate >>> 0));
-            if (hr === DD_OK)
-            {
-                showMode(root);
-            }
-            return hr;
+            return hr === DD_OK ? andThen(showMode(root), ()=>hr) : hr;
         },
 
         /**
@@ -2285,6 +2333,8 @@ export function createDirectDrawSeam(
             const display = screen();
             options.screenWidth = display.width;
             options.screenHeight = display.height;
+            options.screenMode = ()=>screen();
+            options.registryMode = ()=>registryMode(screen());
             return options;
         },
 

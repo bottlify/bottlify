@@ -49,7 +49,7 @@ import {
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
-const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
+const SCREEN = { width: 16, height: 16, bitsPerPixel: 32, displayWidth: 16, displayHeight: 16 };
 
 /** @param {[string, number][]} slots @param {string} name */
 const slot = (slots, name)=>{
@@ -201,11 +201,13 @@ function seamed(build = {}){
         available: ()=>false,
         adapter: ()=>build.adapter ?? null,
     };
+    // The display, as the app keeps it: a mode set is its size from then on.
+    const display = { ...SCREEN };
     const libraries = createGraphicsLibraries({
         graphics,
         memory: box.services,
         publishInterface: box.publishInterface,
-        screen: ()=>SCREEN,
+        screen: ()=>display,
         now: ()=>time,
         schedule: (ms, run)=>{
             timers.push({ at: time + ms, run });
@@ -227,12 +229,22 @@ function seamed(build = {}){
         gamma: build.gamma,
         deactivated: build.deactivated,
         deactivations: build.deactivations,
-        resolution: build.resolution,
+        resolution: (/** @type {number} */ width, /** @type {number} */ height,
+            /** @type {any} */ ...where)=>
+        {
+            if (width > 0 && height > 0)
+            {
+                display.width = width;
+                display.height = height;
+            }
+            build.resolution?.(width, height, ...where);
+        },
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
 
     return {
+        display,
         box,
         fields,
         roots,
@@ -2746,3 +2758,56 @@ test('blocks in the program\'s memory report no size of their own (test_block_fo
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('a mode set and left is put back to the registry\'s as the object goes; giving the screen'
+    + ' back puts it back from IDirectDraw2 on (test_coop_level_mode_set)', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [8, 4, 32, 0, 0]), DD_OK);
+    assert.deepEqual([h.display.width, h.display.height], [8, 4]);
+    assert.equal(h.release(ddraw), 0);
+    assert.deepEqual([h.display.width, h.display.height], [16, 16], 'the registry\'s again');
+
+    // Put back, the mode is the registry's, not the one the object was made in.
+    Object.assign(h.display, { width: 8, height: 4 });
+    const later = h.create7();
+    assert.equal(h.box.call(later, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [12, 12, 32, 0, 0]), DD_OK);
+    assert.equal(h.box.call(later, slot(IDIRECTDRAW7_SLOTS, 'RestoreDisplayMode'), []), DD_OK);
+    assert.deepEqual([h.display.width, h.display.height], [16, 16]);
+    assert.equal(h.release(later), 0);
+
+    // Made and gone with no mode set, it leaves the display as it found it.
+    h.display.width = 8;
+    const quiet = h.create7();
+    assert.equal(h.release(quiet), 0);
+    assert.equal(h.display.width, 8);
+    h.display.width = 16;
+
+    for (const [first, kept] of [[false, [16, 16]], [true, [8, 4]]])
+    {
+        let pointer;
+        if (first)
+        {
+            assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+            pointer = h.box.memory.readU32(0x4100);
+        }
+        else
+        {
+            pointer = h.create7();
+        }
+        const slots = first ? IDIRECTDRAW_SLOTS : IDIRECTDRAW7_SLOTS;
+        assert.equal(h.box.call(pointer, slot(slots, 'SetCooperativeLevel'),
+            [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+        assert.equal(h.box.call(pointer, slot(slots, 'SetDisplayMode'),
+            first ? [8, 4, 32] : [8, 4, 32, 0, 0]), DD_OK);
+        assert.equal(h.box.call(pointer, slot(slots, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        assert.deepEqual([h.display.width, h.display.height], kept,
+            first ? 'the first generation keeps it' : 'later ones put it back');
+        assert.equal(h.release(pointer), 0);
+        assert.deepEqual([h.display.width, h.display.height], [16, 16]);
+    }
+    h.assertAllReleased();
+});

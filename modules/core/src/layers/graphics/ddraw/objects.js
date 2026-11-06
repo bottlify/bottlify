@@ -480,6 +480,14 @@ function sameRect(a, b){
  *           every surface is in system memory and depth is 16 or 32 bits.
  * @property {number} [screenWidth]
  * @property {number} [screenHeight]
+ * @property {() => { width: number, height: number }} [screenMode]
+ *           The display's size now, which a mode set elsewhere (another
+ *           object, ChangeDisplaySettings) changes under this one: its
+ *           surfaces in the display's memory are lost then, as by its own
+ *           SetDisplayMode. Absent, only this object changes the mode.
+ * @property {() => { width: number, height: number }} [registryMode]
+ *           The mode RestoreDisplayMode goes back to: the registry's, read
+ *           when it is called. Absent, the screen this object was made on.
  * @property {(bytes: number) => number} [allocate]
  *           Where a surface's pixels live. Injected so the model is testable
  *           with no backend; the default hands out distinct, page-aligned
@@ -593,6 +601,8 @@ export function createDirectDraw(options = {}){
      */
     const nativeMode = { width: screenWidth, height: screenHeight, bitCount: 32, refreshRate: 0 };
     let displayMode = { ...nativeMode };
+    /** Whether this object set a mode it has not put back since (`modeSet`). */
+    let modeSet = false;
 
     /** Per-generation counts. A generation exists once it has been handed out. */
     /** @type {Map<string, number>} */
@@ -650,6 +660,7 @@ export function createDirectDraw(options = {}){
      * find a surface lost, because nothing tells this layer when it happens.
      */
     const noticeDeactivation = ()=>{
+        noticeScreen();
         const count = options.application?.deactivations() ?? 0;
         if (count !== deactivationsSeen)
         {
@@ -677,6 +688,25 @@ export function createDirectDraw(options = {}){
             loseVideoMemory();
         }
     };
+    /**
+     * Takes up a size the display was set to by someone else: the mode is the
+     * display's, and its memory is taken back from this object's surfaces as
+     * from those of the one that set it (Wine's test_coop_level_mode_set).
+     */
+    function noticeScreen(){
+        const screen = options.screenMode?.();
+        if (screen && (screen.width !== screenSeen.width || screen.height !== screenSeen.height))
+        {
+            screenSeen = { width: screen.width, height: screen.height };
+            changeDisplayMode({ width: screen.width, height: screen.height,
+                bitCount: nativeMode.bitCount, refreshRate: 0 });
+        }
+    }
+    /**
+     * The display's size as this object last knew it: a mode it sets is the
+     * display's from then on, before the display has been told.
+     */
+    let screenSeen = { width: displayMode.width, height: displayMode.height };
 
     function destroyIfUnreferenced(){
         if (destroyed)
@@ -2113,6 +2143,7 @@ export function createDirectDraw(options = {}){
      */
     function createSurfaceAs(request, callOptions, version){
         const generation = GENERATION_OF[version];
+        noticeScreen();
 
         // Order matters and is observable. Aggregation is refused before the
         // cooperative level is looked at, and the cooperative level before the
@@ -2494,7 +2525,18 @@ export function createDirectDraw(options = {}){
         createSurface,
 
         get displayMode(){
+            noticeScreen();
             return { ...displayMode };
+        },
+
+        /** The mode as this object set it, before the display has been told. */
+        get ownMode(){
+            return { ...displayMode };
+        },
+
+        /** Whether this object set a mode it has not put back (RestoreDisplayMode). */
+        get modeSet(){
+            return modeSet;
         },
 
         /**
@@ -2515,12 +2557,21 @@ export function createDirectDraw(options = {}){
             {
                 return DDERR_INVALIDMODE;
             }
+            noticeScreen();
             changeDisplayMode({ width, height, bitCount, refreshRate });
+            screenSeen = { width, height };
+            modeSet = true;
             return DD_OK;
         },
 
+        /** The registry's mode back, read now: what the display was last told to keep. */
         restoreDisplayMode(){
-            changeDisplayMode({ ...nativeMode });
+            noticeScreen();
+            const registry = options.registryMode?.() ?? nativeMode;
+            changeDisplayMode({ width: registry.width, height: registry.height,
+                bitCount: nativeMode.bitCount, refreshRate: 0 });
+            screenSeen = { width: registry.width, height: registry.height };
+            modeSet = false;
             return DD_OK;
         },
 

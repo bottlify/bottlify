@@ -32,6 +32,7 @@ import {
     DDERR_SURFACEALREADYATTACHED,
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
+    DDERR_WRONGMODE,
     DDERR_SURFACENOTATTACHED,
     DDERR_NOTONMIPMAPSUBLEVEL,
     DDPCAPS_4BIT,
@@ -1878,4 +1879,35 @@ test('blocks in the program\'s memory are named by their whole size, never a pit
     assert.equal(request(PITCH, 32).hr, DDERR_INVALIDPARAMS, 'blocks have no pitch');
     assert.equal(request(PITCH | LINEARSIZE, 32).hr, DDERR_INVALIDPARAMS);
     assert.equal(request(0, 32).hr, DDERR_INVALIDPARAMS, 'a size has to be named');
+});
+
+test('a mode set elsewhere is the object\'s mode too, and loses its video memory'
+    + ' (test_coop_level_mode_set)', ()=>{
+    const screen = { width: 64, height: 48 };
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48,
+        screenMode: ()=>screen, registryMode: ()=>({ width: 32, height: 24 }) });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(primary.isLost(), DD_OK);
+
+    // Its own mode is the display's before the display is told.
+    assert.equal(ddraw.setDisplayMode(40, 30, 32), DD_OK);
+    assert.equal(ddraw.ownMode.width, 40);
+    assert.equal(ddraw.modeSet, true);
+    Object.assign(screen, { width: 40, height: 30 });
+    assert.equal(ddraw.displayMode.width, 40);
+    assert.equal(primary.isLost(), DDERR_SURFACELOST, 'its own change loses it too');
+    assert.equal(ddraw.restoreDisplayMode(), DD_OK);
+    assert.deepEqual([ddraw.ownMode.width, ddraw.modeSet], [32, false], 'the registry\'s');
+    Object.assign(screen, { width: 32, height: 24 });
+    assert.equal(primary.restore(), DDERR_WRONGMODE);
+
+    // Another sets the display: this object's mode follows and its memory goes.
+    const other = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY });
+    assert.equal(other.isLost(), DD_OK);
+    Object.assign(screen, { width: 64, height: 48 });
+    assert.equal(other.isLost(), DDERR_SURFACELOST);
+    assert.equal(ddraw.displayMode.width, 64);
+    assert.equal(primary.restore(), DD_OK, 'the primary\'s own mode again');
 });
