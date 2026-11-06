@@ -636,7 +636,11 @@ export function createPipelineState(services){
         /** @param {number} count @param {{ buffers?: any[], offsets?: number[] }} out */
         SOGetTargets(count, out){
             out.buffers = readSlots(pipeline.streamOutput, 0, count);
-            out.offsets = pipeline.streamOutputOffsets.slice(0, count);
+            // Where a bound buffer's writing goes on from is the GPU's to know:
+            // the runtime answers ~0 for it, and zero for an empty slot
+            // (d3d10core.c test_clear_state).
+            out.offsets = pipeline.streamOutput.slice(0, count)
+                .map(buffer=>(buffer ? 0xffffffff : 0));
         },
         /** @param {any} predicate @param {boolean} value */
         SetPredication(predicate, value){

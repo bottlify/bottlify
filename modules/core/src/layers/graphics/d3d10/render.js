@@ -52,7 +52,8 @@ const NO_VIEWS = Object.freeze([]);
 const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
-    INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
+    INDEX_FORMAT, PULLED_VERTEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
+    copyCompatible,
     MIPS_GENERATED, gpuRenderable, isDepthFormat, resolvable, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
@@ -1992,6 +1993,15 @@ export function createRenderer(services){
     };
 
     /**
+     * A vertex format's spelling: WebGPU's, or one the vertex stage reads
+     * itself (`PULLED_VERTEX_FORMAT`), whose slot is always pulled.
+     *
+     * @param {number} format
+     * @returns {string | undefined}
+     */
+    const vertexFormatOf = format=>VERTEX_FORMAT[format] ?? PULLED_VERTEX_FORMAT[format];
+
+    /**
      * The streams of an input layout the vertex stage reads from storage
      * itself (`VertexPull`): those WebGPU does not fetch as vertex buffers -
      * a stride or an element offset it does not align (Direct3D steps a
@@ -2013,12 +2023,12 @@ export function createRenderer(services){
         /** @type {Map<number, number>} */
         const cursor = new Map();
         const placed = inputLayout.elements.map((/** @type {any} */ element)=>{
-            const format = VERTEX_FORMAT[element.Format];
+            const format = vertexFormatOf(element.Format);
             const slot = element.InputSlot;
             const offset = element.AlignedByteOffset === D3D10_APPEND_ALIGNED_ELEMENT
                 ? roundUp(cursor.get(slot) ?? 0, 4)
                 : element.AlignedByteOffset;
-            cursor.set(slot, offset + (VERTEX_FORMAT_BYTES[format] ?? 0));
+            cursor.set(slot, offset + (format ? VERTEX_FORMAT_BYTES[format] : 0));
             const perInstance = element.InputSlotClass
                 === D3D10_INPUT_CLASSIFICATION.PER_INSTANCE_DATA;
             return { element, format, slot, offset, perInstance,
@@ -2026,11 +2036,12 @@ export function createRenderer(services){
         });
         /** @type {number[]} */
         const slots = [];
-        for (const { format, slot, offset, rate, perInstance } of placed)
+        for (const { element, format, slot, offset, rate, perInstance } of placed)
         {
             const bytes = VERTEX_FORMAT_BYTES[format] ?? 4;
             if (format && !slots.includes(slot) && ((strides[slot] ?? 0) % 4 !== 0
-                || offset % Math.min(4, bytes) !== 0 || rate > 1 || (indirect && perInstance)))
+                || offset % Math.min(4, bytes) !== 0 || rate > 1 || (indirect && perInstance)
+                || PULLED_VERTEX_FORMAT[element.Format]))
             {
                 slots.push(slot);
             }
@@ -2069,7 +2080,7 @@ export function createRenderer(services){
         const cursor = new Map();
         for (const element of inputLayout.elements)
         {
-            const format = VERTEX_FORMAT[element.Format];
+            const format = vertexFormatOf(element.Format);
             if (!format)
             {
                 return `input element format ${element.Format} has no vertex spelling`;

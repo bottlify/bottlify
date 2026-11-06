@@ -4142,6 +4142,25 @@ const floatBits = value=>`bitcast<u32>(${value})`;
  * @returns {{ bytes: number, register: (words: string[]) => string } | null}
  */
 export function vertexFetch(format){
+    if (format === 'rg11b10ufloat')
+    {
+        // Floats with no sign: five bits of exponent biased by 15 over six
+        // mantissa bits (red, green) or five (blue); exponent 31 is infinity
+        // or NaN, exponent 0 a denormal.
+        /** @param {string} word @param {number} shift @param {number} mantissa */
+        const small = (word, shift, mantissa)=>{
+            const e = `extractBits(${word}, ${shift + mantissa}u, 5u)`;
+            const m = `extractBits(${word}, ${shift}u, ${mantissa}u)`;
+            const placed = `(${m} << ${23 - mantissa}u)`;
+            return `select(select(((${e} + 112u) << 23u) | ${placed}, 0x7f800000u | ${placed}, `
+                + `${e} == 31u), bitcast<u32>(f32(${m}) * ${2 ** -(14 + mantissa)}), ${e} == 0u)`;
+        };
+        return {
+            bytes: 4,
+            register: ([word])=>`${REG}(${small(word, 0, 6)}, ${small(word, 11, 6)}, `
+                + `${small(word, 22, 5)}, 0x3f800000u)`,
+        };
+    }
     if (format === 'unorm10-10-10-2')
     {
         return {

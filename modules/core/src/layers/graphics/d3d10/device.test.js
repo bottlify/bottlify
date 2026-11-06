@@ -2852,3 +2852,113 @@ test('a keyed mutex is held by one device at a time, taken with the key it was l
     assert.deepEqual([other.ReleaseSync(0), other.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL]);
     other.release();
 });
+
+test('a shared-exponent texture copies into a 32-bit family on Direct3D 11 and not on'
+    + ' Direct3D 10 (test_format_compatibility in d3d11.c and d3d10core.c)', async()=>{
+    /** @param {any} device */
+    const copied = async device=>{
+        const texels = new Uint8Array(64).map((_, index)=>index + 1);
+        /** @type {{ resource?: any }} */
+        const source = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2D, Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R9G9B9E5_SHAREDEXP, Usage: D3D10_USAGE.IMMUTABLE,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE }, [{ pSysMem: texels, SysMemPitch: 16,
+            SysMemSlicePitch: 0 }], source), S_OK);
+        const staging = createTexture2D(device, { Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R32_UINT, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: 0x20000 });
+        device.CopyResource(staging, source.resource);
+        /** @type {{ data?: Uint8Array }} */
+        const mapped = {};
+        assert.equal(await staging.Map(0, 1, 0, mapped), S_OK);
+        const bytes = [...(mapped.data ?? []).slice(0, 64)];
+        staging.Unmap(0);
+        return bytes.every((byte, index)=>byte === texels[index]) ? 'copied'
+            : bytes.every(byte=>byte === 0) ? 'left' : 'mixed';
+    };
+    /** @type {any} */
+    const eleven = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(await copied(eleven.device), 'copied');
+    assert.equal(await copied(createDevice()), 'left');
+});
+
+test('SOGetTargets answers ~0 as the offset of every bound buffer and zero for an empty slot'
+    + ' (d3d10core.c test_clear_state)', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 64, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.STREAM_OUTPUT, CPUAccessFlags: 0, MiscFlags: 0 }, null, made), S_OK);
+    device.SOSetTargets([made.resource, null], [16, 32]);
+    /** @type {{ buffers?: any[], offsets?: number[] }} */
+    const out = {};
+    device.SOGetTargets(4, out);
+    assert.deepEqual(out.offsets, [0xffffffff, 0, 0, 0]);
+    assert.equal(out.buffers?.[0], made.resource);
+    out.buffers?.[0]?.release();
+    device.ClearState();
+    device.SOGetTargets(4, out);
+    assert.deepEqual(out.offsets, [0, 0, 0, 0], 'cleared');
+});
+
+test('one blend state for the same blending, whether Direct3D 10\'s or 10.1\'s description made'
+    + ' it (test_create_blend_state)', ()=>{
+    const device = createDevice();
+    const blend = { AlphaToCoverageEnable: false, BlendEnable: [true, false, false, false,
+        false, false, false, false], SrcBlend: 2, DestBlend: 1, BlendOp: 1, SrcBlendAlpha: 2,
+    DestBlendAlpha: 1, BlendOpAlpha: 1, RenderTargetWriteMask: [0xf, 1, 2, 4, 0xf, 0xf, 0xf, 0xf] };
+    /** @type {{ state?: any }} */
+    const ten = {};
+    assert.equal(device.CreateBlendState(blend, ten), S_OK);
+    /** @type {{ desc?: any }} */
+    const read = {};
+    ten.state.GetDesc1(read);
+    assert.equal(read.desc.IndependentBlendEnable, true, 'the targets differ');
+    /** @type {{ state?: any }} */
+    const one = {};
+    assert.equal(device.CreateBlendState1(read.desc, one), S_OK);
+    assert.equal(one.state, ten.state);
+
+    const same = { ...blend, BlendEnable: new Array(8).fill(false),
+        RenderTargetWriteMask: new Array(8).fill(0xf) };
+    /** @type {{ state?: any }} */
+    const plain = {};
+    assert.equal(device.CreateBlendState(same, plain), S_OK);
+    plain.state.GetDesc1(read);
+    /** @type {{ state?: any }} */
+    const independent = {};
+    assert.equal(device.CreateBlendState1({ ...read.desc, IndependentBlendEnable: true },
+        independent), S_OK);
+    assert.equal(independent.state, plain.state, 'independent targets that are all alike');
+    assert.notEqual(plain.state, ten.state);
+});
+
+test('a buffer is refused with a texture\'s misc flags: faces, GDI, levels to generate'
+    + ' (d3d10core.c test_create_buffer)', ()=>{
+    const device = createDevice();
+    /** @param {number} misc */
+    const made = misc=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = device.CreateBuffer({ ByteWidth: 1024, Usage: D3D10_USAGE.DEFAULT,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: misc }, null, out);
+        out.resource?.release();
+        return hr;
+    };
+    assert.equal(made(0), S_OK);
+    assert.equal(made(0x2), S_OK, 'shared');
+    for (const misc of [0x1, 0x4, 0x20])
+    {
+        assert.equal(made(misc), E_INVALIDARG, `misc ${misc}`);
+    }
+});
+
+test('R11G11B10_FLOAT is a vertex buffer format, read by the vertex stage itself'
+    + ' (d3d10core.c test_required_format_support)', ()=>{
+    const device = createDevice();
+    /** @type {{ support?: number }} */
+    const out = {};
+    assert.equal(device.CheckFormatSupport(DXGI_FORMAT.R11G11B10_FLOAT, out), S_OK);
+    assert.ok(((out.support ?? 0) & 0x2) !== 0, 'IA_VERTEX_BUFFER');
+});

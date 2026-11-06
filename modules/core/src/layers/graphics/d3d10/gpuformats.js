@@ -394,6 +394,17 @@ export function viewFormatOf(storage, viewFormat, options = {}){
 /** @param {string} format @returns {boolean} whether the format is a depth one */
 export const isDepthFormat = format=>format.startsWith('depth');
 
+/**
+ * Vertex formats WebGPU has no spelling for, which the vertex stage reads out
+ * of the buffer's words itself (`wgsl.js` `vertexFetch`): Direct3D 10 requires
+ * R11G11B10_FLOAT of a vertex buffer (d3d10core.c test_required_format_support).
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const PULLED_VERTEX_FORMAT = Object.freeze({
+    [DXGI_FORMAT.R11G11B10_FLOAT]: 'rg11b10ufloat',
+});
+
 /** @type {Readonly<Record<number, string>>} */
 export const VERTEX_FORMAT = Object.freeze({
     [DXGI_FORMAT.R32G32B32A32_FLOAT]: 'float32x4',
@@ -446,6 +457,7 @@ export const VERTEX_FORMAT = Object.freeze({
  * @type {Readonly<Record<string, number>>}
  */
 export const VERTEX_FORMAT_BYTES = Object.freeze({
+    rg11b10ufloat: 4,
     float32x4: 16,
     uint32x4: 16,
     sint32x4: 16,

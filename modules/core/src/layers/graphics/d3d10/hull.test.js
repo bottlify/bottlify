@@ -17,7 +17,7 @@ import {
     DOMAIN_POSITION_BINDING, NO_PIXEL_SHADER, geometryStage, linkDomain, linkDomainPositions,
     linkGeometry, linkHull, translateShader, vertexFetch,
 } from './wgsl.js';
-import { VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from './gpuformats.js';
+import { PULLED_VERTEX_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from './gpuformats.js';
 
 test('a hull shader links as one compute program: each phase a function, the stage read from'
     + ' its declarations', ()=>{
@@ -39,7 +39,8 @@ test('a hull shader links as one compute program: each phase a function, the sta
 
 test('a vertex format is read as a vertex fetch reads it: each format\'s bytes, nothing else',
     ()=>{
-        for (const format of new Set(Object.values(VERTEX_FORMAT)))
+        for (const format of new Set([...Object.values(VERTEX_FORMAT),
+            ...Object.values(PULLED_VERTEX_FORMAT)]))
         {
             const fetch = vertexFetch(format);
             assert.ok(fetch, format);

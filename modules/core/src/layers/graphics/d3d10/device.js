@@ -51,7 +51,7 @@ import {
 import { createSharing } from './sharing.js';
 import { createFactory } from './dxgi.js';
 import {
-    INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
+    INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, PULLED_VERTEX_FORMAT, VERTEX_FORMAT,
     gpuRenderable, multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
@@ -402,7 +402,8 @@ export function blockCopyable(a, b){
 
 /**
  * Whether a copy moves R9G9B9E5_SHAREDEXP texels into a 32-bit family's or
- * back, which Windows makes (test_format_compatibility, d3d11.c:29476).
+ * back, which Direct3D 11's runtime makes (test_format_compatibility,
+ * d3d11.c:29476) and Direct3D 10's does not (d3d10core.c:16362).
  *
  * @param {number} a @param {number} b
  */
@@ -1167,7 +1168,7 @@ export function createDevice(options = {}){
                 !== FORMAT_INFO[source.desc.Format]?.family
             && !(featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1
                 && blockCopyable(destination.desc.Format, source.desc.Format))
-            && !sharedExponentCopyable(destination.desc.Format, source.desc.Format))
+            && !(d3d11 && sharedExponentCopyable(destination.desc.Format, source.desc.Format)))
         {
             diverge(`${call} between formats of different families is ignored`);
             return false;
@@ -1550,7 +1551,7 @@ export function createDevice(options = {}){
                 : null;
             if (!container || !validStreamOutput({
                 outputs: container.outputs, entries: declaration, strides, rasterizedStream,
-                eleven,
+                eleven, oneStride: !d3d11,
                 vertex: /** @type {any} */ (container.shader).kind !== SHADER_KIND.GEOMETRY,
             }))
             {
@@ -1720,7 +1721,7 @@ export function createDevice(options = {}){
             // A buffer holds elements a view can name: no blocks, and no depth.
             let support = FORMAT_SUPPORT.CPU_LOCKABLE
                 | (block || depth ? 0 : FORMAT_SUPPORT.BUFFER);
-            if (VERTEX_FORMAT[format])
+            if (VERTEX_FORMAT[format] || PULLED_VERTEX_FORMAT[format])
             {
                 support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
             }

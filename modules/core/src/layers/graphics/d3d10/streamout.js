@@ -37,9 +37,14 @@ const MOST_STRIDE = 2048;
  * @param {number} request.rasterizedStream
  * @param {boolean} request.eleven  the device is of level 11 or above
  * @param {boolean} request.vertex  the bytecode is a vertex shader's
+ * @param {boolean} [request.oneStride]  Direct3D 10's call, whose one stride is slot
+ *     zero's: given when only slot zero is written, and zero when a later slot is,
+ *     each of whose buffers takes one element (d3d10core.c test_stream_output)
  * @returns {boolean}
  */
-export function validStreamOutput({ outputs, entries, strides, rasterizedStream, eleven, vertex }){
+export function validStreamOutput({ outputs, entries, strides, rasterizedStream, eleven, vertex,
+    oneStride = false })
+{
     const given = strides && strides.length > 0 ? strides : null;
     if (eleven ? rasterizedStream >= STREAMS && rasterizedStream !== SO_NO_RASTERIZED_STREAM
         : rasterizedStream !== 0)
@@ -54,6 +59,11 @@ export function validStreamOutput({ outputs, entries, strides, rasterizedStream,
         return !vertex && (eleven || !given);
     }
     if (entries.length === 0 || (!eleven && given && given.length > 1))
+    {
+        return false;
+    }
+    const laterSlot = entries.some(entry=>entry.OutputSlot > 0);
+    if (oneStride && (laterSlot ? given !== null : given === null))
     {
         return false;
     }

@@ -396,8 +396,12 @@ export function levelExtent(size, level){
  * @returns {number} S_OK or E_INVALIDARG
  */
 export function bufferCreateResult(desc, hasInitialData, rules = NO_RULES){
-    // A buffer has no levels to generate (test_generate_mips).
-    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.GENERATE_MIPS) !== 0)
+    // A buffer has no levels to generate (test_generate_mips), no faces and
+    // nothing GDI draws into: Direct3D 10's GDI_COMPATIBLE is the bit
+    // Direct3D 11's BUFFER_ALLOW_RAW_VIEWS is, which a Direct3D 10 device
+    // refuses (d3d10core.c test_create_buffer).
+    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & (D3D10_RESOURCE_MISC.GENERATE_MIPS
+        | D3D10_RESOURCE_MISC.TEXTURECUBE | D3D10_RESOURCE_MISC.GDI_COMPATIBLE)) !== 0)
     {
         return E_INVALIDARG;
     }
