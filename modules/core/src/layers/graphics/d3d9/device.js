@@ -2536,11 +2536,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         /**
          * @param {number} width @param {number} height @param {number} format
          * @param {number} pool @param {number} usage @param {{ surface?: any }} out
+         * @param {number} [userMemory]  The program's own memory to keep it in, 0 for none.
          */
-        CreateOffscreenPlainSurfaceEx(width, height, format, pool, usage, out){
+        CreateOffscreenPlainSurfaceEx(width, height, format, pool, usage, out, userMemory = 0){
             return (usage & ~EX_SURFACE_USAGE) !== 0
                 ? D3DERR_INVALIDCALL
-                : device.CreateOffscreenPlainSurface(width, height, format, pool, out, usage);
+                : device.CreateOffscreenPlainSurface(width, height, format, pool, out, usage,
+                    userMemory);
         },
 
         /**

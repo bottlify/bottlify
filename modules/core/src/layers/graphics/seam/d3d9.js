@@ -3093,14 +3093,14 @@ export function createDirect3D9Seam(
      * nothing here shares a resource across devices.
      *
      * @param {string} method
-     * @param {(args: number[]) => { out: number, shared: number, usage?: number,
+     * @param {(args: number[], device: any) => { out: number, shared: number, usage?: number,
      *     call: (device: any, held: { surface?: any }) => number }} read
      *     `usage` given: a usage the create takes no part of is refused before the
      *     pointer is touched (Wine's d3d9ex test_create_depth_stencil_surface_ex)
      */
     const exSurfaceCreate = (method, read)=>
         (/** @type {any} */ device, /** @type {number[]} */ args)=>{
-            const { out, shared, usage, call } = read(args);
+            const { out, shared, usage, call } = read(args, device);
             if (sharedHandleRefused(shared) || (out >>> 0) === 0
                 || ((usage ?? 0) & ~EX_SURFACE_USAGE) !== 0)
             {
@@ -3173,12 +3173,19 @@ export function createDirect3D9Seam(
                     ?? device.CreateRenderTargetEx(width >>> 0, height >>> 0,
                         format >>> 0, lockable !== 0, usage >>> 0, held),
             })),
+        // A system-memory surface may live in the program's own memory, its
+        // address in the shared handle, as the plain create's may (Wine's
+        // d3d9ex test_user_memory).
         CreateOffscreenPlainSurfaceEx: exSurfaceCreate('CreateOffscreenPlainSurfaceEx',
-            ([width, height, format, pool, out, shared, usage])=>({
-                out, shared,
-                call: (device, held)=>device.CreateOffscreenPlainSurfaceEx(width >>> 0,
-                    height >>> 0, format >>> 0, pool >>> 0, usage >>> 0, held),
-            })),
+            ([width, height, format, pool, out, shared, usage], device)=>{
+                const userMemory = userMemoryOf(device, shared, pool);
+                return {
+                    out, shared: userMemory === null ? shared : 0,
+                    call: (/** @type {any} */ made, /** @type {{ surface?: any }} */ held)=>
+                        made.CreateOffscreenPlainSurfaceEx(width >>> 0, height >>> 0,
+                            format >>> 0, pool >>> 0, usage >>> 0, held, userMemory ?? 0),
+                };
+            }),
         CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
             ([width, height, format, samples, , , out, shared, usage])=>({
                 out, shared, usage,

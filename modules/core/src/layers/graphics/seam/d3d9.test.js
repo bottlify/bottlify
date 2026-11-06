@@ -1790,6 +1790,19 @@ test('IDirect3D9Ex answers modes as D3DDISPLAYMODEEX, its LUID, and makes Ex dev
     assert.equal(deviceCall('ResetEx', [parameters, mode]), D3DERR_INVALIDCALL,
         'a window takes no mode');
 
+    // As the plain create does, the Ex one keeps a system-memory surface in
+    // the program's own memory (Wine's d3d9ex test_user_memory).
+    const handle = 0x71e0;
+    h.box.memory.writeU32(handle, 0x8000);
+    assert.equal(deviceCall('CreateOffscreenPlainSurfaceEx', [8, 8, D3DFMT.A8R8G8B8,
+        D3DPOOL.SYSTEMMEM, 0x71c0, handle, 0]), D3D_OK);
+    const own = h.box.memory.readU32(0x71c0);
+    assert.equal(h.box.call(own, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'), [0x71f0, 0, 0]),
+        D3D_OK);
+    assert.equal(h.fields.readU32(0x71f0 + D3DLOCKED_RECT.pBits), 0x8000);
+    assert.equal(h.box.call(own, slot(IDIRECT3DSURFACE9_SLOTS, 'UnlockRect'), []), D3D_OK);
+    assert.equal(h.release(own), 0);
+
     // The depth stencil Ex create hands back through the pointer, leaves it
     // alone when it refuses a usage (Wine's d3d9ex
     // test_create_depth_stencil_surface_ex), and clears it when it refuses
@@ -2240,6 +2253,31 @@ test('a create refused for its shared handle leaves no pointer behind', ()=>{
         h.box.memory.writeU32(out, 0xdeadbeef);
         assert.equal(h.device(device, name, args), hr, name);
         assert.equal(h.box.memory.readU32(out), 0, `${name} cleared its out-parameter`);
+    }
+});
+
+test('an Ex device keeps a system-memory surface in the program\'s own memory', ()=>{
+    // Wine's d3d9ex test_user_memory: the shared handle holds its address.
+    const h = seamed();
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const { device } = h.createDevice(h.box.memory.readU32(0x2200));
+    const out = 0x3000;
+    const handle = 0x3100;
+    // Below where the seam allocates (`machine`).
+    const mem = 0x8000;
+    h.box.memory.writeU32(handle, mem);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateOffscreenPlainSurface', [8, 8, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, handle]],
+    ]))
+    {
+        assert.equal(h.device(device, name, args), D3D_OK, name);
+        const surface = h.box.memory.readU32(out);
+        const locked = 0x3200;
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'),
+            [locked, 0, 0]), D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), mem, `${name} pBits`);
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'UnlockRect'), []), D3D_OK);
+        assert.equal(h.release(surface), 0);
     }
 });
 
