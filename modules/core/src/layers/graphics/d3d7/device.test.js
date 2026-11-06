@@ -1028,6 +1028,33 @@ test('a surface made without DDSCAPS_TEXTURE: Direct3D 7 binds nothing, an earli
     }
 });
 
+test('a texture bound as a handle binds it is not held, and is unbound once it is gone'
+    + ' (test_texturemapblend)', ()=>{
+    const f = recorded();
+    const { device, root } = f;
+    const texture = surface(root, { caps: DDSCAPS_TEXTURE, width: 2, height: 2,
+        pixelFormat: ARGB32 });
+    assert.equal(device.SetTexture(0, texture, { unheld: true }), D3D_OK);
+    assert.equal(texture.refCount, 1, 'no reference taken');
+    /** @type {{ surface?: any }} */
+    const bound = {};
+    assert.equal(device.GetTexture(0, bound), D3D_OK);
+    assert.equal(bound.surface, texture);
+    bound.surface.release();
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(texture.refCount, 2, 'bound again as SetTexture binds, it is held');
+    assert.equal(device.SetTexture(0, texture, { unheld: true }), D3D_OK);
+    assert.equal(texture.refCount, 1, 'and let go of when bound by handle');
+    assert.equal(texture.release(), 0);
+    /** @type {{ surface?: any }} */
+    const gone = {};
+    assert.equal(device.GetTexture(0, gone), D3D_OK);
+    assert.equal(gone.surface, null, 'its last reference unbinds it');
+    assert.equal(device.release(), 0, 'and the device lets go of nothing more');
+    assert.equal(f.target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+});
+
 test('recorded: a texture goes up once, and again only after the program wrote it', async()=>{
     const f = recorded();
     const { device, gpu, root, ram, target } = f;

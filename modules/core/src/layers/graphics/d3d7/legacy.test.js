@@ -602,6 +602,7 @@ test('a texture handle names a surface, looked up at the draw so a swap is seen'
     f.device.drawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TLVERTEX, zeros(4, 24), 4, 0);
     assert.equal(f.since('SetTexture', mark).at(-1)?.[2], second,
         'the draw textures with the surface the handle names now');
+    assert.equal(second.refCount, 1, 'and holds no reference on it (test_texturemapblend)');
     f.device.EndScene();
 
     f.device.setRenderState(RS_TEXTUREHANDLE, 0);

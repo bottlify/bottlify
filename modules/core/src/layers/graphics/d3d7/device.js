@@ -841,11 +841,24 @@ export function createDirect3D7(ddraw, services = {}){
             return made;
         };
 
+        /** The stages whose texture is bound without a reference of the device's. */
+        const unheldStages = new Set();
+        /**
+         * A stage's texture, while it lives: one bound without a reference is
+         * gone from the stage once its last reference is.
+         *
+         * @param {number} stage
+         */
+        const boundAt = stage=>{
+            const surface = textures.get(stage) ?? null;
+            return surface && !surface.destroyed ? surface : null;
+        };
+
         /** The textures the renderer samples: adapters, refreshed. */
         const rendererTextures = {
             /** @param {number} stage */
             get: stage=>{
-                const surface = textures.get(stage) ?? null;
+                const surface = boundAt(stage);
                 return surface && !(hardware && notTexture(surface))
                     ? refreshedTexture(surface) : null;
             },
@@ -1184,11 +1197,15 @@ export function createDirect3D7(ddraw, services = {}){
                     services.presenter?.release(adapter.buffer);
                 }
                 targetAdapters.clear();
-                for (const surface of textures.values())
+                for (const [stage, surface] of textures)
                 {
-                    surface.release();
+                    if (!unheldStages.has(stage))
+                    {
+                        surface.release();
+                    }
                 }
                 textures.clear();
+                unheldStages.clear();
                 stopWatchingDepth();
                 stopWatchingPixels();
                 stopWatchingColor();
@@ -1550,8 +1567,11 @@ export function createDirect3D7(ddraw, services = {}){
             /**
              * @param {number} stage
              * @param {any} surface  A DirectDraw surface, or null to unbind.
+             * @param {{ unheld?: boolean }} [how]  Bound without a reference, as
+             *     D3DRENDERSTATE_TEXTUREHANDLE binds one (Wine's ddraw2
+             *     test_texturemapblend): it is bound while it lives.
              */
-            SetTexture(stage, surface){
+            SetTexture(stage, surface, how = {}){
                 if (stage < 0 || stage >= STAGE_COUNT)
                 {
                     return DDERR_INVALIDPARAMS;
@@ -1561,7 +1581,8 @@ export function createDirect3D7(ddraw, services = {}){
                     surface = null;
                 }
                 const previous = textures.get(stage);
-                if (previous === surface)
+                const held = !unheldStages.has(stage);
+                if (previous === surface && held === !how.unheld)
                 {
                     return D3D_OK;
                 }
@@ -1569,20 +1590,34 @@ export function createDirect3D7(ddraw, services = {}){
                 // until it is unbound or replaced.
                 if (surface)
                 {
-                    surface.addRef();
+                    if (!how.unheld)
+                    {
+                        surface.addRef();
+                    }
                     textures.set(stage, surface);
                 }
                 else
                 {
                     textures.delete(stage);
                 }
-                previous?.release();
+                if (surface && how.unheld)
+                {
+                    unheldStages.add(stage);
+                }
+                else
+                {
+                    unheldStages.delete(stage);
+                }
+                if (previous && held)
+                {
+                    previous.release();
+                }
                 return D3D_OK;
             },
 
             /** @param {number} stage @param {{ surface?: any }} out */
             GetTexture(stage, out){
-                const surface = textures.get(stage) ?? null;
+                const surface = boundAt(stage);
                 if (surface)
                 {
                     surface.addRef();

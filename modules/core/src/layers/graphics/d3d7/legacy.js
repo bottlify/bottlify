@@ -1002,7 +1002,8 @@ function createLegacyDevice(inner, version, legacy){
     const prepare = (fvf, flags)=>{
         if (textureByHandle)
         {
-            inner.SetTexture(0, textures.surfaceOf(ownStates.get(RS.TEXTUREHANDLE) ?? 0));
+            inner.SetTexture(0, textures.surfaceOf(ownStates.get(RS.TEXTUREHANDLE) ?? 0),
+                { unheld: true });
         }
         const lit = (fvf & FVF_POSITION_MASK) !== FVF_XYZRHW && (fvf & FVF_NORMAL) !== 0
             && (flags & D3DDP_DONOTLIGHT) === 0 && applyMaterial() !== null;
@@ -1305,8 +1306,10 @@ function createLegacyDevice(inner, version, legacy){
             switch (state)
             {
                 case RS.TEXTUREHANDLE:
+                    // A handle binds the texture without holding it (Wine's
+                    // ddraw2 test_texturemapblend releases it while bound).
                     textureByHandle = true;
-                    return inner.SetTexture(0, textures.surfaceOf(value));
+                    return inner.SetTexture(0, textures.surfaceOf(value), { unheld: true });
                 case RS.TEXTUREMAPBLEND:
                     if (value !== previous)
                     {
