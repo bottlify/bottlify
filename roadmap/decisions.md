@@ -909,6 +909,16 @@ a quad from depth 0 to 1). The bias a program puts on a decal over a wall, at de
 the one asked for. It stands until the constant part of the bias is added in the vertex stage,
 in depth units, whatever the format. *2026-11-06.*
 
+**A91. The screen a program is told it has is the resolution of the Direct3D device it shows.**
+The page is one window: a full-screen device's mode is the screen from its creation or reset, and a
+windowed device's back buffer is the screen from its first frame, so a cursor the program normalises
+by the screen stays under the pointer and its windows fit what is drawn. The display's own size,
+the registry mode, stays the launch's, and leaving full screen goes back to it. On Windows a
+windowed device leaves the desktop alone: Wine's d3d9ex test_reset and test_reset_ex, which read
+the screen after windowed 640x480 devices have presented and again after a full-screen device is
+reset to a window, see 640 and then the registry's 1024 where Windows shows the same size twice.
+*2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
