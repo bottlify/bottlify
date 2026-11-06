@@ -93,6 +93,7 @@ import {
     DDSCAPS2_CUBEMAP_POSITIVEX,
     DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_BACKBUFFER,
+    DDSCAPS_COMPLEX,
     DDSCAPS_FLIP,
     DDSCAPS_FRONTBUFFER,
     DDSCAPS_PRIMARYSURFACE,
@@ -2340,7 +2341,9 @@ export function createDirectDraw(options = {}){
         }
         if ((request.flags & DDSD_LPSURFACE) !== 0)
         {
-            if ((request.caps & DDSCAPS_VIDEOMEMORY) !== 0)
+            // One block of memory is one surface: no mip chain or cube grows
+            // from it, even one level long (Wine's test_user_memory).
+            if ((request.caps & (DDSCAPS_VIDEOMEMORY | DDSCAPS_COMPLEX)) !== 0)
             {
                 return { hr: DDERR_INVALIDCAPS, surface: null };
             }

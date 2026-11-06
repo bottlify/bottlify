@@ -19,7 +19,7 @@ import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INBEGINSTATEBLOCK,
     D3DERR_INVALIDSTATEBLOCK, D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK,
     D3DERR_SCENE_IN_SCENE, D3DERR_SCENE_NOT_IN_SCENE, D3DERR_SURFACENOTINVIDMEM,
-    D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DRENDERSTATE, D3DRENDERSTATE_MAX, D3DSBT,
+    D3DFMT, D3DRENDERSTATE, D3DRENDERSTATE_MAX, D3DSBT,
     D3DTRANSFORMSTATE, D3DVBCAPS_OPTIMIZED, D3DZB, D3D_OK, DDERR_INVALIDCAPS, DDERR_INVALIDPARAMS,
     DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
 } from './constants.js';
@@ -426,6 +426,34 @@ test('ComputeSphereVisibility names the planes a sphere crosses and the ones it 
         assert.deepEqual(out.results, expected, `case ${index}`);
     });
 
+    // Wine's ddraw4 test_compute_sphere_visibility: the same spheres in D3DVIS
+    // bits, a sphere touching a side crossing it. Its cases 2 and 5 are left
+    // out: Windows answers them otherwise (decisions.md A93).
+    assert.equal(device.SetRenderState(CLIPPLANEENABLE, 0), D3D_OK);
+    /** @type {[number[], number[], number[][], number[], number[]][]} */
+    const third = [
+        [view1, proj1, [[11.461533, -4.761727, -1.171646]], [38.252632], [0x1555]],
+        [view1, proj1, [[-3.515620, -1.560661, -12.464638], [14.290396, -2.981143, -24.311312],
+            [1.461626, -6.093709, -13.901010]], [4.354097, 12.500704, 17.251318],
+        [0x154a, 0x1555, 0x1555]],
+        [IDENTITY, IDENTITY, [[0, 0, 0.5]], [0.5], [0x1401]],
+        [IDENTITY, IDENTITY, [[0, 0, 0]], [0], [0x401]],
+        [IDENTITY, IDENTITY, [[-20, 0, 0.5]], [3], [0x154a]],
+        [IDENTITY, IDENTITY, [[20, 0, 0.5]], [3], [0x1562]],
+        [IDENTITY, IDENTITY, [[0, -20, 0.5]], [3], [0x1616]],
+        [IDENTITY, IDENTITY, [[0, 20, 0.5]], [3], [0x1496]],
+        [IDENTITY, IDENTITY, [[0, 0, -20]], [3], [0x956]],
+        [IDENTITY, IDENTITY, [[0, 0, 20]], [3], [0x2156]],
+    ];
+    third.forEach(([view, projection, centers, radii, expected], index)=>{
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.VIEW, view), D3D_OK);
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.PROJECTION, projection), D3D_OK);
+        /** @type {{ results?: number[] }} */
+        const out = {};
+        assert.equal(device.ComputeSphereVisibility(centers, radii, out, true), D3D_OK);
+        assert.deepEqual(out.results, expected, `third generation, case ${index}`);
+    });
+
     releaseAll(f);
 });
 
@@ -621,7 +649,10 @@ test('a vertex buffer is a guest allocation with one lock at a time', ()=>{
     assert.equal(buffer.Lock(0, lock), D3D_OK);
     assert.equal(lock.data, buffer.base);
     assert.equal(lock.size, 4 * 20);
-    assert.equal(buffer.Lock(0, {}), D3DERR_VERTEXBUFFERLOCKED);
+    /** @type {{ data?: number, size?: number }} */
+    const again = {};
+    assert.equal(buffer.Lock(0, again), D3D_OK, 'locked again (test_process_vertices)');
+    assert.deepEqual(again, lock, 'the same memory');
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.DrawPrimitiveVB(D3DPT.TRIANGLELIST, buffer, 0, 3), DDERR_INVALIDPARAMS,
         'a locked buffer cannot be drawn');
@@ -652,12 +683,24 @@ test('Clear needs something to clear and a depth buffer to clear depth', ()=>{
     assert.equal(device.Clear(0, null, 0, 0, 1, 0), DDERR_INVALIDPARAMS);
     assert.equal(device.Clear(0, null, D3DCLEAR.ZBUFFER, 0, 1, 0), DDERR_INVALIDPARAMS,
         'no depth attached');
-    assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), DDERR_INVALIDPARAMS,
-        'two rectangles and none given');
     assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0x00123456, 1, 0), D3D_OK);
 
     releaseAll(f);
 });
+
+test('a Clear given a count and no rectangles clears the whole target (test_clear_rect_count)',
+    async()=>{
+        const { device, gpu, root, target } = recorded();
+        assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0x0000ff00, 1, 0), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const pass = gpu.of('beginRenderPass')[0].descriptor.colorAttachments[0];
+        assert.equal(pass.loadOp, 'clear', 'all of it, as a pass\'s clear');
+        assert.deepEqual([pass.clearValue.r, pass.clearValue.g, pass.clearValue.b], [0, 1, 0]);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+    });
 
 test('the material, clip status and clip planes read back as copies', ()=>{
     const f = fixture();
@@ -947,6 +990,70 @@ test('recorded: a colour fill of the device\'s target clears it on the GPU, no r
         assert.equal(target.release(), 0);
         assert.equal(root.release('IDirectDraw7'), 0);
     });
+
+test('a surface made without DDSCAPS_TEXTURE: Direct3D 7 binds nothing, an earlier device keeps it'
+    + ' and only its software rasteriser samples it (test_texture_wrong_caps)', async()=>{
+    for (const [id, legacy, keeps, samples] of /** @type {[string, boolean, boolean, boolean][]} */ ([
+        [DEVICE_IDS.TNLHAL, false, false, false],
+        [DEVICE_IDS.RGB, false, false, false],
+        [DEVICE_IDS.HAL, true, true, false],
+        [DEVICE_IDS.RGB, true, true, true],
+    ]))
+    {
+        const f = recorded();
+        assert.equal(f.device.release(), 0);
+        const made = f.d3d.createDevice(id, f.target, { legacy });
+        assert.equal(made.hr, D3D_OK);
+        const device = made.device;
+        const plain = surface(f.root, { caps: DDSCAPS_OFFSCREENPLAIN, width: 2, height: 2,
+            pixelFormat: ARGB32 });
+        assert.equal(device.SetTexture(0, plain), D3D_OK, `${id} ${legacy}`);
+        /** @type {{ surface?: any }} */
+        const bound = {};
+        assert.equal(device.GetTexture(0, bound), D3D_OK);
+        assert.equal(bound.surface, keeps ? plain : null, `${id} ${legacy} keeps it bound`);
+        bound.surface?.release();
+        assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+        const quad = vertices([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, quad, 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(f.target.buffer);
+        await device.idle();
+        assert.equal(f.gpu.count('writeTexture'), samples ? 1 : 0, `${id} ${legacy} samples it`);
+        assert.equal(device.release(), 0);
+        assert.equal(plain.release(), 0);
+        assert.equal(f.target.release(), 0);
+    }
+});
+
+test('a texture bound as a handle binds it is not held, and is unbound once it is gone'
+    + ' (test_texturemapblend)', ()=>{
+    const f = recorded();
+    const { device, root } = f;
+    const texture = surface(root, { caps: DDSCAPS_TEXTURE, width: 2, height: 2,
+        pixelFormat: ARGB32 });
+    assert.equal(device.SetTexture(0, texture, { unheld: true }), D3D_OK);
+    assert.equal(texture.refCount, 1, 'no reference taken');
+    /** @type {{ surface?: any }} */
+    const bound = {};
+    assert.equal(device.GetTexture(0, bound), D3D_OK);
+    assert.equal(bound.surface, texture);
+    bound.surface.release();
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(texture.refCount, 2, 'bound again as SetTexture binds, it is held');
+    assert.equal(device.SetTexture(0, texture, { unheld: true }), D3D_OK);
+    assert.equal(texture.refCount, 1, 'and let go of when bound by handle');
+    assert.equal(texture.release(), 0);
+    /** @type {{ surface?: any }} */
+    const gone = {};
+    assert.equal(device.GetTexture(0, gone), D3D_OK);
+    assert.equal(gone.surface, null, 'its last reference unbinds it');
+    assert.equal(device.release(), 0, 'and the device lets go of nothing more');
+    assert.equal(f.target.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+});
 
 test('recorded: a texture goes up once, and again only after the program wrote it', async()=>{
     const f = recorded();
@@ -1359,21 +1466,16 @@ test('recorded: a buffer the runtime clips is clipped behind the eye, and under 
         'every draw, under current rules');
 });
 
-test('a fresh device has a white material, not a black one', ()=>{
-    // This is the version Warcraft III draws its menu through, and lighting now
-    // reads the material. All zeros -- what an unseeded structure holds -- takes
-    // every term to zero for geometry that never calls SetMaterial and carries
-    // no vertex colour, so the whole scene lights to black while every state a
-    // program reads back still says what it expects.
+test('a fresh device\'s material is all zeros (test_material)', ()=>{
     const f = fixture();
     /** @type {{ material?: any }} */
     const out = {};
 
     assert.equal(f.device.GetMaterial(out), D3D_OK);
-    assert.deepEqual(out.material.Diffuse, { r: 1, g: 1, b: 1, a: 1 });
-    assert.deepEqual(out.material.Ambient, { r: 1, g: 1, b: 1, a: 1 });
-    assert.deepEqual(out.material.Specular, { r: 0, g: 0, b: 0, a: 0 });
-    assert.deepEqual(out.material.Emissive, { r: 0, g: 0, b: 0, a: 0 });
+    for (const term of ['Diffuse', 'Ambient', 'Specular', 'Emissive'])
+    {
+        assert.deepEqual(out.material[term], { r: 0, g: 0, b: 0, a: 0 }, term);
+    }
     assert.equal(out.material.Power, 0);
 
     releaseAll(f);
@@ -1471,4 +1573,58 @@ test('the earlier interfaces\' sampler render states are kept on IDirect3DDevice
     assert.equal(device.release(), 0);
     assert.equal(target.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
+});
+
+test('a device is made on no indexed surface, and its target moves to one in system memory or a'
+    + ' depth buffer, not an indexed one (test_rt_caps)', ()=>{
+    const root = ddrawObject();
+    const d3d = createDirect3D7(root);
+    const p8 = { size: 0x20, flags: 0x20 | 0x40, fourCC: 0, bitCount: 8, redMask: 0,
+        greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const palette = /** @type {any} */ (root.createPalette(4 | 0x40, new Array(256).fill(0))
+        .palette);
+    const indexed = (/** @type {number} */ caps)=>{
+        const made = surface(root, { caps: caps | DDSCAPS_3DDEVICE | 0x40, pixelFormat: p8 });
+        assert.equal(made.setPalette(palette), D3D_OK);
+        return made;
+    };
+    const video = indexed(0x4000);
+    const system = indexed(0x800);
+    assert.equal(d3d.createDevice(DEVICE_IDS.HAL, video).hr >>> 0, 0x88760091,
+        'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(d3d.createDevice(DEVICE_IDS.HAL, system).hr >>> 0, 0x887602eb,
+        'D3DERR_SURFACENOTINVIDMEM');
+    assert.equal(d3d.createDevice(DEVICE_IDS.RGB, system).hr >>> 0, 0x80004005, 'E_FAIL');
+    assert.equal(d3d.createDevice(DEVICE_IDS.RGB, video).hr >>> 0, 0x88760091,
+        'in video memory the software rasteriser refuses the format too');
+    const olderVideo = d3d.createDevice(DEVICE_IDS.RGB, video, { legacy: true });
+    assert.equal(olderVideo.hr, D3D_OK, 'where an older interface\'s makes it');
+    olderVideo.device.release();
+    const older = d3d.createDevice(DEVICE_IDS.RGB, system, { legacy: true });
+    assert.equal(older.hr, D3D_OK, 'an older interface\'s rasteriser makes it');
+    older.device.release();
+
+    const target = surface(root);
+    const made = d3d.createDevice(DEVICE_IDS.HAL, target);
+    assert.equal(made.hr, D3D_OK);
+    const device = made.device;
+    const sysmem = surface(root, { caps: DDSCAPS_3DDEVICE | 0x40 | 0x800 });
+    assert.equal(device.SetRenderTarget(sysmem), D3D_OK, 'system memory is taken as a target');
+    assert.equal(device.SetRenderTarget(video) >>> 0, 0x88760064, 'DDERR_INVALIDCAPS');
+    const depth = surface(root, { caps: DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+    assert.equal(device.SetRenderTarget(depth) >>> 0, 0x88760091,
+        'a depth buffer is refused as a format');
+    /** @type {{ surface?: any }} */
+    const held = {};
+    assert.equal(device.GetRenderTarget(held), D3D_OK);
+    assert.equal(held.surface, depth, 'and taken all the same');
+    held.surface.release();
+    assert.equal(depth.refCount, 2, 'with a reference of its own');
+    // Through IDirect3DDevice2 no reference is taken.
+    assert.equal(device.SetRenderTarget(target), D3D_OK);
+    assert.equal(device.SetRenderTarget(depth, { unheldDepth: true }) >>> 0, 0x88760091);
+    assert.equal(depth.refCount, 1);
+    assert.equal(depth.addRef(), 2);
+    assert.equal(device.release(), 0);
+    assert.equal(depth.refCount, 1, 'let go of at the device\'s release');
 });

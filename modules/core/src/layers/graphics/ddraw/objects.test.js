@@ -1776,6 +1776,12 @@ test('a surface made over the program\'s memory takes its pitch, and one made by
         'shorter than a row');
     assert.equal(request(DDSCAPS_VIDEOMEMORY | DDSCAPS_OFFSCREENPLAIN, LPSURFACE | PITCH, 0x100,
         0x9000).hr, DDERR_INVALIDCAPS);
+    const texture = DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
+    const single = request(texture, LPSURFACE | PITCH, 0x100, 0x9000);
+    assert.equal(single.hr, DD_OK, 'a mipmap of one level (test_user_memory)');
+    assert.equal(request(texture | DDSCAPS_COMPLEX, LPSURFACE | PITCH, 0x100, 0x9000).hr,
+        DDERR_INVALIDCAPS, 'but no chain over the program\'s memory');
+    assert.equal(single.surface?.release(), 0);
     assert.equal(request(plain | 0x04000000, 0, 0, 0).hr, DDERR_INVALIDCAPS,
         'ALLOCONLOAD is a texture\'s');
     const own = request(plain, LPSURFACE | PITCH, 0xfc, 0x9000);

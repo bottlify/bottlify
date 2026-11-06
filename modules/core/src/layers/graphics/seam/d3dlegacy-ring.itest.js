@@ -413,6 +413,11 @@ test('Direct3D 3\'s setters in the guest make on the device what its host method
                 recorded.host++;
                 settle();
                 assert.equal(made(guest.device, guest), answer, what);
+                // Stage zero's texture sets its alpha operation under MODULATE.
+                if (kind === 'SetTexture' && args[0] === 0)
+                {
+                    remirror('SetTextureStageState', [0, 4]);
+                }
                 if (state)
                 {
                     // As the seam's host does: a render state the legacy device

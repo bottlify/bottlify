@@ -926,6 +926,15 @@ marks todo too). What sets off that one restore is not documented and is seen on
 that resizes its own full-screen window; a Reset puts the window back to the mode's size, as on
 Windows. *2026-11-06.*
 
+**A93. Temporary: IDirect3DDevice3::ComputeSphereVisibility measures each side by the sphere's
+distance to its plane, a touch counting as crossing.** Windows answers two of the spheres in
+Wine's ddraw4 test_compute_sphere_visibility otherwise (Wine marks both todo): a sphere of radius
+0.04 at depth 0.05 under a projection scaling by ten crosses all six sides, and one of radius 0.25
+at (-1, -1, 0.5) under identity crosses near and far as well as left and bottom, half its radius
+from them. No one scale of the radius or the distance gives those answers and the test's others
+together, so the rule behind them is not known; a program that culls by the answer draws, at
+most, an object Windows would have culled. It stands until the rule is found. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

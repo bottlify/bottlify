@@ -37,7 +37,8 @@
 import {
     D3DERR_INBEGINSTATEBLOCK, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDSTATEBLOCK,
     D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK, D3DERR_SCENE_IN_SCENE,
-    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE, D3DRENDERSTATE,
+    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_SURFACENOTINVIDMEM, D3DERR_VERTEXBUFFERLOCKED, D3DFMT,
+    D3DLIGHTTYPE, D3DRENDERSTATE,
     D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
     D3DTSS_ADDRESS,
     D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
@@ -60,7 +61,8 @@ import { writePixels } from '../d3d9/resources.js';
 import { packDepths, unpackDepths } from './depth.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DXT_CODES, DDPF_PALETTEINDEXED_ANY, DDPF_ZBUFFER,
-    DDSCAPS_ZBUFFER,
+    DDSCAPS_ZBUFFER, DDERR_INVALIDCAPS, DDERR_INVALIDPIXELFORMAT, DDSCAPS_3DDEVICE,
+    DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, E_FAIL,
 } from '../ddraw/constants.js';
 
 /**
@@ -214,20 +216,42 @@ function colourOf(format, value){
 }
 
 /**
- * The material a fresh device has: white diffuse and ambient, no highlight and
- * no glow.
- *
- * Not all zeros, which is what an unseeded structure would be. Geometry that
- * never calls SetMaterial and carries no vertex colour takes every lighting
- * term from here, so a black default lights the whole scene to black while
- * every state a program reads back still says what it expects.
+ * The material a fresh device has: all zeros, as GetMaterial reads it back
+ * before any SetMaterial (Wine's ddraw7 test_material). Lit geometry with no
+ * vertex colour is black under it, as on Windows.
  *
  * @returns {Material}
  */
 function defaultMaterial(){
-    const white = ()=>({ r: 1, g: 1, b: 1, a: 1 });
     const black = ()=>({ r: 0, g: 0, b: 0, a: 0 });
-    return { Diffuse: white(), Ambient: white(), Specular: black(), Emissive: black(), Power: 0 };
+    return { Diffuse: black(), Ambient: black(), Specular: black(), Emissive: black(), Power: 0 };
+}
+
+/**
+ * D3DSTATUS clip bits of the six sides as IDirect3DDevice3's D3DVIS: per side
+ * INTERSECT (1) or OUTSIDE (2) two bits apiece from bit 2, and the frustum's
+ * own pair in bits 0 and 1, OUTSIDE over INTERSECT.
+ *
+ * @param {number} status
+ */
+function visibilityOf(status){
+    let result = 0;
+    let crossing = false;
+    let outside = false;
+    for (let side = 0; side < 6; side++)
+    {
+        if ((status & (1 << (side + 12))) !== 0)
+        {
+            result |= 2 << (2 + side * 2);
+            outside = true;
+        }
+        else if ((status & (1 << side)) !== 0)
+        {
+            result |= 1 << (2 + side * 2);
+            crossing = true;
+        }
+    }
+    return result | (outside ? 2 : crossing ? 1 : 0);
 }
 
 /** @param {Material} material @returns {Material} */
@@ -280,6 +304,58 @@ function bufferLockFlags(lockFlags){
 }
 
 /**
+ * Why a device cannot be created on a surface, or D3D_OK. Past the caps and
+ * the palette DirectDraw asks of any target, an indexed one is drawn by no
+ * device here: an older interface's software rasteriser makes one wherever it
+ * is; otherwise in video memory its format is refused, and in system memory
+ * a hardware device wants video memory first while IDirect3D7's software
+ * rasteriser fails it (Wine's test_rt_caps, each version).
+ *
+ * @param {any} surface
+ * @param {boolean} hardware
+ * @param {boolean} legacy  Asked through IDirect3D, 2 or 3.
+ * @returns {number}
+ */
+export function deviceTargetRefusal(surface, hardware, legacy){
+    const hr = validateDeviceTarget({
+        caps: surface.caps,
+        pixelFormatFlags: surface.pixelFormat.flags,
+        hasPalette: surface.palette !== null,
+    }, hardware);
+    if (hr !== D3D_OK || (surface.pixelFormat.flags & DDPF_PALETTEINDEXED_ANY) === 0)
+    {
+        return hr;
+    }
+    if (!hardware && legacy)
+    {
+        return D3D_OK;
+    }
+    if ((surface.caps & DDSCAPS_SYSTEMMEMORY) === 0)
+    {
+        return DDERR_INVALIDPIXELFORMAT;
+    }
+    return hardware ? D3DERR_SURFACENOTINVIDMEM : E_FAIL;
+}
+
+/**
+ * Why a device's target cannot be moved to a surface, or D3D_OK. Unlike a
+ * device's creation, a target in system memory is taken; an indexed one is
+ * refused by its caps, and a depth buffer is taken but answered as a format
+ * no target has (Wine's test_rt_caps: GetRenderTarget names it after).
+ *
+ * @param {any} surface
+ * @returns {number}
+ */
+export function renderTargetRefusal(surface){
+    if ((surface.caps & DDSCAPS_3DDEVICE) === 0
+        || (surface.pixelFormat.flags & DDPF_PALETTEINDEXED_ANY) !== 0)
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    return (surface.caps & DDSCAPS_ZBUFFER) !== 0 ? DDERR_INVALIDPIXELFORMAT : D3D_OK;
+}
+
+/**
  * The Direct3D 7 object, which is a view of the DirectDraw object: it has
  * no count of its own (the seam routes its references to IDirectDraw7's),
  * and every surface it is handed belongs to that object.
@@ -315,9 +391,10 @@ export function createDirect3D7(ddraw, services = {}){
         /**
          * @param {string} deviceId
          * @param {any} surface  A DirectDraw surface with DDSCAPS_3DDEVICE.
+         * @param {{ legacy?: boolean }} [options]  `legacy` when asked through an older interface.
          * @returns {{ hr: number, device: any }}
          */
-        createDevice(deviceId, surface){
+        createDevice(deviceId, surface, options = {}){
             const description = DEVICE_DESCRIPTIONS.find(device=>device.id === deviceId);
             if (!description)
             {
@@ -329,16 +406,14 @@ export function createDirect3D7(ddraw, services = {}){
             {
                 return { hr: DDERR_INVALIDPARAMS, device: null };
             }
-            const hr = validateDeviceTarget({
-                caps: surface.caps,
-                pixelFormatFlags: surface.pixelFormat.flags,
-                hasPalette: surface.palette !== null,
-            }, description.id !== DEVICE_IDS.RGB);
+            const hr = deviceTargetRefusal(surface, description.id !== DEVICE_IDS.RGB,
+                options.legacy === true);
             if (hr !== D3D_OK)
             {
                 return { hr, device: null };
             }
-            return { hr: D3D_OK, device: createDevice(description, surface) };
+            return { hr: D3D_OK,
+                device: createDevice(description, surface, options.legacy === true) };
         },
 
         /**
@@ -414,9 +489,14 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {{ data?: number, size?: number }} out
              */
             Lock(flags, out){
+                // A buffer locked is locked again, its memory handed out once
+                // more, and one Unlock ends both (Wine's ddraw7
+                // test_process_vertices).
                 if (locked)
                 {
-                    return D3DERR_VERTEXBUFFERLOCKED;
+                    out.data = base;
+                    out.size = length;
+                    return D3D_OK;
                 }
                 locked = true;
                 out.data = base;
@@ -481,7 +561,9 @@ export function createDirect3D7(ddraw, services = {}){
             LockInPlace(out){
                 if (locked)
                 {
-                    return D3DERR_VERTEXBUFFERLOCKED;
+                    out.data = base;
+                    out.size = length;
+                    return D3D_OK;
                 }
                 locked = true;
                 inPlace = true;
@@ -535,8 +617,15 @@ export function createDirect3D7(ddraw, services = {}){
     /**
      * @param {typeof DEVICE_DESCRIPTIONS[number]} description
      * @param {any} target
+     * @param {boolean} legacy  Made for an IDirect3DDevice of an earlier version.
      */
-    function createDevice(description, target){
+    function createDevice(description, target, legacy){
+        // A surface made without DDSCAPS_TEXTURE: a seventh-generation device
+        // binds nothing for it; an earlier one keeps it bound, and only the
+        // software rasteriser samples it (Wine's test_texture_wrong_caps).
+        const hardware = description.id !== DEVICE_IDS.RGB;
+        /** @param {any} surface */
+        const notTexture = surface=>surface !== null && (surface.caps & DDSCAPS_TEXTURE) === 0;
         let inScene = false;
         /** @type {Map<number, number>} */
         let renderStates = createDefaultRenderStates({
@@ -755,12 +844,26 @@ export function createDirect3D7(ddraw, services = {}){
             return made;
         };
 
+        /** The stages whose texture is bound without a reference of the device's. */
+        const unheldStages = new Set();
+        /**
+         * A stage's texture, while it lives: one bound without a reference is
+         * gone from the stage once its last reference is.
+         *
+         * @param {number} stage
+         */
+        const boundAt = stage=>{
+            const surface = textures.get(stage) ?? null;
+            return surface && !surface.destroyed ? surface : null;
+        };
+
         /** The textures the renderer samples: adapters, refreshed. */
         const rendererTextures = {
             /** @param {number} stage */
             get: stage=>{
-                const surface = textures.get(stage);
-                return surface ? refreshedTexture(surface) : null;
+                const surface = boundAt(stage);
+                return surface && !(hardware && notTexture(surface))
+                    ? refreshedTexture(surface) : null;
             },
         };
 
@@ -1097,11 +1200,15 @@ export function createDirect3D7(ddraw, services = {}){
                     services.presenter?.release(adapter.buffer);
                 }
                 targetAdapters.clear();
-                for (const surface of textures.values())
+                for (const [stage, surface] of textures)
                 {
-                    surface.release();
+                    if (!unheldStages.has(stage))
+                    {
+                        surface.release();
+                    }
                 }
                 textures.clear();
+                unheldStages.clear();
                 stopWatchingDepth();
                 stopWatchingPixels();
                 stopWatchingColor();
@@ -1201,38 +1308,42 @@ export function createDirect3D7(ddraw, services = {}){
             },
 
             /**
-             * A new target must be one a device could have been created on.
-             * The reference moves with it: the old target is released, the
-             * new one held.
+             * A new target: one with DDSCAPS_3DDEVICE that is not indexed
+             * (`renderTargetRefusal`). The reference moves with it: the old
+             * target is released, the new one held.
              *
              * @param {any} surface
+             * @param {{ unheldDepth?: boolean }} [how]
              */
-            SetRenderTarget(surface){
+            SetRenderTarget(surface, how = {}){
                 if (!surface)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                const hr = validateDeviceTarget({
-                    caps: surface.caps,
-                    pixelFormatFlags: surface.pixelFormat.flags,
-                    hasPalette: surface.palette !== null,
-                }, description.id !== DEVICE_IDS.RGB);
-                if (hr !== D3D_OK)
+                const hr = renderTargetRefusal(surface);
+                const depth = hr === DDERR_INVALIDPIXELFORMAT;
+                if (hr !== D3D_OK && !depth)
                 {
                     return hr;
                 }
                 if (surface !== renderTarget)
                 {
-                    surface.addRef();
+                    // IDirect3DDevice2 takes a depth buffer as its target with
+                    // no reference of its own, and lets one go all the same
+                    // (Wine's ddraw2 test_rt_caps).
+                    if (!depth || !how.unheldDepth)
+                    {
+                        surface.addRef();
+                    }
                     renderTarget.release();
                     renderTarget = surface;
                     viewport = fullTarget({ width: surface.width, height: surface.height });
-                    if (renderer)
+                    if (renderer && !depth)
                     {
                         targetAdapterFor(surface);
                     }
                 }
-                return D3D_OK;
+                return hr;
             },
 
             /** @param {{ surface?: any }} out */
@@ -1251,7 +1362,7 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {number} stencil
              */
             Clear(rectCount, rects, flags, color, z, stencil){
-                if ((flags & 7) === 0 || (rectCount > 0 && !rects))
+                if ((flags & 7) === 0)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
@@ -1259,6 +1370,8 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                // A count with no rectangles clears the whole target (Wine's
+                // test_clear_rect_count).
                 if (renderer)
                 {
                     renderer.clear(model, rectCount > 0 ? (rects ?? []).slice(0, rectCount) : [],
@@ -1457,14 +1570,22 @@ export function createDirect3D7(ddraw, services = {}){
             /**
              * @param {number} stage
              * @param {any} surface  A DirectDraw surface, or null to unbind.
+             * @param {{ unheld?: boolean }} [how]  Bound without a reference, as
+             *     D3DRENDERSTATE_TEXTUREHANDLE binds one (Wine's ddraw2
+             *     test_texturemapblend): it is bound while it lives.
              */
-            SetTexture(stage, surface){
+            SetTexture(stage, surface, how = {}){
                 if (stage < 0 || stage >= STAGE_COUNT)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                if (!legacy && surface && notTexture(surface))
+                {
+                    surface = null;
+                }
                 const previous = textures.get(stage);
-                if (previous === surface)
+                const held = !unheldStages.has(stage);
+                if (previous === surface && held === !how.unheld)
                 {
                     return D3D_OK;
                 }
@@ -1472,20 +1593,34 @@ export function createDirect3D7(ddraw, services = {}){
                 // until it is unbound or replaced.
                 if (surface)
                 {
-                    surface.addRef();
+                    if (!how.unheld)
+                    {
+                        surface.addRef();
+                    }
                     textures.set(stage, surface);
                 }
                 else
                 {
                     textures.delete(stage);
                 }
-                previous?.release();
+                if (surface && how.unheld)
+                {
+                    unheldStages.add(stage);
+                }
+                else
+                {
+                    unheldStages.delete(stage);
+                }
+                if (previous && held)
+                {
+                    previous.release();
+                }
                 return D3D_OK;
             },
 
             /** @param {number} stage @param {{ surface?: any }} out */
             GetTexture(stage, out){
-                const surface = textures.get(stage) ?? null;
+                const surface = boundAt(stage);
                 if (surface)
                 {
                     surface.addRef();
@@ -1603,10 +1738,17 @@ export function createDirect3D7(ddraw, services = {}){
              * up. The volume's sides come out of world, view and projection
              * together, a user plane out of the world transform alone.
              *
+             * IDirect3DDevice3 asks for D3DVIS bits instead: two a side, from
+             * left at bit 2 up to far, crossing or wholly beyond, and the
+             * frustum as a whole in the lowest two; it counts a sphere that
+             * touches a side as crossing it (Wine's ddraw4
+             * test_compute_sphere_visibility).
+             *
              * @param {readonly number[][]} centers @param {readonly number[]} radii
              * @param {{ results?: number[] }} out
+             * @param {boolean} [visibility]  D3DVIS bits, as the third generation answers
              */
-            ComputeSphereVisibility(centers, radii, out){
+            ComputeSphereVisibility(centers, radii, out, visibility = false){
                 const world = transforms.get(transformStateOf(D3DTRANSFORMSTATE.WORLD) ?? 0)
                     ?? IDENTITY;
                 const all = multiplyMatrices(multiplyMatrices(world,
@@ -1651,7 +1793,11 @@ export function createDirect3D7(ddraw, services = {}){
                         const length = Math.hypot(plane[0], plane[1], plane[2]) || 1;
                         const distance = (plane[0] * center[0] + plane[1] * center[1]
                             + plane[2] * center[2] + plane[3]) / length;
-                        if (distance < -radius)
+                        if (visibility && Math.abs(distance) <= radius)
+                        {
+                            result |= 1 << bit;
+                        }
+                        else if (visibility ? distance <= -radius : distance < -radius)
                         {
                             result |= (1 << bit) | (1 << (bit + 12));
                         }
@@ -1660,7 +1806,7 @@ export function createDirect3D7(ddraw, services = {}){
                             result |= 1 << bit;
                         }
                     });
-                    return result >>> 0;
+                    return (visibility ? visibilityOf(result) : result) >>> 0;
                 });
                 return D3D_OK;
             },

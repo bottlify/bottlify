@@ -61,6 +61,7 @@ import {
     CLASS_E_NOAGGREGATION, DDSCAPS_TEXTURE, DDSD_CAPS, DDSD_PIXELFORMAT,
 } from '../ddraw/constants.js';
 import { clipVolumeMatrix, createLegacyDirect3D, createTextureHandles } from '../d3d7/legacy.js';
+import { deviceTargetRefusal } from '../d3d7/device.js';
 import { loadTexture } from '../d3d7/load.js';
 import { createExecuteBuffer, executeBuffer } from '../d3d7/execute.js';
 
@@ -547,11 +548,12 @@ export function createLegacyDirect3DSeam(
          * @param {any} material @param {number[]} args
          */
         GetHandle: (material, [device, out])=>{
-            if (!publisher.objectAt(device) || (out >>> 0) === 0)
+            const owner = publisher.objectAt(device);
+            if (!owner || (out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, material.getHandle());
+            fields.writeU32(out >>> 0, material.getHandle(owner));
             return D3D_OK;
         },
 
@@ -852,8 +854,10 @@ export function createLegacyDirect3DSeam(
 
     // --- vertex buffers ---
 
+    // IUnknown is the buffer's own interface (Wine's ddraw4 test_vb_refcount).
     const bufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer, IDIRECT3DVERTEXBUFFER_SLOTS, bufferMethods),
+        { ...describe(IID_IDirect3DVertexBuffer, IDIRECT3DVERTEXBUFFER_SLOTS, bufferMethods),
+            identity: true },
     ];
 
     // --- devices ---
@@ -1225,7 +1229,13 @@ export function createLegacyDirect3DSeam(
                 indexCount >>> 0, flags >>> 0, d3d7.clippedDraw(vertices, flags));
         },
 
-        ComputeSphereVisibility: onInner('ComputeSphereVisibility'),
+        // The seventh generation's call, its answer in this one's D3DVIS bits.
+        /** @param {any} device @param {number[]} args */
+        ComputeSphereVisibility: (device, args)=>deviceMethods.ComputeSphereVisibility({
+            ComputeSphereVisibility: (/** @type {number[][]} */ centers,
+                /** @type {number[]} */ radii, /** @type {{ results?: number[] }} */ out)=>
+                device.inner.ComputeSphereVisibility(centers, radii, out, true),
+        }, args),
 
         /** @param {any} device @param {number[]} args */
         GetTexture: (device, [stage, out])=>{
@@ -1523,11 +1533,26 @@ export function createLegacyDirect3DSeam(
     deviceInterfaces[2].push(device1);
     deviceInterfaces[1] = [device1];
 
+    /**
+     * Why a surface answers no device of a kind: the reason a device would
+     * not be made on it, unless it has one already (Wine's ddraw1 test_rt_caps).
+     *
+     * @param {string} kind
+     */
+    const refusedOn = kind=>(/** @type {any} */ surface)=>{
+        if (aggregates.get(surface)?.has(kind))
+        {
+            return undefined;
+        }
+        const hr = deviceTargetRefusal(surface, kind === DEVICE_IDS.HAL, true);
+        return hr === D3D_OK ? undefined : hr;
+    };
     /** The devices a surface answers for, each a part of it. */
     const surfaceDevices = [
-        describe(DEVICE_IDS.HAL, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.HAL), {},
-            surfaceGone),
-        describe(DEVICE_IDS.RGB, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.RGB)),
+        { ...describe(DEVICE_IDS.HAL, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.HAL), {},
+            surfaceGone), refuses: refusedOn(DEVICE_IDS.HAL) },
+        { ...describe(DEVICE_IDS.RGB, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.RGB)),
+            refuses: refusedOn(DEVICE_IDS.RGB) },
     ];
 
     // --- the Direct3D objects, on the DirectDraw object ---

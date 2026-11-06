@@ -166,6 +166,24 @@ test('a vertex blends its world matrices by the weights it carries', ()=>{
         near([0, 1, 2, 3].map(i=>s.float(dest.base + k * 16 + i * 4)), vertex, `vertex ${k}`));
 });
 
+test('a vertex with no weights blends by the bytes after its position'
+    + ' (test_process_vertices)', ()=>{
+    const s = space();
+    const src = s.buffer(FVF.XYZ, 4);
+    s.fill(src, QUAD);
+    const dest = s.buffer(FVF.XYZRHW, 4);
+    const state = device({
+        transforms: { [D3DTS.WORLD + 1]: [0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1] },
+        states: { [D3DRS.VERTEXBLEND]: 1 },
+    });
+    assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM, dest,
+        destIndex: 0, count: 3, source: s.source(src), state, flags: 0 }), D3D_OK);
+    // The weight of each is the next vertex's x.
+    const expected = [[128, 128, 0, 1], [149.33, 64, 0.3333, 0.3333], [76.8, 153.6, 0.6, 0.8]];
+    expected.forEach((vertex, k)=>near([0, 1, 2, 3].map(i=>s.float(dest.base + k * 16 + i * 4)),
+        vertex, `vertex ${k}`));
+});
+
 test('lighting uses the camera-space normal the inverse transpose carries, at its length', ()=>{
     // Wine's ddraw7 test_lighting, through ProcessVertices: a white light down
     // +z, and a normal facing it after each world matrix.

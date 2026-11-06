@@ -197,15 +197,17 @@ function reach(light, position){
  *
  * @param {ProcessMemory} memory @param {VertexSource} source @param {string} name
  * @param {number} count @param {number} bytes  what is read of each vertex's
+ * @param {number} [skip]  bytes past the attribute's start where the read begins
  * @returns {{ view: DataView, step: number } | null}
  */
-function streamOf(memory, source, name, count, bytes){
-    const first = count > 0 ? source.addressOf(name, 0) : null;
-    if (first === null)
+function streamOf(memory, source, name, count, bytes, skip = 0){
+    const at = count > 0 ? source.addressOf(name, 0) : null;
+    if (at === null)
     {
         return null;
     }
-    const step = count > 1 ? /** @type {number} */ (source.addressOf(name, 1)) - first : 0;
+    const first = at + skip;
+    const step = count > 1 ? /** @type {number} */ (source.addressOf(name, 1)) - at : 0;
     const span = memory.readMemory(first, (count - 1) * step + bytes);
     return { view: new DataView(span.buffer, span.byteOffset, span.byteLength), step };
 }
@@ -263,9 +265,13 @@ export function processVertices(request){
     const view = state.transform(D3DTS.VIEW);
     const projection = state.transform(D3DTS.PROJECTION);
     const blend = state.renderState(D3DRS.VERTEXBLEND);
-    // The weights a vertex carries, up to as many as the state blends by; a
-    // vertex without them is carried by the world matrix alone.
-    const weights = blend >= 1 && blend <= 3 ? Math.min(blend, from.blendWeights) : 0;
+    // The weights a vertex carries, up to as many as the state blends by. A
+    // format with none is read as if it had them right after the position,
+    // whatever bytes are there (Wine's test_process_vertices, as Windows
+    // answers it).
+    const carriedWeights = from.blendWeights;
+    const weights = blend >= 1 && blend <= 3
+        ? (carriedWeights > 0 ? Math.min(blend, carriedWeights) : blend) : 0;
     const worldViews = Array.from({ length: weights + 1 },
         (_, index)=>multiply(state.transform(D3DTS.WORLD + index), view));
 
@@ -322,8 +328,9 @@ export function processVertices(request){
     // bytes a vertex at a time.
     const positions = /** @type {{ view: DataView, step: number }} */ (
         streamOf(memory, source, 'position', count, 12));
-    const weighting = weights > 0
-        ? streamOf(memory, source, 'blendWeight', count, weights * 4) : null;
+    const weighting = weights === 0 ? null : carriedWeights > 0
+        ? streamOf(memory, source, 'blendWeight', count, weights * 4)
+        : streamOf(memory, source, 'position', count, weights * 4, 12);
     const diffuses = streamOf(memory, source, 'diffuse', count, 4);
     const speculars = streamOf(memory, source, 'specular', count, 4);
     const normals = lighting || (copying && destNormal)

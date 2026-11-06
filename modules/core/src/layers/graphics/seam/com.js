@@ -45,6 +45,10 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *           it: a texture asked for IDirect3DBaseTexture9 hands back itself, as
  *           single inheritance lays it out, so a caller that casts it back to the
  *           texture by its type finds the texture's whole table.
+ * @property {(target: any) => number | undefined} [refuses]
+ *           Why QueryInterface does not hand this interface out on this object
+ *           now, or undefined when it does: a surface asked for a device it
+ *           cannot back answers with the reason a device would not be made.
  * @property {boolean} [identity]
  *           Its pointer is the object's IUnknown, as single inheritance lays out
  *           a Direct3D 8 or 9 object: QueryInterface for IUnknown answers it, so
@@ -206,7 +210,8 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells, settle
          * @returns {number | undefined}
          */
         refusal(id){
-            return typeof api.refusal === 'function' ? api.refusal(id) : undefined;
+            return declared.get(id)?.refuses?.(api)
+                ?? (typeof api.refusal === 'function' ? api.refusal(id) : undefined);
         },
         /** @param {string} id */
         interfaceFor(id){
@@ -224,7 +229,8 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells, settle
             const descriptor = declared.get(id);
             // An object that says which interfaces it has says it now: one may
             // come to answer an interface it did not when it was published.
-            if (!descriptor || (typeof api.supports === 'function' && !api.supports(id)))
+            if (!descriptor || (typeof api.supports === 'function' && !api.supports(id))
+                || descriptor.refuses?.(api) !== undefined)
             {
                 return null;
             }
