@@ -103,6 +103,7 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  * @property {(() => unknown) | undefined} regain
  *           DirectDraw's: sets the object's mode again as the application is
  *           active again, telling every window itself.
+ * @property {boolean} away  whether the activation was lost since it was held
  */
 
 /**
@@ -279,6 +280,16 @@ export function createFocusWindows({ user32, procedure, cover, states }){
      * @param {Held} one @param {boolean} active
      */
     const activate = (one, active)=>{
+        const back = one.away;
+        one.away = !active;
+        // A Direct3D device that never lost the activation has nothing to
+        // take back: the activation going between two threads of the
+        // program as the device is made is the creation's (Wine's d3d8
+        // test_wndproc, create_messages).
+        if (active && !back && !one.announce)
+        {
+            return 0;
+        }
         if (active)
         {
             return inTurn([
@@ -418,7 +429,7 @@ export function createFocusWindows({ user32, procedure, cover, states }){
             /** @type {Held} */
             const one = before ?? { device, focus, window: how.window >>> 0, changes: false,
                 extended: how.extended, size: { width: 0, height: 0 }, setting: false,
-                reapply: undefined, announce: false, regain: undefined };
+                reapply: undefined, announce: false, regain: undefined, away: false };
             Object.assign(one, { focus, window: (how.window >>> 0) || focus,
                 changes: !how.noWindowChanges, size: { width: how.width, height: how.height },
                 reapply: how.reapply, announce: how.announce === true, regain: how.regain });

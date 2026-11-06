@@ -364,3 +364,18 @@ test('DirectDraw\'s window regaining the activation is fitted to the screen as i
     assert.deepEqual(h.calls.filter(([name])=>name === 'SetWindowPos').map(([, args])=>args),
         [[FOCUS, 0, 0, 0, 1024, 768, 0x10 | 0x4]], 'the screen\'s size, not the mode taken with');
 });
+
+test('a device that never lost the activation takes nothing back when told it has it'
+    + ' (d3d8 test_wndproc: the activation passing between threads as the device is made)', ()=>{
+    const h = harness();
+    h.windows.take(h.device, HOW);
+    h.calls.length = 0;
+    h.send(0x1c, 1);
+    assert.deepEqual(h.names().filter(name=>name !== 'CallWindowProcA'
+        && name !== 'GetWindowLongA'), [], 'nothing placed or restored');
+    h.send(0x1c, 0);
+    h.calls.length = 0;
+    h.send(0x1c, 1);
+    assert.ok(h.names().includes('SetWindowPos') || h.names().includes('ShowWindow'),
+        'once lost, it is taken back');
+});
