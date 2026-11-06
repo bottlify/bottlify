@@ -2544,9 +2544,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ passes?: number }} out  Written only on success.
          */
         ValidateDevice(out){
+            // Direct3D 8 validates any filter, none and those past the last
+            // included, with or without a texture (Wine's d3d8 test_filter);
+            // Direct3D 9 refuses a filter of none.
             const hr = boundPixelShader !== 0
                 ? D3D_OK
-                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true });
+                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true, filters: false });
             if (hr === D3D_OK)
             {
                 out.passes = 1;

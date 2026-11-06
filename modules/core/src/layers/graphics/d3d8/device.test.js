@@ -1989,6 +1989,16 @@ test('ValidateDevice refuses a stage the combiner does not draw, and writes no p
     assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 17), D3D_OK, 'PREMODULATE');
     assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
     assert.equal(refused.passes, undefined);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 4), D3D_OK);
+
+    // Any filter validates in Direct3D 8, none and past the last included
+    // (Wine's d3d8 test_filter).
+    for (const filter of [0, 5])
+    {
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MAGFILTER, filter), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, filter), D3D_OK);
+        assert.equal(device.ValidateDevice(out), D3D_OK, `filter ${filter}`);
+    }
 
     // A pixel shader replaces the cascade, so the cascade is not what is drawn.
     /** @type {{ handle?: number }} */
