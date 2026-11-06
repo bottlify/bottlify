@@ -119,6 +119,9 @@ const FILTER_NUMBERING = Object.freeze({
  * @property {{ dumpFrames: number }} [liveDump]  frames to write down from now on, on
  *     asking (app.debug.dumpFrames), as Direct3D 8 and 9 devices take it
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
+ * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]  told of
+ *     every frame a present puts on the queue, to count and time it; what it answers is
+ *     not waited on - DirectDraw's flips hold nothing here
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
  * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]  told
  *     of a call the guest made in the command ring that the device refused
@@ -2180,7 +2183,12 @@ export function createDirect3D7(ddraw, services = {}){
              */
             present(buffer){
                 presenting = buffer;
-                return renderer?.present(model);
+                const submitted = renderer?.present(model);
+                if (submitted)
+                {
+                    services.frameQueued?.(submitted);
+                }
+                return submitted;
             },
 
             // What DirectDraw tells the device of its surfaces, as calls: what
