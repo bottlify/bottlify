@@ -10,21 +10,22 @@
  * screen, so the runtime hears the application lose and regain the
  * activation before the program does; and the device window is kept the
  * mode's size, and shown above the others (WS_EX_TOPMOST) when it was
- * hidden -- by an extended device only from the second device made on it,
- * and then whether hidden or not.
+ * hidden: by an extended device only from the second device made on it, and
+ * then whether hidden or not.
  *
  * Losing the activation (WM_ACTIVATEAPP with FALSE) puts the display back to
- * the registry's mode, minimises a shown device window -- above the others
- * but for an extended device -- and loses the device; regaining it brings
- * the device window back, and the device then waits for a Reset. Windows
- * leaves a minimised window to the taskbar to restore; there being none
- * here, regaining the activation restores it (decision A87). A mode another set under the device (WM_DISPLAYCHANGE) also
- * leaves it waiting for one. SC_RESTORE is carried out by the default
- * procedure before the program hears it. An extended device is never lost.
- * D3DCREATE_NOWINDOWCHANGES leaves both windows to the program. What the
- * runtime's own changes to the focus window make goes to the default
- * procedure, not the program's, a WM_DISPLAYCHANGE aside. (Wine's d3d8
- * and d3d9 test_wndproc, test_window_style, test_lost_device.)
+ * the registry's mode, minimises a shown device window - above the others,
+ * but for an extended device - and loses the device; regaining it brings the
+ * device window back, and the device then waits for a Reset. Windows leaves a
+ * minimised window to the taskbar to restore; there being none here,
+ * regaining the activation restores it (decision A87). A mode another set
+ * under the device (WM_DISPLAYCHANGE) also leaves it waiting for one.
+ * SC_RESTORE is carried out by the default procedure before the program hears
+ * it. An extended device is never lost. D3DCREATE_NOWINDOWCHANGES leaves both
+ * windows to the program. What the runtime's own changes to the focus window
+ * make goes to the default procedure, not the program's, a WM_DISPLAYCHANGE
+ * aside. (Wine's d3d8 and d3d9 test_wndproc, test_window_style,
+ * test_lost_device.)
  *
  * The procedure given back at the device's last release is the program's,
  * unless the program has set another since: that one stays.
@@ -157,20 +158,21 @@ export function createFocusWindows({ user32, procedure, states }){
             entry.filtering--;
             return answer;
         };
+        /** @type {unknown} */
+        let answer;
         try
         {
-            const answer = changes();
-            return typeof (/** @type {any} */ (answer))?.then === 'function'
-                ? /** @type {Promise<unknown>} */ (answer).then(done, error=>{
-                    done(0);
-                    throw error;
-                }) : done(answer);
+            answer = changes();
         }
-        catch (error)
-        {
+        catch (e){
             done(0);
-            throw error;
+            throw e;
         }
+        return typeof (/** @type {any} */ (answer))?.then === 'function'
+            ? /** @type {Promise<unknown>} */ (answer).then(done, e=>{
+                done(0);
+                throw e;
+            }) : done(answer);
     };
 
     /**
@@ -250,8 +252,8 @@ export function createFocusWindows({ user32, procedure, states }){
     return {
         /**
          * A device created, or reset, full screen: its focus window hooked and
-         * activated, its device window shown -- above the others when it was
-         * hidden -- unless the program keeps its windows itself. A windowed
+         * activated, its device window shown - above the others when it was
+         * hidden - unless the program keeps its windows itself. A windowed
          * one lets the focus window go.
          *
          * @param {FocusDevice} device

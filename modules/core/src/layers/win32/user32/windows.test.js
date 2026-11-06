@@ -6656,7 +6656,8 @@ test('a window minimised goes off the screen with no client area, and comes back
             }
             if (message.message === WM_SIZE)
             {
-                heard.push(['size', message.wParam, message.lParam & 0xffff, message.lParam >>> 16]);
+                heard.push(['size', message.wParam, message.lParam & 0xffff,
+                    message.lParam >>> 16]);
             }
             return message.message === WM_NCCREATE ? 1 : 0;
         } });
@@ -6677,8 +6678,8 @@ test('a window minimised goes off the screen with no client area, and comes back
         heard.length = 0;
 
         await fns.ShowWindow.handler([hwnd, SW_RESTORE]);
-        assert.deepEqual(heard.find(([what])=>what === 'changed')?.slice(1), [30, 40, 100, 50, true],
-            'back where it was');
+        assert.deepEqual(heard.find(([what])=>what === 'changed')?.slice(1),
+            [30, 40, 100, 50, true], 'back where it was');
         assert.deepEqual(heard.find(([what])=>what === 'size'), ['size', 0, 100, 50]);
         await fns.GetWindowRect.handler([hwnd, 0x900]);
         assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [30, 40, 130, 90]);
@@ -6694,7 +6695,8 @@ test('SetWindowPos with HWND_TOPMOST puts a window in the topmost band, HWND_NOT
         fns.RegisterClassA.handler([CLASS_STRUCT]);
         const hwnd = await createWindow(fns, memory, { style: WS_VISIBLE });
         await fns.SetWindowPos.handler([hwnd, 0xffffffff, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE]);
-        assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST, WS_EX_TOPMOST);
+        assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST,
+            WS_EX_TOPMOST);
         await fns.SetWindowPos.handler([hwnd, 0xfffffffe, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE]);
         assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST, 0);
     });

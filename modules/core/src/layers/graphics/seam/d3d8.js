@@ -3223,7 +3223,9 @@ export function createDirect3D8Seam(
             };
         }
         unshown.delete(device);
-        resolution?.(width, height, { window, fullscreen: true });
+        // D3DCREATE_NOWINDOWCHANGES leaves the window's size to the program.
+        resolution?.(width, height, { window: how?.noWindowChanges ? 0 : window,
+            fullscreen: true });
         return taken;
     };
 

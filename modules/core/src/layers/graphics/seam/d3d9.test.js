@@ -510,6 +510,20 @@ test('a fullscreen device names the window it takes with it', ()=>{
     assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true]);
 });
 
+test('D3DCREATE_NOWINDOWCHANGES sets the mode and leaves the window as it is', ()=>{
+    // Wine's test_window_style: the device window keeps its rectangle.
+    const D3DCREATE_NOWINDOWCHANGES = 0x800;
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: 0x777 },
+    D3DCREATE.HARDWARE_VERTEXPROCESSING | D3DCREATE_NOWINDOWCHANGES);
+    assert.notEqual(device, 0);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.resolutions.map(([w, hh, window])=>[w, hh, window]),
+        [[640, 480, 0], [640, 480, 0]], 'the mode, and no window named to place');
+});
+
 test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
     // A mode switch resizes the window and the program hears WM_SIZE for it
     // once its device exists. A window already at the mode's size hears

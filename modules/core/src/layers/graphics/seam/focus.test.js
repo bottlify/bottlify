@@ -115,9 +115,8 @@ test('losing the activation loses the device; regaining it waits for a Reset', (
     assert.equal(device.deviceState, STATES.LOST);
     assert.deepEqual(names(), ['ChangeDisplaySettingsA', 'GetWindowLongA', 'ShowWindow',
         'DefWindowProcA', 'CallWindowProcA', 'SetWindowPos', 'CallWindowProcA'], 'the registry'
-        + ' mode, the window'
-        + ' minimised, shown as it is -- what that makes is the default procedure\'s, a mode change aside --'
-        + ' then the program hears it');
+        + ' mode, the window minimised, shown as it is - what that makes is the default'
+        + ' procedure\'s, a mode change aside - then the program hears it');
     calls.length = 0;
     send(0x1c, 1);
     assert.equal(device.deviceState, STATES.NOT_RESET);

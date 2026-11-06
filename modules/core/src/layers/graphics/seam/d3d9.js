@@ -1957,7 +1957,8 @@ export function createDirect3D9Seam(
                 announced.add(device);
                 resolution?.(lastParameters.backBufferWidth >>> 0,
                     lastParameters.backBufferHeight >>> 0, {
-                        window: deviceWindow, fullscreen: true, announce: true,
+                        window: windowsOf.get(device)?.noWindowChanges ? 0 : deviceWindow,
+                        fullscreen: true, announce: true,
                     });
             }
             return pacedPresent(device.Present());
@@ -3852,7 +3853,9 @@ export function createDirect3D9Seam(
             };
         }
         unshown.delete(device);
-        resolution?.(width, height, { window, fullscreen: true });
+        // D3DCREATE_NOWINDOWCHANGES leaves the window's size to the program.
+        resolution?.(width, height, { window: how?.noWindowChanges ? 0 : window,
+            fullscreen: true });
         return taken;
     };
 
