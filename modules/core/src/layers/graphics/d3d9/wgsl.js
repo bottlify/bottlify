@@ -237,6 +237,20 @@ export const colourInterpolation = (location, flat)=>
     (flat && location <= 1 ? ' @interpolate(flat)' : '');
 
 /**
+ * The rest of the usages in the order their pairs of locations follow the
+ * fog and point size's: packed, so the last is location 31, and those a pixel
+ * shader reads as varyings first, so DEPTH and SAMPLE fall below 28, the
+ * locations some GPUs pass between their stages (SwiftShader; Wine's d3d9
+ * pretransformed_varying_test). A position or a tessellation factor is seldom
+ * a varying at all.
+ *
+ * @type {readonly number[]}
+ */
+const OTHER_USAGES = [D3DDECLUSAGE.BLENDWEIGHT, D3DDECLUSAGE.BLENDINDICES, D3DDECLUSAGE.NORMAL,
+    D3DDECLUSAGE.TANGENT, D3DDECLUSAGE.BINORMAL, D3DDECLUSAGE.DEPTH, D3DDECLUSAGE.SAMPLE,
+    D3DDECLUSAGE.POSITION, D3DDECLUSAGE.TESSFACTOR, D3DDECLUSAGE.POSITIONT];
+
+/**
  * Where a varying of a given usage travels between the two stages: colours
  * first, then the coordinate sets, then everything else.
  *
@@ -255,7 +269,7 @@ export function varyingLocation(usage, index){
         case D3DDECLUSAGE.PSIZE:
             return 11;
         default:
-            return 12 + usage * 2 + Math.min(index, 1);
+            return 12 + Math.max(0, OTHER_USAGES.indexOf(usage)) * 2 + Math.min(index, 1);
     }
 }
 
@@ -2284,6 +2298,14 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         `c[${HYBRID_CONSTANTS.TRANSFORMS + stage * 4 + axis}]`;
     /** The declaration's coordinate sets by number, as read and as wide. @type {Map<number, { value: string, components: number }>} */
     const sets = new Map();
+    /**
+     * A pre-transformed vertex's other elements by the location of their usage:
+     * the fixed function hands them to a model 3 pixel shader that reads
+     * them as they are (Wine's d3d9 pretransformed_varying_test).
+     *
+     * @type {Map<number, string>}
+     */
+    const handedOn = new Map();
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -2310,6 +2332,12 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         else if (element.usage === D3DDECLUSAGE.PSIZE)
         {
             pointBase = `${value}.x`;
+        }
+        if (pretransformed && element.usage !== D3DDECLUSAGE.POSITIONT
+            && element.usage !== D3DDECLUSAGE.PSIZE && element.usage !== D3DDECLUSAGE.COLOR
+            && element.usage !== D3DDECLUSAGE.TEXCOORD)
+        {
+            handedOn.set(varyingLocation(element.usage, element.usageIndex), value);
         }
         else if (element.usage === D3DDECLUSAGE.TEXCOORD
             && ((generated[element.usageIndex] ?? 0) !== 0 || carried[element.usageIndex]))
@@ -2443,8 +2471,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             // adds v1 as nothing and scales by v1.a as nothing.
             const diffuse = location === varyingLocation(D3DDECLUSAGE.COLOR, 0);
             const specular = location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
-            body.push(`    out.o${location} = ${diffuse ? 'vec4f(1.0)'
-                : specular ? 'vec4f(0.0, 0.0, 0.0, 1.0)' : 'vec4f(0.0)'};`);
+            const none = diffuse ? 'vec4f(1.0)' : specular ? 'vec4f(0.0, 0.0, 0.0, 1.0)'
+                : 'vec4f(0.0)';
+            body.push(`    out.o${location} = ${handedOn.get(location) ?? none};`);
         }
     }
     if (options.points)

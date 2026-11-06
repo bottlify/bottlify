@@ -1475,3 +1475,38 @@ test('a model 3 vertex shader sizes its points by the output it declared PSIZE',
     assert.equal(translated.error, null);
     assert.ok(translated.wgsl?.includes('let pointSize = min(max(out.o1.x,'), translated.wgsl);
 });
+
+test('a pre-transformed vertex hands its other elements to a pixel shader that reads them', ()=>{
+    // Wine's d3d9 pretransformed_varying_test: a ps_3_0 reading NORMAL,
+    // BLENDWEIGHT, FOG or DEPTH of an XYZRHW vertex reads what was declared.
+    /** @type {import('./wgsl.js').InputShape} */
+    const four = { components: 4, scalar: 'f32', bgra: false };
+    const normal = varyingLocation(D3DDECLUSAGE.NORMAL, 0);
+    const depth = varyingLocation(D3DDECLUSAGE.DEPTH, 0);
+    const stage = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+        { usage: D3DDECLUSAGE.DEPTH, usageIndex: 0, register: 2 },
+    ], new Map([[0, four], [1, four], [2, four]]), [normal, depth]);
+    assertLine(stage.wgsl, `out.o${normal} = in.v1;`);
+    assertLine(stage.wgsl, `out.o${depth} = in.v2;`);
+    // Every usage's two varyings fit the 32 locations a GPU of the era's
+    // vertex outputs had, apart from one another.
+    const all = Object.values(D3DDECLUSAGE).flatMap(usage=>[0, 1]
+        .map(index=>varyingLocation(usage, index)));
+    assert.ok(Math.max(...all) <= 31, String(Math.max(...all)));
+    assert.ok(varyingLocation(D3DDECLUSAGE.DEPTH, 1) < 28 && varyingLocation(D3DDECLUSAGE.SAMPLE, 1)
+        < 28, 'below the 28 locations SwiftShader passes');
+    /** @type {number[]} */
+    const named = [D3DDECLUSAGE.COLOR, D3DDECLUSAGE.TEXCOORD, D3DDECLUSAGE.FOG,
+        D3DDECLUSAGE.PSIZE];
+    const others = Object.values(D3DDECLUSAGE).filter(usage=>!named.includes(usage))
+        .flatMap(usage=>[0, 1].map(index=>varyingLocation(usage, index)));
+    assert.equal(new Set(others).size, others.length, 'apart');
+    // Transformed, the fixed function hands on no normal.
+    const transformed = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+    ], new Map([[0, four], [1, four]]), [normal]);
+    assertLine(transformed.wgsl, `out.o${normal} = vec4f(0.0);`);
+});

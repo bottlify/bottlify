@@ -7085,8 +7085,12 @@ export function createRenderer(options){
         }
         else
         {
+            // A pre-transformed vertex hands every element to the pixel
+            // shader (`fixedVertexStage`).
+            const pretransformed = program.declaration
+                .some(element=>element.Usage === D3DDECLUSAGE.POSITIONT);
             wanted = program.declaration
-                .filter(element=>HYBRID_USAGES.has(element.Usage))
+                .filter(element=>pretransformed || HYBRID_USAGES.has(element.Usage))
                 .map((element, index)=>({
                     location: index, usage: element.Usage, usageIndex: element.UsageIndex,
                     register: index,
