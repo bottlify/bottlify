@@ -165,7 +165,7 @@ export function createWgl(options){
         }
         : undefined;
 
-    /** @type {Map<number, { context: any, hdc: number }>} thread -> what it holds */
+    /** @type {Map<number, { context: any, hdc: number, readHdc: number }>} thread -> what it holds */
     const current = new Map();
 
     /** @type {number} */
@@ -408,13 +408,19 @@ export function createWgl(options){
         },
 
         /**
+         * wglMakeCurrent, and WGL_ARB_make_current_read's
+         * wglMakeContextCurrentARB, whose second DC is the one the default
+         * framebuffer is read from: it carries the context's format too.
+         *
          * @param {number} hdc
          * @param {any | null} context
+         * @param {number} [readHdc]  the DC read from; `hdc` unless given
          * @returns {boolean}
          */
-        wglMakeCurrent(hdc, context){
+        wglMakeCurrent(hdc, context, readHdc = hdc){
             const thread = options.currentThread();
             const drawable = gdi.describeDrawable(hdc);
+            const readDrawable = readHdc === hdc ? drawable : gdi.describeDrawable(readHdc);
             if (!context)
             {
                 if (drawable)
@@ -433,7 +439,7 @@ export function createWgl(options){
                 return false;
             }
             const record = live.get(context);
-            if (!record || !drawable)
+            if (!record || !drawable || !readDrawable)
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);
                 return false;
@@ -442,7 +448,8 @@ export function createWgl(options){
             // DC onto the same window does; one onto a different drawable that
             // happens to be set up differently does not, and letting that
             // through gives the context a framebuffer it cannot describe.
-            if (formats.get(drawable.key) !== record.formatIndex)
+            if (formats.get(drawable.key) !== record.formatIndex
+                || formats.get(readDrawable.key) !== record.formatIndex)
             {
                 fail(WIN32_ERROR.INVALID_PIXEL_FORMAT);
                 return false;
@@ -461,8 +468,11 @@ export function createWgl(options){
                 // A window's buffers are the window's (`gpu.js` attach); a
                 // bitmap's context draws on the processor, into its own.
                 key: record.size ? undefined : drawable.key,
+                read: readDrawable === drawable || record.size ? null
+                    : { width: readDrawable.width, height: readDrawable.height,
+                        key: readDrawable.key },
             });
-            current.set(thread, { context, hdc });
+            current.set(thread, { context, hdc, readHdc });
             if (record.size)
             {
                 bitmaps.made(context, hdc, record);
@@ -509,6 +519,11 @@ export function createWgl(options){
         /** @returns {number} the DC of the last successful make-current, or zero */
         wglGetCurrentDC(){
             return current.get(options.currentThread())?.hdc ?? 0;
+        },
+
+        /** @returns {number} the DC the current context reads from, or zero */
+        wglGetCurrentReadDCARB(){
+            return current.get(options.currentThread())?.readHdc ?? 0;
         },
 
         /**

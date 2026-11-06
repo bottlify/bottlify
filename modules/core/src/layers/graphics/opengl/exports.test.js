@@ -598,13 +598,27 @@ test('WGL_ARB_pixel_format answers attributes and chooses by them', ()=>{
     assert.ok(PIXEL_FORMATS[chosen - 1].cDepthBits >= 24);
 });
 
-test('the swap interval is remembered', ()=>{
-    const { table } = library();
-    assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1);
-    assert.equal(table.wglSwapIntervalEXT.handler([0]), 1);
-    assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0);
-    assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
-});
+test('the swap interval is the window\'s: every context on it reads it, no other window does',
+    ()=>{
+        const { table } = library({ describeDrawable: (/** @type {number} */ hdc)=>({
+            key: `window:${hdc}`, width: 4, height: 4, window: hdc }) });
+        assert.equal(table.wglSwapIntervalEXT.handler([0]), 0, 'no context is current');
+        for (const hdc of [0x900d, 0x900e])
+        {
+            assert.equal(table.wglSetPixelFormat.handler([hdc, 1, 0]), 1);
+        }
+        const first = table.wglCreateContext.handler([0x900d]);
+        const second = table.wglCreateContext.handler([0x900d]);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1, 'one by default');
+        assert.equal(table.wglSwapIntervalEXT.handler([0]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, second]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0, 'another context, one window');
+        assert.equal(table.wglMakeCurrent.handler([0x900e, first]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1, 'another window');
+        assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
+    });
 
 test('a vector argument is decoded from the window over guest memory, not from a copy', ()=>{
     // The `*v` entry points read a handful of floats the guest points at --
@@ -1204,4 +1218,35 @@ test('wglCreateContextAttribsARB refuses what WGL_ARB_create_context refuses and
         assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
         assert.equal(opengl.withContext((/** @type {any} */ context)=>context.glIsList(1)),
             GL.TRUE, 'the two share their lists');
+    });
+
+test('wglMakeContextCurrentARB reads from its second DC, which must carry the context\'s format',
+    ()=>{
+        /** @type {number[]} */
+        const errors = [];
+        const box = machine();
+        const opengl = createOpengl({
+            readMemory: box.readMemory,
+            writeMemory: box.writeMemory,
+            screen: ()=>({ width: 4, height: 4 }),
+            scratch: box.scratch,
+            describeDrawable: (/** @type {number} */ hdc)=>({ key: `window:${hdc}`,
+                width: 4, height: 4, window: hdc }),
+            setLastError: (/** @type {number} */ code)=>errors.push(code),
+        });
+        const table = /** @type {Table} */ (opengl.table);
+        const [draw, read, other] = [0x900d, 0x900e, 0x900f];
+        assert.equal(table.wglSetPixelFormat.handler([draw, 1, 0]), 1);
+        assert.equal(table.wglSetPixelFormat.handler([read, 1, 0]), 1);
+        assert.equal(table.wglSetPixelFormat.handler([other, 2, 0]), 1);
+        const context = table.wglCreateContext.handler([draw]);
+        assert.equal(table.wglMakeContextCurrentARB.handler([draw, other, context]), 0);
+        assert.deepEqual(errors, [2000], 'ERROR_INVALID_PIXEL_FORMAT: the read DC\'s format');
+        assert.equal(table.wglMakeContextCurrentARB.handler([draw, read, context]), 1);
+        assert.equal(table.wglGetCurrentDC.handler([]), draw);
+        assert.equal(table.wglGetCurrentReadDCARB.handler([]), read);
+        assert.equal(table.wglMakeCurrent.handler([draw, context]), 1);
+        assert.equal(table.wglGetCurrentReadDCARB.handler([]), draw, 'one DC both ways');
+        assert.equal(table.wglMakeContextCurrentARB.handler([draw, draw, 0]), 1);
+        assert.equal(table.wglGetCurrentReadDCARB.handler([]), 0);
     });

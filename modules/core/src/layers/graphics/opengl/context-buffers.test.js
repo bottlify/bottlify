@@ -131,12 +131,12 @@ test('an invalidating map does not copy the store out, and every map gives its m
     const probe = gl.glMapBufferRange(GL.ARRAY_BUFFER, 0, 16, GL.MAP_WRITE_BIT);
     gl.glUnmapBufferARB(GL.ARRAY_BUFFER);
     assert.equal(held.size, 0, 'the unmap gave the range back');
-    // The fixture hands out the next 32 bytes on: what lies there before the
-    // map is what an invalidating map leaves.
-    bytes.fill(0xee, probe + 32, probe + 48);
+    // The fixture hands out memory past the last block: what lies there
+    // before the map is what an invalidating map leaves.
+    bytes.fill(0xee, probe, probe + 0x400);
     const at = gl.glMapBufferRange(GL.ARRAY_BUFFER, 0, 16,
         GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_BUFFER_BIT);
-    assert.equal(at, probe + 32);
+    assert.ok(at > probe && at < probe + 0x400 - 16);
     assert.equal(bytes[at + 3], 0xee, 'nothing of the store was copied over it');
     gl.glUnmapBufferARB(GL.ARRAY_BUFFER);
     gl.glMapBufferARB(GL.ARRAY_BUFFER, GL.READ_ONLY);
@@ -167,4 +167,22 @@ test('glCopyBufferSubData copies between its two targets and refuses an overlap'
     gl.glMapBufferRange(GL.COPY_WRITE_BUFFER, 0, 4, GL.MAP_WRITE_BIT);
     gl.glCopyBufferSubData(GL.COPY_READ_BUFFER, GL.COPY_WRITE_BUFFER, 0, 0, 4);
     assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a mapped destination');
+});
+
+test('a map starts on a 64-byte boundary past its range\'s offset, and gives its block back', ()=>{
+    const { gl, bytes, held } = fixture();
+    filled(gl, 200);
+    // The fixture's blocks are 16 bytes apart in step: most are off a
+    // 64-byte boundary, and the map moves itself onto one.
+    for (const offset of [0, 3, 66, 130, 17])
+    {
+        const at = gl.glMapBufferRange(GL.ARRAY_BUFFER, offset, 10, GL.MAP_READ_BIT);
+        assert.equal(at % 64, offset % 64, `from ${offset}`);
+        assert.equal(bytes[at], offset);
+        assert.equal(gl.glUnmapBufferARB(GL.ARRAY_BUFFER), GL.TRUE);
+        assert.equal(held.size, 0, 'the block went back, not the map\'s address');
+    }
+    const whole = gl.glMapBufferARB(GL.ARRAY_BUFFER, GL.READ_ONLY);
+    assert.equal(whole % 64, 0);
+    assert.equal(bytes[whole + 7], 7);
 });

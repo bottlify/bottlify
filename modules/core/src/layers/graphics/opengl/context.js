@@ -222,6 +222,9 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {number} [depthBits]
  * @property {string} [key]  the window it is: every context made current on it shares
  *           its buffers on a device
+ * @property {{ width: number, height: number, key?: string } | null} [read]  the drawable
+ *           the default framebuffer is read from, where it is another
+ *           (WGL_ARB_make_current_read)
  */
 
 /** @typedef {import('./kernel.js').ContextMemory} ContextMemory */

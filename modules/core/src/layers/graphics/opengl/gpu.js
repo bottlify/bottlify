@@ -433,6 +433,8 @@ export function createGpuRenderer(services){
     /**
      * @typedef {Object} DrawableSurfaces
      * @property {any} colour     the back buffer every draw lands in
+     * @property {any} front  the front buffer, which the back one becomes at the
+     *     next swap: null for a single-buffered drawable
      * @property {any[]} shown    two opaque copies, alternating across swaps
      * @property {number} current
      * @property {any} depth
@@ -449,6 +451,13 @@ export function createGpuRenderer(services){
      * @type {Map<string, DrawableSurfaces>}
      */
     const windows = new Map();
+    /**
+     * What each context's default framebuffer is read from: its draw
+     * drawable's surfaces, or its read DC's (WGL_ARB_make_current_read).
+     *
+     * @type {WeakMap<object, DrawableSurfaces>}
+     */
+    const readers = new WeakMap();
 
     /**
      * @typedef {Object} Recording
@@ -3186,7 +3195,7 @@ export function createGpuRenderer(services){
             return;
         }
         const recording = recordingOf(context);
-        const source = sourceOf(surfaces, readFbo, recording);
+        const source = sourceOf(readers.get(context) ?? surfaces, readFbo, recording);
         if (!source)
         {
             return;
@@ -3219,6 +3228,55 @@ export function createGpuRenderer(services){
             sampler: showSamplerFor(),
             scissor: clampRect({ x: xoffset, y: yoffset, width, height }, view),
         });
+    };
+
+    /**
+     * A drawable's colour pair and depth-stencil surface: a window's, found by
+     * its key if it has them at this size, made otherwise.
+     *
+     * @param {{ width: number, height: number, key?: string, doubleBuffered?: boolean }} drawable
+     * @returns {DrawableSurfaces}
+     */
+    const surfacesFor = drawable=>{
+        const width = Math.max(1, drawable.width);
+        const height = Math.max(1, drawable.height);
+        const held = drawable.key === undefined ? undefined : windows.get(drawable.key);
+        if (held && held.width === width && held.height === height)
+        {
+            return held;
+        }
+        const usage = TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
+            | TextureUsage.COPY_SRC;
+        /** @type {DrawableSurfaces} */
+        const surfaces = {
+            colour: backend.createSurface({
+                width, height, format: COLOUR_FORMAT, label: 'gl-colour', usage,
+            }),
+            front: drawable.doubleBuffered === false ? null : backend.createSurface({
+                width, height, format: COLOUR_FORMAT, label: 'gl-colour-front', usage,
+            }),
+            shown: [0, 1].map(index=>backend.createSurface({
+                width, height, format: COLOUR_FORMAT, label: `gl-shown[${index}]`, usage,
+            })),
+            current: 0,
+            depth: backend.createSurface({
+                width, height, format: DEPTH_FORMAT, label: 'gl-depth',
+                usage: TextureUsage.RENDER_ATTACHMENT,
+            }),
+            width,
+            height,
+            target: /** @type {any} */ (null),
+        };
+        surfaces.target = {
+            key: 'window', width, height, flipped: false, colours: [surfaces.colour],
+            formats: [COLOUR_FORMAT], masks: [0xf], depth: surfaces.depth,
+            depthFormat: DEPTH_FORMAT, attached: new Set(),
+        };
+        if (drawable.key !== undefined)
+        {
+            windows.set(drawable.key, surfaces);
+        }
+        return surfaces;
     };
 
     /**
@@ -3261,7 +3319,8 @@ export function createGpuRenderer(services){
             return;
         }
         const recording = recordingOf(context);
-        const source = sourceOf(surfaces, scene.readFramebuffer ?? null, recording);
+        const source = sourceOf(readers.get(context) ?? surfaces,
+            scene.readFramebuffer ?? null, recording);
         const target = targetOf(surfaces, scene.target ?? null, recording);
         if (!source || !target)
         {
@@ -3748,46 +3807,17 @@ export function createGpuRenderer(services){
          * size gets new ones.
          *
          * @param {object} context
-         * @param {{ width: number, height: number, key?: string }} drawable  `key`
-         *     names the window; without one the buffers are the context's alone
+         * @param {{ width: number, height: number, key?: string,
+         *     read?: { width: number, height: number, key?: string } | null }} drawable
+         *     `key` names the window; without one the buffers are the context's
+         *     alone. `read` is the read DC's drawable, where it is another.
          */
         attach(context, drawable){
-            const width = Math.max(1, drawable.width);
-            const height = Math.max(1, drawable.height);
-            const held = drawable.key === undefined ? undefined : windows.get(drawable.key);
-            if (held && held.width === width && held.height === height)
-            {
-                drawables.set(context, held);
-                return;
-            }
-            const usage = TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
-                | TextureUsage.COPY_SRC;
-            drawables.set(context, {
-                colour: backend.createSurface({
-                    width, height, format: COLOUR_FORMAT, label: 'gl-colour', usage,
-                }),
-                shown: [0, 1].map(index=>backend.createSurface({
-                    width, height, format: COLOUR_FORMAT, label: `gl-shown[${index}]`, usage,
-                })),
-                current: 0,
-                depth: backend.createSurface({
-                    width, height, format: DEPTH_FORMAT, label: 'gl-depth',
-                    usage: TextureUsage.RENDER_ATTACHMENT,
-                }),
-                width,
-                height,
-                target: /** @type {any} */ (null),
-            });
-            const surfaces = /** @type {DrawableSurfaces} */ (drawables.get(context));
-            surfaces.target = {
-                key: 'window', width, height, flipped: false, colours: [surfaces.colour],
-                formats: [COLOUR_FORMAT], masks: [0xf], depth: surfaces.depth,
-                depthFormat: DEPTH_FORMAT, attached: new Set(),
-            };
-            if (drawable.key !== undefined)
-            {
-                windows.set(drawable.key, surfaces);
-            }
+            const surfaces = surfacesFor(drawable);
+            drawables.set(context, surfaces);
+            // WGL_ARB_make_current_read: what the default framebuffer is read
+            // from is the read DC's window.
+            readers.set(context, drawable.read ? surfacesFor(drawable.read) : surfaces);
         },
 
         /** @param {object} context */
@@ -3843,10 +3873,20 @@ export function createGpuRenderer(services){
             ({ dumping: dumpDraws, skips: skipTextures } = liveSwitches());
             const shown = target.shown[target.current];
             target.current ^= 1;
+            // The frame's surfaces as it was drawn: the swap below hands the
+            // window's back buffer on before the frame is replayed.
+            const drawn = { ...target };
+            if (target.front)
+            {
+                // PFD_SWAP_EXCHANGE, which every double-buffered format here
+                // reports: the back buffer is the old front one from now on.
+                [target.colour, target.front] = [target.front, target.colour];
+                target.target = { ...target.target, colours: [target.colour] };
+            }
             const cut = backend.markPresent();
             chain = chain
                 .then(async()=>{
-                    await replay(recording, target, shown, cut);
+                    await replay(recording, drawn, shown, cut);
                 })
                 .catch(error=>{
                     unflushed.delete(recording.id);
@@ -3876,7 +3916,7 @@ export function createGpuRenderer(services){
                 return null;
             }
             const recording = recordingOf(context);
-            const source = sourceOf(surfaces, readFbo, recording);
+            const source = sourceOf(readers.get(context) ?? surfaces, readFbo, recording);
             if (!source)
             {
                 return null;

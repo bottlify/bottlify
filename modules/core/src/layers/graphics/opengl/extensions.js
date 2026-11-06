@@ -253,6 +253,7 @@ export const WGL_EXTENSIONS = Object.freeze({
     ],
     WGL_EXT_swap_control: ['wglSwapIntervalEXT', 'wglGetSwapIntervalEXT'],
     WGL_ARB_create_context: ['wglCreateContextAttribsARB'],
+    WGL_ARB_make_current_read: ['wglMakeContextCurrentARB', 'wglGetCurrentReadDCARB'],
     WGL_ARB_create_context_profile: [],
 });
 
@@ -419,7 +420,8 @@ const LATER_EXTENSION_WORDS = [
  * @type {Readonly<Record<number, readonly string[]>>}
  */
 const BASE_EXTENSION_WORDS = Object.freeze({
-    0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT'],
+    0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT',
+        'wglGetCurrentReadDCARB'],
     1: [
         'glActiveStencilFaceEXT',
         'glActiveTextureARB', 'glClientActiveTextureARB', 'glIsBufferARB', 'glUnmapBufferARB',
@@ -450,7 +452,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
     ],
     3: [
-        'wglCreateContextAttribsARB',
+        'wglCreateContextAttribsARB', 'wglMakeContextCurrentARB',
         'glMultiTexCoord1dARB', 'glMultiTexCoord2fARB', 'glMultiTexCoord2iARB',
         'glMultiTexCoord2sARB', 'glGetCompressedTexImageARB', 'glGetBufferParameterivARB',
         'glGetBufferPointervARB', 'glSecondaryColor3bEXT', 'glSecondaryColor3fEXT',

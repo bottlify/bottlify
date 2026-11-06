@@ -618,7 +618,20 @@ export function createOpengl(services){
     /** Where a swapped frame is copied to, allocated when one first is. */
     let frameAddress = 0;
     let frameBytes = 0;
-    let swapInterval = 1;
+    /**
+     * Each window's swap interval, by its drawable's key: WGL_EXT_swap_control
+     * sets the current DC's window's, which every context on it reads and no
+     * other window shares (Wine's opengl32 test_swap_control). One is the
+     * default.
+     *
+     * @type {Map<string, number>}
+     */
+    const swapIntervals = new Map();
+    /** @returns {string | null} the current DC's drawable's key */
+    const currentDrawableKey = ()=>{
+        const hdc = wgl.wglGetCurrentDC();
+        return current() && hdc !== 0 ? describeDrawable(hdc)?.key ?? null : null;
+    };
 
     /** @type {Map<string, number>} what a program called that is not implemented */
     const unimplemented = new Map();
@@ -1470,6 +1483,27 @@ export function createOpengl(services){
         return 1;
     };
 
+    /**
+     * wglMakeCurrent, and wglMakeContextCurrentARB with a DC to read from.
+     *
+     * @param {number} draw @param {number} read @param {number} handle
+     * @returns {number}
+     */
+    const makeCurrent = (draw, read, handle)=>{
+        const context = handle === 0 ? null : contexts.get(handle);
+        if (handle !== 0 && !context)
+        {
+            services.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        if (!wgl.wglMakeCurrent(draw, context ?? null, read))
+        {
+            return 0;
+        }
+        pointRoutines(context ?? null);
+        return 1;
+    };
+
     /** @type {Record<string, (args: number[]) => number>} */
     const handlers = {
         // --- WGL ---
@@ -1520,20 +1554,12 @@ export function createOpengl(services){
             return 1;
         },
 
-        wglMakeCurrent: ([hdc, handle])=>{
-            const context = (handle >>> 0) === 0 ? null : contexts.get(handle >>> 0);
-            if ((handle >>> 0) !== 0 && !context)
-            {
-                services.setLastError?.(ERROR_INVALID_HANDLE);
-                return 0;
-            }
-            if (!wgl.wglMakeCurrent(hdc >>> 0, context ?? null))
-            {
-                return 0;
-            }
-            pointRoutines(context ?? null);
-            return 1;
-        },
+        wglMakeCurrent: ([hdc, handle])=>makeCurrent(hdc >>> 0, hdc >>> 0, handle >>> 0),
+
+        wglMakeContextCurrentARB: ([draw, read, handle])=>
+            makeCurrent(draw >>> 0, read >>> 0, handle >>> 0),
+
+        wglGetCurrentReadDCARB: ()=>wgl.wglGetCurrentReadDCARB(),
 
         wglGetCurrentContext: ()=>{
             const context = current();
@@ -1588,13 +1614,23 @@ export function createOpengl(services){
             // presenter's, which paces to the display already.
             if ((interval | 0) < 0)
             {
+                // ERROR_INVALID_DATA, as the extension says.
+                services.setLastError?.(13);
                 return 0;
             }
-            swapInterval = interval | 0;
+            const key = currentDrawableKey();
+            if (key === null)
+            {
+                return 0;
+            }
+            swapIntervals.set(key, interval | 0);
             return 1;
         },
 
-        wglGetSwapIntervalEXT: ()=>swapInterval,
+        wglGetSwapIntervalEXT: ()=>{
+            const key = currentDrawableKey();
+            return key === null ? 1 : swapIntervals.get(key) ?? 1;
+        },
 
         wglGetPixelFormatAttribivARB: args=>pixelFormatAttributes(args, 'word'),
 
