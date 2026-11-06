@@ -19,7 +19,7 @@ import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INBEGINSTATEBLOCK,
     D3DERR_INVALIDSTATEBLOCK, D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK,
     D3DERR_SCENE_IN_SCENE, D3DERR_SCENE_NOT_IN_SCENE, D3DERR_SURFACENOTINVIDMEM,
-    D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DRENDERSTATE, D3DRENDERSTATE_MAX, D3DSBT,
+    D3DFMT, D3DRENDERSTATE, D3DRENDERSTATE_MAX, D3DSBT,
     D3DTRANSFORMSTATE, D3DVBCAPS_OPTIMIZED, D3DZB, D3D_OK, DDERR_INVALIDCAPS, DDERR_INVALIDPARAMS,
     DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
 } from './constants.js';
@@ -621,7 +621,10 @@ test('a vertex buffer is a guest allocation with one lock at a time', ()=>{
     assert.equal(buffer.Lock(0, lock), D3D_OK);
     assert.equal(lock.data, buffer.base);
     assert.equal(lock.size, 4 * 20);
-    assert.equal(buffer.Lock(0, {}), D3DERR_VERTEXBUFFERLOCKED);
+    /** @type {{ data?: number, size?: number }} */
+    const again = {};
+    assert.equal(buffer.Lock(0, again), D3D_OK, 'locked again (test_process_vertices)');
+    assert.deepEqual(again, lock, 'the same memory');
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.DrawPrimitiveVB(D3DPT.TRIANGLELIST, buffer, 0, 3), DDERR_INVALIDPARAMS,
         'a locked buffer cannot be drawn');

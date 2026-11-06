@@ -464,9 +464,14 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {{ data?: number, size?: number }} out
              */
             Lock(flags, out){
+                // A buffer locked is locked again, its memory handed out once
+                // more, and one Unlock ends both (Wine's ddraw7
+                // test_process_vertices).
                 if (locked)
                 {
-                    return D3DERR_VERTEXBUFFERLOCKED;
+                    out.data = base;
+                    out.size = length;
+                    return D3D_OK;
                 }
                 locked = true;
                 out.data = base;
@@ -531,7 +536,9 @@ export function createDirect3D7(ddraw, services = {}){
             LockInPlace(out){
                 if (locked)
                 {
-                    return D3DERR_VERTEXBUFFERLOCKED;
+                    out.data = base;
+                    out.size = length;
+                    return D3D_OK;
                 }
                 locked = true;
                 inPlace = true;

@@ -45,7 +45,7 @@ import {
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DDP_DONOTCLIP,
     D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP,
-    D3DERR_VERTEXBUFFERLOCKED, D3D_OK, DDERR_INVALIDCAPS,
+    D3D_OK, DDERR_INVALIDCAPS,
     DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
 } from '../d3d7/constants.js';
 import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
@@ -741,7 +741,10 @@ test('a vertex buffer is a guest allocation with a description of its own', ()=>
     assert.notEqual(data, 0, 'the lock answers a guest address the program writes through');
     assert.equal(h.box.memory.readU32(0x6604), 4 * TL_STRIDE,
         'and the whole buffer, which is all D3D7 can lock');
-    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3DERR_VERTEXBUFFERLOCKED >>> 0);
+    h.box.memory.writeU32(0x6600, 0);
+    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK,
+        'a locked buffer is locked again (test_process_vertices)');
+    assert.equal(h.box.memory.readU32(0x6600), data);
     assert.equal(h.buffer(buffer, 'Lock', [0, 0, 0]), DDERR_INVALIDPARAMS >>> 0);
     assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
 
@@ -931,8 +934,8 @@ test('a buffer no draw has read is locked in place, read whole at its first draw
     }
     const lockUnlock = (/** @type {number} */ buffer)=>{
         assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
-        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3DERR_VERTEXBUFFERLOCKED >>> 0,
-            'locked in place is locked');
+        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK,
+            'locked in place is locked again');
         assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
     };
     const process = (/** @type {number} */ at)=>assert.equal(h.buffer(dest, 'ProcessVertices',
