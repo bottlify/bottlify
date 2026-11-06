@@ -1083,7 +1083,12 @@ export function createDirectDrawSeam(
             /** @param {any} surface @param {number[]} args */
             AddAttachedSurface: (surface, [other])=>{
                 const attached = publisher.objectAt(other);
-                return attached ? surface.addAttachedSurface(attached, generation.id)
+                // The reference the attachment holds is taken through the
+                // pointer passed, whichever interface that is: a first
+                // surface attached through IDirectDrawSurface3 keeps its
+                // first count (test_surface_interface_mismatch).
+                return attached ? surface.addAttachedSurface(attached, generation.id,
+                    publisher.interfaceAt(other) ?? generation.id)
                     : DDERR_INVALIDPARAMS;
             },
 

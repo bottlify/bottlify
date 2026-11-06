@@ -24,13 +24,13 @@ import { createDirectDrawSeam } from './ddraw.js';
 import { displayModes } from '../../win32/user32/display.js';
 import {
     IDIRECTDRAW7_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS,
-    IDIRECTDRAWSURFACE7_SLOTS,
+    IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE3_SLOTS,
     IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
 import {
     IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface4,
     IID_IDirectDrawSurface7, IID_IDirectDrawSurface2, IID_IDirectDrawColorControl,
-    IID_IDirect3DDevice7, IID_IDirect3DTexture2, IID_IDirectDrawSurface,
+    IID_IDirect3DDevice7, IID_IDirect3DTexture2, IID_IDirectDrawSurface, IID_IDirectDrawSurface3,
 } from './iids.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
@@ -48,7 +48,7 @@ import {
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
     DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
-    DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED,
+    DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -1015,6 +1015,45 @@ test('DeleteAttachedSurface with no surface detaches all of them', ()=>{
 
     assert.equal(h.release(target), 0);
     assert.equal(h.release(depth), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('an attachment holds its reference on the interface it was passed as', ()=>{
+    // After Wine's ddraw1 test_surface_interface_mismatch: a first-generation
+    // depth buffer attached through IDirectDrawSurface3 is held on its first
+    // count, which its own Release then does not take to zero.
+    const h = seamed();
+    assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+    const ddraw = h.box.memory.readU32(0x4100);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_NORMAL]), DD_OK);
+    /** @param {number} flags @param {number} caps @param {number} [depthBits] */
+    const create = (flags, caps, depthBits = 0)=>{
+        h.box.bytes.fill(0, 0x5000, 0x5000 + DDSURFACEDESC.SIZE);
+        h.box.memory.writeU32(0x5000, DDSURFACEDESC.SIZE);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwFlags, flags | DDSD_WIDTH | DDSD_HEIGHT);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwWidth, 8);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwHeight, 8);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwCaps, caps);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwMipMapCount, depthBits);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+            [0x5000, 0x5100, 0]), DD_OK);
+        return h.box.memory.readU32(0x5100);
+    };
+    const target = create(DDSD_CAPS, DDSCAPS_OFFSCREENPLAIN);
+    const depth = create(DDSD_CAPS | DDSD_ZBUFFERBITDEPTH, DDSCAPS_ZBUFFER, 16);
+    const riid = h.box.putGuid(0x4000, IID_IDirectDrawSurface3);
+    assert.equal(h.box.call(target, 0, [riid, 0x4300]), DD_OK);
+    const target3 = h.box.memory.readU32(0x4300);
+
+    assert.equal(h.box.call(target3, slot(IDIRECTDRAWSURFACE3_SLOTS, 'AddAttachedSurface'),
+        [depth]), DD_OK);
+    assert.equal(h.release(depth), 1, 'the attachment holds the first interface');
+    assert.equal(h.box.call(target3, slot(IDIRECTDRAWSURFACE3_SLOTS, 'DeleteAttachedSurface'),
+        [0, depth]), DD_OK);
+    assert.equal(h.release(target3), 0);
+    assert.equal(h.release(target), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });

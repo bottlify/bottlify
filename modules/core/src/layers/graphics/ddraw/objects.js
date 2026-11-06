@@ -350,7 +350,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {(value: number) => void} setBuffer
  * @property {(value: number) => void} setCaps
  * @property {(previous: Surface | null) => void} setFlipPrev
- * @property {(next: Surface | null, isImplicit: boolean, via?: string) => void} setFlipNext
+ * @property {(next: Surface | null, isImplicit: boolean, via?: string, held?: string) => void}
+ *           setFlipNext
  * @property {() => void} markLost
  * @property {() => number} isLost
  * @property {() => number} restore
@@ -362,7 +363,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {(rect?: Rect | null) => number} unlock
  * @property {() => { hr: number, dc: number | null }} getDC
  * @property {(handle: number) => number} releaseDC
- * @property {(other: Surface, via?: string) => number} addAttachedSurface
+ * @property {(other: Surface, via?: string, held?: string) => number} addAttachedSurface
  *           `via` the interface called through (`surfaceCountOf`'s key).
  * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
  * @property {(which: number) => ColorKey | null} lastColorKey  The key last set, taken
@@ -371,6 +372,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {boolean} programMemory  Whether its pixels are in memory the program gave it.
  * @property {string | undefined} attachedVia  What its flip successor was attached through.
  * @property {boolean} attachedImplicitly  Whether the runtime made the link to its successor.
+ * @property {string | undefined} attachedHeld  The interface the reference on its
+ *           successor is held on.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
  *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
@@ -1191,6 +1194,12 @@ export function createDirectDraw(options = {}){
         let depthVia;
         /** @type {string | undefined} */
         let flipVia;
+        // The interfaces their references are held on: the pointer's the
+        // program passed, which need not be the one it called through.
+        /** @type {string | undefined} */
+        let depthHeld;
+        /** @type {string | undefined} */
+        let flipHeld;
         // The counts its interfaces keep, by `surfaceCountOf`'s name: the one
         // it was created through holds the creation's reference and every
         // reference the model takes itself.
@@ -1211,12 +1220,12 @@ export function createDirectDraw(options = {}){
             if (flipNext)
             {
                 flipNext.setFlipPrev(null);
-                flipNext.release(flipVia);
+                flipNext.release(flipHeld);
                 flipNext = null;
             }
             if (depth)
             {
-                depth.release(depthVia);
+                depth.release(depthHeld);
                 depth = null;
             }
             if (mipNext)
@@ -1511,14 +1520,20 @@ export function createDirectDraw(options = {}){
             get attachedImplicitly(){
                 return flipImplicit;
             },
+            /** The interface the reference on the buffer behind it is held on. */
+            get attachedHeld(){
+                return flipHeld;
+            },
             /**
              * @param {Surface | null} next @param {boolean} isImplicit
              * @param {string} [via]  The interface the link was made through.
+             * @param {string} [held]  The interface its reference is held on.
              */
-            setFlipNext(next, isImplicit, via = undefined){
+            setFlipNext(next, isImplicit, via = undefined, held = via){
                 flipNext = next;
                 flipImplicit = isImplicit;
                 flipVia = via;
+                flipHeld = held;
             },
             markLost(){
                 lost = true;
@@ -1766,8 +1781,10 @@ export function createDirectDraw(options = {}){
             /**
              * @param {Surface} other
              * @param {string} [via]  The interface called through.
+             * @param {string} [held]  The interface `other` was passed as,
+             *        which holds the reference the attachment takes.
              */
-            addAttachedSurface(other, via){
+            addAttachedSurface(other, via, held = via){
                 if (other === surface)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
@@ -1801,7 +1818,8 @@ export function createDirectDraw(options = {}){
                     }
                     depth = other;
                     depthVia = via;
-                    other.addRef(via);
+                    depthHeld = held;
+                    other.addRef(held);
                     return DD_OK;
                 }
                 // A flip chain is a line: the one being attached must be in no
@@ -1820,14 +1838,15 @@ export function createDirectDraw(options = {}){
                 const after = flipNext;
                 if (after !== null)
                 {
-                    other.setFlipNext(after, flipImplicit, flipVia);
+                    other.setFlipNext(after, flipImplicit, flipVia, flipHeld);
                     after.setFlipPrev(other);
                 }
                 flipNext = other;
                 flipVia = via;
+                flipHeld = held;
                 flipImplicit = false;
                 other.setFlipPrev(surface);
-                other.addRef(via);
+                other.addRef(held);
                 restyleChain(surface);
                 return DD_OK;
             },
@@ -1865,8 +1884,9 @@ export function createDirectDraw(options = {}){
                         return DDERR_SURFACENOTATTACHED;
                     }
                     depth = null;
-                    other.release(depthVia);
+                    other.release(depthHeld);
                     depthVia = undefined;
+                    depthHeld = undefined;
                     return DD_OK;
                 }
                 if (mipNext === other)
@@ -1896,13 +1916,15 @@ export function createDirectDraw(options = {}){
                 // surface moves up to take its place, and the reference it held
                 // on that successor transfers here rather than being retaken.
                 const successor = other.flipNext;
-                const released = flipVia;
+                const released = flipHeld;
                 const successorVia = other.attachedVia;
+                const successorHeld = other.attachedHeld;
                 const successorImplicit = other.attachedImplicitly;
                 other.setFlipNext(null, false);
                 other.setFlipPrev(null);
                 flipNext = successor;
                 flipVia = successorVia;
+                flipHeld = successorHeld;
                 flipImplicit = successorImplicit;
                 successor?.setFlipPrev(surface);
                 other.release(released);

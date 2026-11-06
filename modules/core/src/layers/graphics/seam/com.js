@@ -400,6 +400,7 @@ export function createCountCells({ allocate, memory }){
  *             owe: (call: (thread: unknown) => unknown) => void,
  *             unpublish: (api: any) => void,
  *             objectAt: (pointer: number) => any,
+ *             interfaceAt: (pointer: number) => string | null,
  *             adapterFor: (api: any) => any, count: () => number,
  *             countCell: (api: any) => number }}
  */
@@ -467,7 +468,7 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
         const pointer = publishInterface(adapter, id);
         if (pointer !== 0 && !adapter.pointers.has(pointer >>> 0))
         {
-            byPointer.set(pointer >>> 0, adapter.api);
+            byPointer.set(pointer >>> 0, { api: adapter.api, id });
             adapter.pointers.add(pointer >>> 0);
             adapter.ids.add(id);
         }
@@ -512,7 +513,9 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
      * memoises by object: anything published again comes back as the same
      * pointer and is recorded here again.
      *
-     * @type {Map<number, any>}
+     * Each entry keeps the interface the pointer is, as well as its object.
+     *
+     * @type {Map<number, { api: any, id: string }>}
      */
     const byPointer = new Map();
 
@@ -537,7 +540,7 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
             const pointer = publishInterface(adapter, id);
             if (pointer !== 0)
             {
-                byPointer.set(pointer >>> 0, api);
+                byPointer.set(pointer >>> 0, { api, id });
                 adapter.pointers.add(pointer >>> 0);
                 adapter.ids.add(id);
             }
@@ -577,7 +580,17 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
          */
         objectAt: pointer=>((pointer >>> 0) === 0
             ? null
-            : byPointer.get(pointer >>> 0) ?? null),
+            : byPointer.get(pointer >>> 0)?.api ?? null),
+
+        /**
+         * Which interface a pointer is, or null: a reference taken through a
+         * pointer the program passed is that interface's, whatever interface
+         * the call came through (ddraw's AddAttachedSurface).
+         *
+         * @param {number} pointer
+         * @returns {string | null}
+         */
+        interfaceAt: pointer=>byPointer.get(pointer >>> 0)?.id ?? null,
 
         /** @param {any} api */
         adapterFor: api=>adapters.get(api) ?? null,
