@@ -15,7 +15,7 @@ const STUB = 0x7f0000;
 const STATES = { OK: 'ok', LOST: 'lost', NOT_RESET: 'notreset' };
 
 /** user32 as far as the focus window's hook calls it, every call recorded. */
-function harness({ visible = false, foreground = 0, threads = {} } = {}){
+function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0] } = {}){
     /** @type {[string, number[]][]} */
     const calls = [];
     /** @type {Map<number, number>} */
@@ -47,6 +47,7 @@ function harness({ visible = false, foreground = 0, threads = {} } = {}){
         SendMessageA: ([, message, wParam, lParam])=>Number(nested?.([FOCUS, message, wParam,
             lParam]) ?? 0),
         ChangeDisplaySettingsA: ()=>0,
+        GetSystemMetrics: ([index])=>screen[index] ?? 0,
         IsIconic: ()=>(iconic ? 1 : 0),
         ShowWindow: ([, command])=>{
             iconic = command === 6;
@@ -65,6 +66,8 @@ function harness({ visible = false, foreground = 0, threads = {} } = {}){
     };
     /** @type {number[]} */
     const covered = [];
+    /** @type {number[]} */
+    const losses = [];
     const windows = createFocusWindows({
         cover: hwnd=>{
             covered.push(hwnd);
@@ -90,6 +93,8 @@ function harness({ visible = false, foreground = 0, threads = {} } = {}){
         /** @param {boolean} [restorable] */
         injectDeviceLoss(restorable = false){
             this.deviceState = restorable ? STATES.NOT_RESET : STATES.LOST;
+            // How many calls had been made when it was lost.
+            losses.push(calls.length);
         },
     };
     /** @param {number} message @param {number} wParam @param {number} [lParam] */
@@ -98,7 +103,7 @@ function harness({ visible = false, foreground = 0, threads = {} } = {}){
     const hide = ()=>{
         style &= ~0x10000000;
     };
-    return { windows, device, calls, procs, send, covered, hide,
+    return { windows, device, calls, procs, send, covered, hide, losses,
         names: ()=>calls.map(([name])=>name) };
 }
 
@@ -315,6 +320,9 @@ test('DirectDraw\'s window: placed over the mode then made the foreground one, i
     assert.deepEqual(h.names().filter(name=>name !== 'GetWindowLongA'), ['ChangeDisplaySettingsA',
         'ShowWindow', 'CallWindowProcA', 'SetWindowPos', 'CallWindowProcA', 'CallWindowProcA'],
     'what the minimising and its mode make reach the program meanwhile');
+    assert.deepEqual(h.losses.map(at=>h.names().slice(0, at)
+        .filter(name=>name !== 'GetWindowLongA')), [['ChangeDisplaySettingsA']],
+    'the screen gone before the window is minimised');
     assert.equal(h.device.deviceState, STATES.LOST, 'its surfaces lost');
     // Back: its mode set again, which is all the object does with it.
     h.send(0x1c, 1);
@@ -340,4 +348,19 @@ test('DirectDraw keeps the procedure it found when the program set another, and 
     procs.set(FOCUS, STUB);
     windows.release(device);
     assert.equal(procs.get(FOCUS), PROGRAM_PROC, 'the procedure it first found');
+});
+
+test('DirectDraw\'s window regaining the activation is fitted to the screen as it is now'
+    + ' (ddraw test_cursor_clipping)', ()=>{
+    const h = harness({ foreground: FOCUS, screen: [1024, 768] });
+    h.windows.take(h.device, { focus: FOCUS, window: FOCUS, fullscreen: true,
+        noWindowChanges: false, extended: false, width: 640, height: 480, created: true,
+        announce: true });
+    // Restored by the program while away, it is not minimised when it comes back.
+    h.hide();
+    h.send(0x1c, 0);
+    h.calls.length = 0;
+    h.send(0x1c, 1);
+    assert.deepEqual(h.calls.filter(([name])=>name === 'SetWindowPos').map(([, args])=>args),
+        [[FOCUS, 0, 0, 0, 1024, 768, 0x10 | 0x4]], 'the screen\'s size, not the mode taken with');
 });

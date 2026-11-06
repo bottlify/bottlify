@@ -60,6 +60,8 @@ const SW_RESTORE = 9;
 const HWND_TOPMOST = 0xffffffff;
 const HWND_NOTOPMOST = 0xfffffffe;
 const HWND_BROADCAST = 0xffff;
+const SM_CXSCREEN = 0;
+const SM_CYSCREEN = 1;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
@@ -251,6 +253,27 @@ export function createFocusWindows({ user32, procedure, cover, states }){
     };
 
     /**
+     * The size a regained window is given: the device's mode, or for
+     * DirectDraw the screen's as it is now, whichever object set it (Wine's
+     * ddraw test_cursor_clipping: activation fits the window to the screen).
+     *
+     * @param {Held} one
+     * @returns {[number, number]}
+     */
+    const screenOf = one=>{
+        if (one.announce)
+        {
+            const width = Number(call('GetSystemMetrics', [SM_CXSCREEN])) | 0;
+            const height = Number(call('GetSystemMetrics', [SM_CYSCREEN])) | 0;
+            if (width > 0 && height > 0)
+            {
+                return [width, height];
+            }
+        }
+        return [one.size.width, one.size.height];
+    };
+
+    /**
      * The application losing the activation, or regaining it.
      *
      * @param {Held} one @param {boolean} active
@@ -274,9 +297,8 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 ()=>(one.changes
                     ? (call('IsIconic', [one.window]) !== 0
                         ? call('ShowWindow', [one.window, SW_RESTORE])
-                        // DirectDraw's window is the mode's size by its mode.
-                        : one.announce ? 0 : call('SetWindowPos', [one.window, 0, 0, 0,
-                            one.size.width, one.size.height, SWP_NOACTIVATE | SWP_NOZORDER]))
+                        : call('SetWindowPos', [one.window, 0, 0, 0, ...screenOf(one),
+                            SWP_NOACTIVATE | SWP_NOZORDER]))
                     : 0),
                 ()=>{
                     if (!one.extended && !one.announce && one.device.deviceState === states.LOST)
@@ -289,6 +311,10 @@ export function createFocusWindows({ user32, procedure, cover, states }){
         return inTurn([
             // The registry's mode, which every window hears of.
             ()=>call('ChangeDisplaySettingsA', [0, 0]),
+            // DirectDraw's screen is gone before its window is minimised: the
+            // program asks for it while it hears that (Wine's ddraw
+            // test_coop_level_mode_set, TestCooperativeLevel at WM_KILLFOCUS).
+            ()=>(one.announce ? one.device.injectDeviceLoss(false) : 0),
             // A hidden window stays as it is; an extended device's is not
             // put above the others, and DirectDraw's stays where it was.
             ()=>(one.changes && visible(one.window)
@@ -300,7 +326,7 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 {
                     one.device.occlude?.(true);
                 }
-                else
+                else if (!one.announce)
                 {
                     one.device.injectDeviceLoss(false);
                 }
