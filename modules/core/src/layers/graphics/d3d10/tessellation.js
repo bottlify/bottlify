@@ -27,8 +27,8 @@
 
 import { tessellate } from './tessellator.js';
 import {
-    PATCH_BYTES, TESSELLATOR_BINDINGS, TESSELLATOR_WGSL, TESS_ARGS_WORDS, TESS_SCAN_BINDINGS,
-    TESS_SCAN_WGSL,
+    PATCH_BYTES, TESSELLATOR_BINDINGS, TESSELLATOR_WGSL, TESS_ARGS_WORDS, TESS_INDIRECT_AT,
+    TESS_INDIRECT_BINDINGS, TESS_INDIRECT_WGSL, TESS_SCAN_BINDINGS, TESS_SCAN_WGSL,
 } from './tessellator-wgsl.js';
 import {
     DOMAIN_BINDING, HULL_BINDING, STAGE, VERTEX_PATCH_BINDING, linkHull, linkVertexPatches,
@@ -55,6 +55,14 @@ const ARGS_SLOT = 256;
 /** The room the first draws get, and the most it grows to, in points and indices. */
 const FIRST_ROOM = Object.freeze({ points: 1 << 16, indices: 1 << 18 });
 const MOST_ROOM = Object.freeze({ points: 1 << 23, indices: 1 << 24 });
+/**
+ * The patches an indirect draw's buffers are sized for, before and at most:
+ * how many it draws is on the GPU, read back and the room grown to it.
+ */
+const FIRST_PATCH_ROOM = 1 << 10;
+const MOST_PATCH_ROOM = 1 << 16;
+/** An indirect draw's block (`TESS_INDIRECT_AT`), in bytes: a uniform binding's alignment. */
+const INDIRECT_BLOCK = TESS_INDIRECT_AT.words * 4;
 
 const COMPUTE = STAGE.COMPUTE;
 const VERTEX = STAGE.VERTEX;
@@ -81,6 +89,10 @@ const TESSELLATOR_ENTRIES = [
     entry(TESSELLATOR_BINDINGS.points, COMPUTE, 'storage'),
     entry(TESSELLATOR_BINDINGS.indices, COMPUTE, 'storage'),
     entry(TESSELLATOR_BINDINGS.params, COMPUTE, 'uniform'),
+];
+const INDIRECT_ENTRIES = [
+    entry(TESS_INDIRECT_BINDINGS.io, COMPUTE, 'storage'),
+    entry(TESS_INDIRECT_BINDINGS.given, COMPUTE, 'uniform'),
 ];
 const SCAN_ENTRIES = [
     entry(TESS_SCAN_BINDINGS.counts, COMPUTE, 'read-only-storage'),
@@ -144,11 +156,17 @@ export function createTessellation(services){
     const scratch = {};
     let params = /** @type {any} */ (null);
     let args = /** @type {any} */ (null);
+    /** The blocks of indirect draws (`TESS_INDIRECT_AT`). */
+    let blocks = /** @type {any} */ (null);
     /** Draws through the tessellator recorded this frame: their uniform and argument slots. */
     let drawn = 0;
+    /** Indirect draws among them: their blocks. */
+    let drawnIndirect = 0;
     const room = { ...FIRST_ROOM };
+    let patchRoom = FIRST_PATCH_ROOM;
     let lostReported = false;
-    const counted = { draws: 0, patches: 0, culledFrames: 0, grown: 0 };
+    let patchesLostReported = false;
+    const counted = { draws: 0, indirect: 0, patches: 0, culledFrames: 0, grown: 0 };
 
     /** @param {any} shader */
     const hullOf = shader=>{
@@ -245,6 +263,25 @@ export function createTessellation(services){
         return { gpu: args.gpu, at: drawn * ARGS_SLOT };
     };
 
+    /** The blocks of indirect draws, with this frame's next. */
+    const blockFor = ()=>{
+        const bytes = (drawnIndirect + 1) * INDIRECT_BLOCK;
+        if (!blocks || blocks.size < bytes)
+        {
+            if (blocks)
+            {
+                backend.releaseDynamicBuffer(blocks);
+            }
+            blocks = backend.createDynamicBuffer({ label: 'd3d11:tessellation:indirect',
+                size: Math.max(4 * INDIRECT_BLOCK, 2 * bytes),
+                usage: BufferUsage.STORAGE | BufferUsage.UNIFORM | BufferUsage.INDIRECT
+                    | BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
+                keep: false, gpuOnly: true });
+        }
+        blocks.markRead();
+        return { gpu: blocks.gpu, at: drawnIndirect * INDIRECT_BLOCK };
+    };
+
     /**
      * A compute pipeline over several groups, built once for its key; it
      * refuses to build what the translator could not translate.
@@ -313,17 +350,19 @@ export function createTessellation(services){
                 + ' draws none');
             return null;
         }
-        if (draw.indirect)
+        const indexed = draw.indexCount !== undefined;
+        // An indirect draw's counts are on the GPU: its buffers are sized for
+        // the room in patches, and a pass before the others makes its
+        // arguments into their uniforms and dispatch counts (`indirectOf`).
+        const programArgs = draw.indirect ? services.backingOf(draw.indirect.buffer) : null;
+        if (draw.indirect && !programArgs?.gpu)
         {
-            lose('an indirect draw through the tessellator is not drawn: how many patches it'
-                + ' draws is on the GPU, and the passes before it are sized by it');
             return null;
         }
-        const indexed = draw.indexCount !== undefined;
-        const perInstance = Math.floor((indexed ? draw.indexCount ?? 0 : draw.vertexCount)
-            / points);
+        const perInstance = programArgs ? 0
+            : Math.floor((indexed ? draw.indexCount ?? 0 : draw.vertexCount) / points);
         const instances = draw.instanceCount ?? 1;
-        const patches = perInstance * instances;
+        const patches = programArgs ? patchRoom : perInstance * instances;
         if (patches === 0)
         {
             return null;
@@ -388,11 +427,20 @@ export function createTessellation(services){
         };
         const shared = new Uint32Array([patches, perInstance, capacity.points,
             capacity.indices]);
-        const uniforms = paramsFor([vertexParams, null, shared, new Uint32Array([patches, 0]),
+        const most = patchMost(stage.domain, stage.partitioning, stage.output);
+        const uniforms = paramsFor([vertexParams, null, shared,
+            programArgs ? new Uint32Array([points, indexed ? 1 : 0, patchRoom, most.points,
+                most.indices, capacity.points, capacity.indices, 0])
+                : new Uint32Array([patches, 0]),
             new Uint32Array([patches, 1])]);
+        const block = programArgs ? blockFor() : null;
         /** @param {number} slot @param {number} bytes */
-        const uniform = (slot, bytes)=>({ buffer: uniforms.gpu,
-            offset: uniforms.at + slot * UNIFORM_SLOT, size: Math.ceil(bytes / 16) * 16 });
+        const uniform = (slot, bytes)=>({ buffer: block ? block.gpu : uniforms.gpu,
+            offset: (block ? block.at : uniforms.at) + slot * UNIFORM_SLOT,
+            size: Math.ceil(bytes / 16) * 16 });
+        /** @param {number} word @param {number[]} grid */
+        const gridOf = (word, grid)=>(block ? { buffer: block.gpu, offset: block.at + word * 4 }
+            : grid);
 
         const register = 16;
         const vsOut = scratchOf('vertices', patches * points * stage.inputRegisters * register);
@@ -408,6 +456,27 @@ export function createTessellation(services){
         const argSlot = argsFor();
 
         const commands = [];
+        if (block && programArgs && draw.indirect)
+        {
+            programArgs.gpu.markRead();
+            commands.push({ kind: 'copyBuffer', source: programArgs.gpu.gpu,
+                sourceOffset: draw.indirect.offset, destination: block.gpu,
+                destinationOffset: block.at + TESS_INDIRECT_AT.args * 4,
+                size: (indexed ? 5 : 4) * 4 });
+            commands.push({
+                kind: 'dispatch', what: 'an indirect draw\'s arguments were not read',
+                ids: [], label: 'd3d11:tessellation-indirect',
+                pipeline: computeFor('tess-indirect', TESS_INDIRECT_WGSL, 'indirectPatches',
+                    [INDIRECT_ENTRIES], 'd3d11:tessellation-indirect'),
+                groups: [[
+                    { binding: TESS_INDIRECT_BINDINGS.io, resource: { buffer: block.gpu,
+                        offset: block.at, size: INDIRECT_BLOCK } },
+                    { binding: TESS_INDIRECT_BINDINGS.given, resource: { buffer: uniforms.gpu,
+                        offset: uniforms.at, size: SLOTS * UNIFORM_SLOT } },
+                ]],
+                grid: [1, 1, 1],
+            });
+        }
         commands.push({
             kind: 'dispatch', what: 'a vertex shader run before the tessellator was skipped',
             ids: [], pipeline: vertexPipeline, label: 'd3d11:vs-patches',
@@ -424,7 +493,7 @@ export function createTessellation(services){
                         resource: asWords(pipeline.vertexBuffers[slot]) })),
                 ],
             ],
-            grid: [Math.ceil((patches * points) / 64), 1, 1],
+            grid: gridOf(TESS_INDIRECT_AT.vertexGrid, [Math.ceil((patches * points) / 64), 1, 1]),
         });
 
         // 2. the hull shader, a patch an invocation
@@ -447,7 +516,7 @@ export function createTessellation(services){
                     { binding: HULL_BINDING.params, resource: uniform(SLOT.shared, 16) },
                 ],
             ],
-            grid: [Math.ceil(patches / 64), 1, 1],
+            grid: gridOf(TESS_INDIRECT_AT.patchGrid, [Math.ceil(patches / 64), 1, 1]),
         });
 
         // 3-5. the tessellator's counts, their sums, its points and indices
@@ -467,7 +536,8 @@ export function createTessellation(services){
         ]];
         commands.push({ kind: 'dispatch', what: 'the tessellator\'s count was skipped', ids: [],
             pipeline: tessellator, label: 'd3d11:tessellator-count',
-            groups: tessellatorGroup(SLOT.count), grid: [Math.ceil(patches / 64), 1, 1] });
+            groups: tessellatorGroup(SLOT.count),
+            grid: gridOf(TESS_INDIRECT_AT.patchGrid, [Math.ceil(patches / 64), 1, 1]) });
         commands.push({ kind: 'dispatch', what: 'the tessellator\'s sums were skipped', ids: [],
             pipeline: computeFor('tess-scan', TESS_SCAN_WGSL, 'scanPatches', [SCAN_ENTRIES],
                 'd3d11:tessellator-scan'),
@@ -484,10 +554,19 @@ export function createTessellation(services){
             grid: [1, 1, 1] });
         commands.push({ kind: 'dispatch', what: 'the tessellator\'s points were skipped', ids: [],
             pipeline: tessellator, label: 'd3d11:tessellator-write',
-            groups: tessellatorGroup(SLOT.write), grid: [Math.ceil(patches / 64), 1, 1] });
+            groups: tessellatorGroup(SLOT.write),
+            grid: gridOf(TESS_INDIRECT_AT.patchGrid, [Math.ceil(patches / 64), 1, 1]) });
 
         counted.draws++;
-        counted.patches += patches;
+        if (block)
+        {
+            counted.indirect++;
+            drawnIndirect++;
+        }
+        else
+        {
+            counted.patches += patches;
+        }
         drawn++;
         return {
             commands,
@@ -523,20 +602,48 @@ export function createTessellation(services){
             return null;
         }
         const draws = drawn;
+        const indirect = drawnIndirect;
         drawn = 0;
-        const asked = { points: room.points, indices: room.indices };
+        drawnIndirect = 0;
+        const asked = { points: room.points, indices: room.indices, patches: patchRoom };
         return {
             kind: 'readbackBuffer',
-            ranges: Array.from({ length: draws }, (_, index)=>({ buffer: args.gpu,
-                offset: index * ARGS_SLOT + 16, size: 8 })),
+            ranges: [
+                ...Array.from({ length: draws }, (_, index)=>({ buffer: args.gpu,
+                    offset: index * ARGS_SLOT + 16, size: 8 })),
+                ...Array.from({ length: indirect }, (_, index)=>({ buffer: blocks.gpu,
+                    offset: index * INDIRECT_BLOCK + TESS_INDIRECT_AT.asked * 4, size: 4 })),
+            ],
             /** @param {Uint8Array[] | null} results */
             deliver(results){
                 if (!results)
                 {
                     return;
                 }
+                let patchesOver = false;
+                for (const bytes of results.slice(draws))
+                {
+                    const wanted = new Uint32Array(bytes.buffer, bytes.byteOffset, 1)[0];
+                    patchesOver ||= wanted > asked.patches;
+                    while (patchRoom < Math.min(wanted, MOST_PATCH_ROOM))
+                    {
+                        patchRoom *= 2;
+                        counted.grown++;
+                    }
+                }
+                if (patchesOver)
+                {
+                    counted.culledFrames++;
+                    if (!patchesLostReported || patchRoom >= MOST_PATCH_ROOM)
+                    {
+                        patchesLostReported = true;
+                        lose('patches of an indirect draw through the tessellator past the room'
+                            + ' its buffers had were not drawn; the room is grown for the next'
+                            + ' frames');
+                    }
+                }
                 let over = false;
-                for (const bytes of results)
+                for (const bytes of results.slice(0, draws))
                 {
                     const words = new Uint32Array(bytes.buffer, bytes.byteOffset, 2);
                     if (words[0] > asked.points || words[1] > asked.indices)
@@ -573,6 +680,6 @@ export function createTessellation(services){
         hullOf,
         prepare,
         endFrame,
-        diagnostics: ()=>({ ...counted, room: { ...room } }),
+        diagnostics: ()=>({ ...counted, room: { ...room, patches: patchRoom } }),
     };
 }

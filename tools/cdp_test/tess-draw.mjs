@@ -197,13 +197,22 @@ export function drawPageRunner(){
         context.IASetPrimitiveTopology(scene.topology ?? 33);
         context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: width, Height: height,
             MinDepth: 0, MaxDepth: 1 }]);
-        if (scene.indices)
+        if (scene.indirect)
+        {
+            // Arguments a shader could have written: the device reads them on the GPU.
+            check('arguments buffer', d3d.CreateBuffer({ ByteWidth: 64, Usage: 0,
+                BindFlags: 0x80, CPUAccessFlags: 0, MiscFlags: 0, MiscFlags11: 0x10 },
+            { pSysMem: new Uint8Array(Uint32Array.from(scene.indirect.words).buffer) }, made));
+            context[scene.indices ? 'DrawIndexedInstancedIndirect' : 'DrawInstancedIndirect'](
+                made.resource, scene.indirect.offset);
+        }
+        else if (scene.indices)
         {
             context.DrawIndexed(scene.indexCount, scene.startIndex, scene.baseVertex);
         }
         else
         {
-            context.Draw(scene.vertexCount, 0);
+            context.Draw(scene.vertexCount, scene.startVertex ?? 0);
         }
         context.Flush();
         await d3d.idle();
@@ -458,7 +467,8 @@ export async function fetchCases(cdp, sessionId){
                     : fetchReference(one.format, padded[one.stream],
                         element * stride + one.offset);
             });
-            expected.push({ words: [vertex, 0, 0, 0], exact: true },
+            // The vertex ID is the index itself, without the base vertex (test_vertex_id).
+            expected.push({ words: [indices[first + (point % points)], 0, 0, 0], exact: true },
                 { words: [instance, 0, 0, 0], exact: true });
             expected.forEach((want, register)=>{
                 const at = (point * registers + (registers - 1 - register)) * 4;
@@ -616,16 +626,25 @@ export async function cullCases(cdp, sessionId, hull, shaders){
  * @param {{ ds: Uint8Array, hs: Uint8Array, ps: Uint8Array, vs: Uint8Array }} shaders
  * @returns {Promise<number>} 1 when it differs
  */
-export async function drawCase(cdp, sessionId, shaders){
+export async function drawCase(cdp, sessionId, shaders, way = 'direct'){
     const width = 16;
     const height = 8;
-    const scene = {
+    const base = {
         vs: [...shaders.vs], hs: [...shaders.hs], ds: [...shaders.ds], ps: [...shaders.ps],
         // Vertices 1 and 2 are the patches' points; 0 and 3 are never read.
         vertices: [5, 5, 0, 1, -1, -1, 0, 1, 0, -1, 0, 1, 7, 7, 0, 1],
-        // From the index buffer's second index on, each one less than the vertex.
-        indices: [9, 0, 1], indexOffset: 2, indexCount: 2, startIndex: 0, baseVertex: 1,
     };
+    // From the index buffer's second index on, each one less than the vertex.
+    const indexed = { indices: [9, 0, 1], indexOffset: 2 };
+    /** @type {Record<string, any>} */
+    const ways = {
+        direct: { ...indexed, indexCount: 2, startIndex: 0, baseVertex: 1 },
+        // The same draw with its counts on the GPU, a word into the buffer.
+        'indexed, indirect': { ...indexed,
+            indirect: { offset: 4, words: [0xdead, 2, 1, 0, 1, 0] } },
+        'indirect': { indirect: { offset: 8, words: [0xdead, 0xdead, 2, 1, 1, 0] } },
+    };
+    const scene = { ...base, ...ways[way] };
     const got = await evaluate(cdp, sessionId,
         `tessDraw(${width}, ${height}, ${JSON.stringify(scene)})`);
     let wrong = 0;
@@ -654,7 +673,8 @@ export async function drawCase(cdp, sessionId, shaders){
         }
     }
     const fine = wrong === 0 && got.error === null && got.said.length === 0;
-    console.log(`draw: ${fine ? 'every pixel as expected' : `${wrong} pixels differ`
+    const named = way === 'direct' ? '' : ` (${way})`;
+    console.log(`draw${named}: ${fine ? 'every pixel as expected' : `${wrong} pixels differ`
         + ` ${examples.join('; ')}${got.error ? `; GPU: ${got.error}` : ''}${got.said.length
             ? `; said: ${got.said.join(' | ')}` : ''}`}; ${JSON.stringify(got.tessellation)}`);
     return fine ? 0 : 1;

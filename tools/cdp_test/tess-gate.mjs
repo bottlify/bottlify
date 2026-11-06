@@ -423,11 +423,14 @@ async function main(){
         failed += await hullCase(cdp, sessionId);
         failed += await scanCases(cdp, sessionId);
         failed += await fetchCases(cdp, sessionId);
-        failed += await drawCase(cdp, sessionId, { vs: passThroughVertexShader(),
-            // Fractional odd at 4: five segments a side, two of them thin.
-            hs: quadHullShader({ factor: 4, partitioning: 3,
-                corners: [[0, 0], [0, 2], [1, 0], [1, 2]] }),
-            ds: quadDomainShader(), ps: colouredPixelShader() });
+        for (const way of ['direct', 'indexed, indirect', 'indirect'])
+        {
+            failed += await drawCase(cdp, sessionId, { vs: passThroughVertexShader(),
+                // Fractional odd at 4: five segments a side, two of them thin.
+                hs: quadHullShader({ factor: 4, partitioning: 3,
+                    corners: [[0, 0], [0, 2], [1, 0], [1, 2]] }),
+                ds: quadDomainShader(), ps: colouredPixelShader() }, way);
+        }
         failed += await cullCases(cdp, sessionId, passQuadHullShader, {
             vs: passThroughVertexShader(), ds: lerpQuadDomainShader(),
             ps: colouredPixelShader() });

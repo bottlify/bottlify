@@ -28,8 +28,8 @@ import {
     D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_CULL_MODE,
     D3D10_DRIVER_TYPE, D3D10_FILL_MODE, D3D10_FILTER, D3D10_MAP,
     D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION,
-    D3D10_TEXTURE_ADDRESS, D3D10_USAGE, D3D11_DSV_FLAG, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_FALSE,
-    S_OK,
+    D3D10_TEXTURE_ADDRESS, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS, D3D11_DSV_FLAG,
+    D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_FALSE, S_OK,
 } from './constants.js';
 import { D3D10_ASYNC_GETDATA_DONOTFLUSH } from './queries.js';
 import { D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
@@ -2718,6 +2718,46 @@ test('a draw through the tessellator is five compute passes and a draw of the do
     assert.match(vertex, /dsDomain = /);
     assert.equal(device.diagnostics().tessellation.draws, 1);
     assert.equal(device.diagnostics().tessellation.patches, 3);
+});
+
+test('an indirect draw through the tessellator makes its arguments, which only the GPU has,'
+    + ' into the passes\' uniforms and dispatch counts before them', async()=>{
+    const { gpu, device, context, divergences } = quadPatches();
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 64, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D11_BIND_UNORDERED_ACCESS, CPUAccessFlags: 0, MiscFlags: 0,
+        MiscFlags11: D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS }, null, made), S_OK);
+    const argsGpu = gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        call.descriptor.label.startsWith('d3d10:buffer#')).at(-1).createBuffer;
+    context.DrawInstancedIndirect(made.resource, 12);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(divergences, []);
+    assert.deepEqual(gpu.errors, [], 'the GPU took the frame');
+    const passes = gpu.of('dispatchWorkgroups');
+    assert.deepEqual(passes.map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.replace(/#\d+$/, '')),
+    ['d3d11:tessellation-indirect', 'd3d11:vs-patches', 'd3d11:hs', 'd3d11:tessellator',
+        'd3d11:tessellator-scan', 'd3d11:tessellator'], 'in the order they run');
+    const block = passes[0].groups[0].descriptor.entries[0].resource;
+    const copied = gpu.of('copyBufferToBuffer').find((/** @type {any} */ call)=>
+        call.source === argsGpu);
+    assert.ok(copied, 'the arguments copied in');
+    assert.deepEqual([copied.sourceOffset, copied.destination, copied.destinationOffset,
+        copied.size], [12, block.buffer, block.offset + 328 * 4, 16]);
+    assert.deepEqual(passes.slice(1).map((/** @type {any} */ call)=>call.indirect && {
+        buffer: call.indirect.buffer === block.buffer,
+        offset: call.indirect.offset - block.offset }),
+    [{ buffer: true, offset: 320 * 4 }, { buffer: true, offset: 324 * 4 },
+        { buffer: true, offset: 324 * 4 }, undefined, { buffer: true, offset: 324 * 4 }],
+    'the vertex program\'s count, then the patches\', the sums one group');
+    // The hull pass reads the patches the first pass wrote, as a uniform.
+    const hullParams = passes[2].groups[1].descriptor.entries.at(-1).resource;
+    assert.deepEqual([hullParams.buffer === block.buffer, hullParams.offset - block.offset],
+        [true, 128 * 4]);
+    assert.equal(gpu.count('drawIndirect'), 1);
+    assert.equal(device.diagnostics().tessellation.indirect, 1);
 });
 
 test('a draw through the tessellator and a geometry shader runs the domain shader over the'

@@ -1131,3 +1131,89 @@ fn scanPatches(@builtin(local_invocation_index) t: u32) {
     }
 }
 `;
+
+/** The bindings of the pass before an indirect draw through the tessellator. */
+export const TESS_INDIRECT_BINDINGS = Object.freeze({ io: 0, given: 1 });
+
+/**
+ * Words of an indirect draw's block (`TESS_INDIRECT_WGSL`): the uniforms of
+ * the passes after it where the host's direct draw has them (sixty-four
+ * words a slot), then what the pass writes besides and reads.
+ */
+export const TESS_INDIRECT_AT = Object.freeze({
+    /** The vertex program's three dispatch counts, then the patch passes'. */
+    vertexGrid: 320, patchGrid: 324,
+    /** The program's arguments, copied in before the pass. */
+    args: 328,
+    /** The patches the arguments asked for, kept or not. */
+    asked: 336,
+    words: 384,
+});
+
+/**
+ * Before an indirect draw through the tessellator: its arguments, which only
+ * the GPU has, made into what the passes after it read - the vertex program's
+ * counts and starts, the patches and room the hull, tessellator and domain
+ * passes take, and the passes' dispatch counts - with the patches cut to the
+ * room the host gave its buffers (`given`'s fourth slot: points a patch,
+ * whether indexed, the room in patches, a patch's most points and indices,
+ * the room in points and indices) and how many were asked kept for the host
+ * to read back. The vertex program's stream words are the host's, copied.
+ */
+export const TESS_INDIRECT_WGSL = /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> io: array<u32>;
+@group(0) @binding(1) var<uniform> given: array<vec4u, 80>;
+
+fn givenWord(i: u32) -> u32 {
+    return given[i / 4u][i % 4u];
+}
+
+@compute @workgroup_size(1)
+fn indirectPatches() {
+    for (var i = 8u; i < 128u; i++) {
+        io[i] = givenWord(i);
+    }
+    let points = givenWord(192u);
+    let indexed = givenWord(193u);
+    let room = givenWord(194u);
+    let count = io[${TESS_INDIRECT_AT.args}u];
+    let instances = io[${TESS_INDIRECT_AT.args + 1}u];
+    let start = io[${TESS_INDIRECT_AT.args + 2}u];
+    var base = 0u;
+    var first = io[${TESS_INDIRECT_AT.args + 3}u];
+    if (indexed != 0u) {
+        base = io[${TESS_INDIRECT_AT.args + 3}u];
+        first = io[${TESS_INDIRECT_AT.args + 4}u];
+    }
+    let perInstance = count / points;
+    var asked = 0u;
+    if (perInstance != 0u && instances != 0u) {
+        asked = select(perInstance * instances, 0xffffffffu,
+            instances > 0xffffffffu / perInstance);
+    }
+    let patches = min(asked, room);
+    io[0] = patches * points;
+    io[1] = perInstance * points;
+    io[2] = givenWord(2u);
+    io[3] = givenWord(3u);
+    io[4] = start;
+    io[5] = base;
+    io[6] = first;
+    io[7] = 0u;
+    io[128] = patches;
+    io[129] = perInstance;
+    io[130] = min(givenWord(197u), patches * givenWord(195u));
+    io[131] = min(givenWord(198u), patches * givenWord(196u));
+    io[192] = patches;
+    io[193] = 0u;
+    io[256] = patches;
+    io[257] = 1u;
+    io[${TESS_INDIRECT_AT.vertexGrid}u] = (patches * points + 63u) / 64u;
+    io[${TESS_INDIRECT_AT.vertexGrid + 1}u] = 1u;
+    io[${TESS_INDIRECT_AT.vertexGrid + 2}u] = 1u;
+    io[${TESS_INDIRECT_AT.patchGrid}u] = (patches + 63u) / 64u;
+    io[${TESS_INDIRECT_AT.patchGrid + 1}u] = 1u;
+    io[${TESS_INDIRECT_AT.patchGrid + 2}u] = 1u;
+    io[${TESS_INDIRECT_AT.asked}u] = asked;
+}
+`;

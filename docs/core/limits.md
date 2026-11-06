@@ -192,18 +192,19 @@ event, an error. Neither stops the program.
 - Direct3D 11 tessellation runs as compute passes before the draw: the vertex shader over the
   control points, the hull shader a patch an invocation, the fixed-function tessellator (Microsoft's
   reference, bit for bit), and the domain shader as the vertex stage of an indirect draw. An
-  indirect draw through the tessellator is not drawn (its patch count is on the GPU, and the passes
-  are sized by it), and the patches of a frame past the room its buffers have (grown, up to 8 M
-  points and 16 M indices, after the first frame that needs more) are not drawn and said.
+  indirect draw through the tessellator reads its arguments on the GPU, in a pass before the
+  others; its buffers are sized for a room in patches (1 K, grown up to 64 K after the first frame
+  that asks for more). Patches past the room the buffers have (grown, up to 8 M points and 16 M
+  indices, after the first frame that needs more) are not drawn and said.
 - Direct3D 10 and 11 geometry shaders and stream output run as compute passes before the draw:
   the vertex shader over the draw's vertices, the geometry shader a primitive and instance an
   invocation, the strips it builds made lists, stream output into the bound buffers (whole
   primitives, stopping at the first that does not fit; each buffer's filled size kept on the GPU
   for the next draw, `DrawAuto` and the stream-output queries), and the rasterized stream drawn
-  indexed and indirect. Not drawn, and said: a draw through both the tessellator and a geometry
-  shader, an indirect draw or `DrawAuto` through a geometry shader (their counts are on the GPU,
-  and the passes are sized by them), a triangle strip with adjacency through one, and a draw
-  whose output could pass 128 MB between the passes.
+  indexed and indirect, after the tessellator too. Not drawn, and said: an indirect draw or
+  `DrawAuto` through a geometry shader (their counts are on the GPU, and the passes are sized by
+  them), a triangle strip with adjacency through one, and a draw whose output could pass 128 MB
+  between the passes.
 - HLSL compiled at run time (`D3DCompile` of D3DCompiler_43 and D3DCOMPILER_47,
   `D3D10CompileShader`): vertex and pixel shaders of models 4.0, 4.1 and 5.0, and the model 2
   and 3 profiles as `D3DXCompileShader` compiles them. Geometry, hull, domain and compute
