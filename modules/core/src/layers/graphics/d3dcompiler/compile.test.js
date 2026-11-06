@@ -127,8 +127,9 @@ V main(float3 p : POSITION, float2 uv : TEXCOORD0, uint vid : SV_VertexID)
     [['POSITION', 0, 0, 3, 0, 7], ['TEXCOORD', 0, 0, 3, 1, 3], ['SV_VertexID', 0, 6, 1, 2, 1]]);
     assert.deepEqual(vs.outputs.map((/** @type {any} */ e)=>[e.name, e.systemValue,
         e.componentType, e.register, e.mask, e.readWriteMask]),
-    [['SV_Position', 1, 3, 0, 15, 0], ['TEXCOORD', 0, 3, 1, 3, 0],
-        ['BLENDINDICES', 0, 2, 2, 1, 0]]);
+    [['SV_Position', 1, 3, 0, 15, 0], ['TEXCOORD', 0, 3, 1, 3, 12],
+        ['BLENDINDICES', 0, 2, 2, 1, 14]],
+    'an output alone in its register: what is never written');
     const program = decodeSm4(vs.shader.tokens);
     assert.equal(program.reduce((n, i)=>n + i.length, 0), vs.shader.tokens.length);
     assert.deepEqual(program.filter(i=>i.opcode >= OPCODE.DCL_RESOURCE).map(i=>i.name),
@@ -142,6 +143,13 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 { return diffuse.Sample(linear, uv) * pos.z; }`, 'ps_4_0')));
     assert.deepEqual(ps.inputs.map((/** @type {any} */ e)=>[e.name, e.systemValue, e.register,
         e.readWriteMask]), [['SV_Position', 1, 0, 4], ['TEXCOORD', 0, 1, 3]]);
+    // Wine's reflection tests: a depth output, mask 0x1, never writes 0xe.
+    const depth = /** @type {any} */ (parseDxbc(await compiled(`
+void main(in float4 d : position, out float4 b : sv_target2, out float c : sv_depth)
+{ b = d; c = 0; }`, 'ps_4_0')));
+    assert.deepEqual(depth.outputs.map((/** @type {any} */ e)=>[e.name, e.index, e.register,
+        e.mask, e.readWriteMask]),
+    [['sv_target', 2, 2, 0xf, 0], ['sv_depth', 0, 0xffffffff, 1, 0xe]]);
     const reflected = /** @type {any} */ (reflectShader(new Uint8Array([])) ?? null);
     assert.equal(reflected, null);
 });

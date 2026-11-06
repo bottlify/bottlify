@@ -399,12 +399,16 @@ export function writeProgram(program, options){
         register: /** @type {number} */ (input.reg), mask: widthMask(input.width),
         rwMask: (input.used ?? 0) & widthMask(input.width) })));
     const sortedOutputs = program.outputs.slice().sort((a, b)=>(a.reg ?? 0) - (b.reg ?? 0));
+    // An output's read-write mask is the components never written: of the whole register
+    // where the output has it alone (Wine's reflection tests: a depth or a primitive id, mask
+    // 0x1, says 0xe), of its own components where it shares the register with another.
     const osgn = writeSignature(sortedOutputs.map(output=>{
         const mask = widthMask(output.width) << output.first;
+        const alone = output.depth || !program.outputs.some(other=>other !== output
+            && !other.depth && other.reg === output.reg);
         return { name: output.name, index: output.index, sv: output.sv,
             componentType: componentType(output.kind), register: /** @type {number} */ (output.reg),
-            mask, rwMask: output.depth ? 1 & ~(output.written ?? 0)
-                : mask & ~(output.written ?? 0) };
+            mask, rwMask: (alone ? 0xf : mask) & ~(output.written ?? 0) };
     }));
 
     // ---- the token stream --------------------------------------------------------------
