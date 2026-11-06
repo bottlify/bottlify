@@ -82,7 +82,8 @@ import {
     DDSCAPS_PALETTE,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
     DDSCAPS_ZBUFFER, DDSCL_CREATEDEVICEWINDOW, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN,
-    DDSCL_NOWINDOWCHANGES, DDSCL_SETFOCUSWINDOW, DDERR_NOHWND, DDSD_BACKBUFFERCOUNT,
+    DDSCL_NOWINDOWCHANGES, DDSCL_SETFOCUSWINDOW, DDERR_NOHWND,
+    DDERR_NOEXCLUSIVEMODE, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_LINEARSIZE, DDSD_MIPMAPCOUNT,
     DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
@@ -486,6 +487,21 @@ export function createDirectDrawSeam(
      * @type {Set<any>}
      */
     const exclusiveHolders = new Set();
+    /**
+     * Whether an object other than `root` holds the screen exclusively.
+     *
+     * @param {any} root
+     */
+    const heldElsewhere = root=>{
+        for (const holder of exclusiveHolders)
+        {
+            if (holder.destroyed || (holder.cooperativeLevel & DDSCL_EXCLUSIVE) === 0)
+            {
+                exclusiveHolders.delete(holder);
+            }
+        }
+        return [...exclusiveHolders].some(holder=>holder !== root);
+    };
 
     const privateData = createPrivateData({ memory, publisher, rules: DDRAW_PRIVATE_DATA,
         callGuest, currentThread });
@@ -2215,6 +2231,12 @@ export function createDirectDrawSeam(
         // adds a refresh rate and flags after them.
         /** @param {any} root @param {number[]} args */
         SetDisplayMode: (root, [width, height, depth, rate])=>{
+            // The screen another object holds exclusively is not this one's
+            // to change (Wine's test_coop_level_mode_set_multi).
+            if (heldElsewhere(root))
+            {
+                return DDERR_NOEXCLUSIVEMODE;
+            }
             const hr = root.setDisplayMode(
                 width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (rate >>> 0));
             if (hr === DD_OK && root.modeSet)
@@ -2279,18 +2301,8 @@ export function createDirectDrawSeam(
         RestoreAllSurfaces: (/** @type {any} */ root)=>root.restoreAllSurfaces(),
 
         /** @param {any} root */
-        TestCooperativeLevel: root=>{
-            for (const holder of exclusiveHolders)
-            {
-                if (holder.destroyed || (holder.cooperativeLevel & DDSCL_EXCLUSIVE) === 0)
-                {
-                    exclusiveHolders.delete(holder);
-                }
-            }
-            return root.testCooperativeLevel({
-                heldElsewhere: [...exclusiveHolders].some(holder=>holder !== root),
-            });
-        },
+        TestCooperativeLevel: root=>root.testCooperativeLevel(
+            { heldElsewhere: heldElsewhere(root) }),
 
         /**
          * The host flag asks after the adapter a 3D-only card is attached to,

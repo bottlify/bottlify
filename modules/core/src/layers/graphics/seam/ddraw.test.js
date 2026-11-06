@@ -2974,3 +2974,22 @@ test('the exclusive window losing the activation withholds the screen until it i
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
+
+test('another object holding the screen exclusively refuses a mode set'
+    + ' (test_coop_level_mode_set_multi)', ()=>{
+    const h = seamed();
+    const holder = h.create7();
+    const other = h.create7();
+    const mode = (/** @type {number} */ ddraw, /** @type {number} */ width)=>h.box.call(ddraw,
+        slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'), [width, 8, 32, 0, 0]) | 0;
+    assert.equal(mode(other, 12), DD_OK, 'no one holds it yet');
+    assert.equal(h.box.call(holder, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    assert.equal(mode(other, 8), DDERR_NOEXCLUSIVEMODE | 0);
+    assert.equal(h.display.width, 12);
+    assert.equal(mode(holder, 8), DD_OK, 'its holder\'s to change');
+    assert.equal(h.release(holder), 0);
+    assert.equal(mode(other, 8), DD_OK, 'free again once the holder is gone');
+    assert.equal(h.release(other), 0);
+    h.assertAllReleased();
+});
