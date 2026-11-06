@@ -1000,6 +1000,39 @@ function makeWithMemory(){
     return { ...made, memory, divergences };
 }
 
+test('UpdateSurface carries DXT blocks whole, or a part of one ending at both surfaces\' edge',
+    ()=>{
+        // Wine's d3d9 update_surface_test, block_size_tests.
+        const { device } = makeWithMemory();
+        /** @type {{ texture?: any }} */
+        const from = {};
+        device.CreateTexture(64, 64, 0, 0, D3DFMT.DXT1, D3DPOOL.SYSTEMMEM, from);
+        /** @type {{ texture?: any }} */
+        const into = {};
+        device.CreateTexture(64, 64, 0, 0, D3DFMT.DXT1, D3DPOOL.DEFAULT, into);
+        const level = (/** @type {any} */ texture, /** @type {number} */ index)=>{
+            /** @type {{ surface?: any }} */
+            const held = {};
+            assert.equal(texture.GetSurfaceLevel(index, held), D3D_OK);
+            return held.surface;
+        };
+        const rect2x2 = { left: 0, top: 0, right: 2, bottom: 2 };
+        for (const [source, destination, rect, expected] of /** @type {[number, number, any,
+            number][]} */ ([[1, 0, null, D3D_OK], [0, 1, null, D3DERR_INVALIDCALL],
+                [5, 4, null, D3DERR_INVALIDCALL], [4, 5, null, D3DERR_INVALIDCALL],
+                [4, 5, rect2x2, D3DERR_INVALIDCALL], [5, 5, rect2x2, D3D_OK]]))
+        {
+            const a = level(from.texture, source);
+            const b = level(into.texture, destination);
+            assert.equal(device.UpdateSurface(a, rect, b, null), expected,
+                `level ${source} into ${destination}`);
+            a.release();
+            b.release();
+        }
+        from.texture.release();
+        into.texture.release();
+    });
+
 test('UpdateSurface moves a rectangle from system memory into the default pool', ()=>{
     const { device, memory } = makeWithMemory();
     /** @type {{ surface?: any }} */

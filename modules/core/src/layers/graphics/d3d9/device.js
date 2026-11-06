@@ -4526,6 +4526,23 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            const block = FORMAT_INFO[from.Format]?.blockSize;
+            if (block !== undefined)
+            {
+                // Whole blocks, or a part of one that ends where both surfaces
+                // end (Wine's d3d9 update_surface_test: a 2x2 level into a
+                // 4x4 one is refused, into a 2x2 one taken).
+                const fits = (/** @type {number} */ start, /** @type {number} */ end,
+                    /** @type {number} */ size, /** @type {number} */ into,
+                    /** @type {number} */ intoSize)=>start % block === 0 && into % block === 0
+                    && ((end - start) % block === 0
+                        || (end === size && into + end - start === intoSize));
+                if (!fits(rect.left, rect.right, from.Width, at.x, to.Width)
+                    || !fits(rect.top, rect.bottom, from.Height, at.y, to.Height))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+            }
             deliverMoves([rectMove(source, rect, destination, at)], out);
             renderer?.markDirty?.(destination);
             return D3D_OK;
