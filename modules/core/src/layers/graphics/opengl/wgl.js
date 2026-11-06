@@ -52,6 +52,7 @@ import { PFD, WIN32_ERROR } from './constants.js';
 import { CORE_FUNCTIONS, createGlContext } from './context.js';
 import { HIDDEN_GL_EXTENSIONS } from './extensions.js';
 import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './pixelformat.js';
+import { createBitmapDrawables } from './wgl-bitmap.js';
 
 /**
  * @typedef {Object} DrawableInfo
@@ -63,12 +64,15 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  *           any other.
  * @property {number} width
  * @property {number} height
+ * @property {boolean} [memory]  A memory DC: its pixels are the selected bitmap's.
  */
 
 /**
  * @typedef {Object} WglGdi
  * @property {(hdc: number) => DrawableInfo | null} describeDrawable
  *           Null for a handle that is not a device context at all.
+ * @property {(hdc: number) => import('./wgl-bitmap.js').BitmapSurface | null} [bitmapSurface]
+ *           The bitmap a memory DC has selected, and its pixels.
  */
 
 /**
@@ -98,7 +102,7 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  * @property {boolean} [keepPrimitives]
  *           Handed to every context: keep what each one draws for a test to
  *           read back (see `GlContextOptions.keepPrimitives`).
- * @property {(options: { extensions: string[] }) => any} [createContext]
+ * @property {(options: { extensions: string[], processor?: boolean }) => any} [createContext]
  *           Makes a context in place of this module, which then hands it none of
  *           the above but the extensions: a root's (`root.js`), whose memory and
  *           renderer are its own.
@@ -130,10 +134,17 @@ export function createWgl(options){
     const swaps = new Map();
 
     /**
+     * `size` for a context on a memory DC: the bitmap's selected when it was
+     * made, which it keeps whatever is selected later.
+     *
      * @type {Map<any, { key: string, formatIndex: number, doubleBuffered: boolean,
-     *                   depthBits: number }>}
+     *                   depthBits: number, size: { width: number, height: number } | null,
+     *                   colorBits: number, depth: number }>}
      */
     const live = new Map();
+    const bitmaps = createBitmapDrawables({
+        bitmapSurface: hdc=>gdi.bitmapSurface?.(hdc) ?? null,
+    });
 
     /** @type {import('./kernel.js').ContextMemory | undefined} */
     const contextMemory = options.memory
@@ -295,13 +306,16 @@ export function createWgl(options){
             // not the hidden ones, which stay obtainable but unannounced.
             const contextExtensions = Object.keys(extensions).filter(name=>!name.startsWith('WGL_')
                 && !name.startsWith('GL_VERSION_') && !HIDDEN_GL_EXTENSIONS.has(name));
+            // A memory DC's is the generic renderer's context: it draws on the
+            // processor, into a buffer the bitmap meets (`wgl-bitmap.js`).
+            const processor = drawable.memory === true;
             const context = options.createContext
-                ? options.createContext({ extensions: contextExtensions })
+                ? options.createContext({ extensions: contextExtensions, processor })
                 : createGlContext({
                     extensions: contextExtensions,
                     memory: contextMemory,
                     divergence: options.divergence,
-                    gpu: options.gpu,
+                    gpu: processor ? undefined : options.gpu,
                     raster: options.raster,
                     keepPrimitives: options.keepPrimitives,
                 });
@@ -310,6 +324,9 @@ export function createWgl(options){
                 formatIndex: index,
                 doubleBuffered: (format.dwFlags & PFD.DOUBLEBUFFER) !== 0,
                 depthBits: format.cDepthBits,
+                size: processor ? { width: drawable.width, height: drawable.height } : null,
+                colorBits: format.cColorBits,
+                depth: processor ? bitmaps.depthAt(hdc) : format.cColorBits,
             });
             return context;
         },
@@ -385,13 +402,28 @@ export function createWgl(options){
                 return false;
             }
             context.attach({
-                width: drawable.width,
-                height: drawable.height,
+                width: record.size?.width ?? drawable.width,
+                height: record.size?.height ?? drawable.height,
                 doubleBuffered: record.doubleBuffered,
                 depthBits: record.depthBits,
             });
             current.set(thread, { context, hdc });
+            if (record.size)
+            {
+                bitmaps.made(context, hdc, record);
+            }
             return true;
+        },
+
+        /**
+         * glFlush, glFinish and glReadPixels on a context over a memory DC:
+         * its buffer and the bitmap selected now meet (`wgl-bitmap.js`).
+         * Nothing for any other.
+         *
+         * @param {any} context
+         */
+        meetBitmap(context){
+            bitmaps.meet(context);
         },
 
         /** @returns {any | null} */
@@ -436,12 +468,19 @@ export function createWgl(options){
             {
                 return null;
             }
-            if (!current.has(options.currentThread()))
+            const held = current.get(options.currentThread());
+            if (!held)
             {
                 return null;
             }
             const extension = providedBy.get(name);
             if (!extension)
+            {
+                return null;
+            }
+            // The generic renderer of a memory DC is no driver's: it has no
+            // WGL extensions (Wine's opengl32 test_bitmap_rendering).
+            if (extension.startsWith('WGL_') && live.get(held.context)?.size)
             {
                 return null;
             }

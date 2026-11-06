@@ -5788,7 +5788,8 @@ export function createGdiFunctions(host){
          * its own drawable.
          *
          * @param {number} hdc
-         * @returns {{ key: string, window: number, width: number, height: number } | null}
+         * @returns {{ key: string, window: number, width: number, height: number,
+         *     memory: boolean } | null}
          */
         describeDrawable(hdc){
             const dc = contexts.get(hdc >>> 0);
@@ -5814,7 +5815,27 @@ export function createGdiFunctions(host){
                 window: own ? dc.window : 0,
                 width: size.width,
                 height: size.height,
+                memory: dc.kind === 'memory',
             };
+        },
+
+        /**
+         * The bitmap a memory DC has selected, and its pixels as a surface
+         * (`graphics/gdi/surface.js`): what OPENGL32's generic renderer copies
+         * its colour buffer into, and reads it from. Null for any other DC, or
+         * a bitmap with no pixels to address.
+         *
+         * @param {number} hdc
+         * @returns {{ bitmap: number, surface: any } | null}
+         */
+        bitmapSurface(hdc){
+            const dc = contexts.get(hdc >>> 0);
+            if (!dc || dc.kind !== 'memory')
+            {
+                return null;
+            }
+            const surface = host.graphics?.surfaceFor?.(dc, surfaceOf(dc)) ?? null;
+            return surface ? { bitmap: dc.bitmap, surface } : null;
         },
     };
 }

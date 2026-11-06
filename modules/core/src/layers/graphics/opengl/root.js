@@ -93,14 +93,16 @@ export function createOpenglRoot(services){
 
     return {
         /**
-         * @param {{ extensions?: readonly string[] }} options
+         * @param {{ extensions?: readonly string[], processor?: boolean }} options
+         *     `processor`: the context draws on the processor whatever the
+         *     root has, as the generic renderer of a memory DC does.
          */
         CreateContext(options){
             return createGlContext({
                 extensions: options.extensions,
                 memory,
                 divergence: services.divergence,
-                gpu: renderer() ?? undefined,
+                gpu: options.processor ? undefined : renderer() ?? undefined,
                 // A model's twin draws, and is sent each level's data with
                 // the call that gives it: kept here as well, every texture a
                 // program loaded was held twice (the Doom 3 demo's first

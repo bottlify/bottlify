@@ -786,6 +786,10 @@ export function createGraphicsModule(){
                     // would be lost to the next.
                     /** @param {number} hdc */
                     describeDrawable: hdc=>win32.gdi().describeDrawable(hdc),
+                    // A context on a memory DC draws into the bitmap selected
+                    // there (`wgl-bitmap.js`).
+                    /** @param {number} hdc */
+                    bitmapSurface: hdc=>win32.gdi().bitmapSurface?.(hdc) ?? null,
                     // WGL's refusals are read with GetLastError.
                     /** @param {number} code */
                     setLastError: code=>win32.setLastError?.(code),

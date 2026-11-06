@@ -452,6 +452,9 @@ const LIST_TYPES = new Map([
  *           it, and then every non-null handle is its own drawable the size of
  *           the screen -- which is right for the one window a program of this
  *           era opens and wrong as soon as it opens two.
+ * @property {(hdc: number) => import('./wgl-bitmap.js').BitmapSurface | null} [bitmapSurface]
+ *           The bitmap a memory DC has selected, which a context made on that DC
+ *           draws into (`wgl-bitmap.js`).
  * @property {() => void} [presented]  Told of every frame a program swaps.
  * @property {() => number} [currentThread]
  * @property {4 | 8} [pointerSize]
@@ -597,7 +600,7 @@ export function createOpengl(services){
     let madeContext = false;
 
     const wgl = createWgl({
-        gdi: { describeDrawable },
+        gdi: { describeDrawable, bitmapSurface: services.bitmapSurface },
         currentThread: services.currentThread ?? (()=>0),
         setLastError: services.setLastError,
         memory: {
@@ -1819,8 +1822,15 @@ export function createOpengl(services){
         glReadBuffer: ([mode])=>answer(current()?.glReadBuffer(mode >>> 0)),
         glRenderMode: ([mode])=>answer(current()?.glRenderMode(mode >>> 0)),
         glAccum: ([op, value])=>answer(current()?.glAccum(op >>> 0, asFloat(value))),
-        glFlush: ()=>answer(current()?.glFlush()),
-        glFinish: ()=>answer(current()?.glFinish()),
+        // On a memory DC the context's buffer meets the bitmap selected now.
+        glFlush: ()=>call(context=>{
+            context.glFlush();
+            wgl.meetBitmap(context);
+        }),
+        glFinish: ()=>call(context=>{
+            context.glFinish();
+            wgl.meetBitmap(context);
+        }),
         glColorMaterial: ([face, mode])=>
             answer(current()?.glColorMaterial(face >>> 0, mode >>> 0)),
         glClipPlane: ([plane, equation])=>
@@ -2141,6 +2151,7 @@ export function createOpengl(services){
         // --- pixels ---
 
         glReadPixels: ([x, y, width, height, format, type, out])=>call(context=>{
+            wgl.meetBitmap(context);
             const packed = context.glReadPixels(
                 x | 0, y | 0, width | 0, height | 0, format >>> 0, type >>> 0);
             if (packed && (out >>> 0) !== 0)

@@ -253,7 +253,27 @@ export const PIXEL_FORMATS = Object.freeze([
         cDepthBits: depth,
         cStencilBits: stencil,
     })),
+    // A depth the display does not have is the generic renderer's for a
+    // bitmap alone: sixteen bits are a BI_RGB DIB's five of each, and no
+    // alpha is reported (Wine's opengl32 test_16bit_bitmap_rendering).
+    ...DEPTH_STENCIL.map(([depth, stencil])=>pixelFormat({
+        dwFlags: PFD.DRAW_TO_BITMAP | PFD.SUPPORT_OPENGL | PFD.SUPPORT_GDI | PFD.GENERIC_FORMAT,
+        cColorBits: 16,
+        cRedBits: 5,
+        cRedShift: 10,
+        cGreenBits: 5,
+        cGreenShift: 5,
+        cBlueBits: 5,
+        cBlueShift: 0,
+        cAlphaBits: 0,
+        cAlphaShift: 0,
+        cDepthBits: depth,
+        cStencilBits: stencil,
+    })),
 ]);
+
+/** The display's depth: the window formats'. */
+const DISPLAY_COLOR_BITS = 32;
 
 /** The three request-only bits, which no described format ever carries. */
 const DONTCARE_BITS = PFD.DEPTH_DONTCARE | PFD.DOUBLEBUFFER_DONTCARE | PFD.STEREO_DONTCARE;
@@ -297,7 +317,9 @@ function matchCost(candidate, request, index){
     const depthDontCare = (request.dwFlags & PFD.DEPTH_DONTCARE) !== 0;
     return [
         candidate.iPixelType === request.iPixelType ? 0 : 1,
-        atLeast(candidate.cColorBits, request.cColorBits),
+        // No depth asked for is the display's, which every window format has:
+        // a bitmap-only depth is had only by naming it.
+        atLeast(candidate.cColorBits, request.cColorBits || DISPLAY_COLOR_BITS),
         atLeast(candidate.cAlphaBits, request.cAlphaBits),
         Math.abs(candidate.cStencilBits - request.cStencilBits),
         depthDontCare ? candidate.cDepthBits : -candidate.cDepthBits,
