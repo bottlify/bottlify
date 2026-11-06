@@ -1905,3 +1905,17 @@ test('a depth buffer asked for by bits alone is depth only, 24 of them in a 32-b
         assert.equal(surface.release(), 0);
     }
 });
+
+test('a palette of alphas is attached to a texture alone (test_palette_alpha)', ()=>{
+    const ddraw = withLevel();
+    const made = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256 | 0x400,
+        new Array(256).fill(0));
+    const palette = /** @type {any} */ (made.palette);
+    const texture = makeOffscreen(ddraw, { caps: DDSCAPS_TEXTURE });
+    const plain = makeOffscreen(ddraw);
+    assert.equal(plain.setPalette(palette), 0x88760250, 'DDERR_INVALIDSURFACETYPE');
+    assert.equal(texture.setPalette(palette), DD_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(plain.release(), 0);
+    assert.equal(palette.release(), 0);
+});

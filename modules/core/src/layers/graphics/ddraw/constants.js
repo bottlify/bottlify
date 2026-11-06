@@ -215,6 +215,8 @@ export const DDPCAPS_8BIT = 0x00000004;
 export const DDPCAPS_INITIALIZE = 0x00000008;
 export const DDPCAPS_PRIMARYSURFACE = 0x00000010;
 export const DDPCAPS_ALLOW256 = 0x00000040;
+/** A palette whose entries' flags are each texel's alpha: a texture's alone. */
+export const DDPCAPS_ALPHA = 0x00000400;
 export const DDPCAPS_1BIT = 0x00000100;
 export const DDPCAPS_2BIT = 0x00000200;
 

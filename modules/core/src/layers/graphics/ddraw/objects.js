@@ -76,6 +76,7 @@ import {
     DDERR_SURFACELOST,
     DDERR_SURFACENOTATTACHED,
     DDPCAPS_1BIT,
+    DDPCAPS_ALPHA,
     DDPCAPS_2BIT,
     DDPCAPS_4BIT,
     DDPCAPS_PRIMARYSURFACE,
@@ -1568,6 +1569,11 @@ export function createDirectDraw(options = {}){
                 if (sublevel && spec.version === 7)
                 {
                     return DDERR_NOTONMIPMAPSUBLEVEL;
+                }
+                // A palette of alphas is a texture's (Wine's test_palette_alpha).
+                if (next && (next.caps & DDPCAPS_ALPHA) !== 0 && (caps & DDSCAPS_TEXTURE) === 0)
+                {
+                    return DDERR_INVALIDSURFACETYPE;
                 }
                 if (palette)
                 {
