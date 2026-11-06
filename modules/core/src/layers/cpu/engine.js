@@ -586,6 +586,8 @@ export function engineContractProblem(engineModule, url){
  *     forcedStep  Records one turn
  *     the host forced an interpreted instruction through, for the progress guarantee's
  *     `forcedSteps`, where, at what x87 top and why (`forcedAt`).
+ * @property {(at: number, instructions: number) => void} [interpretedAt]  Instructions the
+ *     host interpreted from an address on, for the diagnostics' `interpretedFrom`.
  * @property {() => Promise<number>} translatePending
  *     Regions published; resolves when the batch is instantiated.
  * @property {() => Promise<void>} flush  Writes the store's own bookkeeping (a directory

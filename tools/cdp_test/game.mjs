@@ -1036,6 +1036,11 @@ function describeCork(cork, say){
             + ` emit ${cork.emitMs?.toFixed(1)} encode ${cork.encodeMs?.toFixed(1)}`
             + ` store ${cork.storeMs?.toFixed(1)} instantiate ${cork.instantiateMs?.toFixed(1)}`
             + ` publish ${cork.publishMs?.toFixed(1)} worker ${cork.workerMs?.toFixed(1)})`);
+        // The translation worker's own: all it was held for, by part.
+        const ms = (/** @type {number | undefined} */ value)=>value?.toFixed(1) ?? 'not measured';
+        say(`    worker busy ms: ${ms(cork.workerBusyMs)} (emit ${ms(cork.workerEmitMs)}`
+            + ` encode ${ms(cork.workerEncodeMs)} compile ${ms(cork.workerCompileMs)}`
+            + ` pack ${ms(cork.workerPackMs)}) for ${cork.regions ?? 'not measured'} regions`);
     }
     const refused = Object.entries(cork.refused ?? {});
     if (refused.length > 0)
@@ -1048,18 +1053,32 @@ function describeCork(cork, say){
             say(`      ${why.map(([reason, count])=>`${reason} x${count}`).join('; ')}`);
         }
     }
+    // Where the host's interpreter spent its instructions, by where it began.
+    const from = cork.interpretedFrom ?? [];
+    if (from.length > 0)
+    {
+        say(`    interpreted from:`);
+        for (const { address, count, first, last } of from)
+        {
+            say(`      0x${(address >>> 0).toString(16).padStart(8, '0')}`
+                + ` ${(count / 1e6).toFixed(2)} M  ${(first / 1000).toFixed(1)}-${(last / 1000).toFixed(1)} s`);
+        }
+    }
     const byTarget = cork.exitsByTarget ?? [];
     if (byTarget.length > 0)
     {
         say(`    untranslated exits by target:`);
-        for (const { address, count, reason, first, last } of byTarget)
+        for (const { address, count, reason, first, last, way } of byTarget)
         {
             // From the first exit to the last seen (to a thousand exits): a loading
             // phase's wait for a translation, or one still paid in play.
             const when = first >= 0 ? `  ${(first / 1000).toFixed(1)}-${(last / 1000).toFixed(1)} s`
                 : '';
+            // With `timings`: where it waited for its translation (`way`).
+            const steps = way ? `  way: ${Object.entries(way).map(([step, value])=>step === 'batch'
+                ? `batch ${value}` : `${step} ${(value / 1000).toFixed(2)}`).join(', ')}` : '';
             say(`      0x${(address >>> 0).toString(16).padStart(8, '0')}`
-                + ` x${count}  ${reason}${when}`);
+                + ` x${count}  ${reason}${when}${steps}`);
         }
     }
 }
