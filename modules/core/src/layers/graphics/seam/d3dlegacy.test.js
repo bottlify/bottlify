@@ -848,8 +848,8 @@ test('GetCaps writes each description as large as its caller said, and GetStats 
     const vertices = 0x7000;
     h.box.bytes.fill(0, vertices, vertices + 4 * 24);
     assert.equal(h.device(device, 'DrawPrimitive', [D3DPT.TRIANGLESTRIP,
-        FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, vertices, 4, 0]), 0x88760000 + 761,
-    'D3DERR_SCENE_NOT_IN_SCENE: the draw was read and handed down');
+        FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, vertices, 4, 0]), D3D_OK,
+    'outside a scene: the draw was read and handed down, and drawn');
     h.device(device, 'BeginScene');
     assert.equal(h.device(device, 'DrawPrimitive', [D3DPT.TRIANGLESTRIP,
         FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, vertices, 4, 0]), D3D_OK);
@@ -859,8 +859,9 @@ test('GetCaps writes each description as large as its caller said, and GetStats 
     assert.equal(h.device(device, 'GetStats', [stats]), DDERR_INVALIDPARAMS >>> 0);
     h.box.memory.writeU32(stats, D3DSTATS.SIZE);
     assert.equal(h.device(device, 'GetStats', [stats]), D3D_OK);
-    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwTrianglesDrawn), 2);
-    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwVerticesProcessed), 4);
+    // Both strips, the one outside the scene too.
+    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwTrianglesDrawn), 4);
+    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwVerticesProcessed), 8);
 
     h.release(viewport);
     assert.equal(h.release(device), 0);

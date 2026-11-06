@@ -124,6 +124,9 @@ const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
  * @property {number} Attenuation2
  * @property {number} Theta         The inner cone's full angle, in radians.
  * @property {number} Phi           The outer cone's.
+ * @property {boolean} [Legacy]     A light of Direct3D 1 to 6, which falls off by
+ *     the share of its range left rather than by the distance (Wine's ddraw2
+ *     and ddraw4 test_specular_lighting).
  */
 
 /**
@@ -1140,7 +1143,8 @@ export function packLight(block, at, light){
     {
         put4(block, at + 16, 0, 0, 0, 0);
     }
-    put4(block, at + 20, light.Attenuation0, light.Attenuation1, light.Attenuation2, 0);
+    put4(block, at + 20, light.Attenuation0, light.Attenuation1, light.Attenuation2,
+        light.Legacy === true ? 1 : 0);
     put4(block, at + 24, Math.cos(light.Theta / 2), Math.cos(light.Phi / 2), light.Falloff, 0);
 }
 
@@ -1160,7 +1164,7 @@ export function sameLight(a, b){
         && sameNumber(a.Range, b.Range) && sameNumber(a.Falloff, b.Falloff)
         && sameNumber(a.Attenuation0, b.Attenuation0) && sameNumber(a.Attenuation1, b.Attenuation1)
         && sameNumber(a.Attenuation2, b.Attenuation2) && sameNumber(a.Theta, b.Theta)
-        && sameNumber(a.Phi, b.Phi);
+        && sameNumber(a.Phi, b.Phi) && (a.Legacy === true) === (b.Legacy === true);
 }
 
 /** @param {ColourValue} a @param {ColourValue} b */

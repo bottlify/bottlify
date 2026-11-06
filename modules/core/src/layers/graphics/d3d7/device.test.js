@@ -167,18 +167,24 @@ test('a device is created on a 3D surface in video memory, and on nothing else',
 
 // --- the scene ---
 
-test('the scene is a pair, and a draw belongs inside it', ()=>{
+test('the scene is a pair, and a draw outside it is drawn all the same', ()=>{
     const f = fixture();
     const { device } = f;
     const triangle = new Uint8Array(20 * 3);
 
     assert.equal(device.EndScene(), D3DERR_SCENE_NOT_IN_SCENE);
-    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3),
-        D3DERR_SCENE_NOT_IN_SCENE);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3), D3D_OK,
+        'Wine\'s test_draw_primitive draws before any BeginScene');
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.BeginScene(), D3DERR_SCENE_IN_SCENE);
     assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK, 'the refused begin did not count');
+    // Indices into no vertices draw nothing and succeed, a null array too.
+    const indices = new Uint8Array(8);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL, new Uint8Array(0), 0,
+        indices, 4), D3D_OK);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL,
+        /** @type {any} */ (null), 0, indices, 4), D3D_OK);
     assert.equal(device.EndScene(), D3DERR_SCENE_NOT_IN_SCENE);
 
     releaseAll(f);
@@ -194,8 +200,18 @@ test('a fresh device answers every D3D7 render state and nothing newer', ()=>{
 
     for (const [name, state] of Object.entries(D3DRENDERSTATE))
     {
-        assert.equal(device.GetRenderState(state, out), D3D_OK, name);
         assert.ok(state <= D3DRENDERSTATE_MAX, `${name} is a D3D7 state`);
+        if (name === 'TEXTUREHANDLE' || name === 'TEXTUREMAPBLEND')
+        {
+            // Wine's ddraw7 test_set_render_state: the earlier interfaces'
+            // texture states are refused here, and the value left alone.
+            const left = { value: 0xdeadbeef };
+            assert.equal(device.SetRenderState(state, 0), DDERR_INVALIDPARAMS, name);
+            assert.equal(device.GetRenderState(state, left), DDERR_INVALIDPARAMS, name);
+            assert.equal(left.value, 0xdeadbeef);
+            continue;
+        }
+        assert.equal(device.GetRenderState(state, out), D3D_OK, name);
     }
     assert.equal(device.GetRenderState(154, out), DDERR_INVALIDPARAMS, 'POINTSIZE is D3D8');
     assert.equal(device.SetRenderState(154, 1), DDERR_INVALIDPARAMS);
@@ -514,6 +530,55 @@ test('a state block holds what was set between begin and end, and can be refresh
     releaseAll(f);
 });
 
+test('what is set while a block is recorded goes into the block, not the device', ()=>{
+    // Wine's ddraw7 test_begin_end_state_block.
+    const f = fixture();
+    const { device } = f;
+    /** @type {{ handle?: number }} */
+    const out = {};
+    /** @type {{ value?: number }} */
+    const value = {};
+    /** @type {{ value?: number }} */
+    const stage = {};
+    /** @type {{ matrix?: Float32Array }} */
+    const world = {};
+    const lighting = D3DRENDERSTATE.LIGHTING;
+    const scaled = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 1, 'lighting starts on');
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetRenderState(lighting, 0), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.ADD), D3D_OK);
+    assert.equal(device.SetTransform(D3DTRANSFORMSTATE.WORLD, scaled), D3D_OK);
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 1, 'the device kept its own');
+    assert.equal(device.GetTextureStageState(0, D3DTSS.COLOROP, stage), D3D_OK);
+    assert.equal(stage.value, D3DTOP.MODULATE);
+    assert.equal(device.GetTransform(D3DTRANSFORMSTATE.WORLD, world), D3D_OK);
+    assert.equal(world.matrix?.[0], 1);
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    const block = /** @type {number} */ (out.handle);
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 1, 'and keeps it after the end');
+
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.ApplyStateBlock(block), D3DERR_INBEGINSTATEBLOCK);
+    assert.equal(device.CaptureStateBlock(block), D3DERR_INBEGINSTATEBLOCK);
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, out), D3DERR_INBEGINSTATEBLOCK);
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+
+    assert.equal(device.ApplyStateBlock(block), D3D_OK);
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 0, 'the block applied');
+    assert.equal(device.GetTextureStageState(0, D3DTSS.COLOROP, stage), D3D_OK);
+    assert.equal(stage.value, D3DTOP.ADD);
+    assert.equal(device.GetTransform(D3DTRANSFORMSTATE.WORLD, world), D3D_OK);
+    assert.equal(world.matrix?.[0], 2);
+
+    releaseAll(f);
+});
+
 test('a vertex buffer gives its guest memory back with its last reference', ()=>{
     /** @type {number[]} */
     const freed = [];
@@ -611,6 +676,12 @@ test('the material, clip status and clip planes read back as copies', ()=>{
     assert.equal(device.GetMaterial(out), D3D_OK);
     assert.equal(out.material.Power, 8);
     assert.deepEqual(out.material.Emissive, { r: 0.1, g: 0.2, b: 0.3, a: 0 });
+    // A material of no power: GetMaterial and drawing say zero, ProcessVertices
+    // highlights by the last power that was not (test_specular_lighting).
+    assert.equal(device.SetMaterial({ ...material, Power: 0 }), D3D_OK);
+    assert.equal(device.GetMaterial(out), D3D_OK);
+    assert.equal(out.material.Power, 0);
+    assert.equal(device.processingState().material.Power, 8);
 
     const status = { flags: 1, status: 0, extents: [1, 2, 3, 4, 5, 6] };
     /** @type {{ status?: any }} */

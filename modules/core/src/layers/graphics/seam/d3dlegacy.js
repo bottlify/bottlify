@@ -180,6 +180,18 @@ export function createLegacyDirect3DSeam(
     const pointerTo = (object, id)=>publisher.publish(object, [], id);
 
     /**
+     * A surface the model took a reference on for the program, handed out
+     * as `id`: the reference is that interface's to release, so it moves to
+     * that interface's count (`handedAs`).
+     *
+     * @param {any} surface @param {string} id
+     */
+    const handedSurface = (surface, id)=>{
+        surface.handedAs?.(id);
+        return pointerTo(surface, id);
+    };
+
+    /**
      * A device's methods, each first making what the routines of its third
      * generation wrote into the ring of the Direct3D 7 device under it
      * (`shadeLegacy`): the host answers after every call the program made
@@ -1035,7 +1047,7 @@ export function createLegacyDirect3DSeam(
                 /** @type {{ surface?: any }} */
                 const held = {};
                 device.inner.GetRenderTarget(held);
-                fields.writeU32(out >>> 0, pointerTo(held.surface, ids.surface));
+                fields.writeU32(out >>> 0, handedSurface(held.surface, ids.surface));
                 return D3D_OK;
             },
 
@@ -1227,7 +1239,7 @@ export function createLegacyDirect3DSeam(
             if (hr === D3D_OK)
             {
                 fields.writeU32(out >>> 0,
-                    held.surface ? pointerTo(held.surface, IDS[3].texture) : 0);
+                    held.surface ? handedSurface(held.surface, IDS[3].texture) : 0);
             }
             return hr;
         },

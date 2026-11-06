@@ -164,7 +164,13 @@ function reach(light, position){
     const distance = Math.sqrt(dot(offset, offset));
     const toLight = unit(offset);
     let scale = 0;
-    if (distance <= light.Range)
+    if (distance <= light.Range && light.Legacy === true)
+    {
+        // A Direct3D 1-6 light falls off over the share of its range left.
+        const left = (light.Range - distance) / light.Range;
+        scale = light.Attenuation0 + light.Attenuation1 * left + light.Attenuation2 * left * left;
+    }
+    else if (distance <= light.Range)
     {
         const denominator = light.Attenuation0 + light.Attenuation1 * distance
             + light.Attenuation2 * distance * distance;

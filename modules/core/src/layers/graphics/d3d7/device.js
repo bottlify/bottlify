@@ -557,8 +557,16 @@ export function createDirect3D7(ddraw, services = {}){
                 renderStates.set(state, 0);
             }
         }
-        /** @param {number} state */
-        const isProgramState = state=>state <= D3DRENDERSTATE_MAX && renderStates.has(state);
+        /**
+         * TEXTUREHANDLE and TEXTUREMAPBLEND are the earlier interfaces' and
+         * refused on IDirect3DDevice7 both ways (ddraw7 test_set_render_state);
+         * those devices keep them themselves (legacy.js).
+         *
+         * @param {number} state
+         */
+        const isProgramState = state=>state <= D3DRENDERSTATE_MAX && renderStates.has(state)
+            && state !== D3DRENDERSTATE_D3D7_ONLY.TEXTUREHANDLE
+            && state !== D3DRENDERSTATE_D3D7_ONLY.TEXTUREMAPBLEND;
         /** @type {Map<number, Map<number, number>>} */
         const stageStates = new Map();
         /** @type {Map<number, any>} stage -> DirectDraw surface */
@@ -568,6 +576,11 @@ export function createDirect3D7(ddraw, services = {}){
         /** @type {Map<number, { light: Light, enabled: boolean }>} */
         const lights = new Map();
         let material = defaultMaterial();
+        /**
+         * The last power SetMaterial gave that was not zero, which is what
+         * ProcessVertices highlights a material of no power by.
+         */
+        let processedPower = 0;
         let renderTarget = target;
         /** @type {import('../webgpu/contract.js').ViewportState} */
         let viewport = fullTarget({ width: target.width, height: target.height });
@@ -823,16 +836,14 @@ export function createDirect3D7(ddraw, services = {}){
          * What every draw is refused for before its arguments are looked at.
          * A draw of nothing -- no vertices, or no indices -- is not refused
          * for having no primitives: it draws nothing and succeeds, whatever
-         * its arrays are (Wine's ddraw7.c test_draw_primitive).
+         * its arrays are (Wine's ddraw7.c test_draw_primitive). Nor is a draw
+         * outside a scene: Direct3D 7 and its elders draw it (the same test,
+         * and ddraw2's and ddraw4's, draw before any BeginScene).
          *
          * @param {number} type @param {number} fvf @param {number} primitiveCount
          * @param {number} elements  The vertices or indices the draw names.
          */
         const drawPreconditions = (type, fvf, primitiveCount, elements)=>{
-            if (!inScene)
-            {
-                return D3DERR_SCENE_NOT_IN_SCENE;
-            }
             if (elements !== 0 && vertexCountOf(type, primitiveCount) === 0)
             {
                 return primitiveCount > 0 ? D3DERR_INVALIDPRIMITIVETYPE : DDERR_INVALIDPARAMS;
@@ -882,15 +893,22 @@ export function createDirect3D7(ddraw, services = {}){
             return 0;
         };
 
-        /** Records a state set while a block is being recorded. */
         /**
+         * A state set while a block is being recorded goes into the block
+         * and not to the device: the device keeps what it had until the block
+         * is applied (ddraw7 test_begin_end_state_block). True when it was
+         * taken so.
+         *
          * @param {string} kind @param {number} key @param {any} value
+         * @returns {boolean}
          */
-        function record(kind, key, value){
-            if (recording)
+        function recorded(kind, key, value){
+            if (!recording)
             {
-                recording[kind].set(key, value);
+                return false;
             }
+            recording[kind].set(key, value);
+            return true;
         }
 
         /** @param {any} block */
@@ -1220,8 +1238,10 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                transforms.set(key, Float32Array.from(matrix));
-                record('transforms', key, Float32Array.from(matrix));
+                if (!recorded('transforms', key, Float32Array.from(matrix)))
+                {
+                    transforms.set(key, Float32Array.from(matrix));
+                }
                 return D3D_OK;
             },
 
@@ -1309,6 +1329,10 @@ export function createDirect3D7(ddraw, services = {}){
                     return DDERR_INVALIDPARAMS;
                 }
                 material = copyMaterial(value);
+                if (material.Power !== 0)
+                {
+                    processedPower = material.Power;
+                }
                 return D3D_OK;
             },
 
@@ -1365,8 +1389,11 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                if (recorded('renderStates', state, value >>> 0))
+                {
+                    return D3D_OK;
+                }
                 renderStates.set(state, value >>> 0);
-                record('renderStates', state, value >>> 0);
                 if (LEGACY_SAMPLER_STATES.has(state))
                 {
                     services.divergence?.('Direct3D 7', 'the texture filter, address and border'
@@ -1444,8 +1471,10 @@ export function createDirect3D7(ddraw, services = {}){
                 for (const each of types)
                 {
                     const stored = FILTER_NUMBERING[each]?.stored(value >>> 0) ?? value >>> 0;
-                    states.set(each, stored);
-                    record('stageStates', (stage << 8) | each, stored);
+                    if (!recorded('stageStates', (stage << 8) | each, stored))
+                    {
+                        states.set(each, stored);
+                    }
                 }
                 return D3D_OK;
             },
@@ -1520,7 +1549,10 @@ export function createDirect3D7(ddraw, services = {}){
                     renderState: state=>renderStates.get(state) ?? 0,
                     lights: [...lights.values()].filter(entry=>entry.enabled)
                         .map(entry=>entry.light),
-                    material,
+                    // A material of no shininess highlights by the last power
+                    // that was not zero (Wine's ddraw7 test_specular_lighting).
+                    material: material.Power === 0 ? { ...material, Power: processedPower }
+                        : material,
                 };
             },
 
@@ -1630,6 +1662,10 @@ export function createDirect3D7(ddraw, services = {}){
 
             /** @param {number} handle */
             ApplyStateBlock(handle){
+                if (recording)
+                {
+                    return D3DERR_INBEGINSTATEBLOCK;
+                }
                 const block = stateBlocks.get(handle);
                 if (!block)
                 {
@@ -1646,6 +1682,10 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {number} handle
              */
             CaptureStateBlock(handle){
+                if (recording)
+                {
+                    return D3DERR_INBEGINSTATEBLOCK;
+                }
                 const block = stateBlocks.get(handle);
                 if (!block)
                 {
@@ -1680,6 +1720,10 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {{ handle?: number }} out
              */
             CreateStateBlock(type, out){
+                if (recording)
+                {
+                    return D3DERR_INBEGINSTATEBLOCK;
+                }
                 if (!/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
                 {
                     return DDERR_INVALIDPARAMS;
@@ -1751,7 +1795,9 @@ export function createDirect3D7(ddraw, services = {}){
             DrawIndexedPrimitive(type, fvf, vertices, vertexCount, indices, indexCount){
                 const primitiveCount = primitiveCountOf(type, indexCount);
                 const hr = drawPreconditions(type, fvf, primitiveCount, indexCount);
-                if (hr !== D3D_OK || indexCount === 0)
+                // Indices into no vertices draw nothing, whatever the arrays
+                // are (test_draw_primitive: a null array of none, indexed).
+                if (hr !== D3D_OK || indexCount === 0 || vertexCount === 0)
                 {
                     return hr;
                 }
