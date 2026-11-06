@@ -814,6 +814,7 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0],
     },
     { query: GL.RENDERBUFFER_BINDING, name: 'GL_RENDERBUFFER_BINDING', kind: 'int', value: [0] },
+    { query: GL.VERTEX_ARRAY_BINDING, name: 'GL_VERTEX_ARRAY_BINDING', kind: 'int', value: [0] },
     {
         query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],

@@ -21,6 +21,7 @@ import { GL } from './constants.js';
 import { INTERLEAVED_LAYOUTS, componentBytes, readElement, readIndex } from './arrays.js';
 import { createBufferObject } from './objects.js';
 import { TEXTURE_UNITS } from './state.js';
+import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
 
 /** The conventional arrays after the position, in the order a draw reads them. */
 const CONVENTIONAL = /** @type {const} */ (['color', 'secondary', 'normal', 'fogCoord']);
@@ -134,6 +135,17 @@ const ARRAYS = {
         stride: GL.FOG_COORDINATE_ARRAY_STRIDE, binding: null, normalised: false,
     },
 };
+
+/**
+ * The flat queries a vertex array object holds (OpenGL 3.0, table 6.6 and
+ * 6.7): the client vertex array group but for the array buffer binding, the
+ * client-active texture unit and the compiled-array lock, which are the
+ * context's.
+ */
+const VERTEX_ARRAY_OBJECT_QUERIES = Object.freeze(queriesSavedBy(CLIENT_BITS,
+    GL.CLIENT_VERTEX_ARRAY_BIT).filter(query=>query !== GL.ARRAY_BUFFER_BINDING
+    && query !== GL.CLIENT_ACTIVE_TEXTURE && query !== GL.ARRAY_ELEMENT_LOCK_FIRST
+    && query !== GL.ARRAY_ELEMENT_LOCK_COUNT));
 
 /** The glGetPointerv name of each array. */
 const POINTER_QUERIES = Object.freeze({
@@ -714,6 +726,52 @@ export function installArrayCalls(context, kernel){
             record: aliasRecord, setEnable: aliasSetEnable, enabled: aliasEnabled,
         },
         clientActiveUnit: ()=>clientActive,
+
+        /**
+         * What a vertex array object holds, taken from the context as it is:
+         * every array's pointer and enable, the generic ones', and the
+         * element array buffer binding.
+         *
+         * @returns {any}
+         */
+        vertexArrayState(){
+            return {
+                values: new Map(VERTEX_ARRAY_OBJECT_QUERIES.map(query=>
+                    [query, [...record(query).values]])),
+                pointers: structuredClone(pointers),
+                texCoordPointers: structuredClone(texCoordPointers),
+                texCoordEnabled: [...texCoordEnabled],
+                programs: kernel.side.saveClientPrograms(GL.CLIENT_VERTEX_ARRAY_BIT),
+            };
+        },
+
+        /**
+         * Makes a vertex array object's state the context's (glBindVertexArray);
+         * the client-active unit and the lock stay as they are.
+         *
+         * @param {any} state  as `vertexArrayState` gave it
+         */
+        useVertexArrayState(state){
+            for (const [query, values] of state.values)
+            {
+                setState(query, [...values]);
+            }
+            for (const name of Object.keys(pointers))
+            {
+                Object.assign(pointers[name], state.pointers[name]);
+            }
+            texCoordPointers.forEach((pointer, i)=>{
+                Object.assign(pointer, state.texCoordPointers[i]);
+            });
+            state.texCoordEnabled.forEach((/** @type {number} */ v, /** @type {number} */ i)=>{
+                texCoordEnabled[i] = v;
+            });
+            for (const name of Object.keys(ARRAYS))
+            {
+                mirror(name);
+            }
+            kernel.side.restoreClientPrograms(state.programs);
+        },
 
         /** @param {number} mask @returns {any} */
         saveClient(mask){

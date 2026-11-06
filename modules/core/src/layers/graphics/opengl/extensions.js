@@ -30,6 +30,32 @@
  * `GL_VERSIONS`, which the extension string does not name.
  */
 
+import { GL_SIGNATURES } from './registry.js';
+
+/**
+ * A command's arguments as the registry declares them (`registry.js`), a
+ * letter each, or undefined for a name it does not have: an extension's
+ * command no table here sizes takes its size from it (`EXTENSION_WORDS`).
+ * `registry.test.js` holds the tables to it for every name both have.
+ *
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+export const registryArguments = name=>GL_SIGNATURES[name]?.split(':')[1];
+
+/**
+ * The stack words a command takes on a 32-bit caller's stack: a double and a
+ * 64-bit integer two, anything else one.
+ *
+ * @param {string} name
+ * @returns {number | undefined}
+ */
+export function registryWords(name){
+    const letters = registryArguments(name);
+    return letters === undefined ? undefined
+        : [...letters].reduce((sum, letter)=>sum + (letter === 'd' || letter === 'l' ? 2 : 1), 0);
+}
+
 /** GL_ARB_shader_objects' functions and their stack words. */
 /** @type {readonly [string, number][]} */
 const SHADER_OBJECT_WORDS = [
@@ -174,6 +200,9 @@ export const GL_EXTENSIONS = Object.freeze({
         ...VERTEX_ATTRIB_ARB,
     ],
     GL_ARB_fragment_shader: [],
+    GL_ARB_vertex_array_object: [
+        'glBindVertexArray', 'glDeleteVertexArrays', 'glGenVertexArrays', 'glIsVertexArray',
+    ],
     GL_ARB_shading_language_100: [],
     GL_ARB_fragment_program: [
         'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
@@ -419,6 +448,16 @@ export const EXTENSION_WORDS = (()=>{
         ...LATER_EXTENSION_WORDS])
     {
         (words[count] ??= []).push(name);
+    }
+    // The rest of every extension's functions, as the registry sizes them.
+    const sized = new Set(Object.values(words).flat());
+    for (const name of new Set(Object.values(GL_EXTENSIONS).flat()))
+    {
+        const count = sized.has(name) ? undefined : registryWords(name);
+        if (count !== undefined)
+        {
+            (words[count] ??= []).push(name);
+        }
     }
     return Object.freeze(words);
 })();

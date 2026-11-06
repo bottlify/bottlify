@@ -214,6 +214,13 @@ export function laterEntryPoints(h){
             }
         }),
 
+        // --- vertex array objects ---
+
+        glGenVertexArrays: generator((context, count)=>context.glGenVertexArrays(count)),
+        glDeleteVertexArrays: deleter((context, names)=>context.glDeleteVertexArrays(names)),
+        glBindVertexArray: ([name])=>answer(current()?.glBindVertexArray(name >>> 0)),
+        glIsVertexArray: ([name])=>current()?.glIsVertexArray(name >>> 0) ?? GL.FALSE,
+
         // --- GL_ARB_shader_objects: the objects above by handle ---
 
         glCreateShaderObjectARB: ([type])=>current()?.glCreateShader(type >>> 0) ?? 0,

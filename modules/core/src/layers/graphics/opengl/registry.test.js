@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL_CORE_REMOVED, GL_EXTENSION_COMMANDS, GL_FEATURE_COMMANDS, GL_SIGNATURES }
     from './registry.js';
-import { ARGUMENT_WORDS, floatArguments, registryArguments, registryWords } from './exports.js';
+import { ARGUMENT_WORDS, floatArguments } from './exports.js';
+import { registryArguments, registryWords } from './extensions.js';
 
 test('the registry carries each argument\'s size class as the specification declares it', ()=>{
     // A double and a 64-bit integer are two words on an x86 stack; a pointer-sized
