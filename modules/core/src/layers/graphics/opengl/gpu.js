@@ -51,6 +51,9 @@ import {
     FACE_STRIDE, attachmentImage, createTextureObject, isTextureComplete, levelKey,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
+import { depthWriteWords } from '../webgpu/internal/depth.js';
+import { TEX, gpuStorageOf } from './formats.js';
+import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
 import {
     CANONICAL_LAYOUT, clientReads, expandIndices, instanceElements, isList, lockedFor,
     packVertices, planLayout, scanIndices, topologyOf, vertexRange,
@@ -463,6 +466,13 @@ export function createGpuRenderer(services){
      */
     /** @type {WeakMap<object, DrawableSurfaces>} context -> its drawable's surfaces */
     const drawables = new WeakMap();
+    /**
+     * The buffers of each window a context was made current on, by its
+     * drawable's key: the window's, whichever context draws.
+     *
+     * @type {Map<string, DrawableSurfaces>}
+     */
+    const windows = new Map();
 
     /**
      * @typedef {Object} Recording
@@ -547,10 +557,11 @@ export function createGpuRenderer(services){
      *     and a uniform block per program stage.
      * @property {string} key
      * @property {{ binding: number, cube: boolean, unit: number, sampler?: number,
-     *     layout?: { viewDimension: string, sampleType: string, multisampled: boolean }
-     *     }[]} textures
+     *     layout?: { viewDimension: string, sampleType: string, multisampled: boolean },
+     *     unfilterable?: boolean }[]} textures
      *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value, and
-     *     the texture its type reads (`layout`)
+     *     the texture its type reads (`layout`); `unfilterable`: bound as a float
+     *     texture no sampler filters
      * @property {boolean} vertexBlock
      * @property {boolean} fragmentBlock
      * @property {boolean} [glsl]  the textures are visible to the vertex stage too
@@ -627,6 +638,27 @@ export function createGpuRenderer(services){
 
     /** @type {Map<string, { groups: any[], pipeline: any }>} */
     const layouts = new Map();
+
+    /**
+     * A plan whose textures include some no sampler filters (`kinds`, one
+     * letter a texture as `TextureRecord.kind`): a layout of its own, and a
+     * pipeline of its own.
+     *
+     * @type {Map<string, BindPlan>}
+     */
+    const plansByKinds = new Map();
+    /** @param {BindPlan} plan @param {string} kinds @returns {BindPlan} */
+    const planOfKinds = (plan, kinds)=>{
+        const key = `${plan.key}~${kinds}`;
+        let made = plansByKinds.get(key);
+        if (!made)
+        {
+            made = { ...plan, key, textures: plan.textures.map((texture, k)=>({ ...texture,
+                unfilterable: kinds[k] === 'u' })) };
+            plansByKinds.set(key, made);
+        }
+        return made;
+    };
     /** @param {BindPlan} plan */
     const layoutFor = plan=>{
         const existing = layouts.get(plan.key);
@@ -651,19 +683,23 @@ export function createGpuRenderer(services){
         {
             const visibility = plan.glsl ? VERTEX_STAGE | FRAGMENT_STAGE : FRAGMENT_STAGE;
             const layout = texture.layout;
+            const unfilterable = texture.unfilterable
+                || (!!layout?.multisampled && layout.sampleType === 'float');
+            const sampleType = layout && layout.sampleType !== 'float' ? layout.sampleType
+                : unfilterable ? 'unfilterable-float' : undefined;
             fixedEntries.push({
                 binding: texture.binding,
                 visibility,
-                texture: layout ? {
-                    viewDimension: layout.viewDimension,
-                    // A multisampled texture is never filtered.
-                    sampleType: layout.multisampled && layout.sampleType === 'float'
-                        ? 'unfilterable-float' : layout.sampleType,
-                    multisampled: layout.multisampled,
-                } : texture.cube ? { viewDimension: 'cube' } : {},
+                texture: {
+                    ...layout ? { viewDimension: layout.viewDimension }
+                        : texture.cube ? { viewDimension: 'cube' } : {},
+                    ...sampleType ? { sampleType } : {},
+                    ...layout?.multisampled ? { multisampled: true } : {},
+                },
             });
             fixedEntries.push({
-                binding: texture.binding + 1, visibility, sampler: {},
+                binding: texture.binding + 1, visibility,
+                sampler: texture.unfilterable ? { type: 'non-filtering' } : {},
             });
         }
         if (plan.vertexBlock)
@@ -788,6 +824,12 @@ export function createGpuRenderer(services){
      *           or a BC format when every level travels as blocks
      * @property {Map<number, any>} views   a level as a target, by level key, once drawn into
      * @property {number} [usedIn]  the last frame whose commands sample or write it
+     * @property {string} [shape]  a sized texture's format, size and dimension
+     * @property {import('./formats.js').GpuStorage} [storage]  a sized texture's storage
+     * @property {'f' | 'u' | 'i'} [kind]  how a float shader may sample it: filtered, not
+     *           filtered (a 32-bit float without float32-filterable, a depth), or not at
+     *           all (an integer); a texture of RGBA bytes is 'f'
+     * @property {any} [sampleView]  the view a sampler reads, where it is not the surface's
      */
     /** @type {WeakMap<import('./objects.js').TextureObject, TextureRecord>} */
     const textures = new WeakMap();
@@ -856,13 +898,19 @@ export function createGpuRenderer(services){
      * key are only built again when `glTexParameter*` actually changed
      * something, not once per unit per draw.
      *
-     * @type {WeakMap<import('./objects.js').TextureObject, { version: number, sampler: any }>}
+     * @type {WeakMap<import('./objects.js').TextureObject,
+     *     { version: number, sampler: any, filtered: boolean }>}
      */
     const samplerByTexture = new WeakMap();
-    /** @param {import('./objects.js').TextureObject} texture */
-    const samplerFor = texture=>{
+    /**
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {boolean} [filtered]  false for a texture no sampler may filter,
+     *     which is read nearest, the nearest level too
+     */
+    const samplerFor = (texture, filtered = true)=>{
         const cached = samplerByTexture.get(texture);
-        if (cached && cached.version === texture.parametersVersion)
+        if (cached && cached.version === texture.parametersVersion
+            && cached.filtered === filtered)
         {
             return cached.sampler;
         }
@@ -873,10 +921,16 @@ export function createGpuRenderer(services){
             ?? FILTERS[GL.LINEAR];
         const wrap = (/** @type {number} */ query)=>
             WRAPS[parameters.get(query) ?? GL.REPEAT] ?? 'repeat';
+        if (!filtered && (mag.filter !== 'nearest' || min.filter !== 'nearest'
+            || (min.mip ?? 'nearest') !== 'nearest'))
+        {
+            diverge('a texture WebGPU does not filter (a 32-bit float without'
+                + ' float32-filterable, a depth) was asked a linear filter and is read nearest');
+        }
         const descriptor = {
-            magFilter: mag.filter,
-            minFilter: min.filter,
-            mipmapFilter: min.mip ?? 'nearest',
+            magFilter: filtered ? mag.filter : 'nearest',
+            minFilter: filtered ? min.filter : 'nearest',
+            mipmapFilter: filtered ? min.mip ?? 'nearest' : 'nearest',
             // A filter without a mipmap reads the base level only.
             lodMaxClamp: min.mip === null ? 0 : 32,
             addressModeU: wrap(GL.TEXTURE_WRAP_S),
@@ -890,7 +944,7 @@ export function createGpuRenderer(services){
             sampler = createSampler({ label: `gl-sampler:${key}`, ...descriptor });
             samplers.set(key, sampler);
         }
-        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler });
+        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler, filtered });
         return sampler;
     };
 
@@ -1027,6 +1081,253 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * What the device can hold, as `formats.js` asks it: the WebGPU features
+     * this backend was given.
+     *
+     * @type {import('./formats.js').DeviceFormats}
+     */
+    const deviceFormats = {
+        compressed: services.compressedTextures === true,
+        formatsTier1: backend.hasFeature?.('texture-formats-tier1') === true,
+        float32Filterable: backend.hasFeature?.('float32-filterable') === true,
+        rg11b10Renderable: backend.hasFeature?.('rg11b10ufloat-renderable') === true,
+        depth32Stencil: backend.hasFeature?.('depth32float-stencil8') === true,
+    };
+    /**
+     * Where each sized format lives on this device, and where it lives
+     * decoded: a compressed base level WebGPU takes only in whole blocks.
+     *
+     * @type {[Map<object, import('./formats.js').GpuStorage | null>,
+     *     Map<object, import('./formats.js').GpuStorage | null>]}
+     */
+    const storages = [new Map(), new Map()];
+    /**
+     * @param {import('./formats.js').SizedFormat} sized
+     * @param {boolean} blocks  whether blocks may stay blocks
+     * @returns {import('./formats.js').GpuStorage | null}
+     */
+    const storageFor = (sized, blocks)=>{
+        const kept = storages[blocks ? 0 : 1];
+        let storage = kept.get(sized);
+        if (storage === undefined)
+        {
+            storage = gpuStorageOf(sized, blocks ? deviceFormats
+                : { ...deviceFormats, compressed: false });
+            kept.set(sized, storage);
+        }
+        return storage;
+    };
+
+    /**
+     * The GPU copy of a texture whose levels are kept as a sized format
+     * (`texture-levels.js`): a surface in the WebGPU format `formats.js`
+     * chose, of three dimensions for a 3D texture and of layers for a cube
+     * map or an array (a 1D array is a 2D array one texel high), its levels
+     * uploaded from the format's own bytes, a depth format's drawn in by the
+     * backend's depth write (WebGPU copies no bytes into a depth texture).
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {Recording} recording
+     * @param {import('./objects.js').TextureLevel} base
+     * @returns {TextureRecord}
+     */
+    const sizedTextureFor = (texture, recording, base)=>{
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (base.sized);
+        const target = texture.target;
+        const cube = target === GL.TEXTURE_CUBE_MAP;
+        const solid = target === GL.TEXTURE_3D;
+        const oneArray = target === TEX.TEXTURE_1D_ARRAY;
+        const twoArray = target === TEX.TEXTURE_2D_ARRAY;
+        const baseDepth = base.depth ?? 1;
+        const layers = cube ? 6 : twoArray ? baseDepth : oneArray ? base.height : 1;
+        const height = oneArray ? 1 : base.height;
+        const volume = solid ? baseDepth : 1;
+        const storage = storageFor(sized, base.width % 4 === 0 && base.height % 4 === 0);
+        if (!storage)
+        {
+            diverge(`a texture of ${sized.name} has no format on this device and samples as`
+                + ' the incomplete texture');
+            return textureFor(incompleteTexture(cube), recording);
+        }
+        const chain = Math.floor(Math.log2(Math.max(1, base.width, height, volume))) + 1;
+        let levels = 0;
+        while (levels < chain)
+        {
+            const level = texture.levels.get(levelKey(levels));
+            if (!level || level.sized !== sized
+                || level.width !== Math.max(1, base.width >> levels)
+                || level.height !== (oneArray ? base.height : Math.max(1, base.height >> levels))
+                || (level.depth ?? 1) !== (solid ? Math.max(1, baseDepth >> levels) : baseDepth))
+            {
+                break;
+            }
+            levels++;
+        }
+        const format = storage.format;
+        const dimension = solid ? '3d' : cube ? 'cube' : oneArray || twoArray ? '2d-array'
+            : undefined;
+        const shape = `${format}|${base.width}x${height}x${volume}|${layers}|${dimension}`;
+        let record = textures.get(texture);
+        let previous = null;
+        if (record && (record.shape !== shape || record.levels !== levels))
+        {
+            previous = record;
+            record = undefined;
+        }
+        let carried = false;
+        if (!record)
+        {
+            const blocks = sized.compressed && storage.conversion === null;
+            const gpu = backend.createSurface({
+                width: base.width, height, format, mipLevelCount: levels, layers,
+                depth: volume, dimension, label: `gl-texture:${texture.name}`,
+                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
+                    | TextureUsage.COPY_SRC
+                    | (storage.renderable && !blocks && !solid
+                        ? TextureUsage.RENDER_ATTACHMENT : 0),
+            });
+            record = {
+                gpu, width: base.width, height: base.height, levels, cube, format,
+                views: new Map(), shape, storage,
+                kind: storage.sampleType === 'float' ? 'f'
+                    : storage.sampleType === 'unfilterable-float'
+                        || storage.sampleType === 'depth' ? 'u' : 'i',
+                // A depth format with a stencil is bound for sampling through
+                // its depth alone.
+                sampleView: storage.depth
+                    ? gpu.texture.createView({ label: `gl-texture:${texture.name}:depth`,
+                        dimension: dimension ?? '2d', aspect: 'depth-only' })
+                    : null,
+            };
+            textures.set(texture, record);
+            for (const [key, image] of texture.levels)
+            {
+                if (!releasedLevels.has(image))
+                {
+                    texture.dirty.set(key, null);
+                    continue;
+                }
+                const level = key % FACE_STRIDE;
+                const face = (key - level) / FACE_STRIDE;
+                if (previous !== null && previous.format === format && !storage.depth
+                    && !solid && !oneArray && !twoArray && level < previous.levels
+                    && level < levels && image.width === Math.max(1, previous.width >> level)
+                    && image.height === Math.max(1, previous.height >> level))
+                {
+                    recording.commands.push({ kind: 'carry', from: previous.gpu.texture,
+                        to: record.gpu.texture, level, face, width: image.width,
+                        height: image.height });
+                    stats.carried++;
+                    carried = true;
+                    continue;
+                }
+                texture.dirty.set(key, null);
+                lose(`a ${sized.name} level the device drew was made again in another shape and`
+                    + ' uploads what this side holds of it');
+            }
+        }
+        const ordered = carried
+            || (record.usedIn !== undefined && unflushed.has(record.usedIn));
+        for (const [key, rect] of texture.dirty)
+        {
+            const level = key % FACE_STRIDE;
+            const face = (key - level) / FACE_STRIDE;
+            const image = texture.levels.get(key);
+            if (!image || level >= levels || face >= (cube ? 6 : 1))
+            {
+                continue;
+            }
+            stats.uploads++;
+            const imageDepth = image.depth ?? 1;
+            const data = image.data ?? blankStorage(sized, image.width, image.height, imageDepth);
+            if (storage.depth)
+            {
+                uploadDepth(recording, record, image, level, cube ? face : 0, data, sized,
+                    oneArray);
+                continue;
+            }
+            const bytes = deviceBytes(data, sized, storage, image.width, image.height,
+                imageDepth);
+            if (!bytes)
+            {
+                lose(`a ${sized.name} level could not be decoded for the device`);
+                continue;
+            }
+            const whole = rect === null || sized.compressed || solid || twoArray || oneArray
+                || (rect.x === 0 && rect.y === 0 && rect.width === image.width
+                    && rect.height === image.height);
+            /** @type {Uint8Array} */
+            let slice = bytes;
+            const area = whole ? { x: 0, y: 0, width: image.width, height: image.height }
+                : /** @type {import('./objects.js').DirtyRect} */ (rect);
+            if (!whole)
+            {
+                const texel = bytes.byteLength / (image.width * image.height);
+                slice = new Uint8Array(area.width * area.height * texel);
+                for (let row = 0; row < area.height; row++)
+                {
+                    const from = ((area.y + row) * image.width + area.x) * texel;
+                    slice.set(bytes.subarray(from, from + area.width * texel),
+                        row * area.width * texel);
+                }
+            }
+            const request = {
+                texture: record.gpu.texture,
+                format,
+                mipLevel: level,
+                width: area.width,
+                height: oneArray ? 1 : area.height,
+                origin: { x: area.x, y: area.y, z: cube ? face : 0 },
+                depthOrArrayLayers: oneArray ? image.height : solid || twoArray ? imageDepth : 1,
+                data: ordered ? slice.slice() : slice,
+            };
+            if (ordered)
+            {
+                recording.commands.push({ kind: 'upload', upload: { ...request, staging: true } });
+            }
+            else
+            {
+                backend.uploadTexture(request);
+            }
+        }
+        texture.dirty.clear();
+        record.usedIn = recording.id;
+        return record;
+    };
+
+    /**
+     * A depth level drawn into the device's copy, a slice (an array's layer,
+     * a cube's face) at a time.
+     *
+     * @param {Recording} recording @param {TextureRecord} record
+     * @param {import('./objects.js').TextureLevel} image
+     * @param {number} level @param {number} face
+     * @param {Uint8Array} data @param {import('./formats.js').SizedFormat} sized
+     * @param {boolean} oneArray
+     */
+    const uploadDepth = (recording, record, image, level, face, data, sized, oneArray)=>{
+        if (!backend.depthPipelines)
+        {
+            lose(`a ${sized.name} level was not written: this backend draws no depths in`);
+            return;
+        }
+        const width = image.width;
+        const height = oneArray ? 1 : image.height;
+        const slices = oneArray ? image.height : image.depth ?? 1;
+        const pipeline = pipelineSlot(recording, backend.depthPipelines(record.format));
+        for (let slice = 0; slice < slices; slice++)
+        {
+            const { depths, stencils } = depthSlice(data, sized, width * height, slice);
+            recording.commands.push({
+                kind: 'depth', pipeline,
+                surface: { texture: record.gpu.texture, width, height, mipLevel: level,
+                    layer: face + slice },
+                words: depthWriteWords(width, depths, stencils),
+            });
+        }
+    };
+
+    /**
      * The GPU copy of a texture, uploaded or brought up to date for a command
      * of `recording`.
      *
@@ -1038,6 +1339,10 @@ export function createGpuRenderer(services){
         const cube = texture.target === GL.TEXTURE_CUBE_MAP;
         const base = /** @type {import('./objects.js').TextureLevel} */ (
             texture.levels.get(levelKey(0)));
+        if (base.sized)
+        {
+            return sizedTextureFor(texture, recording, base);
+        }
         // The mip chain the base level defines, as GL's completeness reads it:
         // each level half the one above, down to 1x1 and no further. A level
         // past that, or one of another size, is not in the chain -- three 1x1
@@ -2213,6 +2518,22 @@ export function createGpuRenderer(services){
                     + ' black instead');
                 texture = incompleteTexture(entry.cube);
             }
+            const sized = texture.levels.get(levelKey(0))?.sized;
+            if (sized && (sized.kind === 'int' || sized.kind === 'uint'
+                || sized.kind === 'stencil'))
+            {
+                // The shaders declare every texture as float; an integer one
+                // binds to none of them.
+                diverge(`a draw sampled an integer texture (${sized.name}) through a float`
+                    + ' sampler, and sampled the incomplete texture instead');
+                texture = incompleteTexture(entry.cube);
+            }
+            else if (sized?.kind === 'depth'
+                && texture.parameters.get(TEX.TEXTURE_COMPARE_MODE) === TEX.COMPARE_REF_TO_TEXTURE)
+            {
+                diverge('a draw sampled a depth texture with its comparison on: the depth is'
+                    + ' read as a value, not compared');
+            }
             return { entry, texture };
         });
         // The id strings are read only by the skip filter and the dump; a
@@ -2232,17 +2553,26 @@ export function createGpuRenderer(services){
             recording.counts.cut++;
             return;
         }
+        let kinds = '';
         /** @type {RecordedBinding[]} */
-        const bindings = sampled.map(({ entry, texture })=>({
-            binding: entry.binding,
-            view: textureFor(texture, recording).gpu.view,
-            sampler: samplerFor(texture),
-            texture,
-        }));
+        const bindings = sampled.map(({ entry, texture })=>{
+            const copy = textureFor(texture, recording);
+            const kind = copy.kind ?? 'f';
+            kinds += kind;
+            return {
+                binding: entry.binding,
+                view: copy.sampleView ?? copy.gpu.view,
+                sampler: samplerFor(texture, kind === 'f'),
+                texture,
+            };
+        });
+        // A texture no sampler filters makes the draw a pipeline of its own.
+        const pipelineKey = kinds.includes('u') ? `${key}~${kinds}` : key;
         // The descriptor only when the key has no pipeline yet: it is a dozen
         // objects a draw, for a state that repeats all frame.
-        const pipeline = pipelines.get(key)
-            ?? pipelineFor(key, generated, drawDescriptor(state), plan);
+        const pipeline = pipelines.get(pipelineKey)
+            ?? pipelineFor(pipelineKey, generated, drawDescriptor(state),
+                pipelineKey === key ? plan : planOfKinds(plan, kinds));
         // One draw, one MVP: shared with any program stage that reads the
         // same state matrix, instead of each reader multiplying it out again
         // -- and, when the view and the object are both what the previous
@@ -2336,7 +2666,7 @@ export function createGpuRenderer(services){
         recording.commands.push({
             kind: 'draw',
             pipeline: pipelineSlot(recording, pipeline),
-            mergeKey: key,
+            mergeKey: pipelineKey,
             uniforms,
             vertexUniforms,
             fragmentUniforms,
@@ -2656,14 +2986,14 @@ export function createGpuRenderer(services){
             key: `fbo${fbo.name}.${fbo.version}`,
             width: bound.width, height: bound.height, flipped: true,
             colours: views,
-            formats: views.map((/** @type {any} */ v)=>(v ? TEXTURE_FORMAT : '')),
+            formats: views.map((/** @type {any} */ v)=>(v ? v.format ?? TEXTURE_FORMAT : '')),
             masks: fbo.drawBuffers.slice(0, views.length).map((/** @type {number} */ buffer)=>{
                 const attachment = fbo.attachments.get(buffer);
                 const image = attachment ? attachmentImage(attachment) : null;
                 const base = image ? baseFormatOfImage(attachment) : GL.RGBA;
                 return HAS_ALPHA.has(base) ? 0xf : 0x7;
             }),
-            depth, depthFormat: depth ? DEPTH_FORMAT : '', attached,
+            depth, depthFormat: depth ? depth.format ?? DEPTH_FORMAT : '', attached,
         };
         fboTargets.set(fbo, { version: fbo.version, records, target });
         return target;
@@ -2730,7 +3060,10 @@ export function createGpuRenderer(services){
     const levelView = (texture, level, face, recording)=>{
         const textureRecord = textureFor(texture, recording);
         const key = levelKey(level, face);
-        const image = texture.levels.get(key);
+        // An array's layer is named where a cube's face is; its level is one.
+        const layered = texture.target === TEX.TEXTURE_2D_ARRAY
+            || texture.target === TEX.TEXTURE_1D_ARRAY;
+        const image = texture.levels.get(layered ? levelKey(level) : key);
         if (image)
         {
             releasedLevels.add(image);
@@ -2749,8 +3082,8 @@ export function createGpuRenderer(services){
                     arrayLayerCount: 1,
                 }),
                 width: image?.width ?? 1,
-                height: image?.height ?? 1,
-                format: TEXTURE_FORMAT,
+                height: texture.target === TEX.TEXTURE_1D_ARRAY ? 1 : image?.height ?? 1,
+                format: textureRecord.format,
                 label: `gl-texture:${texture.name}:${key}`,
             };
             textureRecord.views.set(key, view);
@@ -2978,7 +3311,10 @@ export function createGpuRenderer(services){
         height, readFbo = null)=>
     {
         const surfaces = drawables.get(context);
-        if (!surfaces || width <= 0 || height <= 0 || !texture.levels.get(levelKey(level, face)))
+        const layered = texture.target === TEX.TEXTURE_2D_ARRAY
+            || texture.target === TEX.TEXTURE_1D_ARRAY;
+        if (!surfaces || width <= 0 || height <= 0
+            || !texture.levels.get(levelKey(level, layered ? 0 : face)))
         {
             return;
         }
@@ -2995,8 +3331,8 @@ export function createGpuRenderer(services){
                 + ' nothing was copied');
             return;
         }
-        const pipeline = pipelineFor(copyKey(TEXTURE_FORMAT), generateCopy(),
-            showDescriptor(TEXTURE_FORMAT), SINGLE_TEXTURE_PLAN);
+        const pipeline = pipelineFor(copyKey(view.format), generateCopy(),
+            showDescriptor(view.format), SINGLE_TEXTURE_PLAN);
         const uniforms = new Float32Array(COPY_UNIFORM_FLOATS);
         uniforms.set([x, y, xoffset, yoffset, source.width, source.height,
             source.flipped ? -1 : 1], 0);
@@ -3105,6 +3441,13 @@ export function createGpuRenderer(services){
         }
         const recording = recordingOf(context);
         const copy = textureFor(texture, recording);
+        if ((copy.kind ?? 'f') !== 'f' || copy.shape?.endsWith('3d')
+            || copy.shape?.endsWith('2d-array'))
+        {
+            lose(`glGenerateMipmap of a texture of ${copy.format}: its levels are made by a`
+                + ' filtered draw of one 2D level, which this texture does not take');
+            return;
+        }
         const faces = copy.cube ? 6 : 1;
         const pipeline = pipelineFor(blitKey(copy.format), generateBlit(),
             showDescriptor(copy.format), SINGLE_TEXTURE_PLAN);
@@ -3243,13 +3586,21 @@ export function createGpuRenderer(services){
     /**
      * @param {Recording} recording
      * @param {DrawableSurfaces} target
-     * @param {any} shown   the opaque copy this frame is shown through
-     * @param {number} cut   the backend's cut this recording was queued as
+     * @param {any} shown   the opaque copy this frame is shown through, or null
+     *        for the part of a frame a read needs drawn, which is not shown
+     * @param {number | undefined} cut   the backend's cut this recording was
+     *        queued as; none for that part of a frame
+     * @param {any} [read]   a surface whose texels the frame ends by copying out
+     * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
+     *     what `read` held once the recording was drawn
      */
-    const replay = async(recording, target, shown, cut)=>{
-        const show = pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
-            showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
-        const built = await Promise.allSettled([...recording.pipelines, show]);
+    const replay = async(recording, target, shown, cut, read)=>{
+        const show = shown ? pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
+            showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN) : null;
+        const built = await Promise.allSettled(show ? [...recording.pipelines, show]
+            : recording.pipelines);
+        /** @type {(() => Promise<any>) | null} */
+        let copied = null;
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -3357,6 +3708,12 @@ export function createGpuRenderer(services){
                     continue;
                 }
                 const pipeline = outcome.value;
+                if (command.kind === 'depth')
+                {
+                    frame.writeDepth(command.surface, command.words, pipeline);
+                    pass = null;
+                    continue;
+                }
                 if (command.kind === 'copy')
                 {
                     // Into the level, reading the framebuffer: its own pass,
@@ -3451,8 +3808,13 @@ export function createGpuRenderer(services){
                     pass = null;
                 }
             }
-            const shownBy = built[built.length - 1];
-            if (shownBy.status === 'fulfilled')
+            if (read)
+            {
+                copied = frame.snapshot(read);
+            }
+            // A frame drawn for a read shows nothing.
+            const shownBy = shown ? built[built.length - 1] : null;
+            if (shownBy?.status === 'fulfilled')
             {
                 pass = frame.beginPass({ target: shown, clear: false });
                 pass.setPipeline(shownBy.value.gpu);
@@ -3464,7 +3826,7 @@ export function createGpuRenderer(services){
                 pass.draw(3, 1, 0);
                 frame.present(shown);
             }
-            else
+            else if (shownBy)
             {
                 lose(String(shownBy.reason?.message ?? shownBy.reason));
             }
@@ -3487,6 +3849,7 @@ export function createGpuRenderer(services){
                     .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
                     .join(' ')}]`;
         }
+        return copied ? copied() : null;
     };
 
     /** @param {any} a @param {any} b */
@@ -3516,14 +3879,24 @@ export function createGpuRenderer(services){
 
         /**
          * Backs a context's drawable with a colour pair and a depth-stencil
-         * surface of its size.
+         * surface of its size. A window's buffers are the window's, as on
+         * Windows: every context made current on it draws into and reads the
+         * same ones, and they outlive the contexts; a drawable of another
+         * size gets new ones.
          *
          * @param {object} context
-         * @param {{ width: number, height: number }} drawable
+         * @param {{ width: number, height: number, key?: string }} drawable  `key`
+         *     names the window; without one the buffers are the context's alone
          */
         attach(context, drawable){
             const width = Math.max(1, drawable.width);
             const height = Math.max(1, drawable.height);
+            const held = drawable.key === undefined ? undefined : windows.get(drawable.key);
+            if (held && held.width === width && held.height === height)
+            {
+                drawables.set(context, held);
+                return;
+            }
             const usage = TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
                 | TextureUsage.COPY_SRC;
             drawables.set(context, {
@@ -3548,6 +3921,10 @@ export function createGpuRenderer(services){
                 formats: [COLOUR_FORMAT], masks: [0xf], depth: surfaces.depth,
                 depthFormat: DEPTH_FORMAT, attached: new Set(),
             };
+            if (drawable.key !== undefined)
+            {
+                windows.set(drawable.key, surfaces);
+            }
         },
 
         /** @param {object} context */
@@ -3605,12 +3982,98 @@ export function createGpuRenderer(services){
             target.current ^= 1;
             const cut = backend.markPresent();
             chain = chain
-                .then(()=>replay(recording, target, shown, cut))
+                .then(async()=>{
+                    await replay(recording, target, shown, cut);
+                })
                 .catch(error=>{
                     unflushed.delete(recording.id);
                     lose(error instanceof Error ? error.message : String(error));
                 });
             return { width: target.width, height: target.height };
+        },
+
+        /**
+         * glReadPixels' colour on the device: what the context drew so far is
+         * drawn now, and the read framebuffer's read buffer -- or the window's
+         * back buffer -- copied out once it is. Null for a context with no
+         * drawable, or a read buffer that is no colour image this renderer
+         * reads.
+         *
+         * @param {object} context
+         * @param {{ x: number, y: number, width: number, height: number }} rect
+         *     in window coordinates, y up
+         * @param {any} readFbo  the read framebuffer object, or null for the window's
+         * @returns {Promise<Uint8Array | null> | null} the rectangle as RGBA, its bottom
+         *     row first, zero where it lies outside the buffer
+         */
+        readPixels(context, rect, readFbo){
+            const surfaces = drawables.get(context);
+            if (!surfaces)
+            {
+                return null;
+            }
+            const recording = recordingOf(context);
+            const source = sourceOf(surfaces, readFbo, recording);
+            if (!source)
+            {
+                return null;
+            }
+            const attachment = readFbo ? readFbo.attachments.get(readFbo.readBuffer) : null;
+            const read = { texture: source.view.texture, width: source.width,
+                height: source.height, format: source.view.format,
+                mipLevel: attachment?.kind === 'texture' ? attachment.level : 0,
+                layer: attachment?.kind === 'texture' ? attachment.face : 0 };
+            const swapped = read.format === COLOUR_FORMAT;
+            if (!swapped && read.format !== TEXTURE_FORMAT)
+            {
+                return null;
+            }
+            // Everything drawn so far is drawn now; what the context draws
+            // after the read goes into a recording of its own over the result.
+            recordings.delete(context);
+            /** @type {{ width: number, height: number, data: Uint8Array } | null} */
+            let shot = null;
+            chain = chain
+                .then(async()=>{
+                    shot = await replay(recording, surfaces, null, undefined, read);
+                })
+                .catch(error=>{
+                    unflushed.delete(recording.id);
+                    lose(error instanceof Error ? error.message : String(error));
+                });
+            return chain.then(()=>{
+                if (!shot)
+                {
+                    return null;
+                }
+                const { width, height } = rect;
+                const out = new Uint8Array(width * height * 4);
+                const taken = /** @type {{ width: number, height: number, data: Uint8Array }} */ (shot);
+                for (let row = 0; row < height; row++)
+                {
+                    const y = rect.y + row;
+                    if (y < 0 || y >= taken.height)
+                    {
+                        continue;
+                    }
+                    const line = source.flipped ? y : taken.height - 1 - y;
+                    for (let column = 0; column < width; column++)
+                    {
+                        const x = rect.x + column;
+                        if (x < 0 || x >= taken.width)
+                        {
+                            continue;
+                        }
+                        const from = (line * taken.width + x) * 4;
+                        const to = (row * width + column) * 4;
+                        out[to] = taken.data[from + (swapped ? 2 : 0)];
+                        out[to + 1] = taken.data[from + 1];
+                        out[to + 2] = taken.data[from + (swapped ? 0 : 2)];
+                        out[to + 3] = taken.data[from + 3];
+                    }
+                }
+                return out;
+            });
         },
 
         /** Every replay queued so far has run. */

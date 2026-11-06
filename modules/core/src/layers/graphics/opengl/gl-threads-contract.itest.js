@@ -559,6 +559,29 @@ function snapshot(context){
     return out;
 }
 
+/**
+ * A snapshot with what it read on a device -- glReadPixels' answer, which
+ * comes once the device has drawn -- in place of the promise of it.
+ *
+ * @param {unknown[] | null} state
+ * @returns {Promise<unknown[] | null>}
+ */
+async function settled(state){
+    if (!state)
+    {
+        return null;
+    }
+    return Promise.all(state.map(async entry=>{
+        const [what, value, error] = /** @type {[string, unknown, number]} */ (entry);
+        if (!(value instanceof Promise))
+        {
+            return entry;
+        }
+        const read = await value;
+        return [what, read ? [...read] : read, error];
+    }));
+}
+
 const TEXTURE_NAMES = [1, 2, 3];
 const BUFFER_NAMES = [1, 2];
 /** The vertices a buffer object or a thread's client arrays hold: a position, a colour, a texel. */
@@ -1266,7 +1289,8 @@ async function play(steps, shared, mode){
     for (const thread of [0, 1])
     {
         calling.thread = thread;
-        const states = sides.map(side=>side.opengl.withContext(snapshot));
+        const states = await Promise.all(sides.map(side=>settled(
+            side.opengl.withContext(snapshot))));
         const differs = states[0]?.findIndex((entry, i)=>!isDeepStrictEqual(entry,
             states[1]?.[i])) ?? -1;
         if (differs >= 0 || (states[0] === null) !== (states[1] === null))

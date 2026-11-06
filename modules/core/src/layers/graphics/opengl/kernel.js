@@ -60,6 +60,10 @@
  *             dstX0: number, dstY0: number, dstX1: number, dstY1: number,
  *             linear: boolean }) => void) | null} [blit]
  *           glBlitFramebuffer's colour, from the read framebuffer to the draw one
+ * @property {((rect: { x: number, y: number, width: number, height: number })
+ *             => Promise<Uint8Array | null> | null) | null} [readBack]
+ *           The read buffer's colour on the device, RGBA, its bottom row first:
+ *           null where the renderer cannot read it (`gpu.js` readPixels)
  * @property {((buffer: import('./objects.js').BufferObject) => void) | null} bufferDeleted
  *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on

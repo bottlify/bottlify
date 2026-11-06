@@ -4742,6 +4742,8 @@ export function createWin32Module(){
                     deleteSurfaceDc: handle=>gdi.deleteSurfaceDc(handle),
                     /** @param {number} hdc */
                     describeDrawable: hdc=>gdi.describeDrawable(hdc),
+                    /** @param {number} hdc */
+                    bitmapSurface: hdc=>gdi.bitmapSurface(hdc),
                 }),
 
                 /**

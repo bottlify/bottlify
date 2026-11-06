@@ -213,3 +213,19 @@ test('glBlitFramebuffer\'s arguments are checked before anything moves', ()=>{
     gl.glBlitFramebuffer(0, 0, 1, 1, 0, 0, 1, 1, GL.COLOR_BUFFER_BIT, GL.NEAREST);
     assert.equal(gl.glGetError(), GL.INVALID_FRAMEBUFFER_OPERATION, 'an incomplete read');
 });
+
+test('framebuffers are the share group\'s, under either spelling (Wine\'s opengl32'
+    + ' test_sharelists)', ()=>{
+    const first = fixture();
+    const second = fixture();
+    const third = fixture();
+    first.bindFramebuffer(GL.DRAW_FRAMEBUFFER, 1, true);
+    assert.equal(first.glGetError(), GL.NO_ERROR, 'the EXT spelling binds the draw target too');
+    assert.equal(first.glIsFramebuffer(1), GL.TRUE);
+    assert.equal(first.shareGroup.used, true, 'and the group has held an object');
+    second.shareLists(first);
+    assert.equal(second.glIsFramebuffer(1), GL.TRUE, 'seen where the group is shared');
+    assert.equal(third.glIsFramebuffer(1), GL.FALSE, 'and nowhere else');
+    second.glDeleteFramebuffers([1]);
+    assert.equal(first.glIsFramebuffer(1), GL.FALSE, 'deleted for every context of it');
+});

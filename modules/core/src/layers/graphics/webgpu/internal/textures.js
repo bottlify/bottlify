@@ -80,6 +80,7 @@ const UNCOMPRESSED_PIXEL_BYTES = {
     bgra8unorm: 4,
     'bgra8unorm-srgb': 4,
     rgb10a2unorm: 4,
+    rgb10a2uint: 4,
     rg11b10ufloat: 4,
     rgb9e5ufloat: 4,
     rg32float: 8,
@@ -91,6 +92,13 @@ const UNCOMPRESSED_PIXEL_BYTES = {
     rgba32float: 16,
     rgba32uint: 16,
     rgba32sint: 16,
+    // texture-formats-tier1's sixteen-bit normalised formats.
+    r16unorm: 2,
+    r16snorm: 2,
+    rg16unorm: 4,
+    rg16snorm: 4,
+    rgba16unorm: 8,
+    rgba16snorm: 8,
 };
 
 /**

@@ -39,7 +39,10 @@ import {
     translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
-import { createDefaultState, readState } from './state.js';
+import { createDefaultState, readState, settleDrawableState } from './state.js';
+import {
+    DEFAULT_VERSION, shadingLanguageVersion, versionState, versionString,
+} from './version.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -59,15 +62,15 @@ import { createSceneBuilder } from './context-scene.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
 
-/** What this implementation answers glGetString with. */
+/**
+ * What this implementation answers glGetString with, but for the versions,
+ * which are the context's (`version.js`): what its core entry points
+ * implement, every one of them through wglGetProcAddress past 1.1; everything
+ * past it is reported as an extension.
+ */
 const STRINGS = Object.freeze({
     [GL.VENDOR]: 'Bottlify Project',
     [GL.RENDERER]: VIDEO_ADAPTER_NAME,
-    // The version is what the core entry points implement, every one of
-    // them through wglGetProcAddress past 1.1; everything past it is
-    // reported as an extension.
-    [GL.VERSION]: '2.1',
-    [GL.SHADING_LANGUAGE_VERSION]: '1.20',
 });
 
 /**
@@ -92,7 +95,7 @@ const CLEAR_BITS = GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT | GL.STENCIL_BUFFER
  * would be meaningless later.
  */
 const NOT_COMPILABLE = new Set([
-    'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString',
+    'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString', 'glGetStringi',
     'glGetPointerv', 'glGetTexParameteriv', 'glGetTexParameterfv', 'glGetTexLevelParameteriv',
     'glGetTexEnviv', 'glGetTexEnvfv', 'glGetTexGenfv', 'glGetTexImage', 'glGetLightfv',
     'glGetMaterialfv', 'glGetClipPlane', 'glIsEnabled', 'glIsTexture', 'glIsList',
@@ -204,6 +207,8 @@ const PIXEL_STORE_PARAMETERS = new Set([
     GL.UNPACK_ALIGNMENT, GL.UNPACK_ROW_LENGTH, GL.UNPACK_SKIP_ROWS, GL.UNPACK_SKIP_PIXELS,
     GL.UNPACK_SWAP_BYTES, GL.UNPACK_LSB_FIRST, GL.PACK_ALIGNMENT, GL.PACK_ROW_LENGTH,
     GL.PACK_SKIP_ROWS, GL.PACK_SKIP_PIXELS, GL.PACK_SWAP_BYTES, GL.PACK_LSB_FIRST,
+    // The image height and skipped images of 3D transfers (OpenGL 1.2).
+    0x806b, 0x806c, 0x806d, 0x806e,
 ]);
 
 /** How many pushes the attribute stacks take. */
@@ -218,6 +223,8 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {number} height
  * @property {boolean} doubleBuffered
  * @property {number} [depthBits]
+ * @property {string} [key]  the window it is: every context made current on it shares
+ *           its buffers on a device
  */
 
 /** @typedef {import('./kernel.js').ContextMemory} ContextMemory */
@@ -226,6 +233,8 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @typedef {Object} GlContextOptions
  * @property {ReturnType<typeof createShareGroup>} [shareGroup]
  * @property {readonly string[]} [extensions]  what glGetString(GL_EXTENSIONS) reports
+ * @property {import('./version.js').ContextVersion} [version]  the version, profile and
+ *           flags the context was made for; `DEFAULT_VERSION` unless asked
  * @property {ContextMemory} [memory]
  * @property {(detail: string, severity?: 'loss') => void} [divergence]
  *           Told, once per distinct message, when a call was accepted but
@@ -267,7 +276,12 @@ export function createGlContext(options = {}){
     const raster = options.raster !== false;
 
     let attached = false;
+    const version = options.version ?? DEFAULT_VERSION;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
+    for (const { query, ...entry } of versionState(version, extensions.length))
+    {
+        state.set(query, entry);
+    }
     let framebuffer = createFramebuffer(0, 0);
 
     /** @type {number} */
@@ -406,6 +420,11 @@ export function createGlContext(options = {}){
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
                     width, height, kernel.side.readFramebuffer?.() ?? null)
             : null,
+        readBack: gpu?.readPixels
+            ? rect=>(attached
+                ? gpu.readPixels(context, rect, kernel.side.readFramebuffer?.() ?? null)
+                : null)
+            : null,
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
@@ -445,17 +464,27 @@ export function createGlContext(options = {}){
          * the drawable's dimensions **at the first attachment** and are not
          * touched by a later one -- a program that makes a context current on
          * a second, differently sized window keeps the viewport it had.
+         * Anything else already set stays: wglCopyContext may have filled a
+         * context current nowhere yet (Wine's opengl32 test_copy_context).
          *
          * @param {Drawable} drawable
          */
         attach(drawable){
             if (attached)
             {
+                if (gpu && drawable.key !== undefined)
+                {
+                    // Made current on a window: its buffers, whichever they are.
+                    gpu.attach(context, drawable);
+                    framebuffer = { ...framebuffer, width: drawable.width,
+                        height: drawable.height };
+                    return;
+                }
                 context.resize(drawable.width, drawable.height);
                 return;
             }
             attached = true;
-            state = createDefaultState(drawable);
+            settleDrawableState(state, drawable);
             if (gpu)
             {
                 gpu.attach(context, drawable);
@@ -646,13 +675,45 @@ export function createGlContext(options = {}){
             {
                 return kernel.side.programErrorString();
             }
-            const value = /** @type {any} */ (STRINGS)[name];
+            const value = name === GL.VERSION ? versionString(version)
+                : name === GL.SHADING_LANGUAGE_VERSION ? shadingLanguageVersion(version)
+                    : /** @type {any} */ (STRINGS)[name];
             if (value === undefined)
             {
                 setError(GL.INVALID_ENUM);
                 return null;
             }
             return value;
+        },
+
+        /**
+         * One extension's name by its index (OpenGL 3.0): a context of an
+         * earlier version has no such call to make.
+         *
+         * @param {number} name @param {number} index
+         * @returns {string | null}
+         */
+        glGetStringi(name, index){
+            if (!enter('glGetStringi', [name, index]))
+            {
+                return null;
+            }
+            if (name !== GL.EXTENSIONS)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (index < 0 || index >= extensions.length)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return extensions[index];
+        },
+
+        /** The version, profile and flags the context was made for. */
+        get version(){
+            return version;
         },
 
         /** @param {number} target @param {number} mode */
@@ -1562,6 +1623,36 @@ export function createGlContext(options = {}){
             kernel.side.restoreServerLighting(saved.lighting);
             kernel.side.restoreServerPrograms(saved.programs);
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
+        },
+
+        /**
+         * wglCopyContext's first half: the server attribute groups of `mask`
+         * as glPushAttrib saves them, for `pasteAttribs` of another context.
+         *
+         * @param {number} mask
+         */
+        copyAttribs(mask){
+            return {
+                mask,
+                values: snapshot(queriesSavedBy(SERVER_BITS, mask)),
+                textures: kernel.side.saveServerTextures(mask),
+                lighting: kernel.side.saveServerLighting(mask),
+                programs: kernel.side.saveServerPrograms(mask),
+            };
+        },
+
+        /**
+         * And its second: what `copyAttribs` took, laid onto this context
+         * as glPopAttrib restores it.
+         *
+         * @param {{ mask: number, values: any, textures: any, lighting: any,
+         *     programs: any }} saved
+         */
+        pasteAttribs(saved){
+            restore(saved.values);
+            kernel.side.restoreServerTextures(saved.mask, saved.textures);
+            kernel.side.restoreServerLighting(saved.lighting);
+            kernel.side.restoreServerPrograms(saved.programs);
         },
 
         /** @param {number} mask */

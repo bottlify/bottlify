@@ -459,37 +459,5 @@ export function installCoreCalls(context, kernel){
             return null;
         },
 
-        // --- 3D textures ---
-
-        /**
-         * glTexImage3D and glTexSubImage3D, by their target and size alone:
-         * GL_MAX_3D_TEXTURE_SIZE is the specification's minimum of 16, and
-         * what fits is accepted and not kept.
-         *
-         * @param {string} call @param {number} target @param {number} level
-         * @param {number} width @param {number} height @param {number} depth
-         */
-        texImage3D(call, target, level, width, height, depth){
-            if (!enter('texImage3D', [call, target, level, width, height, depth]))
-            {
-                return;
-            }
-            if (target !== GL.TEXTURE_3D && target !== GL.PROXY_TEXTURE_3D)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            const max = record(GL.MAX_3D_TEXTURE_SIZE).values[0];
-            if (level < 0 || width < 0 || height < 0 || depth < 0 || width > max || height > max
-                || depth > max)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            if (target === GL.TEXTURE_3D)
-            {
-                diverge(`${call} was accepted and kept nothing: there are no 3D textures here`);
-            }
-        },
     });
 }

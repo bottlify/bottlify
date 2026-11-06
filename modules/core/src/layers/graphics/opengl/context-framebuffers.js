@@ -12,12 +12,15 @@
  *
  * The object rules:
  *
- * - **Renderbuffers live in the share group, framebuffers in the context.**
- *   A framebuffer is a container of attachments and the specification does
- *   not share containers.
+ * - **Renderbuffers and framebuffers live in the share group.** OpenGL 3.0
+ *   shares no containers, but GL_EXT_framebuffer_object shares framebuffers
+ *   and Windows' drivers go on sharing them between the contexts
+ *   wglShareLists joins, under either spelling (Wine's opengl32
+ *   test_sharelists).
  * - **A name glGenFramebuffers did not hand out cannot be bound** under the
  *   ARB names (GL_INVALID_OPERATION); the EXT names make the object on the
- *   first bind, as that extension does.
+ *   first bind, as that extension does, to the draw and read targets as well
+ *   (GL_EXT_framebuffer_blit).
  * - **Deleting what is bound unbinds it**, and deleting a renderbuffer or a
  *   texture detaches it from the framebuffer bound for drawing or reading.
  * - **The draw and read buffers belong to the framebuffer**: binding another
@@ -33,6 +36,7 @@
 
 import { GL } from './constants.js';
 import { RENDERBUFFER_FORMATS, attachmentImage, levelKey } from './objects.js';
+import { componentTypeOf } from './formats.js';
 
 /**
  * @typedef {import('./objects.js').RenderbufferObject} RenderbufferObject
@@ -79,10 +83,16 @@ export function framebufferStatus(fbo){
         {
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
-        if (point === GL.DEPTH_ATTACHMENT && image.holds === 'depth'
-            && attachment.kind === 'texture')
+        const sized = attachment.kind === 'texture'
+            ? attachment.texture.levels.get(levelKey(attachment.level, attachment.face))?.sized
+            : null;
+        if (sized && (sized.kind === 'int' || sized.kind === 'uint' || sized.compressed
+            || sized.packing === 'rgb9e5'
+            || (attachment.kind === 'texture' && attachment.texture.target === GL.TEXTURE_3D)))
         {
-            // A depth texture this renderer cannot sample after drawing it.
+            // What this renderer cannot draw into: an integer format (its
+            // shaders write floats), a shared exponent (WebGPU renders none),
+            // a slice of a 3D texture.
             return GL.FRAMEBUFFER_UNSUPPORTED;
         }
         sizes.push(image);
@@ -147,9 +157,13 @@ export const FRAMEBUFFER_CALLS_NOT_COMPILED = Object.freeze([
 export function installFramebufferCalls(context, kernel){
     const { enter, setError, setState, diverge } = kernel;
 
-    /** The context's framebuffers, by name; generated names hold null until bound. */
-    /** @type {Map<number, FramebufferObject | null>} */
-    const framebuffers = new Map();
+    /**
+     * The share group's framebuffers, by name; generated names hold null
+     * until bound.
+     *
+     * @returns {Map<number, FramebufferObject | null>}
+     */
+    const framebuffers = ()=>kernel.shareGroup().framebuffers;
     /** @type {FramebufferObject | null} */
     let drawFbo = null;
     /** @type {FramebufferObject | null} */
@@ -318,7 +332,7 @@ export function installFramebufferCalls(context, kernel){
      */
     const bindFramebuffer = (call, target, name, ext)=>{
         const which = targetsOf(target);
-        if (!which || (ext && target !== GL.FRAMEBUFFER))
+        if (!which)
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -327,16 +341,17 @@ export function installFramebufferCalls(context, kernel){
         let fbo = null;
         if (name !== 0)
         {
-            if (!framebuffers.has(name) && !ext)
+            if (!framebuffers().has(name) && !ext)
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            fbo = framebuffers.get(name) ?? null;
+            fbo = framebuffers().get(name) ?? null;
             if (!fbo)
             {
                 fbo = createFramebufferObject(name);
-                framebuffers.set(name, fbo);
+                framebuffers().set(name, fbo);
+                kernel.shareGroup().used = true;
             }
         }
         if (which.includes('draw'))
@@ -421,9 +436,10 @@ export function installFramebufferCalls(context, kernel){
             let next = 1;
             while (names.length < count)
             {
-                if (!framebuffers.has(next))
+                if (!framebuffers().has(next))
                 {
-                    framebuffers.set(next, null);
+                    framebuffers().set(next, null);
+                    kernel.shareGroup().used = true;
                     names.push(next);
                 }
                 next++;
@@ -439,11 +455,11 @@ export function installFramebufferCalls(context, kernel){
             }
             for (const name of names)
             {
-                if (name === 0 || !framebuffers.has(name))
+                if (name === 0 || !framebuffers().has(name))
                 {
                     continue;
                 }
-                const fbo = framebuffers.get(name);
+                const fbo = framebuffers().get(name);
                 if (fbo && fbo === drawFbo)
                 {
                     drawFbo = null;
@@ -452,7 +468,7 @@ export function installFramebufferCalls(context, kernel){
                 {
                     readFbo = null;
                 }
-                framebuffers.delete(name);
+                framebuffers().delete(name);
             }
             publish();
         },
@@ -463,7 +479,7 @@ export function installFramebufferCalls(context, kernel){
             {
                 return GL.FALSE;
             }
-            return framebuffers.get(name) ? GL.TRUE : GL.FALSE;
+            return framebuffers().get(name) ? GL.TRUE : GL.FALSE;
         },
 
         /** @param {number} target @param {number} name @param {boolean} ext */
@@ -581,6 +597,17 @@ export function installFramebufferCalls(context, kernel){
             }
             const image = attachmentImage(attached);
             const colour = image?.holds === 'colour';
+            // A texture kept as a sized format answers from its format.
+            const sized = attached.kind === 'texture'
+                ? attached.texture.levels.get(levelKey(attached.level, attached.face))?.sized
+                : null;
+            const bits = /** @type {number[]} */ ([GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE]).indexOf(pname);
+            if (sized && bits >= 0)
+            {
+                return [sized.bits[bits]];
+            }
             switch (pname)
             {
                 case GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
@@ -602,15 +629,18 @@ export function installFramebufferCalls(context, kernel){
                 case GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
                     return [colour ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-                    return [image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
-                        : 0];
+                    return [sized ? sized.depth
+                        : image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
+                            : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-                    return [image && (image.holds === 'stencil' || image.holds === 'depthStencil')
-                        ? 8 : 0];
+                    return [sized ? sized.stencil
+                        : image && (image.holds === 'stencil' || image.holds === 'depthStencil')
+                            ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-                    return [GL.UNSIGNED_NORMALIZED];
+                    return [sized ? componentTypeOf(sized, colour ? 'colour' : 'depth')
+                        : GL.UNSIGNED_NORMALIZED];
                 case GL.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-                    return [GL.LINEAR_COLOR];
+                    return [sized?.srgb ? GL.SRGB : GL.LINEAR_COLOR];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
@@ -749,7 +779,7 @@ export function installFramebufferCalls(context, kernel){
             }
             Object.assign(boundRenderbuffer, { width, height, internalFormat, samples,
                 version: boundRenderbuffer.version + 1 });
-            for (const fbo of framebuffers.values())
+            for (const fbo of framebuffers().values())
             {
                 if (fbo && [...fbo.attachments.values()].some(a=>a.kind === 'renderbuffer'
                     && a.renderbuffer === boundRenderbuffer))
