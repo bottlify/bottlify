@@ -167,14 +167,14 @@ test('a device is created on a 3D surface in video memory, and on nothing else',
 
 // --- the scene ---
 
-test('the scene is a pair, and a draw belongs inside it', ()=>{
+test('the scene is a pair, and a draw outside it is drawn all the same', ()=>{
     const f = fixture();
     const { device } = f;
     const triangle = new Uint8Array(20 * 3);
 
     assert.equal(device.EndScene(), D3DERR_SCENE_NOT_IN_SCENE);
-    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3),
-        D3DERR_SCENE_NOT_IN_SCENE);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3), D3D_OK,
+        'Wine\'s test_draw_primitive draws before any BeginScene');
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.BeginScene(), D3DERR_SCENE_IN_SCENE);
     assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3), D3D_OK);
@@ -611,6 +611,12 @@ test('the material, clip status and clip planes read back as copies', ()=>{
     assert.equal(device.GetMaterial(out), D3D_OK);
     assert.equal(out.material.Power, 8);
     assert.deepEqual(out.material.Emissive, { r: 0.1, g: 0.2, b: 0.3, a: 0 });
+    // A material of no power: GetMaterial and drawing say zero, ProcessVertices
+    // highlights by the last power that was not (test_specular_lighting).
+    assert.equal(device.SetMaterial({ ...material, Power: 0 }), D3D_OK);
+    assert.equal(device.GetMaterial(out), D3D_OK);
+    assert.equal(out.material.Power, 0);
+    assert.equal(device.processingState().material.Power, 8);
 
     const status = { flags: 1, status: 0, extents: [1, 2, 3, 4, 5, 6] };
     /** @type {{ status?: any }} */

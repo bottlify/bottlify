@@ -45,7 +45,7 @@ import {
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DDP_DONOTCLIP,
     D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP,
-    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3D_OK, DDERR_INVALIDCAPS,
+    D3DERR_VERTEXBUFFERLOCKED, D3D_OK, DDERR_INVALIDCAPS,
     DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
 } from '../d3d7/constants.js';
 import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
@@ -534,7 +534,7 @@ test('a draw reads exactly as many vertex bytes as the format implies', ()=>{
 
     assert.equal(
         h.device(device, 'DrawPrimitive', [D3DPT.TRIANGLELIST, FVF_TL, vertices, 3, 0]),
-        D3DERR_SCENE_NOT_IN_SCENE >>> 0, 'a draw outside a scene is refused before a read');
+        D3D_OK, 'a draw outside a scene is drawn');
     assert.equal(h.device(device, 'BeginScene'), D3D_OK);
     assert.equal(h.device(device, 'DrawPrimitive',
         [D3DPT.TRIANGLELIST, FVF_TL, vertices, 3, 0]), D3D_OK);
@@ -936,7 +936,7 @@ test('a buffer no draw has read is locked in place, read whole at its first draw
     const process = (/** @type {number} */ at)=>assert.equal(h.buffer(dest, 'ProcessVertices',
         [1, at, 4, src, 0, device, 0]), D3D_OK);
     const draw = ()=>assert.equal(h.device(device, 'DrawPrimitiveVB', [4, dest, 0, 3, 0]),
-        D3DERR_SCENE_NOT_IN_SCENE >>> 0, 'outside a scene, the buffer still readied');
+        D3D_OK, 'outside a scene, the buffer readied');
 
     lockUnlock(src);
     process(0);
