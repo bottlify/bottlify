@@ -171,6 +171,16 @@ test('a stream that cannot be read says where it stopped', ()=>{
         .error ?? '', /without a destination/);
 });
 
+test('a model 3 pixel shader may take POSITION1 as an input, not POSITION0', ()=>{
+    // Wine's d3d9 test_position_index.
+    const three = { major: 3, minor: 0 };
+    const reading = (/** @type {number} */ index)=>[versionToken(SHADER_KIND.PIXEL, 3, 0),
+        op(OPCODE.DCL, 2), (0x80000000 | (index << 16)) >>> 0, dst(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), 0x90e40000, END_TOKEN];
+    assert.equal(validateShader(reading(1), SHADER_KIND.PIXEL, three), D3D_OK);
+    assert.equal(validateShader(reading(0), SHADER_KIND.PIXEL, three), D3DERR_INVALIDCALL);
+});
+
 test('a create refuses the wrong kind, a broken stream and a model past the device', ()=>{
     const two = { major: 2, minor: 0 };
     assert.equal(validateShader(TRANSFORM_VS, SHADER_KIND.VERTEX, two), D3D_OK);

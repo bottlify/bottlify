@@ -1897,6 +1897,13 @@ export function translateShader(parsed, options = {}){
                 {
                     emits(varyingLocation(D3DDECLUSAGE.COLOR, output - 100),
                         `oD${output - 100}`);
+                    if (output === 100)
+                    {
+                        // The diffuse a shader below model 3 leaves unwritten
+                        // is one in every component (Wine's d3d9
+                        // test_uninitialized_varyings, test_default_diffuse).
+                        prologue.push('    out.oD0 = vec4f(1.0);');
+                    }
                     // Below model 3 a colour output leaves the shader held to
                     // [0, 1]; a model 3 output is whatever the shader wrote.
                     body.push(`    out.oD${output - 100} = saturate(out.oD${output - 100});`);
@@ -1916,7 +1923,8 @@ export function translateShader(parsed, options = {}){
             if (!outputs.includes(location))
             {
                 emits(location, `oX${location}`);
-                body.push(`    out.oX${location} = vec4f(0.0);`);
+                const diffuse = major < 3 && location === varyingLocation(D3DDECLUSAGE.COLOR, 0);
+                body.push(`    out.oX${location} = vec4f(${diffuse ? '1.0' : '0.0'});`);
             }
         }
         // Direct3D puts a pixel's centre on its integer coordinate and WebGPU

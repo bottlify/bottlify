@@ -1510,3 +1510,17 @@ test('a pre-transformed vertex hands its other elements to a pixel shader that r
     ], new Map([[0, four], [1, four]]), [normal]);
     assertLine(transformed.wgsl, `out.o${normal} = vec4f(0.0);`);
 });
+
+test('a vertex shader below model 3 leaves the diffuse it does not write one', ()=>{
+    // Wine's d3d9 test_uninitialized_varyings: vs_1_1 writing oD0.x alone
+    // gives (x, 1, 1, 1); vs_3_0 has no such default.
+    const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.ATTROUT, 0, 0x1), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed);
+    const code = translated.wgsl ?? '';
+    assert.ok(code.indexOf('out.oD0 = vec4f(1.0);') >= 0, code);
+    const written = code.indexOf('out.oD0 = vec4f(_t.x, out.oD0.y');
+    assert.ok(written > code.indexOf('out.oD0 = vec4f(1.0);'), 'before the shader writes its part');
+});

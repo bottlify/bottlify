@@ -455,6 +455,16 @@ export function validateShader(tokens, kind, supported){
     const limits = constantLimits(kind, major, parsed.version.minor);
     for (const instruction of parsed.instructions)
     {
+        // A model 3 pixel shader's input of POSITION0 is the pixel's own
+        // place, which it reads through vPos, not a varying (Wine's d3d9
+        // test_position_index: POSITION1 is taken, POSITION0 refused).
+        const declared = instruction.declaration;
+        if (kind === SHADER_KIND.PIXEL && major >= 3 && declared && 'usage' in declared
+            && instruction.dest?.type === REGISTER.INPUT && declared.usage === 0
+            && declared.usageIndex === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
         for (const operand of [instruction.dest, ...instruction.sources])
         {
             const limit = operand ? limits[operand.type] : undefined;

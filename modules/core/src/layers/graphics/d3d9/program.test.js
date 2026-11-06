@@ -1240,44 +1240,45 @@ const COLOURLESS_VERTEX_SHADER = [
     END_TOKEN,
 ];
 
-test('a varying the pixel shader reads and the vertex shader never writes is written as zero',
-    async()=>{
-        // Direct3D reads whatever was left in the register; a WebGPU fragment
-        // input with no vertex output fails the pipeline and, with it, the
-        // whole frame. So the vertex stage writes it, as zero.
-        const h = harness();
-        /** @type {{ shader?: any }} */
-        const vs = {};
-        /** @type {{ shader?: any }} */
-        const ps = {};
-        assert.equal(h.device.CreateVertexShader(COLOURLESS_VERTEX_SHADER, vs), D3D_OK);
-        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
-        h.device.SetVertexShader(vs.shader);
-        h.device.SetPixelShader(ps.shader);
-        h.device.SetTexture(0, h.texture);
-        await h.draw();
-        assert.deepEqual(h.reports, []);
-        assert.equal(h.device.diagnostics().programmable, 1);
-        const vertexModule = h.gpu.of('createShaderModule')
-            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
-        assert.ok(vertexModule);
-        const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
-        assert.ok(vertexModule.code.includes(`@location(${colour}) oX${colour}: vec4f`),
-            'the colour the pixel shader reads is an output');
-        assert.ok(vertexModule.code.includes(`out.oX${colour} = vec4f(0.0);`), 'written as zero');
+test('a varying the pixel shader reads and the vertex shader never writes is written, the'
+    + ' diffuse of a shader below model 3 as one', async()=>{
+    // A WebGPU fragment input with no vertex output fails the pipeline
+    // and, with it, the whole frame. So the vertex stage writes it: the
+    // diffuse as Windows leaves it unwritten below model 3, one in every
+    // component (Wine's d3d9 test_default_diffuse), anything else zero.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(COLOURLESS_VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(0, h.texture);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    assert.equal(h.device.diagnostics().programmable, 1);
+    const vertexModule = h.gpu.of('createShaderModule')
+        .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+    assert.ok(vertexModule);
+    const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+    assert.ok(vertexModule.code.includes(`@location(${colour}) oX${colour}: vec4f`),
+        'the colour the pixel shader reads is an output');
+    assert.ok(vertexModule.code.includes(`out.oX${colour} = vec4f(1.0);`), 'written as one');
 
-        h.device.SetTexture(0, null);
-        h.device.SetPixelShader(null);
-        h.device.SetVertexShader(null);
-        h.device.SetVertexDeclaration(null);
-        h.device.SetStreamSource(0, null, 0, 0);
-        ps.shader.release();
-        vs.shader.release();
-        h.texture.release();
-        h.declaration.release();
-        h.vb.release();
-        assert.equal(h.device.release(), 0);
-    });
+    h.device.SetTexture(0, null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    ps.shader.release();
+    vs.shader.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
 
 test('a pixel shader over a declaration that carries only a position is given what it reads',
     async()=>{
