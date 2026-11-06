@@ -1423,7 +1423,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)],
         [0xffff0000, 0xffffffff], 'two bytes, and nothing past them');
     assert.equal(onOcclusion('GetData', [data, 8, 1]), D3D_OK);
-    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0xffffffff]);
+    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0],
+        'eight bytes of room take the count as 64 bits (test_occlusion_query)');
     assert.equal(h.release(occlusion), 0);
     assert.equal(h.release(device), 0);
     h.release(root);
@@ -2695,10 +2696,13 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
     let polledInGuest = 0;
     /** @param {(...args: any[]) => number} js @param {string} name @param {number[]} args */
     const both = (js, name, args)=>{
+        // Both words: a count is 64 bits where there is room for them.
         memory.writeU32(data, 0xdeadbeef);
+        memory.writeU32(data + 4, 0xdeadbeef);
         const answer = js(guest, query, ...args) >>> 0;
-        const written = memory.readU32(data);
+        const written = [memory.readU32(data), memory.readU32(data + 4)];
         memory.writeU32(data, 0xdeadbeef);
+        memory.writeU32(data + 4, 0xdeadbeef);
         const hostAnswer = h.box.trap(query, name, args);
         if (answer === HANDED >>> 0)
         {
@@ -2710,8 +2714,15 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
             polledInGuest++;
         }
         assert.equal(answer, hostAnswer >>> 0, `${name}(${args})`);
-        assert.equal(written, memory.readU32(data), `${name}(${args}) writes`);
+        assert.deepEqual(written, [memory.readU32(data), memory.readU32(data + 4)],
+            `${name}(${args}) writes`);
+        if (name === 'GetData' && answer === D3D_OK && args[0] !== 0 && args[1] === 8)
+        {
+            assert.equal(written[1], 0, 'a count with room for 64 bits has its high word');
+            wide++;
+        }
     };
+    let wide = 0;
     for (let round = 0; round < 600; round++)
     {
         const roll = next() % 10;
@@ -2738,6 +2749,7 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
         }
     }
     assert.ok(measured > 20, `${measured} measurements`);
+    assert.ok(wide > 5, `${wide} counts read into eight bytes`);
     assert.ok(polledInGuest > 50 && inGuest > polledInGuest,
         `${polledInGuest} polls not done and ${inGuest - polledInGuest} counts in the guest`);
 });

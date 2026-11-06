@@ -125,7 +125,8 @@ export function QueryIssue({ u32, host }, self, flags){
 /**
  * HRESULT GetData(this, void *data, DWORD size, DWORD flags): an event is
  * done, TRUE in its four bytes; an occlusion query the host has asked for is
- * not done yet, S_FALSE, and one whose count is back has it in its four bytes.
+ * not done yet, S_FALSE, and one whose count is back has it in its four bytes,
+ * or eight where there is room for them (Wine's test_occlusion_query).
  * A buffer too small for them is the host's to refuse, and every other query,
  * and an occlusion count the host has not asked for, is the host's.
  *
@@ -177,6 +178,11 @@ export function QueryGetData({ u32, setU32, host }, self, data, size, flags){
         if (data !== 0 && size !== 0)
         {
             setU32(data, u32(block + QUERY_COUNT));
+            // Room for eight bytes takes the count as the 64-bit one it is.
+            if (size >= 8)
+            {
+                setU32(data + 4, 0);
+            }
         }
         return 0;
     }

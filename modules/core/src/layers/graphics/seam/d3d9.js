@@ -1456,8 +1456,13 @@ export function createDirect3D9Seam(
             const write = hr=>{
                 if (hr === D3D_OK && (data >>> 0) !== 0 && held.value !== undefined)
                 {
-                    const bytes = new Uint8Array(new Uint32Array([held.value >>> 0]).buffer);
-                    memory.writeMemory(data >>> 0, bytes.subarray(0, Math.min(4, size >>> 0)));
+                    // An occlusion count is 64 bits where the caller has room
+                    // for them, past four billion saturated in its low word
+                    // (Wine's test_occlusion_query accepts either).
+                    const wide = query.type === D3DQUERYTYPE_OCCLUSION ? 8 : 4;
+                    const bytes = new Uint8Array(new Uint32Array([
+                        Math.min(held.value, 0xffffffff) >>> 0, 0]).buffer);
+                    memory.writeMemory(data >>> 0, bytes.subarray(0, Math.min(wide, size >>> 0)));
                 }
                 return hr;
             };
