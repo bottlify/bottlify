@@ -78,8 +78,9 @@ function fixture(){
      * then process with `flags` and draw the square.
      *
      * @param {number[]} normal @param {number[]} extra  Instruction bytes before processing.
+     * @param {number} [vertexCount]  What D3DEXECUTEDATA says.
      */
-    const run = (normal, extra = [])=>{
+    const run = (normal, extra = [], vertexCount = 4)=>{
         [[-1, -1], [-1, 1], [1, 1], [1, -1]].forEach(([x, y], k)=>{
             [x, y, 0, ...normal, 0, 0].forEach((value, index)=>
                 view.setFloat32(base + k * 32 + index * 4, value, true));
@@ -103,7 +104,7 @@ function fixture(){
         stream.push(3, 8, 2, 0, 0, 0, 1, 0, 2, 0, 1, 0, 2, 0, 3, 0, 0, 0, 1, 0);
         stream.push(11, 0, 0, 0);
         bytes.set(stream, base + 128);
-        buffer.setExecuteData({ vertexOffset: 0, vertexCount: 4, instructionOffset: 128,
+        buffer.setExecuteData({ vertexOffset: 0, vertexCount, instructionOffset: 128,
             instructionLength: stream.length, hVertexOffset: 0,
             status: { flags: 0, status: 0, extent: [0, 0, 0, 0] } });
         draws.length = 0;
@@ -118,6 +119,13 @@ function fixture(){
     };
     return { device, viewport, legacy, run };
 }
+
+test('D3DEXECUTEDATA\'s vertex count does not bound what the processing makes and the draw'
+    + ' reads (test_execute_buffer_updates)', ()=>{
+    const f = fixture();
+    assert.equal(f.run([1, 1, 1], [], 0), 0xffffffff);
+    assert.equal(f.run([1, 1, 1], [], 1), 0xffffffff);
+});
 
 test('a D3DVERTEX processed with no material is white, and one lit takes its light', ()=>{
     const f = fixture();

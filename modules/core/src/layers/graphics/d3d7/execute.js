@@ -156,8 +156,21 @@ export function executeBuffer({ memory, device, buffer, viewport }){
         ? null
         : memory.readMemory(buffer.data + offset, length));
 
-    const vertexCount = Math.min(data.vertexCount, MAX_VERTICES);
-    const transformed = new Uint8Array(vertexCount * VERTEX_BYTES);
+    // The transformed array holds what the processing instructions put in it:
+    // D3DEXECUTEDATA's vertex count does not bound it (Wine's ddraw1
+    // test_execute_buffer_updates), only the most an index can name does.
+    let vertexCount = Math.min(data.vertexCount, MAX_VERTICES);
+    let transformed = new Uint8Array(vertexCount * VERTEX_BYTES);
+    /** @param {number} count  Vertices the array is to hold. */
+    const holding = count=>{
+        if (transformed.length < count * VERTEX_BYTES)
+        {
+            const grown = new Uint8Array(count * VERTEX_BYTES);
+            grown.set(transformed);
+            transformed = grown;
+        }
+        vertexCount = Math.max(vertexCount, count);
+    };
     // An execute-buffer device draws nothing through a viewport its target
     // cannot hold (Wine's ddraw1.c test_viewport); its states still apply.
     const drawing = viewport.data !== null && device.holds(viewport.data);
@@ -330,8 +343,9 @@ export function executeBuffer({ memory, device, buffer, viewport }){
      * @param {number} flags @param {number} start @param {number} dest @param {number} count
      */
     function process(flags, start, dest, count){
-        const n = Math.max(0, Math.min(count, vertexCount - dest));
+        const n = Math.max(0, Math.min(count, MAX_VERTICES - dest));
         const from = data.vertexOffset + start * VERTEX_BYTES;
+        holding(dest + n);
         const operation = flags & D3DPROCESSVERTICES.OPMASK;
         if (operation === D3DPROCESSVERTICES.COPY)
         {
