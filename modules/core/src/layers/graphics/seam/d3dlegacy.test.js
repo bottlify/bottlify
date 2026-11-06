@@ -24,7 +24,8 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import {
-    IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAW_SLOTS,
+    IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE_SLOTS,
+    IDIRECTDRAW_SLOTS,
 } from './vtables.js';
 import {
     IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3D_SLOTS, IDIRECT3DDEVICE2_SLOTS,
@@ -54,12 +55,15 @@ import { DDSURFACEDESC, DDSURFACEDESC2, readSurfaceDesc, writeSurfaceDesc }
 import { d3dFormatOf } from '../d3d7/device.js';
 import { D3DFMT } from '../d3d7/constants.js';
 import {
-    DDCKEY_SRCBLT, DDERR_NOCOLORKEY, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN,
-    DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDCKEY_SRCBLT, DDERR_INVALIDCAPS, DDERR_INVALIDPIXELFORMAT, DDERR_NOCOLORKEY,
+    DDERR_NOPALETTEATTACHED, DDPCAPS_8BIT, DDPF_PALETTEINDEXED8, DDPF_RGB, DDSCAPS_3DDEVICE,
+    DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS,
+    DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import {
     D3DDEB_BUFSIZE, D3DDEB_CAPS, DDERR_ALREADYINITIALIZED,
     D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_HWRASTERIZATION, D3DERR_NOCURRENTVIEWPORT,
+    D3DERR_SURFACENOTINVIDMEM,
     D3DERR_VIEWPORTDATANOTSET, D3DERR_VIEWPORTHASNODEVICE, D3DFDS_GUID, D3DLIGHTSTATE,
     D3DLIGHT_ACTIVE, D3DPTEXTURECAPS_POW2, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND,
     DEVICE_IDS,
@@ -1314,6 +1318,71 @@ test('a surface asked for a device is one, with the surface\'s interfaces and co
     const model = h.publisher.objectAt(surface);
     assert.equal(h.release(device), 0);
     assert.ok(model.destroyed, 'the last reference was the device\'s, and the surface went');
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a surface no device could draw into refuses the device GUID with why (test_rt_caps)', ()=>{
+    const h = seamed();
+    const ddraw = h.create1();
+    const at = 0x5000;
+    /** @param {number} caps @param {any} [pixelFormat] @returns {number} a new 8x8 surface */
+    const surfaceWith = (caps, pixelFormat = XRGB32)=>{
+        h.box.bytes.fill(0, at, at + DDSURFACEDESC.SIZE);
+        writeSurfaceDesc(h.box.services, at, DDSURFACEDESC, {
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+            width: 8, height: 8, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+            caps, caps2: 0, pixelFormat,
+        });
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+            [at, 0x5100, 0]), DD_OK);
+        return h.box.memory.readU32(0x5100);
+    };
+
+    const plain = surfaceWith(DDSCAPS_OFFSCREENPLAIN);
+    const refused = h.query(plain, DEVICE_IDS.HAL);
+    assert.equal(refused.hr, DDERR_INVALIDCAPS >>> 0, 'no 3DDEVICE cap: no device');
+    assert.equal(refused.pointer, 0);
+    assert.equal(h.query(plain, DEVICE_IDS.RGB).hr, DDERR_INVALIDCAPS >>> 0);
+    assert.equal(h.countOf(plain), 1, 'a refusal takes no reference');
+
+    const system = surfaceWith(DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY);
+    assert.equal(h.query(system, DEVICE_IDS.HAL).hr, D3DERR_SURFACENOTINVIDMEM >>> 0,
+        'the hardware device wants video memory');
+    const software = h.query(system, DEVICE_IDS.RGB);
+    assert.equal(software.hr, DD_OK, 'the software one draws into system memory');
+    assert.equal(h.query(system, DEVICE_IDS.RGB).pointer, software.pointer,
+        'the device made once is answered again');
+    h.release(software.pointer);
+    h.release(software.pointer);
+
+    // An indexed target: only the software device of the first generation
+    // takes one, and once made it is answered whatever the palette does.
+    const indexed = surfaceWith(DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, Object.freeze({
+        size: 0x20, flags: DDPF_PALETTEINDEXED8 | DDPF_RGB, fourCC: 0, bitCount: 8,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0,
+    }));
+    assert.equal(h.query(indexed, DEVICE_IDS.RGB).hr, DDERR_NOPALETTEATTACHED >>> 0);
+    h.box.bytes.fill(0, 0x5800, 0x5c00);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreatePalette'),
+        [DDPCAPS_8BIT, 0x5800, 0x5900, 0]), DD_OK);
+    const palette = h.box.memory.readU32(0x5900);
+    const setPalette = (/** @type {number} */ to)=>
+        h.box.call(indexed, slot(IDIRECTDRAWSURFACE_SLOTS, 'SetPalette'), [to]);
+    assert.equal(setPalette(palette), DD_OK);
+    assert.equal(h.query(indexed, DEVICE_IDS.HAL).hr, DDERR_INVALIDPIXELFORMAT >>> 0);
+    const onIndexed = h.query(indexed, DEVICE_IDS.RGB);
+    assert.equal(onIndexed.hr, DD_OK);
+    assert.equal(h.device1(onIndexed.pointer, 'CreateMatrix', [0x4600]), D3D_OK,
+        'the first call makes the device');
+    assert.equal(setPalette(0), DD_OK);
+    assert.equal(h.query(indexed, DEVICE_IDS.RGB).hr, DD_OK, 'the device it has is answered');
+    h.release(onIndexed.pointer);
+    h.release(onIndexed.pointer);
+    h.release(palette);
+    h.release(indexed);
+    h.release(plain);
+    h.release(system);
     h.release(ddraw);
     h.assertAllReleased();
 });
