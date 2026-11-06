@@ -613,6 +613,9 @@ export function createKernelModule(){
                  */
                 nextDeadline: ()=>live() ? state.scheduler.nextDeadline() : null,
 
+                /** What the soonest deadline is a wait on, or null. */
+                nextDeadlineOn: ()=>live() ? state.scheduler.nextDeadlineOn() : null,
+
                 /**
                  * @param {any} thread @param {number} exitCode
                  * @param {boolean} [itself]  Whether the thread ended itself. By

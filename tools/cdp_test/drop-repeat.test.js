@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { repeatingDrops, scenesOf } from './drop-repeat.mjs';
+import { freezesOf, repeatingDrops, scenesOf } from './drop-repeat.mjs';
 
 /**
  * A run of frames: `scenes` scenes of `seconds` at 5 ms a frame, a 2 s load
@@ -48,4 +48,22 @@ test('a drop at one point of every run repeats; a drop that wanders does not', (
     assert.equal(result.scenes[1].repeating.length, 1);
     assert.equal(result.scenes[1].repeating[0].fromS, 3);
     assert.equal(result.scenes[1].repeating[0].runs, 5);
+});
+
+test('a freeze is listed in its scene with its idle time by what it waited on', ()=>{
+    const frames = run(2, 4, [[1, 2]]);
+    const slow = frames.find(frame=>frame.ms === 40);
+    if (!slow)
+    {
+        throw new Error('the run has no slow frame');
+    }
+    slow.ms = 600;
+    Object.assign(slow, { idleMs: 500 });
+    slow.notes = { instructions: 1000, 'idle-host-wait Sleep': 100,
+        'idle-message-wait others': 400 };
+    const freezes = freezesOf(frames, 1500, 500);
+    assert.equal(freezes[0].length, 0, 'the first scene has none');
+    assert.equal(freezes[1].length, 1);
+    assert.equal(freezes[1][0].idle, 500);
+    assert.deepEqual(freezes[1][0].idleBy[0], ['idle-message-wait others', 400], 'largest first');
 });

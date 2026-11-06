@@ -984,6 +984,9 @@ export function createBridgeModule(){
                  */
                 suspended: ()=>live() ? state.callbacks.pendingCalls() : 0,
 
+                /** The host call that suspended last, or '' when none has. */
+                lastSuspended: ()=>live() ? state.callbacks.lastSuspended() : '',
+
                 /**
                  * Settles when the next suspended call answers: what a driver loop
                  * with nothing else to do waits on, so it wakes when the machine

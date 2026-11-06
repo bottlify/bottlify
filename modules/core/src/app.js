@@ -7849,7 +7849,15 @@ async function buildApp(options){
                         // from expiring. In full: a wait this long was asked
                         // for, and a cap here would make it end early.
                         creditClock(Infinity);
-                        journal.end(wait.phase);
+                        const waitedMs = journal.end(wait.phase);
+                        // The frame's idle time by what it waited on: a call on
+                        // the host by name, the process's other executors.
+                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                        {
+                            const call = onHost > 0 ? ` ${bridge.lastSuspended()}` : '';
+                            journal.note(`${wait.phase}${call}${othersRung !== null
+                                ? ' others' : ''}`, waitedMs);
+                        }
                     }
 
                     // What the machine's state says before it is given another
@@ -8004,7 +8012,12 @@ async function buildApp(options){
                                 timer: false, sleep: true,
                                 deadlineMs: nextDeadlineMs(), wakes: [],
                             });
-                            journal.end('idle-deadline');
+                            const waitedMs = journal.end('idle-deadline');
+                            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                            {
+                                journal.note(`idle-deadline ${kernel.nextDeadlineOn?.()
+                                    ?? 'timer'}`, waitedMs);
+                            }
                             continue;
                         }
                         // Or another process of the run is running beside this
@@ -8016,7 +8029,8 @@ async function buildApp(options){
                             await pacing.wait({
                                 timer: true, sleep: true, deadlineMs: null, wakes: [],
                             });
-                            journal.end('idle-host-wait');
+                            journal.note('idle-host-wait other process',
+                                journal.end('idle-host-wait'));
                             continue;
                         }
                         // Either everything finished without the program exiting,
