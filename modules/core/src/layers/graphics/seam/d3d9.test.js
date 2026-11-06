@@ -1691,6 +1691,9 @@ test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the pla
         assert.equal(h.box.call(ex, 0, [iid, queried]), D3D_OK);
         const base = h.box.memory.readU32(queried);
         assert.notEqual(base, 0);
+        // Single inheritance: the plain interface is the front of the extended
+        // one, the same pointer.
+        assert.equal(base, ex, 'IDirect3D9 is the IDirect3D9Ex pointer');
         assert.equal(h.root.refCount, 2, 'one object, one count');
         assert.equal(h.release(base), 1);
 
@@ -1701,6 +1704,7 @@ test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the pla
         writeIid(h, iid, IID_IDirect3DDevice9Ex);
         assert.equal(h.box.call(device, 0, [iid, queried]), D3D_OK);
         const deviceEx = h.box.memory.readU32(queried);
+        assert.equal(deviceEx, device, 'IDirect3DDevice9 is the IDirect3DDevice9Ex pointer');
         assert.equal(h.box.call(deviceEx, slot(EX_DEVICE_SLOTS, 'GetMaximumFrameLatency'),
             [0x7030]), D3D_OK);
         assert.equal(h.box.memory.readU32(0x7030), 3);
@@ -1710,6 +1714,7 @@ test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the pla
         writeIid(h, iid, IID_IDirect3DSwapChain9Ex);
         assert.equal(h.box.call(chain, 0, [iid, queried]), D3D_OK);
         const chainEx = h.box.memory.readU32(queried);
+        assert.equal(chainEx, chain, 'and the chain\'s');
         assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
         assert.equal(h.box.call(chainEx, slot(EX_CHAIN_SLOTS, 'GetLastPresentCount'), [0x7050]),
             D3D_OK);

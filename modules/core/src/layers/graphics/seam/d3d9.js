@@ -98,6 +98,18 @@ import { loudRefusals } from './refusals.js';
  */
 const describe = (...args)=>({ ...describeAny(...args), identity: true });
 
+/**
+ * A plain interface list as the front of an extended object's: the plain
+ * interface answered by the extended one's pointer, as single inheritance lays
+ * an IDirect3DDevice9Ex out (Wine's d3d9ex.c test_reset_resources: an orphaned
+ * back buffer's GetContainer for IDirect3DDevice9 is the device the program holds).
+ *
+ * @param {import('./com.js').InterfaceDescriptor[]} plain
+ * @param {string} base @param {string} extended
+ */
+const frontOf = (plain, base, extended)=>plain.map(face=>(face.id === base
+    ? { ...face, sharedWith: extended } : face));
+
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
 const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
@@ -1671,7 +1683,7 @@ export function createDirect3D9Seam(
                 /** @param {any} chain @param {number[]} args */
                 GetDisplayModeEx: (chain, [mode, rotation])=>writeDisplayModeEx(mode, rotation),
             }),
-        ...swapChainInterfaces,
+        ...frontOf(swapChainInterfaces, IID_IDirect3DSwapChain9, IID_IDirect3DSwapChain9Ex),
     ];
 
     /**
@@ -3243,7 +3255,7 @@ export function createDirect3D9Seam(
     const exDeviceInterfaces = [
         describe(IID_IDirect3DDevice9Ex, [...IDIRECT3DDEVICE9_SLOTS, ...IDIRECT3DDEVICE9EX_SLOTS],
             synced({ ...deviceMethods, ...exDeviceMethods }), deviceGuests, undefined, IN_PLACE),
-        ...deviceInterfaces,
+        ...frontOf(deviceInterfaces, IID_IDirect3DDevice9, IID_IDirect3DDevice9Ex),
     ];
 
     /** @param {any} device */
@@ -3777,7 +3789,7 @@ export function createDirect3D9Seam(
     const rootExInterfaces = [
         describe(IID_IDirect3D9Ex, [...IDIRECT3D9_SLOTS, ...IDIRECT3D9EX_SLOTS],
             { ...rootMethods, ...rootExMethods }, fpuGuests),
-        ...rootInterfaces,
+        ...frontOf(rootInterfaces, IID_IDirect3D9, IID_IDirect3D9Ex),
     ];
 
     /** @type {any} */
