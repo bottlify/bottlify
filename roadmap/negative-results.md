@@ -2677,3 +2677,24 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, the VM's hardware WebGPU adapter; Chrome
   version and power plan not recorded.
 - **Decision.** Kept (it removes a loop and its interpreter work); not counted as a frame-rate gain.
+
+### 2026-11-06: heavy frames inside 3DMark03's tests are not cold code waiting for its translation (cork, frame pacing)
+
+- **Idea.** Frames of 0.5-1.5 s inside a test (not between tests) came with millions of instructions
+  interpreted; the guess was that hot code sat in the translation queue behind a batch of up to 256
+  regions (about 3.4 ms of the worker each).
+- **Workload.** 3DMark03 (`--route`), `--worker --graphics-worker --coi --graphics-config
+  '{"compressedTextures":true}' --store local --prefetch`, 420 s, cold, `{"timings":true}`; 8 runs
+  on 4307bd214 to 4c4bb5ac6 (instruments only). Bundle hash not recorded.
+- **Values.** Per exit target, queued to published (87db6ece3): 10-140 ms, the batch 5-256
+  regions. The translation worker was busy 22-27 s a run for 6000-6150 regions: emit 16.6-21.0 s,
+  compile 1.2-1.7 s, pack 0.5-0.7 s, encode 0.2-0.4 s. Heavy frames inside tests in every run:
+  GT1 +2 s and +10-15 s, GT2 +8-9 s (0.5-1.4 s; the engine thread idle 0.3-0.5 s of it,
+  1-5 M interpreted, 15-80 thousand exits); GT3 +1.4 s and +6.5 s (0.55-0.9 s, 750-960 M translated
+  guest instructions, nothing interpreted); GT3 +7 s with 0-19 M interpreted, varying run to run.
+- **Why.** The wait for a translation is a tenth of the stall at most; the bulk is the engine thread
+  idle and translated guest work, causes not yet known.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, the VM's hardware WebGPU adapter; Chrome
+  version and power plan not recorded.
+- **Decision.** Batch sizes and the worker left as they are; the two unexplained stalls are open
+  questions.
