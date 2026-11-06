@@ -96,7 +96,9 @@ import {
     DDSCAPS_FRONTBUFFER,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
+    DDSCAPS_ALLOCONLOAD,
     DDSCAPS_TEXTURE,
+    DDSCAPS_VIDEOMEMORY,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
     DDSCL_EXCLUSIVE,
@@ -144,6 +146,9 @@ function blockRowBytes(format, width){
     }
     return Math.max(1, Math.ceil(width / 4)) * (code === 0x31545844 ? 8 : 16);
 }
+
+/** @param {number} value @param {number} to  a power of two @returns {number} */
+const align = (value, to)=>(value + to - 1) & ~(to - 1);
 
 /**
  * An uncompressed surface's row: whole bytes a pixel, or, for pixels of 1, 2
@@ -1057,7 +1062,7 @@ export function createDirectDraw(options = {}){
      *   backBufferCount: number, pixelFormat: import("./structs.js").PixelFormatFields,
      *   owner: string | null, implicit: boolean, mipMapCount?: number,
      *   mode?: { width: number, height: number, bitCount: number },
-     *   version?: 1 | 2 | 4 | 7 }} spec
+     *   version?: 1 | 2 | 4 | 7, userMemory?: { pointer: number, pitch: number } }} spec
      *   `mode` is the display mode a primary and its buffers are the screen in;
      *   `version` the generation a mipmap level was created through.
      * @returns {Surface}
@@ -1070,8 +1075,12 @@ export function createDirectDraw(options = {}){
         let height = spec.height;
         let pixelFormat = spec.pixelFormat;
         let bpp = bytesPerPixel(pixelFormat);
-        let pitch = blockRowBytes(pixelFormat, width) ?? rowBytes(pixelFormat, width, bpp);
-        let buffer = allocate(pitch * height);
+        // A row starts on an eight-byte boundary, as the runtime lays one out
+        // (Wine's test_create_surface_pitch: 63 pixels of 32 bits are 0x100).
+        let pitch = spec.userMemory?.pitch ?? blockRowBytes(pixelFormat, width)
+            ?? align(rowBytes(pixelFormat, width, bpp), 8);
+        let ownsBuffer = !spec.userMemory;
+        let buffer = spec.userMemory?.pointer ?? allocate(pitch * height);
 
         /** @type {Surface | null} */
         let flipNext = null;
@@ -1182,7 +1191,10 @@ export function createDirectDraw(options = {}){
             {
                 watcher.freed?.(buffer);
             }
-            free(buffer);
+            if (ownsBuffer)
+            {
+                free(buffer);
+            }
         });
 
         const surface = {
@@ -1909,6 +1921,11 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                if (ownsBuffer)
+                {
+                    free(buffer);
+                    ownsBuffer = false;
+                }
                 buffer = /** @type {number} */ (request.surfacePointer) >>> 0;
                 if (has(DDSD_WIDTH))
                 {
@@ -2122,6 +2139,32 @@ export function createDirectDraw(options = {}){
         {
             return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
         }
+        // Memory of the program's own is system memory at a pitch it names, a
+        // multiple of four that holds a row (Wine's test_create_surface_pitch).
+        /** @type {{ pointer: number, pitch: number } | undefined} */
+        let userMemory;
+        // Only a texture is allocated when loaded (test_create_surface_pitch).
+        if ((request.caps & DDSCAPS_ALLOCONLOAD) !== 0 && (request.caps & DDSCAPS_TEXTURE) === 0)
+        {
+            return { hr: DDERR_INVALIDCAPS, surface: null };
+        }
+        if ((request.flags & DDSD_LPSURFACE) !== 0)
+        {
+            if ((request.caps & DDSCAPS_VIDEOMEMORY) !== 0)
+            {
+                return { hr: DDERR_INVALIDCAPS, surface: null };
+            }
+            const given = (request.pitch ?? 0) | 0;
+            const row = blockRowBytes(pixelFormat, width)
+                ?? rowBytes(pixelFormat, width, bytesPerPixel(pixelFormat));
+            if ((request.flags & DDSD_PITCH) === 0 || ((request.surfacePointer ?? 0) >>> 0) === 0
+                || (given & 3) !== 0 || given < row)
+            {
+                return { hr: DDERR_INVALIDPARAMS, surface: null };
+            }
+            userMemory = { pointer: /** @type {number} */ (request.surfacePointer) >>> 0,
+                pitch: given };
+        }
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)
         {
@@ -2175,6 +2218,7 @@ export function createDirectDraw(options = {}){
             implicit: false,
             mipMapCount: levels,
             ...primaryMode,
+            ...(userMemory ? { userMemory } : {}),
         });
 
         attachLevels(front, capsOf(0));
@@ -2235,6 +2279,21 @@ export function createDirectDraw(options = {}){
         },
         get cooperativeWindow(){
             return cooperativeWindow;
+        },
+        /**
+         * The bytes its surfaces in video memory take, which the memory a
+         * program is told is free goes down by (Wine's test_create_surface_pitch).
+         */
+        get videoBytes(){
+            let bytes = 0;
+            for (const surface of surfaces)
+            {
+                if ((surface.caps & DDSCAPS_VIDEOMEMORY) !== 0)
+                {
+                    bytes += surface.pitch * surface.height;
+                }
+            }
+            return bytes;
         },
         get surfaceCount(){
             return surfaces.size;

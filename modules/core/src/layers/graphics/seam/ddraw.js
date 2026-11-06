@@ -1940,12 +1940,14 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            for (const pointer of [total, free])
+            const whole = videoMemory?.() ?? VIDEO_MEMORY;
+            if ((total >>> 0) !== 0)
             {
-                if ((pointer >>> 0) !== 0)
-                {
-                    fields.writeU32(pointer >>> 0, videoMemory?.() ?? VIDEO_MEMORY);
-                }
+                fields.writeU32(total >>> 0, whole);
+            }
+            if ((free >>> 0) !== 0)
+            {
+                fields.writeU32(free >>> 0, Math.max(0, whole - (root.videoBytes ?? 0)));
             }
             return DD_OK;
         },

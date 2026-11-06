@@ -49,6 +49,7 @@ import {
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
     DDSCAPS_TEXTURE,
+    DDSCAPS_VIDEOMEMORY,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
     DDSCL_EXCLUSIVE,
@@ -1062,7 +1063,7 @@ test('a complex mip-mapped texture is a chain of halving levels, as long as aske
         levels.forEach((level, index)=>{
             assert.equal(level.width, Math.max(1, width >> index));
             assert.equal(level.height, Math.max(1, height >> index));
-            assert.equal(level.pitch, level.width * 4);
+            assert.equal(level.pitch, Math.ceil(level.width / 2) * 8);
             assert.equal(level.mipMapCount, expected - index, 'each level counts itself and below');
             assert.equal(level.caps & MIPPED, MIPPED);
             assert.equal(level.caps2 & DDSCAPS2_MIPMAPSUBLEVEL,
@@ -1708,11 +1709,12 @@ test('a new palette on the primary, or a new entry in it, is on the screen at on
     assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
 
-test('a surface of 1, 2 or 4 bits a pixel has the pitch its pixels share bytes by', ()=>{
+test('a surface of 1, 2 or 4 bits a pixel has the pitch its pixels share bytes by, to eight', ()=>{
     const ddraw = withLevel();
-    // DDPF_PALETTEINDEXED1, 2, 4 and 8.
-    for (const [bits, flag, width, pitch] of [[1, 0x800, 9, 2], [2, 0x1000, 5, 2], [4, 0x8, 5, 3],
-        [8, 0x20, 5, 5]])
+    // DDPF_PALETTEINDEXED1, 2, 4 and 8; a row starts on an eight-byte
+    // boundary, as the runtime lays rows out (test_create_surface_pitch).
+    for (const [bits, flag, width, pitch] of [[1, 0x800, 9, 8], [2, 0x1000, 5, 8], [4, 0x8, 5, 8],
+        [8, 0x20, 5, 8], [8, 0x20, 17, 24]])
     {
         const made = ddraw.createSurface({
             flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
@@ -1740,4 +1742,39 @@ test('a surface of a FOURCC the device does not name is refused', ()=>{
     assert.equal(made.hr >>> 0, 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
     assert.equal(made.surface, null);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a surface made over the program\'s memory takes its pitch, and one made by the runtime a row'
+    + ' on eight bytes (test_create_surface_pitch)', ()=>{
+    const ddraw = withLevel();
+    const request = (/** @type {number} */ caps, /** @type {number} */ flags,
+        /** @type {number} */ pitch, /** @type {number} */ pointer)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | flags, caps, width: 63, height: 63,
+        pixelFormat: RGB32, pitch, surfacePointer: pointer });
+    const made = request(DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN, 0, 0, 0);
+    assert.equal(made.surface?.pitch, 0x100);
+    const before = ddraw.videoBytes;
+    const video = request(DDSCAPS_VIDEOMEMORY | DDSCAPS_OFFSCREENPLAIN, 0, 0, 0);
+    assert.equal(ddraw.videoBytes, before + 0x100 * 63, 'video memory taken');
+    const LPSURFACE = 0x800;
+    const PITCH = 0x8;
+    const plain = DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN;
+    assert.equal(request(plain, LPSURFACE, 0, 0x9000).hr, DDERR_INVALIDPARAMS, 'no pitch');
+    assert.equal(request(plain, LPSURFACE | PITCH, 0x100, 0).hr, DDERR_INVALIDPARAMS, 'no memory');
+    assert.equal(request(plain, LPSURFACE | PITCH, 0xfe, 0x9000).hr, DDERR_INVALIDPARAMS);
+    assert.equal(request(plain, LPSURFACE | PITCH, 0xf8, 0x9000).hr, DDERR_INVALIDPARAMS,
+        'shorter than a row');
+    assert.equal(request(DDSCAPS_VIDEOMEMORY | DDSCAPS_OFFSCREENPLAIN, LPSURFACE | PITCH, 0x100,
+        0x9000).hr, DDERR_INVALIDCAPS);
+    assert.equal(request(plain | 0x04000000, 0, 0, 0).hr, DDERR_INVALIDCAPS,
+        'ALLOCONLOAD is a texture\'s');
+    const own = request(plain, LPSURFACE | PITCH, 0xfc, 0x9000);
+    assert.equal(own.hr, DD_OK);
+    assert.equal(own.surface?.pitch, 0xfc);
+    assert.equal(own.surface?.buffer, 0x9000);
+    for (const one of [made, video, own])
+    {
+        assert.equal(one.surface?.release(), 0);
+    }
+    assert.equal(ddraw.videoBytes, before);
 });
