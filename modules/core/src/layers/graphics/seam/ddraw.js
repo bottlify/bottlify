@@ -1011,8 +1011,11 @@ export function createDirectDrawSeam(
             destColorKey,
             width: surface.width,
             height: surface.height,
+            // Blocks in the program's own memory have no size the runtime
+            // knows: it reports none (test_block_formats_creation).
             pitch: compressed
-                ? surface.pitch * Math.max(1, Math.ceil(surface.height / 4))
+                ? (surface.programMemory ? 0xffffffff
+                    : surface.pitch * Math.max(1, Math.ceil(surface.height / 4)))
                 : surface.pitch,
             backBufferCount: surface.backBufferCount,
             mipMapCount: surface.mipMapCount,

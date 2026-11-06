@@ -2703,3 +2703,31 @@ test('the emulation\'s caps are its own, and an object made without hardware put
     }
     h.assertAllReleased();
 });
+
+test('blocks in the program\'s memory report no size of their own (test_block_formats_creation)',
+    ()=>{
+        const h = seamed();
+        const ddraw = h.create7();
+        const sizeOf = (/** @type {number} */ flags)=>{
+            h.box.bytes.fill(0, 0x5000, 0x5000 + DDSURFACEDESC2.SIZE);
+            writeSurfaceDesc(h.box.services, 0x5000, DDSURFACEDESC2, {
+                flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | flags, width: 8,
+                height: 8, pitch: 32, backBufferCount: 0, mipMapCount: 0,
+                caps: DDSCAPS_TEXTURE | 0x800, caps2: 0, surfacePointer: 0x7000,
+                pixelFormat: { size: 0x20, flags: 4, fourCC: 0x31545844, bitCount: 0, redMask: 0,
+                    greenMask: 0, blueMask: 0, alphaMask: 0 } });
+            assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'),
+                [0x5000, 0x5100, 0]), DD_OK);
+            const surface = h.box.memory.readU32(0x5100);
+            h.box.bytes.fill(0, 0x5200, 0x5200 + DDSURFACEDESC2.SIZE);
+            h.box.memory.writeU32(0x5200, DDSURFACEDESC2.SIZE);
+            assert.equal(h.surface7(surface, 'GetSurfaceDesc', [0x5200]), DD_OK);
+            const size = h.box.memory.readU32(0x5200 + DDSURFACEDESC2.dwLinearSize);
+            assert.equal(h.release(surface), 0);
+            return size;
+        };
+        assert.equal(sizeOf(0x00080000 | 0x800), 0xffffffff, 'over the program\'s memory');
+        assert.equal(sizeOf(0x00080000), 32, 'the runtime\'s own: every block');
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });

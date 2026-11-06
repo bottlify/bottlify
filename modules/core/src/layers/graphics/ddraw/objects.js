@@ -105,6 +105,7 @@ import {
     DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS,
     DDSD_HEIGHT,
+    DDSD_LINEARSIZE,
     DDSD_LPSURFACE,
     DDSD_MIPMAPCOUNT,
     DDSD_PITCH,
@@ -340,6 +341,7 @@ export function depthFormatForDepth(bitDepth){
  *           `via` the interface called through (`surfaceCountOf`'s key).
  * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
  * @property {string} generation  The generation it was created through: '1', '4' or '7'.
+ * @property {boolean} programMemory  Whether its pixels are in memory the program gave it.
  * @property {string | undefined} attachedVia  What its flip successor was attached through.
  * @property {boolean} attachedImplicitly  Whether the runtime made the link to its successor.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
@@ -1443,6 +1445,10 @@ export function createDirectDraw(options = {}){
                 return own;
             },
             /** The interface the buffer behind it was attached through. */
+            /** Whether its pixels are in memory the program gave it. */
+            get programMemory(){
+                return !ownsBuffer;
+            },
             get attachedVia(){
                 return flipVia;
             },
@@ -2228,15 +2234,29 @@ export function createDirectDraw(options = {}){
                 return { hr: DDERR_INVALIDCAPS, surface: null };
             }
             const given = (request.pitch ?? 0) | 0;
-            const row = blockRowBytes(pixelFormat, width)
-                ?? rowBytes(pixelFormat, width, bytesPerPixel(pixelFormat));
-            if ((request.flags & DDSD_PITCH) === 0 || ((request.surfacePointer ?? 0) >>> 0) === 0
-                || (given & 3) !== 0 || given < row)
+            const blockRow = blockRowBytes(pixelFormat, width);
+            const row = blockRow ?? rowBytes(pixelFormat, width, bytesPerPixel(pixelFormat));
+            if (((request.surfacePointer ?? 0) >>> 0) === 0)
+            {
+                return { hr: DDERR_INVALIDPARAMS, surface: null };
+            }
+            // Blocks are named by their whole size, never a pitch: dwLinearSize
+            // shares lPitch's place, and holds every block row (Wine's
+            // test_block_formats_creation).
+            if (blockRow !== null)
+            {
+                if ((request.flags & (DDSD_PITCH | DDSD_LINEARSIZE)) !== DDSD_LINEARSIZE
+                    || (given >>> 0) < blockRow * Math.ceil(height / 4))
+                {
+                    return { hr: DDERR_INVALIDPARAMS, surface: null };
+                }
+            }
+            else if ((request.flags & DDSD_PITCH) === 0 || (given & 3) !== 0 || given < row)
             {
                 return { hr: DDERR_INVALIDPARAMS, surface: null };
             }
             userMemory = { pointer: /** @type {number} */ (request.surfacePointer) >>> 0,
-                pitch: given };
+                pitch: blockRow ?? given };
         }
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)

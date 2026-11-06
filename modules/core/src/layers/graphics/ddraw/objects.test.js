@@ -1845,3 +1845,27 @@ test('a buffer attached to a chain the runtime made goes in behind the surface, 
     assert.equal(front.backBufferCount, 3);
     assert.equal(added.caps & DDSCAPS_FLIP, 0);
 });
+
+test('blocks in the program\'s memory are named by their whole size, never a pitch'
+    + ' (test_block_formats_creation)', ()=>{
+    const ddraw = withLevel();
+    const dxt1 = { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x31545844, bitCount: 0,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const request = (/** @type {number} */ flags, /** @type {number} */ size)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | 0x800 | flags,
+        caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE,
+        width: 8, height: 8, pixelFormat: dxt1, pitch: size, surfacePointer: 0x7000 });
+    const LINEARSIZE = 0x00080000;
+    const PITCH = 0x8;
+    // Four 8-byte blocks: two rows of two.
+    const whole = request(LINEARSIZE, 32);
+    assert.equal(whole.hr, DD_OK);
+    assert.equal(whole.surface?.programMemory, true);
+    assert.equal(whole.surface?.buffer, 0x7000);
+    assert.equal(request(LINEARSIZE, 33).hr, DD_OK, 'more is room to spare');
+    assert.equal(request(LINEARSIZE, 31).hr, DDERR_INVALIDPARAMS, 'less is not every block');
+    assert.equal(request(LINEARSIZE, 0).hr, DDERR_INVALIDPARAMS);
+    assert.equal(request(PITCH, 32).hr, DDERR_INVALIDPARAMS, 'blocks have no pitch');
+    assert.equal(request(PITCH | LINEARSIZE, 32).hr, DDERR_INVALIDPARAMS);
+    assert.equal(request(0, 32).hr, DDERR_INVALIDPARAMS, 'a size has to be named');
+});
