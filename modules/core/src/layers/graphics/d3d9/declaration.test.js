@@ -73,6 +73,26 @@ test('blend weights follow the position, and a last beta of indices is its own e
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
         element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT3, 12),
     ]);
+    // Five as floats are four weights and a float of indices
+    // (test_fvf_decl_conversion).
+    // XYZB2 with a D3DCOLOR last beta is, as Direct3D 9 declares it, a
+    // D3DCOLOR weight and UBYTE4 indices; the format itself is a float and
+    // a D3DCOLOR.
+    assert.deepEqual(elementsOfFvf(0x0008 | 0x8000), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT1, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.D3DCOLOR, 16),
+    ]);
+    assert.deepEqual(elementsOfFvf(0x0008 | 0x8000, { asDirect3D9: true }), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.D3DCOLOR, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.UBYTE4, 16),
+    ]);
+    assert.deepEqual(elementsOfFvf(0x000e), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT4, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.FLOAT1, 28),
+    ]);
 });
 
 test('the conversion round-trips for every format a fixed-function draw can read', ()=>{

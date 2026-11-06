@@ -612,6 +612,11 @@ export function createDirect3D9(options = {}){
             {
                 return D3DERR_NOTAVAILABLE;
             }
+            // A buffer has no format to ask about: the question is not one.
+            if (resourceType === D3DRTYPE.VERTEXBUFFER || resourceType === D3DRTYPE.INDEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const info = FORMAT_INFO[format];
             if (!info || info.video)
             {
@@ -623,6 +628,13 @@ export function createDirect3D9(options = {}){
             // encoded (D3DRS_SRGBWRITEENABLE); a floating-point one is neither.
             if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0
                 && (info.depth || srgbViewFormats(gpuFormatOf(format, 4, 4, true)).length === 0))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A plain surface is written encoded only as a target (Wine's
+            // test_check_device_format).
+            if ((usage & USAGE_QUERY_SRGBWRITE) !== 0 && resourceType === D3DRTYPE.SURFACE
+                && (usage & D3DUSAGE.RENDERTARGET) === 0)
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -3279,7 +3291,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             let declaration = fvfDeclarations.get(fvf);
             if (!declaration)
             {
-                const elements = elementsOfFvf(fvf);
+                const elements = elementsOfFvf(fvf, { asDirect3D9: true });
                 if (!elements)
                 {
                     return D3DERR_INVALIDCALL;
@@ -3312,7 +3324,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ fvf?: number }} out
          */
         GetFVF(out){
-            out.fvf = vertexDeclaration.fvf;
+            out.fvf = vertexDeclaration.fvf || (vertexDeclaration.declaration?.reportedFvf ?? 0);
             return D3D_OK;
         },
 

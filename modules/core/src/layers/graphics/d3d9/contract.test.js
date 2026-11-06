@@ -90,6 +90,12 @@ test('the adapter answers format questions from the table its creates consult', 
         D3DERR_NOTAVAILABLE, 'an adapter format no display is in');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.R5G6B5),
         D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VERTEXBUFFER, 100), D3DERR_INVALIDCALL,
+        'a buffer has no format to ask about');
+    assert.equal(d3d.CheckDeviceFormat(0x40000, D3DRTYPE.SURFACE, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'sRGB writes to a plain surface');
+    assert.equal(d3d.CheckDeviceFormat(0x40001, D3DRTYPE.SURFACE, D3DFMT.A8R8G8B8), D3D_OK,
+        'sRGB writes to a target');
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),
         D3D_OK);
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.SURFACE, D3DFMT.D24S8),
@@ -211,6 +217,20 @@ test('a declaration the program made reports no format, even when it describes o
     const fvf = {};
     device.GetFVF(fvf);
     assert.equal(fvf.fvf, 0);
+    // Alone, a position is answered as the format it is (test_fvf_decl_conversion).
+    for (const [type, usage, expected] of [[D3DDECLTYPE.FLOAT3, D3DDECLUSAGE.POSITION, 2],
+        [D3DDECLTYPE.FLOAT4, D3DDECLUSAGE.POSITIONT, 4],
+        [D3DDECLTYPE.FLOAT3, D3DDECLUSAGE.NORMAL, 0]])
+    {
+        /** @type {{ declaration?: any }} */
+        const alone = {};
+        assert.equal(device.CreateVertexDeclaration([element(usage, type, 0)], alone), D3D_OK);
+        assert.equal(device.SetVertexDeclaration(alone.declaration), D3D_OK);
+        device.GetFVF(fvf);
+        assert.equal(fvf.fvf, expected);
+        alone.declaration.release();
+    }
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
     // But a fixed-function draw still reads it as the format it describes.
     assert.equal(device.stageProcessing.fvf, FVF_XYZ_DIFFUSE);
 

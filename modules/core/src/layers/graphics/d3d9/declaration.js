@@ -195,9 +195,12 @@ const FVF_POSITION_MASK = 0x00e;
  * its vertex.
  *
  * @param {number} fvf
+ * @param {{ asDirect3D9?: boolean }} [options]  asDirect3D9: the declaration
+ *     Direct3D 9 makes of the format, which differs for XYZB2 with a D3DCOLOR
+ *     last beta; a fixed-function draw reads the format itself.
  * @returns {VertexElement[] | null} null when the format is not one
  */
-export function elementsOfFvf(fvf){
+export function elementsOfFvf(fvf, options = {}){
     /** @type {VertexElement[]} */
     const elements = [];
     let offset = 0;
@@ -235,11 +238,32 @@ export function elementsOfFvf(fvf){
         {
             betas--;
         }
-        if (betas > 0)
+        // Five betas as floats are four weights and one float of indices
+        // (Wine's test_fvf_decl_conversion, XYZB5).
+        const floatIndices = betas === 5;
+        if (floatIndices)
+        {
+            betas = 4;
+        }
+        // Two betas, the last a D3DCOLOR, come out as Direct3D 9 makes them:
+        // the weight a D3DCOLOR and the indices UBYTE4
+        // (test_fvf_decl_conversion).
+        const colourPair = options.asDirect3D9 === true && betas === 1
+            && (fvf & FVF_LASTBETA_D3DCOLOR) !== 0 && position === FVF.XYZB2;
+        if (colourPair)
+        {
+            push(D3DDECLTYPE.D3DCOLOR, D3DDECLUSAGE.BLENDWEIGHT, 0);
+            push(D3DDECLTYPE.UBYTE4, D3DDECLUSAGE.BLENDINDICES, 0);
+        }
+        else if (betas > 0)
         {
             push(D3DDECLTYPE.FLOAT1 + betas - 1, D3DDECLUSAGE.BLENDWEIGHT, 0);
         }
-        if (lastIsIndices)
+        if (floatIndices)
+        {
+            push(D3DDECLTYPE.FLOAT1, D3DDECLUSAGE.BLENDINDICES, 0);
+        }
+        if (lastIsIndices && !colourPair)
         {
             push((fvf & FVF_LASTBETA_UBYTE4) !== 0 ? D3DDECLTYPE.UBYTE4 : D3DDECLTYPE.D3DCOLOR,
                 D3DDECLUSAGE.BLENDINDICES, 0);
@@ -495,6 +519,9 @@ export function fixedFunctionLayoutOf(declaration){
  * @property {number} fvf   The format this was made from, or zero when it was
  *                          made by the program -- even when the elements
  *                          happen to describe one.
+ * @property {number} reportedFvf  What GetFVF answers while it is bound: its
+ *     format, or for one the program made the position it is alone, XYZ or
+ *     XYZRHW, and zero for any other (Wine's test_fvf_decl_conversion).
  * @property {number} refCount
  * @property {boolean} destroyed  whether its last reference has gone for good
  * @property {any} counter  its count, which guest code may keep (`ReferenceCount.place`)
@@ -516,10 +543,18 @@ let lastDeclarationId = 0;
  */
 export function createVertexDeclaration(options){
     const elements = Object.freeze(options.elements.map(element=>({ ...element })));
+    const [only] = elements;
+    const alone = elements.length === 1 && only.Stream === 0 && only.Offset === 0
+        && only.UsageIndex === 0;
+    const positionOnly = alone && only.Usage === D3DDECLUSAGE.POSITION
+        && only.Type === D3DDECLTYPE.FLOAT3 ? FVF.XYZ
+        : alone && only.Usage === D3DDECLUSAGE.POSITIONT && only.Type === D3DDECLTYPE.FLOAT4
+            ? FVF.XYZRHW : 0;
     return {
         id: ++lastDeclarationId,
         elements,
         fvf: options.fvf ?? 0,
+        reportedFvf: options.fvf || positionOnly,
         get refCount(){
             return options.count.value;
         },
