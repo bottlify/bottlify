@@ -4957,6 +4957,15 @@ export function createWin32Module(){
                 activeWindow: ()=>windowService.active(),
 
                 /**
+                 * One of user32's functions by name, for a layer that calls it
+                 * on the program's windows as the system's own libraries do: a
+                 * full-screen Direct3D device on its focus window.
+                 *
+                 * @param {string} name
+                 */
+                user32: name=>libraries['USER32.dll']?.[name],
+
+                /**
                  * Whether the application has been told it is no longer the
                  * active one (WM_ACTIVATEAPP(0)) and not told otherwise since:
                  * what DirectDraw's exclusive mode is lost on.

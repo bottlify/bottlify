@@ -165,6 +165,17 @@ const D3DDISPLAYROTATION_IDENTITY = 1;
 const ADAPTER_LUID = 0x00000001;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
+
+/** The program keeps its windows itself: a full-screen device changes neither (`focus.js`). */
+const D3DCREATE_NOWINDOWCHANGES = 0x00000800;
+
+/**
+ * `then` of an answer that may be a promise, at once when it is not.
+ *
+ * @param {unknown} value @param {(answer: any) => any} then
+ */
+const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<unknown>} */ (value).then(then) : then(value));
 /** What a device of the plain interface answers a shared handle with. */
 const E_NOTIMPL = 0x80004001 | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
@@ -192,6 +203,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
+ *        A full-screen device's focus and device windows (`focus.js`).
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
@@ -220,7 +233,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     where its caller reads it, when that is not EAX: XMM0 in a 64-bit process.
  */
 export function createDirect3D9Seam(
-    { publisher, memory, screen, divergence, cursor, resolution, identity,
+    { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, resolution,
+        identity,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
@@ -1915,10 +1929,12 @@ export function createDirect3D9Seam(
                 // to take it with it the way a created one does; a window left
                 // at the old size has the program clipping its cursor to a
                 // rectangle the picture no longer fills.
-                takeScreen(device, next, (next.hDeviceWindow >>> 0) || deviceWindow);
+                const taken = takeScreen(device, next, (next.hDeviceWindow >>> 0) || deviceWindow);
+                // A reset puts the state back to its defaults, which the block
+                // has to say before the guest reads or writes it again.
+                shadowOf(device)?.remirror();
+                return andThen(taken, ()=>hr);
             }
-            // A reset puts the state back to its defaults, which the block
-            // has to say before the guest reads or writes it again.
             shadowOf(device)?.remirror();
             return hr;
         },
@@ -3625,14 +3641,17 @@ export function createDirect3D9Seam(
         // window is kept for a later Reset, whose present parameters need
         // not repeat it.
         deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-        takeScreen(held.device, wanted, deviceWindow);
+        windowsOf.set(held.device, { focus: focus >>> 0,
+            noWindowChanges: ((behaviourFlags >>> 0) & D3DCREATE_NOWINDOWCHANGES) !== 0,
+            extended: held.device.extended === true });
+        const taken = takeScreen(held.device, wanted, deviceWindow);
         const result = handBack(held.device, deviceInterfacesOf(held.device), id,
             out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
         if (result === D3D_OK)
         {
             lastDevice = held.device;
         }
-        return result;
+        return andThen(taken, ()=>result);
     };
 
     /** The roots Direct3DCreate9Ex made. @type {WeakSet<object>} */
@@ -3788,15 +3807,23 @@ export function createDirect3D9Seam(
      * goes (`leaveFullScreen`); a windowed one takes it at its first frame.
      *
      * @param {any} device @param {any} parameters @param {number} window
+     * @returns {unknown} a promise while the windows hear of it
      */
     const takeScreen = (device, parameters, window)=>{
         const width = parameters.backBufferWidth >>> 0;
         const height = parameters.backBufferHeight >>> 0;
+        const how = windowsOf.get(device);
+        const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
+            fullscreen: !parameters.windowed, width, height, created: !how.taken }) : 0;
+        if (how)
+        {
+            how.taken = true;
+        }
         if (parameters.windowed)
         {
             leaveFullScreen(device);
             unshown.set(device, { width, height, window });
-            return;
+            return taken;
         }
         fullScreen.add(device);
         if (!releaseWatched.has(device))
@@ -3808,13 +3835,25 @@ export function createDirect3D9Seam(
                 if (left === 0)
                 {
                     leaveFullScreen(device);
+                    focusWindows?.release(device);
                 }
                 return left;
             };
         }
         unshown.delete(device);
         resolution?.(width, height, { window, fullscreen: true });
+        return taken;
     };
+
+    /**
+     * The windows a device was created with, for its focus window's hook
+     * (`focus.js`): the focus window, whether the program keeps its windows
+     * itself, and whether the device is never lost.
+     *
+     * @type {WeakMap<any, { focus: number, noWindowChanges: boolean, extended: boolean,
+     *     taken?: boolean }>}
+     */
+    const windowsOf = new WeakMap();
 
     /**
      * A windowed device's first frame: its window is the screen from now on.
