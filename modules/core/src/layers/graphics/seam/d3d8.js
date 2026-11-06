@@ -2617,7 +2617,7 @@ export function createDirect3D8Seam(
             backBufferHeight: asked.height === 0 ? taken.height : asked.height,
             backBufferFormat: raw.BackBufferFormat,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? raw.MultiSampleType,
             swapEffect: raw.SwapEffect,
             hDeviceWindow: raw.hDeviceWindow,
             windowed: raw.Windowed !== 0,

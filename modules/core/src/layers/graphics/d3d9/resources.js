@@ -860,7 +860,10 @@ export function createSurface(options){
          */
         GetDC(gdi, out){
             const layout = DC_FORMATS[options.format];
-            if (!layout || locked || family.dc !== null || family.locks > 0)
+            // A surface that cannot be locked has no DC either: a back buffer
+            // made without D3DPRESENTFLAG_LOCKABLE_BACKBUFFER (Wine's
+            // test_lockable_backbuffer).
+            if (!layout || !lockable || locked || family.dc !== null || family.locks > 0)
             {
                 return D3DERR_INVALIDCALL;
             }

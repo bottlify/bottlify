@@ -3213,7 +3213,7 @@ export function createDirect3D9Seam(
             backBufferHeight: (raw.BackBufferHeight >>> 0) || taken.height,
             backBufferFormat: raw.BackBufferFormat || D3DFMT.X8R8G8B8,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? raw.MultiSampleType,
             swapEffect: raw.SwapEffect,
             // None named is the window the device was made for, and what
             // GetPresentParameters then answers (test_swapchain_parameters).

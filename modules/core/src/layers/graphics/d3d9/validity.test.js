@@ -291,6 +291,25 @@ test('a present interval is DEFAULT or one the caps offer, and reads back as giv
     }
 });
 
+test('a lockable back buffer is never multisampled, and an unlockable one has no DC', ()=>{
+    // Wine's test_lockable_backbuffer.
+    assert.equal(validatePresentParameters({ swapEffect: D3DSWAPEFFECT.DISCARD,
+        lockableBackBuffer: true, multiSampleType: 4 }), D3DERR_INVALIDCALL);
+    assert.equal(validatePresentParameters({ swapEffect: D3DSWAPEFFECT.DISCARD,
+        lockableBackBuffer: true }), D3D_OK);
+    const device = createDevice();
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    /** @type {{ dc?: number }} */
+    const dc = { dc: 0x1234 };
+    assert.equal(back.surface.GetDC({ createSurfaceDc: ()=>1, deleteSurfaceDc: ()=>true }, dc),
+        D3DERR_INVALIDCALL);
+    assert.equal(dc.dc, 0x1234);
+    back.surface.release();
+    assertFullyReleased(device);
+});
+
 test('a full-screen device makes no additional swap chain, a windowed one does', ()=>{
     // Wine's test_swapchain.
     const d3d = createDirect3D9();
