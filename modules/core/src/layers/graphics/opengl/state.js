@@ -875,6 +875,25 @@ export function createDefaultState(inputs){
 const INT_MAX = 0x7fffffff;
 
 /**
+ * The defaults the drawable decides -- the viewport and scissor box, the
+ * buffers drawn and read, the depth and double-buffering a query reports --
+ * set from it in `state`, every other entry left as it is.
+ *
+ * @param {Map<number, StateRecord>} state
+ * @param {StateInputs} inputs
+ */
+export function settleDrawableState(state, inputs){
+    for (const entry of DEFAULT_STATE)
+    {
+        const record = entry.dependsOn ? state.get(entry.query) : undefined;
+        if (record)
+        {
+            record.values = resolveStateDefault(entry, inputs);
+        }
+    }
+}
+
+/**
  * Reads a state record the way a typed query would see it.
  *
  * @param {StateRecord} record

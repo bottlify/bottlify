@@ -570,6 +570,10 @@ test('wglCopyContext copies the groups asked for, into a context current nowhere
     assert.deepEqual(destination.glGetIntegerv(GL.DEPTH_FUNC), [GL.LESS], 'not its group');
 
     f.wgl.wglMakeCurrent(WINDOW_DC, destination);
+    assert.equal(destination.glIsEnabled(GL.DEPTH_TEST), GL.TRUE,
+        'what was copied outlives the first make-current');
+    assert.deepEqual(destination.glGetIntegerv(GL.VIEWPORT).slice(2), [200, 150],
+        'which sizes the viewport still');
     assert.equal(f.wgl.wglCopyContext(source, destination, GL.ALL_ATTRIB_BITS), false);
     assert.equal(f.wgl.getLastError(), WIN32_ERROR.INVALID_HANDLE);
     f.wgl.wglMakeCurrent(WINDOW_DC, source);

@@ -39,7 +39,7 @@ import {
     translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
-import { createDefaultState, readState } from './state.js';
+import { createDefaultState, readState, settleDrawableState } from './state.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -440,6 +440,8 @@ export function createGlContext(options = {}){
          * the drawable's dimensions **at the first attachment** and are not
          * touched by a later one -- a program that makes a context current on
          * a second, differently sized window keeps the viewport it had.
+         * Anything else already set stays: wglCopyContext may have filled a
+         * context current nowhere yet (Wine's opengl32 test_copy_context).
          *
          * @param {Drawable} drawable
          */
@@ -450,7 +452,7 @@ export function createGlContext(options = {}){
                 return;
             }
             attached = true;
-            state = createDefaultState(drawable);
+            settleDrawableState(state, drawable);
             if (gpu)
             {
                 gpu.attach(context, drawable);
