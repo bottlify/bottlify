@@ -16,6 +16,9 @@
  *
  *     node tools/glsl-functions.mjs <builtinfunctions.adoc>
  *
+ * The catalog is made from the file at KhronosGroup/GLSL revision
+ * 0099bf83b0288469917fc2e2972cb0a2b74d6711.
+ *
  * The specification documents 4.60 alone; the version each function came
  * with is `glsl-builtins.js`'s, from the earlier specifications' tables.
  */

@@ -952,6 +952,16 @@ makes the first one fail is not known: the buffer, the device and the arguments 
 times. A draw of nothing draws nothing, and every other draw of nothing in the same test
 succeeds, so here it succeeds too. *2026-11-06.*
 
+**A96. A GLSL 1.40 shader keeps what 1.30 deprecated.** The 1.40 specification removes the
+deprecated features (built-in matrices and lights, `attribute`, `varying`, `gl_FragColor`) unless
+GL_ARB_compatibility is supported, and every desktop driver of the era supports it, so a 1.40
+shader written against one uses them. Here 1.40 compiles as compatibility; from 1.50 on, the
+`#version` line's profile decides, core by default as the specification says. *2026-11-06.*
+
+**A97. A GLSL 1.10 shader may use the non-square matrix types.** They came with 1.20; the
+front end accepted them in 1.10 before 1.30 and later were added, and a program that relies on
+it compiled here then. Nothing else of 1.20 is taken into 1.10. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

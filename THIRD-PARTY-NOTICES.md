@@ -249,3 +249,13 @@ Joliet specification.
   argument, and which commands each version and each ARB, KHR and EXT extension adds; no code is
   copied, and what answers the commands is original work under the MPL
 - License: Apache-2.0
+
+## The GLSL specification's built-in functions: used as a specification
+
+- Source: `chapters/builtinfunctions.adoc` of https://github.com/KhronosGroup/GLSL at revision
+  `0099bf83b0288469917fc2e2972cb0a2b74d6711` (Copyright The Khronos Group Inc.)
+- Location in this repository: `modules/core/src/layers/graphics/opengl/glsl-catalog.js`, written
+  by `tools/glsl-functions.mjs` -- each built-in function's name, section, return and parameter
+  types and parameter directions as the specification declares them; none of the specification's
+  text is copied, and the compiler that checks calls against them is original work under the MPL
+- License: CC-BY-4.0 (the specification's sources)
