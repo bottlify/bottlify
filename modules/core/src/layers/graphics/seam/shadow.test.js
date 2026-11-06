@@ -773,6 +773,27 @@ test('a buffer the guest holds locked is sent only when the ring has calls that 
     assert.equal(m.taken.length, 2);
 });
 
+test('a static buffer held on its first lock is sent before the ring\'s calls that may read it',
+    ()=>{
+        // Wine's d3d9 test_draw_mapped_buffer: an index buffer locked once,
+        // written and drawn from without an unlock, draws what it holds.
+        const m = machine({ commands: true });
+        const ib = fakeBuffer(0x8000, 0x100);
+        const block = m.shadow.attachBuffer(ib);
+        const at = m.shadow.address();
+        m.put32(block + BUFFER.LOCKED, 1);
+        m.put32(block + BUFFER.FROM, 0);
+        m.put32(block + BUFFER.TO, 12);
+        m.put32(block + BUFFER.LOCK_FLAGS, 0);
+        m.put32(at + SHADOW.LOCK_RING, block);
+        m.put32(at + SHADOW.LOCK_CALLS, 1);
+        const ring = m.u32(at + SHADOW.COMMANDS);
+        record(7, [1, 2]).forEach((word, i)=>m.put32(ring + i * 4, word));
+        m.put32(at + SHADOW.COMMAND_HEAD, 16);
+        m.shadow.sync();
+        assert.deepEqual(ib.calls, ['lock 0+12 0x0', 'unlock'], 'sent before the draw');
+    });
+
 test('a held lock is found through the lock routine\'s ring, and past its capacity by a look at'
     + ' every buffer', ()=>{
     const m = machine({ commands: true });

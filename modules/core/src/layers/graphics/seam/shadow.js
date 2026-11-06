@@ -4370,9 +4370,8 @@ export function createShadow(deps){
      * read it. A buffer is settled at its unlock, and a host entry while it
      * was still locked -- another call between two quads of one lock -- made
      * the ring's draws of it before what they read was there.
-     * ponytail: dynamic buffers and those the guest has unlocked once are
-     * looked at; any other held across an entry on its first lock is settled
-     * at its unlock.
+     * Dynamic buffers, those the guest has unlocked once, and those its lock
+     * routine named since the last look are looked at.
      */
     const settleHeld = ()=>{
         // Every lock taken and every one let go of is counted -- by the
@@ -4399,10 +4398,19 @@ export function createShadow(deps){
         }
         else if (taken > 0)
         {
+            // A buffer locked for the first time and drawn from before its
+            // unlock reads what is written so far, as one locked again does
+            // (Wine's d3d9 test_draw_mapped_buffer): from here on it is one
+            // the guest locks itself.
             const ring = readWords(address + SHADOW.LOCK_RING, SHADOW.LOCK_RING_CAPACITY);
             for (let n = heldSince; n !== locks; n = (n + 1) >>> 0)
             {
-                heldLocks.add(ring[n & (SHADOW.LOCK_RING_CAPACITY - 1)]);
+                const block = ring[n & (SHADOW.LOCK_RING_CAPACITY - 1)];
+                heldLocks.add(block);
+                if (blocks.has(block))
+                {
+                    lockedInGuest.add(block);
+                }
             }
         }
         heldSince = locks;
