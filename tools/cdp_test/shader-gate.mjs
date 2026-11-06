@@ -240,6 +240,17 @@ function pageRunner(){
         {
             floats.fill(0, plan.viewportRegister * 4, plan.viewportRegister * 4 + 4);
         }
+        // Each sampler's level-of-detail bias where the translation reads it,
+        // four samplers a register, as the draw fills it (`levelBiases`).
+        if (plan.biasRegister !== undefined)
+        {
+            for (let index = 0; index < 16 && plan.biasRegister * 4 + index < floats.length;
+                index++)
+            {
+                floats[plan.biasRegister * 4 + index] =
+                    plan.texels[index % plan.texels.length].variant?.lodBias ?? 0;
+            }
+        }
         const bools = [];
         for (const b of plan.bools)
         {
@@ -592,7 +603,8 @@ async function main(){
                 (_, k)=>buildCase(profile, seed * 1000003 + k, length));
             const plans = cases.map(c=>({ ...pagePlan(c), entry: c.entry, samplers: c.samplers,
                 constants: c.constants, ints: c.ints, bools: c.bools,
-                viewportRegister: c.viewportRegister, texels: c.texels }));
+                viewportRegister: c.viewportRegister, biasRegister: c.biasRegister,
+                texels: c.texels }));
             const answer = await cdp.send('Runtime.evaluate', {
                 expression: `gateRun(${JSON.stringify(plans)}).then(r => JSON.stringify(r))`,
                 awaitPromise: true, returnByValue: true,

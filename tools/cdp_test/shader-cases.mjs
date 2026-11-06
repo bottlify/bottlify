@@ -618,6 +618,7 @@ const programText = (p, body, subs = [])=>[p.name, ...p.head, ...p.init, ...body
  * @property {Record<string, number[]>} expected  By output name, unwritten components NaN.
  * @property {Record<string, number>} written
  * @property {number | undefined} viewportRegister
+ * @property {number | undefined} biasRegister  Where the samplers' level biases go.
  * @property {boolean} killed
  * @property {boolean} [unsettled]  A read lay where the GPU's rounding decides it
  *     (`sampledLevel`): not compared.
@@ -740,7 +741,8 @@ export function buildCase(profile, seed, length = 10){
         profile, seed, text, vertex: p.vertex,
         wgsl: translated.wgsl, entry: translated.entry, samplers: translated.samplers, texels,
         constants, ints, bools, inputs, expected, written,
-        viewportRegister: translated.viewportRegister, killed, unsettled,
+        viewportRegister: translated.viewportRegister, biasRegister: translated.biasRegister,
+        killed, unsettled,
         error: translated.error,
     };
 }
