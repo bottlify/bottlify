@@ -3317,10 +3317,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                // Owned by the device: the count keeps it alive for as long as
-                // the device is, so the same object comes back every time.
+                // Owned by the device, which holds no reference a program
+                // counts: the same object comes back every time, and its count
+                // is the program's alone, as an implicit surface's is (Wine's
+                // test_fvf_decl_management: three Gets, a count of three).
                 declaration = createVertexDeclaration({
-                    elements, fvf, count: createReferenceCount(),
+                    elements, fvf, count: implicitCount(),
                 });
                 fvfDeclarations.set(fvf, declaration);
             }

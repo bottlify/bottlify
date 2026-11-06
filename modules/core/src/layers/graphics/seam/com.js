@@ -45,6 +45,12 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *           it: a texture asked for IDirect3DBaseTexture9 hands back itself, as
  *           single inheritance lays it out, so a caller that casts it back to the
  *           texture by its type finds the texture's whole table.
+ * @property {boolean} [identity]
+ *           Its pointer is the object's IUnknown, as single inheritance lays out
+ *           a Direct3D 8 or 9 object: QueryInterface for IUnknown answers it, so
+ *           a container asked for as IUnknown is the pointer the program holds.
+ *           An object with no such interface answers IUnknown with a table of
+ *           its own, the same one whichever interface it was reached through.
  * @property {(target: any, pointers: Iterable<number>) => void} [released]
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
@@ -188,7 +194,11 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
             // comparing two pointers is testing.
             if (id === IID_IUNKNOWN)
             {
-                return { id, methods: IUNKNOWN_ONLY };
+                const own = [...declared.values()].find(each=>each.identity === true);
+                const whole = own?.sharedWith ? declared.get(own.sharedWith) : own;
+                return whole
+                    ? { id, sharedWith: whole.id, methods: methodsFor(whole) }
+                    : { id, methods: IUNKNOWN_ONLY };
             }
             const descriptor = declared.get(id);
             // An object that says which interfaces it has says it now: one may

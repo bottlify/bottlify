@@ -190,6 +190,8 @@ test('setting a format makes a declaration, the same one each time, that reports
     const second = {};
     device.GetVertexDeclaration(second);
     assert.equal(second.declaration, first.declaration, 'one declaration per format');
+    assert.equal(second.declaration.refCount, 2,
+        'the device holds no reference the program counts: two Gets, two references');
     /** @type {{ fvf?: number }} */
     const fvf = {};
     device.GetFVF(fvf);

@@ -29,8 +29,8 @@
  * because both are facts about the ABI rather than about Direct3D.
  */
 
-import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
-    IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
+import { describe as describeAny, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS,
+    IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
     IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
     IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS, IDIRECT3DVOLUME8_SLOTS,
     IDIRECT3DVOLUMETEXTURE8_SLOTS } from './vtables.js';
@@ -75,6 +75,15 @@ import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { loudRefusals } from './refusals.js';
+
+/**
+ * Every interface here is its object's IUnknown: one inheritance chain, one
+ * pointer (com.js `identity`).
+ *
+ * @param {Parameters<typeof describeAny>} args
+ * @returns {import('./com.js').InterfaceDescriptor}
+ */
+const describe = (...args)=>({ ...describeAny(...args), identity: true });
 
 /** Direct3D 8's stage state types below 32, a bit each: what the block keeps for them. */
 const STAGE_STATE_TYPES_8 = Object.values(D3DTSS)

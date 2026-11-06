@@ -896,6 +896,13 @@ test('a surface names its container: its texture, its swap chain, or its device'
     // The same pointer, as single inheritance lays it out: D3DX casts a base
     // texture back to the texture by its type and calls GetLevelDesc through it.
     assert.equal(base.pointer, texture, 'the base texture is the texture');
+    putGuid(h, iid, [0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    assert.deepEqual(containerOf(level), { hr: D3D_OK, pointer: texture },
+        'and so is its IUnknown');
+    h.release(texture);
+    assert.equal(h.box.call(texture, 0, [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), texture, 'QueryInterface for IUnknown too');
+    h.release(texture);
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelCount')), 1);
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelDesc'),
         [0, out]), D3D_OK);

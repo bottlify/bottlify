@@ -27,7 +27,7 @@
  * an HRESULT -- a count, a boolean, a float -- which the caller reads as that.
  */
 
-import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
+import { IDIRECT3D9_SLOTS, describe as describeAny } from './vtables.js';
 import { fpuSetupCode } from './fpu.js';
 import {
     D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_BOX64, D3DLOCKED_RECT,
@@ -87,6 +87,15 @@ import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 import { loudRefusals } from './refusals.js';
+
+/**
+ * Every interface here is its object's IUnknown: one inheritance chain, one
+ * pointer (com.js `identity`).
+ *
+ * @param {Parameters<typeof describeAny>} args
+ * @returns {import('./com.js').InterfaceDescriptor}
+ */
+const describe = (...args)=>({ ...describeAny(...args), identity: true });
 
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
