@@ -8,6 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Finds and launches a Chromium-based browser with a CDP endpoint.
@@ -41,6 +42,43 @@ function closeLeftBehind(profileRoot){
     catch {
         // Nothing left behind, or no way to ask: the launch goes on.
     }
+}
+
+/**
+ * The browser's memory, all its processes together, in megabytes: 8192 unless
+ * CDP_TEST_MEMORY_MB says otherwise, 0 for no ceiling. One ceiling for all of
+ * them, because a tab's memory is split between its renderer (the page and its
+ * workers) and the GPU process (its textures and buffers). A title that ran away
+ * with memory paged the whole VM until it stopped answering; with a ceiling it
+ * is the browser that dies of it, and the run reports that.
+ */
+export function memoryLimitMb(){
+    const said = process.env.CDP_TEST_MEMORY_MB;
+    return said !== undefined && said !== '' ? Number(said) : 8192;
+}
+
+/**
+ * Puts the browser and the processes it has started into one job object with
+ * that ceiling (Windows only; elsewhere the ceiling is not set, and says so).
+ *
+ * @param {import("node:child_process").ChildProcess} proc
+ */
+function limitMemory(proc){
+    const limit = memoryLimitMb();
+    if (!limit)
+    {
+        return;
+    }
+    if (process.platform !== 'win32')
+    {
+        console.error(`browser memory ceiling of ${limit} MB not set: only Windows has one here`);
+        return;
+    }
+    const script = fileURLToPath(new URL('./job-limit.ps1', import.meta.url));
+    execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+        '-ProcessId', String(proc.pid), '-LimitMb', String(limit)],
+    { stdio: 'ignore', timeout: 60_000 });
+    console.error(`browser memory ceiling: ${limit} MB`);
 }
 
 /** The browser's backgrounding of a hidden page, off: a page measured runs as one in front. */
@@ -234,6 +272,8 @@ function start(browser, flags, headed = false, profileDir){
                 }
             }, 50);
         });
+
+    limitMemory(proc);
 
     /** @type {BrowserHandle} */
     const handle = { proc, browserWs: '', profileRoot, ownProfile };
