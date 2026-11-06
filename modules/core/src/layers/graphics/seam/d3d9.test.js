@@ -465,6 +465,21 @@ test('the raster status follows the display\'s clock, which the caps say can be 
     h.release(root);
 });
 
+test('a target made by another device is not bound', ()=>{
+    // Wine's d3d9 test_render_target_device_mismatch.
+    const h = seamed();
+    const root = h.create();
+    const first = h.createDevice(root).device;
+    const second = h.createDevice(root).device;
+    const out = 0x3200;
+    assert.equal(h.device(second, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [0, target]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(first, 'SetDepthStencilSurface', [target]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(second, 'SetRenderTarget', [0, target]), D3D_OK);
+});
+
 test('a fullscreen device names the window it takes with it', ()=>{
     // The real device places its window at the mode's size; the window is
     // named so whoever answers can do the same, and fullscreen is the signal.

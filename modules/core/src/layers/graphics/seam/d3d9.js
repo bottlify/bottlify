@@ -345,6 +345,18 @@ export function createDirect3D9Seam(
     };
 
     /**
+     * Whether a surface was made by a device other than this one: no target
+     * of another device is bound (Wine's d3d9
+     * test_render_target_device_mismatch).
+     *
+     * @param {any} device @param {any} surface
+     */
+    const madeElsewhere = (device, surface)=>{
+        const owner = surface ? owners.get(surface) ?? owners.get(surface.container) : null;
+        return owner !== null && owner !== undefined && owner !== device;
+    };
+
+    /**
      * A resource, published as whichever interface it is, with the reference
      * the out-parameter owes taken. Publishing can fail -- guest memory for a
      * vtable is finite -- and the failure is the whole call's: the pointer
@@ -2178,7 +2190,12 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [index, surface])=>{
-            const hr = device.SetRenderTarget(index >>> 0, publisher.objectAt(surface));
+            const target = publisher.objectAt(surface);
+            if (madeElsewhere(device, target))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetRenderTarget(index >>> 0, target);
             // A new target is a new viewport, which the guest's GetViewport reads.
             shadowOf(device)?.remirror({ viewport: true });
             return hr;
@@ -2202,8 +2219,11 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetDepthStencilSurface: (device, [surface])=>
-            device.SetDepthStencilSurface(publisher.objectAt(surface)),
+        SetDepthStencilSurface: (device, [surface])=>{
+            const target = publisher.objectAt(surface);
+            return madeElsewhere(device, target) ? D3DERR_INVALIDCALL
+                : device.SetDepthStencilSurface(target);
+        },
 
         /** @param {any} device @param {number[]} args */
         GetDepthStencilSurface: (device, [out])=>{
