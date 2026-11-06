@@ -25,7 +25,7 @@
  *   size. That is what `readSurfaceDesc` returning null encodes.
  */
 
-import { DDSD_CKDESTBLT, DDSD_CKSRCBLT } from './constants.js';
+import { DDPF_ZBUFFER, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_ZBUFFERBITDEPTH } from './constants.js';
 
 /**
  * DDPIXELFORMAT. Five of its eight fields are unions; the alias names are
@@ -284,13 +284,18 @@ export function readSurfaceDesc(memory, address, layout){
  * @param {SurfaceDescFields} desc
  */
 export function writeSurfaceDesc(memory, address, layout, desc){
+    // The older descriptor names a depth buffer's depth beside its pixel
+    // format, in the mip count's place (Wine's ddraw1 test_d32_support).
+    const depthBits = !('dwCaps2' in layout) && (desc.pixelFormat.flags & DDPF_ZBUFFER) !== 0
+        ? desc.pixelFormat.bitCount : 0;
     writeU32(memory, address + layout.dwSize, layout.SIZE);
-    writeU32(memory, address + layout.dwFlags, desc.flags);
+    writeU32(memory, address + layout.dwFlags,
+        desc.flags | (depthBits === 0 ? 0 : DDSD_ZBUFFERBITDEPTH));
     writeU32(memory, address + layout.dwHeight, desc.height);
     writeU32(memory, address + layout.dwWidth, desc.width);
     writeU32(memory, address + layout.lPitch, desc.pitch);
     writeU32(memory, address + layout.dwBackBufferCount, desc.backBufferCount);
-    writeU32(memory, address + layout.dwMipMapCount, desc.mipMapCount);
+    writeU32(memory, address + layout.dwMipMapCount, depthBits || desc.mipMapCount);
     writeU32(memory, address + layout.lpSurface, desc.surfacePointer ?? 0);
     writeU32(memory, address + layout.dwCaps, desc.caps);
     if ('dwCaps2' in layout)

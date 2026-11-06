@@ -256,3 +256,19 @@ test('a format that names no bit count has no bytes per pixel to give', ()=>{
     assert.equal(bytesPerPixel(format(0)), 0,
         'and a compressed one says nothing rather than something plausible');
 });
+
+test('the older descriptor of a depth buffer names its depth in the mip count\'s place, the newer'
+    + ' one does not (test_d32_support)', ()=>{
+    const memory = fakeMemory();
+    const depth = { size: 0x20, flags: DDPF_ZBUFFER, fourCC: 0, bitCount: 32, redMask: 0,
+        greenMask: 0xffffffff, blueMask: 0, alphaMask: 0 };
+    const fields = { flags: DDSD_CAPS | DDSD_PIXELFORMAT, width: 64, height: 64, pitch: 256,
+        backBufferCount: 0, mipMapCount: 0, caps: 0x20000, caps2: 0, pixelFormat: depth };
+    writeSurfaceDesc(memory, DESC, DDSURFACEDESC, fields);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC.dwFlags),
+        DDSD_CAPS | DDSD_PIXELFORMAT | 0x40);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC.dwZBufferBitDepth), 32);
+    writeSurfaceDesc(memory, DESC, DDSURFACEDESC2, fields);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwFlags), DDSD_CAPS | DDSD_PIXELFORMAT);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwMipMapCount), 0);
+});
