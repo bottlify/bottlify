@@ -421,8 +421,12 @@ export function fixedFunctionLayoutOf(declaration){
             case D3DDECLUSAGE.POSITION:
             case D3DDECLUSAGE.POSITIONT: {
                 const transformed = element.Usage === D3DDECLUSAGE.POSITIONT;
-                if (position || element.UsageIndex !== 0 || element.Type
-                    !== (transformed ? D3DDECLTYPE.FLOAT4 : D3DDECLTYPE.FLOAT3))
+                // An untransformed position of four floats (D3DFVF_XYZW) is
+                // read as three: the pipeline takes its w as one, which the
+                // matrices then scale (test_ffp_w, test_fog).
+                if (position || element.UsageIndex !== 0 || (transformed
+                    ? element.Type !== D3DDECLTYPE.FLOAT4
+                    : element.Type !== D3DDECLTYPE.FLOAT3 && element.Type !== D3DDECLTYPE.FLOAT4))
                 {
                     return null;
                 }

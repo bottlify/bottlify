@@ -56,6 +56,9 @@
  *                         only here. The program is packed alone as the local
  *                         bundle wine-<dll>. One test at a time unless --jobs says
  *                         otherwise: each run is a browser of its own
+ *     --graphics-config <json>  with --browser: the graphics layer's settings, as
+ *                         game.mjs takes them (`{"driverRules":"current"}` judges
+ *                         Direct3D 8 and 9 by today's drivers, as Wine's tests do)
  *     --gpu-adapter <a>   with --browser: swiftshader (default), the adapter the
  *                         pictures are judged on, or hardware
  */
@@ -575,7 +578,7 @@ function packTest(module, exePath){
  * printed it, and the run's end read off the report's `stopped:` line.
  *
  * @param {string} bundle @param {string} module @param {string} test
- * @param {{ timeout: number, adapter: string }} settings
+ * @param {{ timeout: number, adapter: string, graphicsConfig?: object }} settings
  * @returns {Promise<ChildResult>}
  */
 function runInBrowser(bundle, module, test, settings){
@@ -590,6 +593,8 @@ function runInBrowser(bundle, module, test, settings){
             '--wait', String(settings.timeout), '--output', output,
             ...settings.adapter === 'hardware' ? []
                 : ['--chrome-flag', '--use-webgpu-adapter=swiftshader'],
+            ...settings.graphicsConfig
+                ? ['--graphics-config', JSON.stringify(settings.graphicsConfig)] : [],
         ], { cwd: fileURLToPath(ROOT), stdio: ['ignore', 'pipe', 'pipe'] });
         let printed = '';
         // The report's path is caught as it goes by: the program's own output
@@ -646,7 +651,7 @@ function parseArgs(argv){
         return at === -1 ? fallback : argv[at + 1];
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
-        '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter']);
+        '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter', '--graphics-config']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -675,6 +680,8 @@ function parseArgs(argv){
         baseline: value('--baseline'),
         gate: argv.includes('--gate'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
+        graphicsConfig: value('--graphics-config')
+            ? JSON.parse(/** @type {string} */ (value('--graphics-config'))) : undefined,
         specs,
     };
 }
@@ -1023,7 +1030,7 @@ async function main(){
     const extracted = new URL('extracted/', LOCAL);
     await mkdir(extracted, { recursive: true });
     const settings = { timeout: options.timeout, corkConfig: options.corkConfig,
-        adapter: options.adapter };
+        adapter: options.adapter, graphicsConfig: options.graphicsConfig };
     /** @type {Map<string, string>} module -> its bundle, for --browser */
     const bundles = new Map();
     console.log(`winetest build ${build ?? 'unknown'}, ${options.jobs} at a time,`

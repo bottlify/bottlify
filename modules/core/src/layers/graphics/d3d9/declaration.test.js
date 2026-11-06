@@ -212,3 +212,13 @@ test('fixed function reads a declaration by its offsets and refuses what it cann
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [
         element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 0)] }), null, 'no position');
 });
+
+test('a position of four floats (D3DFVF_XYZW) is drawn by the fixed function as three, its'
+    + ' colours where the format puts them (test_fog, test_ffp_w)', ()=>{
+    const layout = fixedFunctionLayoutOf({ id: 9, elements: elementsOfFvf(0x4002 | 0x40 | 0x80) });
+    assert.ok(layout, 'drawn by the fixed function');
+    const byName = Object.fromEntries((layout?.attributes ?? []).map(attribute=>
+        [attribute.name, [attribute.offset, attribute.format]]));
+    assert.deepEqual(byName, { position: [0, 'float32x3'], diffuse: [16, 'unorm8x4'],
+        specular: [20, 'unorm8x4'] });
+});
