@@ -44,6 +44,7 @@
 
 import { GL, WGL } from './constants.js';
 import { EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, WGL_EXTENSIONS } from './extensions.js';
+import { GL_SIGNATURES } from './registry.js';
 import { laterEntryPoints } from './exports-later.js';
 import {
     choosePixelFormat, decodePixelFormat, encodePixelFormat, PIXEL_FORMATS,
@@ -264,6 +265,30 @@ const WORDS_OF = new Map(Object.entries(ARGUMENT_WORDS)
     .flatMap(([words, names])=>names.map(name=>[name, Number(words)])));
 
 /**
+ * A command's arguments as the registry declares them (`registry.js`), a
+ * letter each, or undefined for a name it does not have: the commands past
+ * the tables above take their sizes from here. `registry.test.js` holds the
+ * tables to it for every name both have.
+ *
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+export const registryArguments = name=>GL_SIGNATURES[name]?.split(':')[1];
+
+/**
+ * The stack words a command takes on a 32-bit caller's stack: a double and a
+ * 64-bit integer two, anything else one.
+ *
+ * @param {string} name
+ * @returns {number | undefined}
+ */
+export function registryWords(name){
+    const letters = registryArguments(name);
+    return letters === undefined ? undefined
+        : [...letters].reduce((sum, letter)=>sum + (letter === 'd' || letter === 'l' ? 2 : 1), 0);
+}
+
+/**
  * The float and double arguments of an export, by their first word (the
  * bridge's `floats`); null for one that takes none.
  *
@@ -271,12 +296,13 @@ const WORDS_OF = new Map(Object.entries(ARGUMENT_WORDS)
  * @returns {Record<number, 'f32' | 'f64'> | null}
  */
 export function floatArguments(name){
-    const words = WORDS_OF.get(name);
+    const words = WORDS_OF.get(name) ?? registryWords(name);
     if (words === undefined)
     {
         return null;
     }
-    let signature = FLOAT_SIGNATURES[name];
+    let signature = FLOAT_SIGNATURES[name]
+        ?? registryArguments(name)?.replace(/[pi]/g, 'i').replace(/l/g, 'ii');
     const family = signature === undefined ? FAMILY.exec(name) : null;
     if (family?.groups && (family.groups.type === 'f' || family.groups.type === 'd'))
     {
@@ -2228,6 +2254,13 @@ export function createOpengl(services){
     }
     for (const [name, handler] of Object.entries({ ...implemented, ...swaps }))
     {
+        // A command past the tables is sized by the registry.
+        const words = table[name] ? undefined : registryWords(name);
+        if (words !== undefined)
+        {
+            table[name] = { argBytes: words * 4, handler };
+            continue;
+        }
         if (!table[name])
         {
             // The two lists are the same specification seen twice, and a name

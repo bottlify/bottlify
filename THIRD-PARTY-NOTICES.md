@@ -239,3 +239,13 @@ Joliet specification.
   which `bc67.test.js` holds `bc67.js` to; none of its code is in the repository
 - License: MIT or the Unlicense, at the user's choice (MIT: Copyright (c) 2022 Sergii
   Kudlai)
+
+## Khronos' OpenGL API registry: the commands' declarations
+
+- Source: `xml/gl.xml` of https://github.com/KhronosGroup/OpenGL-Registry at revision
+  `6af574a14089ccfee87efe230ebcdd8742859813` (Copyright 2013-2026 The Khronos Group Inc.)
+- Location in this repository: `modules/core/src/layers/graphics/opengl/registry.js`, written by
+  `tools/gl-registry.mjs` -- each command's name and the size class of its return and of each
+  argument, and which commands each version and each ARB, KHR and EXT extension adds; no code is
+  copied, and what answers the commands is original work under the MPL
+- License: Apache-2.0
