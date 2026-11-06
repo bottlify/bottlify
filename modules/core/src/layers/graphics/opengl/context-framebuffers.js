@@ -64,7 +64,9 @@ const isColour = point=>point >= GL.COLOR_ATTACHMENT0
 export function framebufferStatus(fbo){
     if (fbo.attachments.size === 0)
     {
-        return GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        // Without attachments, its default size makes it one.
+        return fbo.defaults.width > 0 && fbo.defaults.height > 0 ? GL.FRAMEBUFFER_COMPLETE
+            : GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
     }
     /** @type {{ width: number, height: number }[]} */
     const sizes = [];
@@ -136,7 +138,24 @@ function sameImage(a, b){
 const createFramebufferObject = (/** @type {number} */ name)=>({
     name, attachments: new Map(), drawBuffers: [GL.COLOR_ATTACHMENT0, GL.NONE, GL.NONE, GL.NONE],
     readBuffer: GL.COLOR_ATTACHMENT0, version: 0,
+    defaults: { width: 0, height: 0, layers: 0, samples: 0, fixed: GL.FALSE },
 });
+
+/**
+ * The largest default size, layer count and sample count a framebuffer
+ * without attachments takes: WebGPU's least 2D texture size and layer count,
+ * and the samples a renderbuffer takes.
+ */
+const DEFAULT_LIMITS = Object.freeze({ width: 8192, height: 8192, layers: 256, samples: 4 });
+
+/** The defaults' parameters, by name, and the limit of each. */
+const DEFAULT_PARAMETERS = new Map(/** @type {[number, [string, number]][]} */ ([
+    [GL.FRAMEBUFFER_DEFAULT_WIDTH, ['width', DEFAULT_LIMITS.width]],
+    [GL.FRAMEBUFFER_DEFAULT_HEIGHT, ['height', DEFAULT_LIMITS.height]],
+    [GL.FRAMEBUFFER_DEFAULT_LAYERS, ['layers', DEFAULT_LIMITS.layers]],
+    [GL.FRAMEBUFFER_DEFAULT_SAMPLES, ['samples', DEFAULT_LIMITS.samples]],
+    [GL.FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS, ['fixed', 1]],
+]));
 
 /**
  * The calls of this file a display list does not record: all of them, as
@@ -148,6 +167,8 @@ export const FRAMEBUFFER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetFramebufferAttachmentParameteriv', 'glGenRenderbuffers', 'glDeleteRenderbuffers',
     'glIsRenderbuffer', 'bindRenderbuffer', 'glRenderbufferStorageMultisample',
     'glGetRenderbufferParameteriv', 'glGenerateMipmap', 'glBlitFramebuffer',
+    'glCreateFramebuffers', 'glCreateRenderbuffers', 'framebufferParameter',
+    'getFramebufferParameter', 'glGetFramebufferParameterivEXT',
 ]);
 
 /**
@@ -251,7 +272,7 @@ export function installFramebufferCalls(context, kernel){
                     return { fbo: drawFbo, width: image.width, height: image.height };
                 }
             }
-            return { fbo: drawFbo, width: 0, height: 0 };
+            return { fbo: drawFbo, width: drawFbo.defaults.width, height: drawFbo.defaults.height };
         },
         /** @returns {FramebufferObject | null} */
         readFramebuffer: ()=>readFbo,
@@ -346,13 +367,7 @@ export function installFramebufferCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            fbo = framebuffers().get(name) ?? null;
-            if (!fbo)
-            {
-                fbo = createFramebufferObject(name);
-                framebuffers().set(name, fbo);
-                kernel.shareGroup().used = true;
-            }
+            fbo = objectNamed(name);
         }
         if (which.includes('draw'))
         {
@@ -369,6 +384,22 @@ export function installFramebufferCalls(context, kernel){
         publish();
     };
     const record = kernel.record;
+
+    /**
+     * A framebuffer name's object, made if the name was only generated.
+     *
+     * @param {number} name @returns {FramebufferObject}
+     */
+    const objectNamed = name=>{
+        let fbo = framebuffers().get(name);
+        if (!fbo)
+        {
+            fbo = createFramebufferObject(name);
+            framebuffers().set(name, fbo);
+            kernel.shareGroup().used = true;
+        }
+        return fbo;
+    };
 
     /**
      * @param {number} target @param {number} attachment @param {number} textarget
@@ -647,7 +678,192 @@ export function installFramebufferCalls(context, kernel){
             }
         },
 
+        // --- parameters (GL_ARB_framebuffer_no_attachments, 4.5, EXT_direct_state_access) ---
+
+        /**
+         * glFramebufferParameteri and glNamedFramebufferParameteri: a
+         * framebuffer object's size, layers and samples without attachments.
+         *
+         * @param {string} call
+         * @param {FramebufferObject | null | undefined} fbo  undefined: no such target or name
+         * @param {number} pname @param {number} param
+         */
+        framebufferParameter(call, fbo, pname, param){
+            if (!enter('framebufferParameter', [call, fbo, pname, param]))
+            {
+                return;
+            }
+            const parameter = DEFAULT_PARAMETERS.get(pname);
+            if (!parameter || (fbo === undefined && call === 'glFramebufferParameteri'))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (!fbo)
+            {
+                // No object by that name; or the default framebuffer, which
+                // has no defaults to set.
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const [field, limit] = parameter;
+            // Fixed sample locations is a boolean: any value is one.
+            if (field !== 'fixed' && (param < 0 || param > limit))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            /** @type {Record<string, number>} */ (fbo.defaults)[field] = field === 'fixed'
+                ? (param !== 0 ? GL.TRUE : GL.FALSE) : param;
+            fbo.version++;
+        },
+
+        /**
+         * glGetFramebufferParameteriv and glGetNamedFramebufferParameteriv: a
+         * framebuffer's defaults, and since 4.5 what any framebuffer, the
+         * default one included, says of itself.
+         *
+         * @param {string} call
+         * @param {FramebufferObject | null | undefined} fbo  undefined: no such target or name
+         * @param {number} pname
+         * @returns {number[] | null}
+         */
+        getFramebufferParameter(call, fbo, pname){
+            if (!enter('getFramebufferParameter', [call, fbo, pname]))
+            {
+                return null;
+            }
+            const parameter = DEFAULT_PARAMETERS.get(pname);
+            const own = pname === GL.DOUBLEBUFFER || pname === GL.STEREO
+                || pname === GL.SAMPLES || pname === GL.SAMPLE_BUFFERS
+                || pname === GL.IMPLEMENTATION_COLOR_READ_FORMAT
+                || pname === GL.IMPLEMENTATION_COLOR_READ_TYPE;
+            if (!parameter && !own)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (fbo === undefined)
+            {
+                setError(call === 'glGetFramebufferParameteriv' ? GL.INVALID_ENUM
+                    : GL.INVALID_OPERATION);
+                return null;
+            }
+            if (parameter)
+            {
+                if (!fbo)
+                {
+                    setError(GL.INVALID_OPERATION);
+                    return null;
+                }
+                const defaults = /** @type {Record<string, number>} */ (fbo.defaults);
+                return [defaults[parameter[0]]];
+            }
+            switch (pname)
+            {
+                case GL.DOUBLEBUFFER:
+                    return [fbo ? GL.FALSE : record(GL.DOUBLEBUFFER).values[0]];
+                case GL.STEREO:
+                    return [GL.FALSE];
+                case GL.IMPLEMENTATION_COLOR_READ_FORMAT:
+                    return [GL.RGBA];
+                case GL.IMPLEMENTATION_COLOR_READ_TYPE:
+                    return [GL.UNSIGNED_BYTE];
+                default:
+                    // Drawn single-sampled, every framebuffer here.
+                    return [0];
+            }
+        },
+
+        /**
+         * EXT_direct_state_access' glGetFramebufferParameterivEXT: a
+         * framebuffer's draw and read buffers, as the queries would answer
+         * with it bound.
+         *
+         * @param {number} name @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetFramebufferParameterivEXT(name, pname){
+            if (!enter('glGetFramebufferParameterivEXT', [name, pname]))
+            {
+                return null;
+            }
+            const drawn = pname === GL.DRAW_BUFFER ? 0 : pname - GL.DRAW_BUFFER0;
+            if (pname !== GL.READ_BUFFER && (drawn < 0 || drawn >= COLOR_ATTACHMENTS))
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (name === 0)
+            {
+                if (pname === GL.READ_BUFFER)
+                {
+                    return [readFbo ? (record(GL.DOUBLEBUFFER).values[0] ? GL.BACK : GL.FRONT)
+                        : record(GL.READ_BUFFER).values[0]];
+                }
+                return [defaultDrawBuffers[drawn]];
+            }
+            if (!framebuffers().has(name))
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            const fbo = objectNamed(name);
+            return [pname === GL.READ_BUFFER ? fbo.readBuffer : fbo.drawBuffers[drawn]];
+        },
+
+        /**
+         * The framebuffer a named call reaches: undefined for a name that is
+         * no object (4.5 section 9.2.1), null for zero, the default one.
+         *
+         * @param {number} name @returns {FramebufferObject | null | undefined}
+         */
+        framebufferNamed(name){
+            return name === 0 ? null : framebuffers().get(name) ?? undefined;
+        },
+
+        /** @param {number} target @returns {FramebufferObject | null | undefined} */
+        framebufferBoundTo(target){
+            return boundTo(target);
+        },
+
+        /** glCreateFramebuffers (4.5): names that are objects at once. @param {number} count */
+        glCreateFramebuffers(count){
+            if (!enter('glCreateFramebuffers', [count]))
+            {
+                return [];
+            }
+            const names = context.glGenFramebuffers(count);
+            for (const name of names)
+            {
+                objectNamed(name);
+            }
+            return names;
+        },
+
         // --- renderbuffers ---
+
+        /** glCreateRenderbuffers (4.5): names that are objects at once. @param {number} count */
+        glCreateRenderbuffers(count){
+            if (!enter('glCreateRenderbuffers', [count]))
+            {
+                return [];
+            }
+            if (count < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return [];
+            }
+            const group = renderbuffers();
+            const names = group.reserve(count);
+            for (const name of names)
+            {
+                group.define(name, { name, width: 0, height: 0, internalFormat: GL.RGBA,
+                    samples: 0, version: 0 });
+            }
+            kernel.shareGroup().used = true;
+            return names;
+        },
 
         /** @param {number} count @returns {number[]} */
         glGenRenderbuffers(count){

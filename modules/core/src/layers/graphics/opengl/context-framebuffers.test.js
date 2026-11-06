@@ -229,3 +229,94 @@ test('framebuffers are the share group\'s, under either spelling (Wine\'s opengl
     second.glDeleteFramebuffers([1]);
     assert.equal(first.glIsFramebuffer(1), GL.FALSE, 'deleted for every context of it');
 });
+
+test('a framebuffer object without attachments is complete once it has a default size', ()=>{
+    const gl = fixture();
+    const [fbo] = gl.glCreateFramebuffers(1);
+    assert.equal(gl.glIsFramebuffer(fbo), GL.TRUE, 'created, an object before any bind');
+    gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER),
+        GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT);
+    const bound = gl.framebufferBoundTo(GL.FRAMEBUFFER);
+    gl.framebufferParameter('glFramebufferParameteri', bound, GL.FRAMEBUFFER_DEFAULT_WIDTH, 64);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER),
+        GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, 'a width alone is not a size');
+    gl.framebufferParameter('glFramebufferParameteri', bound, GL.FRAMEBUFFER_DEFAULT_HEIGHT, 32);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    assert.deepEqual(gl.side.drawTarget(), { fbo: bound, width: 64, height: 32 });
+    assert.deepEqual(gl.getFramebufferParameter('glGetFramebufferParameteriv', bound,
+        GL.FRAMEBUFFER_DEFAULT_HEIGHT), [32]);
+    gl.framebufferParameter('glFramebufferParameteri', bound,
+        GL.FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS, 7);
+    assert.deepEqual(gl.getFramebufferParameter('glGetFramebufferParameteriv', bound,
+        GL.FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS), [GL.TRUE]);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+});
+
+test('the framebuffer parameters\' errors, as 4.5 section 9.2.1 lists them', ()=>{
+    const gl = fixture();
+    /** @param {number} expected @param {string} why */
+    const error = (expected, why)=>assert.equal(gl.glGetError(), expected, why);
+    const defaultOne = gl.framebufferBoundTo(GL.FRAMEBUFFER);
+    assert.equal(defaultOne, null);
+    gl.framebufferParameter('glFramebufferParameteri', undefined, GL.FRAMEBUFFER_DEFAULT_WIDTH, 1);
+    error(GL.INVALID_ENUM, 'no such target');
+    gl.framebufferParameter('glNamedFramebufferParameteri', undefined,
+        GL.FRAMEBUFFER_DEFAULT_WIDTH, 1);
+    error(GL.INVALID_OPERATION, 'no such object');
+    gl.framebufferParameter('glFramebufferParameteri', null, GL.FRAMEBUFFER_DEFAULT_WIDTH, 1);
+    error(GL.INVALID_OPERATION, 'the default framebuffer has no defaults');
+    const [fbo] = gl.glCreateFramebuffers(1);
+    const made = gl.framebufferNamed(fbo);
+    gl.framebufferParameter('glNamedFramebufferParameteri', made, GL.DRAW_BUFFER, 1);
+    error(GL.INVALID_ENUM, 'not a parameter');
+    gl.framebufferParameter('glNamedFramebufferParameteri', made, GL.FRAMEBUFFER_DEFAULT_WIDTH,
+        8193);
+    error(GL.INVALID_VALUE, 'past the largest');
+    gl.framebufferParameter('glNamedFramebufferParameteri', made, GL.FRAMEBUFFER_DEFAULT_SAMPLES,
+        -1);
+    error(GL.INVALID_VALUE, 'negative');
+    assert.equal(gl.getFramebufferParameter('glGetFramebufferParameteriv', defaultOne,
+        GL.FRAMEBUFFER_DEFAULT_WIDTH), null);
+    error(GL.INVALID_OPERATION, 'the default framebuffer\'s defaults');
+    assert.equal(gl.getFramebufferParameter('glGetFramebufferParameteriv', defaultOne,
+        GL.DRAW_BUFFER), null);
+    error(GL.INVALID_ENUM, 'only the EXT_direct_state_access query reads draw buffers');
+    assert.equal(gl.getFramebufferParameter('glGetNamedFramebufferParameteriv', undefined,
+        GL.STEREO), null);
+    error(GL.INVALID_OPERATION, 'no such object, by name');
+    assert.equal(gl.getFramebufferParameter('glGetFramebufferParameteriv', undefined,
+        GL.STEREO), null);
+    error(GL.INVALID_ENUM, 'no such target');
+});
+
+test('what a framebuffer says of itself: the window double-buffered, an object not, neither in '
+    + 'stereo, and the draw and read buffers through EXT_direct_state_access', ()=>{
+    const gl = fixture();
+    /** @param {any} fbo @param {number} pname */
+    const ask = (fbo, pname)=>gl.getFramebufferParameter('glGetFramebufferParameteriv', fbo,
+        pname)?.[0];
+    assert.equal(ask(null, GL.DOUBLEBUFFER), GL.TRUE);
+    assert.equal(ask(null, GL.STEREO), GL.FALSE);
+    assert.equal(ask(null, GL.SAMPLES), 0);
+    assert.equal(ask(null, GL.IMPLEMENTATION_COLOR_READ_FORMAT), GL.RGBA);
+    assert.deepEqual(gl.glGetFramebufferParameterivEXT(0, GL.DRAW_BUFFER), [GL.BACK]);
+    assert.deepEqual(gl.glGetFramebufferParameterivEXT(0, GL.READ_BUFFER), [GL.BACK]);
+    const [fbo] = gl.glCreateFramebuffers(1);
+    gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    assert.equal(ask(gl.framebufferBoundTo(GL.FRAMEBUFFER), GL.DOUBLEBUFFER), GL.FALSE);
+    assert.deepEqual(gl.glGetFramebufferParameterivEXT(fbo, GL.DRAW_BUFFER),
+        [GL.COLOR_ATTACHMENT0]);
+    assert.deepEqual(gl.glGetFramebufferParameterivEXT(fbo, GL.READ_BUFFER),
+        [GL.COLOR_ATTACHMENT0]);
+    // The window's, while an object is bound.
+    assert.deepEqual(gl.glGetFramebufferParameterivEXT(0, GL.READ_BUFFER), [GL.BACK]);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.equal(gl.glGetFramebufferParameterivEXT(0, GL.STEREO), null);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    assert.equal(gl.glGetFramebufferParameterivEXT(99, GL.DRAW_BUFFER), null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
+    const [a, b] = gl.glCreateRenderbuffers(2);
+    assert.equal(gl.glIsRenderbuffer(a), GL.TRUE);
+    assert.equal(gl.glIsRenderbuffer(b), GL.TRUE);
+});

@@ -464,6 +464,9 @@ export function createShareGroup(){
  * @property {number[]} drawBuffers  per draw buffer: an attachment point or GL_NONE
  * @property {number} readBuffer
  * @property {number} version  raised by every change of what it draws into
+ * @property {{ width: number, height: number, layers: number, samples: number,
+ *     fixed: number }} defaults  what it is without attachments
+ *     (GL_ARB_framebuffer_no_attachments)
  */
 
 /** The internal formats a renderbuffer takes, and what each holds. */

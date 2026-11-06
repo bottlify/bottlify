@@ -367,6 +367,19 @@ export const PENDING_VERSION_FUNCTIONS = Object.freeze((()=>{
         .filter(name=>!earlier.has(name));
 })());
 
+/**
+ * Functions of extensions this implementation does not report, implemented
+ * because a later version's or another extension's do the same work: the
+ * EXT_direct_state_access forms of GL_ARB_framebuffer_no_attachments.
+ * Sized from the registry and obtainable as the pending versions' are.
+ *
+ * @type {readonly string[]}
+ */
+export const UNANNOUNCED_FUNCTIONS = Object.freeze([
+    'glGetFramebufferParameterivEXT', 'glNamedFramebufferParameteriEXT',
+    'glGetNamedFramebufferParameterivEXT',
+]);
+
 /** The functions each version past 1.1 adds: obtainable, never in the extension string. */
 export const GL_VERSIONS = Object.freeze(Object.fromEntries(Object.entries(VERSION_FUNCTIONS)
     .map(([version, functions])=>[version, functions.map(([name])=>name)])));
@@ -505,7 +518,7 @@ export const EXTENSION_WORDS = (()=>{
     // the registry sizes them.
     const sized = new Set(Object.values(words).flat());
     for (const name of new Set([...Object.values(GL_EXTENSIONS).flat(),
-        ...PENDING_VERSION_FUNCTIONS]))
+        ...PENDING_VERSION_FUNCTIONS, ...UNANNOUNCED_FUNCTIONS]))
     {
         const count = sized.has(name) ? undefined : registryWords(name);
         if (count !== undefined)
@@ -532,6 +545,7 @@ export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([]));
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),
     ...PENDING_VERSION_FUNCTIONS,
+    ...UNANNOUNCED_FUNCTIONS,
     ...Object.values(WGL_EXTENSIONS).flat(),
     ...Object.values(GL_VERSIONS).flat(),
 ]));

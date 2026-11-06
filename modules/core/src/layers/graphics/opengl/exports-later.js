@@ -276,6 +276,29 @@ export function laterEntryPoints(h){
         glGetFramebufferAttachmentParameteriv: ([target, attachment, pname, out])=>call(
             context=>writeQuery(out, context.glGetFramebufferAttachmentParameteriv(
                 target >>> 0, attachment >>> 0, pname >>> 0), 'word')),
+        // GL_ARB_framebuffer_no_attachments, its 4.5 and EXT_direct_state_access forms.
+        glFramebufferParameteri: ([target, pname, param])=>call(context=>context
+            .framebufferParameter('glFramebufferParameteri',
+                context.framebufferBoundTo(target >>> 0), pname >>> 0, param | 0)),
+        glNamedFramebufferParameteri: ([name, pname, param])=>call(context=>context
+            .framebufferParameter('glNamedFramebufferParameteri',
+                context.framebufferNamed(name >>> 0), pname >>> 0, param | 0)),
+        glNamedFramebufferParameteriEXT: ([name, pname, param])=>call(context=>context
+            .framebufferParameter('glNamedFramebufferParameteri',
+                context.framebufferNamed(name >>> 0), pname >>> 0, param | 0)),
+        glGetFramebufferParameteriv: ([target, pname, out])=>call(context=>writeQuery(out,
+            context.getFramebufferParameter('glGetFramebufferParameteriv',
+                context.framebufferBoundTo(target >>> 0), pname >>> 0), 'word')),
+        glGetNamedFramebufferParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getFramebufferParameter('glGetNamedFramebufferParameteriv',
+                context.framebufferNamed(name >>> 0), pname >>> 0), 'word')),
+        glGetNamedFramebufferParameterivEXT: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getFramebufferParameter('glGetNamedFramebufferParameteriv',
+                context.framebufferNamed(name >>> 0), pname >>> 0), 'word')),
+        glGetFramebufferParameterivEXT: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.glGetFramebufferParameterivEXT(name >>> 0, pname >>> 0), 'word')),
+        glCreateFramebuffers: generator((context, count)=>context.glCreateFramebuffers(count)),
+        glCreateRenderbuffers: generator((context, count)=>context.glCreateRenderbuffers(count)),
         glGenRenderbuffers: generator((context, count)=>context.glGenRenderbuffers(count)),
         glDeleteRenderbuffers: deleter((context, names)=>context.glDeleteRenderbuffers(names)),
         glIsRenderbuffer: ([name])=>current()?.glIsRenderbuffer(name >>> 0) ?? GL.FALSE,

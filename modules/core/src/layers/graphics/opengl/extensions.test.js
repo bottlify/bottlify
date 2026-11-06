@@ -118,8 +118,14 @@ test('the extension string reports exactly what wglGetProcAddress can hand out',
         }
         assert.ok(!extensions.includes(version), `${version} is not an extension's name`);
     }
-    assert.equal(table.wglGetProcAddress.handler([cstring('glGetStringi')]), 0,
-        'a function of a version past the one claimed is not');
+    // A later version's function, or an unreported extension's, is obtained
+    // when it is implemented, as a driver hands out what it has (A111).
+    assert.notEqual(table.wglGetProcAddress.handler([cstring('glGetStringi')]), 0,
+        'implemented, of a version past the one claimed');
+    assert.notEqual(table.wglGetProcAddress.handler([cstring('glGetFramebufferParameterivEXT')]),
+        0, 'implemented, of an extension not reported');
+    assert.equal(table.wglGetProcAddress.handler([cstring('glDispatchCompute')]), 0,
+        'of a later version and not implemented');
     assert.equal(table.wglGetProcAddress.handler([cstring('glFrobnicateXYZ')]), 0);
     assert.equal(table.wglGetProcAddress.handler([0]), 0);
 

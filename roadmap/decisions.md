@@ -1024,6 +1024,13 @@ GL_FRAMEBUFFER_UNSUPPORTED:** integer formats, RGB9_E5, compressed formats and 3
 specification allows the answer for any combination an implementation cannot draw; integer
 targets come with the GLSL emitter's integer outputs. *2026-11-06.*
 
+**A111. wglGetProcAddress hands out every function implemented, whatever reports it.** A
+function of a version past the context's, or of an extension the string does not name, is
+obtainable once it is implemented here, as Windows drivers hand out every function they have:
+the version and extension strings are the promise a program reads, the pointer is not. Wine's
+opengl32 test calls 4.3 and 4.5 framebuffer queries and EXT_direct_state_access forms through
+pointers it never checks. A function not implemented is still null. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

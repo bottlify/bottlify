@@ -41,7 +41,10 @@
  *   tells a core entry point from an extension. An extension function returns
  *   null when no context is current, and a stable pointer otherwise. Names are
  *   not aliased: a vendor suffix is a different function and is present only
- *   if that vendor's extension is reported.
+ *   if that vendor's extension is reported -- or if it is implemented
+ *   (`unannounced`), as a driver hands out every function it has whatever it
+ *   reports: the version and extension strings are the promise, the pointer
+ *   is not (decision A111).
  *
  * The GDI half arrives injected. What this layer needs from a device context
  * is which drawable it names and how big it is, and nothing else -- so the
@@ -83,6 +86,8 @@ import { createBitmapDrawables } from './wgl-bitmap.js';
  * @property {(code: number) => void} [setLastError]
  *           Where the guest's last-error slot lives. A mirror is kept here
  *           either way, so a test never needs one.
+ * @property {(name: string) => boolean} [unannounced]  whether a function of a
+ *           version or extension not reported is implemented, and so obtainable
  * @property {Readonly<Record<string, readonly string[]>>} [extensions]
  *           Extension name -> the functions it adds. What is not in here is
  *           not reported and is not obtainable, which is the honest answer.
@@ -549,7 +554,8 @@ export function createWgl(options){
             {
                 return null;
             }
-            const extension = providedBy.get(name);
+            const extension = providedBy.get(name)
+                ?? (options.unannounced?.(name) ? 'unannounced' : undefined);
             if (!extension)
             {
                 return null;

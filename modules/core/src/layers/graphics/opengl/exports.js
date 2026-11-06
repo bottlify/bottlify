@@ -44,7 +44,8 @@
 
 import { GL, WGL } from './constants.js';
 import {
-    EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, WGL_EXTENSIONS, registryArguments,
+    EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, PENDING_VERSION_FUNCTIONS,
+    UNANNOUNCED_FUNCTIONS, WGL_EXTENSIONS, registryArguments,
 } from './extensions.js';
 import { laterEntryPoints } from './exports-later.js';
 import {
@@ -532,6 +533,13 @@ export function byteRunNames(bytes, width, count){
 }
 
 /**
+ * What wglGetProcAddress hands out though nothing reported names it, when it
+ * is implemented: the later versions' functions and the unreported
+ * extensions' (decision A111).
+ */
+const UNANNOUNCED = new Set([...PENDING_VERSION_FUNCTIONS, ...UNANNOUNCED_FUNCTIONS]);
+
+/**
  * @param {OpenglServices} services
  */
 export function createOpengl(services){
@@ -596,6 +604,7 @@ export function createOpengl(services){
             madeContext = true;
             return root.CreateContext(options);
         },
+        unannounced: name=>UNANNOUNCED.has(name) && implemented[name] !== undefined,
     });
 
     /** @type {Map<number, any>} guest handle -> the context it names */
