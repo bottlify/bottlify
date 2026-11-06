@@ -1021,7 +1021,14 @@ function describeCork(cork, say){
     }
     const exits = cork.exits ?? {};
     say(`    exits: ${Object.entries(exits).map(([kind, count])=>`${kind}=${count}`).join(' ')}`
-        + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : ''));
+        + (cork.transfers ? `  transfers through the hash: ${cork.transfers}` : '')
+        // Untranslated exits by what left (`untranslatedBy`): held ones land on translated
+        // addresses; the switches say when reads and stores through esp began to be tested.
+        + (cork.untranslatedBy ? `  untranslated by: ${Object.entries(cork.untranslatedBy)
+            .filter(([, count])=>count > 0).map(([why, count])=>`${why}=${count}`).join(' ')}` : '')
+        + `  reads tested: ${cork.readSwitches ?? 'not measured'}`
+        + `  stack code: ${cork.stackCode ?? 'not measured'}`
+        + `  held entries: ${cork.heldEntries ?? 'not measured'}`);
     if (typeof cork.translateMs === 'number')
     {
         say(`    translate ms: ${cork.translateMs.toFixed(1)}`
