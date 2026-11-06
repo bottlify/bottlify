@@ -159,6 +159,7 @@ import { createNtdllFunctions } from './ntdll/functions.js';
 import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
+import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 
 /**
  * win32 — the API surface the guest was compiled against.
@@ -4603,6 +4604,28 @@ export function createWin32Module(){
                         }
                         catch (e){
                             void e;
+                        }
+                    },
+                }),
+
+                /**
+                 * The NT handles a DXGI resource made shared is named by
+                 * (IDXGIResource1::CreateSharedHandle): kernel objects of the
+                 * type Windows gives them, each naming a share's key, closed
+                 * and duplicated as any handle.
+                 */
+                sharedHandles: ()=>({
+                    /** @param {number} key */
+                    open: key=>kernel.handles.open(SHARED_RESOURCE_HANDLE, { key }),
+                    /** @param {number} handle @returns {number | null} */
+                    resolve: handle=>{
+                        try
+                        {
+                            return kernel.handles.resolve(handle, SHARED_RESOURCE_HANDLE).key;
+                        }
+                        catch (e){
+                            void e;
+                            return null;
                         }
                     },
                 }),

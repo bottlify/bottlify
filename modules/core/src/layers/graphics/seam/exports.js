@@ -178,6 +178,8 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll'];
  * @param {{ create: (options: { manualReset: boolean, signalled: boolean }) => number,
  *     set: (handle: number) => void }} [deps.events]
  *        Kernel events by handle, which DXGI hands out and sets.
+ * @param {{ open: (key: number) => number, resolve: (handle: number) => number | null }}
+ *     [deps.sharedHandles]  The NT handles DXGI's shared resources are named by.
  * @param {string[]} [deps.guestTraps]
  *        With guest code on, the parts of it kept as traps all the same: methods
  *        by name, or the groups `getters`, `ring`, `locks`, `levels` and
@@ -205,7 +207,7 @@ export function createGraphicsLibraries(
         windowClient, gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
         presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
-        guestTraps = [], pointerSize = 4, floatResult, events,
+        guestTraps = [], pointerSize = 4, floatResult, events, sharedHandles,
         schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
@@ -370,6 +372,7 @@ export function createGraphicsLibraries(
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
         events,
+        sharedHandles,
         root: (/** @type {any} */ factoryOptions)=>graphics.create('d3d10', { factoryOptions }),
         divergence,
         // A back buffer asked for at zero takes the window's client area; the

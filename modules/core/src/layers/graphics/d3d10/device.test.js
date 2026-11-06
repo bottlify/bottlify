@@ -2712,3 +2712,143 @@ test('a shader model 4 program that reads raw memory is refused below level 11, 
     assert.equal(made(0xb000, raw), S_OK);
     assert.equal(made(0xa000, solidPixelShader([1, 0, 0, 1])), S_OK);
 });
+
+test('a texture made shared is opened by another device of the same root over the same'
+    + ' bytes, by the kind of handle it was made for (test_shared_resource)', async()=>{
+    const options = {};
+    /** @param {number} [level] */
+    const device11 = (level = 0xb000)=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, options), S_OK);
+        return out.device;
+    };
+    const one = device11();
+    const two = device11(0xa000);
+    /** @param {number} misc @param {number} misc11 */
+    const made = (misc, misc11)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = one.CreateTexture2D({ ...TEXTURE_2D, Width: 4, Height: 4,
+            MiscFlags: misc, MiscFlags11: misc11 }, null, out);
+        return { hr, resource: out.resource ?? null };
+    };
+    const SHARED = 0x2;
+    const KEYED = 0x10;
+    const NT = 0x800;
+    assert.equal(made(SHARED | KEYED, 0).hr, E_INVALIDARG, 'one way of sharing');
+    assert.equal(made(0, NT).hr, E_INVALIDARG, 'an NT handle names a share');
+    assert.equal(made(SHARED | KEYED, NT).hr, E_INVALIDARG);
+
+    const plain = made(0, 0).resource;
+    /** @type {{ handle?: number }} */
+    const none = {};
+    assert.equal(plain.GetSharedHandle(none), S_OK);
+    assert.equal(none.handle, 0, 'no handle for a texture not shared');
+    assert.ok(plain.supports(IID.IDXGIResource1) && !plain.supports(IID.IDXGIKeyedMutex));
+
+    const shared = made(SHARED, 0).resource;
+    /** @type {{ handle?: number }} */
+    const legacy = {};
+    assert.equal(shared.GetSharedHandle(legacy), S_OK);
+    assert.ok(((legacy.handle ?? 0) & 0xc0000000) !== 0, 'a legacy handle');
+    assert.equal(shared.ntShareKey(), null, 'no NT handle for it');
+    /** @type {{ resource?: any }} */
+    const opened = {};
+    assert.equal(two.OpenSharedResource1(legacy.handle, opened), E_INVALIDARG);
+    assert.equal(two.OpenSharedResource(legacy.handle, opened), S_OK);
+    assert.equal(two.OpenSharedResource(0x1234, {}), E_INVALIDARG, 'a handle naming nothing');
+
+    // What one device writes the other reads.
+    const texels = new Uint8Array(64).map((_, index)=>index);
+    one.UpdateSubresource(shared, 0, null, texels, 16, 64);
+    const staging = createTexture2D(two, { Width: 4, Height: 4, Usage: D3D10_USAGE.STAGING,
+        BindFlags: 0, CPUAccessFlags: 0x20000 });
+    two.CopyResource(staging, opened.resource);
+    /** @type {{ data?: Uint8Array }} */
+    const mapped = {};
+    assert.equal(await staging.Map(0, 1, 0, mapped), S_OK);
+    assert.deepEqual([...(mapped.data ?? []).slice(0, 64)], [...texels]);
+    staging.Unmap(0);
+
+    const nt = made(SHARED, NT).resource;
+    assert.equal(nt.GetSharedHandle({}), E_INVALIDARG, 'named by an NT handle only');
+    const key = nt.ntShareKey();
+    assert.notEqual(key, null);
+    assert.equal(two.OpenSharedResource(key, {}), E_INVALIDARG);
+    /** @type {{ resource?: any }} */
+    const byNt = {};
+    assert.equal(two.OpenSharedResource1(key, byNt), S_OK);
+
+    // The share outlives the object it was made as while another holds it.
+    shared.release();
+    /** @type {{ resource?: any }} */
+    const again = {};
+    assert.equal(two.OpenSharedResource(legacy.handle, again), S_OK, 'still opened by its handle');
+    again.resource.release();
+    opened.resource.release();
+    assert.equal(two.OpenSharedResource(legacy.handle, {}), E_INVALIDARG, 'gone with the last');
+    byNt.resource.release();
+    nt.release();
+    plain.release();
+});
+
+test('a keyed mutex is held by one device at a time, taken with the key it was let go with,'
+    + ' and abandoned with the object that held it (test_keyed_mutex)', async()=>{
+    const options = {};
+    const device11 = ()=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, options), S_OK);
+        return out.device;
+    };
+    const one = device11();
+    const two = device11();
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(one.CreateTexture2D({ ...TEXTURE_2D, MiscFlags: 0x10 }, null, made), S_OK);
+    const texture = made.resource;
+    assert.ok(texture.supports(IID.IDXGIKeyedMutex));
+    const INVALID_CALL = DXGI_ERROR_INVALID_CALL;
+    const TIMEOUT = 0x102;
+    const ABANDONED = 0x80;
+    assert.deepEqual([texture.ReleaseSync(0), texture.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL],
+        'not held');
+    assert.equal(texture.AcquireSync(1, 0), TIMEOUT, 'zero at first');
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+    assert.deepEqual([texture.AcquireSync(0, 0), texture.AcquireSync(1, 0)],
+        [INVALID_CALL, INVALID_CALL], 'held by this device already');
+    assert.equal(texture.ReleaseSync(0), S_OK);
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+    assert.equal(texture.ReleaseSync(1), S_OK, 'let go with any key');
+    assert.deepEqual([texture.AcquireSync(0, 0), texture.AcquireSync(2, 0)], [TIMEOUT, TIMEOUT]);
+    assert.equal(texture.AcquireSync(1, 0), S_OK);
+    assert.equal(texture.ReleaseSync(0), S_OK);
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+
+    /** @type {{ handle?: number }} */
+    const handle = {};
+    texture.GetSharedHandle(handle);
+    /** @type {{ resource?: any }} */
+    const opened = {};
+    assert.equal(two.OpenSharedResource(handle.handle, opened), S_OK);
+    const other = opened.resource;
+    assert.ok(other.supports(IID.IDXGIKeyedMutex));
+    assert.deepEqual([other.AcquireSync(0, 0), other.AcquireSync(1, 0)], [TIMEOUT, TIMEOUT],
+        'held by the other device');
+    assert.deepEqual([other.ReleaseSync(0), other.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL]);
+
+    // A wait is answered when the holder lets go, or when it runs out.
+    const waited = other.AcquireSync(5, 10000);
+    assert.ok(waited instanceof Promise);
+    assert.equal(texture.ReleaseSync(5), S_OK);
+    assert.equal(await waited, S_OK);
+    assert.equal(await texture.AcquireSync(0, 5), TIMEOUT, 'a wait that runs out');
+    assert.equal(other.ReleaseSync(0), S_OK);
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+
+    texture.release();
+    assert.deepEqual([other.AcquireSync(0, 0), other.AcquireSync(0, 0)], [ABANDONED, ABANDONED]);
+    assert.deepEqual([other.ReleaseSync(0), other.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL]);
+    other.release();
+});

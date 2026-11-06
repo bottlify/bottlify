@@ -4056,6 +4056,26 @@ export function createRenderer(services){
 
     return {
         /**
+         * The storage a resource made shared keeps, for another device's
+         * renderer to take as its object's own (`sharing.js`).
+         *
+         * @param {any} resource
+         */
+        shareBacking(resource){
+            return backingOf(resource);
+        },
+
+        /**
+         * A resource opened over a share: its storage is the share's, bytes,
+         * GPU texture and what the guest maps alike.
+         *
+         * @param {any} resource @param {any} backing
+         */
+        adoptBacking(resource, backing){
+            backings.set(resource, backing);
+        },
+
+        /**
          * The program's last reference to a resource is gone: its guest
          * memory goes back. A view still holding it keeps what the GPU has;
          * one that hands it out again (GetResource) maps it into new memory.

@@ -1155,6 +1155,8 @@ export function createGraphicsModule(){
                 floatResult: config?.floatResult,
                 // DXGI's swap chain hands out a kernel event, and its device sets one.
                 events: win32.events?.(),
+                // A shared resource's NT handle is a kernel object of the process.
+                sharedHandles: win32.sharedHandles?.(),
                 guestTraps: config?.guestTraps,
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.

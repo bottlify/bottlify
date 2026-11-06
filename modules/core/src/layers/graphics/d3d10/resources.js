@@ -36,6 +36,7 @@ import {
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FORMAT, DXGI_USAGE,
     E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
 } from './constants.js';
+import { acquireSync, releaseSync } from './sharing.js';
 import { VIEW_UNION } from './structs.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
 
@@ -324,6 +325,58 @@ export function createResource(options){
             options.retainDevice();
             out.device = options.device();
             return S_OK;
+        },
+
+        /**
+         * The share this object is one of, when it was made or opened shared
+         * (`sharing.js`).
+         *
+         * @type {import('./sharing.js').Share | null}
+         */
+        share: null,
+
+        /**
+         * IDXGIResource::GetSharedHandle: a legacy handle for a resource made
+         * shared, none for one that is not, and a refusal for one that only
+         * an NT handle names (test_shared_resource).
+         *
+         * @param {{ handle?: number }} out
+         * @returns {number}
+         */
+        GetSharedHandle(out){
+            const share = this.share;
+            if (share?.nt)
+            {
+                return E_INVALIDARG;
+            }
+            out.handle = share ? share.key : 0;
+            return S_OK;
+        },
+
+        /**
+         * What an NT handle made by IDXGIResource1::CreateSharedHandle names:
+         * the share's key, for a resource made with SHARED_NTHANDLE only.
+         *
+         * @returns {number | null}
+         */
+        ntShareKey(){
+            return this.share?.nt ? this.share.key : null;
+        },
+
+        /**
+         * @param {number} key @param {number} milliseconds
+         * @returns {number | Promise<number>}
+         */
+        AcquireSync(key, milliseconds){
+            return this.share?.mutex
+                ? acquireSync(this.share, options.device(), key, milliseconds)
+                : DXGI_ERROR_INVALID_CALL;
+        },
+
+        /** @param {number} key @returns {number} */
+        ReleaseSync(key){
+            return this.share?.mutex ? releaseSync(this.share, options.device(), key)
+                : DXGI_ERROR_INVALID_CALL;
         },
 
         /**
@@ -842,7 +895,7 @@ export const VIEW_KINDS = Object.freeze({
  */
 export function textureInterfaces(desc, textureIid, dimension){
     const base = [IID.ID3D10DeviceChild, IID.ID3D10Resource, IID.IDXGIObject,
-        IID.IDXGIDeviceSubObject, IID.IDXGIResource, textureIid];
+        IID.IDXGIDeviceSubObject, IID.IDXGIResource, IID.IDXGIResource1, textureIid];
     const single = dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
         && desc.MipLevels === 1 && (desc.ArraySize ?? 1) === 1;
     return single ? [...base, IID.IDXGISurface, IID.IDXGISurface1] : base;

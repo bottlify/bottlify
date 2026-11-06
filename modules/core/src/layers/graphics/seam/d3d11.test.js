@@ -17,9 +17,10 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D10Seam } from './d3d10.js';
 import {
-    ID3D11DEVICECHILD_SLOTS, ID3D11DEVICECONTEXT_SLOTS, ID3D11DEVICE_SLOTS,
+    ID3D11DEVICE1_SLOTS, ID3D11DEVICECHILD_SLOTS, ID3D11DEVICECONTEXT_SLOTS, ID3D11DEVICE_SLOTS,
     ID3D11RESOURCEDESC_SLOTS, ID3D11VIEWDESC_SLOTS, miscFlagsIn, miscFlagsOut,
 } from './d3d11.js';
+import { IDXGIKEYEDMUTEX_SLOTS, IDXGIRESOURCE1_SLOTS, IDXGIRESOURCE_SLOTS } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_USAGE, D3D_FEATURE_LEVEL, DXGI_FORMAT, E_INVALIDARG, IID, S_FALSE, S_OK,
 } from '../d3d10/constants.js';
@@ -45,7 +46,8 @@ const RELEASE = 2;
  * A flat address space, the bridge's publisher, and the seam over a recording
  * GPU: the device drawn here, or recorded and played elsewhere.
  *
- * @param {{ elsewhere?: boolean }} [options]
+ * @param {{ elsewhere?: boolean, sharedHandles?: { open: (key: number) => number,
+ *     resolve: (handle: number) => number | null } }} [options]
  */
 function seamed(options = {}){
     const bytes = new Uint8Array(4 << 20);
@@ -114,6 +116,7 @@ function seamed(options = {}){
                 : createDirect3D10({ ...drawing, guest });
         },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+        sharedHandles: options.sharedHandles,
     });
     /** @param {number[]} dwords */
     const place = dwords=>{
@@ -459,4 +462,97 @@ test('a buffer mapped on a deferred context is written where its command list pl
     const read = s.memory.readU32(mapped);
     assert.deepEqual([0, 1, 2, 3].map(index=>s.memory.readU32(read + 4 * index)), [1, 2, 3, 9]);
     s.call(context, unmapSlot, [staging, 0]);
+});
+
+/**
+ * Shares made by one device and opened by another, through the seam: drawn
+ * here, or recorded and played elsewhere.
+ *
+ * @param {boolean} elsewhere
+ */
+function sharedThrough(elsewhere){
+    /** @type {Map<number, number>} */
+    const kernel = new Map();
+    const s = seamed({ elsewhere, sharedHandles: {
+        /** @param {number} key */
+        open: key=>{
+            const handle = 0x200 + kernel.size * 4;
+            kernel.set(handle, key);
+            return handle;
+        },
+        /** @param {number} handle */
+        resolve: handle=>kernel.get(handle) ?? null,
+    } });
+    const one = s.create().device;
+    const two = s.create().device;
+    /** @param {number} misc */
+    const texture = misc=>{
+        const out = s.place([0]);
+        // D3D11_TEXTURE2D_DESC: 4x4, one level, one slice, RGBA8, one sample,
+        // default usage, a shader resource.
+        assert.equal(s.call(one, slot(ID3D11DEVICE_SLOTS, 'CreateTexture2D'), [s.place([4, 4,
+            1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0, D3D10_USAGE.DEFAULT,
+            D3D10_BIND.SHADER_RESOURCE, 0, misc]), 0, out]), S_OK);
+        return s.memory.readU32(out);
+    };
+    /** @param {number} device @param {string} method @param {number} handle */
+    const open = (device, method, handle)=>{
+        const out = s.place([0xdeadbeef]);
+        const hr = s.call(device, slot(ID3D11DEVICE1_SLOTS, method),
+            [handle, placeGuidOf(s, IID.ID3D11Texture2D), out]);
+        return { hr, pointer: s.memory.readU32(out) };
+    };
+    const two1 = s.query(two, IID.ID3D11Device1);
+
+    // A legacy handle, and a keyed mutex on the texture.
+    const keyed = texture(0x100);
+    const resource = s.query(keyed, IID.IDXGIResource);
+    const handleAt = s.place([0xdeadbeef]);
+    assert.equal(s.call(resource, slot(IDXGIRESOURCE_SLOTS, 'GetSharedHandle'), [handleAt]),
+        S_OK);
+    const legacy = s.memory.readU32(handleAt);
+    assert.ok((legacy & 0xc0000000) !== 0, 'a legacy handle');
+    const opened = open(two, 'OpenSharedResource', legacy);
+    assert.equal(opened.hr, S_OK);
+    assert.notEqual(opened.pointer, 0);
+    assert.equal(open(two1, 'OpenSharedResource1', legacy).hr, E_INVALIDARG);
+    const mutex = s.query(keyed, IID.IDXGIKeyedMutex);
+    const other = s.query(opened.pointer, IID.IDXGIKeyedMutex);
+    assert.ok(mutex !== 0 && other !== 0);
+    const acquire = slot(IDXGIKEYEDMUTEX_SLOTS, 'AcquireSync');
+    const release = slot(IDXGIKEYEDMUTEX_SLOTS, 'ReleaseSync');
+    assert.equal(s.call(mutex, acquire, [0, 0, 0]), S_OK, 'the key, in two words');
+    assert.equal(s.call(other, acquire, [0, 0, 0]), 0x102, 'held by the other device');
+    assert.equal(s.call(mutex, release, [7, 1]), S_OK);
+    assert.equal(s.call(other, acquire, [7, 0, 0]), 0x102, 'a key of 64 bits');
+    assert.equal(s.call(other, acquire, [7, 1, 0]), S_OK);
+
+    // An NT handle names a texture made for one, and only through OpenSharedResource1.
+    const nt = texture(0x802);
+    const nt1 = s.query(nt, IID.IDXGIResource1);
+    assert.equal(s.call(nt1, slot(IDXGIRESOURCE1_SLOTS, 'GetSharedHandle'), [handleAt]),
+        E_INVALIDARG);
+    const ntAt = s.place([0xdeadbeef]);
+    assert.equal(s.call(nt1, slot(IDXGIRESOURCE1_SLOTS, 'CreateSharedHandle'),
+        [0, 0x10000000, 0, ntAt]), S_OK);
+    const handle = s.memory.readU32(ntAt);
+    assert.equal(kernel.size, 1, 'a kernel object');
+    assert.equal(open(two, 'OpenSharedResource', handle).hr, E_INVALIDARG);
+    const byNt = open(two1, 'OpenSharedResource1', handle);
+    assert.equal(byNt.hr, S_OK);
+    assert.notEqual(byNt.pointer, 0);
+    const legacy1 = s.query(keyed, IID.IDXGIResource1);
+    assert.equal(s.call(legacy1, slot(IDXGIRESOURCE1_SLOTS, 'CreateSharedHandle'),
+        [0, 0x10000000, 0, ntAt]), E_INVALIDARG, 'no NT handle to a legacy share');
+    assert.equal(s.memory.readU32(ntAt), 0);
+    assert.deepEqual(s.divergences, [], 'the played side opened the same shares');
+}
+
+test('a texture made shared is opened by another device through its handle: a legacy one, or'
+    + ' an NT handle the kernel keeps (test_shared_resource, test_keyed_mutex)', ()=>{
+    sharedThrough(false);
+});
+
+test('a shared texture is opened alike on a device recorded and played elsewhere', ()=>{
+    sharedThrough(true);
 });

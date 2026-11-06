@@ -294,6 +294,19 @@ export const IDXGIRESOURCE_SLOTS = /** @type {[string, number][]} */ ([
     ['GetEvictionPriority', 1],
 ]);
 
+export const IDXGIRESOURCE1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIRESOURCE_SLOTS,
+    ['CreateSubresourceSurface', 2],
+    ['CreateSharedHandle', 4],
+]);
+
+/** AcquireSync(UINT64 Key, DWORD ms) and ReleaseSync(UINT64 Key): a key is two words. */
+export const IDXGIKEYEDMUTEX_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIDEVICESUBOBJECT_SLOTS,
+    ['AcquireSync', 3],
+    ['ReleaseSync', 2],
+]);
+
 export const IDXGISURFACE_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIDEVICESUBOBJECT_SLOTS,
     ['GetDesc', 1],
@@ -668,6 +681,9 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @property {{ create: (options: { manualReset: boolean, signalled: boolean }) => number,
  *     set: (handle: number) => void }} [events]  Kernel events by handle: a swap chain's
  *     frame latency object, and the event IDXGIDevice2::EnqueueSetEvent sets.
+ * @property {{ open: (key: number) => number, resolve: (handle: number) => number | null }}
+ *     [sharedHandles]  The NT handles of shared resources (`d3d10/sharing.js`): one opened
+ *     over a share's key, and the key a handle names.
  */
 
 /**
@@ -690,7 +706,8 @@ export function updateSpan(packed, depth, rowPitch, depthPitch){
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, root: makeRoot,
     divergence, factoryOptions: given, screen, identity, videoMemory, resolution, gdi,
-    ringAllocate, allocateCode, traps = new Set(), ringBytes, floatResult, events })
+    ringAllocate, allocateCode, traps = new Set(), ringBytes, floatResult, events,
+    sharedHandles })
 {
     const setEvent = events?.set;
     const fields = createFields(memory);
@@ -2106,15 +2123,72 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         GetParent: getParent,
         GetDevice: subObjectDevice,
         /**
-         * Nothing is shared between processes here, so no resource has a
-         * handle to share.
+         * A legacy handle for a texture made shared, none for one that is not,
+         * and nothing written for one only an NT handle names.
          *
          * @param {any} resource @param {number[]} args
          */
         GetSharedHandle: (resource, [out])=>{
-            fields.writeU32(out, 0);
+            /** @type {{ handle?: number }} */
+            const held = {};
+            const hr = resource.GetSharedHandle(held);
+            if (hr === S_OK && (out >>> 0) !== 0)
+            {
+                fields.writeU32(out, held.handle ?? 0);
+            }
+            return hr;
+        },
+        /**
+         * An NT handle to a texture made with SHARED_NTHANDLE, a kernel
+         * object of the process (test_shared_resource); none for any other.
+         * A name is not kept: what OpenSharedResourceByName would find is said.
+         *
+         * @param {any} resource @param {number[]} args
+         */
+        CreateSharedHandle: (resource, [, , name, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const key = resource.ntShareKey();
+            if (key === null || !sharedHandles)
+            {
+                fields.writeU32(out, 0);
+                if (key !== null)
+                {
+                    divergence?.('DXGI', 'an NT handle to a shared resource needs the kernel;'
+                        + ' none is made');
+                }
+                return E_INVALIDARG;
+            }
+            if ((name >>> 0) !== 0)
+            {
+                divergence?.('DXGI', 'a shared resource\'s handle is made without its name:'
+                    + ' it is not found by name');
+            }
+            fields.writeU32(out, sharedHandles.open(key));
             return S_OK;
         },
+        /**
+         * One subresource of a resource as a surface of its own: not made yet,
+         * said, and refused as not implemented.
+         *
+         * @param {any} resource @param {number[]} args
+         */
+        CreateSubresourceSurface: (resource, [, out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            divergence?.('DXGI', 'IDXGIResource1::CreateSubresourceSurface is not implemented');
+            return E_NOTIMPL;
+        },
+        /** @param {any} resource @param {number[]} args */
+        AcquireSync: (resource, [low, high, milliseconds])=>
+            resource.AcquireSync((low >>> 0) + (high >>> 0) * 0x100000000, milliseconds >>> 0),
+        /** @param {any} resource @param {number[]} args */
+        ReleaseSync: (resource, [low, high])=>
+            resource.ReleaseSync((low >>> 0) + (high >>> 0) * 0x100000000),
         /** @param {any} resource @param {number[]} args */
         GetUsage: (resource, [out])=>{
             fields.writeU32(out, resource.GetUsage());
@@ -2265,6 +2339,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         ], dxgiResourceMethods).map(face=>({ ...face, sharedWith: IID.IDXGIResource })),
         ...describeAll([
             [IID.IDXGIResource, IDXGIRESOURCE_SLOTS],
+            [IID.IDXGIResource1, IDXGIRESOURCE1_SLOTS],
+            [IID.IDXGIKeyedMutex, IDXGIKEYEDMUTEX_SLOTS],
             [IID.IDXGISurface, IDXGISURFACE_SLOTS],
             [IID.IDXGISurface1, IDXGISURFACE1_SLOTS],
         ], dxgiResourceMethods),
@@ -3029,6 +3105,37 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         };
 
     /**
+     * A device's object over a shared texture, handed back as the interface
+     * asked for: by a legacy handle (`OpenSharedResource`) or by the key an
+     * NT handle names (`OpenSharedResource1`).
+     *
+     * @param {any} device @param {string} method @param {number | null} key
+     * @param {number} iid @param {number} out
+     * @returns {number}
+     */
+    const openShared = (device, method, key, iid, out)=>{
+        if ((out >>> 0) === 0)
+        {
+            return E_INVALIDARG;
+        }
+        fields.writeU32(out, 0);
+        /** @type {{ resource?: any }} */
+        const held = {};
+        const hr = key === null ? E_INVALIDARG : device[method](key, held);
+        if (hr !== S_OK)
+        {
+            return hr;
+        }
+        const id = readGuid(memory, iid);
+        if (!held.resource.supports(id))
+        {
+            held.resource.release();
+            return E_NOINTERFACE;
+        }
+        return handBack(held.resource, resourceInterfaces(held.resource)[0], id, out);
+    };
+
+    /**
      * @param {string} method
      * @param {import('./com.js').InterfaceDescriptor[]} interfaces
      * @param {string} id
@@ -3556,13 +3663,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             /** @param {any} device */
             GetCreationFlags: device=>device.GetCreationFlags(),
             /** @param {any} device @param {number[]} args */
-            OpenSharedResource: (device, [, , out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    fields.writeU32(out, 0);
-                }
-                return device.OpenSharedResource();
-            },
+            OpenSharedResource: (device, [handle, iid, out])=>
+                openShared(device, 'OpenSharedResource', handle >>> 0, iid, out),
             /** @param {any} device @param {number[]} args */
             SetTextFilterSize: (device, [width, height])=>{
                 device.SetTextFilterSize(width >>> 0, height >>> 0);
@@ -3788,6 +3890,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             swapChain: swapChainInterfaces,
         },
         resourceInterfaces: resource=>resourceInterfaces(resource)[0],
+        openShared,
+        /** @param {number} handle @returns {number | null} the key an NT handle names */
+        sharedKeyOf: handle=>sharedHandles?.resolve(handle >>> 0) ?? null,
     };
 
     // --- blobs and reflection ---

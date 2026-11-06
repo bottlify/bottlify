@@ -580,7 +580,11 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
         return E_INVALIDARG;
     }
     const shared = D3D10_RESOURCE_MISC.SHARED | D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX;
-    if ((desc.MiscFlags & shared) === shared)
+    // A texture is shared one way: a plain share or a keyed mutex, and an NT
+    // handle only names one of those (test_shared_resource).
+    if ((desc.MiscFlags & shared) === shared
+        || (((/** @type {any} */ (desc).MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.SHARED_NTHANDLE)
+            !== 0 && (desc.MiscFlags & shared) === 0))
     {
         return E_INVALIDARG;
     }

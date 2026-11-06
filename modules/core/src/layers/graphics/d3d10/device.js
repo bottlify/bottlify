@@ -48,6 +48,7 @@ import {
 import {
     SHADER_KIND, SYSTEM_VALUE, declaresBufferViews, parseDxbc, parseShaderOfKind,
 } from './dxbc.js';
+import { createSharing } from './sharing.js';
 import { createFactory } from './dxgi.js';
 import {
     INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
@@ -144,7 +145,32 @@ const PREDICATE_QUERIES = new Set([
  *     what the present waits on before it answers the program.
  * @property {import('./render.js').GuestStorage} [guest]  Guest memory for the bytes of
  *     the resources a program maps, which a map then hands out as they are.
+ * @property {ReturnType<typeof createSharing>} [sharing]  The shared resources of every
+ *     device made with the same options (`sharing.js`).
  */
+
+/**
+ * The devices made with one options object, as a root makes all of its own,
+ * share their shared resources.
+ *
+ * @type {WeakMap<object, ReturnType<typeof createSharing>>}
+ */
+const SHARINGS = new WeakMap();
+
+/** @param {DeviceOptions} options */
+function sharingOf(options){
+    if (options.sharing)
+    {
+        return options.sharing;
+    }
+    let sharing = SHARINGS.get(options);
+    if (!sharing)
+    {
+        sharing = createSharing();
+        SHARINGS.set(options, sharing);
+    }
+    return sharing;
+}
 
 /**
  * @param {any} adapter
@@ -189,7 +215,7 @@ export function D3D10CreateDevice(adapter, driverType, software, flags, sdkVersi
     {
         return DXGI_ERROR_SDK_COMPONENT_MISSING;
     }
-    out.device = createDevice({ ...options, adapter, flags });
+    out.device = createDevice({ ...options, sharing: sharingOf(options), adapter, flags });
     return S_OK;
 }
 
@@ -484,7 +510,8 @@ export function D3D11CreateDevice(adapter, driverType, software, flags, levels, 
     {
         return S_FALSE;
     }
-    const device = createDevice({ ...options, adapter, flags, api: 'd3d11', featureLevel: level });
+    const device = createDevice({ ...options, sharing: sharingOf(options), adapter, flags,
+        api: 'd3d11', featureLevel: level });
     out.made = device;
     if (out.wantContext)
     {
@@ -747,6 +774,7 @@ export function createDevice(options = {}){
     // program's last reference, and nothing else (test_state_refcounting).
     const state = createPipelineState({ diverge, keepsBound: d3d11, keepsRasterizer: true });
     const featureLevel = options.featureLevel ?? D3D_FEATURE_LEVEL.LEVEL_10_0;
+    const sharing = options.sharing ?? createSharing();
     /** The newest shader model the device takes, as 0xMm (`dxbc.js`). */
     const shaderModel = !d3d11 ? 0x40
         : featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0 ? 0x50
@@ -865,18 +893,73 @@ export function createDevice(options = {}){
                 : (desc.ArraySize ?? 1),
             SampleDesc: Object.freeze({ ...(desc.SampleDesc ?? { Count: 1, Quality: 0 }) }),
         });
+        const keyed = (resolved.MiscFlags & D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX) !== 0;
+        const interfaces = elevenOnly(resolved, textureInterfaces(resolved, iid, dimension));
         out.resource = createResource({
             dimension,
             desc: resolved,
-            interfaces: elevenOnly(resolved, textureInterfaces(resolved, iid, dimension)),
+            interfaces: keyed ? [...interfaces, IID.IDXGIKeyedMutex] : interfaces,
             retainDevice,
             releaseDevice,
             device: deviceHandle,
             storage,
-            onLastRef: ()=>renderer.resourceReleased(made),
+            onLastRef: ()=>released(made),
         });
         const made = out.resource;
         renderer.resourceCreated(out.resource, data);
+        if (keyed || (resolved.MiscFlags & D3D10_RESOURCE_MISC.SHARED) !== 0)
+        {
+            made.share = sharing.share(made, renderer.shareBacking(made), { keyed,
+                nt: ((resolved.MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.SHARED_NTHANDLE) !== 0,
+                interfaces: keyed ? [...interfaces, IID.IDXGIKeyedMutex] : interfaces });
+        }
+        return S_OK;
+    };
+
+    /**
+     * A resource's last reference is gone: its storage with it, unless
+     * another device's object of the same share still holds it.
+     *
+     * @param {any} resource
+     */
+    const released = resource=>{
+        if (!resource.share || sharing.letGo(resource.share, deviceHandle()))
+        {
+            renderer.resourceReleased(resource);
+        }
+    };
+
+    /**
+     * ID3D11Device::OpenSharedResource and ID3D11Device1::OpenSharedResource1:
+     * an object of this device over a texture another device made shared,
+     * named by its legacy handle or by the key an NT handle names
+     * (test_shared_resource). Each opens only what its kind of handle names.
+     *
+     * @param {number} key @param {{ resource?: any }} out @param {boolean} [nt]
+     * @returns {number}
+     */
+    const openShared = (key, out, nt = false)=>{
+        out.resource = null;
+        const share = sharing.find(key);
+        if (!share || share.nt !== nt)
+        {
+            return E_INVALIDARG;
+        }
+        const source = share.resource;
+        const opened = createResource({
+            dimension: source.dimension,
+            desc: source.desc,
+            interfaces: share.interfaces,
+            retainDevice,
+            releaseDevice,
+            device: deviceHandle,
+            storage,
+            onLastRef: ()=>released(opened),
+        });
+        sharing.hold(share);
+        opened.share = share;
+        renderer.adoptBacking(opened, share.backing);
+        out.resource = opened;
         return S_OK;
     };
 
@@ -1149,7 +1232,7 @@ export function createDevice(options = {}){
                         ? desc.StructureByteStride : 0 }),
                 interfaces: elevenOnly(desc, [IID.ID3D10DeviceChild, IID.ID3D10Resource,
                     IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGIResource,
-                    IID.ID3D10Buffer]),
+                    IID.IDXGIResource1, IID.ID3D10Buffer]),
                 retainDevice,
                 releaseDevice,
                 device: deviceHandle,
@@ -2150,12 +2233,25 @@ export function createDevice(options = {}){
         },
 
         /**
-         * Nothing here is ever shared, so no handle names a resource.
+         * A texture another device of the same root made shared, by its
+         * legacy handle.
          *
+         * @param {number} handle @param {{ resource?: any }} out
          * @returns {number}
          */
-        OpenSharedResource(){
-            return E_INVALIDARG;
+        OpenSharedResource(handle, out){
+            return openShared(handle, out);
+        },
+
+        /**
+         * By the key an NT handle names (`ntShareKey`): only a texture made
+         * with SHARED_NTHANDLE.
+         *
+         * @param {number} key @param {{ resource?: any }} out
+         * @returns {number}
+         */
+        OpenSharedResource1(key, out){
+            return openShared(key, out, true);
         },
 
         // --- ID3D10Multithread ---
