@@ -513,7 +513,8 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const vertexBuffer = 6;
     assert.equal(ask('CheckDeviceFormat',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, vertexBuffer, D3DFMT.A8R8G8B8]),
-    D3DERR_NOTAVAILABLE, 'and a kind of resource that has no format is never available');
+    D3DERR_INVALIDCALL, 'and a kind of resource that has no format is not a question'
+        + ' (test_check_device_format)');
 
     assert.equal(ask('CheckDeviceMultiSampleType',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 1, 0]), D3D_OK, 'one sample per pixel');

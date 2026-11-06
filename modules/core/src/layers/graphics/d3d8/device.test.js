@@ -2352,7 +2352,11 @@ test('Direct3D 8 answers display formats, buffers and intervals as Windows does'
         'no conversion when a windowed chain presents');
     assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.X1R5G5B5, false),
         D3DERR_NOTAVAILABLE, 'no modes in X1R5G5B5');
-    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.UNKNOWN, true), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.UNKNOWN, true), D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'no display is in A8R8G8B8');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VERTEXBUFFER, 100), D3DERR_INVALIDCALL);
+    assert.equal(d3d.CheckDepthStencilMatch(D3DFMT.A8R8G8B8, 71), D3DERR_NOTAVAILABLE, 'no D32');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.UNKNOWN),
         D3DERR_INVALIDCALL);
     for (const interval of [2, 3, 0x80000001])

@@ -497,6 +497,15 @@ export function createDirect3D8(options = {}){
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (!D3D8_DISPLAY_FORMATS.has(adapterFormat))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A buffer has no format to ask about: the question is not one.
+            if (resourceType === D3DRTYPE.VERTEXBUFFER || resourceType === D3DRTYPE.INDEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if (resourceType === D3DRTYPE.VOLUMETEXTURE)
             {
                 return volumeCreateResult({
@@ -528,8 +537,8 @@ export function createDirect3D8(options = {}){
             // and a back buffer of it or its alpha twin: Direct3D 8 converts
             // none when it presents, windowed or not (Wine's d3d8
             // test_display_formats).
-            const back = windowed && backBufferFormat === D3DFMT.UNKNOWN ? adapterFormat
-                : backBufferFormat;
+            // D3DFMT_UNKNOWN is no back buffer here, windowed or not.
+            const back = backBufferFormat;
             const twin = { [D3DFMT.X8R8G8B8]: D3DFMT.A8R8G8B8,
                 [D3DFMT.X1R5G5B5]: D3DFMT.A1R5G5B5 }[adapterFormat];
             return D3D8_DISPLAY_FORMATS.has(adapterFormat)

@@ -397,7 +397,8 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A16B16G16R16]: wideFormat(8, true, false, 4, 'unorm16'),
     [D3DFMT.L16]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false,
         wide: Object.freeze({ channels: 1, stored: 'unorm16', luminance: true }) }),
-    [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
+    // No D32: no card a program of the era meets offers it, and Windows says so
+    // (Wine's test_check_device_format, CheckDepthStencilMatch with D32).
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true, alpha: false }),

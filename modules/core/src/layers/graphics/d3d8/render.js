@@ -884,7 +884,6 @@ const DEPTH_FORMAT = Object.freeze({
     [D3DFMT.D16]: 'depth16unorm',
     [D3DFMT.D24X8]: 'depth24plus',
     [D3DFMT.D24S8]: 'depth24plus-stencil8',
-    [D3DFMT.D32]: 'depth32float',
 });
 
 /**
