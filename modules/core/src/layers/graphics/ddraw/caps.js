@@ -190,9 +190,11 @@ export function validateSurfaceCaps(request){
 
     if (caps & DDSCAPS_PRIMARYSURFACE)
     {
-        // A primary is a front buffer by being one, never by asking (Wine's
-        // test_primary_caps).
-        if (caps & (DDSCAPS_TEXTURE | DDSCAPS_BACKBUFFER | DDSCAPS_FRONTBUFFER))
+        // A primary is a front buffer by being one: the original interface
+        // let it ask as well, every later one refuses (Wine's
+        // test_primary_caps, each version).
+        if ((caps & (DDSCAPS_TEXTURE | DDSCAPS_BACKBUFFER))
+            || ((caps & DDSCAPS_FRONTBUFFER) && request.version !== 1))
         {
             return fail(DDERR_INVALIDCAPS);
         }
