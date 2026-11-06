@@ -2057,6 +2057,10 @@ export function createHarness(canvas, how = {}){
                 posted };
         }
 
+        // The other executors answer their diagnostics between their slices, so a
+        // first ask, and a moment for the answers, before the one the report reads.
+        app.diagnostics();
+        await new Promise(resolve=>setTimeout(resolve, 500));
         const layers = app.diagnostics();
         /** @param {string} name */
         const metrics = name=>layers.find((/** @type {any} */ entry)=>entry.name === name)
@@ -2084,7 +2088,7 @@ export function createHarness(canvas, how = {}){
                 ? JSON.parse(metrics('kernel').sharedTime) : metrics('kernel').sharedTime ?? null,
             remotes: (metrics('cpu').executors ?? []).map((/** @type {any} */ one)=>({
                 index: one.index, retired: one.retired ?? null, spent: one.spent ?? null,
-                said: one.said ?? null })),
+                said: one.said ?? null, interpretedFrom: one.interpretedFrom ?? null })),
         };
         result.threads = {
             byState: metrics('kernel').byState ?? {},

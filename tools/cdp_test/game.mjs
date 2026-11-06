@@ -1139,10 +1139,18 @@ function describe(result, context, calls, symbols){
                 continue;
             }
             const computing = spent.slicesMs - spent.answerWaitMs;
+            // Where this executor's interpreter spent its instructions (`timings`).
+            const from = (one.interpretedFrom ?? []).slice(0, 12).map((/** @type {any} */ at)=>
+                `0x${(at.address >>> 0).toString(16)} ${(at.count / 1e6).toFixed(2)} M`
+                + ` ${(at.first / 1000).toFixed(1)}-${(at.last / 1000).toFixed(1)} s`);
             say(`    e${one.index}: slices ${seconds(spent.slicesMs)} of ${seconds(spent.wallMs)},`
                 + ` answer waits ${seconds(spent.answerWaitMs)} (${spent.traps} traps), idle`
                 + ` ${seconds(spent.idleMs)}; retired ${(one.retired / 1e9).toFixed(1)} G,`
                 + ` ${rate(one.retired, computing)} computing`);
+            if (from.length > 0)
+            {
+                say(`      interpreted from: ${from.join(', ')}`);
+            }
             // Who woke whom: a notify is a lock every thread shares and a sleeping
             // side's wake tens of microseconds, so the share asleep is the cost.
             const theirs = spent.waits;

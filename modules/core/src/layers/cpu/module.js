@@ -1609,6 +1609,7 @@ export function createCpuModule(){
                             cacheMisses: figures.cacheMisses,
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
+                            interpretedFrom: figures.interpretedFrom ?? null,
                             spent: figures.spent,
                             heldBytes: figures.heldBytes ?? null,
                             evictions: figures.evictions ?? null,
