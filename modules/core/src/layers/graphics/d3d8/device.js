@@ -3345,7 +3345,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /**
          * Every level a system-memory texture and a device-memory one share.
          *
-         * The source is system memory and the destination is not. A smaller
+         * The source is system memory and the destination video memory: a
+         * managed or scratch one is refused (Wine's test_update_texture_pool). A smaller
          * destination starts from the source level of its own size, the
          * source's larger levels skipped, and takes as many levels as it has.
          * Windows also accepts a destination whose size no source level has,
@@ -3367,7 +3368,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (source.volume || destination.volume)
             {
                 const update = source.volume && destination.volume && source !== destination
-                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool !== D3DPOOL.SYSTEMMEM
+                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
                     && source.width >= destination.width && source.height >= destination.height
                     && source.depth >= destination.depth
                     ? volumeUpdate(source, destination, { bySize: true })
@@ -3401,7 +3402,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             const from = describe(top);
             const to = describe(into);
-            if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.SYSTEMMEM
+            if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool !== D3DPOOL.DEFAULT
                 || (source.cube ?? false) !== (destination.cube ?? false)
                 || from.Width < to.Width || from.Height < to.Height)
             {

@@ -2665,6 +2665,14 @@ test('UpdateTexture into a smaller texture starts from the source level of its s
     assert.equal(kept.result, D3D_OK);
     assert.equal(kept.moves.length, 8 + 4, 'a volume of the same size keeps its top levels,'
         + ' a slice at a time');
+    // Only video memory is updated (Wine's test_update_texture_pool).
+    for (const pool of [D3DPOOL.MANAGED, D3DPOOL.SCRATCH])
+    {
+        assert.equal(update(volume(4, 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+            volume(4, 1, D3DFMT.A8R8G8B8, pool)).result, D3DERR_INVALIDCALL, `pool ${pool}`);
+        assert.equal(update(texture([4, 4], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+            texture([4, 4], 1, D3DFMT.A8R8G8B8, pool)).result, D3DERR_INVALIDCALL, `pool ${pool}`);
+    }
 
     const small = update(texture([4, 4], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
         texture([8, 8], 1, D3DFMT.A8R8G8B8, DEFAULT));

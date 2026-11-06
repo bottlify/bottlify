@@ -1146,14 +1146,19 @@ test('UpdateTexture carries a system-memory texture into the one that draws', ()
     const device = h.createDevice(root);
     const out = 0xd000;
 
-    /** @param {number} pool */
-    const texture = pool=>{
+    /** @param {number} pool @param {number} [usage] */
+    const texture = (pool, usage = 0)=>{
         assert.equal(h.device(device, 'CreateTexture',
-            [4, 4, 1, 0, D3DFMT.A8R8G8B8, pool, out]), D3D_OK);
+            [4, 4, 1, usage, D3DFMT.A8R8G8B8, pool, out]), D3D_OK);
         return h.box.memory.readU32(out);
     };
     const source = texture(D3DPOOL.SYSTEMMEM);
-    const destination = texture(D3DPOOL.MANAGED);
+    // Dynamic, so the test can lock it and read what arrived.
+    const destination = texture(D3DPOOL.DEFAULT, 0x200);
+    const managed = texture(D3DPOOL.MANAGED);
+    assert.equal(h.device(device, 'UpdateTexture', [source, managed]), D3DERR_INVALIDCALL,
+        'only video memory is updated (Wine\'s test_update_texture_pool)');
+    assert.equal(h.release(managed), 0);
 
     assert.equal(h.texture(source, 'GetLevelCount'), 1);
     const desc = 0xd100;
