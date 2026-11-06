@@ -213,3 +213,16 @@ test('a thread that stops waiting leaves every queue, so the object goes to some
     assert.equal(b.state, 'ready', 'the waiter still in the queue took it');
     assert.equal(event.waiters.length, 0);
 });
+
+test('the soonest deadline is named by what waits on it', ()=>{
+    const h = harness();
+    const a = h.thread('a');
+    const b = h.thread('b');
+    assert.equal(h.sched.nextDeadlineOn(), null, 'nothing waits on time');
+    h.sched.block(a, 'Sleep', { deadline: 1020, result: 0 });
+    h.sched.block(b, 'an event', { deadline: 1010, result: 0x102 });
+    assert.equal(h.sched.nextDeadlineOn(), 'an event', 'the sooner of the two');
+    const timer = h.sync.createTimer({ manualReset: false, name: 'tick' });
+    h.sync.armTimer(timer, 1005, 0);
+    assert.equal(h.sched.nextDeadlineOn(), 'timer', 'a timer due sooner still');
+});

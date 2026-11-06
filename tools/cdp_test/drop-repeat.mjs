@@ -15,13 +15,17 @@
  * worth a hunt, and this lists those, with what grew in them (frame-drops.js).
  *
  *   node tools/cdp_test/drop-repeat.mjs <frames.json>... [--bin S] [--share F]
- *       [--gap MS] [--json FILE]
+ *       [--gap MS] [--json FILE] [--freeze MS]
  *
  * `--bin` (1 s) is how near two runs' drops must fall to count as one point,
  * `--share` (0.7) the part of the runs that must drop there, `--gap` (1500 ms)
  * the pause between presents that ends a scene (a load). Runs that do not cut
  * into the same number of scenes are laid together by order up to the fewest,
  * and that is said.
+ *
+ * `--freeze MS` lists instead every frame of MS or longer inside a scene, run
+ * by run: the freezes a person sees, with what the frame was made of and its
+ * idle time by what it waited on (the `idle-*` notes the run loop keeps).
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -132,6 +136,22 @@ export function repeatingDrops(runs, { bin, share, gap }){
     return { runs: runs.length, needed, sceneCounts: counts, scenes };
 }
 
+/**
+ * Every frame of `freeze` ms or longer inside a scene, by scene.
+ *
+ * @param {Frame[]} frames @param {number} gap @param {number} freeze
+ */
+export function freezesOf(frames, gap, freeze){
+    return scenesOf(frames, gap).map(scene=>scene.frames.filter(frame=>frame.ms >= freeze)
+        .map(frame=>({
+            atS: (frame.startedAt - scene.startMs) / 1000, ms: frame.ms,
+            guest: frame.byKind.guest ?? 0, host: frame.byKind.host ?? 0,
+            idle: frame.idleMs ?? 0,
+            idleBy: Object.entries(frame.notes ?? {}).filter(([name])=>name.startsWith('idle-'))
+                .sort((one, two)=>two[1] - one[1]),
+        })));
+}
+
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/')
     .split('/').pop() ?? ''))
 {
@@ -140,8 +160,29 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '
     const option = (name, fallback)=>(args.includes(name)
         ? Number(args[args.indexOf(name) + 1]) : fallback);
     const json = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
+    const freeze = option('--freeze', 0);
     const files = args.filter((arg, at)=>!arg.startsWith('--')
-        && !['--bin', '--share', '--gap', '--json'].includes(args[at - 1]));
+        && !['--bin', '--share', '--gap', '--json', '--freeze'].includes(args[at - 1]));
+    if (freeze > 0)
+    {
+        for (const file of files)
+        {
+            console.log(file);
+            const frames = /** @type {Frame[]} */ (JSON.parse(readFileSync(file, 'utf8')));
+            freezesOf(frames, option('--gap', 1500), freeze).forEach((list, scene)=>{
+                for (const one of list)
+                {
+                    const by = one.idleBy.length > 0
+                        ? `: ${one.idleBy.map(([name, ms])=>`${name} ${ms.toFixed(0)}`).join(', ')}`
+                        : '';
+                    console.log(`  scene ${scene} +${one.atS.toFixed(1)} s ${one.ms.toFixed(0)} ms`
+                        + ` guest ${one.guest.toFixed(0)} host ${one.host.toFixed(0)}`
+                        + ` idle ${one.idle.toFixed(0)}${by}`);
+                }
+            });
+        }
+        process.exit(0);
+    }
     if (files.length < 2)
     {
         console.error('usage: node tools/cdp_test/drop-repeat.mjs <frames.json> <frames.json>...'

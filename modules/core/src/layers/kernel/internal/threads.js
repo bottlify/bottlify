@@ -2468,6 +2468,34 @@ export function createScheduler(options){
         nextDeadline: ()=>soonest(),
 
         /**
+         * What the soonest deadline belongs to: the blocked thread's wait, or
+         * a timer. What a profile names an idle turn by when the machine sat
+         * waiting for the clock - a sleep is the program's choice, a timed
+         * wait on an event is a signal that came late.
+         */
+        nextDeadlineOn: ()=>{
+            /** @type {{ deadline: number, on: string } | null} */
+            let best = null;
+            for (const thread of threads)
+            {
+                if (thread.state === ThreadState.BLOCKED
+                    && thread.deadline !== null && thread.deadline !== undefined
+                    && (best === null || thread.deadline < best.deadline))
+                {
+                    best = { deadline: thread.deadline, on: thread.waitingOn ?? 'unknown' };
+                }
+            }
+            for (const timer of timers.values())
+            {
+                if (best === null || timer.deadline < best.deadline)
+                {
+                    best = { deadline: timer.deadline, on: 'timer' };
+                }
+            }
+            return best?.on ?? null;
+        },
+
+        /**
          * Adds one to a thread's suspend count. Past the most a thread can
          * carry the count is left as it was and the call refused.
          *

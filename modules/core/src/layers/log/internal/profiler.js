@@ -64,7 +64,7 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  * and up to eight notes as (name id, amount) pairs. Names are dictionary
  * ids, which is what `intern` answers.
  */
-export const NOTES_PER_FRAME = 8;
+export const NOTES_PER_FRAME = 12;
 
 /**
  * @typedef {Object} MirroredCounter

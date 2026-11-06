@@ -79,6 +79,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * event loop turn after turn. @type {Map<string, number>} */
     const suspendedBy = new Map();
     /**
+     * The host call that suspended last: what an idle turn is named by. With
+     * several calls out it names one of them, which for a profile is enough.
+     */
+    let lastSuspended = '';
+    /**
      * Counts suspensions. A host call that calls the guest back builds the
      * callback's frame before it suspends, so a frame stamped with the count
      * still current when a call suspends is that call's own, however far
@@ -424,6 +429,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
             {
                 suspendedBy.set(call.name, (suspendedBy.get(call.name) ?? 0) + 1);
+                lastSuspended = call.name;
             }
             // A thread whose host call has not answered has nothing to run: it
             // is parked on `hlt` and retires the park loop and nothing else.
@@ -737,6 +743,9 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * would spin until it gave up.
          */
         pendingCalls: ()=>pending,
+
+        /** The host call that suspended last, or '' when none has. */
+        lastSuspended: ()=>lastSuspended,
 
 
         /**
