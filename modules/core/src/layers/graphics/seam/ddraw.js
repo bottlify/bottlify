@@ -1936,8 +1936,10 @@ export function createDirectDrawSeam(
      * @param {number} pointer
      * @param {'hal' | 'hel' | 'none'} kind  The hardware's, the emulation's,
      *        or the hardware's of an object made without any.
+     * @param {number} [used]  The video memory the object's surfaces take, which
+     *        is not free (ddraw1 test_create_surface_pitch).
      */
-    const writeCaps = (pointer, kind)=>{
+    const writeCaps = (pointer, kind, used = 0)=>{
         const at = pointer >>> 0;
         const size = fields.readU32(at + DDCAPS.dwSize);
         if (!DDCAPS_SIZES.includes(size))
@@ -1962,7 +1964,7 @@ export function createDirectDrawSeam(
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
             dwZBufferBitDepths: kind === 'hal' ? DDBD_16 | DDBD_32 : DDBD_16,
             dwVidMemTotal: videoMemory?.() ?? VIDEO_MEMORY,
-            dwVidMemFree: videoMemory?.() ?? VIDEO_MEMORY,
+            dwVidMemFree: Math.max(0, (videoMemory?.() ?? VIDEO_MEMORY) - used),
             ddsOldCaps: surfaceCaps,
         });
         if (size >= DDCAPS.SIZE)
@@ -2261,7 +2263,7 @@ export function createDirectDrawSeam(
                     // (ddraw7 test_caps), one of the emulation alone no hardware.
                     const hr = writeCaps(pointer, emulation
                         ? (root.hardwareOnly ? 'none' : 'hel')
-                        : root.emulated ? 'none' : 'hal');
+                        : root.emulated ? 'none' : 'hal', root.videoBytes ?? 0);
                     if (hr !== DD_OK)
                     {
                         return hr;

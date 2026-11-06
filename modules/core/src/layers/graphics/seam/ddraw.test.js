@@ -2976,6 +2976,26 @@ test('the emulation\'s caps are its own, and an object made without hardware put
     h.assertAllReleased();
 });
 
+test('GetCaps counts the video memory a surface takes as not free, until it goes', ()=>{
+    // ddraw1 test_create_surface_pitch reads the free memory from GetCaps.
+    const h = seamed();
+    const ddraw = h.create7();
+    const free = ()=>{
+        h.box.bytes.fill(0, 0x6100, 0x6100 + DDCAPS.SIZE);
+        h.box.memory.writeU32(0x6100 + DDCAPS.dwSize, DDCAPS.SIZE);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetCaps'), [0x6100, 0]), DD_OK);
+        return h.box.memory.readU32(0x6100 + DDCAPS.dwVidMemFree);
+    };
+    const before = free();
+    const surface = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY,
+        width: 64, height: 64 });
+    assert.ok(free() < before, 'taken');
+    assert.equal(h.release(surface), 0);
+    assert.equal(free(), before, 'and given back');
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('blocks in the program\'s memory report no size of their own (test_block_formats_creation)',
     ()=>{
         const h = seamed();
