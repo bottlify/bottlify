@@ -867,6 +867,50 @@ test('recorded: a blended draw adds and writes every channel, as a D3D7 device a
         assert.equal(f.root.release('IDirectDraw7'), 0);
     });
 
+test('recorded: two devices on one surface draw into one picture, shown through the first and'
+    + ' then the one left (test_multiple_devices)', async()=>{
+    /** @param {number} devices @returns {Promise<number>} the targets drawn into */
+    const drawn = async devices=>{
+        const f = recorded({ writable: true });
+        const others = Array.from({ length: devices - 1 },
+            ()=>f.d3d.createDevice(DEVICE_IDS.TNLHAL, f.target).device);
+        for (const one of [f.device, ...others, f.device])
+        {
+            assert.equal(one.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL,
+                vertices([[0, 0], [8, 0], [0, 8], [8, 8]], false), 4), D3D_OK);
+        }
+        f.device.present(f.target.buffer);
+        await f.device.idle();
+        const views = new Set(f.gpu.of('beginRenderPass')
+            .map(call=>call.descriptor.colorAttachments[0].view));
+        assert.deepEqual(f.claimed, [f.target.buffer], 'one claim on the address');
+        if (devices > 1)
+        {
+            const reading = f.device.ReadBack(f.target);
+            assert.notEqual(reading, null, 'the first answers for the picture');
+            assert.deepEqual(others.map(one=>one.ReadBack(f.target)), [null], 'and only it');
+            await reading;
+            assert.equal(f.device.release(), 0);
+            assert.deepEqual(f.claimed, [f.target.buffer, f.target.buffer],
+                'the first gone, the one left shows it');
+            assert.deepEqual(f.released, []);
+            for (const one of others)
+            {
+                assert.equal(one.release(), 0);
+            }
+            assert.deepEqual(f.released, [f.target.buffer], 'given back with the last');
+            assert.equal(f.target.release(), 0);
+            assert.equal(f.root.release('IDirectDraw7'), 0);
+        }
+        else
+        {
+            releaseAll(f);
+        }
+        return views.size;
+    };
+    assert.equal(await drawn(2), await drawn(1), 'as many pictures as one device draws into');
+});
+
 test('recorded: a draw and a present are one encoder, one submit, one frame', async()=>{
     const f = recorded();
     const { device, gpu, target } = f;

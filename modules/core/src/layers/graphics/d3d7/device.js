@@ -386,6 +386,18 @@ export function createDirect3D7(ddraw, services = {}){
 
     /** A guest allocation is a buffer to the renderer; the address is the program's. */
     const allocate = (/** @type {number} */ bytes)=>ddraw.allocateStorage(bytes);
+    /**
+     * The targets the object's devices draw into, by the address of their
+     * pixels, each with the devices drawing there: the renderer is the
+     * object's, so two devices on one surface draw into one picture, and the
+     * second sees what the first drew (Wine's test_multiple_devices). The
+     * first device on it answers for it: reads it back, takes up what the
+     * program wrote, and shows it, the next one doing so once it is gone.
+     *
+     * @type {Map<number, { adapter: any, users: Map<object, () => unknown>,
+     *     shown: object | null }>}
+     */
+    const sharedTargets = new Map();
 
     return {
         /** The three devices, in the order a program enumerates them. */
@@ -704,6 +716,46 @@ export function createDirect3D7(ddraw, services = {}){
          * @type {Map<number, any>}
          */
         const targetAdapters = new Map();
+        /** This device, as `sharedTargets` names its users. */
+        const self = {};
+        /**
+         * Whether this device answers for the target at an address: the
+         * first of the object's devices drawing there.
+         *
+         * @param {number} buffer
+         */
+        const answersFor = buffer=>{
+            const shared = sharedTargets.get(buffer);
+            return !shared || shared.users.keys().next().value === self;
+        };
+        /**
+         * This device draws at an address no longer: the target goes with the
+         * last device on it, and is shown through another while one is left.
+         *
+         * @param {number} buffer
+         */
+        const leaveTarget = buffer=>{
+            const shared = sharedTargets.get(buffer);
+            if (!shared)
+            {
+                return;
+            }
+            shared.users.delete(self);
+            const [next] = shared.users;
+            if (!next)
+            {
+                sharedTargets.delete(buffer);
+                if (shared.shown)
+                {
+                    services.presenter?.release(buffer);
+                }
+            }
+            else if (shared.shown === self)
+            {
+                shared.shown = next[0];
+                services.presenter?.claim(buffer, next[1]);
+            }
+        };
         /** @type {WeakMap<object, any>} texture surface -> its adapter */
         const textureAdapters = new WeakMap();
 
@@ -714,6 +766,14 @@ export function createDirect3D7(ddraw, services = {}){
             if (existing)
             {
                 return existing;
+            }
+            const show = ()=>device.present(buffer);
+            const shared = sharedTargets.get(buffer);
+            if (shared)
+            {
+                shared.users.set(self, show);
+                targetAdapters.set(buffer, shared.adapter);
+                return shared.adapter;
             }
             // A z-buffer is one whatever its descriptor said of its format.
             const format = d3dFormatOf(surface.pixelFormat)
@@ -736,9 +796,12 @@ export function createDirect3D7(ddraw, services = {}){
                 },
             };
             targetAdapters.set(buffer, adapter);
-            if (services.presenter && (surface.caps & DDSCAPS_ZBUFFER) === 0)
+            const shown = services.presenter && (surface.caps & DDSCAPS_ZBUFFER) === 0;
+            sharedTargets.set(buffer, { adapter, users: new Map([[self, show]]),
+                shown: shown ? self : null });
+            if (shown)
             {
-                services.presenter.claim(buffer, ()=>device.present(buffer));
+                services.presenter?.claim(buffer, show);
             }
             return adapter;
         };
@@ -1098,6 +1161,10 @@ export function createDirect3D7(ddraw, services = {}){
          * @returns {Promise<void> | null}
          */
         const readBack = surface=>{
+            if (!answersFor(surface.buffer))
+            {
+                return null;
+            }
             const depth = depthDrawnAt(surface);
             if (depth && renderer && write && read)
             {
@@ -1129,6 +1196,10 @@ export function createDirect3D7(ddraw, services = {}){
         };
         /** @param {any} surface */
         const written = surface=>{
+            if (!answersFor(surface.buffer))
+            {
+                return;
+            }
             const depth = depthDrawnAt(surface);
             if (depth && renderer && read)
             {
@@ -1154,7 +1225,12 @@ export function createDirect3D7(ddraw, services = {}){
         const freed = buffer=>{
             if (targetAdapters.delete(buffer))
             {
-                services.presenter?.release(buffer);
+                const shared = sharedTargets.get(buffer);
+                sharedTargets.delete(buffer);
+                if (shared?.shown)
+                {
+                    services.presenter?.release(buffer);
+                }
             }
         };
         const stopWatchingPixels = ddraw.watchPixels?.({ readBack, written, freed })
@@ -1205,9 +1281,9 @@ export function createDirect3D7(ddraw, services = {}){
                 }
                 // A device holds its target, its textures and the object
                 // that made it, and gives them all back with its last reference.
-                for (const adapter of targetAdapters.values())
+                for (const buffer of targetAdapters.keys())
                 {
-                    services.presenter?.release(adapter.buffer);
+                    leaveTarget(buffer);
                 }
                 targetAdapters.clear();
                 for (const [stage, surface] of textures)
