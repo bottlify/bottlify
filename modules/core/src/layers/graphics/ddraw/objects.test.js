@@ -559,7 +559,7 @@ test('an indexed surface with no palette of its own draws in the primary\'s', ()
     assert.equal(offscreen.getDC().hr, DD_OK);
     assert.equal(made[0].palette?.[0], 0x00800000);
     colours.setEntries(0, [0x00008000]);
-    assert.equal(made[0].palette?.[0], 0x00008000);
+    assert.equal(made[0].palette?.[0], 0x00800000, 'as it was when the DC was made');
 });
 
 test('a device context on one surface says nothing about another', ()=>{
@@ -1479,10 +1479,8 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     assert.ok(ddraw.destroyed);
 });
 
-test('a device context over an indexed surface sees the palette change while it is held', ()=>{
-    // A program that animates its palette while drawing text through the DC
-    // expects the new colours: the DC is given the palette's live table, not
-    // a copy made when it was asked for.
+test('a device context over an indexed surface keeps the palette it was made with'
+    + ' (test_palette_gdi)', ()=>{
     /** @type {any[]} */
     const made = [];
     const ddraw = createDirectDraw({
@@ -1505,8 +1503,8 @@ test('a device context over an indexed surface sees the palette change while it 
     assert.equal(table[3], 0, 'an entry never written is black');
     // A PALETTEENTRY is red in its low byte; the pixel is 0x00RRGGBB.
     assert.equal(palette.setEntries(3, [0x00112233]), DD_OK);
-    assert.equal(made[0].palette[3], 0x00332211, 'the held DC reads the new entry');
-    assert.equal(made[0].palette, table, 'through the same table');
+    assert.equal(made[0].palette[3], 0, 'the held DC keeps the entry it was made with');
+    assert.equal(made[0].palette, table);
 });
 
 // --- what the object knows about its primary, and a surface about its changes ---

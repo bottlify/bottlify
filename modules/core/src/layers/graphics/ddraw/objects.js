@@ -1723,11 +1723,13 @@ export function createDirectDraw(options = {}){
                     pitch,
                     bitCount: bpp * 8,
                     bits: buffer,
-                    // The palette's own live array: a program that animates its
-                    // palette while holding the DC draws in the new colours. A
-                    // surface with none of its own draws in the primary's, the
-                    // colours its pixels are shown in once blitted there.
-                    palette: bpp === 1 ? (palette ?? primaryPalette())?.pixels ?? null : null,
+                    // The palette as it is now: one changed or set again while
+                    // the DC is held does not reach it (Wine's
+                    // test_palette_gdi). A surface with none of its own draws
+                    // in the primary's, the colours its pixels are shown in
+                    // once blitted there.
+                    palette: bpp === 1
+                        ? (palette ?? primaryPalette())?.pixels.slice() ?? null : null,
                     format: pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                     // The section a surface's DC reports: no image size, and a
                     // 16-bit one laid out by its masks (test_getdc).
