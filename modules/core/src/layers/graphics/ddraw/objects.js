@@ -1592,8 +1592,11 @@ export function createDirectDraw(options = {}){
                 {
                     return fail(DDERR_SURFACEBUSY);
                 }
+                // Only the seventh generation's textures are lenient: made
+                // through an older interface they refuse it like any surface
+                // (Wine's test_lockrect_invalid, each version).
                 if (!rectIsValid(area, width, height)
-                    && !acceptsMalformedLockRect(caps, spec.caps2))
+                    && (own !== '7' || !acceptsMalformedLockRect(caps, spec.caps2)))
                 {
                     return fail(DDERR_INVALIDPARAMS);
                 }

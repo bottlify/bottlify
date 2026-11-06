@@ -451,7 +451,8 @@ test('a partial lock points at its own corner and does not change the pitch', ()
     assert.ok(ddraw.destroyed);
 });
 
-test('a malformed lock rectangle is refused, except by a texture with its own copy', ()=>{
+test('a malformed lock rectangle is refused, except by a seventh-generation texture with its'
+    + ' own copy', ()=>{
     const ddraw = withLevel();
     const plain = makeOffscreen(ddraw);
     const managed = makeOffscreen(ddraw, {
@@ -471,6 +472,11 @@ test('a malformed lock rectangle is refused, except by a texture with its own co
     // The lenient answer is the one a program may have been written against.
     assert.equal(managed.lock(inverted).hr, DD_OK);
     assert.equal(managed.unlock(inverted), DD_OK);
+    // Made through an older generation, the same texture refuses it.
+    const older = makeOffscreen(ddraw, { caps: DDSCAPS_TEXTURE, caps2: DDSCAPS2_TEXTUREMANAGE,
+        version: 4 });
+    assert.equal(older.lock(inverted).hr, DDERR_INVALIDPARAMS);
+    assert.equal(older.release(), 0);
 
     // An empty rectangle is well formed: it locks nothing, successfully.
     const empty = { left: 8, top: 8, right: 8, bottom: 16 };
