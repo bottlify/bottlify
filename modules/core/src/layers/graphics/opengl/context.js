@@ -43,6 +43,7 @@ import { createDefaultState, readState, settleDrawableState } from './state.js';
 import {
     DEFAULT_VERSION, shadingLanguageVersion, versionState, versionString,
 } from './version.js';
+import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -114,6 +115,7 @@ const NOT_COMPILABLE = new Set([
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED,
+    ...INDEXED_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -370,8 +372,49 @@ export function createGlContext(options = {}){
         return true;
     };
 
+    /**
+     * Clears what `request.mask` names within the scissor box, under the
+     * write masks: the colour draw buffers each under its own (`masks`, red 1
+     * to alpha 8, a zero leaving one alone) or, without them, under
+     * GL_COLOR_WRITEMASK.
+     *
+     * @param {{ mask: number, colour: readonly number[], depth: number, stencil: number,
+     *     masks?: readonly number[] }} request
+     */
+    const clearWith = request=>{
+        const box = scissorBox();
+        const colourMask = record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0);
+        if (gpu && attached)
+        {
+            gpu.clear(context, {
+                target: kernel.side.drawTarget(),
+                mask: request.mask,
+                colour: request.colour,
+                depth: request.depth,
+                stencil: request.stencil,
+                colourMask,
+                masks: request.masks,
+                depthMask: record(GL.DEPTH_WRITEMASK).values[0] !== 0,
+                stencilMask: record(GL.STENCIL_WRITEMASK).values[0],
+                scissor: box,
+            });
+            return;
+        }
+        if (request.mask & GL.COLOR_BUFFER_BIT)
+        {
+            const first = request.masks?.[0];
+            fillBox(framebuffer, request.colour.map(toByte), box, first === undefined
+                ? colourMask : [1, 2, 4, 8].map(bit=>(first & bit) !== 0));
+        }
+        if ((request.mask & GL.DEPTH_BUFFER_BIT) && record(GL.DEPTH_WRITEMASK).values[0] !== 0)
+        {
+            fillDepth(framebuffer, request.depth, box);
+        }
+    };
+
     /** @type {ContextKernel} */
     const kernel = {
+        clearWith,
         enter,
         setError,
         record,
@@ -794,31 +837,13 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_FRAMEBUFFER_OPERATION);
                 return;
             }
-            const box = scissorBox();
-            if (gpu && attached)
-            {
-                gpu.clear(context, {
-                    target: kernel.side.drawTarget(),
-                    mask,
-                    colour: record(GL.COLOR_CLEAR_VALUE).values,
-                    depth: record(GL.DEPTH_CLEAR_VALUE).values[0],
-                    stencil: record(GL.STENCIL_CLEAR_VALUE).values[0],
-                    colourMask: record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0),
-                    depthMask: record(GL.DEPTH_WRITEMASK).values[0] !== 0,
-                    stencilMask: record(GL.STENCIL_WRITEMASK).values[0],
-                    scissor: box,
-                });
-                return;
-            }
-            if (mask & GL.COLOR_BUFFER_BIT)
-            {
-                fillBox(framebuffer, record(GL.COLOR_CLEAR_VALUE).values.map(toByte), box,
-                    record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0));
-            }
-            if ((mask & GL.DEPTH_BUFFER_BIT) && record(GL.DEPTH_WRITEMASK).values[0] !== 0)
-            {
-                fillDepth(framebuffer, record(GL.DEPTH_CLEAR_VALUE).values[0], box);
-            }
+            clearWith({
+                mask,
+                colour: record(GL.COLOR_CLEAR_VALUE).values,
+                depth: record(GL.DEPTH_CLEAR_VALUE).values[0],
+                stencil: record(GL.STENCIL_CLEAR_VALUE).values[0],
+                masks: kernel.side.perBuffer?.()?.masks,
+            });
         },
 
         /**
@@ -889,6 +914,7 @@ export function createGlContext(options = {}){
             {
                 setState(GL.COLOR_WRITEMASK,
                     [red ? 1 : 0, green ? 1 : 0, blue ? 1 : 0, alpha ? 1 : 0]);
+                kernel.side.allBuffers?.(GL.COLOR_WRITEMASK, record(GL.COLOR_WRITEMASK).values);
             }
         },
 
@@ -1704,6 +1730,7 @@ export function createGlContext(options = {}){
     installCoreCalls(context, kernel);
     // Last: a new vertex array object starts from the arrays as the others left them.
     installVertexArrayCalls(context, kernel);
+    installIndexedCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 
@@ -1748,6 +1775,7 @@ export function createGlContext(options = {}){
                 + ' fragment passes it, and a program that masks with stencil draws unmasked');
         }
         entry.values = [value];
+        kernel.side.allBuffers?.(cap, entry.values);
     }
 
     /**

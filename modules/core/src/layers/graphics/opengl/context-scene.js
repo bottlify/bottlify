@@ -283,6 +283,8 @@ export function createSceneBuilder(kernel){
             : [];
 
         const blendOn = on(GL.BLEND);
+        // Blending and colour masks per draw buffer, when they differ.
+        const perBuffer = side.perBuffer?.() ?? null;
         const src = record(GL.BLEND_SRC).values[0];
         const dst = record(GL.BLEND_DST).values[0];
         const srcAlpha = record(GL.BLEND_SRC_ALPHA).values[0];
@@ -314,8 +316,10 @@ export function createSceneBuilder(kernel){
             fog,
             units,
             current: kernel.currentAttributes(),
-            blend: blendOn ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
+            blend: blendOn || perBuffer?.blend.some((/** @type {boolean} */ b)=>b)
+                ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
             blendColor: record(GL.BLEND_COLOR).values,
+            perBuffer,
             // The framebuffer object drawn into, or null for the window.
             target: side.drawTarget?.() ?? null,
             readFramebuffer: side.readFramebuffer?.() ?? null,

@@ -136,6 +136,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {PipelineVertex} current   the current attributes, for an array that is off
  * @property {SceneBlend | null} blend   the factors and equations, when blending is on
  * @property {readonly number[]} [blendColor]  GL_BLEND_COLOR
+ * @property {import('./context-indexed.js').PerBuffer} [perBuffer]  each draw buffer's
+ *           blending and colour mask, when they differ (glEnablei, glColorMaski)
  * @property {{ fbo: import('./objects.js').FramebufferObject, width: number,
  *     height: number } | null} [target]  the framebuffer object drawn into, or the window
  * @property {import('./objects.js').FramebufferObject | null}

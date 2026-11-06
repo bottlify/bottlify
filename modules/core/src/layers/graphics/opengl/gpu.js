@@ -352,6 +352,8 @@ function describeCensus(texture){
  * @property {number} depth
  * @property {number} stencil
  * @property {readonly boolean[]} colourMask
+ * @property {readonly number[]} [masks]  per draw buffer, the channels cleared (red 1 to
+ *     alpha 8) in place of `colourMask`: glClearBuffer's one buffer, or masks set apart
  * @property {boolean} depthMask
  * @property {number} stencilMask
  * @property {import('./raster.js').Box} scissor
@@ -1699,8 +1701,14 @@ export function createGpuRenderer(services){
             depthFormat: target.depthFormat,
             targets: target.flipped
                 ? target.formats.map((/** @type {string} */ format, /** @type {number} */ k)=>
-                    ({ format, mask: colourMask & target.masks[k] }))
-                : undefined,
+                    (scene.perBuffer
+                        ? { format, mask: scene.perBuffer.masks[k] & target.masks[k],
+                            blend: scene.perBuffer.blend[k] }
+                        : { format, mask: colourMask & target.masks[k] }))
+                : scene.perBuffer
+                    ? [{ format: target.formats[0] || COLOUR_FORMAT,
+                        mask: scene.perBuffer.masks[0], blend: scene.perBuffer.blend[0] }]
+                    : undefined,
             glsl: glsl ? { id: glsl.id, program: glsl.linked } : null,
             twoSide: glsl ? scene.twoSide : false,
             units,
@@ -3369,18 +3377,23 @@ export function createGpuRenderer(services){
             ? (request.colourMask[0] ? 1 : 0) | (request.colourMask[1] ? 2 : 0)
                 | (request.colourMask[2] ? 4 : 0) | (request.colourMask[3] ? 8 : 0)
             : 0;
+        /** @param {number} k @returns {number} draw buffer k's channels cleared */
+        const bufferMask = k=>(mask & GL.COLOR_BUFFER_BIT
+            ? request.masks?.[k] ?? colourMask : 0);
         const hasDepth = target.depthFormat !== '';
         const depth = (mask & GL.DEPTH_BUFFER_BIT) !== 0 && request.depthMask && hasDepth;
         const stencilMask = mask & GL.STENCIL_BUFFER_BIT && hasDepth
             ? request.stencilMask & 0xff : 0;
-        if (colourMask === 0 && !depth && stencilMask === 0)
+        const drawn = target.formats.map((/** @type {string} */ _, /** @type {number} */ k)=>
+            bufferMask(k) & target.masks[k]);
+        if (drawn.every(bits=>bits === 0) && !depth && stencilMask === 0)
         {
             return;
         }
         const state = { targetFormat: target.formats[0] || COLOUR_FORMAT,
-            depthFormat: target.depthFormat, colourMask, depth, stencilMask,
+            depthFormat: target.depthFormat, colourMask: bufferMask(0), depth, stencilMask,
             targets: target.flipped ? target.formats.map((format, k)=>({ format,
-                mask: colourMask & target.masks[k] })) : undefined };
+                mask: drawn[k] })) : undefined };
         const pipeline = pipelineFor(clearKey(state), generateClear(state.targets?.length ?? 1),
             clearDescriptor(state), NO_TEXTURE_PLAN);
         const uniforms = new Float32Array(CLEAR_UNIFORM_FLOATS);

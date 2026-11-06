@@ -92,7 +92,9 @@ import { emitStage, interfaceStruct } from './glsl-wgsl.js';
  *           the enabled user clip planes, in the uniform block's order, and
  *           whether the device clips by the distances a vertex stage writes
  *           (`clip-distances`) or the fragment stage discards what they cut
- * @property {{ format: string, mask: number }[]} [targets]  the colour targets,
+ * @property {{ format: string, mask: number, blend?: boolean }[]} [targets]  the colour
+ *           targets, `blend` false for a draw buffer blending is disabled for
+ *           (glDisablei) where `blend` is on for another,
  *           when there is more than `targetFormat` with `colourMask`: a
  *           framebuffer object's draw buffers, each with the channels it is
  *           written in (an RGB attachment's alpha is not)
@@ -505,7 +507,7 @@ const targetsKey = targets=>{
     let key = '';
     for (const target of targets)
     {
-        key += `${target.format}/${target.mask};`;
+        key += `${target.format}/${target.mask}${target.blend === false ? '/n' : ''};`;
     }
     return key;
 };
@@ -1451,7 +1453,8 @@ export function drawDescriptor(state){
     const backFace = stencilFace(state.stencilBack ?? state.stencil);
     const targets = (state.targets ?? [{ format: state.targetFormat, mask: state.colourMask }])
         .map(target=>(target.format === '' ? null
-            : { format: target.format, blend, writeMask: target.mask }));
+            : { format: target.format, blend: target.blend === false ? undefined : blend,
+                writeMask: target.mask }));
     return {
         vertexBuffers: buffers,
         target: targets[0],

@@ -56,6 +56,25 @@ export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
 
     /**
+     * 64-bit answers, as GLint64s: what glGetInteger64v writes.
+     *
+     * @param {number} address @param {number[] | null} values
+     */
+    const writeInt64s = (address, values)=>{
+        if (!values || (address >>> 0) === 0)
+        {
+            return;
+        }
+        const bytes = new Uint8Array(values.length * 8);
+        const view = new DataView(bytes.buffer);
+        values.forEach((value, k)=>view.setBigInt64(k * 8, BigInt(Math.trunc(value)), true));
+        h.writeMemory(address >>> 0, bytes);
+    };
+
+    /** How many values glClearBuffer reads: four for a colour, one otherwise. @param {number} buffer */
+    const clearCount = buffer=>((buffer >>> 0) === GL.COLOR ? 4 : 1);
+
+    /**
      * An array of pointers the program hands over, each a pointer's width.
      *
      * @param {number} address @param {number} count
@@ -223,6 +242,31 @@ export function laterEntryPoints(h){
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- indexed state, 64-bit queries and one buffer's clears (3.0, 3.2) ---
+
+        glEnablei: ([cap, index])=>answer(current()?.glEnablei(cap >>> 0, index >>> 0)),
+        glDisablei: ([cap, index])=>answer(current()?.glDisablei(cap >>> 0, index >>> 0)),
+        glIsEnabledi: ([cap, index])=>current()?.glIsEnabledi(cap >>> 0, index >>> 0)
+            ?? GL.FALSE,
+        glColorMaski: ([index, r, g, b, a])=>answer(current()?.glColorMaski(index >>> 0,
+            r & 0xff, g & 0xff, b & 0xff, a & 0xff)),
+        glGetIntegeri_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetIntegeri_v(target >>> 0, index >>> 0), 'word')),
+        glGetBooleani_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetBooleani_v(target >>> 0, index >>> 0), 'byte')),
+        glGetInteger64i_v: ([target, index, out])=>call(context=>writeInt64s(out,
+            context.glGetInteger64i_v(target >>> 0, index >>> 0))),
+        glGetInteger64v: ([query, out])=>call(context=>writeInt64s(out,
+            context.glGetInteger64v(query >>> 0))),
+        glClearBufferiv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('i', value, clearCount(buffer)), 'int')),
+        glClearBufferuiv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('ui', value, clearCount(buffer)), 'uint')),
+        glClearBufferfv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('f', value, clearCount(buffer)), 'float')),
+        glClearBufferfi: ([buffer, drawBuffer, depth, stencil])=>answer(current()
+            ?.glClearBufferfi(buffer >>> 0, drawBuffer | 0, asFloat(depth), stencil | 0)),
 
         // --- vertex array objects ---
 

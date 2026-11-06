@@ -64,6 +64,11 @@
  *             => Promise<Uint8Array | null> | null) | null} [readBack]
  *           The read buffer's colour on the device, RGBA, its bottom row first:
  *           null where the renderer cannot read it (`gpu.js` readPixels)
+ * @property {(request: { mask: number, colour: readonly number[], depth: number,
+ *             stencil: number, masks?: readonly number[] }) => void} clearWith
+ *           Clears what the mask names within the scissor box: the colour draw
+ *           buffers each under its own mask when `masks` is given
+ *           (`context-indexed.js`), under GL_COLOR_WRITEMASK otherwise
  * @property {((buffer: import('./objects.js').BufferObject) => void) | null} bufferDeleted
  *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on

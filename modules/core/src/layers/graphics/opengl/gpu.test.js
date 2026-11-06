@@ -2309,3 +2309,58 @@ test('a window\'s buffers are the window\'s: another context on it reads what th
         second.attach({ ...window, width: 16 });
         assert.notEqual(textureLabelled(r, /gl-colour/), colour);
     });
+
+test('blending and colour masks set apart per draw buffer reach each target\'s pipeline state, '
+    + 'and glClearBuffer clears one target', async()=>{
+    const r = rig();
+    const { context } = r;
+    const names = context.glGenTextures(2);
+    for (const name of names)
+    {
+        context.glBindTexture(GL.TEXTURE_2D, name);
+        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
+    }
+    context.glGenFramebuffers(1);
+    context.bindFramebuffer(GL.FRAMEBUFFER, 1, false);
+    names.forEach((/** @type {number} */ name, /** @type {number} */ k)=>
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0 + k, GL.TEXTURE_2D,
+            name, 0));
+    context.glDrawBuffers([GL.COLOR_ATTACHMENT0, GL.COLOR_ATTACHMENT0 + 1]);
+    context.glEnable(GL.BLEND);
+    context.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA);
+    context.glDisablei(GL.BLEND, 1);
+    context.glColorMaski(1, 1, 0, 0, 0);
+    context.clearBuffer(GL.COLOR, 1, [0, 1, 0, 1], 'float');
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const targets = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets);
+    const drawn = targets.find((/** @type {any[]} */ list)=>list.length === 2 && list[0].blend);
+    assert.ok(drawn, 'a pipeline over both targets, the first blending');
+    assert.equal(drawn[1].blend, undefined, 'the second does not blend');
+    assert.deepEqual([drawn[0].writeMask, drawn[1].writeMask], [0xf, 0x1]);
+    const cleared = targets.find((/** @type {any[]} */ list)=>list.length === 2
+        && list[0].writeMask === 0);
+    assert.ok(cleared, 'the clear writes the first target nothing');
+    assert.equal(cleared[1].writeMask, 0x1, 'and the second under its own mask');
+
+    // The other way round: only the second buffer blends, and a pipeline
+    // that differs in nothing else is another one.
+    context.glDisable(GL.BLEND);
+    context.glEnablei(GL.BLEND, 1);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const swapped = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets).find((/** @type {any[]} */ list)=>list.length === 2
+        && !list[0].blend && list[1].blend);
+    assert.ok(swapped, 'a pipeline blending the second target alone');
+    assert.deepEqual([swapped[0].writeMask, swapped[1].writeMask], [0xf, 0x1]);
+});
