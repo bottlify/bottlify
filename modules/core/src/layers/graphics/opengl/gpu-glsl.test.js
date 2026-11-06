@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
+import { TEX } from './formats.js';
 import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { GLSL_BLOCK_BINDING } from './glsl-wgsl.js';
@@ -129,6 +130,11 @@ void main() { c = colour; }`);
             === GLSL_BLOCK_BINDING + tint);
     assert.equal(layout.buffer.type, 'uniform');
     assert.equal(layout.buffer.hasDynamicOffset, undefined, 'bound where the range is');
+    gl.glDeleteBuffersARB([buffer]);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+    assert.equal(r.divergences.length, 2, 'a deleted buffer leaves both points');
+    assert.ok(r.divergences.every(d=>/with no buffer bound to its binding point [35]/.test(d)));
 });
 
 test('a block whose binding point holds nothing reads zeros, and says so', async()=>{
@@ -178,3 +184,100 @@ flat in int id; out vec4 c; void main() { c = vec4(float(id)); }`);
         assert.equal(bias + (draw.args[2] ?? 0), 5,
             'the device\'s first vertex plus the bias is 5');
     });
+
+test('an integer output writes an integer attachment, unblended; a draw without a program'
+    + ' there draws nothing and says so', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const [colour] = gl.glGenTextures(1);
+    gl.glBindTexture(GL.TEXTURE_2D, colour);
+    gl.glTexImage2D(GL.TEXTURE_2D, 0, TEX.RGBA8UI, 4, 4, 0, TEX.RGBA_INTEGER, GL.UNSIGNED_BYTE,
+        null);
+    const [fbo] = gl.glGenFramebuffers(1);
+    gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    gl.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, colour, 0);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    gl.glEnable(GL.BLEND);
+    r.floats(0x1000, TRIANGLE);
+    gl.glVertexAttribPointerARB(0, 3, GL.FLOAT, 0, 12, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glEnableClientState(GL.VERTEX_ARRAY);
+    gl.glVertexPointer(3, GL.FLOAT, 12, 0x1000);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    assert.equal(r.divergences.length, 1);
+    assert.match(r.divergences[0], /without a GLSL program wrote an integer colour buffer/);
+
+    use(gl, `#version 130
+in vec3 position; void main() { gl_Position = vec4(position, 1.0); }`, `#version 130
+out uvec4 id; void main() { id = uvec4(7u, 8u, 9u, 10u); }`);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    const pipelines = r.gpu.of('createRenderPipeline').map((/** @type {any} */ p)=>p.descriptor)
+        .filter((/** @type {any} */ d)=>d.fragment.targets[0]?.format === 'rgba8uint');
+    assert.equal(pipelines.length, 1, 'the program\'s draw only');
+    assert.equal(pipelines[0].fragment.targets[0].blend, undefined, 'never blended');
+    assert.match(pipelines[0].fragment.module.descriptor.code,
+        /@location\(0\) c0: vec4u,[^]*out\.c0 = fg_id;/);
+});
+
+test('a sampler binds what its type declares: an unsigned texture, a depth texture compared by'
+    + ' its function, an array texture\'s layers', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const program = use(gl, `#version 130
+in vec3 position; out vec2 uv;
+void main() { uv = position.xy; gl_Position = vec4(position, 1.0); }`, `#version 130
+in vec2 uv; out vec4 c;
+uniform usampler2D ids; uniform sampler2DShadow depth; uniform sampler2DArray layers;
+void main() { c = vec4(texture(ids, uv)) + vec4(texture(depth, vec3(uv, 0.5)))
+    + texture(layers, vec3(uv, 1.0)); }`);
+    /** @param {number} unit @param {number} target @returns {number} */
+    const bind = (unit, target)=>{
+        const [name] = gl.glGenTextures(1);
+        gl.glActiveTextureARB(GL.TEXTURE0 + unit);
+        gl.glBindTexture(target, name);
+        gl.glTexParameteri(target, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+        return name;
+    };
+    bind(0, GL.TEXTURE_2D);
+    gl.glTexImage2D(GL.TEXTURE_2D, 0, TEX.RGBA8UI, 1, 1, 0, TEX.RGBA_INTEGER, GL.UNSIGNED_BYTE,
+        Uint8Array.from([1, 2, 3, 4]));
+    bind(1, GL.TEXTURE_2D);
+    gl.glTexImage2D(GL.TEXTURE_2D, 0, TEX.DEPTH_COMPONENT32F, 1, 1, 0, GL.DEPTH_COMPONENT,
+        GL.FLOAT, null);
+    gl.glTexParameteri(GL.TEXTURE_2D, TEX.TEXTURE_COMPARE_MODE, TEX.COMPARE_REF_TO_TEXTURE);
+    gl.glTexParameteri(GL.TEXTURE_2D, TEX.TEXTURE_COMPARE_FUNC, GL.GREATER);
+    const array = bind(2, TEX.TEXTURE_2D_ARRAY);
+    gl.glTexImage3D(TEX.TEXTURE_2D_ARRAY, 0, GL.RGBA8, 1, 1, 2, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        null);
+    gl.uniform(gl.glGetUniformLocation(program, 'ids'), 1, [0], 'i', 1);
+    gl.uniform(gl.glGetUniformLocation(program, 'depth'), 1, [1], 'i', 1);
+    gl.uniform(gl.glGetUniformLocation(program, 'layers'), 1, [2], 'i', 1);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    r.floats(0x1000, TRIANGLE);
+    gl.glVertexAttribPointerARB(0, 3, GL.FLOAT, 0, 12, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    assert.deepEqual(r.divergences, [], 'each texture is what its sampler reads');
+
+    const layout = r.gpu.of('createBindGroupLayout').flatMap((/** @type {any} */ call)=>
+        call.descriptor.entries);
+    /** @param {number} binding */
+    const at = binding=>layout.find((/** @type {any} */ e)=>e.binding === binding);
+    // Samplers are bound in the program's order: ids 0, depth 1, layers 2.
+    assert.equal(at(1).texture.sampleType, 'uint');
+    assert.equal(at(3).texture.sampleType, 'depth');
+    assert.equal(at(4).sampler.type, 'comparison');
+    assert.equal(at(5).texture.viewDimension, '2d-array');
+    const samplers = boundEntries(r.gpu).filter((/** @type {any} */ e)=>e.binding === 4);
+    assert.equal(samplers[0].resource.descriptor.compare, 'greater',
+        'TEXTURE_COMPARE_FUNC is the sampler\'s');
+    const views = boundEntries(r.gpu).filter((/** @type {any} */ e)=>e.binding === 3);
+    assert.equal(views[0].resource.viewDescriptor?.aspect, 'depth-only');
+    const layered = boundEntries(r.gpu).find((/** @type {any} */ e)=>e.binding === 5);
+    assert.equal(layered.resource.texture.descriptor.label, `gl-texture:${array}`,
+        'the unit\'s 2D array binding, not the incomplete texture');
+});

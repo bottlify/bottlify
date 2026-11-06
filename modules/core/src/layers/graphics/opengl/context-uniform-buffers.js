@@ -5,22 +5,28 @@
  */
 
 /**
- * The uniform buffer binding points (OpenGL 3.1 section 2.11.4,
- * GL_ARB_uniform_buffer_object): an indexed binding of a buffer object, or
- * a range of one, that a program's uniform blocks read through the point
- * glUniformBlockBinding gave each of them.
+ * The indexed buffer binding points (OpenGL 3.0 section 2.15 and 3.1
+ * section 2.11.4): glBindBufferBase and glBindBufferRange bind a buffer
+ * object, or a range of one, to a numbered point of a target, from which a
+ * program's uniform blocks read (UNIFORM_BUFFER, GL_ARB_uniform_buffer_object)
+ * and into which transform feedback writes. A target is a row of its own
+ * here (`TARGETS`): its number of points, its offset alignment and the
+ * queries that answer it; adding one is adding a row.
  *
  * The rules, as the specification states them:
  *
  * - **A point holds a buffer and a range**: glBindBufferBase the whole
  *   buffer (start and size answer 0), glBindBufferRange from an offset that
- *   is a multiple of UNIFORM_BUFFER_OFFSET_ALIGNMENT, of a positive size.
- *   Both also bind the buffer to the target's general binding, which
- *   glBindBuffer, glBufferData and the rest address.
+ *   is a multiple of the target's alignment, of a positive size. Both also
+ *   bind the buffer to the target's general binding, which glBindBuffer,
+ *   glBufferData and the rest address.
  * - **A deleted buffer leaves the points that held it**, in the context that
  *   deleted it; a name made again later is another buffer.
- * - **The points are the context's**, not the share group's, and none of
- *   these calls is compiled into a display list.
+ * - **The points are the context's**, not the share group's, and neither
+ *   call is compiled into a display list.
+ *
+ * The indexed queries (glGetIntegeri_v and the rest) answer through
+ * `kernel.side.indexed`, by the query's enum.
  */
 
 import { GL } from './constants.js';
@@ -32,12 +38,26 @@ export const UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256;
 
 /** The calls of this file a display list does not record. */
 export const UNIFORM_BUFFER_CALLS_NOT_COMPILED = Object.freeze([
-    'glBindBufferBase', 'glBindBufferRange', 'glGetIntegeri_v',
+    'glBindBufferBase', 'glBindBufferRange',
+]);
+
+/**
+ * The indexed targets: how many points each has, the alignment of a range's
+ * offset, the general binding glBindBufferBase sets too, and the indexed
+ * queries of a point's buffer, start and size.
+ *
+ * @type {ReadonlyMap<number, { points: number, alignment: number, general: number,
+ *     binding: number, start: number, size: number }>}
+ */
+const TARGETS = new Map([
+    [GL.UNIFORM_BUFFER, { points: BLOCK_LIMITS.bindings, alignment: UNIFORM_BUFFER_OFFSET_ALIGNMENT,
+        general: GL.UNIFORM_BUFFER_BINDING, binding: GL.UNIFORM_BUFFER_BINDING,
+        start: GL.UNIFORM_BUFFER_START, size: GL.UNIFORM_BUFFER_SIZE }],
 ]);
 
 /**
  * @typedef {{ name: number, buffer: import('./objects.js').BufferObject, offset: number,
- *     size: number }} UniformBinding  `size` 0 for a whole buffer (glBindBufferBase)
+ *     size: number }} BufferBinding  `size` 0 for a whole buffer (glBindBufferBase)
  */
 
 /**
@@ -46,15 +66,17 @@ export const UNIFORM_BUFFER_CALLS_NOT_COMPILED = Object.freeze([
  */
 export function installUniformBufferCalls(context, kernel){
     const { enter, setError, setState } = kernel;
-    /** @type {(UniformBinding | null)[]} */
-    const points = new Array(BLOCK_LIMITS.bindings).fill(null);
+    /** @type {Map<number, (BufferBinding | null)[]>} */
+    const tables = new Map([...TARGETS].map(([target, row])=>[target,
+        new Array(row.points).fill(null)]));
 
     /**
      * A point's binding, or null where its buffer has been deleted since.
      *
-     * @param {number} index @returns {UniformBinding | null}
+     * @param {number} target @param {number} index @returns {BufferBinding | null}
      */
-    const live = index=>{
+    const live = (target, index)=>{
+        const points = /** @type {(BufferBinding | null)[]} */ (tables.get(target));
         const point = points[index];
         if (point && kernel.shareGroup().buffers.objects.get(point.name) !== point.buffer)
         {
@@ -76,7 +98,9 @@ export function installUniformBufferCalls(context, kernel){
         {
             return;
         }
-        if (target !== GL.UNIFORM_BUFFER)
+        const row = TARGETS.get(target);
+        const points = tables.get(target);
+        if (!row || !points)
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -87,7 +111,7 @@ export function installUniformBufferCalls(context, kernel){
             return;
         }
         if (name !== 0 && size !== null && (size <= 0 || offset < 0
-            || offset % UNIFORM_BUFFER_OFFSET_ALIGNMENT !== 0))
+            || offset % row.alignment !== 0))
         {
             setError(GL.INVALID_VALUE);
             return;
@@ -103,19 +127,32 @@ export function installUniformBufferCalls(context, kernel){
         }
         points[index] = buffer ? { name, buffer, offset: size === null ? 0 : offset,
             size: size ?? 0 } : null;
-        setState(GL.UNIFORM_BUFFER_BINDING, [name]);
+        setState(row.general, [name]);
     };
+
+    // The indexed queries, through the table the context's glGet*i_v reads.
+    const indexed = /** @type {Map<number, (index: number) => ({ kind: string,
+     *     values: number[] } | null)>} */ (kernel.side.indexed ??= new Map());
+    for (const [target, row] of TARGETS)
+    {
+        /** @param {(point: BufferBinding | null) => number} read */
+        const query = read=>(/** @type {number} */ index)=>(index < 0 || index >= row.points
+            ? null : { kind: 'int', values: [read(live(target, index))] });
+        indexed.set(row.binding, query(point=>point?.name ?? 0));
+        indexed.set(row.start, query(point=>point?.offset ?? 0));
+        indexed.set(row.size, query(point=>point?.size ?? 0));
+    }
 
     Object.assign(kernel.side, {
         /**
-         * What each point holds for a draw: the buffer, and the range a
-         * block reads from (a whole buffer from 0).
+         * What each uniform buffer point holds for a draw: the buffer, and
+         * the range a block reads from (a whole buffer from 0).
          *
          * @returns {({ buffer: import('./objects.js').BufferObject, offset: number,
          *     size: number } | null)[]}
          */
-        uniformBuffers: ()=>points.map((unused, index)=>{
-            const point = live(index);
+        uniformBuffers: ()=>(tables.get(GL.UNIFORM_BUFFER) ?? []).map((unused, index)=>{
+            const point = live(GL.UNIFORM_BUFFER, index);
             return point ? { buffer: point.buffer, offset: point.offset,
                 size: point.size === 0 ? point.buffer.size : point.size } : null;
         }),
@@ -133,32 +170,6 @@ export function installUniformBufferCalls(context, kernel){
          */
         glBindBufferRange(target, index, name, offset, size){
             bind('glBindBufferRange', target, index, name, offset, size);
-        },
-
-        /**
-         * The indexed queries of the uniform buffer points.
-         *
-         * @param {number} pname @param {number} index @returns {number[] | null}
-         */
-        glGetIntegeri_v(pname, index){
-            if (!enter('glGetIntegeri_v', [pname, index]))
-            {
-                return null;
-            }
-            if (pname !== GL.UNIFORM_BUFFER_BINDING && pname !== GL.UNIFORM_BUFFER_START
-                && pname !== GL.UNIFORM_BUFFER_SIZE)
-            {
-                setError(GL.INVALID_ENUM);
-                return null;
-            }
-            if (index < 0 || index >= points.length)
-            {
-                setError(GL.INVALID_VALUE);
-                return null;
-            }
-            const point = live(index);
-            return [pname === GL.UNIFORM_BUFFER_BINDING ? point?.name ?? 0
-                : pname === GL.UNIFORM_BUFFER_START ? point?.offset ?? 0 : point?.size ?? 0];
         },
     });
 }

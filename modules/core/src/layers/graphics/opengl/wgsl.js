@@ -36,7 +36,8 @@ import {
     CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
 } from './arb-wgsl.js';
 import {
-    blockDeclaration, emitStage, interfaceStruct, samplerTypeOf, textureTypeOf,
+    blockDeclaration, emitStage, interfaceStruct, samplerTypeOf, samplerVarTypeOf,
+    textureTypeOf,
 } from './glsl-wgsl.js';
 
 /**
@@ -1155,6 +1156,9 @@ ${fragmentBody.join('\n')}
     return { bindings, main };
 }
 
+/** A WebGPU format of integer channels: a colour buffer no blend reaches. */
+const INTEGER_FORMAT = /[su]int$/;
+
 /**
  * The shader pair for a draw state, as one module with both entry points,
  * and -- when a program stage runs -- what its uniform block has to carry.
@@ -1304,9 +1308,10 @@ ${parts.join('\n\n')}
 function samplerDeclarations(program, used){
     return [...used].sort((a, b)=>a - b).map(index=>{
         const sampler = program.samplers[index];
-        const kind = textureTypeOf(samplerTypeOf(sampler));
+        const type = samplerTypeOf(sampler);
+        const kind = textureTypeOf(type);
         return `@group(0) @binding(${1 + index * 2}) var glt${index}: ${kind};
-@group(0) @binding(${2 + index * 2}) var gls${index}: sampler;`;
+@group(0) @binding(${2 + index * 2}) var gls${index}: ${samplerVarTypeOf(type)};`;
     });
 }
 
@@ -1463,7 +1468,10 @@ export function drawDescriptor(state){
     const backFace = stencilFace(state.stencilBack ?? state.stencil);
     const targets = (state.targets ?? [{ format: state.targetFormat, mask: state.colourMask }])
         .map(target=>(target.format === '' ? null
-            : { format: target.format, blend, writeMask: target.mask }));
+            // An integer buffer is written as it is, never blended
+            // (section 4.1.8 of 3.0).
+            : { format: target.format, blend: INTEGER_FORMAT.test(target.format) ? undefined
+                : blend, writeMask: target.mask }));
     return {
         vertexBuffers: buffers,
         target: targets[0],

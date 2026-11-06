@@ -88,7 +88,13 @@ export const samplerBinding = index=>1 + index * 2;
  * @returns {string}
  */
 export function textureTypeOf(type){
-    const scalar = type.shadow ? 'f32' : SCALARS[type.sampled ?? 'float'];
+    if (type.shadow)
+    {
+        // A comparison reads a depth texture (`textureCall`).
+        return type.dim === 'Cube' ? type.array ? 'texture_depth_cube_array'
+            : 'texture_depth_cube' : type.array ? 'texture_depth_2d_array' : 'texture_depth_2d';
+    }
+    const scalar = SCALARS[type.sampled ?? 'float'];
     if (type.ms)
     {
         return `texture_multisampled_2d<${scalar}>`;
@@ -107,6 +113,15 @@ export function textureTypeOf(type){
 }
 
 /**
+ * The WGSL sampler a sampler of a type pairs its texture with: a comparison
+ * sampler for a shadow one.
+ *
+ * @param {import('./glsl-types.js').SamplerType} type
+ * @returns {string}
+ */
+export const samplerVarTypeOf = type=>(type.shadow ? 'sampler_comparison' : 'sampler');
+
+/**
  * What a bind group layout says of a sampler's texture: the view's
  * dimension and the sample type its shader reads.
  *
@@ -114,7 +129,7 @@ export function textureTypeOf(type){
  * @returns {{ viewDimension: string, sampleType: string, multisampled: boolean }}
  */
 export function textureLayoutOf(type){
-    const sampleType = type.shadow || (type.sampled ?? 'float') === 'float' ? 'float'
+    const sampleType = type.shadow ? 'depth' : (type.sampled ?? 'float') === 'float' ? 'float'
         : type.sampled === 'int' ? 'sint' : 'uint';
     const viewDimension = type.dim === '3D' ? '3d' : type.dim === 'Cube'
         ? type.array ? 'cube-array' : 'cube' : type.array ? '2d-array' : '2d';
@@ -1976,6 +1991,21 @@ export function emitStage(program, which, options, given, partner){
                 + ` ${ivec}(0), ${size} - ${ivec}(1))`;
             return `textureLoad(${tex}, ${texel}${layer}, ${lodCode})`;
         }
+        if (reference !== null)
+        {
+            // A depth texture compared by the sampler, with the function the
+            // texture's TEXTURE_COMPARE_FUNC gives it. WGSL compares at an
+            // implicit level in the fragment stage only, and otherwise at the
+            // base level: a level, gradients or a bias asked of a comparison
+            // read the base level or the implicit one (decision A111).
+            const compareHead = `${tex}, ${smp}, ${coords}${layer}, ${reference}`;
+            const compared = !vertex && level === null && !gradients
+                ? `textureSampleCompare(${compareHead}${offsetCode})`
+                : `textureSampleCompareLevel(${compareHead}${offsetCode})`;
+            // 1.10's shadow lookups answer a luminance: (r, r, r, 1).
+            return node.type.kind === 'scalar' ? compared
+                : `vec4f(vec3f(${compared}), 1.0f)`;
+        }
         const head = `${tex}, ${smp}, ${coords}${layer}`;
         let sample;
         if (gradients)
@@ -1998,11 +2028,6 @@ export function emitStage(program, which, options, given, partner){
         else
         {
             sample = `textureSample(${head}${offsetCode})`;
-        }
-        if (reference !== null)
-        {
-            const passed = `select(0.0f, 1.0f, ${reference} <= ${sample}.x)`;
-            return node.type.kind === 'scalar' ? passed : `vec4f(${passed})`;
         }
         return sample;
     }
@@ -2285,7 +2310,7 @@ export function emitStage(program, which, options, given, partner){
             if (param.type.kind === 'sampler')
             {
                 params.push(`pt${id}_${name}: ${textureTypeOf(param.type)}`,
-                    `ps${id}_${name}: sampler`);
+                    `ps${id}_${name}: ${samplerVarTypeOf(param.type)}`);
                 continue;
             }
             if (param.direction === 'in')
@@ -2620,7 +2645,8 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
         const sampler = program.samplers[index];
         const kind = textureTypeOf(samplerTypeOf(sampler));
         return `@group(0) @binding(${samplerBinding(index)}) var glt${index}: ${kind};
-@group(0) @binding(${samplerBinding(index) + 1}) var gls${index}: sampler;`;
+@group(0) @binding(${samplerBinding(index) + 1}) var gls${index}:`
+            + ` ${samplerVarTypeOf(samplerTypeOf(sampler))};`;
     });
 
     return {

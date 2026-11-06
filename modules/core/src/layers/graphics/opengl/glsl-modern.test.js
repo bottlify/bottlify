@@ -308,7 +308,12 @@ void main() {
     assert.ok(code.includes('textureSampleLevel(glt1, gls1, fg_v.xyz.xy,'
         + ' i32(floor(fg_v.xyz.z + 0.5f)), 1.0f)'), 'an array\'s layer rounded');
     assert.match(code, /textureLoad\(glt2, clamp\(vec2i\(floor\(fg_v\.xy \* vec2f\(t\d+\)\)\), vec2i\(0\), t\d+ - vec2i\(1\)\), 0\)/);
-    assert.match(code, /select\(0\.0f, 1\.0f, fg_v\.xyz\.z <= textureSample\(glt3, gls3, fg_v\.xyz\.xy\)\.x\)/);
+    assert.match(code, /textureSampleCompare\(glt3, gls3, fg_v\.xyz\.xy, fg_v\.xyz\.z\)/,
+        'a shadow sampler compares, by the texture\'s function');
+    const declared = fragment.samplers.join('\n');
+    assert.match(declared, /var glt3: texture_depth_2d;\n.*var gls3: sampler_comparison;/);
+    assert.match(declared, /var glt1: texture_2d_array<f32>;/);
+    assert.match(declared, /var glt2: texture_2d<i32>;/);
     assert.match(code, /textureSample\(glt4, gls4, vec2f\(fg_v\.x, 0\.5f\)\)/);
     assert.match(code, /textureSample\(glt0, gls0, fg_v\.xy, vec2i\(1i, \(-1i\)\)\)/);
     assert.match(code, /textureDimensions\(glt0, u32\(1i\)\)/);

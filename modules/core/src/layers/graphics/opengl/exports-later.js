@@ -444,8 +444,6 @@ export function laterEntryPoints(h){
         glBindBufferRange: ([target, index, buffer, offset, size])=>answer(
             current()?.glBindBufferRange(target >>> 0, index >>> 0, buffer >>> 0, offset | 0,
                 size | 0)),
-        glGetIntegeri_v: ([pname, index, out])=>call(context=>writeQuery(out,
-            context.glGetIntegeri_v(pname >>> 0, index >>> 0), 'word')),
         glGetUniformBlockIndex: ([program, name])=>(current()?.glGetUniformBlockIndex(
             program >>> 0, h.readName(name)) ?? GL.INVALID_INDEX),
         glGetActiveUniformBlockiv: ([program, index, pname, out])=>call(context=>writeQuery(

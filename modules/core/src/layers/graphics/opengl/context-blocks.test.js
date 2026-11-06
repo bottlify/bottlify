@@ -171,20 +171,15 @@ test('a block\'s uniforms: listed after the default block\'s, Block.member where
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
 });
 
-test('the uniform buffer points: a buffer or a range of one, aligned, and left by a deleted'
-    + ' buffer', ()=>{
+test('the uniform buffer points refuse an offset off the alignment, a size of zero, a point past'
+    + ' the last and a target with none', ()=>{
     const gl = fixture();
     const [a, b] = gl.glGenBuffersARB(2);
     gl.glBindBufferBase(GL.UNIFORM_BUFFER, 2, a);
     assert.deepEqual(gl.glGetIntegerv(GL.UNIFORM_BUFFER_BINDING), [a], 'the general binding too');
-    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 2), [a]);
-    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_START, 2), [0]);
-    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_SIZE, 2), [0]);
     gl.glBindBufferRange(GL.UNIFORM_BUFFER, 5, b, 512, 64);
-    assert.deepEqual([GL.UNIFORM_BUFFER_BINDING, GL.UNIFORM_BUFFER_START,
-        GL.UNIFORM_BUFFER_SIZE].map(p=>gl.glGetIntegeri_v(p, 5)[0]), [b, 512, 64]);
+    assert.deepEqual(gl.glGetIntegerv(GL.UNIFORM_BUFFER_BINDING), [b]);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
-
     gl.glBindBufferRange(GL.UNIFORM_BUFFER, 5, b, 100, 64);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE,
         'an offset off UNIFORM_BUFFER_OFFSET_ALIGNMENT');
@@ -194,18 +189,36 @@ test('the uniform buffer points: a buffer or a range of one, aligned, and left b
     assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'past MAX_UNIFORM_BUFFER_BINDINGS');
     gl.glBindBufferBase(GL.ARRAY_BUFFER, 0, a);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'not an indexed target');
-    gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 30);
-    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
-    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_START, 5), [512],
-        'refused calls leave it');
     assert.deepEqual(gl.glGetIntegerv(GL.UNIFORM_BUFFER_OFFSET_ALIGNMENT), [256]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_UNIFORM_BUFFER_BINDINGS), [24]);
+    gl.glDeleteBuffersARB([b]);
+    assert.deepEqual(gl.glGetIntegerv(GL.UNIFORM_BUFFER_BINDING), [0],
+        'the general binding held b last');
+});
 
+// The indexed queries are the context's glGetIntegeri_v (context-indexed.js),
+// which reads the points through kernel.side.indexed.
+test('the uniform buffer points answer their buffer, start and size, and a deleted buffer'
+    + ' leaves them', { skip: typeof fixture().glGetIntegeri_v !== 'function'
+    && 'glGetIntegeri_v comes with context-indexed.js' }, ()=>{
+    const gl = fixture();
+    const [a, b] = gl.glGenBuffersARB(2);
+    gl.glBindBufferBase(GL.UNIFORM_BUFFER, 2, a);
+    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 2), [a]);
+    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_START, 2), [0]);
+    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_SIZE, 2), [0]);
+    gl.glBindBufferRange(GL.UNIFORM_BUFFER, 5, b, 512, 64);
+    assert.deepEqual([GL.UNIFORM_BUFFER_BINDING, GL.UNIFORM_BUFFER_START,
+        GL.UNIFORM_BUFFER_SIZE].map(p=>gl.glGetIntegeri_v(p, 5)[0]), [b, 512, 64]);
+    gl.glBindBufferRange(GL.UNIFORM_BUFFER, 5, b, 100, 64);
+    assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_START, 5), [512],
+        'a refused call leaves it');
+    gl.glGetError();
+    gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 30);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
     gl.glDeleteBuffersARB([b]);
     assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 5), [0],
         'a deleted buffer leaves its points');
-    assert.deepEqual(gl.glGetIntegerv(GL.UNIFORM_BUFFER_BINDING), [0],
-        'the general binding held b last');
     gl.glBindBufferBase(GL.UNIFORM_BUFFER, 2, 0);
     assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 2), [0]);
 });

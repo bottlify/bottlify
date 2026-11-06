@@ -52,7 +52,7 @@ import {
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
-import { TEX, gpuStorageOf } from './formats.js';
+import { TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
 import {
     CANONICAL_LAYOUT, clientReads, expandIndices, instanceElements, isList, lockedFor,
@@ -78,6 +78,18 @@ import { GLSL_BLOCK_BINDING, samplerTypeOf, textureLayoutOf } from './glsl-wgsl.
  * the vertex stage (`uniforms.misc.z`), the viewport and scissor, the front
  * face and every copy between the two follow it.
  */
+
+/** What a texture holds, or a sampler reads, in a divergence's words. */
+const KIND_WORDS = /** @type {Record<string, string>} */ ({ float: 'a float',
+    sint: 'an integer', uint: 'an unsigned integer', depth: 'a depth (shadow)',
+    stencil: 'a stencil' });
+
+/** A texture's TEXTURE_COMPARE_FUNC as a comparison sampler's function. */
+const COMPARE_FUNCTIONS = /** @type {Record<number, string>} */ ({
+    [GL.NEVER]: 'never', [GL.LESS]: 'less', [GL.EQUAL]: 'equal', [GL.LEQUAL]: 'less-equal',
+    [GL.GREATER]: 'greater', [GL.NOTEQUAL]: 'not-equal', [GL.GEQUAL]: 'greater-equal',
+    [GL.ALWAYS]: 'always',
+});
 
 /**
  * Which of a unit's bindings a GLSL sampler of each shape reads (`Scene`'s
@@ -699,7 +711,8 @@ export function createGpuRenderer(services){
             });
             fixedEntries.push({
                 binding: texture.binding + 1, visibility,
-                sampler: texture.unfilterable ? { type: 'non-filtering' } : {},
+                sampler: layout?.sampleType === 'depth' ? { type: 'comparison' }
+                    : texture.unfilterable ? { type: 'non-filtering' } : {},
             });
         }
         if (plan.vertexBlock)
@@ -899,7 +912,7 @@ export function createGpuRenderer(services){
      * something, not once per unit per draw.
      *
      * @type {WeakMap<import('./objects.js').TextureObject,
-     *     { version: number, sampler: any, filtered: boolean }>}
+     *     { version: number, sampler: any, filtered: boolean, compared?: boolean }>}
      */
     const samplerByTexture = new WeakMap();
     /**
@@ -907,10 +920,10 @@ export function createGpuRenderer(services){
      * @param {boolean} [filtered]  false for a texture no sampler may filter,
      *     which is read nearest, the nearest level too
      */
-    const samplerFor = (texture, filtered = true)=>{
+    const samplerFor = (texture, filtered = true, compared = false)=>{
         const cached = samplerByTexture.get(texture);
         if (cached && cached.version === texture.parametersVersion
-            && cached.filtered === filtered)
+            && cached.filtered === filtered && cached.compared === compared)
         {
             return cached.sampler;
         }
@@ -936,6 +949,8 @@ export function createGpuRenderer(services){
             addressModeU: wrap(GL.TEXTURE_WRAP_S),
             addressModeV: wrap(GL.TEXTURE_WRAP_T),
             addressModeW: wrap(GL.TEXTURE_WRAP_R),
+            ...compared ? { compare: COMPARE_FUNCTIONS[parameters.get(TEX.TEXTURE_COMPARE_FUNC)
+                ?? GL.LEQUAL] ?? 'less-equal' } : {},
         };
         const key = JSON.stringify(descriptor);
         let sampler = samplers.get(key);
@@ -944,7 +959,8 @@ export function createGpuRenderer(services){
             sampler = createSampler({ label: `gl-sampler:${key}`, ...descriptor });
             samplers.set(key, sampler);
         }
-        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler, filtered });
+        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler, filtered,
+            compared });
         return sampler;
     };
 
@@ -969,6 +985,53 @@ export function createGpuRenderer(services){
                 });
             }
             incompleteTextures.set(cube, texture);
+        }
+        return texture;
+    };
+
+    /**
+     * The incomplete texture of the shape and kind a GLSL sampler declares:
+     * a float one black and opaque, an integer one zero, a depth one 1 (a
+     * comparison of it passes where LEQUAL would).
+     *
+     * @type {Map<string, import('./objects.js').TextureObject>}
+     */
+    const incompleteShapes = new Map();
+    /**
+     * @param {{ cube: boolean, layout?: { viewDimension: string, sampleType: string,
+     *     multisampled: boolean } }} entry
+     * @returns {import('./objects.js').TextureObject}
+     */
+    const incompleteOf = entry=>{
+        const layout = entry.layout;
+        if (!layout || (layout.sampleType === 'float' && !layout.multisampled
+            && (layout.viewDimension === '2d' || layout.viewDimension === 'cube')))
+        {
+            return incompleteTexture(entry.cube);
+        }
+        const key = `${layout.viewDimension}:${layout.sampleType}`;
+        let texture = incompleteShapes.get(key);
+        if (!texture)
+        {
+            const target = layout.viewDimension === '3d' ? GL.TEXTURE_3D
+                : layout.viewDimension === '2d-array' ? TEX.TEXTURE_2D_ARRAY
+                    : layout.viewDimension === 'cube' ? GL.TEXTURE_CUBE_MAP : GL.TEXTURE_2D;
+            const internal = layout.sampleType === 'sint' ? TEX.RGBA8I
+                : layout.sampleType === 'uint' ? TEX.RGBA8UI
+                    : layout.sampleType === 'depth' ? TEX.DEPTH_COMPONENT32F : GL.RGBA8;
+            const sized = sizedFormatOf(internal);
+            const data = layout.sampleType === 'depth' ? new Uint8Array(new Float32Array([1])
+                .buffer) : layout.sampleType === 'float' ? new Uint8Array([0, 0, 0, 255])
+                : new Uint8Array(4);
+            texture = createTextureObject(0, target);
+            for (let face = 0; face < (target === GL.TEXTURE_CUBE_MAP ? 6 : 1); face++)
+            {
+                texture.levels.set(levelKey(0, face), /** @type {any} */ ({
+                    width: 1, height: 1, depth: 1, internalFormat: internal, border: 0,
+                    baseFormat: sized?.base ?? GL.RGBA, sized, data,
+                }));
+            }
+            incompleteShapes.set(key, texture);
         }
         return texture;
     };
@@ -2482,6 +2545,16 @@ export function createGpuRenderer(services){
                 + ' both, so the front face\'s were applied to the back face\'s test too');
         }
         const state = drawStateOf(scene, layout, topology, target);
+        if (!state.glsl && (state.targets ?? [{ format: state.targetFormat }])
+            .some(t=>/[su]int$/.test(t.format)))
+        {
+            // Only a GLSL program writes integers; the fixed pipeline's and an
+            // assembly program's floats in an integer buffer are undefined
+            // (section 4.1.8 of 3.0), and WebGPU refuses the pipeline.
+            diverge('a draw without a GLSL program wrote an integer colour buffer, and drew'
+                + ' nothing');
+            return;
+        }
         const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
             ? lastDraw.key : drawKey(state);
         lastDraw = { state, key };
@@ -2519,16 +2592,27 @@ export function createGpuRenderer(services){
                 texture = incompleteTexture(entry.cube);
             }
             const sized = texture.levels.get(levelKey(0))?.sized;
-            if (sized && (sized.kind === 'int' || sized.kind === 'uint'
-                || sized.kind === 'stencil'))
+            // What the texture holds against what the shader declares: a
+            // float sampler reads a float or depth texture, an isampler an
+            // int one, a usampler a uint one, a shadow sampler a depth one.
+            const holds = sized?.kind === 'int' ? 'sint' : sized?.kind === 'uint' ? 'uint'
+                : sized?.kind === 'stencil' ? 'stencil' : sized?.kind === 'depth' ? 'depth'
+                    : 'float';
+            const wanted = entry.layout?.sampleType ?? 'float';
+            if (holds !== wanted && !(wanted === 'float' && holds === 'depth'))
             {
-                // The shaders declare every texture as float; an integer one
-                // binds to none of them.
-                diverge(`a draw sampled an integer texture (${sized.name}) through a float`
-                    + ' sampler, and sampled the incomplete texture instead');
-                texture = incompleteTexture(entry.cube);
+                diverge(`a draw sampled ${KIND_WORDS[holds]} texture (${sized?.name ?? 'RGBA'})`
+                    + ` through ${KIND_WORDS[wanted]} sampler, and sampled the incomplete texture`
+                    + ' instead');
+                texture = incompleteOf(entry);
             }
-            else if (sized?.kind === 'depth'
+            else if (wanted === 'float' && holds === 'depth' && entry.layout
+                && texture.parameters.get(TEX.TEXTURE_COMPARE_MODE) === TEX.COMPARE_REF_TO_TEXTURE)
+            {
+                diverge('a draw sampled a depth texture with its comparison on through a sampler'
+                    + ' that is not a shadow one: the depth is read as a value');
+            }
+            else if (sized?.kind === 'depth' && !entry.layout
                 && texture.parameters.get(TEX.TEXTURE_COMPARE_MODE) === TEX.COMPARE_REF_TO_TEXTURE)
             {
                 diverge('a draw sampled a depth texture with its comparison on: the depth is'
@@ -2559,10 +2643,16 @@ export function createGpuRenderer(services){
             const copy = textureFor(texture, recording);
             const kind = copy.kind ?? 'f';
             kinds += kind;
+            const compared = entry.layout?.sampleType === 'depth';
+            // An integer texture is loaded, never sampled: its sampler is a
+            // placeholder, filters and all.
+            const loaded = entry.layout?.sampleType === 'sint'
+                || entry.layout?.sampleType === 'uint';
             return {
                 binding: entry.binding,
                 view: copy.sampleView ?? copy.gpu.view,
-                sampler: samplerFor(texture, kind === 'f'),
+                // A comparison filters a depth texture as any other is.
+                sampler: samplerFor(texture, kind === 'f' || compared || loaded, compared),
                 texture,
             };
         });
@@ -2726,7 +2816,8 @@ export function createGpuRenderer(services){
      *
      * @param {import('./pipeline.js').Scene} scene
      * @param {any} executable
-     * @param {{ cube: boolean, sampler?: number }} entry
+     * @param {{ cube: boolean, sampler?: number, layout?: { viewDimension: string,
+     *     sampleType: string, multisampled: boolean } }} entry
      * @returns {import('./objects.js').TextureObject}
      */
     const textureForSampler = (scene, executable, entry)=>{
@@ -2737,7 +2828,7 @@ export function createGpuRenderer(services){
         const target = BOUND_TARGETS[`${type.dim}${type.ms ? 'MS' : ''}`
             + `${type.array ? 'Array' : ''}`];
         const texture = target ? bound?.[target] : null;
-        return texture && isTextureComplete(texture) ? texture : incompleteTexture(entry.cube);
+        return texture && isTextureComplete(texture) ? texture : incompleteOf(entry);
     };
 
     /**
