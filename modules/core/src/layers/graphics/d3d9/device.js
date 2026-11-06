@@ -1968,7 +1968,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * (`unbindIndices`); DrawPrimitiveUP drew none and keeps them.
      */
     const unbindStreamZero = ()=>{
-        stream(0).buffer = rebound(stream(0).buffer, null);
+        const zero = stream(0);
+        zero.buffer = rebound(zero.buffer, null);
+        // Its offset and stride go too (Wine's d3d9 test_draw_indexed).
+        zero.offset = 0;
+        zero.stride = 0;
     };
     const unbindIndices = ()=>{
         indices = rebound(indices, null);
@@ -3639,9 +3643,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          */
         DrawIndexedPrimitive(type, base, minIndex, numVertices, startIndex, primitiveCount){
             const bias = streamBias();
-            if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null || !indices)
+            if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            // No index buffer is not checked either: the draw answers D3D_OK
+            // and, reading indices from nothing, draws nothing (Wine's d3d9
+            // test_draw_indexed).
+            if (!indices)
+            {
+                report('draw-indices', 'an indexed draw with no index buffer drew nothing');
+                return D3D_OK;
             }
             if (bias === DRAWS_NOTHING)
             {
@@ -3674,6 +3686,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !(stride > 0)
                 || vertexData.byteLength < vertexCountOf(type, primitiveCount) * stride)
             {
+                // Refused, it has let stream zero's buffer go all the same,
+                // keeping its offset and stride (Wine's d3d9 test_draw_indexed).
+                stream(0).buffer = rebound(stream(0).buffer, null);
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
@@ -3703,6 +3718,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !indexData
                 || !(stride > 0) || vertexData.byteLength < reach * stride)
             {
+                // Refused, it has let the index buffer go all the same.
+                unbindIndices();
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();

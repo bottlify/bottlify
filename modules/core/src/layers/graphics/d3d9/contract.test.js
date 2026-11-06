@@ -342,6 +342,54 @@ test('a device that advertises a version makes shaders up to it and binds them',
     assert.equal(device.release(), 0);
 });
 
+test('a user-pointer draw lets stream zero and the indices go, refused or not', ()=>{
+    // Wine's d3d9 test_draw_indexed: refused, DrawPrimitiveUP lets stream
+    // zero's buffer go and keeps its stride, DrawIndexedPrimitiveUP the
+    // indices; drawn, stream zero is left empty, stride and offset too. An
+    // indexed draw with no indices answers D3D_OK and draws nothing.
+    const { device } = make();
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    assert.equal(device.CreateIndexBuffer(16, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED, indices),
+        D3D_OK);
+    /** @returns {any[]} */
+    const zero = ()=>{
+        /** @type {{ buffer?: any, offset?: number, stride?: number }} */
+        const out = {};
+        device.GetStreamSource(0, out);
+        return [out.buffer ?? null, out.offset, out.stride];
+    };
+    const index = ()=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        device.GetIndices(out);
+        return out.buffer ?? null;
+    };
+    const bytes = new Uint8Array(12 * 3);
+    device.BeginScene();
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 0, 12), D3D_OK);
+    assert.equal(device.SetIndices(indices.buffer), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 12), D3DERR_INVALIDCALL,
+        'no declaration');
+    assert.deepEqual(zero(), [null, 0, 12]);
+    assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 3, 1, new Uint8Array(6),
+        D3DFMT_INDEX.INDEX16, bytes, 12), D3DERR_INVALIDCALL);
+    assert.equal(index(), null);
+    device.SetFVF(FVF_XYZ);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 3, 0, 1), D3D_OK,
+        'no indices: nothing drawn');
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 4, 12), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 12), D3D_OK);
+    assert.deepEqual(zero(), [null, 0, 0]);
+    device.EndScene();
+    vertices.buffer.release();
+    indices.buffer.release();
+    assert.equal(device.release(), 0);
+});
+
 test('a draw with a shader bound succeeds, and the renderer is handed the whole program', ()=>{
     /** @type {string[]} */
     const reports = [];

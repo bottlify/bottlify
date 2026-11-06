@@ -1401,7 +1401,7 @@ test('the viewport, scissor and the draws cross with their arguments in this ver
         assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0x4000, 12]), D3D_OK);
         assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0, 12]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'DrawIndexedPrimitive', [4, 0xffffffff, 0, 3, 0, 1]),
-            D3DERR_INVALIDCALL, 'no indices bound');
+            D3D_OK, 'no indices bound draws nothing (test_draw_indexed)');
         assert.equal(h.device(device, 'DrawRectPatch', [1, 0, 0]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'EndScene'), D3D_OK);
 
