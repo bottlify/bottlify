@@ -16,7 +16,9 @@
  * Losing the activation (WM_ACTIVATEAPP with FALSE) puts the display back to
  * the registry's mode, minimises a shown device window - above the others,
  * but for an extended device - and loses the device; regaining it brings the
- * device window back, and the device then waits for a Reset. Windows leaves a
+ * device window back, and the device then waits for a Reset; an extended
+ * device is not lost but answers that its window is covered meanwhile
+ * (S_PRESENT_OCCLUDED), and takes its mode back itself. Windows leaves a
  * minimised window to the taskbar to restore; there being none here,
  * regaining the activation restores it (decision A87). A mode another set
  * under the device (WM_DISPLAYCHANGE) also leaves it waiting for one.
@@ -67,6 +69,7 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
 /**
  * @typedef {Object} FocusDevice
  * @property {(restorable?: boolean) => void} injectDeviceLoss
+ * @property {(covered: boolean) => void} [occlude]
  * @property {string} deviceState  As `DEVICE_STATE`.
  *
  * @typedef {Object} Held
@@ -77,6 +80,9 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  * @property {boolean} extended
  * @property {{ width: number, height: number }} size
  * @property {boolean} setting  While the mode it set is being told.
+ * @property {(() => { bitsPerPixel: number } | null) | undefined} reapply
+ *           Sets the device's mode again, and answers how it was found when it
+ *           was not the device's.
  */
 
 /**
@@ -185,6 +191,27 @@ export function createFocusWindows({ user32, procedure, cover, states }){
     };
 
     /**
+     * A mode the device set, which every window hears of as it hears of a
+     * mode ChangeDisplaySettings set, and which loses that device nothing.
+     *
+     * @param {Held} one @param {{ bitsPerPixel: number } | null | undefined} mode
+     */
+    const tellMode = (one, mode)=>{
+        if (!mode)
+        {
+            return 0;
+        }
+        one.setting = true;
+        /** @param {unknown} answer */
+        const set = answer=>{
+            one.setting = false;
+            return answer;
+        };
+        return andThen(call('SendMessageA', [HWND_BROADCAST, WM_DISPLAYCHANGE, mode.bitsPerPixel,
+            ((one.size.height & 0xffff) << 16 | one.size.width & 0xffff) >>> 0]), set);
+    };
+
+    /**
      * The application losing the activation, or regaining it.
      *
      * @param {Held} one @param {boolean} active
@@ -193,6 +220,16 @@ export function createFocusWindows({ user32, procedure, cover, states }){
         if (active)
         {
             return inTurn([
+                // An extended device takes its mode back itself, where
+                // another waits for a Reset to.
+                ()=>{
+                    if (!one.extended)
+                    {
+                        return 0;
+                    }
+                    one.device.occlude?.(false);
+                    return tellMode(one, one.reapply?.());
+                },
                 ()=>(one.changes
                     ? (call('IsIconic', [one.window]) !== 0
                         ? call('ShowWindow', [one.window, SW_RESTORE])
@@ -217,7 +254,11 @@ export function createFocusWindows({ user32, procedure, cover, states }){
             ()=>(one.changes && !one.extended ? call('SetWindowPos', [one.window, HWND_TOPMOST,
                 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
             ()=>{
-                if (!one.extended)
+                if (one.extended)
+                {
+                    one.device.occlude?.(true);
+                }
+                else
                 {
                     one.device.injectDeviceLoss(false);
                 }
@@ -268,8 +309,11 @@ export function createFocusWindows({ user32, procedure, cover, states }){
          * @param {FocusDevice} device
          * @param {{ focus: number, window: number, fullscreen: boolean,
          *     noWindowChanges: boolean, extended: boolean, width: number,
-         *     height: number, created: boolean, mode?: { bitsPerPixel: number } | null }} how
-         *        `mode` when the device set a mode other than the one it found.
+         *     height: number, created: boolean, mode?: { bitsPerPixel: number } | null,
+         *     reapply?: () => { bitsPerPixel: number } | null }} how
+         *        `mode` when the device set a mode other than the one it found;
+         *        `reapply` sets it again, for an extended device regaining the
+         *        activation.
          * @returns {unknown} a promise while the windows hear of it
          */
         take(device, how){
@@ -290,30 +334,18 @@ export function createFocusWindows({ user32, procedure, cover, states }){
             }
             /** @type {Held} */
             const one = before ?? { device, focus, window: how.window >>> 0, changes: false,
-                extended: how.extended, size: { width: 0, height: 0 }, setting: false };
+                extended: how.extended, size: { width: 0, height: 0 }, setting: false,
+                reapply: undefined };
             Object.assign(one, { focus, window: (how.window >>> 0) || focus,
-                changes: !how.noWindowChanges, size: { width: how.width, height: how.height } });
+                changes: !how.noWindowChanges, size: { width: how.width, height: how.height },
+                reapply: how.reapply });
             held.set(device, one);
             hook(focus).devices.add(one);
+            // Created or reset, an extended device's window is its own again.
+            device.occlude?.(false);
             return inTurn([
                 ()=>(how.created ? call('SetForegroundWindow', [focus]) : 0),
-                // A mode the device set is every window's to hear of, as a
-                // mode ChangeDisplaySettings set is.
-                ()=>{
-                    if (!how.mode)
-                    {
-                        return 0;
-                    }
-                    one.setting = true;
-                    /** @param {unknown} answer */
-                    const set = answer=>{
-                        one.setting = false;
-                        return answer;
-                    };
-                    return andThen(call('SendMessageA', [HWND_BROADCAST, WM_DISPLAYCHANGE,
-                        how.mode.bitsPerPixel, ((how.height & 0xffff) << 16 | how.width & 0xffff)
-                            >>> 0]), set);
-                },
+                ()=>tellMode(one, how.mode),
                 ()=>{
                     if (!one.changes)
                     {

@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS,
-    D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
+    D3DSWAPEFFECT, D3DUSAGE, D3D_OK, S_PRESENT_OCCLUDED,
 } from './constants.js';
 import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
@@ -53,6 +53,28 @@ test('an Ex device is never lost: a GPU that went away is removed', ()=>{
     assert.equal(plain.extended, false);
     plain.injectDeviceLoss(false);
     assert.equal(plain.Present(), D3DERR_DEVICELOST, 'a plain device is lost as it was');
+    assert.equal(plain.release(), 0);
+});
+
+test('an Ex device whose application lost the activation answers its window covered', ()=>{
+    // Wine's d3d9ex.c test_lost_device: S_PRESENT_OCCLUDED (MAKE_D3DSTATUS(2168))
+    // from Present and from CheckDeviceState for a window, D3D_OK asked of none.
+    const WINDOW = 0x10010;
+    assert.equal(S_PRESENT_OCCLUDED, 0x08760878);
+    const device = make(true);
+    device.occlude(true);
+    assert.equal(device.Present(), S_PRESENT_OCCLUDED);
+    assert.equal(device.CheckDeviceState(WINDOW), S_PRESENT_OCCLUDED);
+    assert.equal(device.CheckDeviceState(0), D3D_OK);
+    assert.equal(device.TestCooperativeLevel(), D3D_OK);
+    device.occlude(false);
+    assert.equal(device.Present(), D3D_OK);
+    assert.equal(device.CheckDeviceState(WINDOW), D3D_OK);
+    assert.equal(device.release(), 0);
+
+    const plain = make(false);
+    plain.occlude(true);
+    assert.equal(plain.Present(), D3D_OK, 'a plain device is lost instead, which says it');
     assert.equal(plain.release(), 0);
 });
 

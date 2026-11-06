@@ -51,6 +51,7 @@
 
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL,
+    S_PRESENT_OCCLUDED,
     D3DERR_NOTAVAILABLE,
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
     D3D_OK, FORMAT_INFO, blockAligned, isCompressed, surfaceBytes, surfacePitch, videoPoolAllowed,
@@ -884,6 +885,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) === 0;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
+    /** Whether the application lost the activation while the device was full screen. */
+    let occluded = false;
     let inScene = false;
     let nextAddress = 0x40000000;
     /** Addresses this layer invented rather than took from the guest's heap. */
@@ -2253,7 +2256,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     const presented = submitted=>{
         const held = submitted ? services.frameQueued?.(submitted) ?? null : null;
-        return held ? held.then(()=>D3D_OK) : D3D_OK;
+        // An extended device whose application is not the active one is told
+        // its window is covered, the frame made all the same.
+        const answer = extended && occluded ? S_PRESENT_OCCLUDED : D3D_OK;
+        return held ? held.then(()=>answer) : answer;
     };
 
     /**
@@ -2360,6 +2366,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             deviceState = restorable ? DEVICE_STATE.NOT_RESET : DEVICE_STATE.LOST;
         },
 
+        /**
+         * Whether the application has lost the activation, which a full-screen
+         * extended device answers as its window being covered.
+         *
+         * @param {boolean} covered
+         */
+        occlude(covered){
+            occluded = covered;
+        },
+
         get deviceState(){
             return deviceState;
         },
@@ -2453,11 +2469,19 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /**
          * D3D_OK while the device can be used, D3DERR_DEVICEREMOVED once its
-         * GPU is gone. Whether the window is covered is not known here, so
-         * S_PRESENT_OCCLUDED is never answered.
+         * GPU is gone, S_PRESENT_OCCLUDED for a window while a full-screen
+         * device's application is not the active one (`occlude`); asked of no
+         * window, the device itself can be used. Whether a window is covered
+         * by another is not known here.
+         *
+         * @param {number} [window]
          */
-        CheckDeviceState(){
-            return deviceState === DEVICE_STATE.OK ? D3D_OK : D3DERR_DEVICEREMOVED;
+        CheckDeviceState(window = 0){
+            if (deviceState !== DEVICE_STATE.OK)
+            {
+                return D3DERR_DEVICEREMOVED;
+            }
+            return occluded && window !== 0 ? S_PRESENT_OCCLUDED : D3D_OK;
         },
 
         /** @param {{ priority?: number }} out */

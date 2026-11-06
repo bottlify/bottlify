@@ -79,6 +79,11 @@ function harness({ visible = false } = {}){
     });
     const device = {
         deviceState: STATES.OK,
+        occluded: false,
+        /** @param {boolean} over */
+        occlude(over){
+            this.occluded = over;
+        },
         /** @param {boolean} [restorable] */
         injectDeviceLoss(restorable = false){
             this.deviceState = restorable ? STATES.NOT_RESET : STATES.LOST;
@@ -234,4 +239,30 @@ test('a mode the device sets is broadcast, and loses that device nothing', ()=>{
     calls.length = 0;
     windows.take(device, { ...HOW, created: false });
     assert.equal(calls.some(([name])=>name === 'SendMessageA'), false, 'the same mode: nothing');
+});
+
+test('an extended device is told its window is covered while the activation is gone, and'
+    + ' takes its mode back', ()=>{
+    const { windows, device, calls, send } = harness();
+    let found = { width: 1024, height: 768 };
+    windows.take(device, { ...HOW, extended: true, reapply: ()=>{
+        if (found.width === 640)
+        {
+            return null;
+        }
+        found = { width: 640, height: 480 };
+        return { bitsPerPixel: 16 };
+    } });
+    send(0x1c, 0);
+    assert.equal(device.occluded, true);
+    assert.equal(device.deviceState, STATES.OK, 'and not lost');
+    calls.length = 0;
+    send(0x1c, 1);
+    assert.equal(device.occluded, false);
+    assert.deepEqual(calls.find(([name])=>name === 'SendMessageA')?.[1],
+        [0xffff, 0x7e, 16, (480 << 16 | 640) >>> 0], 'its mode set again, and told');
+    assert.equal(device.deviceState, STATES.OK);
+    send(0x1c, 0);
+    windows.take(device, { ...HOW, extended: true, created: false });
+    assert.equal(device.occluded, false, 'a reset makes the window its own again');
 });

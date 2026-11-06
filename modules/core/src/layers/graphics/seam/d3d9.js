@@ -3834,7 +3834,16 @@ export function createDirect3D9Seam(
             resolution?.(width, height);
         }
         const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
-            fullscreen: !parameters.windowed, width, height, created: !how.taken, mode }) : 0;
+            fullscreen: !parameters.windowed, width, height, created: !how.taken, mode,
+            reapply: ()=>{
+                const shown = screen();
+                if (shown.width === width && shown.height === height)
+                {
+                    return null;
+                }
+                resolution?.(width, height);
+                return { bitsPerPixel: shown.bitsPerPixel ?? 32 };
+            } }) : 0;
         if (how)
         {
             how.taken = true;
