@@ -39,6 +39,7 @@ import { createEffectSeam } from './d3d10-effect.js';
 import { readGuid } from './ddraw.js';
 import { describeAdapter } from './adapter.js';
 import { createFields } from './structs.js';
+import { SHADER_KIND } from '../d3d10/dxbc.js';
 import {
     D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT,
     D3D10_RESOURCE_DIMENSION, D3D10_USAGE,
@@ -4512,6 +4513,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 {
                     fields.writeU32(out, 0);
                     return E_FAIL;
+                }
+                // Direct3D 10 has the vertex, geometry and pixel stages: a
+                // program of a stage Direct3D 11 added is refused (test_reflection_cs,
+                // built for d3d10).
+                if ((reflected.desc.Version >>> 16) > SHADER_KIND.GEOMETRY)
+                {
+                    fields.writeU32(out, 0);
+                    return E_INVALIDARG;
                 }
                 const copy = allocate ? allocate(bytes.length) : 0;
                 if (!copy)

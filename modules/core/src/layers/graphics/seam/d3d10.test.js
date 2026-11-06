@@ -1062,6 +1062,13 @@ test('d3d10.dll makes blobs, cuts signatures out of a shader and reflects it', (
     assert.equal(h.d3d10.D3D10ReflectShader.handler([h.box.place([1, 2, 3]), 12, reflectionAt])
         >>> 0, E_FAIL, 'not a container');
     assert.equal(h.box.memory.readU32(reflectionAt), 0);
+    const compute = assemble({ kind: SHADER_KIND.COMPUTE, major: 5, instructions: [ret()] });
+    const computeAt = h.box.allocate(compute.length);
+    h.box.memory.writeBytes(computeAt, compute);
+    h.box.memory.writeU32(reflectionAt, 0xdeadbeef);
+    assert.equal(h.d3d10.D3D10ReflectShader.handler([computeAt, compute.length, reflectionAt])
+        >>> 0, E_INVALIDARG, 'a stage Direct3D 10 does not have (test_reflection_cs)');
+    assert.equal(h.box.memory.readU32(reflectionAt), 0);
     assert.equal(h.d3d10.D3D10ReflectShader.handler([shaderAt, shader.length, reflectionAt])
         >>> 0, S_OK);
     const reflection = h.box.memory.readU32(reflectionAt);
