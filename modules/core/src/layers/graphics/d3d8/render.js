@@ -41,7 +41,7 @@ import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
     D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat,
-    isCompressed, surfaceBytes,
+    isCompressed, surfaceBytes, tightRows,
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
@@ -5405,7 +5405,8 @@ export function createRenderer(options){
                     ? bytes
                     : isCompressed(desc.Format)
                         ? decodeCompressed(bytes, desc.Format, desc.Width, desc.Height)
-                        : expandTexels(desc.Format, bytes, desc.Width * desc.Height, float32),
+                        : expandTexels(desc.Format, tightRows(bytes, desc.Format, desc.Width,
+                            desc.Height, surface.pitch), desc.Width * desc.Height, float32),
             }, true);
         }
         return made;
@@ -5745,7 +5746,8 @@ export function createRenderer(options){
         uploadTexels(record.gpu, {
             format: gpuFormatOf(record.format, record.width, record.height, false, float32),
             mipLevel: level, width, height, depth,
-            texels: expandTexels(record.format, bytes, width * height * depth, float32),
+            texels: expandTexels(record.format, tightRows(bytes, record.format, width,
+                height * depth), width * height * depth, float32),
         }, ordered);
         (record.written ??= new Set()).add(level);
     };
@@ -5867,7 +5869,8 @@ export function createRenderer(options){
                     ? bytes
                     : decodes
                         ? decodeCompressed(bytes, record.format, width, height, room)
-                        : expandTexels(record.format, bytes, width * height, float32);
+                        : expandTexels(record.format, tightRows(bytes, record.format, width,
+                            height, held.surface.pitch), width * height, float32);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
                     ordered);

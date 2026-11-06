@@ -301,8 +301,9 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps, guestCod
          *
          * @param {number} root
          * @param {Record<string, number>} parameters
+         * @param {number} [behaviour]
          */
-        createDevice(root, parameters = {}){
+        createDevice(root, parameters = {}, behaviour = BEHAVIOUR){
             const at = 0x2000;
             box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
             fields.writeStruct(at, D3DPRESENT_PARAMETERS8, {
@@ -316,7 +317,7 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps, guestCod
                 ...parameters,
             });
             const hr = box.call(root, slot(IDIRECT3D8_SLOTS, 'CreateDevice'),
-                [0, D3DDEVTYPE.HAL, HWND, BEHAVIOUR, at, 0x2100]);
+                [0, D3DDEVTYPE.HAL, HWND, behaviour, at, 0x2100]);
             assert.equal(hr, D3D_OK);
             return box.memory.readU32(0x2100);
         },
@@ -2159,7 +2160,7 @@ test('a fullscreen device gives the display back to the registry mode at its las
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
     assert.equal(h.release(device), 0);
     assert.deepEqual(h.resolutions.at(-1), [800, 600, undefined, undefined]);
-    assert.equal(h.resolutions.length, 2);
+    assert.equal(h.resolutions.length, 3, 'the mode, the window placed in it, the mode given back');
     h.release(root);
 });
 
@@ -2169,6 +2170,15 @@ test('a fullscreen device names the window it takes with it', ()=>{
     const h = seamed();
     assert.notEqual(h.createDevice(h.create(), { Windowed: 0, hDeviceWindow: 0x777 }), 0);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true]);
+});
+
+test('D3DCREATE_NOWINDOWCHANGES sets the mode and leaves the window as it is', ()=>{
+    // Wine's test_window_style: the device window keeps its rectangle.
+    const D3DCREATE_NOWINDOWCHANGES = 0x800;
+    const h = seamed();
+    assert.notEqual(h.createDevice(h.create(), { Windowed: 0, hDeviceWindow: 0x777 },
+        BEHAVIOUR | D3DCREATE_NOWINDOWCHANGES), 0);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0, true]);
 });
 
 test('a device with no window of its own presents into the focus window', ()=>{

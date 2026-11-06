@@ -1182,6 +1182,7 @@ export function createGraphicsModule(){
                 // A full-screen Direct3D 8 or 9 device's windows: user32's own
                 // calls on them, and a window procedure of the device's.
                 user32: (/** @type {string} */ name)=>win32.user32?.(name),
+                cover: (/** @type {number} */ hwnd)=>win32.coverWindow?.(hwnd),
                 procedure: (/** @type {string} */ name,
                     /** @type {(args: number[]) => unknown} */ handler)=>
                     bridge.register(`<${name}>`, { argBytes: 16, handler }),

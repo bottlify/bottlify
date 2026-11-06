@@ -88,6 +88,11 @@ const WM_RBUTTONUP = 0x0205;
 const WM_CONTEXTMENU = 0x007b;
 const WS_EX_NOPARENTNOTIFY = 0x00000004;
 const SWP_NOCLIENTMOVE = 0x1000;
+/** A minimised or maximised state changed: WM_SIZE told with it whatever the size did. */
+const SWP_STATECHANGED = 0x8000;
+const SWP_FRAMECHANGED = 0x0020;
+/** Where Windows keeps a minimised top-level window: off the screen (WINDOWPLACEMENT). */
+const ICON_PLACE = -32000;
 const WM_NCCREATE = 0x0081;
 const WM_CREATE = 0x0001;
 const WM_CLOSE = 0x0010;
@@ -597,6 +602,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           The top-level windows bottom to top, for the screen to be composed of.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
+ * @property {(hwnd: number) => void} cover
+ *           Makes a window the one a full-screen device presents into, its
+ *           frame taking no room.
  * @property {() => number} active
  *           The active top-level window -- what GetForegroundWindow answers --
  *           or zero while there is none.
@@ -3912,6 +3920,39 @@ export function createWindowFunctions(host){
         /** EVENT_OBJECT_CREATE, once WM_CREATE has let the window be. */
         const made = ()=>winEvent(EVENT_OBJECT_CREATE, record.hwnd, OBJID_WINDOW, thread);
         /**
+         * A window made maximised or minimised is made in its normal place
+         * and then put in that state, as ShowWindow would, before its parent
+         * is told of it and before it is shown (win32u create_window; msg.c
+         * WmCreateMaxPopupSeq).
+         */
+        const minMaxed = ()=>{
+            const state = record.style & (WS_MINIMIZE | WS_MAXIMIZE);
+            if (state === 0 || !live(record.hwnd))
+            {
+                return 0;
+            }
+            record.style = (record.style & ~(WS_MINIMIZE | WS_MAXIMIZE)) >>> 0;
+            const minimising = (state & WS_MINIMIZE) !== 0;
+            return andThen(askCbt(HCBT_MINMAX, record.hwnd, minimising ? SW_MINIMIZE
+                : SW_SHOWMAXIMIZED, thread), refused=>{
+                if ((refused | 0) !== 0 || !live(record.hwnd))
+                {
+                    return 0;
+                }
+                const normal = placeOf(record);
+                return andThen(minimising ? (isChild(record) ? normal : iconPlace())
+                    : maximisedPlace(record, thread), place=>{
+                    record.style = (record.style | state) >>> 0;
+                    record.normalPlace = normal;
+                    const SWP_NOZORDER = 0x0004;
+                    const SWP_NOACTIVATE = 0x0010;
+                    return placeWindow([record.hwnd, 0, place.x, place.y, place.width,
+                        place.height, SWP_FRAMECHANGED | SWP_STATECHANGED | SWP_NOZORDER
+                        | SWP_NOACTIVATE], thread);
+                });
+            });
+        };
+        /**
          * The window, shown and then activated when it was created visible.
          * Made without being told its size, it is told when first shown.
          */
@@ -3924,7 +3965,8 @@ export function createWindowFunctions(host){
         // is on the record.
         /** EVENT_OBJECT_CREATE, then the parents told of the child. */
         const told = ()=>andThen(made(), ()=>parentNotify(record, WM_CREATE, thread));
-        const onThisSide = ()=>(record.wndProc === 0 ? andThen(told(), activated)
+        const onThisSide = ()=>(record.wndProc === 0
+            ? andThen(minMaxed(), ()=>andThen(told(), activated))
             : andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
             }, thread), created=>{
@@ -3932,7 +3974,7 @@ export function createWindowFunctions(host){
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
-                return andThen(told(), activated);
+                return andThen(minMaxed(), ()=>andThen(told(), activated));
             }));
         /** Whether the window's procedure is still one this side runs. */
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
@@ -4049,7 +4091,7 @@ export function createWindowFunctions(host){
                         if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
                         {
                             record.needsSize = true;
-                            return done(record.hwnd);
+                            return andThen(minMaxed(), ()=>done(record.hwnd));
                         }
                         const client = geometry.clientRect(record);
                         return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
@@ -4057,12 +4099,13 @@ export function createWindowFunctions(host){
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                         ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                             (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                        ()=>andThen(parentNotify(record, WM_CREATE, thread), ()=>(!visible
+                        ()=>andThen(minMaxed(), ()=>andThen(parentNotify(record, WM_CREATE,
+                            thread), ()=>(!visible
                             ? done(record.hwnd)
                             : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
                                 ()=>andThen(reveal(), ()=>andThen(activateCreated(record, thread),
                                     ()=>andThen(eraseShown(thread),
-                                        ()=>done(record.hwnd)))))))));
+                                        ()=>done(record.hwnd))))))))));
                     })))));
         });
     };
@@ -5751,7 +5794,7 @@ export function createWindowFunctions(host){
                 // What SetWindowPos did, told as the two messages a program
                 // lays itself out by: the client area's corner -- on the
                 // screen, or in the parent's client area for a child -- if it
-                // moved, and its size if that changed.
+                // moved, and its size if that or the window's state changed.
                 const word = (message.lParam >>> 0) === 0 ? null
                     : host.readMemory((message.lParam >>> 0) + L.WINDOWPOS.flags, 4);
                 const flags = word ? (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) : 0;
@@ -5762,7 +5805,8 @@ export function createWindowFunctions(host){
                 const y = client.top - base.top;
                 const moved = (flags & SWP_NOCLIENTMOVE) !== 0 ? 0 : send(record.hwnd, WM_MOVE, 0,
                     ((y & 0xffff) << 16 | x & 0xffff) >>> 0, thread);
-                return andThen(moved, ()=>andThen((flags & SWP_NOCLIENTSIZE) !== 0 ? 0
+                return andThen(moved, ()=>andThen((flags & SWP_NOCLIENTSIZE) !== 0
+                    && (flags & SWP_STATECHANGED) === 0 ? 0
                     : send(record.hwnd, WM_SIZE, (record.style & WS_MINIMIZE) !== 0 ? SIZE_MINIMIZED
                         : (record.style & WS_MAXIMIZE) !== 0 ? SIZE_MAXIMIZED : SIZE_RESTORED,
                     (((client.bottom - client.top) & 0xffff) << 16
@@ -6704,6 +6748,21 @@ export function createWindowFunctions(host){
          * @param {number} width @param {number} height
          * @param {{ announce?: boolean }} [how]
          */
+        /**
+         * Makes a window the one a full-screen device presents into: its
+         * frame takes no room, so its client area is the whole of it, as the
+         * picture is the whole mode. Nothing moves; the device places it.
+         *
+         * @param {number} hwnd
+         */
+        cover: hwnd=>{
+            const record = live(hwnd);
+            if (record && !record.frameless)
+            {
+                record.frameless = true;
+                tell(record);
+            }
+        },
         place: (hwnd, x, y, width, height, how = {})=>{
             const record = live(hwnd);
             if (!record)
@@ -6862,6 +6921,19 @@ export function createWindowFunctions(host){
         return activate(next ? next.hwnd : 0, { thread });
     };
 
+    /** @param {any} record */
+    const placeOf = record=>({ x: record.x, y: record.y, width: record.width,
+        height: record.height });
+
+    /** A minimised top-level window's place: off the screen, the minimised metrics' size. */
+    const iconPlace = ()=>{
+        const SM_CXMINIMIZED = 57;
+        const SM_CYMINIMIZED = 58;
+        return { x: ICON_PLACE, y: ICON_PLACE,
+            width: table.GetSystemMetrics.handler([SM_CXMINIMIZED]),
+            height: table.GetSystemMetrics.handler([SM_CYMINIMIZED]) };
+    };
+
     /**
      * ShowWindow past the hook: WM_SHOWWINDOW when the visibility changes,
      * then SetWindowPos with the command's flags -- which paints, activates
@@ -6894,11 +6966,25 @@ export function createWindowFunctions(host){
         {
             return wasVisible ? 1 : 0;
         }
-        const flags = showFlags(record, cmdShow);
-        // Where the window goes, asked before it is told it is shown; a
-        // restore puts it back where it was before it was maximised.
-        const target = maximising ? maximisedPlace(record, thread)
-            : unmaximising ? record.normalPlace ?? null : null;
+        // A change of state is a frame change, and WM_WINDOWPOSCHANGED says
+        // so: the default procedure tells WM_SIZE with the new state from it
+        // even where the client kept its size (win32u show_window).
+        const flags = showFlags(record, cmdShow)
+            | (stateChanges ? SWP_FRAMECHANGED | SWP_STATECHANGED : 0);
+        const minimising = stateChanges && MINIMISING.has(cmdShow);
+        const unminimising = stateChanges && minimised && !minimising;
+        const backMaximised = unminimising && record.restoresMaximised;
+        // Where a restore puts the window: kept while it is maximised or
+        // minimised, its own place when it is neither.
+        const normal = maximised || minimised
+            ? record.normalPlace ?? placeOf(record) : placeOf(record);
+        // Where the window goes, asked before it is told it is shown: a
+        // top-level window minimised goes off the screen, where Windows
+        // keeps its icons (WINDOWPLACEMENT ptMinPosition, -32000), a child
+        // stays where it is; restored, it goes back where it was.
+        const target = maximising || backMaximised ? maximisedPlace(record, thread)
+            : minimising ? (isChild(record) ? placeOf(record) : iconPlace())
+                : unmaximising || unminimising ? normal : null;
         // Sent, and then chained onto whatever follows it: a procedure the
         // bridge has to run answers with a promise, so returning this call's
         // own result before it has answered hands the host call back to the
@@ -6929,10 +7015,8 @@ export function createWindowFunctions(host){
                 return placeWindow([record.hwnd, 0, 0, 0, 0, 0, flags], thread);
             }
             const SWP_NOSIZE_NOMOVE = 0x0003;
-            const SWP_FRAMECHANGED = 0x0020;
-            record.normalPlace = maximising
-                ? { x: record.x, y: record.y, width: record.width, height: record.height }
-                : null;
+            record.normalPlace = (record.style & (WS_MINIMIZE | WS_MAXIMIZE)) !== 0
+                ? normal : null;
             return placeWindow([record.hwnd, 0, place.x, place.y, place.width, place.height,
                 (flags & ~SWP_NOSIZE_NOMOVE) | SWP_FRAMECHANGED], thread);
         }));

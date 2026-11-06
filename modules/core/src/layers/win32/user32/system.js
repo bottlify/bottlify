@@ -514,6 +514,10 @@ const WS_SYSMENU = 0x00080000;
 const WS_MINIMIZEBOX = 0x00020000;
 const WS_MAXIMIZEBOX = 0x00010000;
 const WS_EX_TOOLWINDOW = 0x00000080;
+const WS_EX_TOPMOST = 0x00000008;
+/** SetWindowPos's hWndInsertAfter: into the topmost band, out of it. */
+const HWND_TOPMOST = 0xffffffff;
+const HWND_NOTOPMOST = 0xfffffffe;
 const WS_EX_CONTEXTHELP = 0x00000400;
 /** TITLEBARINFO: cbSize, rcTitleBar, rgstate[6] (the bar, a reserved slot, four buttons). */
 const TITLEBARINFO_SIZE = 44;
@@ -1089,13 +1093,24 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
         let restacked = false;
+        // HWND_TOPMOST and HWND_NOTOPMOST put a top-level window in the
+        // band above the others or out of it, which WS_EX_TOPMOST says.
+        const band = (record.style & WS_CHILD) !== 0 || (flags & SWP_NOZORDER) !== 0 ? null
+            : (after >>> 0) === HWND_TOPMOST ? true : (after >>> 0) === HWND_NOTOPMOST ? false
+                : null;
+        if (band !== null && ((record.exStyle & WS_EX_TOPMOST) !== 0) !== band)
+        {
+            record.exStyle = (band ? record.exStyle | WS_EX_TOPMOST
+                : record.exStyle & ~WS_EX_TOPMOST) >>> 0;
+            restacked = true;
+        }
         if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
         {
             restacked = host.restack(record, after >>> 0, false) !== false;
         }
         else if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM)
         {
-            restacked = host.raise(record, false) !== false;
+            restacked = host.raise(record, false) !== false || restacked;
         }
         host.tell?.(record);
         const isShown = host.shown(record);

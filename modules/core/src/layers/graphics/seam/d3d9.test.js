@@ -495,7 +495,7 @@ test('a fullscreen device gives the display back to the registry mode at its las
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
     assert.equal(h.release(device), 0);
     assert.deepEqual(h.resolutions.at(-1), [1280, 1024, undefined, undefined]);
-    assert.equal(h.resolutions.length, 2);
+    assert.equal(h.resolutions.length, 3, 'the mode, the window placed in it, the mode given back');
     h.release(root);
 });
 
@@ -510,6 +510,21 @@ test('a fullscreen device names the window it takes with it', ()=>{
     assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true]);
 });
 
+test('D3DCREATE_NOWINDOWCHANGES sets the mode and leaves the window as it is', ()=>{
+    // Wine's test_window_style: the device window keeps its rectangle.
+    const D3DCREATE_NOWINDOWCHANGES = 0x800;
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: 0x777 },
+    D3DCREATE.HARDWARE_VERTEXPROCESSING | D3DCREATE_NOWINDOWCHANGES);
+    assert.notEqual(device, 0);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.resolutions.map(([w, hh, window])=>[w, hh, window]),
+        [[640, 480, undefined], [640, 480, 0], [640, 480, 0]],
+        'the mode, and no window named to place');
+});
+
 test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
     // A mode switch resizes the window and the program hears WM_SIZE for it
     // once its device exists. A window already at the mode's size hears
@@ -518,11 +533,11 @@ test('a fullscreen device tells its window the mode at its first frame, once', (
     const root = h.create();
     const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
         Windowed: 0, hDeviceWindow: 0x777 });
-    assert.equal(h.resolutions.length, 1, 'creation placed the window');
+    assert.equal(h.resolutions.length, 2, 'creation set the mode and placed the window');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true, 'announced']);
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
-    assert.equal(h.resolutions.length, 2, 'the second frame says nothing');
+    assert.equal(h.resolutions.length, 3, 'the second frame says nothing');
 
     const windowed = h.createDevice(h.create()).device;
     const before = h.resolutions.length;
@@ -1408,7 +1423,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)],
         [0xffff0000, 0xffffffff], 'two bytes, and nothing past them');
     assert.equal(onOcclusion('GetData', [data, 8, 1]), D3D_OK);
-    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0xffffffff]);
+    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0],
+        'eight bytes of room take the count as 64 bits (test_occlusion_query)');
     assert.equal(h.release(occlusion), 0);
     assert.equal(h.release(device), 0);
     h.release(root);
@@ -2680,10 +2696,13 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
     let polledInGuest = 0;
     /** @param {(...args: any[]) => number} js @param {string} name @param {number[]} args */
     const both = (js, name, args)=>{
+        // Both words: a count is 64 bits where there is room for them.
         memory.writeU32(data, 0xdeadbeef);
+        memory.writeU32(data + 4, 0xdeadbeef);
         const answer = js(guest, query, ...args) >>> 0;
-        const written = memory.readU32(data);
+        const written = [memory.readU32(data), memory.readU32(data + 4)];
         memory.writeU32(data, 0xdeadbeef);
+        memory.writeU32(data + 4, 0xdeadbeef);
         const hostAnswer = h.box.trap(query, name, args);
         if (answer === HANDED >>> 0)
         {
@@ -2695,8 +2714,15 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
             polledInGuest++;
         }
         assert.equal(answer, hostAnswer >>> 0, `${name}(${args})`);
-        assert.equal(written, memory.readU32(data), `${name}(${args}) writes`);
+        assert.deepEqual(written, [memory.readU32(data), memory.readU32(data + 4)],
+            `${name}(${args}) writes`);
+        if (name === 'GetData' && answer === D3D_OK && args[0] !== 0 && args[1] === 8)
+        {
+            assert.equal(written[1], 0, 'a count with room for 64 bits has its high word');
+            wide++;
+        }
     };
+    let wide = 0;
     for (let round = 0; round < 600; round++)
     {
         const roll = next() % 10;
@@ -2723,6 +2749,7 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
         }
     }
     assert.ok(measured > 20, `${measured} measurements`);
+    assert.ok(wide > 5, `${wide} counts read into eight bytes`);
     assert.ok(polledInGuest > 50 && inGuest > polledInGuest,
         `${polledInGuest} polls not done and ${inGuest - polledInGuest} counts in the guest`);
 });

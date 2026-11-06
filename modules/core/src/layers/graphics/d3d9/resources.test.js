@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, blockAligned,
-    offsetOfRect, surfaceBytes, surfacePitch,
+    offsetOfRect, pitchedRows, surfaceBytes, surfacePitch, tightRows,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
 import {
@@ -589,10 +589,44 @@ test('a DXTn top level must be whole blocks; ATI1 and ATI2 may be any size', ()=
     assert.equal(surfacePitch(D3DFMT.ATI2, 257), 65 * 16);
 });
 
-test('an uncompressed format is measured exactly as it always was', ()=>{
+test('an uncompressed row starts on four bytes', ()=>{
+    // Wine's d3d9 test_surface_alignment: a 5-pixel R5G6B5 row is 12 bytes.
     assert.equal(surfacePitch(D3DFMT.A8R8G8B8, 10), 40);
+    assert.equal(surfacePitch(D3DFMT.R5G6B5, 5), 12);
     assert.equal(surfaceBytes(D3DFMT.R5G6B5, 10, 4), 80);
-    assert.equal(surfaceBytes(D3DFMT.A8, 7, 3), 21);
+    assert.equal(surfaceBytes(D3DFMT.A8, 7, 3), 24);
+    // What an upload reads, and a read-back writes, is rows without the gap.
+    const pitched = Uint8Array.of(1, 2, 3, 0, 4, 5, 6, 0);
+    const tight = tightRows(pitched, D3DFMT.L8, 3, 2);
+    assert.deepEqual([...tight], [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual([...pitchedRows(tight, D3DFMT.L8, 3, 2)], [...pitched]);
+    const even = Uint8Array.of(1, 2, 3, 4);
+    assert.equal(tightRows(even, D3DFMT.L8, 4, 1), even, 'a width with no gap is the bytes');
+    assert.deepEqual([...tightRows(Uint8Array.of(1, 2, 3, 4, 5, 6), D3DFMT.L8, 3, 2, 3)],
+        [1, 2, 3, 4, 5, 6], 'a surface\'s own pitch');
+});
+
+test('a surface in the program\'s own memory has tight rows', ()=>{
+    // Wine's d3d9ex test_user_memory: an L8 texture 33 wide locks at 33.
+    const surface = createSurface({
+        type: SURFACE_TYPE.PLAIN, width: 33, height: 33, format: D3DFMT.L8,
+        pool: D3DPOOL.SYSTEMMEM, usage: 0, base: 0x1000, count: createReferenceCount(),
+        tight: true,
+    });
+    const locked = { pBits: 0, Pitch: 0 };
+    assert.equal(surface.LockRect(locked, { left: 1, top: 2, right: 3, bottom: 4 }, 0), D3D_OK);
+    assert.equal(locked.Pitch, 33);
+    assert.equal(locked.pBits - 0x1000, 2 * 33 + 1);
+    assert.equal(surface.UnlockRect(), D3D_OK);
+    const own = createSurface({
+        type: SURFACE_TYPE.PLAIN, width: 33, height: 33, format: D3DFMT.L8,
+        pool: D3DPOOL.SYSTEMMEM, usage: 0, base: 0x1000, count: createReferenceCount(),
+    });
+    assert.equal(own.pitch, 36, 'the runtime\'s own memory starts each row on four bytes');
+    const move = rectMoveOf(surface, { left: 0, top: 1, right: 33, bottom: 2 }, own,
+        { x: 0, y: 1 });
+    assert.deepEqual([move.from - 0x1000, move.fromPitch, move.to - 0x1000, move.toPitch],
+        [33, 33, 36, 36], 'a copy between them goes by each one\'s own');
 });
 
 test('a rectangle into a compressed surface is addressed by block', ()=>{
@@ -805,6 +839,11 @@ for (const { format, name, pack } of [
             {
                 const at = (y * width + x) * 4;
                 expected.push(...pack([...pixels.subarray(at, at + 4)]));
+            }
+            // Each row starts on four bytes: R5G6B5's ten are followed by two of nothing.
+            while (expected.length % pitch !== 0)
+            {
+                expected.push(0);
             }
         }
         assert.deepEqual([...arrived], expected);

@@ -549,7 +549,10 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         {
             sweepHeld();
         }
-        return left;
+        // What the objects that went owe the program -- their own calls into
+        // it -- is made before it hears the answer.
+        const owed = object.afterRelease?.();
+        return typeof owed?.then === 'function' ? owed.then(()=>left) : left;
     }
 
     /**

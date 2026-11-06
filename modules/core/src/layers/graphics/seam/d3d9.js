@@ -203,6 +203,10 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [deps.callGuest]  A call into the program: its own objects' AddRef and
+ *     Release, which private data holds them by.
+ * @param {() => any} [deps.currentThread]
  * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
  *        A full-screen device's focus and device windows (`focus.js`).
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
@@ -234,7 +238,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  */
 export function createDirect3D9Seam(
     { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, resolution,
-        identity,
+        identity, callGuest, currentThread,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
@@ -280,7 +284,8 @@ export function createDirect3D9Seam(
         : D3DDEVICE_CREATION_PARAMETERS;
     const LOCKED_RECT = long ? D3DLOCKED_RECT64 : D3DLOCKED_RECT;
     const LOCKED_BOX = long ? D3DLOCKED_BOX64 : D3DLOCKED_BOX;
-    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA,
+        callGuest, currentThread });
     /**
      * The rate of the mode the device runs in: the one a full-screen device
      * asked for, when the display lists it, else the display's own. A program
@@ -1451,8 +1456,13 @@ export function createDirect3D9Seam(
             const write = hr=>{
                 if (hr === D3D_OK && (data >>> 0) !== 0 && held.value !== undefined)
                 {
-                    const bytes = new Uint8Array(new Uint32Array([held.value >>> 0]).buffer);
-                    memory.writeMemory(data >>> 0, bytes.subarray(0, Math.min(4, size >>> 0)));
+                    // An occlusion count is 64 bits where the caller has room
+                    // for them, past four billion saturated in its low word
+                    // (Wine's test_occlusion_query accepts either).
+                    const wide = query.type === D3DQUERYTYPE_OCCLUSION ? 8 : 4;
+                    const bytes = new Uint8Array(new Uint32Array([
+                        Math.min(held.value, 0xffffffff) >>> 0, 0]).buffer);
+                    memory.writeMemory(data >>> 0, bytes.subarray(0, Math.min(wide, size >>> 0)));
                 }
                 return hr;
             };
@@ -1957,7 +1967,8 @@ export function createDirect3D9Seam(
                 announced.add(device);
                 resolution?.(lastParameters.backBufferWidth >>> 0,
                     lastParameters.backBufferHeight >>> 0, {
-                        window: deviceWindow, fullscreen: true, announce: true,
+                        window: windowsOf.get(device)?.noWindowChanges ? 0 : deviceWindow,
+                        fullscreen: true, announce: true,
                     });
             }
             return pacedPresent(device.Present());
@@ -3100,7 +3111,9 @@ export function createDirect3D9Seam(
         }));
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, synced(deviceMethods), deviceGuests,
-            undefined, IN_PLACE),
+            (/** @type {any} */ device)=>privateData.sweep(holder=>(owners.get(holder)
+                ?? (holder.container ? owners.get(holder.container) : null)) === device),
+            IN_PLACE),
     ];
 
     /**
@@ -3824,8 +3837,25 @@ export function createDirect3D9Seam(
         const width = parameters.backBufferWidth >>> 0;
         const height = parameters.backBufferHeight >>> 0;
         const how = windowsOf.get(device);
+        const found = screen();
+        const mode = !parameters.windowed && (found.width !== width || found.height !== height)
+            ? { bitsPerPixel: found.bitsPerPixel ?? 32 } : null;
+        if (!parameters.windowed)
+        {
+            // The mode first, which the windows placed in it then hear.
+            resolution?.(width, height);
+        }
         const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
-            fullscreen: !parameters.windowed, width, height, created: !how.taken }) : 0;
+            fullscreen: !parameters.windowed, width, height, created: !how.taken, mode,
+            reapply: ()=>{
+                const shown = screen();
+                if (shown.width === width && shown.height === height)
+                {
+                    return null;
+                }
+                resolution?.(width, height);
+                return { bitsPerPixel: shown.bitsPerPixel ?? 32 };
+            } }) : 0;
         if (how)
         {
             how.taken = true;
@@ -3852,8 +3882,12 @@ export function createDirect3D9Seam(
             };
         }
         unshown.delete(device);
-        resolution?.(width, height, { window, fullscreen: true });
-        return taken;
+        // D3DCREATE_NOWINDOWCHANGES leaves the window's size to the program.
+        return andThen(taken, ()=>{
+            resolution?.(width, height, { window: how?.noWindowChanges ? 0 : window,
+                fullscreen: true });
+            return 0;
+        });
     };
 
     /**

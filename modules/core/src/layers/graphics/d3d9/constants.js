@@ -28,6 +28,8 @@ export const D3DERR_NOTFOUND = 0x88760866;
 export const D3DOK_NOAUTOGEN = 0x0876086f;
 /** Direct3D 9Ex's answer for a device whose adapter is gone. */
 export const D3DERR_DEVICEREMOVED = 0x88760870;
+/** Direct3D 9Ex's success for a full-screen device whose application is not the active one. */
+export const S_PRESENT_OCCLUDED = 0x08760878;
 /** E_FAIL: what a vertex declaration Windows cannot lay out is answered. */
 export const E_FAIL = 0x80004005;
 
@@ -543,9 +545,60 @@ export function surfacePitch(format, width){
     const { blockBytes, blockSize } = info;
     if (blockBytes === undefined || blockSize === undefined)
     {
-        return width * info.bytesPerPixel;
+        // A row of pixels starts on a four-byte boundary, which a program
+        // may count on (Wine's test_surface_alignment: a 5-pixel R5G6B5 row
+        // is 12 bytes).
+        return Math.ceil(width * info.bytesPerPixel / 4) * 4;
     }
     return Math.ceil(width / blockSize) * blockBytes;
+}
+
+/**
+ * Rows laid at `surfacePitch` taken out tight, one after another, as a
+ * texel upload reads them; the bytes themselves where the two agree, which
+ * is every width but the odd ones of formats under four bytes a pixel.
+ *
+ * @param {Uint8Array} bytes  `rows` rows at the pitch.
+ * @param {number} format @param {number} width @param {number} rows
+ * @param {number} [pitch]  The surface's own, where it is not `surfacePitch`'s.
+ * @returns {Uint8Array}
+ */
+export function tightRows(bytes, format, width, rows, pitch = surfacePitch(format, width)){
+    const info = FORMAT_INFO[format];
+    const row = width * (info?.bytesPerPixel ?? 0);
+    if (!info || info.blockSize !== undefined || row === pitch || row === 0)
+    {
+        return bytes;
+    }
+    const out = new Uint8Array(row * rows);
+    for (let y = 0; y < rows; y++)
+    {
+        out.set(bytes.subarray(y * pitch, y * pitch + row), y * row);
+    }
+    return out;
+}
+
+/**
+ * Tight rows laid out at `surfacePitch`, as a read-back writes them into a
+ * surface's bytes: `tightRows` the other way.
+ *
+ * @param {Uint8Array} bytes @param {number} format @param {number} width @param {number} rows
+ * @returns {Uint8Array}
+ */
+export function pitchedRows(bytes, format, width, rows){
+    const info = FORMAT_INFO[format];
+    const pitch = surfacePitch(format, width);
+    const row = width * (info?.bytesPerPixel ?? 0);
+    if (!info || info.blockSize !== undefined || row === pitch || row === 0)
+    {
+        return bytes;
+    }
+    const out = new Uint8Array(pitch * rows);
+    for (let y = 0; y < rows; y++)
+    {
+        out.set(bytes.subarray(y * row, y * row + row), y * pitch);
+    }
+    return out;
 }
 
 /**
@@ -567,11 +620,7 @@ export function surfaceBytes(format, width, height){
         return 0;
     }
     const { blockSize } = info;
-    if (blockSize === undefined)
-    {
-        return width * height * info.bytesPerPixel;
-    }
-    return surfacePitch(format, width) * Math.ceil(height / blockSize);
+    return surfacePitch(format, width) * Math.ceil(height / (blockSize ?? 1));
 }
 
 const reinterpret = new DataView(new ArrayBuffer(4));

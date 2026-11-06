@@ -324,6 +324,10 @@ const E_FAIL = 0x80004005 | 0;
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [deps.callGuest]  A call into the program: its own objects' AddRef and
+ *     Release, which private data holds them by.
+ * @param {() => any} [deps.currentThread]
  * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
  *        A full-screen device's focus and device windows (`focus.js`).
  *        The hardware behind the device, as the assembling caller knows it.
@@ -344,7 +348,7 @@ const E_FAIL = 0x80004005 | 0;
  */
 export function createDirect3D8Seam(
     { focus: focusWindows = null, publisher, memory, screen, allocate, allocateCode,
-        divergence, cursor, resolution, identity,
+        divergence, cursor, resolution, identity, callGuest, currentThread,
         windowClientSize, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         traps = new Set(), phases, ringBytes },
@@ -417,7 +421,8 @@ export function createDirect3D8Seam(
         const wait = presents.present(now(), interval);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
-    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
+    const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA,
+        callGuest, currentThread });
 
     /**
      * Each device's block (`shadow.js`): its command ring, the buffers its
@@ -2637,7 +2642,8 @@ export function createDirect3D8Seam(
     }));
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests,
-            undefined, IN_PLACE),
+            (/** @type {any} */ device)=>privateData.sweep(holder=>ownerOf(holder) === device),
+            IN_PLACE),
     ];
 
     /**
@@ -3195,8 +3201,25 @@ export function createDirect3D8Seam(
         const width = parameters.backBufferWidth >>> 0;
         const height = parameters.backBufferHeight >>> 0;
         const how = windowsOf.get(device);
+        const found = screen();
+        const mode = !parameters.windowed && (found.width !== width || found.height !== height)
+            ? { bitsPerPixel: found.bitsPerPixel ?? 32 } : null;
+        if (!parameters.windowed)
+        {
+            // The mode first, which the windows placed in it then hear.
+            resolution?.(width, height);
+        }
         const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
-            fullscreen: !parameters.windowed, width, height, created: !how.taken }) : 0;
+            fullscreen: !parameters.windowed, width, height, created: !how.taken, mode,
+            reapply: ()=>{
+                const shown = screen();
+                if (shown.width === width && shown.height === height)
+                {
+                    return null;
+                }
+                resolution?.(width, height);
+                return { bitsPerPixel: shown.bitsPerPixel ?? 32 };
+            } }) : 0;
         if (how)
         {
             how.taken = true;
@@ -3223,8 +3246,12 @@ export function createDirect3D8Seam(
             };
         }
         unshown.delete(device);
-        resolution?.(width, height, { window, fullscreen: true });
-        return taken;
+        // D3DCREATE_NOWINDOWCHANGES leaves the window's size to the program.
+        return andThen(taken, ()=>{
+            resolution?.(width, height, { window: how?.noWindowChanges ? 0 : window,
+                fullscreen: true });
+            return 0;
+        });
     };
 
     /**

@@ -34,7 +34,7 @@
 
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, offsetOfRect,
-    surfaceBytes, surfacePitch,
+    pitchedRows, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 import { halvesToStored, toHalf } from './half.js';
@@ -563,6 +563,7 @@ const D3DTEXF_LINEAR = 2;
 /**
  * @typedef {Object} Surface
  * @property {number} base            Byte address the surface's own storage starts at.
+ * @property {number} pitch           The bytes from one row to the next.
  * @property {string} kind            A SURFACE_TYPE.
  * @property {number} refCount
  * @property {boolean} destroyed      Whether its last reference has gone for good.
@@ -631,6 +632,10 @@ const BI_BITFIELDS = 3;
  * @property {number} base
  * @property {ReferenceCount} count
  * @property {boolean} [lockable]     Only a render target is asked this at creation.
+ * @property {boolean} [tight]        Rows with no gap between them, as in memory a Direct3D
+ *           9Ex program hands over for the surface (Wine's d3d9ex test_user_memory: an
+ *           L8 row of 33 pixels is 33 bytes), where a surface of the runtime's own starts
+ *           each row on four bytes.
  * @property {boolean} [forgivesDoubleUnlock]
  * @property {boolean} [rejectsMalformedRects]
  *           Whether a lock rectangle outside the surface, or with its edges
@@ -674,7 +679,10 @@ const BI_BITFIELDS = 3;
  * @returns {Surface}
  */
 export function createSurface(options){
-    const pitch = surfacePitch(options.format, options.width);
+    const pitch = options.tight === true
+        ? options.width * (FORMAT_INFO[options.format]?.bytesPerPixel ?? 0) || surfacePitch(
+            options.format, options.width)
+        : surfacePitch(options.format, options.width);
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
@@ -709,6 +717,8 @@ export function createSurface(options){
     /** @type {Surface} */
     const self = counted({
         base: options.base,
+        /** The distance between its rows: `surfacePitch`, or tight in the program's memory. */
+        pitch,
         /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
         kind: options.type,
         /** A refused lock hands back a null address and a zero pitch (`clearsFailedLock`). */
@@ -952,8 +962,8 @@ export function rectMoveOf(source, rect, destination, point){
     const info = FORMAT_INFO[from.Format];
     const block = info.blockSize ?? 1;
     const blockBytes = info.blockBytes ?? info.bytesPerPixel;
-    const fromPitch = surfacePitch(from.Format, from.Width);
-    const toPitch = surfacePitch(to.Format, to.Width);
+    const fromPitch = source.pitch ?? surfacePitch(from.Format, from.Width);
+    const toPitch = destination.pitch ?? surfacePitch(to.Format, to.Width);
     return {
         from: source.base + Math.floor(rect.top / block) * fromPitch
             + Math.floor(rect.left / block) * blockBytes,
@@ -1077,7 +1087,7 @@ export function writePixels(surface, pixels, writeMemory){
     const wide = FORMAT_INFO[desc.Format].wide;
     if (wide)
     {
-        // Its rows lie at its pitch with nothing between them, as the read-back's do.
+        // Its rows lie tight in the read-back, and at its pitch in the surface.
         // A device that keeps 32-bit floats whole reads them back as they are stored.
         const count = desc.Width * desc.Height * wide.channels;
         if (wide.luminance)
@@ -1085,13 +1095,13 @@ export function writePixels(surface, pixels, writeMemory){
             // Four halves a texel on the GPU, the luminance in red.
             const halves = new Uint16Array(pixels.slice(0, count * 8).buffer);
             const red = Uint16Array.from({ length: count }, (_, index)=>halves[index * 4]);
-            writeMemory(surface.base,
-                halvesToStored(wide.stored, new Uint8Array(red.buffer), count));
+            writeMemory(surface.base, pitchedRows(halvesToStored(wide.stored,
+                new Uint8Array(red.buffer), count), desc.Format, desc.Width, desc.Height));
             return;
         }
-        writeMemory(surface.base, wide.stored === 'float' && pixels.length === count * 4
+        writeMemory(surface.base, pitchedRows(wide.stored === 'float' && pixels.length === count * 4
             ? pixels.subarray(0, count * 4)
-            : halvesToStored(wide.stored, pixels, count));
+            : halvesToStored(wide.stored, pixels, count), desc.Format, desc.Width, desc.Height));
         return;
     }
     // A four-byte surface is laid out exactly as the read-back is, rows at
@@ -1175,6 +1185,7 @@ export function levelExtent(size, level){
  * @property {(address: number) => void} [free]
  *     Gives a level's storage back when the last reference goes. Absent in a
  *     build whose storage is a fabricated address rather than guest memory.
+ * @property {boolean} [tight]  Its one level is the program's memory, its rows tight.
  * @property {boolean} [cube]
  * @property {boolean} [rejectsMalformedRects]  Passed to every level's surface.
  * @property {boolean} [strictFaces]  A cube's faces refuse a malformed rectangle in
@@ -1291,6 +1302,7 @@ export function createTexture(options){
             usage: options.usage,
             base: chainOf(face) + offsetOf(level),
             count,
+            tight: options.tight,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is
             // measured rather than reasoned about.

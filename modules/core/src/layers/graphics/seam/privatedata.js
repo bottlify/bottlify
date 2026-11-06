@@ -21,11 +21,18 @@
  * that expires once the surface's contents change.
  *
  * A pointer this layer did not publish -- one of the program's own objects --
- * is kept as the pointer it is, without a reference: taking one would be a
- * call into the program's AddRef, which nothing here makes.
+ * is held by a call into its own AddRef, on the calling thread, and let go
+ * of by its Release: at once where a call replaces or frees the entry, and
+ * once the Release that ended the holding object is done otherwise
+ * (`publisher.owe`). Windows makes these calls under the program's own x87
+ * control word (Wine's d3d8 and d3d9 test_fpu_setup).
  */
 
 import { createFields } from './structs.js';
+
+/** @param {unknown} value @param {(answer: any) => any} then */
+const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<unknown>} */ (value).then(then) : then(value));
 
 /** The flag that makes the data an interface pointer: D3DSPD_IUNKNOWN, DDSPD_IUNKNOWNPOINTER. */
 const IUNKNOWN = 0x1;
@@ -69,6 +76,7 @@ export const DDRAW_PRIVATE_DATA = Object.freeze({
  * @property {Uint8Array | null} bytes
  * @property {number} pointer   The interface pointer, for an interface entry.
  * @property {any} adapter      Who holds the reference that entry took, if it took one.
+ * @property {boolean} guest    Whether that reference is the program's object's own.
  * @property {number | null} stamp  The surface's uniqueness when a volatile entry was set.
  */
 
@@ -85,11 +93,40 @@ const keyOf = (memory, address)=>Array.from(memory.readMemory(address >>> 0, 16)
  * @param {any} deps.memory      readMemory/writeMemory.
  * @param {any} deps.publisher   From createPublisher: the way from a pointer to its object.
  * @param {PrivateDataRules} deps.rules
+ * @param {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [deps.callGuest]  A call into the program, for its own objects' AddRef and Release.
+ * @param {() => any} [deps.currentThread]
  */
-export function createPrivateData({ memory, publisher, rules }){
+export function createPrivateData({ memory, publisher, rules, callGuest, currentThread }){
     const fields = createFields(memory);
+    /**
+     * A program's object's AddRef (slot 1) or Release (slot 2), called as the
+     * program would call it.
+     *
+     * @param {number} pointer @param {1 | 2} slot @param {unknown} [thread]
+     * @returns {unknown}
+     */
+    const callUnknown = (pointer, slot, thread = currentThread?.())=>{
+        if (!callGuest)
+        {
+            return 0;
+        }
+        const table = fields.readU32(pointer >>> 0);
+        const entry = table === 0 ? 0 : fields.readU32(table + slot * 4);
+        return entry === 0 ? 0 : callGuest({ entry, args: [pointer >>> 0], thread });
+    };
+    /** Whether an entry holds a reference on one of the program's own objects. */
+    const holdsGuest = (/** @type {PrivateEntry | undefined} */ entry)=>entry?.guest === true;
     /** @type {WeakMap<object, Map<string, PrivateEntry>>} */
     const stores = new WeakMap();
+    /**
+     * The objects whose entries hold one of the program's objects, which a
+     * device going takes with it (`sweep`) though the program let go of them
+     * before -- a back buffer, which its device keeps.
+     *
+     * @type {Set<any>}
+     */
+    const holders = new Set();
 
     /** @param {object} object */
     const storeOf = object=>{
@@ -102,9 +139,15 @@ export function createPrivateData({ memory, publisher, rules }){
         return store;
     };
 
-    /** @param {PrivateEntry | undefined} entry */
+    /**
+     * The reference an entry took, given back now.
+     *
+     * @param {PrivateEntry | undefined} entry
+     * @returns {unknown} a promise while the program's Release runs
+     */
     const letGo = entry=>{
         entry?.adapter?.release();
+        return holdsGuest(entry) ? callUnknown(/** @type {PrivateEntry} */ (entry).pointer, 2) : 0;
     };
 
     /** @param {PrivateEntry} entry */
@@ -132,7 +175,7 @@ export function createPrivateData({ memory, publisher, rules }){
                     return rules.invalid;
                 }
                 /** @type {PrivateEntry} */
-                const entry = { bytes: null, pointer: 0, adapter: null, stamp: null };
+                const entry = { bytes: null, pointer: 0, adapter: null, stamp: null, guest: false };
                 if ((flags & IUNKNOWN) !== 0)
                 {
                     if ((size >>> 0) !== 4)
@@ -141,6 +184,7 @@ export function createPrivateData({ memory, publisher, rules }){
                     }
                     entry.pointer = data >>> 0;
                     entry.adapter = hold(entry.pointer);
+                    entry.guest = !entry.adapter && entry.pointer !== 0 && !!callGuest;
                 }
                 else
                 {
@@ -152,10 +196,18 @@ export function createPrivateData({ memory, publisher, rules }){
                 }
                 const store = storeOf(object);
                 const key = keyOf(memory, guid);
-                const before = store.get(key);
-                store.set(key, entry);
-                letGo(before);
-                return rules.ok;
+                const thread = currentThread?.();
+                // The new reference first, then the old one given back, as a
+                // program's own object may be both.
+                return andThen(entry.guest ? callUnknown(entry.pointer, 1, thread) : 0, ()=>{
+                    const before = store.get(key);
+                    store.set(key, entry);
+                    if (entry.guest)
+                    {
+                        holders.add(object);
+                    }
+                    return andThen(letGo(before), ()=>rules.ok);
+                });
             },
 
             /** @param {any} object @param {number[]} args */
@@ -202,6 +254,11 @@ export function createPrivateData({ memory, publisher, rules }){
                     if (rules.readTakesReference)
                     {
                         entry.adapter?.addRef();
+                        if (entry.guest)
+                        {
+                            fields.writeU32(sizeAt >>> 0, size);
+                            return andThen(callUnknown(entry.pointer, 1), ()=>rules.ok);
+                        }
                     }
                 }
                 fields.writeU32(sizeAt >>> 0, size);
@@ -222,9 +279,24 @@ export function createPrivateData({ memory, publisher, rules }){
                     return rules.notFound;
                 }
                 store.delete(key);
-                letGo(entry);
-                return rules.ok;
+                return andThen(letGo(entry), ()=>rules.ok);
             },
+        },
+
+        /**
+         * A device went, and with it the objects it kept: what their entries
+         * held of the program's goes too.
+         *
+         * @param {(holder: any) => boolean} gone  Whether an object went with it.
+         */
+        sweep(gone){
+            for (const holder of [...holders])
+            {
+                if (holder.destroyed === true || gone(holder))
+                {
+                    this.released(holder);
+                }
+            }
         },
 
         /**
@@ -235,9 +307,15 @@ export function createPrivateData({ memory, publisher, rules }){
         released(object){
             const store = stores.get(object);
             stores.delete(object);
+            holders.delete(object);
             for (const entry of store?.values() ?? [])
             {
-                letGo(entry);
+                entry.adapter?.release();
+                if (holdsGuest(entry))
+                {
+                    publisher.owe?.((/** @type {unknown} */ thread)=>
+                        callUnknown(entry.pointer, 2, thread));
+                }
             }
         },
     };
