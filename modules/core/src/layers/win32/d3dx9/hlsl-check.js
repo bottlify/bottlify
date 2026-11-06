@@ -24,9 +24,9 @@
  */
 
 import {
-    BOOL, FLOAT, INT, RANK, STRING, arrayOf, baseOf, componentsOf, conversionRank, fromTypeRef,
-    flatBases, isNumeric, matrixOf, samplerOf, sameType, scalarCount, scalarOf, structOf,
-    typeToString, vectorOf, withBase,
+    BOOL, FLOAT, INT, RANK, STRING, UINT, VOID, arrayOf, baseOf, componentsOf, conversionRank,
+    fromTypeRef, flatBases, isNumeric, matrixOf, samplerOf, sameType, scalarCount, scalarOf,
+    structOf, typeToString, vectorOf, withBase,
 } from './hlsl-types.js';
 import { isIntrinsic, resolveIntrinsic } from './hlsl-intrinsics.js';
 import { createEvaluator } from './hlsl-eval.js';
@@ -62,14 +62,17 @@ const COMPOUND = new Set(['+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '|='
 
 /**
  * @param {Program} program
- * @param {{ entry?: string, rowMajor?: boolean, bodies?: boolean }} [options]   `bodies`: false
- *     to check every declaration but no function's body -- an effect, whose bodies are checked
- *     by the compile of each entry point it names.
+ * @param {{ entry?: string, rowMajor?: boolean, bodies?: boolean, sm4?: boolean }} [options]
+ *     `bodies`: false to check every declaration but no function's body - an effect, whose
+ *     bodies are checked by the compile of each entry point it names. `sm4`: the dialect of
+ *     Shader Model 4, where `uint` is a type of its own and a texture is an object with
+ *     methods (`tex.Sample(s, uv)`, `tex.Load(i)`, `tex[i]`).
  * @returns {{ module: Module, diagnostics: Diagnostic[] }}
  */
 export function check(program, options = {}){
     /** @type {Diagnostic[]} */
     const diagnostics = [];
+    const sm4 = options.sm4 === true;
     let nextId = 1;
     /** @type {Map<string, Type>} */
     const structs = new Map();
@@ -134,12 +137,13 @@ export function check(program, options = {}){
 
     /** @param {import('./hlsl-parser.js').TypeRef} ref @returns {Type} */
     function typeOf(ref){
-        const t = fromTypeRef(ref, name=>structs.get(name) ?? typedefs.get(name));
+        const t = fromTypeRef(ref, name=>structs.get(name) ?? typedefs.get(name), sm4);
         if (!t)
         {
             return fail('X3000', `unrecognized identifier '${ref.name}'`, ref.pos);
         }
-        return t;
+        // A comparison sampler is a kind of its own only where a texture says which it takes.
+        return sm4 && ref.comparison ? samplerOf('comparison') : t;
     }
 
     /**
@@ -234,7 +238,7 @@ export function check(program, options = {}){
      * shape of the other, vectors and matrices shrink to the smaller, a vector and a matrix do
      * not meet.
      *
-     * @param {'bool' | 'int' | 'float'} base @param {Type} ta @param {Type} tb
+     * @param {import('./hlsl-types.js').Base} base @param {Type} ta @param {Type} tb
      * @param {Position} pos
      * @returns {Type}
      */
@@ -287,13 +291,13 @@ export function check(program, options = {}){
      * The widest element type of two numeric types, a bool being the narrowest.
      *
      * @param {Type} ta @param {Type} tb
-     * @returns {'bool' | 'int' | 'float'}
+     * @returns {import('./hlsl-types.js').Base}
      */
     function widest(ta, tb){
         const a = baseOf(ta);
         const b = baseOf(tb);
-        return a === 'float' || b === 'float' ? 'float' : a === 'int' || b === 'int' ? 'int'
-            : 'bool';
+        return a === 'float' || b === 'float' ? 'float' : a === 'uint' || b === 'uint' ? 'uint'
+            : a === 'int' || b === 'int' ? 'int' : 'bool';
     }
 
     /**
@@ -308,7 +312,8 @@ export function check(program, options = {}){
         switch (op)
         {
             case '+': case '-': case '*': case '/': case '%': {
-                const base = widest(ta, tb) === 'float' ? 'float' : 'int';
+                const wide = widest(ta, tb);
+                const base = wide === 'float' || wide === 'uint' ? wide : 'int';
                 const t = shapeType(base, ta, tb, pos);
                 return { opType: t, type: t, integerOnly: false };
             }
@@ -325,7 +330,7 @@ export function check(program, options = {}){
                 {
                     return fail('X3082', 'int or unsigned int type required', pos);
                 }
-                const t = shapeType('int', ta, tb, pos);
+                const t = shapeType(widest(ta, tb) === 'uint' ? 'uint' : 'int', ta, tb, pos);
                 return { opType: t, type: t, integerOnly: true };
             }
         }
@@ -712,7 +717,8 @@ export function check(program, options = {}){
         switch (e.kind)
         {
             case 'num':
-                e.type = e.ntype === 'int' || e.ntype === 'uint' ? INT : FLOAT;
+                e.type = e.ntype === 'uint' && sm4 ? UINT
+                    : e.ntype === 'int' || e.ntype === 'uint' ? INT : FLOAT;
                 return e;
             case 'bool':
                 e.type = BOOL;
@@ -722,6 +728,7 @@ export function check(program, options = {}){
                 return e;
             case 'ident': return identifier(e);
             case 'combine': return e;
+            case 'texop': return e;
             case 'unary': return unary(e);
             case 'incdec': {
                 e.operand = expr(e.operand);
@@ -802,10 +809,11 @@ export function check(program, options = {}){
                 {
                     return fail('X3082', 'int or unsigned int type required', e.pos);
                 }
-                opType = withBase(t, 'int');
+                opType = withBase(t, baseOf(t) === 'uint' ? 'uint' : 'int');
                 break;
             default:
-                opType = withBase(t, baseOf(t) === 'float' ? 'float' : 'int');
+                opType = withBase(t, baseOf(t) === 'float' || baseOf(t) === 'uint'
+                    ? /** @type {'float' | 'uint'} */ (baseOf(t)) : 'int');
                 break;
         }
         e.operand = coerce(a, opType);
@@ -1038,6 +1046,21 @@ export function check(program, options = {}){
         const t = obj.type;
         /** @type {Type} */
         let result;
+        if (sm4 && t.kind === 'texture' && t.dim !== 'any' && t.dim !== 'cube'
+            && t.dim !== 'cubearray')
+        {
+            // `tex[i]`: a Load of level 0 (sample 0 of a multisampled one).
+            const n = coordinateLanes(t.dim);
+            const index = expr(e.index);
+            if (!isNumeric(index.type))
+            {
+                return fail('X3017', `cannot convert from '${typeToString(index.type)}' to 'uint'`,
+                    index.pos);
+            }
+            const at = coerce(index, n === 1 ? UINT : vectorOf('uint', n));
+            return { kind: 'texop', method: 'Index', texture: obj, sampler: null, args: [at],
+                outs: [], dim: t.dim, type: t.elem ?? vectorOf('float', 4), pos: e.pos };
+        }
         if (t.kind === 'array')
         {
             result = t.elem;
@@ -1090,7 +1113,7 @@ export function check(program, options = {}){
     function call(e){
         if (e.callee.kind === 'member')
         {
-            return textureMethod(e);
+            return sm4 ? objectMethod(e) : textureMethod(e);
         }
         if (e.callee.kind !== 'ident')
         {
@@ -1194,6 +1217,144 @@ export function check(program, options = {}){
         const rewritten = { kind: 'call', callee: { kind: 'ident', name, pos }, pos,
             args: [combine, ...rest.map(expr)] };
         return intrinsicCall(rewritten, name);
+    }
+
+    /**
+     * The lanes of a texture's coordinate: its dimensions, an array's slice after them.
+     * @param {string} dim
+     */
+    const coordinateLanes = dim=>({ '1d': 1, '1darray': 2, '2d': 2, '2darray': 3, '3d': 3,
+        cube: 3, cubearray: 4, '2dms': 2, '2dmsarray': 3, buffer: 1, any: 2 })[dim] ?? 2;
+    /** The lanes of an offset or a gradient: the dimensions alone. @param {string} dim */
+    const offsetLanes = dim=>({ '1d': 1, '1darray': 1, '2d': 2, '2darray': 2, '3d': 3, cube: 3,
+        cubearray: 3, '2dms': 2, '2dmsarray': 2, buffer: 1, any: 2 })[dim] ?? 2;
+
+    /**
+     * A method of a Shader Model 4 texture: the reads (`Sample`, `SampleLevel`, `SampleBias`,
+     * `SampleGrad`, `SampleCmp`, `SampleCmpLevelZero`, `Gather`, `Load`) and `GetDimensions`.
+     * Each becomes a `texop` node: the texture, the sampler, the arguments converted to what
+     * the method takes, and for GetDimensions the l-values it writes.
+     *
+     * @param {any} e @returns {any}
+     */
+    function objectMethod(e){
+        const method = e.callee.name;
+        const object = expr(e.callee.object);
+        const t = object.type;
+        if (t.kind !== 'texture')
+        {
+            return fail('X3087', 'methods are not supported', e.pos);
+        }
+        const dim = t.dim === 'any' ? '2d' : t.dim;
+        const texel = t.elem ?? vectorOf('float', 4);
+        const base = /** @type {import('./hlsl-types.js').Base} */ (baseOf(texel) ?? 'float');
+        const lanes = coordinateLanes(dim);
+        const vectorType = (/** @type {'int' | 'uint' | 'float'} */ b, /** @type {number} */ n)=>
+            (n === 1 ? scalarOf(b) : vectorOf(b, n));
+        const floatCoord = vectorType('float', lanes);
+        const offset = vectorType('int', offsetLanes(dim));
+        const ms = dim === '2dms' || dim === '2dmsarray';
+        /** @type {Record<string, { sampler?: 'any' | 'comparison', params: Type[],
+         *     optional?: Type[], result: Type }>} */
+        const forms = {
+            Sample: { sampler: 'any', params: [floatCoord], optional: [offset], result: texel },
+            SampleLevel: { sampler: 'any', params: [floatCoord, FLOAT], optional: [offset],
+                result: texel },
+            SampleBias: { sampler: 'any', params: [floatCoord, FLOAT], optional: [offset],
+                result: texel },
+            SampleGrad: { sampler: 'any', params: [floatCoord, vectorType('float',
+                offsetLanes(dim)), vectorType('float', offsetLanes(dim))], optional: [offset],
+            result: texel },
+            SampleCmp: { sampler: 'comparison', params: [floatCoord, FLOAT], optional: [offset],
+                result: FLOAT },
+            SampleCmpLevelZero: { sampler: 'comparison', params: [floatCoord, FLOAT],
+                optional: [offset], result: FLOAT },
+            Gather: { sampler: 'any', params: [floatCoord], optional: [offset],
+                result: vectorOf(base === 'bool' ? 'float' : base, 4) },
+            Load: dim === 'buffer' ? { params: [INT], result: texel }
+                : ms ? { params: [vectorType('int', lanes), INT], optional: [offset],
+                    result: texel }
+                    : { params: [vectorType('int', lanes + 1)], optional: [offset],
+                        result: texel },
+        };
+        if (method === 'GetDimensions')
+        {
+            return dimensionsCall(e, object, dim);
+        }
+        const form = forms[method];
+        if (!form || (dim === 'buffer' && method !== 'Load') || (ms && method !== 'Load'))
+        {
+            return fail('X3018', `invalid subscript '${method}'`, e.callee.pos);
+        }
+        const args = e.args.slice();
+        /** @type {any} */
+        let sampler = null;
+        if (form.sampler)
+        {
+            sampler = args.length > 0 ? expr(args.shift()) : null;
+            if (!sampler || sampler.type.kind !== 'sampler')
+            {
+                return fail('X3013', `'${method}': no matching ${e.args.length} parameter `
+                    + 'intrinsic method', e.pos);
+            }
+            if ((form.sampler === 'comparison') !== (sampler.type.dim === 'comparison'))
+            {
+                return fail('X3017', `cannot convert from '${sampler.type.dim === 'comparison'
+                    ? 'SamplerComparisonState' : 'SamplerState'}' to '${form.sampler
+                    === 'comparison' ? 'SamplerComparisonState' : 'SamplerState'}'`,
+                sampler.pos);
+            }
+        }
+        const optional = form.optional ?? [];
+        if (args.length < form.params.length || args.length > form.params.length + optional.length)
+        {
+            return fail('X3013', `'${method}': no matching ${e.args.length} parameter intrinsic `
+                + 'method', e.pos);
+        }
+        const types = [...form.params, ...optional];
+        const checked = args.map((/** @type {any} */ a, /** @type {number} */ i)=>{
+            const one = expr(a);
+            if (!isNumeric(one.type))
+            {
+                return fail('X3017', `cannot convert from '${typeToString(one.type)}' to `
+                    + `'${typeToString(types[i])}'`, one.pos);
+            }
+            return coerce(one, types[i]);
+        });
+        return { kind: 'texop', method, texture: object, sampler, args: checked, outs: [],
+            dim, type: form.result, pos: e.pos };
+    }
+
+    /**
+     * `tex.GetDimensions(...)`: with a mip level first and the count of levels last, or
+     * neither; each out argument a uint or a float, as the l-value is.
+     *
+     * @param {any} e @param {any} object @param {string} dim @returns {any}
+     */
+    function dimensionsCall(e, object, dim){
+        const sizes = { '1d': 1, '1darray': 2, '2d': 2, '2darray': 3, '3d': 3, cube: 2,
+            cubearray: 3, '2dms': 3, '2dmsarray': 4, buffer: 1 }[dim] ?? 2;
+        const args = e.args.map(expr);
+        const ms = dim === '2dms' || dim === '2dmsarray';
+        const withLevel = !ms && dim !== 'buffer' && args.length === sizes + 2;
+        if (args.length !== sizes && !withLevel)
+        {
+            return fail('X3013', `'GetDimensions': no matching ${args.length} parameter `
+                + 'intrinsic method', e.pos);
+        }
+        const level = withLevel ? coerce(args[0], UINT) : null;
+        const outs = withLevel ? args.slice(1) : args;
+        for (const out of outs)
+        {
+            lvalue(out);
+            if (out.type.kind !== 'scalar' || out.type.base === 'bool')
+            {
+                return fail('X3017', `cannot convert from '${typeToString(out.type)}' to `
+                    + "'uint'", out.pos);
+            }
+        }
+        return { kind: 'texop', method: 'GetDimensions', texture: object, sampler: null,
+            args: level ? [level] : [], outs, levels: withLevel, dim, type: VOID, pos: e.pos };
     }
 
     /** @param {any} e @param {FunctionSymbol} fn @returns {any} */

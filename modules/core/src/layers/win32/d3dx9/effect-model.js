@@ -453,7 +453,7 @@ export function literalOf(expr, named){
  * The DWORDs of a parameter's data for these numbers, each converted to the
  * parameter's element type in the order its scalars are laid out.
  *
- * @param {number[]} numbers @param {('bool' | 'int' | 'float')[]} bases
+ * @param {number[]} numbers @param {import('./hlsl-types.js').Base[]} bases
  * @returns {number[]}
  */
 function wordsOf(numbers, bases){
@@ -467,7 +467,8 @@ function wordsOf(numbers, bases){
         {
             return value ? 1 : 0;
         }
-        return Math.trunc(value) | 0;
+        // A uint (a D3D9 effect has none) keeps its 32 bits.
+        return base === 'uint' ? value >>> 0 : Math.trunc(value) | 0;
     });
 }
 
@@ -553,11 +554,13 @@ export function shapeOf(type, ref, name, semantic, flags){
             return { ...model, type: PT.STRING, bytes: 4, init: [{ string: '' }] };
         case 'texture':
             return { ...model, type: { any: PT.TEXTURE, '1d': PT.TEXTURE1D, '2d': PT.TEXTURE2D,
-                '3d': PT.TEXTURE3D, cube: PT.TEXTURECUBE }[type.dim], bytes: 4,
+                '3d': PT.TEXTURE3D, cube: PT.TEXTURECUBE }[/** @type {'any'} */ (type.dim)]
+                ?? PT.TEXTURE, bytes: 4,
             init: [{ word: 0 }] };
         case 'sampler':
             return { ...model, type: { any: PT.SAMPLER, '1d': PT.SAMPLER1D, '2d': PT.SAMPLER2D,
-                '3d': PT.SAMPLER3D, cube: PT.SAMPLERCUBE }[type.dim], bytes: 0, samplers: [null] };
+                '3d': PT.SAMPLER3D, cube: PT.SAMPLERCUBE }[/** @type {'any'} */ (type.dim)]
+                ?? PT.SAMPLER, bytes: 0, samplers: [null] };
         case 'shader':
             return { ...model, type: (ref?.name ?? '').toLowerCase() === 'pixelshader'
                 ? PT.PIXELSHADER : PT.VERTEXSHADER, bytes: 4, init: [{ shader: null }] };

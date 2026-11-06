@@ -422,6 +422,27 @@ test('the declarations become bindings in the stage group', ()=>{
     assert.match(linked.fragment, /var r3: vec4<u32>;/);
 });
 
+test('a pixel shader as fxc writes it, SV_TARGET with no system value, draws to target 0', ()=>{
+    // `float4 color; float4 main() : SV_TARGET { return color; }`, compiled by fxc: its output
+    // signature names SV_TARGET and leaves the system value field at zero.
+    const words = [0x43425844, 0x80f1c810, 0xdacbbc8b, 0xe07b133e, 0x3059cbfa, 0x00000001,
+        0x000000b8, 0x00000003, 0x0000002c, 0x0000003c, 0x00000070, 0x4e475349, 0x00000008,
+        0x00000000, 0x00000008, 0x4e47534f, 0x0000002c, 0x00000001, 0x00000008, 0x00000020,
+        0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x0000000f, 0x545f5653, 0x45475241,
+        0xabab0054, 0x52444853, 0x00000040, 0x00000040, 0x00000010, 0x04000059, 0x00208e46,
+        0x00000000, 0x00000001, 0x03000065, 0x001020f2, 0x00000000, 0x06000036, 0x001020f2,
+        0x00000000, 0x00208e46, 0x00000000, 0x00000000, 0x0100003e];
+    const bytes = new Uint8Array(words.length * 4);
+    words.forEach((word, i)=>new DataView(bytes.buffer).setUint32(i * 4, word, true));
+    const container = /** @type {any} */ (parseDxbc(bytes));
+    assert.equal(container.outputs[0].systemValue, SYSTEM_VALUE.UNDEFINED);
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const linked = linkProgram(vs, translateShader(container));
+    assert.deepEqual(linked.unsupported, []);
+    assert.deepEqual(linked.targets, [0]);
+    assert.match(linked.fragment, /@location\(0\) target0: vec4<f32>,/);
+});
+
 test('an immediate constant buffer becomes a module constant', ()=>{
     const translated = translate([mov(o(0), lu(0))], {
         declarations: [immediateConstantBuffer([[1, 2, 3, 4]])],

@@ -90,6 +90,17 @@ numbers: arithmetic and texture slots, temporaries, constants.
   tests; the rest are best-known. The location of an error in a source passed in
   memory is printed as `memory(line,col)`.
 
+## Shader Models 4 and 5
+
+D3DCompile and D3D10CompileShader use the same front end in its model 4 dialect (`check(...,
+{ sm4: true })`): `uint` is a type of its own, the bitwise operators and shifts compile, a texture
+is an object with methods (`Sample`, `SampleLevel`, `SampleBias`, `SampleGrad`, `SampleCmp`,
+`SampleCmpLevelZero`, `Gather`, `Load`, `GetDimensions`, `tex[i]`), and `Texture2DArray`,
+`TextureCubeArray`, `Texture2DMS` and `Buffer<T>` are types. The lowering is this one, given a
+target (`LowerTarget`): the builder, the constant buffers, the textures and the signatures are
+the target's, in `graphics/d3dcompiler/` (its `compile.js` says what it compiles and what it
+refuses).
+
 ## Assembly
 
 `D3DXAssembleShader` and `D3DXDisassembleShader` are `shader-asm.js`, one table of

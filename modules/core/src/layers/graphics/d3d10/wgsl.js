@@ -1718,7 +1718,12 @@ export function linkProgram(vs, ps, options = {}){
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
-        if (element.systemValue === SYSTEM_VALUE.TARGET)
+        // fxc writes SV_Target and SV_Depth with no system value in the output signature
+        // (the name says it, and the program writes oDepth); the reflection's D3D_NAME_TARGET
+        // and D3D_NAME_DEPTH are what other compilers put there.
+        const name = element.name.toUpperCase();
+        if (element.systemValue === SYSTEM_VALUE.TARGET
+            || (element.systemValue === SYSTEM_VALUE.UNDEFINED && name === 'SV_TARGET'))
         {
             targets.push(element.index);
             if (options.targets && !options.targets.includes(element.index))
@@ -1730,7 +1735,8 @@ export function linkProgram(vs, ps, options = {}){
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
         }
-        if (element.systemValue === SYSTEM_VALUE.DEPTH)
+        if (element.systemValue === SYSTEM_VALUE.DEPTH
+            || (element.systemValue === SYSTEM_VALUE.UNDEFINED && name === 'SV_DEPTH'))
         {
             psOut.push('    @builtin(frag_depth) depth: f32,');
             psReturn.push('oDepth');

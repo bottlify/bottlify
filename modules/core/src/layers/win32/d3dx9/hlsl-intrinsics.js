@@ -149,7 +149,9 @@ function componentwise(name, arity, opts = {}){
         {
             return null;
         }
-        const base = opts.ints && args.every(a=>baseOf(a) === 'int') ? 'int' : 'float';
+        const integer = (/** @type {Type} */ a)=>baseOf(a) === 'int' || baseOf(a) === 'uint';
+        const base = opts.ints && args.every(integer)
+            ? (args.some(a=>baseOf(a) === 'uint') ? 'uint' : 'int') : 'float';
         const param = withBase(shape, base);
         const result = opts.result === 'bool' ? withBase(shape, 'bool') : param;
         return accept({ name: n, paramTypes: args.map(()=>param), resultType: result }, args);
@@ -180,6 +182,39 @@ for (const n of ['isfinite', 'isinf', 'isnan'])
 {
     componentwise(n, 1, { result: 'bool' });
 }
+
+/**
+ * Shader Model 4's functions of bits: a reinterpretation keeps the shape and changes the
+ * element type; the bit counts take integers.
+ *
+ * @param {string} name @param {'int' | 'uint' | 'float' | 'same'} result
+ * @param {'any' | 'integer' | 'float' | 'uint'} takes
+ */
+function bitFunction(name, result, takes){
+    SPECS.set(name, (n, args)=>{
+        const a = args[0];
+        if (args.length !== 1 || !isNumeric(a))
+        {
+            return null;
+        }
+        const base = baseOf(a);
+        const param = takes === 'float' ? withBase(a, 'float') : takes === 'uint'
+            ? withBase(a, 'uint') : takes === 'integer'
+                ? withBase(a, base === 'int' ? 'int' : 'uint')
+                : withBase(a, base === 'bool' ? 'uint' : /** @type {any} */ (base));
+        const out = result === 'same' ? param : withBase(a, result);
+        return accept({ name: n, paramTypes: [param], resultType: out }, args);
+    });
+}
+bitFunction('asuint', 'uint', 'any');
+bitFunction('asint', 'int', 'any');
+bitFunction('asfloat', 'float', 'any');
+bitFunction('countbits', 'uint', 'uint');
+bitFunction('reversebits', 'uint', 'uint');
+bitFunction('firstbithigh', 'same', 'integer');
+bitFunction('firstbitlow', 'same', 'integer');
+bitFunction('f32tof16', 'uint', 'float');
+bitFunction('f16tof32', 'float', 'uint');
 
 SPECS.set('all', (n, args)=>args.length === 1 && isNumeric(args[0])
     ? { name: n, paramTypes: [args[0]], resultType: BOOL } : null);
@@ -472,7 +507,7 @@ const LANE = new Map(/** @type {[string, Lane][]} */ ([
     ['fmod', { f: fmodFloat }],
     ['max', { f: fmax, i: Math.max }], ['min', { f: fmin, i: Math.min }],
     ['lerp', { f: (a, b, t)=>f32(a + f32(t * f32(b - a))) }],
-    ['mad', { f: (a, b, c)=>f32(f32(a * b) + c), i: (a, b, c)=>a * b + c }],
+    ['mad', { f: (a, b, c)=>f32(f32(a * b) + c), i: (a, b, c)=>Math.imul(a, b) + c }],
     ['rcp', { f: x=>f32(1 / x) }],
     ['smoothstep', { f: (a, b, x)=>{
         const t = f32(sat(f32(f32(x - a) / f32(b - a))));
@@ -483,6 +518,102 @@ const LANE = new Map(/** @type {[string, Lane][]} */ ([
     ['isfinite', { f: x=>Number.isFinite(x) ? 1 : 0 }],
     ['isinf', { f: x=>x === Infinity || x === -Infinity ? 1 : 0 }],
     ['isnan', { f: x=>Number.isNaN(x) ? 1 : 0 }],
+]));
+
+const bitScratch = new DataView(new ArrayBuffer(4));
+/** The bits of a lane of a type, as a uint32. @param {number} x @param {string} from */
+function bitsOf(x, from){
+    if (from === 'float')
+    {
+        bitScratch.setFloat32(0, x, true);
+        return bitScratch.getUint32(0, true);
+    }
+    return x >>> 0;
+}
+/** A float of the bits of a half, in the low sixteen. @param {number} h */
+function halfToFloat(h){
+    const sign = h & 0x8000 ? -1 : 1;
+    const exponent = (h >>> 10) & 0x1f;
+    const mantissa = h & 0x3ff;
+    if (exponent === 0)
+    {
+        return sign * mantissa * hm.exp2(-24);
+    }
+    if (exponent === 31)
+    {
+        return mantissa ? NaN : sign * Infinity;
+    }
+    return sign * (1 + mantissa / 1024) * hm.exp2(exponent - 15);
+}
+/**
+ * The half nearest a float, ties to even; a magnitude past the largest half is infinity.
+ * @param {number} x
+ */
+function floatToHalf(x){
+    const bits = bitsOf(x, 'float');
+    const sign = (bits >>> 16) & 0x8000;
+    const exponent = (bits >>> 23) & 0xff;
+    const mantissa = bits & 0x7fffff;
+    if (exponent === 0xff)
+    {
+        return sign | 0x7c00 | (mantissa ? 0x200 : 0);
+    }
+    const e = exponent - 127 + 15;
+    if (e >= 31)
+    {
+        return sign | 0x7c00;
+    }
+    const full = mantissa | 0x800000;
+    const shift = e <= 0 ? 14 - e : 13;
+    if (shift > 24)
+    {
+        return sign;
+    }
+    const kept = full >>> shift;
+    const rest = full & ((1 << shift) - 1);
+    const half = 1 << (shift - 1);
+    const rounded = kept + (rest > half || (rest === half && (kept & 1)) ? 1 : 0);
+    return sign | (e <= 0 ? rounded : ((e << 10) + (rounded & 0x3ff) + (rounded >> 11 << 10)));
+}
+/** The functions of a lane's bits, each told the element type the lane is. */
+const BITS = new Map(/** @type {[string, (x: number, from: string) => number][]} */ ([
+    ['asuint', (x, from)=>bitsOf(x, from)],
+    ['asint', (x, from)=>bitsOf(x, from) | 0],
+    ['asfloat', (x, from)=>{
+        if (from === 'float')
+        {
+            return x;
+        }
+        bitScratch.setUint32(0, x >>> 0, true);
+        return bitScratch.getFloat32(0, true);
+    }],
+    ['countbits', x=>{
+        let n = 0;
+        for (let v = x >>> 0; v !== 0; v &= v - 1)
+        {
+            n++;
+        }
+        return n;
+    }],
+    ['reversebits', x=>{
+        let r = 0;
+        for (let i = 0; i < 32; i++)
+        {
+            r = (r << 1) | ((x >>> i) & 1);
+        }
+        return r >>> 0;
+    }],
+    // From the top: for a negative int the first bit that is not the sign; -1 when none.
+    ['firstbithigh', (x, from)=>{
+        const v = from === 'int' && (x | 0) < 0 ? ~x >>> 0 : x >>> 0;
+        return v === 0 ? (from === 'int' ? -1 : 4294967295) : 31 - Math.clz32(v);
+    }],
+    ['firstbitlow', (x, from)=>{
+        const v = x >>> 0;
+        return v === 0 ? (from === 'int' ? -1 : 4294967295) : 31 - Math.clz32(v & -v);
+    }],
+    ['f32tof16', x=>floatToHalf(x)],
+    ['f16tof32', x=>f32(halfToFloat(x & 0xffff))],
 ]));
 
 /** @param {number[]} a @param {number[]} b */
@@ -582,15 +713,23 @@ export function evaluateIntrinsic(name, args, argTypes, resultType, hooks = {}, 
     {
         const lanes = args.map((a, i)=>flattenValue(a, argTypes[i]));
         const count = scalarCount(resultType);
-        const isInt = baseOf(argTypes[0]) === 'int' && lane.i !== undefined;
+        const argBase = baseOf(argTypes[0]);
+        const isInt = (argBase === 'int' || argBase === 'uint') && lane.i !== undefined;
         const fn = isInt ? /** @type {Function} */ (lane.i) : lane.f;
         const out = [];
         for (let k = 0; k < count; k++)
         {
             const v = fn(...lanes.map(l=>l[l.length === 1 ? 0 : k]));
-            out.push(isInt ? v : f32(v));
+            // Integer arithmetic wraps in its 32 bits, as the registers do.
+            out.push(!isInt ? f32(v) : argBase === 'uint' ? v >>> 0 : v | 0);
         }
         return buildValue(resultType, out);
+    }
+    const bits = BITS.get(name);
+    if (bits)
+    {
+        const from = /** @type {string} */ (baseOf(argTypes[0]));
+        return buildValue(resultType, flattenValue(args[0], argTypes[0]).map(x=>bits(x, from)));
     }
     const lanes = args.map((a, i)=>argTypes[i].kind === 'sampler' ? []
         : flattenValue(a, argTypes[i]));
