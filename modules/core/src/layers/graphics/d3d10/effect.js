@@ -91,8 +91,12 @@ export const ASSIGNMENT = Object.freeze({
     ANONYMOUS_SHADER: 7,
 });
 
-/** The type a constant in an assignment is stored as. */
-export const CONSTANT_TYPE = Object.freeze({ FLOAT: 1, INT: 2, UINT: 3, BOOL: 4 });
+/**
+ * The type a constant in an assignment is stored as. AS_TAKEN is none the
+ * file stores: a value an expression computed, whose bits are already of the
+ * type the state takes (a StencilEnable it sets reads back 0xffffffff).
+ */
+export const CONSTANT_TYPE = Object.freeze({ AS_TAKEN: 0, FLOAT: 1, INT: 2, UINT: 3, BOOL: 4 });
 
 /**
  * A numeric type's base type as the file stores it, and as a program is told it.
@@ -173,6 +177,9 @@ const HEADER = Object.freeze([
  * @property {FxConstant[]} [constants]
  * @property {string} [variable]  The variable named.
  * @property {number} [element]   The constant index into it.
+ * @property {string} [indexVariable]  The variable whose value is the index.
+ * @property {Uint8Array} [expression]  The expression giving the index or the
+ *     value, as a container of its own (effect-expression.js).
  * @property {FxShader | null} [shader]  A shader compiled in place, or null.
  */
 
@@ -525,10 +532,17 @@ function readEffect(chunk){
                     assignment.shader = readShader(word(offset), word(offset + 4));
                     break;
                 case ASSIGNMENT.VARIABLE_INDEX:
-                case ASSIGNMENT.INDEX_EXPRESSION:
+                    assignment.variable = string(word(offset));
+                    assignment.indexVariable = string(word(offset + 4));
+                    break;
+                case ASSIGNMENT.INDEX_EXPRESSION: {
+                    assignment.variable = string(word(offset));
+                    const sized = word(offset + 4);
+                    assignment.expression = bytesAt(sized + 4, word(sized));
+                    break;
+                }
                 case ASSIGNMENT.VALUE_EXPRESSION:
-                    // Kept as what it is: evaluating it needs the effect's
-                    // expression machine, which this runtime does not have.
+                    assignment.expression = bytesAt(offset + 4, word(offset));
                     break;
                 default:
                     throw new NotAnEffect(`an assignment of kind ${kind}`);

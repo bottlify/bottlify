@@ -18,7 +18,7 @@ import {
 import { D3D10CreateDevice } from './device.js';
 import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import { CONSTANT_TYPE, D3D10_SVC, D3D10_SVT, parseEffect } from './effect.js';
-import { FX_KIND, effectBinary } from './effect-fixtures.js';
+import { FX_KIND, effectBinary, expressionBinary } from './effect-fixtures.js';
 import {
     D3D10_EFFECT_VARIABLE, EffectRefused, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
 } from './effect-object.js';
@@ -397,7 +397,7 @@ test('a technique finds its passes, and a pass says which shaders and values it 
             { name: 'P1', assignments: [
                 { state: PASS_STATE.PIXEL_SHADER, constant: [[CONSTANT_TYPE.INT, 0]] },
                 { state: PASS_STATE.VERTEX_SHADER, shader: vs },
-                { state: PASS_STATE.GEOMETRY_SHADER, kind: 5 }] },
+                { state: PASS_STATE.GEOMETRY_SHADER, kind: 5, variable: 'missing' }] },
             { name: 'P2', assignments: [
                 { state: PASS_STATE.PIXEL_SHADER, variable: 'p' },
                 { state: PASS_STATE.VERTEX_SHADER, variable: 'v', element: 1 },
@@ -453,7 +453,6 @@ test('a technique finds its passes, and a pass says which shaders and values it 
         'the vertex shader\'s one-element input signature in a container of its own, as Wine\'s'
         + ' test_effect_resource_variable measures it');
     assert.deepEqual(shaderOf(p1, PASS_STATE.GEOMETRY_SHADER).variable, INVALID.variables.shader);
-    assert.ok(reports.some(line=>line.includes('index expression')), reports.join('\n'));
 
     assert.deepEqual(shaderOf(p2, PASS_STATE.PIXEL_SHADER),
         { variable: effect.GetVariableByName('p'), index: 0 });
@@ -499,6 +498,117 @@ test('a pass value a variable gives is the variable\'s value now', ()=>{
     assert.equal(descOf(p0).StencilRef, 3, 'read when asked');
     assert.equal(descOf(p1).StencilRef, 6, 'the second element, four dwords in');
     assert.deepEqual(descOf(p1).BlendFactor, [0.1, 0.2, 0.3, 0.4].map(Math.fround));
+});
+
+test('a pass picks by an index variable or expression and computes values now', ()=>{
+    // Wine's test_effect_index_expression and test_effect_value_expression:
+    // ps_array[g_var.z], vs_array[g_i], bs_array[g_var.w] and a blend factor
+    // of -g_var, each what the variables hold when asked; an index past the
+    // array picks the first element.
+    const float4 = { name: 'float4', numeric: /** @type {const} */ ({ layout: 'vector',
+        base: 'float', columns: 4 }) };
+    const uint = { name: 'uint', numeric: /** @type {const} */ ({ layout: 'scalar', base: 'uint' }) };
+    const toUint = (/** @type {number} */ component)=>expressionBinary({
+        inputs: [{ name: 'g_var', register: 0 }],
+        code: [[0x133, 1, false, [[2, component]], [4, 0]]],
+    });
+    /** @param {number} src @returns {{ assignments: import('./effect-fixtures.js').FixtureAssignment[] }} */
+    const blend = src=>({ assignments: [{ state: 0x26, constant: [[CONSTANT_TYPE.UINT, src]] }] });
+    const reports = /** @type {string[]} */ ([]);
+    const { effect, device } = made({
+        buffers: [{ name: '$Globals', size: 32, variables: [
+            { name: 'g_var', offset: 0, type: float4 },
+            { name: 'g_i', offset: 16, type: uint }] }],
+        objects: [
+            { name: 'ps_array', type: { name: 'PixelShader', object: FX_KIND.PIXELSHADER,
+                elements: 2 }, elements: [{ shader: solidPixelShader([1, 0, 0, 1]) },
+                { shader: solidPixelShader([0, 1, 0, 1]) }] },
+            { name: 'vs_array', type: { name: 'VertexShader', object: FX_KIND.VERTEXSHADER,
+                elements: 2 }, elements: [{ shader: passThroughVertexShader() },
+                { shader: passThroughVertexShader() }] },
+            { name: 'bs_array', type: { name: 'BlendState', object: FX_KIND.BLEND, elements: 2 },
+                elements: [blend(6), blend(3)] },
+        ],
+        techniques: [{ name: 'tech', passes: [{ name: 'p0', assignments: [
+            { state: PASS_STATE.PIXEL_SHADER, kind: 5, variable: 'ps_array', bytes: toUint(2) },
+            { state: PASS_STATE.VERTEX_SHADER, variable: 'vs_array', indexVariable: 'g_i' },
+            { state: PASS_STATE.BLEND, kind: 5, variable: 'bs_array', bytes: toUint(3) },
+            { state: PASS_STATE.BLEND_FACTOR, kind: 6, bytes: expressionBinary({
+                inputs: [{ name: 'g_var', register: 0 }],
+                code: [[0x101, 4, false, [[2, 0]], [4, 0]]] }) },
+        ] }] }],
+    }, reports);
+    const pass = effect.GetTechniqueByIndex(0).GetPassByIndex(0);
+    /** @param {number} state */
+    const indexOf = state=>{
+        /** @type {{ desc?: any }} */
+        const out = {};
+        assert.equal(pass.GetShaderDesc(state, out), S_OK);
+        return out.desc.index;
+    };
+    const [buffer] = effect.buffers();
+    const view = new DataView(buffer.bytes.buffer, buffer.bytes.byteOffset);
+    /** @param {number[]} values @param {number} index */
+    const set = (values, index)=>{
+        values.forEach((value, at)=>view.setFloat32(at * 4, value, true));
+        view.setUint32(16, index, true);
+    };
+    assert.deepEqual([indexOf(PASS_STATE.PIXEL_SHADER), indexOf(PASS_STATE.VERTEX_SHADER)], [0, 0]);
+    set([2, 0, 1, 1], 1);
+    assert.deepEqual([indexOf(PASS_STATE.PIXEL_SHADER), indexOf(PASS_STATE.VERTEX_SHADER)], [1, 1],
+        'looked at again when asked');
+    assert.deepEqual(descOf(pass).BlendFactor, [-2, -0, -1, -1]);
+    const slots = effect.GetVariableByName('bs_array').shape.slots;
+    const bound = ()=>{
+        /** @type {any} */
+        const out = {};
+        device.OMGetBlendState(out);
+        out.state?.release?.();
+        return out.state;
+    };
+    assert.equal(pass.Apply(0), S_OK);
+    assert.equal(bound(), slots[1].made);
+    set([0, 0, 2, 2], 2);
+    assert.deepEqual([indexOf(PASS_STATE.PIXEL_SHADER), indexOf(PASS_STATE.VERTEX_SHADER)], [0, 0],
+        'past the array, the first');
+    assert.equal(pass.Apply(0), S_OK);
+    assert.equal(bound(), slots[0].made);
+    assert.deepEqual(reports, []);
+    assert.equal(effect.release(), 0);
+});
+
+test('a state field an expression gives follows the variables', ()=>{
+    // Wine's test_effect_value_expression: StencilEnable = g_var.x reads
+    // back the word the expression gave, 0xffffffff for true.
+    const float4 = { name: 'float4', numeric: /** @type {const} */ ({ layout: 'vector',
+        base: 'float', columns: 4 }) };
+    const { effect, device } = made({
+        buffers: [{ name: '$Globals', size: 16, variables: [
+            { name: 'g_var', offset: 0, type: float4 }] }],
+        objects: [{ name: 'ds', type: { name: 'DepthStencilState', object: FX_KIND.DEPTHSTENCIL },
+            elements: [{ assignments: [{ state: 0x19, kind: 6, bytes: expressionBinary({
+                inputs: [{ name: 'g_var', register: 0 }],
+                code: [[0x137, 1, false, [[2, 0]], [4, 0]]] }) }] }] }],
+    });
+    const ds = effect.GetVariableByName('ds').As(VARIABLE_KIND.DEPTH_STENCIL);
+    /** @returns {any} */
+    const store = ()=>{
+        /** @type {{ desc?: any }} */
+        const out = {};
+        assert.equal(ds.GetBackingStore(0, out), S_OK);
+        return out.desc;
+    };
+    assert.equal(store().StencilEnable, 0);
+    const first = ds.GetState(0).state;
+    const [buffer] = effect.buffers();
+    new DataView(buffer.bytes.buffer, buffer.bytes.byteOffset).setFloat32(0, NaN, true);
+    assert.equal(store().StencilEnable, 0xffffffff);
+    const second = ds.GetState(0).state;
+    assert.notEqual(second, first, 'made again for what changed');
+    first.release();
+    second.release();
+    assert.equal(effect.release(), 0);
+    assert.equal(device.release(), 0);
 });
 
 test('what an effect made is named for giving back, and goes with its last release', ()=>{

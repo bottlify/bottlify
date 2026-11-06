@@ -37,6 +37,7 @@
 import { attachCom } from './com.js';
 import { D3D10_BIND, D3D10_USAGE, E_FAIL, E_INVALIDARG, IID, S_OK } from './constants.js';
 import { ASSIGNMENT, CONSTANT_TYPE, D3D10_SVC, D3D10_SVT } from './effect.js';
+import { NotAnExpression, parseExpression, runExpression } from './effect-expression.js';
 import { SAMPLER_TEXTURE, stateDesc } from './effect-states.js';
 import {
     getComponents, getMatrices, setComponents, setMatrices,
@@ -1151,6 +1152,58 @@ export function createEffect(data, services){
         [VARIABLE_KIND.SAMPLER]: { block: 'sampler', create: 'CreateSamplerState' },
     };
 
+    /**
+     * Whether a state's field is given by what a variable holds now, or an
+     * expression over it, rather than a constant.
+     *
+     * @param {import('./effect.js').FxAssignment} assignment
+     */
+    const dependent = assignment=>!assignment.constants && assignment.state !== SAMPLER_TEXTURE;
+
+    /**
+     * A state object whose fields follow the effect's variables: its
+     * description is what they make of it when it is read, and the object is
+     * made again when that changed (test_effect_value_expression's mutable
+     * depth-stencil state).
+     *
+     * @param {any} slot
+     * @param {{ block: 'blend' | 'depthstencil' | 'rasterizer' | 'sampler',
+     *           create: string }} stateBlock
+     */
+    const stateNow = (slot, stateBlock)=>{
+        /** @type {{ key: string, desc: any, made: any }} */
+        const held = { key: '', desc: null, made: null };
+        const refresh = ()=>{
+            const desc = stateDesc(stateBlock.block, slot.assignments ?? [], report,
+                (assignment, count)=>constantsOf(assignment, count));
+            const key = JSON.stringify(desc);
+            if (key !== held.key)
+            {
+                /** @type {{ state?: any }} */
+                const out = {};
+                const state = device[stateBlock.create](desc, out) === S_OK
+                    ? out.state ?? null
+                    : null;
+                const at = owned.indexOf(held.made);
+                if (held.made && at >= 0)
+                {
+                    owned.splice(at, 1);
+                    held.made.release?.();
+                }
+                if (state)
+                {
+                    owned.push(state);
+                }
+                Object.assign(held, { key, desc, made: state });
+            }
+            return held;
+        };
+        Object.defineProperties(slot, {
+            desc: { get: ()=>refresh().desc, enumerable: true },
+            made: { get: ()=>refresh().made, enumerable: true },
+        });
+    };
+
     const objects = data.objects.map(fx=>{
         /** @type {any[]} */
         const slots = fx.elements.map(element=>(element.stringAt === undefined ? { ...element }
@@ -1159,7 +1212,11 @@ export function createEffect(data, services){
         const stateBlock = STATE_BLOCKS[kind];
         for (const slot of slots)
         {
-            if (stateBlock)
+            if (stateBlock && (slot.assignments ?? []).some(dependent))
+            {
+                stateNow(slot, stateBlock);
+            }
+            else if (stateBlock)
             {
                 slot.desc = stateDesc(stateBlock.block, slot.assignments ?? [], report);
                 /** @type {{ state?: any }} */
@@ -1329,28 +1386,162 @@ export function createEffect(data, services){
     };
 
     /**
-     * The constants an assignment comes to now: its own, or those its
-     * numeric variable holds. An expression is not evaluated, and says so.
+     * The words a numeric variable holds, as an expression reads them into
+     * its registers: `words` of them, those past the variable's own zero.
+     *
+     * @param {string} name @param {number} words
+     */
+    const wordsOf = (name, words)=>{
+        const variable = variableNamed(name);
+        const storage = variable?.shape.storage;
+        const fxType = variable?.shape.fxType;
+        if (!storage || fxType?.kind !== 'numeric')
+        {
+            return null;
+        }
+        const out = new Uint32Array(words);
+        const bytes = Math.min(words * 4, fxType.unpackedSize, storage.bytes.length - storage.at);
+        const view = new DataView(storage.bytes.buffer, storage.bytes.byteOffset);
+        for (let index = 0; (index + 1) * 4 <= bytes; index++)
+        {
+            out[index] = view.getUint32(storage.at + index * 4, true);
+        }
+        return out;
+    };
+
+    /** @type {Map<import('./effect.js').FxAssignment, import('./effect-expression.js').Expression | null>} */
+    const expressions = new Map();
+    /**
+     * What an assignment's expression comes to over the variables' values
+     * now, or null for one this runtime cannot read, said once.
+     *
+     * @param {import('./effect.js').FxAssignment} assignment
+     */
+    const evaluated = assignment=>{
+        if (!expressions.has(assignment))
+        {
+            let parsed = null;
+            try
+            {
+                parsed = assignment.expression ? parseExpression(assignment.expression) : null;
+            }
+            catch (e){
+                if (!(e instanceof NotAnExpression))
+                {
+                    throw e;
+                }
+                report(`an expression of pass state 0x${assignment.state.toString(16)} is not`
+                    + ` evaluated: ${e.message}`);
+            }
+            expressions.set(assignment, parsed);
+        }
+        const expression = expressions.get(assignment);
+        if (!expression)
+        {
+            return null;
+        }
+        try
+        {
+            return runExpression(expression, wordsOf);
+        }
+        catch (e){
+            if (!(e instanceof NotAnExpression))
+            {
+                throw e;
+            }
+            report(`an expression of pass state 0x${assignment.state.toString(16)} is not`
+                + ` evaluated: ${e.message}`);
+            expressions.set(assignment, null);
+            return null;
+        }
+    };
+
+    /**
+     * The element of `elements` an assignment picks now: a constant index,
+     * the value of an index variable, or what an index expression comes
+     * to. One past the array picks the first, as Windows does
+     * (test_effect_index_expression).
+     *
+     * @param {import('./effect.js').FxAssignment} assignment
+     * @param {number} elements
+     */
+    const indexOf = (assignment, elements)=>{
+        let index = assignment.element ?? 0;
+        if (assignment.kind === ASSIGNMENT.VARIABLE_INDEX)
+        {
+            index = convert(valuesOf(variableNamed(assignment.indexVariable ?? ''), 0, 1)?.[0],
+                'uint');
+        }
+        else if (assignment.kind === ASSIGNMENT.INDEX_EXPRESSION)
+        {
+            index = evaluated(assignment)?.[0] ?? 0;
+        }
+        return index < elements ? index : 0;
+    };
+
+    /**
+     * The variable an assignment names and the element of it it picks now,
+     * or null for an assignment that names none.
+     *
+     * @param {import('./effect.js').FxAssignment} assignment
+     * @returns {{ named: any, index: number } | null}
+     */
+    const elementOf = assignment=>{
+        switch (assignment.kind)
+        {
+            case ASSIGNMENT.VARIABLE:
+            case ASSIGNMENT.CONSTANT_INDEX:
+            case ASSIGNMENT.VARIABLE_INDEX:
+            case ASSIGNMENT.INDEX_EXPRESSION: {
+                const named = variableNamed(assignment.variable ?? '');
+                if (!named)
+                {
+                    return null;
+                }
+                const elements = named.shape.slots?.length
+                    ?? Math.max(1, named.shape.fxType?.elements ?? 0);
+                return { named, index: indexOf(assignment, elements) };
+            }
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * The constants an assignment comes to now: its own, those its numeric
+     * variable holds, or what its expression computes.
      *
      * @param {import('./effect.js').FxAssignment} assignment
      * @param {number} count
      * @returns {import('./effect.js').FxConstant[] | null}
      */
     const constantsOf = (assignment, count)=>{
-        switch (assignment.kind)
+        if (assignment.kind === ASSIGNMENT.CONSTANT)
         {
-            case ASSIGNMENT.CONSTANT:
-                return assignment.constants ?? null;
-            case ASSIGNMENT.VARIABLE:
-                return valuesOf(variableNamed(assignment.variable ?? ''), 0, count);
-            case ASSIGNMENT.CONSTANT_INDEX:
-                return valuesOf(variableNamed(assignment.variable ?? ''),
-                    assignment.element ?? 0, count);
-            default:
-                report(`a pass state computed by the effect's expression machine is not`
-                    + ` evaluated (state 0x${assignment.state.toString(16)})`);
-                return null;
+            return assignment.constants ?? null;
         }
+        if (assignment.kind === ASSIGNMENT.VALUE_EXPRESSION)
+        {
+            const words = evaluated(assignment);
+            return words
+                ? Array.from({ length: count }, (_, index)=>({
+                    type: CONSTANT_TYPE.AS_TAKEN, bits: words[index] ?? 0,
+                }))
+                : null;
+        }
+        const picked = elementOf(assignment);
+        const fxType = picked?.named.shape.fxType;
+        if (!picked || fxType?.kind !== 'numeric')
+        {
+            report(`a pass state 0x${assignment.state.toString(16)} names no numeric variable;`
+                + ' it is not set');
+            return null;
+        }
+        // A constant index into numeric data is the dword it starts at
+        // (`fv1_a[1]` is 4); an index computed now counts elements.
+        return valuesOf(picked.named, assignment.kind === ASSIGNMENT.CONSTANT_INDEX
+            ? assignment.element ?? 0
+            : picked.index * (fxType.stride / 4), count);
     };
 
     /**
@@ -1364,6 +1555,10 @@ export function createEffect(data, services){
         }
         const view = new DataView(new ArrayBuffer(4));
         view.setUint32(0, constant.bits, true);
+        if (constant.type === CONSTANT_TYPE.AS_TAKEN)
+        {
+            return as === 'float' ? view.getFloat32(0, true) : constant.bits >>> 0;
+        }
         const value = constant.type === CONSTANT_TYPE.FLOAT
             ? view.getFloat32(0, true)
             : constant.type === CONSTANT_TYPE.INT ? view.getInt32(0, true) : constant.bits;
@@ -1416,17 +1611,20 @@ export function createEffect(data, services){
                 found = { variable: inlineShaders.get(assignment) ?? nullShaderOf(stage),
                     index: 0 };
             }
-            else if (assignment?.kind === ASSIGNMENT.VARIABLE
-                || assignment?.kind === ASSIGNMENT.CONSTANT_INDEX)
-            {
-                const named = variableNamed(assignment.variable ?? '');
-                found = named?.kind === VARIABLE_KIND.SHADER
-                    ? { variable: named, index: assignment.element ?? 0 }
-                    : found;
-            }
             else if (assignment)
             {
-                report('a shader a pass picks by an index expression is not evaluated');
+                const picked = elementOf(assignment);
+                if (picked?.named.kind === VARIABLE_KIND.SHADER)
+                {
+                    found = { variable: picked.named, index: picked.index };
+                }
+                // What an index variable or expression picks follows the
+                // variables, so it is looked at each time.
+                if (assignment.kind === ASSIGNMENT.VARIABLE_INDEX
+                    || assignment.kind === ASSIGNMENT.INDEX_EXPRESSION)
+                {
+                    return found;
+                }
             }
             shaders.set(state, found);
             return found;
@@ -1449,17 +1647,12 @@ export function createEffect(data, services){
             {
                 return null;
             }
-            if (assignment.kind === ASSIGNMENT.VARIABLE
-                || assignment.kind === ASSIGNMENT.CONSTANT_INDEX)
+            const picked = elementOf(assignment);
+            if (picked?.named.kind === kind)
             {
-                const named = variableNamed(assignment.variable ?? '');
-                if (named?.kind === kind)
-                {
-                    return named.shape.slots[assignment.element ?? 0]?.made ?? null;
-                }
+                return picked.named.shape.slots[picked.index]?.made ?? null;
             }
-            report(`a pass's ${kind} state picked by an expression, or naming no ${kind}`
-                + ' variable, is not applied');
+            report(`a pass's ${kind} state naming no ${kind} variable is not applied`);
             return undefined;
         };
 
@@ -1497,14 +1690,9 @@ export function createEffect(data, services){
             const samplerTexture = slot=>{
                 const assignment = (slot?.assignments ?? [])
                     .find((/** @type {any} */ entry)=>entry.state === SAMPLER_TEXTURE);
-                if (assignment?.kind !== ASSIGNMENT.VARIABLE
-                    && assignment?.kind !== ASSIGNMENT.CONSTANT_INDEX)
-                {
-                    return null;
-                }
-                const texture = variableNamed(assignment.variable ?? '');
-                return texture?.kind === VARIABLE_KIND.SHADER_RESOURCE
-                    ? texture.shape.slots[assignment.element ?? 0]?.resource ?? null
+                const picked = assignment ? elementOf(assignment) : null;
+                return picked?.named.kind === VARIABLE_KIND.SHADER_RESOURCE
+                    ? picked.named.shape.slots[picked.index]?.resource ?? null
                     : null;
             };
             for (const binding of bindingsOf(shader))

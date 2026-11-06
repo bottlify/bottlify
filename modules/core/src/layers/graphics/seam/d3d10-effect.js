@@ -23,6 +23,7 @@
 
 import { S_OK, IID } from '../d3d10/constants.js';
 import { parseEffect } from '../d3d10/effect.js';
+import { stateIndexNotTaken } from '../d3d10/effect-states.js';
 import {
     EffectRefused, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
 } from '../d3d10/effect-object.js';
@@ -935,9 +936,10 @@ export function createEffectSeam(context){
             return E_INVALIDARG;
         }
         const parsed = parseEffect(memory.readMemory(data >>> 0, size >>> 0));
-        if ('error' in parsed)
+        const error = 'error' in parsed ? parsed.error : stateIndexNotTaken(parsed.effect);
+        if (error || !('effect' in parsed))
         {
-            report(`an effect was refused: ${parsed.error}`);
+            report(`an effect was refused: ${error}`);
             clear();
             return E_FAIL;
         }

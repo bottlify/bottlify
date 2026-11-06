@@ -125,6 +125,18 @@ export function defaultDesc(block){
 export function convertConstant(constant, type){
     const view = new DataView(new ArrayBuffer(4));
     view.setUint32(0, constant.bits, true);
+    if (constant.type === CONSTANT_TYPE.AS_TAKEN)
+    {
+        switch (type)
+        {
+            case 'float': return view.getFloat32(0, true);
+            case 'int': return constant.bits | 0;
+            case 'byte': return constant.bits & 0xff;
+            // A BOOL keeps the word it was given: true from an expression is
+            // 0xffffffff in the backing store (test_effect_value_expression).
+            default: return constant.bits >>> 0;
+        }
+    }
     const value = constant.type === CONSTANT_TYPE.FLOAT
         ? view.getFloat32(0, true)
         : constant.type === CONSTANT_TYPE.INT ? view.getInt32(0, true) : constant.bits;
@@ -140,15 +152,17 @@ export function convertConstant(constant, type){
 
 /**
  * The description a state block's assignments come to, from the effect's
- * starting description. An assignment this cannot evaluate -- a variable
- * or an expression rather than a constant -- is reported and the field left
- * as it starts.
+ * starting description. A field given by a variable or an expression takes
+ * what `evaluate` makes of it now; one it cannot evaluate is reported and
+ * left as it starts.
  *
  * @param {'rasterizer' | 'depthstencil' | 'blend' | 'sampler'} block
  * @param {import('./effect.js').FxAssignment[]} assignments
  * @param {(detail: string) => void} report
+ * @param {(assignment: import('./effect.js').FxAssignment, count: number)
+ *     => import('./effect.js').FxConstant[] | null} [evaluate]
  */
-export function stateDesc(block, assignments, report){
+export function stateDesc(block, assignments, report, evaluate){
     /** @type {Record<string, any>} */
     const desc = defaultDesc(block);
     for (const assignment of assignments)
@@ -164,14 +178,15 @@ export function stateDesc(block, assignments, report){
                 + ' not one of its fields; it is ignored');
             continue;
         }
-        if (!assignment.constants)
+        const constants = assignment.constants
+            ?? evaluate?.(assignment, property.count ?? 1) ?? null;
+        if (!constants)
         {
             report(`a ${block} state's ${property.field} given by a variable or an expression is`
                 + ' not evaluated; it keeps its starting value');
             continue;
         }
-        const values = assignment.constants.map(constant=>convertConstant(constant,
-            property.type));
+        const values = constants.map(constant=>convertConstant(constant, property.type));
         const [face, field] = property.field.includes('.')
             ? property.field.split('.')
             : [null, property.field];
@@ -193,4 +208,30 @@ export function stateDesc(block, assignments, report){
         }
     }
     return desc;
+}
+
+/**
+ * A state block field given at an index the field does not have, described,
+ * or null. fx_4_1 writes every blend field but alpha to coverage for each
+ * render target; Direct3D 10's blend state has one SrcBlend, and its effect
+ * runtime refuses such an effect (Wine's test_effect_fx_4_1_blend_state).
+ *
+ * @param {import('./effect.js').EffectData} effect
+ * @returns {string | null}
+ */
+export function stateIndexNotTaken(effect){
+    for (const object of effect.objects)
+    {
+        for (const element of object.elements)
+        {
+            const past = (element.assignments ?? []).find(entry=>entry.index
+                >= (STATE_PROPERTY[entry.state]?.indexed ? 8 : 1));
+            if (past)
+            {
+                return `${object.name} gives state 0x${past.state.toString(16)} at index`
+                    + ` ${past.index}, which it does not have`;
+            }
+        }
+    }
+    return null;
 }

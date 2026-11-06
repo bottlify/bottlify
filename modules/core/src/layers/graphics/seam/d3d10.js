@@ -2605,10 +2605,17 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         });
     };
 
+    /**
+     * A BOOL as its word: a description an effect computed keeps the word its
+     * expression gave (0xffffffff), one made of booleans reads 1 or 0.
+     *
+     * @param {boolean | number} value
+     */
+    const boolWord = value=>(typeof value === 'number' ? value >>> 0 : value ? 1 : 0);
     /** @param {any} desc @param {number} out */
     const writeBlendDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_BLEND_DESC, {
-            AlphaToCoverageEnable: desc.AlphaToCoverageEnable ? 1 : 0,
+            AlphaToCoverageEnable: boolWord(desc.AlphaToCoverageEnable),
             SrcBlend: desc.SrcBlend,
             DestBlend: desc.DestBlend,
             BlendOp: desc.BlendOp,
@@ -2619,7 +2626,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         for (let index = 0; index < 8; index++)
         {
             fields.writeU32(out + D3D10_BLEND_DESC.BlendEnable + index * 4,
-                desc.BlendEnable[index] ? 1 : 0);
+                boolWord(desc.BlendEnable[index]));
         }
         memory.writeMemory(out + D3D10_BLEND_DESC.RenderTargetWriteMask,
             Uint8Array.from(desc.RenderTargetWriteMask));
@@ -2627,10 +2634,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     /** @param {any} desc @param {number} out */
     const writeDepthStencilDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_DEPTH_STENCIL_DESC, {
-            DepthEnable: desc.DepthEnable ? 1 : 0,
+            DepthEnable: boolWord(desc.DepthEnable),
             DepthWriteMask: desc.DepthWriteMask,
             DepthFunc: desc.DepthFunc,
-            StencilEnable: desc.StencilEnable ? 1 : 0,
+            StencilEnable: boolWord(desc.StencilEnable),
         });
         memory.writeMemory(out + D3D10_DEPTH_STENCIL_DESC.StencilReadMask,
             Uint8Array.from([desc.StencilReadMask, desc.StencilWriteMask, 0, 0]));
@@ -2642,14 +2649,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         fields.writeStruct(out, D3D10_RASTERIZER_DESC, {
             FillMode: desc.FillMode,
             CullMode: desc.CullMode,
-            FrontCounterClockwise: desc.FrontCounterClockwise ? 1 : 0,
+            FrontCounterClockwise: boolWord(desc.FrontCounterClockwise),
             DepthBias: desc.DepthBias,
             DepthBiasClamp: desc.DepthBiasClamp,
             SlopeScaledDepthBias: desc.SlopeScaledDepthBias,
-            DepthClipEnable: desc.DepthClipEnable ? 1 : 0,
-            ScissorEnable: desc.ScissorEnable ? 1 : 0,
-            MultisampleEnable: desc.MultisampleEnable ? 1 : 0,
-            AntialiasedLineEnable: desc.AntialiasedLineEnable ? 1 : 0,
+            DepthClipEnable: boolWord(desc.DepthClipEnable),
+            ScissorEnable: boolWord(desc.ScissorEnable),
+            MultisampleEnable: boolWord(desc.MultisampleEnable),
+            AntialiasedLineEnable: boolWord(desc.AntialiasedLineEnable),
         }, ['DepthBiasClamp', 'SlopeScaledDepthBias']);
     };
     /** @param {any} desc @param {number} out */
