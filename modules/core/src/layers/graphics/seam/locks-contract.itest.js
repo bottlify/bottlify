@@ -127,11 +127,13 @@ function generate(seed, count){
             const span = 1 + next(Math.min(24, VERTICES - first));
             const offset = first * STRIDE;
             const length = span * STRIDE;
-            if (flags === D3DLOCK_NOOVERWRITE && read.subarray(offset, offset + length).includes(1))
+            // With NOOVERWRITE a lock is one, DISCARD or not (`lockCode`).
+            const overwrites = (flags & D3DLOCK_NOOVERWRITE) === 0;
+            if (!overwrites && read.subarray(offset, offset + length).includes(1))
             {
                 continue;
             }
-            if (flags !== D3DLOCK_NOOVERWRITE)
+            if (overwrites)
             {
                 read = new Uint8Array(LENGTH);
             }

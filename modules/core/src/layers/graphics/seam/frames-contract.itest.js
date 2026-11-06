@@ -565,14 +565,15 @@ function generate(seed, steps, upUnbinds, nine){
             const span = whole ? units - first : 1 + below(Math.min(24, units - first));
             const offset = first * entry.unit;
             const bytes = span * entry.unit;
-            if (flags === D3DLOCK_NOOVERWRITE
-                && entry.read.subarray(offset, offset + bytes).includes(1))
+            // With NOOVERWRITE a lock is one, DISCARD or not (`lockCode`).
+            const promises = (flags & D3DLOCK_NOOVERWRITE) !== 0;
+            if (promises && entry.read.subarray(offset, offset + bytes).includes(1))
             {
                 continue;
             }
             if (flags !== D3DLOCK_READONLY)
             {
-                if (flags !== D3DLOCK_NOOVERWRITE)
+                if (!promises)
                 {
                     entry.read = new Uint8Array(length);
                 }
@@ -833,8 +834,7 @@ export function streaming(seed, steps, nine){
             || !unread(on, first * entry.unit, (first + units) * entry.unit))
         {
             first = 0;
-            flags = pick([D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD,
-                D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE, 0]);
+            flags = pick([D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, 0]);
         }
         const toEnd = hold || below(5) === 0;
         const end = toEnd ? total : first + units;

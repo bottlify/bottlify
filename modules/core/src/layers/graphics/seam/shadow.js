@@ -701,8 +701,8 @@ const D3DLOCK_READONLY = 0x10;
 const D3DLOCK_NOOVERWRITE = 0x1000;
 const D3DLOCK_DISCARD = 0x2000;
 /**
- * Or-ed into a buffer block's LOCK_FLAGS by the lock routine for a lock that
- * is not NOOVERWRITE alone (`lockCode`), and taken off by the host that
+ * Or-ed into a buffer block's LOCK_FLAGS by the lock routine for a lock
+ * without NOOVERWRITE (`lockCode`), and taken off by the host that
  * replays it: a DISCARD or a lock with neither flag, taken in the guest only
  * while the ring holds no draw, renames what draws read -- those made before
  * it from the old bytes, those after from the new -- so its replay comes
@@ -1063,13 +1063,16 @@ export function getRenderStateCode(at, trap){
  * The cases left to the host: the device's lock held (`SHADOW.HELD`), a lock
  * of the buffer already held (the host refuses it), a lock for reading, an
  * empty or out-of-range lock, a null out-pointer -- and, while the device's
- * command ring holds a draw the host has not made, any lock but NOOVERWRITE
- * alone: the bytes that draw reads are the buffer's until then, and the host
+ * command ring holds a draw the host has not made, any lock without
+ * NOOVERWRITE: the bytes that draw reads are the buffer's until then, and the host
  * makes it before it takes the lock. A DISCARD with it promises nothing about
  * those bytes, and the buffer has one storage. So too while what was unlocked
  * may be lent to the graphics worker: the host claims it before the program
  * writes over it. The device's lock is let go before the program's pointer is
- * written, which may fault.
+ * written, which may fault. A lock with both DISCARD and NOOVERWRITE is a
+ * NOOVERWRITE, taken in place and remembered without the DISCARD (Wine's
+ * `wined3d_resource_sanitise_map_flags`; its d3d8 and d3d9
+ * test_map_synchronisation find such a lock unsynchronised).
  *
  * Unless, for a DISCARD alone, the buffer has another storage the host has let
  * go of (`SPARES`, `SPARE_FREE`; `renameSlot` given): then the buffer moves
@@ -1078,7 +1081,7 @@ export function getRenderStateCode(at, trap){
  * before it, the storage left takes the spare's place, and the lock goes on as
  * a NOOVERWRITE of the new storage -- the flags the host replays it with. Not
  * while a lock the host replays before the ring's run is in the block
- * (`LOCK_IN_PLACE`, which the lock sets for anything but NOOVERWRITE alone),
+ * (`LOCK_IN_PLACE`, which the lock sets for anything without NOOVERWRITE),
  * nor for a lock the host refuses: the move would hold that replay back past
  * the draws after it, or move a buffer whose lock failed.
  *
@@ -1105,8 +1108,8 @@ export function getRenderStateCode(at, trap){
  *   guarded:
  *     mov eax, [esp+20]
  *     and eax, NOOVERWRITE | DISCARD
- *     cmp eax, NOOVERWRITE
- *     je free
+ *     test eax, NOOVERWRITE
+ *     jnz free
  *     cmp eax, DISCARD            ; with renameSlot, else jmp held
  *     jne held
  *     test dword [ecx+LOCK_FLAGS], LOCK_IN_PLACE
@@ -1205,10 +1208,11 @@ export function getRenderStateCode(at, trap){
  *     mov [ecx+TO], edx
  *   merged:
  *     mov ebx, [esp+24]           ; flags, one word further for the push
- *     mov edx, ebx
- *     and edx, NOOVERWRITE | DISCARD
- *     cmp edx, NOOVERWRITE
- *     je alone
+ *     test ebx, NOOVERWRITE
+ *     jz inPlace
+ *     and ebx, ~DISCARD           ; with NOOVERWRITE, a NOOVERWRITE
+ *     jmp alone
+ *   inPlace:
  *     or ebx, LOCK_IN_PLACE
  *   alone:
  *     or [ecx+LOCK_FLAGS], ebx
@@ -1324,8 +1328,8 @@ export function lockCode(at, trap, renameSlot, copyAt){
         { label: 'guarded' },
         [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
         [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
-        [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x74, to: 'free' },                               // je free
+        [0xa9, ...dword(D3DLOCK_NOOVERWRITE)],                   // test eax, 0x1000
+        { jcc: 0x75, to: 'free' },                               // jnz free
         ...move,
         { label: 'free' },
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
@@ -1366,10 +1370,11 @@ export function lockCode(at, trap, renameSlot, copyAt){
         [0x89, 0x51, BUFFER.TO],                                 // mov [ecx+20], edx
         { label: 'merged' },
         [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
-        [0x89, 0xda],                                            // mov edx, ebx
-        [0x81, 0xe2, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and edx, 0x3000
-        [0x81, 0xfa, ...dword(D3DLOCK_NOOVERWRITE)],             // cmp edx, 0x1000
-        { jcc: 0x74, to: 'alone' },                              // je alone
+        [0xf7, 0xc3, ...dword(D3DLOCK_NOOVERWRITE)],             // test ebx, 0x1000
+        { jcc: 0x74, to: 'inPlace' },                            // jz inPlace
+        [0x81, 0xe3, ...dword(~D3DLOCK_DISCARD >>> 0)],          // and ebx, ~0x2000
+        { jcc: 0xeb, to: 'alone' },                              // jmp alone
+        { label: 'inPlace' },
         [0x81, 0xcb, ...dword(LOCK_IN_PLACE)],                   // or ebx, imm
         { label: 'alone' },
         [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx

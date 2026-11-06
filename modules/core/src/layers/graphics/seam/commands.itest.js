@@ -187,10 +187,13 @@ test('a command routine writes the call into the ring and leaves the rest to the
         [commandSlot('DrawIndexedPrimitive'), 32, 4, 0, 0, 4, 0, 2]);
     assert.equal(run(LOCK, [0, 16, OUT, 0], VBUF), 'trap', 'a plain lock waits for the host');
     assert.equal(run(LOCK, [0, 16, OUT, 0x2000], VBUF), 'trap', 'and so does DISCARD');
-    assert.equal(run(LOCK, [16, 16, OUT, 0x3000], VBUF), 'trap',
-        'and so does DISCARD with NOOVERWRITE, which promises nothing of what the draw reads');
-    assert.equal(run(LOCK, [16, 16, OUT, 0x1000], VBUF), 'ok', 'NOOVERWRITE alone does not');
-    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2, 'each lock taken in the guest counted');
+    assert.equal(run(LOCK, [16, 16, OUT, 0x1000], VBUF), 'ok', 'NOOVERWRITE does not');
+    host.writePhysical(VBLOCK + BUFFER.LOCKED, new Uint8Array(4));
+    // With DISCARD too a lock is a NOOVERWRITE (Wine's d3d9 test_map_synchronisation
+    // finds it unsynchronised), and is remembered as one.
+    assert.equal(run(LOCK, [16, 16, OUT, 0x3000], VBUF), 'ok', 'nor does it with DISCARD');
+    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS) & 0x2000, 0, 'its DISCARD dropped');
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 3, 'each lock taken in the guest counted');
 
     // What the host makes of them: the calls, in order, with what was copied.
     /** @type {any[]} */
