@@ -48,6 +48,8 @@ export const DDERR_SURFACELOST = dderr(450);
 export const DDERR_SURFACENOTATTACHED = dderr(460);
 export const DDERR_NOCLIPPERATTACHED = dderr(568);
 export const DDERR_HWNDALREADYSET = dderr(571);
+export const DDERR_NOHWND = dderr(569);
+export const DDERR_NOFOCUSWINDOW = dderr(602);
 export const DDERR_CLIPPERISUSINGHWND = dderr(567);
 export const DDERR_NOPALETTEATTACHED = dderr(572);
 export const DDERR_EXCLUSIVEMODEALREADYSET = dderr(581);
@@ -216,12 +218,17 @@ export const DDPCAPS_2BIT = 0x00000200;
 
 /** SetCooperativeLevel flags. */
 export const DDSCL_FULLSCREEN = 0x00000001;
+export const DDSCL_ALLOWREBOOT = 0x00000002;
 export const DDSCL_NORMAL = 0x00000008;
 export const DDSCL_NOWINDOWCHANGES = 0x00000004;
 export const DDSCL_EXCLUSIVE = 0x00000010;
 export const DDSCL_SETFOCUSWINDOW = 0x00000080;
+export const DDSCL_SETDEVICEWINDOW = 0x00000100;
+export const DDSCL_CREATEDEVICEWINDOW = 0x00000200;
 export const DDSCL_ALLOWMODEX = 0x00000040;
 export const DDSCL_MULTITHREADED = 0x00000400;
+export const DDSCL_FPUSETUP = 0x00000800;
+export const DDSCL_FPUPRESERVE = 0x00001000;
 
 /** Lock and Flip flags this layer has an opinion about. */
 export const DDLOCK_READONLY = 0x00000010;

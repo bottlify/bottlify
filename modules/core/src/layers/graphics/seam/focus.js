@@ -38,9 +38,11 @@
  * activates it after, above the others and shown only when it was the
  * foreground window, its frame kept; and a mode set while it is held, by
  * anyone, brings the window to the new size before the program hears of the
- * mode. Regaining the activation sets the object's own mode again, and giving
- * the level back takes the window from above the others (Wine's ddraw
- * test_wndproc, test_window_style, test_coop_level_mode_set).
+ * mode. Losing the activation loses the surfaces in video memory, the
+ * activation going to another thread's window as well; regaining it sets the
+ * object's own mode again, and giving the level back takes the window from
+ * above the others (Wine's ddraw test_wndproc, test_window_style,
+ * test_coop_level_mode_set, test_lost_device).
  */
 
 const GWLP_WNDPROC = -4;
@@ -298,8 +300,7 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 {
                     one.device.occlude?.(true);
                 }
-                // DirectDraw's surfaces are lost by the activation itself.
-                else if (!one.announce)
+                else
                 {
                     one.device.injectDeviceLoss(false);
                 }

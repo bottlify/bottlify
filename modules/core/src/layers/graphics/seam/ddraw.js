@@ -81,7 +81,8 @@ import {
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PALETTE,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
-    DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NOWINDOWCHANGES, DDSD_BACKBUFFERCOUNT,
+    DDSCAPS_ZBUFFER, DDSCL_CREATEDEVICEWINDOW, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN,
+    DDSCL_NOWINDOWCHANGES, DDSCL_SETFOCUSWINDOW, DDERR_NOHWND, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_LINEARSIZE, DDSD_MIPMAPCOUNT,
     DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
@@ -174,6 +175,14 @@ const DDENUMSURFACES_NOMATCH = 0x00000004;
 /** A message to every top-level window, and the one that tells them the display's size. */
 const HWND_BROADCAST = 0xffff;
 const WM_DISPLAYCHANGE = 0x007e;
+
+/** The window DirectDraw makes for a device: its class and title, a popup, shown. */
+const DEVICE_WINDOW = 'DirectDrawDeviceWnd';
+const WS_POPUP = 0x80000000;
+const SW_SHOW = 5;
+const SWP_NOZORDER = 0x0004;
+const SWP_NOACTIVATE = 0x0010;
+const E_FAIL = 0x80004005;
 
 /** @param {unknown} value @param {(answer: any) => any} then */
 const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
@@ -427,6 +436,8 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
  *     The full-screen windows Direct3D 8 and 9 hold, which an exclusive
  *     full-screen DirectDraw object holds the same way
+ * @param {(name: string, handler: (args: number[]) => unknown) => number} [deps.procedure]
+ *     A window procedure of the host's, as a guest address: the device window's
  * @param {<T>(call: () => T) => T} [deps.aroundCall]  runs each method of a surface or
  *     the DirectDraw object: Direct3D 7's command rings made first, and what their
  *     routines check said again after
@@ -437,7 +448,7 @@ export function createDirectDrawSeam(
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
-        aroundCall, windowClient, user32, focus },
+        aroundCall, windowClient, user32, focus, procedure },
 )
 {
     const fields = createFields(memory);
@@ -564,12 +575,15 @@ export function createDirectDrawSeam(
         facade.release = (/** @type {string} */ id)=>{
             const left = root.release(generationOf(id));
             // Gone, it puts back a mode it set and left, once the Release is
-            // done (test_coop_level_mode_set).
+            // done (test_coop_level_mode_set), and takes the window it made
+            // for a device away.
             if (root.destroyed && !ended.has(root))
             {
                 ended.add(root);
                 focus?.release(holderOf(facade));
-                publisher.owe?.(()=>leaveScreen(root));
+                const device = root.deviceWindow;
+                publisher.owe?.(()=>andThen(leaveScreen(root), ()=>(device !== 0
+                    ? user32?.('DestroyWindow')?.handler([device]) : 0)));
             }
             return left;
         };
@@ -951,7 +965,8 @@ export function createDirectDrawSeam(
         let holder = holders.get(root);
         if (!holder)
         {
-            holder = { injectDeviceLoss: ()=>{}, deviceState: 'ddraw' };
+            // Its window losing the activation loses the screen's memory.
+            holder = { injectDeviceLoss: ()=>root.setWindowInactive(true), deviceState: 'ddraw' };
             holders.set(root, holder);
         }
         return holder;
@@ -974,10 +989,15 @@ export function createDirectDrawSeam(
                 width: 0, height: 0, created: false });
         }
         const mode = root.displayMode;
-        return focus.take(holderOf(root), { focus: window, window, fullscreen: true,
+        // A window DirectDraw made is the device's; the focus window named
+        // before it is the one the application is activated through.
+        const focusWindow = (flags & DDSCL_CREATEDEVICEWINDOW) !== 0 && root.focusWindow !== 0
+            ? root.focusWindow : window;
+        return focus.take(holderOf(root), { focus: focusWindow, window, fullscreen: true,
             noWindowChanges: (flags & DDSCL_NOWINDOWCHANGES) !== 0, extended: false,
             width: mode.width, height: mode.height, created: true, announce: true,
             regain: ()=>{
+                root.setWindowInactive(false);
                 const set = modesSet.get(root);
                 if (!set || !root.modeSet)
                 {
@@ -996,15 +1016,54 @@ export function createDirectDrawSeam(
      * mode, when it set one and has not put it back.
      *
      * @param {any} root
+     * @param {number} [window]  sized to the mode put back, as normal mode is set on it
      * @returns {unknown}
      */
-    const leaveScreen = root=>{
+    const leaveScreen = (root, window = 0)=>{
         if (!root.modeSet)
         {
             return undefined;
         }
         root.restoreDisplayMode();
-        return showMode(root);
+        return showMode(root, window);
+    };
+
+    /** The device windows' class, registered with the first: its name, in the guest. */
+    let deviceClass = 0;
+
+    /**
+     * The window DDSCL_CREATEDEVICEWINDOW asks DirectDraw to make: a popup
+     * over the screen, of the class and title Wine's
+     * test_coop_level_create_device_window finds it by. 0 when it could not
+     * be made.
+     *
+     * @returns {unknown}
+     */
+    const makeDeviceWindow = ()=>{
+        const create = user32?.('CreateWindowExA');
+        const defaults = user32?.('DefWindowProcA');
+        if (!create || !defaults || !procedure || !scratch)
+        {
+            return 0;
+        }
+        if (deviceClass === 0)
+        {
+            const name = scratch.allocate(DEVICE_WINDOW.length + 1);
+            memory.writeMemory(name, new Uint8Array([...DEVICE_WINDOW, '\0']
+                .map(c=>c.charCodeAt(0))));
+            // WNDCLASSA: the procedure at 4, the class name at 36.
+            const wndclass = scratch.allocate(40);
+            memory.writeMemory(wndclass, new Uint8Array(40));
+            fields.writeU32(wndclass + 4, procedure('ddraw device window',
+                args=>defaults.handler(args)));
+            fields.writeU32(wndclass + 36, name);
+            user32?.('RegisterClassA')?.handler([wndclass]);
+            deviceClass = name;
+        }
+        const display = screen();
+        return andThen(create.handler([0, deviceClass, deviceClass, WS_POPUP, 0, 0,
+            display.width, display.height, 0, 0, 0, 0]), made=>((made >>> 0) === 0 ? 0
+            : andThen(user32?.('ShowWindow')?.handler([made >>> 0, SW_SHOW]), ()=>made >>> 0)));
     };
 
     /**
@@ -1016,8 +1075,11 @@ export function createDirectDrawSeam(
      * window over the mode as well (`coverScreen`).
      *
      * @param {any} root
+     * @param {number} [window]  a window sized to the mode before the others
+     *     hear of it, at its corner (Wine's test_coop_level_mode_set: the
+     *     window normal mode is set on as the mode is put back)
      */
-    const showMode = root=>{
+    const showMode = (root, window = 0)=>{
         const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
         const mode = root.ownMode;
         const display = screen();
@@ -1035,8 +1097,10 @@ export function createDirectDrawSeam(
         // (Wine's test_coop_level_mode_set: a normal-mode window hears this
         // alone).
         const size = ((mode.height & 0xffff) << 16 | (mode.width & 0xffff)) >>> 0;
-        return changed ? user32?.('SendMessageA')?.handler([HWND_BROADCAST, WM_DISPLAYCHANGE,
-            display.bitsPerPixel ?? 32, size]) ?? 0 : 0;
+        const sized = changed && window !== 0 ? user32?.('SetWindowPos')?.handler([window, 0, 0, 0,
+            mode.width, mode.height, SWP_NOZORDER | SWP_NOACTIVATE]) : 0;
+        return andThen(sized, ()=>(changed ? user32?.('SendMessageA')?.handler([HWND_BROADCAST,
+            WM_DISPLAYCHANGE, display.bitsPerPixel ?? 32, size]) ?? 0 : 0));
     };
 
     /**
@@ -1763,6 +1827,48 @@ export function createDirectDrawSeam(
     };
 
     /**
+     * The level set, on the window named or the one DirectDraw made for the
+     * device. The window is taken before the level is: a program that sets
+     * another level from the WM_ACTIVATEAPP taking it sends is answered,
+     * and then this level is the object's (Wine's
+     * test_coop_level_activateapp). Giving the screen back puts back the
+     * mode it was given in, sizing the window normal mode is set on to it,
+     * unless the first generation has set a level on the object (Wine's
+     * test_coop_level_mode_set and test_coop_level_versions).
+     *
+     * @param {any} root
+     * @param {number} window
+     * @param {number} flags
+     * @param {1 | 2 | 4 | 7} version
+     */
+    const setLevel = (root, window, flags, version)=>{
+        const wasExclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
+        return andThen(holdWindow(root, window, flags), ()=>{
+            const restores = root.restoresMode && version !== 1;
+            const hr = root.setCooperativeLevel(window, flags, { putsModeBack: restores });
+            if (!focus)
+            {
+                coverScreen(root);
+            }
+            const exclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
+            if (exclusive)
+            {
+                exclusiveHolders.add(root);
+            }
+            else
+            {
+                exclusiveHolders.delete(root);
+            }
+            if (hr === DD_OK && version === 1)
+            {
+                root.noteLevelOfFirst();
+            }
+            return hr === DD_OK && wasExclusive && !exclusive && restores
+                ? andThen(leaveScreen(root, window), ()=>hr) : hr;
+        });
+    };
+
+    /**
      * The methods of one ddraw generation.
      *
      * @param {typeof GENERATIONS[keyof typeof GENERATIONS]} generation
@@ -2068,32 +2174,41 @@ export function createDirectDrawSeam(
 
         /** @param {any} root @param {number[]} args */
         SetCooperativeLevel: (root, [window, flags])=>{
-            const wasExclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
-            // The window is taken before the level is: a program that sets
-            // another level from the WM_ACTIVATEAPP taking it sends is
-            // answered, and then this level is the object's (Wine's
-            // test_coop_level_activateapp).
-            return andThen(holdWindow(root, window >>> 0, flags >>> 0), ()=>{
-                const hr = root.setCooperativeLevel(window >>> 0, flags >>> 0);
-                if (!focus)
+            const asked = window >>> 0;
+            const level = flags >>> 0;
+            const plan = root.planCooperativeLevel(asked, level);
+            if (typeof plan === 'number')
+            {
+                if (plan === DD_OK && version === 1)
                 {
-                    coverScreen(root);
+                    root.noteLevelOfFirst();
                 }
-                const exclusive = (root.cooperativeLevel & DDSCL_EXCLUSIVE) !== 0;
-                if (exclusive)
-                {
-                    exclusiveHolders.add(root);
-                }
-                else
-                {
-                    exclusiveHolders.delete(root);
-                }
-                // Giving the screen back puts back the mode it was given in,
-                // from IDirectDraw2 on; the first generation keeps it (Wine's
-                // test_coop_level_mode_set, each version).
-                return hr === DD_OK && wasExclusive && !exclusive && version !== 1
-                    ? andThen(leaveScreen(root), ()=>hr) : hr;
-            });
+                return plan;
+            }
+            // Normal mode takes away the window DirectDraw made for a device.
+            const made = (level & DDSCL_EXCLUSIVE) === 0 && root.deviceWindow !== 0
+                ? user32?.('DestroyWindow')?.handler([root.deviceWindow]) : 0;
+            return andThen(made, ()=>andThen(plan.deviceWindow ? makeDeviceWindow() : asked,
+                (/** @type {number} */ target)=>{
+                    if (!plan.deviceWindow)
+                    {
+                        return setLevel(root, target >>> 0, level, version);
+                    }
+                    if ((target >>> 0) === 0)
+                    {
+                        return E_FAIL;
+                    }
+                    root.deviceWindowMade(target >>> 0);
+                    if ((level & DDSCL_SETFOCUSWINDOW) !== 0)
+                    {
+                        const hr = asked === 0 ? DDERR_NOHWND : root.setFocusWindow(asked);
+                        if (hr !== DD_OK)
+                        {
+                            return hr;
+                        }
+                    }
+                    return setLevel(root, target >>> 0, level, version);
+                }));
         },
 
         // The first generation takes width, height and depth; every later one

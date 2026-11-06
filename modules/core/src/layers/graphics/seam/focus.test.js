@@ -315,10 +315,11 @@ test('DirectDraw\'s window: placed over the mode then made the foreground one, i
     assert.deepEqual(h.names().filter(name=>name !== 'GetWindowLongA'), ['ChangeDisplaySettingsA',
         'ShowWindow', 'CallWindowProcA', 'SetWindowPos', 'CallWindowProcA', 'CallWindowProcA'],
     'what the minimising and its mode make reach the program meanwhile');
-    // Back: its mode set again; the device keeps its state.
+    assert.equal(h.device.deviceState, STATES.LOST, 'its surfaces lost');
+    // Back: its mode set again, which is all the object does with it.
     h.send(0x1c, 1);
     assert.equal(regained, 1);
-    assert.equal(h.device.deviceState, STATES.OK);
+    assert.equal(h.device.deviceState, STATES.LOST, 'no Reset for DirectDraw to wait for');
     // Given back: from above the others, unless it keeps its windows.
     h.calls.length = 0;
     h.windows.take(h.device, { ...DDRAW, fullscreen: false });
