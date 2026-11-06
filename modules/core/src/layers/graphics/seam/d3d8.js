@@ -301,6 +301,30 @@ const E_FAIL = 0x80004005 | 0;
  */
 
 /**
+ * IDirect3DDevice8 and 9's SetCursorPosition: a device with a cursor set puts
+ * the system's cursor there as SetCursorPos does, unless it is there already:
+ * a move to where the cursor is, one SetCursorPos put there included, makes no
+ * WM_MOUSEMOVE (Wine's test_cursor_pos). Declared void.
+ *
+ * @param {any} device @param {number} x @param {number} y
+ * @param {(() => { x: number, y: number } | null) | undefined} cursorAt
+ * @param {((x: number, y: number) => void) | undefined} placeCursor
+ * @returns {number}
+ */
+export function cursorMoved(device, x, y, cursorAt, placeCursor){
+    if (!device.GetCursor?.()?.surface)
+    {
+        return 0;
+    }
+    const at = cursorAt?.();
+    if (!at || at.x !== x || at.y !== y)
+    {
+        placeCursor?.(x, y);
+    }
+    return 0;
+}
+
+/**
  * @param {Object} deps
  * @param {any} deps.publisher   From createPublisher.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]
@@ -319,6 +343,9 @@ const E_FAIL = 0x80004005 | 0;
  * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
+ * @param {(x: number, y: number) => void} [deps.placeCursor]  The cursor put on the screen, as
+ *     SetCursorPos puts it: SetCursorPosition's, for a device with a cursor set.
+ * @param {() => { x: number, y: number } | null} [deps.cursorAt]  Where the cursor is.
  * @param {(width: number, height: number,
  *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
  *          ) => void} [deps.resolution]
@@ -349,7 +376,7 @@ const E_FAIL = 0x80004005 | 0;
  */
 export function createDirect3D8Seam(
     { focus: focusWindows = null, publisher, memory, screen, allocate, allocateCode,
-        divergence, cursor, resolution, identity, callGuest, currentThread,
+        divergence, cursor, placeCursor, cursorAt, resolution, identity, callGuest, currentThread,
         windowClientSize, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         traps = new Set(), phases, ringBytes },
@@ -1931,9 +1958,9 @@ export function createDirect3D8Seam(
             return hr;
         },
 
-        // Declared void. The position is the host's own pointer, and a cursor
-        // the program moves itself is moved by the program's own drawing.
-        SetCursorPosition: ()=>0,
+        /** @param {any} device @param {number[]} args */
+        SetCursorPosition: (device, [x, y])=>cursorMoved(device, x | 0, y | 0, cursorAt,
+            placeCursor),
 
         /** @param {any} device @param {number[]} args */
         ShowCursor: (device, [show])=>{

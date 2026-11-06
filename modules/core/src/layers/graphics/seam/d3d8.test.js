@@ -29,6 +29,7 @@ import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { BUFFER, SHADOW, SURFACE, TEXTURE } from './shadow.js';
 import * as inGuest from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
+import { cursorMoved } from './d3d8.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
     IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
@@ -2665,4 +2666,26 @@ test('a state block\'s token is in the device\'s block while the device holds it
     assert.equal(bit(SHADOW.STATE_BLOCKS), 0, 'and not once deleted');
     assert.equal(h.release(device), 0);
     h.release(root);
+});
+
+test('SetCursorPosition puts the system\'s cursor there for a device with a cursor, and leaves'
+    + ' one already there alone (test_cursor_pos)', ()=>{
+    /** @type {[number, number][]} */
+    const placed = [];
+    let at = { x: 50, y: 50 };
+    const cursorAt = ()=>at;
+    const placeCursor = (/** @type {number} */ x, /** @type {number} */ y)=>{
+        placed.push([x, y]);
+        at = { x, y };
+    };
+    const bare = { GetCursor: ()=>({ surface: null, shown: false }) };
+    assert.equal(cursorMoved(bare, 75, 75, cursorAt, placeCursor), 0);
+    assert.deepEqual(placed, [], 'no cursor set: nothing moves');
+    const device = { GetCursor: ()=>({ surface: {}, shown: true }) };
+    cursorMoved(device, 75, 75, cursorAt, placeCursor);
+    cursorMoved(device, 75, 75, cursorAt, placeCursor);
+    at = { x: 100, y: 100 };
+    cursorMoved(device, 100, 100, cursorAt, placeCursor);
+    cursorMoved(device, 125, 125, cursorAt, placeCursor);
+    assert.deepEqual(placed, [[75, 75], [125, 125]]);
 });

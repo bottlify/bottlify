@@ -4927,6 +4927,11 @@ async function buildApp(options){
                 deviceCursor = cursor;
                 showCursor();
             },
+            // A device's SetCursorPosition puts the system's cursor where
+            // SetCursorPos does, and reads it to leave one there alone.
+            /** @param {number} x @param {number} y */
+            placeCursor: (x, y)=>core.api('input')?.place?.(x, y),
+            cursorAt: ()=>core.api('input')?.cursor?.() ?? null,
         },
         win32: {
             // A 64-bit process's structures hold 8-byte pointers.

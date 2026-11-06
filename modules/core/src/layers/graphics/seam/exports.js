@@ -130,6 +130,8 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *        wglGetProcAddress answers for a core name.
  * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
+ * @param {(x: number, y: number) => void} [deps.placeCursor]  The system's cursor put somewhere.
+ * @param {() => { x: number, y: number } | null} [deps.cursorAt]  Where it is.
  * @param {(width: number, height: number,
  *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
  *          ) => void} [deps.resolution]
@@ -215,7 +217,8 @@ export function createGraphicsLibraries(
         flipQueued, publisher: shared, callGuest,
         free, exportAddress, processHeapAllocate,
         currentThread,
-        scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
+        scratch, render, allocate, allocateCode, divergence, cursor, placeCursor, cursorAt,
+        resolution, windowClientSize,
         windowClient, gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
         presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
@@ -368,12 +371,14 @@ export function createGraphicsLibraries(
         : null;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
-        traps: new Set(guestTraps), divergence, cursor, resolution, ringBytes,
+        traps: new Set(guestTraps), divergence, cursor, placeCursor, cursorAt, resolution,
+        ringBytes,
         windowClientSize, now, waitUntil, presented, refresh, phases, focus, callGuest,
         currentThread, identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
-        publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
+        publisher, memory, screen, divergence, cursor, placeCursor, cursorAt, resolution,
+        windowClientSize, gdi, now,
         focus, callGuest, currentThread,
         waitUntil, presented, refresh, phases, allocate: guestAllocate,
         allocateCode: guestAllocateCode,

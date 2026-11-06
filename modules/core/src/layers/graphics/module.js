@@ -1200,6 +1200,9 @@ export function createGraphicsModule(){
                 exportAddress: config?.exportAddress,
                 // Where a program's cursor goes, when the host shows one.
                 cursor: config?.cursor,
+                // SetCursorPosition's: the system's cursor, put and read.
+                placeCursor: config?.placeCursor,
+                cursorAt: config?.cursorAt,
                 // The clock the display's raster -- the vertical blank and the
                 // scan line -- runs on: the guest's, from the assembling caller
                 // that owns it, because a program that spins on the blank times

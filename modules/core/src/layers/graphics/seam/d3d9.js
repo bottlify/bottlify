@@ -74,6 +74,7 @@ import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../wi
 import { scanWindows } from '../../win32/common/scan-windows.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
+import { cursorMoved } from './d3d8.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
@@ -206,6 +207,9 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {() => any} deps.screen  The display this build is configured for.
  * @param {(api: string, detail: string, severity?: 'loss') => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
+ * @param {(x: number, y: number) => void} [deps.placeCursor]  The cursor put on the screen, as
+ *     SetCursorPos puts it: SetCursorPosition's, for a device with a cursor set.
+ * @param {() => { x: number, y: number } | null} [deps.cursorAt]  Where the cursor is.
  *     Where the program's cursor goes; without a taker the call is refused.
  * @param {(width: number, height: number,
  *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
@@ -249,7 +253,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     where its caller reads it, when that is not EAX: XMM0 in a 64-bit process.
  */
 export function createDirect3D9Seam(
-    { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, resolution,
+    { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, placeCursor,
+        cursorAt, resolution,
         identity, callGuest, currentThread,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
@@ -1872,8 +1877,9 @@ export function createDirect3D9Seam(
             }
             return hr;
         },
-        // Declared void. The position is the host's own pointer.
-        SetCursorPosition: ()=>0,
+        /** @param {any} device @param {number[]} args */
+        SetCursorPosition: (device, [x, y])=>cursorMoved(device, x | 0, y | 0, cursorAt,
+            placeCursor),
         /** @param {any} device @param {number[]} args */
         ShowCursor: (device, [show])=>{
             const was = device.ShowCursor((show >>> 0) !== 0);
