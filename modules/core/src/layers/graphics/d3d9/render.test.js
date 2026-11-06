@@ -1701,6 +1701,35 @@ test('StretchRect scales one target over another on the GPU, filtered as asked',
         && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
 });
 
+test('StretchRect scales an offscreen plain surface into a target, from its bytes', async()=>{
+    // Wine's d3d9 stretchrect_test: offscreenplain into a render target,
+    // scaling, is allowed. The plain surface's pixels are its guest bytes,
+    // taken up for the stretch.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const plain = {};
+    assert.equal(device.CreateOffscreenPlainSurface(2, 2, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT,
+        plain), D3D_OK);
+    h.write(plain.surface.base, new Uint8Array(16).fill(0x5a));
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    assert.equal(device.StretchRect(plain.surface, null, back.surface, null, D3DTEXF.POINT),
+        D3D_OK);
+    await h.present();
+    const stretch = h.device.diagnostics().lastFrame
+        .find((/** @type {any} */ command)=>command.kind === 'stretch');
+    assert.ok(stretch, 'the stretch was drawn');
+    const made = h.gpu.of('createTexture').find((/** @type {any} */ call)=>
+        call.descriptor.label === 'plain');
+    assert.ok(made, 'the plain surface was given a GPU copy');
+    assert.equal(stretch.source.texture, made.texture, 'and the stretch draws from it');
+    assert.ok(h.reads.some(([address, length])=>address === plain.surface.base && length >= 16),
+        'its bytes were taken up');
+    assert.deepEqual(h.gpu.errors, []);
+});
+
 test('StretchRect takes a render-target texture\'s level as its source, on the GPU', async()=>{
     // D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES, which the caps claim: a
     // texture drawn into is stretched as a target surface is.

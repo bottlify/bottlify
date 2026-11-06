@@ -165,9 +165,11 @@ export const D3DISSUE = Object.freeze({ END: 1, BEGIN: 2 });
 /** D3DGETDATA_FLUSH: send what was issued to the GPU. */
 const D3DGETDATA_FLUSH = 1;
 
-/** The last D3DTEXTUREFILTERTYPE StretchRect accepts. */
-const D3DTEXF_ANISOTROPIC = 3;
-/** D3DTEXF_LINEAR: a stretch filtered between texels; POINT and NONE take the nearest. */
+/**
+ * D3DTEXF_LINEAR: a stretch filtered between texels; POINT and NONE take the
+ * nearest. It is the last filter StretchRect accepts: ANISOTROPIC and the
+ * rest are refused (Wine's d3d9 stretchrect_test).
+ */
 const D3DTEXF_LINEAR = 2;
 
 /** D3DSTREAMSOURCE_INDEXEDDATA and D3DSTREAMSOURCE_INSTANCEDATA. */
@@ -4754,7 +4756,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         StretchRect(source, sourceRect, destination, destinationRect, filter, out = {}){
-            if (!source || !destination || filter > D3DTEXF_ANISOTROPIC)
+            if (!source || !destination || filter > D3DTEXF_LINEAR)
             {
                 report('stretch-arguments', `StretchRect refused: ${!source ? 'no source surface'
                     : !destination ? 'no destination surface' : `filter ${filter}`}`);
@@ -4813,8 +4815,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // whenever both sides are its GPU's and not one texture, and
                 // the program is answered as it will be. Drawing nothing on
                 // purpose, it is answered as a GPU would answer it.
+                // An offscreen plain surface is taken up from its bytes for
+                // the stretch there.
                 if ((services.renderedElsewhere === true || services.drawsNothing === true)
-                    && drawnOnGpu(source)
+                    && (drawnOnGpu(source) || stretchKindOf(source) === 'plain')
                     && drawnOnGpu(destination) && !oneTexture(source, destination))
                 {
                     out.moves = [];

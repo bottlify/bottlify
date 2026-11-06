@@ -5427,6 +5427,53 @@ export function createRenderer(options){
         return made;
     };
 
+    /** The GPU copy each offscreen plain surface a stretch drew from was given. */
+    const plainSurfaces = new WeakMap();
+
+    /**
+     * An offscreen plain surface on the GPU, for a stretch to draw from. Its
+     * pixels are its guest bytes and nothing else: each stretch takes up what
+     * they hold then, in the frame's order. Null for a format the GPU takes up
+     * no copy of (a depth, a four-character code).
+     *
+     * @param {any} surface
+     * @returns {any}
+     */
+    const plainSurfaceFor = surface=>{
+        const desc = describe(surface);
+        const info = FORMAT_INFO[desc.Format];
+        if (!info || info.depth || (!info.wide && !TEXEL_EXPANSION[desc.Format]
+            && !isCompressed(desc.Format)))
+        {
+            return null;
+        }
+        let made = plainSurfaces.get(surface);
+        if (!made)
+        {
+            made = backend.createSurface({
+                width: desc.Width,
+                height: desc.Height,
+                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, false, float32),
+                label: 'plain',
+                ...narrowed(desc.Format),
+                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+            });
+            plainSurfaces.set(surface, made);
+        }
+        const bytes = readMemory(surface.base, surfaceBytes(desc.Format, desc.Width, desc.Height));
+        uploadTexels(made, {
+            format: made.format,
+            mipLevel: 0,
+            width: desc.Width,
+            height: desc.Height,
+            texels: isCompressed(desc.Format)
+                ? decodeCompressed(bytes, desc.Format, desc.Width, desc.Height)
+                : expandTexels(desc.Format, tightRows(bytes, desc.Format, desc.Width,
+                    desc.Height, surface.pitch), desc.Width * desc.Height, float32),
+        }, true);
+        return made;
+    };
+
     /**
      * A volume texture's levels, taken into care as a texture's surfaces are:
      * each unlock, through the texture or through the level, marks that
@@ -10062,11 +10109,15 @@ export function createRenderer(options){
          * @returns {boolean}
          */
         stretchSurface(source, rect, destination, destRect, linear){
-            if (!onGpu(source) || !onGpu(destination))
+            if (!onGpu(destination))
             {
                 return false;
             }
-            const from = surfaceFor(source);
+            const from = onGpu(source) ? surfaceFor(source) : plainSurfaceFor(source);
+            if (!from)
+            {
+                return false;
+            }
             const into = surfaceFor(destination);
             if (from.texture === into.texture || !from.view)
             {

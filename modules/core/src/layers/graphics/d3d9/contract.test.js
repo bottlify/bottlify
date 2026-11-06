@@ -1263,6 +1263,8 @@ test('StretchRect copies equal rectangles and refuses a stretch, saying why', ()
     'a stretch');
     assert.equal(device.StretchRect(source.surface, null, target.surface, null, 4),
         D3DERR_INVALIDCALL, 'no such filter');
+    assert.equal(device.StretchRect(source.surface, null, target.surface, null, 3),
+        D3DERR_INVALIDCALL, 'D3DTEXF_ANISOTROPIC is not a stretch filter');
     /** @type {{ surface?: any }} */
     const system = {};
     device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, system);
@@ -1388,6 +1390,30 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
         { between: 0, intoTarget: 0, intoPlain: 7 },
         'into a target nothing moves; into a plain surface the bytes still do');
     assert.deepEqual(copied({ drawsNothing: true }), { between: 0, intoTarget: 0, intoPlain: 7 });
+});
+
+test('StretchRect scales a plain surface into a target drawn elsewhere', ()=>{
+    // The played device takes the plain surface's bytes up for the stretch
+    // (Wine's stretchrect_test: offscreenplain into a target, scaling).
+    const { device } = make({ services: { renderedElsewhere: true,
+        allocate: (()=>{
+            let next = 0x1000;
+            return (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            };
+        })() } });
+    /** @type {{ surface?: any }} */
+    const target = {};
+    device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, false, target);
+    /** @type {{ surface?: any }} */
+    const plain = {};
+    device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plain);
+    assert.equal(device.StretchRect(plain.surface, null, target.surface, null, 0), D3D_OK);
+    plain.surface.release();
+    target.surface.release();
+    device.release();
 });
 
 test('StretchRect takes a texture level only into a target, a plain surface only from another,'
