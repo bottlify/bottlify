@@ -36,6 +36,7 @@ import { GL } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
+import { BLOCK_LIMITS } from './glsl-link.js';
 
 /**
  * How many texture units a context has: the larger of the coordinate sets
@@ -827,6 +828,48 @@ export const DEFAULT_STATE = Object.freeze([
     // A copy's two bindings answer under the target's own name (OpenGL 3.1).
     { query: GL.COPY_READ_BUFFER, name: 'GL_COPY_READ_BUFFER_BINDING', kind: 'int', value: [0] },
     { query: GL.COPY_WRITE_BUFFER, name: 'GL_COPY_WRITE_BUFFER_BINDING', kind: 'int', value: [0] },
+    // OpenGL 3.1's uniform buffers: the general binding, and the limits
+    // (`BLOCK_LIMITS`; `context-uniform-buffers.js` has the indexed points).
+    {
+        query: GL.UNIFORM_BUFFER_BINDING, name: 'GL_UNIFORM_BUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.MAX_VERTEX_UNIFORM_BLOCKS, name: 'GL_MAX_VERTEX_UNIFORM_BLOCKS', kind: 'int',
+        value: [BLOCK_LIMITS.perStage],
+    },
+    {
+        query: GL.MAX_FRAGMENT_UNIFORM_BLOCKS, name: 'GL_MAX_FRAGMENT_UNIFORM_BLOCKS',
+        kind: 'int', value: [BLOCK_LIMITS.perStage],
+    },
+    {
+        query: GL.MAX_COMBINED_UNIFORM_BLOCKS, name: 'GL_MAX_COMBINED_UNIFORM_BLOCKS',
+        kind: 'int', value: [BLOCK_LIMITS.combined],
+    },
+    {
+        query: GL.MAX_UNIFORM_BUFFER_BINDINGS, name: 'GL_MAX_UNIFORM_BUFFER_BINDINGS',
+        kind: 'int', value: [BLOCK_LIMITS.bindings],
+    },
+    {
+        query: GL.MAX_UNIFORM_BLOCK_SIZE, name: 'GL_MAX_UNIFORM_BLOCK_SIZE', kind: 'int',
+        value: [BLOCK_LIMITS.size],
+    },
+    {
+        query: GL.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS,
+        name: 'GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS', kind: 'int',
+        value: [GLSL_LIMITS.vertexUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+    },
+    {
+        query: GL.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS,
+        name: 'GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS', kind: 'int',
+        value: [GLSL_LIMITS.fragmentUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+    },
+    {
+        query: GL.UNIFORM_BUFFER_OFFSET_ALIGNMENT, name: 'GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT',
+        kind: 'int', value: [256],
+    },
     {
         query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],

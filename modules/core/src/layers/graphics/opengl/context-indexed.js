@@ -40,12 +40,7 @@ export const INDEXED_CALLS_NOT_COMPILED = Object.freeze([
  *     IndexedQuery
  */
 
-/**
- * What a scene draws with when its draw buffers do not agree: each buffer's
- * blending and colour mask (red 1, green 2, blue 4, alpha 8). Null when they do.
- *
- * @typedef {{ blend: boolean[], masks: number[] } | null} PerBuffer
- */
+/** @typedef {import('./pipeline.js').PerBuffer} PerBuffer */
 
 /**
  * @param {any} context
@@ -59,13 +54,16 @@ export function installIndexedCalls(context, kernel){
     /** Each draw buffer's colour mask as four flags, the first mirrored in GL_COLOR_WRITEMASK. */
     const masks = Array.from({ length: BUFFERS }, ()=>[1, 1, 1, 1]);
 
-    /** @type {Map<number, IndexedQuery>} */
-    const indexed = new Map([
-        [GL.BLEND, index=>(index < BUFFERS ? { kind: 'bool', values: [blend[index] ? 1 : 0] }
-            : null)],
-        [GL.COLOR_WRITEMASK, index=>(index < BUFFERS ? { kind: 'bool', values: masks[index] }
-            : null)],
-    ]);
+    /**
+     * Every installer's indexed targets, whichever installs first.
+     *
+     * @type {Map<number, IndexedQuery>}
+     */
+    const indexed = kernel.side.indexed ??= new Map();
+    indexed.set(GL.BLEND, index=>(index < BUFFERS
+        ? { kind: 'bool', values: [blend[index] ? 1 : 0] } : null));
+    indexed.set(GL.COLOR_WRITEMASK, index=>(index < BUFFERS
+        ? { kind: 'bool', values: masks[index] } : null));
 
     /**
      * The first buffer's from the unindexed state, which is its own: what
@@ -81,7 +79,6 @@ export function installIndexedCalls(context, kernel){
         | (mask[3] ? 8 : 0);
 
     Object.assign(kernel.side, {
-        indexed,
         /**
          * glEnable, glDisable and glColorMask set every buffer's: told after
          * the unindexed state has taken the value.

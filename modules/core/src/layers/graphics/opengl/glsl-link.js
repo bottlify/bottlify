@@ -32,7 +32,8 @@
  */
 
 import { BUILTIN_ATTRIBUTES, GLSL_LIMITS } from './glsl-builtins.js';
-import { componentsOf, glslName } from './glsl-types.js';
+import { baseOf, componentsOf, glslName, innermost } from './glsl-types.js';
+import { blockLayout, blockVariables } from './glsl-layout.js';
 import { canonicalAttribName } from './arb-program.js';
 
 /**
@@ -51,8 +52,69 @@ import { canonicalAttribName } from './arb-program.js';
  * @property {UserFunction[]} functions  the definitions main reaches, callees first
  * @property {VariableSymbol[]} globals  every global the stage's shaders declare
  * @property {Set<string>} uses  the names of the globals and built-ins main reaches
+ * @property {Map<string, VariableSymbol>} builtins  the built-in variables its
+ *     shaders name, with the types this version gives them
  * @property {import('./glsl-types.js').StructType[]} structs  one per name
  * @property {number} version
+ */
+
+/**
+ * A value the vertex stage passes the fragment stage (section 4.3.4 of 1.30,
+ * "Inputs", and 7.4.1 of the 3.3 API: matched by name, a member of a block by
+ * the block's name and its own).
+ *
+ * @typedef {Object} Varying
+ * @property {string} name     `x`, or `Block.x` for a block member
+ * @property {GlslType} type
+ * @property {string} vertexPath  the WGSL the vertex stage writes it through,
+ *     past the stage's prefix: `g_x`, or `g_instance.m_x`
+ * @property {string} fragmentPath  what the fragment stage reads it into
+ * @property {'smooth' | 'flat' | 'noperspective'} interpolation
+ * @property {boolean} centroid
+ */
+
+/**
+ * A fragment shader's own output (section 4.3.6 of 1.30, and 3.0's
+ * glBindFragDataLocation): the colour number it is written to.
+ *
+ * @typedef {Object} FragmentOutput
+ * @property {string} name
+ * @property {GlslType} type
+ * @property {number} location  the first; an array takes one a element
+ * @property {number} index  0, or 1 for the second source of dual-source blending
+ */
+
+/**
+ * A uniform block a program uses (OpenGL 3.1 section 2.11.4): where its
+ * members lie in the buffer the application binds, and which stages read it.
+ *
+ * @typedef {Object} UniformBlock
+ * @property {string} name  as glGetUniformBlockIndex takes it: `B`, or `B[2]`
+ *     for an element of an array of blocks
+ * @property {string} blockName  the block's name, without an element
+ * @property {number} element  the element of an array of blocks, or 0
+ * @property {string | null} instance
+ * @property {number} size  UNIFORM_BLOCK_DATA_SIZE, in bytes
+ * @property {'std140' | 'std430'} packing
+ * @property {import('./glsl-layout.js').MemberLayout[]} members
+ * @property {{ vertex: boolean, fragment: boolean }} stages
+ * @property {number} binding  the binding point a link leaves it at: the
+ *     shader's `layout(binding)` (4.20), else 0
+ */
+
+/**
+ * An active uniform of a named block, as glGetActiveUniform lists it after
+ * the default block's.
+ *
+ * @typedef {Object} BlockUniform
+ * @property {string} name
+ * @property {GlslType} type
+ * @property {number} size
+ * @property {number} block  the block's index
+ * @property {number} offset
+ * @property {number} arrayStride
+ * @property {number} matrixStride
+ * @property {boolean} rowMajor
  */
 
 /**
@@ -81,12 +143,20 @@ import { canonicalAttribName } from './arb-program.js';
  * @property {Map<number, { leaf: UniformLeaf, element: number }>} locations
  * @property {number} storeWords
  * @property {ArrayBuffer} defaults  the store as linking leaves it
- * @property {{ name: string, type: GlslType }[]} varyings  what the stages pass, by name
- * @property {{ leaf: UniformLeaf, element: number, dim: string, shadow: boolean }[]} samplers
- *     in binding order
+ * @property {Varying[]} varyings  what the stages pass, by name
+ * @property {{ leaf: UniformLeaf, element: number, dim: string, shadow: boolean,
+ *     type: import('./glsl-types.js').SamplerType }[]} samplers  in binding order
  * @property {boolean} writesData  the fragment stage writes gl_FragData
  * @property {number} fragmentOutputs  how many colour outputs it writes at most
+ * @property {FragmentOutput[]} outputs  the fragment shader's own outputs
+ * @property {UniformBlock[]} blocks  the active uniform blocks, by index
+ * @property {BlockUniform[]} blockUniforms  their active uniforms
  */
+
+/** The uniform blocks a stage may read, and all its stages together (OpenGL 3.1). */
+export const BLOCK_LIMITS = Object.freeze({
+    perStage: 10, combined: 20, bindings: 24, size: 16384,
+});
 
 /** @param {GlslType} type */
 const wordsOf = type=>(type.kind === 'sampler' ? 1 : componentsOf(type));
@@ -120,11 +190,14 @@ function leavesOf(name, type, path){
 
 /**
  * @param {{ vertex: ShaderUnit[], fragment: ShaderUnit[],
- *     attribBindings: Map<string, number> }} input
+ *     attribBindings: Map<string, number>,
+ *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
  * @returns {{ ok: true, log: string, program: LinkedProgram }
  *     | { ok: false, log: string }}
  */
-export function linkProgram({ vertex, fragment, attribBindings }){
+export function linkProgram(given){
+    const { vertex, fragment, attribBindings } = given;
+    const fragDataBindings = given.fragDataBindings ?? new Map();
     /** @type {string[]} */
     const errors = [];
     /** @param {string} message */
@@ -257,8 +330,20 @@ export function linkProgram({ vertex, fragment, attribBindings }){
             }
         }
         visit('main()');
+        /** @type {Map<string, VariableSymbol>} */
+        const builtins = new Map();
+        for (const unit of units)
+        {
+            for (const [name, symbol] of unit.builtins ?? [])
+            {
+                if (!builtins.has(name))
+                {
+                    builtins.set(name, symbol);
+                }
+            }
+        }
         return {
-            stage, main, functions: ordered, globals: [...globals.values()], uses,
+            stage, main, functions: ordered, globals: [...globals.values()], uses, builtins,
             structs: [...structs.values()],
             version: Math.max(...units.map(unit=>unit.version)),
         };
@@ -276,29 +361,50 @@ export function linkProgram({ vertex, fragment, attribBindings }){
         ? stage.globals.filter(symbol=>symbol.storage === storage && stage.uses.has(symbol.name))
         : []);
 
-    // --- varyings ---
-    /** @type {{ name: string, type: GlslType }[]} */
+    // --- varyings: the vertex stage's outputs the fragment stage reads ---
+    /** @type {Varying[]} */
     const varyings = [];
     if (vs && fs)
     {
-        const declared = new Map(vs.globals.filter(s=>s.storage === 'varying')
-            .map(s=>[s.name, s]));
-        for (const symbol of usedOf(fs, 'varying'))
+        const outputs = new Map(interfaceOf(vs, 'out', error).map(entry=>[entry.name, entry]));
+        const late = Math.min(vs.version, fs.version) >= 430;
+        for (const input of interfaceOf(fs, 'in', error))
         {
-            const from = declared.get(symbol.name);
+            if (!input.used)
+            {
+                continue;
+            }
+            const word = input.legacy ? 'varying' : 'input';
+            const from = outputs.get(input.name);
             if (!from)
             {
-                error(`fragment shader varying '${symbol.name}' is not declared in the vertex`
+                error(`fragment shader ${word} '${input.name}' is not declared in the vertex`
                     + ' shader');
                 continue;
             }
-            if (glslName(from.type) !== glslName(symbol.type))
+            if (glslName(from.type) !== glslName(input.type))
             {
-                error(`varying '${symbol.name}' has type ${glslName(from.type)} in the vertex`
-                    + ` shader and ${glslName(symbol.type)} in the fragment shader`);
+                error(`${word} '${input.name}' has type ${glslName(from.type)} in the vertex`
+                    + ` shader and ${glslName(input.type)} in the fragment shader`);
                 continue;
             }
-            varyings.push({ name: symbol.name, type: symbol.type });
+            // Before 4.30 both stages say the same interpolation (section
+            // 4.3.9 of 1.30 to 4.20); from it the fragment stage's decides.
+            if (!late && (from.interpolation ?? 'smooth') !== (input.interpolation ?? 'smooth'))
+            {
+                error(`${word} '${input.name}' is interpolated`
+                    + ` ${from.interpolation ?? 'smooth'} in the vertex shader and`
+                    + ` ${input.interpolation ?? 'smooth'} in the fragment shader`);
+                continue;
+            }
+            const integer = /^(int|uint|double)$/.test(String(baseOf(innermost(input.type))));
+            varyings.push({
+                name: input.name, type: input.type, vertexPath: from.path,
+                fragmentPath: input.path,
+                interpolation: integer ? 'flat' : input.interpolation ?? from.interpolation
+                    ?? 'smooth',
+                centroid: input.centroid,
+            });
         }
     }
 
@@ -309,7 +415,17 @@ export function linkProgram({ vertex, fragment, attribBindings }){
         : [];
     if (vs)
     {
-        const active = usedOf(vs, 'attribute');
+        const active = [...usedOf(vs, 'attribute'), ...usedOf(vs, 'in')];
+        /**
+         * Where an attribute is bound: the shader's `layout(location)`, which
+         * wins over glBindAttribLocation's (section 2.11.3 of 3.3), else that.
+         *
+         * @param {VariableSymbol} symbol @returns {number | undefined}
+         */
+        const boundAt = symbol=>{
+            const explicit = symbol.qualifiers?.layout.location;
+            return typeof explicit === 'number' ? explicit : attribBindings.get(symbol.name);
+        };
         /** @param {GlslType} type */
         const slotsOf = type=>(type.kind === 'matrix' ? type.cols : 1);
         /** @type {Set<number>} */
@@ -329,7 +445,7 @@ export function linkProgram({ vertex, fragment, attribBindings }){
         }
         for (const symbol of active)
         {
-            const bound = attribBindings.get(symbol.name);
+            const bound = boundAt(symbol);
             if (bound === undefined)
             {
                 continue;
@@ -342,6 +458,11 @@ export function linkProgram({ vertex, fragment, attribBindings }){
             }
             for (let k = 0; k < slots; k++)
             {
+                if (taken.has(bound + k) && typeof symbol.qualifiers?.layout.location === 'number')
+                {
+                    error(`attribute '${symbol.name}' is given location ${bound + k}, which`
+                        + ' another attribute has in the shader too');
+                }
                 taken.add(bound + k);
             }
             attributes.push({ name: symbol.name, type: symbol.type, location: bound });
@@ -349,7 +470,7 @@ export function linkProgram({ vertex, fragment, attribBindings }){
         let first = true;
         for (const symbol of active)
         {
-            if (attribBindings.has(symbol.name))
+            if (boundAt(symbol) !== undefined)
             {
                 continue;
             }
@@ -402,6 +523,10 @@ export function linkProgram({ vertex, fragment, attribBindings }){
     {
         for (const symbol of usedOf(stage, 'uniform'))
         {
+            if (symbol.block)
+            {
+                continue;
+            }
             const other = uniformRoots.get(symbol.name);
             if (other && glslName(other.type) !== glslName(symbol.type))
             {
@@ -418,7 +543,7 @@ export function linkProgram({ vertex, fragment, attribBindings }){
     const uniforms = [];
     /** @type {Map<number, { leaf: UniformLeaf, element: number }>} */
     const locations = new Map();
-    /** @type {{ leaf: UniformLeaf, element: number, dim: string, shadow: boolean }[]} */
+    /** @type {LinkedProgram["samplers"]} */
     const samplers = [];
     let nextLocation = 0;
     let storeWords = 0;
@@ -440,7 +565,7 @@ export function linkProgram({ vertex, fragment, attribBindings }){
                 {
                     entry.samplerBindings.push(samplers.length);
                     samplers.push({ leaf: entry, element: k, dim: leaf.type.dim,
-                        shadow: leaf.type.shadow });
+                        shadow: leaf.type.shadow, type: leaf.type });
                 }
             }
             for (let k = 0; k < leaf.size; k++)
@@ -504,6 +629,15 @@ export function linkProgram({ vertex, fragment, attribBindings }){
         }
         fragmentOutputs = writesData ? GLSL_LIMITS.drawBuffers : 1;
     }
+    const outputs = fs ? fragmentOutputsOf(fs, fragDataBindings, error) : [];
+    if (outputs.length > 0)
+    {
+        fragmentOutputs = Math.max(...outputs.map(o=>o.location
+            + (o.type.kind === 'array' ? o.type.length : 1)));
+    }
+
+    // --- uniform blocks ---
+    const { blocks, blockUniforms } = uniformBlocksOf(vs, fs, error);
 
     if (errors.length > 0)
     {
@@ -514,9 +648,245 @@ export function linkProgram({ vertex, fragment, attribBindings }){
         log: '',
         program: {
             vertex: vs, fragment: fs, attributes, builtinAttributes, uniforms, locations,
-            storeWords, defaults, varyings, samplers, writesData, fragmentOutputs,
+            storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
+            blocks, blockUniforms,
         },
     };
+}
+
+/**
+ * A fragment shader's own outputs and their colour numbers (section 3.9.2 of
+ * 3.0, 4.4.2 of the 3.30 language): `layout(location)` first, then
+ * glBindFragDataLocation's, then the lowest free numbers in declaration order.
+ *
+ * @param {LinkedStage} fs
+ * @param {Map<string, { location: number, index: number }>} bindings
+ * @param {(message: string) => void} error
+ * @returns {FragmentOutput[]}
+ */
+function fragmentOutputsOf(fs, bindings, error){
+    const declared = fs.globals.filter(s=>s.storage === 'out' && !s.block);
+    /** @type {FragmentOutput[]} */
+    const outputs = [];
+    /** @type {Set<string>} taken `location:index` pairs */
+    const taken = new Set();
+    /** @param {GlslType} type */
+    const slots = type=>(type.kind === 'array' ? type.length : 1);
+    /** @param {VariableSymbol} symbol @param {number} location @param {number} index */
+    const place = (symbol, location, index)=>{
+        if (location < 0 || location + slots(symbol.type) > GLSL_LIMITS.drawBuffers
+            || index < 0 || index > 1 || (index === 1 && location + slots(symbol.type) > 1))
+        {
+            error(`fragment output '${symbol.name}' is at location ${location} index ${index},`
+                + ` past the ${GLSL_LIMITS.drawBuffers} draw buffers`);
+            return;
+        }
+        for (let k = 0; k < slots(symbol.type); k++)
+        {
+            const key = `${location + k}:${index}`;
+            if (taken.has(key))
+            {
+                error(`fragment output '${symbol.name}' is at location ${location + k}, which`
+                    + ' another output has');
+                return;
+            }
+            taken.add(key);
+        }
+        outputs.push({ name: symbol.name, type: symbol.type, location, index });
+    };
+    /** @type {VariableSymbol[]} */
+    const later = [];
+    for (const symbol of declared)
+    {
+        const layout = symbol.qualifiers?.layout ?? {};
+        const bound = bindings.get(symbol.name);
+        if (typeof layout.location === 'number')
+        {
+            place(symbol, layout.location, typeof layout.index === 'number' ? layout.index : 0);
+        }
+        else if (bound)
+        {
+            place(symbol, bound.location, bound.index);
+        }
+        else
+        {
+            later.push(symbol);
+        }
+    }
+    for (const symbol of later)
+    {
+        let location = 0;
+        while (location < GLSL_LIMITS.drawBuffers && Array.from({ length: slots(symbol.type) },
+            (_, k)=>taken.has(`${location + k}:0`)).some(Boolean))
+        {
+            location++;
+        }
+        place(symbol, location, 0);
+    }
+    return outputs;
+}
+
+/**
+ * The uniform blocks the stages read (OpenGL 3.1 section 2.11.4), the
+ * vertex stage's first, each by its index; a block both stages declare is
+ * one block and is declared alike in both. A shared or packed block is laid
+ * out as a std140 one: where it lies is the implementation's to say, and
+ * the program asks.
+ *
+ * @param {LinkedStage | null} vs @param {LinkedStage | null} fs
+ * @param {(message: string) => void} error
+ * @returns {{ blocks: UniformBlock[], blockUniforms: BlockUniform[] }}
+ */
+function uniformBlocksOf(vs, fs, error){
+    /** @type {UniformBlock[]} */
+    const blocks = [];
+    /** @type {BlockUniform[]} */
+    const blockUniforms = [];
+    /** @type {Map<string, { info: import('./glsl-check.js').InterfaceBlock, first: number }>} */
+    const byName = new Map();
+    for (const stage of [vs, fs])
+    {
+        if (!stage)
+        {
+            continue;
+        }
+        /** @type {Set<import('./glsl-check.js').InterfaceBlock>} */
+        const used = new Set();
+        /** @type {import('./glsl-check.js').InterfaceBlock[]} */
+        const order = [];
+        for (const symbol of stage.globals)
+        {
+            const info = symbol.block;
+            if (symbol.storage !== 'uniform' || !info)
+            {
+                continue;
+            }
+            if (!order.includes(info))
+            {
+                order.push(info);
+            }
+            if (stage.uses.has(symbol.name))
+            {
+                used.add(info);
+            }
+        }
+        const read = order.filter(info=>used.has(info));
+        if (read.reduce((n, info)=>n + (info.arrays[0] ?? 1), 0) > BLOCK_LIMITS.perStage)
+        {
+            error(`${stage.stage} shader: more than ${BLOCK_LIMITS.perStage} uniform blocks`);
+        }
+        for (const info of read)
+        {
+            const known = byName.get(info.name);
+            if (known)
+            {
+                if (shapeOf(known.info) !== shapeOf(info))
+                {
+                    error(`uniform block '${info.name}' is declared differently in the vertex`
+                        + ' and fragment shaders');
+                    continue;
+                }
+                const count = known.info.arrays[0] ?? 1;
+                for (let k = 0; k < count; k++)
+                {
+                    blocks[known.first + k].stages[stage.stage === 'vertex' ? 'vertex'
+                        : 'fragment'] = true;
+                }
+                continue;
+            }
+            /** @type {'std140' | 'std430'} */
+            const packing = info.layout.std430 ? 'std430' : 'std140';
+            const laid = info.laid ?? blockLayout(info.members.map(m=>({ name: m.name,
+                type: m.type, rowMajor: !!m.layout.row_major })), 'std140');
+            if (laid.size > BLOCK_LIMITS.size)
+            {
+                error(`uniform block '${info.name}' takes ${laid.size} bytes, more than`
+                    + ` ${BLOCK_LIMITS.size}`);
+                continue;
+            }
+            const first = blocks.length;
+            byName.set(info.name, { info, first });
+            const count = info.arrays[0] ?? 1;
+            const binding = typeof info.layout.binding === 'number' ? info.layout.binding : 0;
+            for (let k = 0; k < count; k++)
+            {
+                blocks.push({
+                    name: info.arrays.length > 0 ? `${info.name}[${k}]` : info.name,
+                    blockName: info.name, element: k, instance: info.instance,
+                    size: laid.size, packing, members: laid.members,
+                    stages: { vertex: stage === vs, fragment: stage === fs },
+                    binding: typeof info.layout.binding === 'number' ? binding + k : 0,
+                });
+            }
+            const prefix = info.instance ? `${info.name}.` : '';
+            for (const variable of blockVariables(laid, packing))
+            {
+                blockUniforms.push({ name: `${prefix}${variable.name}`, type: variable.type,
+                    size: variable.arraySize, block: first, offset: variable.offset,
+                    arrayStride: variable.arrayStride, matrixStride: variable.matrixStride,
+                    rowMajor: variable.rowMajor });
+            }
+        }
+    }
+    if (blocks.length > BLOCK_LIMITS.combined)
+    {
+        error(`more than ${BLOCK_LIMITS.combined} uniform blocks`);
+    }
+    return { blocks, blockUniforms };
+}
+
+/** @param {import('./glsl-check.js').InterfaceBlock} info @returns {string} */
+function shapeOf(info){
+    return `${info.arrays.join(',')}|${Object.keys(info.layout).sort().join(',')}|`
+        + info.members.map(m=>`${glslName(m.type)} ${m.name}${m.layout.row_major ? ' r' : ''}`)
+            .join(';');
+}
+
+/**
+ * A stage's inputs or outputs between stages, by the name the other stage
+ * matches: a variable's own, a block member's `Block.member`.
+ *
+ * @param {LinkedStage} stage @param {'in' | 'out'} direction
+ * @param {(message: string) => void} error
+ * @returns {{ name: string, type: GlslType, path: string, used: boolean, legacy: boolean,
+ *     interpolation: 'smooth' | 'flat' | 'noperspective' | null, centroid: boolean }[]}
+ */
+function interfaceOf(stage, direction, error){
+    /** @type {ReturnType<typeof interfaceOf>} */
+    const entries = [];
+    for (const symbol of stage.globals)
+    {
+        if (symbol.storage !== direction && symbol.storage !== 'varying')
+        {
+            continue;
+        }
+        const used = stage.uses.has(symbol.name);
+        const own = symbol.qualifiers;
+        const block = symbol.block;
+        if (block && block.instance === symbol.name)
+        {
+            if (symbol.type.kind === 'array')
+            {
+                error(`${stage.stage} shader: an array of blocks '${block.name}' is passed`
+                    + ' between the vertex and fragment stages, which this implementation does'
+                    + ' not do');
+                continue;
+            }
+            for (const member of block.members)
+            {
+                entries.push({ name: `${block.name}.${member.name}`, type: member.type,
+                    path: `g_${symbol.name}.m_${member.name}`, used, legacy: false,
+                    interpolation: member.qualifiers.interpolation ?? own?.interpolation ?? null,
+                    centroid: member.qualifiers.centroid || !!own?.centroid });
+            }
+            continue;
+        }
+        entries.push({ name: block ? `${block.name}.${symbol.name}` : symbol.name,
+            type: symbol.type, path: `g_${symbol.name}`, used,
+            legacy: symbol.storage === 'varying', interpolation: own?.interpolation ?? null,
+            centroid: !!own?.centroid });
+    }
+    return entries;
 }
 
 /** @param {import('./glsl-types.js').StructType} struct @returns {string} */
@@ -535,4 +905,6 @@ function describe(struct){
  * @property {Float32Array} floats
  * @property {Int32Array} ints
  * @property {number} version  raised on every glUniform* that changes a value
+ * @property {Int32Array} blockBindings  the binding point each uniform block
+ *     reads (glUniformBlockBinding), by block index
  */

@@ -61,6 +61,13 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  */
 
 /**
+ * What a scene draws with when its draw buffers do not agree: each buffer's
+ * blending and colour mask (red 1, green 2, blue 4, alpha 8). Null when they do.
+ *
+ * @typedef {{ blend: boolean[], masks: number[] } | null} PerBuffer
+ */
+
+/**
  * @typedef {Object} SceneUnit
  * @property {number} index  which texture coordinate set it reads
  * @property {import('./objects.js').TextureObject} texture   the object bound,
@@ -136,8 +143,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {PipelineVertex} current   the current attributes, for an array that is off
  * @property {SceneBlend | null} blend   the factors and equations, when blending is on
  * @property {readonly number[]} [blendColor]  GL_BLEND_COLOR
- * @property {import('./context-indexed.js').PerBuffer} [perBuffer]  each draw buffer's
- *           blending and colour mask, when they differ (glEnablei, glColorMaski)
+ * @property {PerBuffer} [perBuffer]  each draw buffer's blending and colour mask, when
+ *           they differ (glEnablei, glColorMaski)
  * @property {{ fbo: import('./objects.js').FramebufferObject, width: number,
  *     height: number } | null} [target]  the framebuffer object drawn into, or the window
  * @property {import('./objects.js').FramebufferObject | null}
@@ -172,6 +179,9 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  *             oneD?: import('./objects.js').TextureObject | null }[]} boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [uniformBuffers]  what each uniform buffer
+ *           binding point holds (glBindBufferRange), for a GLSL program's blocks
  */
 
 /**

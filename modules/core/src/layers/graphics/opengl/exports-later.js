@@ -482,6 +482,65 @@ export function laterEntryPoints(h){
             a[10] >>> 0)),
         glCopyTexSubImage3D: a=>answer(current()?.glCopyTexSubImage3D(a[0] >>> 0, a[1] | 0,
             a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] | 0)),
+
+        // --- 3.0's unsigned uniforms and fragment outputs ---
+
+        glGetUniformuiv: ([program, location, out])=>call(context=>{
+            const answered = context.getUniform(program >>> 0, location | 0);
+            if (answered)
+            {
+                /** @param {number} v */
+                const unsigned = v=>Math.trunc(v) >>> 0;
+                writeQuery(out, answered.float ? answered.values.map(unsigned) : answered.values,
+                    'word');
+            }
+        }),
+        glBindFragDataLocation: ([program, colour, name])=>call(context=>
+            context.bindFragData(program >>> 0, colour >>> 0, 0, h.readName(name))),
+        glBindFragDataLocationIndexed: ([program, colour, index, name])=>call(context=>
+            context.bindFragData(program >>> 0, colour >>> 0, index >>> 0, h.readName(name))),
+        glGetFragDataLocation: ([program, name])=>(current()?.fragData(program >>> 0,
+            h.readName(name), 'location') ?? -1),
+        glGetFragDataIndex: ([program, name])=>(current()?.fragData(program >>> 0,
+            h.readName(name), 'index') ?? -1),
+
+        // --- 3.1's uniform buffers and blocks ---
+
+        glBindBufferBase: ([target, index, buffer])=>answer(current()?.glBindBufferBase(
+            target >>> 0, index >>> 0, buffer >>> 0)),
+        glBindBufferRange: ([target, index, buffer, offset, size])=>answer(
+            current()?.glBindBufferRange(target >>> 0, index >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+        glGetUniformBlockIndex: ([program, name])=>(current()?.glGetUniformBlockIndex(
+            program >>> 0, h.readName(name)) ?? GL.INVALID_INDEX),
+        glGetActiveUniformBlockiv: ([program, index, pname, out])=>call(context=>writeQuery(
+            out, context.glGetActiveUniformBlockiv(program >>> 0, index >>> 0, pname >>> 0),
+            'word')),
+        glGetActiveUniformBlockName: ([program, index, size, length, out])=>call(context=>
+            answerString(context.glGetActiveUniformBlockName(program >>> 0, index >>> 0), size,
+                length, out)),
+        glUniformBlockBinding: ([program, index, binding])=>answer(
+            current()?.glUniformBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glGetUniformIndices: ([program, count, names, out])=>call(context=>{
+            const indices = context.glGetUniformIndices(program >>> 0,
+                readPointers(names, count | 0).map(pointer=>h.readName(pointer)));
+            if (indices && indices.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, indices);
+            }
+        }),
+        glGetActiveUniformsiv: ([program, count, indices, pname, out])=>call(context=>{
+            const list = (count | 0) > 0 && (indices >>> 0) !== 0
+                ? readTyped('ui', indices, count | 0).map(v=>v >>> 0) : [];
+            const values = context.glGetActiveUniformsiv(program >>> 0, list, pname >>> 0);
+            if (values && values.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, values);
+            }
+        }),
+        glGetActiveUniformName: ([program, index, size, length, out])=>call(context=>
+            answerString(context.glGetActiveUniformName(program >>> 0, index >>> 0), size,
+                length, out)),
     };
 
     /**
@@ -508,13 +567,15 @@ export function laterEntryPoints(h){
         });
     }
 
-    // glUniform{1234}{fi} and their vector forms, and the matrices.
+    // glUniform{1234}{f,i,ui} and their vector forms, and the matrices.
     for (const n of [1, 2, 3, 4])
     {
-        for (const kind of /** @type {const} */ (['f', 'i']))
+        for (const kind of /** @type {const} */ (['f', 'i', 'u']))
         {
-            const decode = kind === 'f' ? asFloat : (/** @type {number} */ w)=>w | 0;
-            handlers[`glUniform${n}${kind}`] = args=>{
+            const decode = kind === 'f' ? asFloat : kind === 'u'
+                ? (/** @type {number} */ w)=>w >>> 0 : (/** @type {number} */ w)=>w | 0;
+            const suffix = kind === 'u' ? 'ui' : kind;
+            handlers[`glUniform${n}${suffix}`] = args=>{
                 const context = current();
                 if (context)
                 {
@@ -527,10 +588,10 @@ export function laterEntryPoints(h){
                 }
                 return 0;
             };
-            handlers[`glUniform${n}${kind}v`] = ([location, count, address])=>call(context=>
+            handlers[`glUniform${n}${suffix}v`] = ([location, count, address])=>call(context=>
                 context.uniform(location | 0, count | 0,
-                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : 'i', address,
-                        (count | 0) * n) : [], kind, n));
+                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : kind === 'u' ? 'ui' : 'i',
+                        address, (count | 0) * n) : [], kind, n));
         }
     }
     for (const cols of [2, 3, 4])
