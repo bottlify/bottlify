@@ -746,9 +746,11 @@ test('a vertex buffer is a guest allocation with a description of its own', ()=>
     assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
 
     const back = 0x6700;
+    h.box.memory.writeU32(back + D3DVERTEXBUFFERDESC.dwSize, 0);
     assert.equal(h.buffer(buffer, 'GetVertexBufferDesc', [back]), D3D_OK);
-    assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwSize),
-        D3DVERTEXBUFFERDESC.SIZE, 'the size written back is ours, not whatever was there');
+    // Wine's ddraw7 test_vb_desc: the size is left as the program left it.
+    assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwSize), 0,
+        'the size is not written');
     assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwFVF), FVF_TL);
     assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwNumVertices), 4);
 

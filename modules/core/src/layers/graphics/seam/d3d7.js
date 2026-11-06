@@ -1019,12 +1019,12 @@ export function createDirect3D7Seam(
             /** @type {{ desc?: any }} */
             const held = {};
             buffer.GetVertexBufferDesc(held);
-            fields.writeStruct(out >>> 0, D3DVERTEXBUFFERDESC, {
-                dwSize: D3DVERTEXBUFFERDESC.SIZE,
-                dwCaps: held.desc.caps,
-                dwFVF: held.desc.fvf,
-                dwNumVertices: held.desc.numVertices,
-            });
+            // dwSize is the program's, read nor written (ddraw7 test_vb_desc
+            // reads back the zero it left there).
+            fields.writeU32((out >>> 0) + D3DVERTEXBUFFERDESC.dwCaps, held.desc.caps);
+            fields.writeU32((out >>> 0) + D3DVERTEXBUFFERDESC.dwFVF, held.desc.fvf);
+            fields.writeU32((out >>> 0) + D3DVERTEXBUFFERDESC.dwNumVertices,
+                held.desc.numVertices);
             return D3D_OK;
         },
         /** @param {any} buffer */
