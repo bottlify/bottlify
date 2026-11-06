@@ -200,8 +200,18 @@ test('a fresh device answers every D3D7 render state and nothing newer', ()=>{
 
     for (const [name, state] of Object.entries(D3DRENDERSTATE))
     {
-        assert.equal(device.GetRenderState(state, out), D3D_OK, name);
         assert.ok(state <= D3DRENDERSTATE_MAX, `${name} is a D3D7 state`);
+        if (name === 'TEXTUREHANDLE' || name === 'TEXTUREMAPBLEND')
+        {
+            // Wine's ddraw7 test_set_render_state: the earlier interfaces'
+            // texture states are refused here, and the value left alone.
+            const left = { value: 0xdeadbeef };
+            assert.equal(device.SetRenderState(state, 0), DDERR_INVALIDPARAMS, name);
+            assert.equal(device.GetRenderState(state, left), DDERR_INVALIDPARAMS, name);
+            assert.equal(left.value, 0xdeadbeef);
+            continue;
+        }
+        assert.equal(device.GetRenderState(state, out), D3D_OK, name);
     }
     assert.equal(device.GetRenderState(154, out), DDERR_INVALIDPARAMS, 'POINTSIZE is D3D8');
     assert.equal(device.SetRenderState(154, 1), DDERR_INVALIDPARAMS);

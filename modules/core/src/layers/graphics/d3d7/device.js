@@ -557,8 +557,16 @@ export function createDirect3D7(ddraw, services = {}){
                 renderStates.set(state, 0);
             }
         }
-        /** @param {number} state */
-        const isProgramState = state=>state <= D3DRENDERSTATE_MAX && renderStates.has(state);
+        /**
+         * TEXTUREHANDLE and TEXTUREMAPBLEND are the earlier interfaces' and
+         * refused on IDirect3DDevice7 both ways (ddraw7 test_set_render_state);
+         * those devices keep them themselves (legacy.js).
+         *
+         * @param {number} state
+         */
+        const isProgramState = state=>state <= D3DRENDERSTATE_MAX && renderStates.has(state)
+            && state !== D3DRENDERSTATE_D3D7_ONLY.TEXTUREHANDLE
+            && state !== D3DRENDERSTATE_D3D7_ONLY.TEXTUREMAPBLEND;
         /** @type {Map<number, Map<number, number>>} */
         const stageStates = new Map();
         /** @type {Map<number, any>} stage -> DirectDraw surface */
