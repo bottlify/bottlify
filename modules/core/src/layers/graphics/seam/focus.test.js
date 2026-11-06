@@ -15,7 +15,7 @@ const STUB = 0x7f0000;
 const STATES = { OK: 'ok', LOST: 'lost', NOT_RESET: 'notreset' };
 
 /** user32 as far as the focus window's hook calls it, every call recorded. */
-function harness({ visible = false } = {}){
+function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0] } = {}){
     /** @type {[string, number[]][]} */
     const calls = [];
     /** @type {Map<number, number>} */
@@ -40,10 +40,14 @@ function harness({ visible = false } = {}){
         CallWindowProcA: ()=>0,
         DefWindowProcA: ()=>0,
         SetForegroundWindow: ()=>1,
+        GetForegroundWindow: ()=>foreground,
+        GetWindowThreadProcessId: ([hwnd])=>/** @type {Record<number, number>} */ (threads)[hwnd]
+            ?? 1,
         // A broadcast reaches the focus window's procedure, among the others.
         SendMessageA: ([, message, wParam, lParam])=>Number(nested?.([FOCUS, message, wParam,
             lParam]) ?? 0),
         ChangeDisplaySettingsA: ()=>0,
+        GetSystemMetrics: ([index])=>screen[index] ?? 0,
         IsIconic: ()=>(iconic ? 1 : 0),
         ShowWindow: ([, command])=>{
             iconic = command === 6;
@@ -62,6 +66,8 @@ function harness({ visible = false } = {}){
     };
     /** @type {number[]} */
     const covered = [];
+    /** @type {number[]} */
+    const losses = [];
     const windows = createFocusWindows({
         cover: hwnd=>{
             covered.push(hwnd);
@@ -87,15 +93,17 @@ function harness({ visible = false } = {}){
         /** @param {boolean} [restorable] */
         injectDeviceLoss(restorable = false){
             this.deviceState = restorable ? STATES.NOT_RESET : STATES.LOST;
+            // How many calls had been made when it was lost.
+            losses.push(calls.length);
         },
     };
-    /** @param {number} message @param {number} wParam */
-    const send = (message, wParam)=>/** @type {(args: number[]) => unknown} */ (hook)(
-        [FOCUS, message, wParam, 0]);
+    /** @param {number} message @param {number} wParam @param {number} [lParam] */
+    const send = (message, wParam, lParam = 0)=>/** @type {(args: number[]) => unknown} */ (hook)(
+        [FOCUS, message, wParam, lParam]);
     const hide = ()=>{
         style &= ~0x10000000;
     };
-    return { windows, device, calls, procs, send, covered, hide,
+    return { windows, device, calls, procs, send, covered, hide, losses,
         names: ()=>calls.map(([name])=>name) };
 }
 
@@ -265,4 +273,109 @@ test('an extended device is told its window is covered while the activation is g
     send(0x1c, 0);
     windows.take(device, { ...HOW, extended: true, created: false });
     assert.equal(device.occluded, false, 'a reset makes the window its own again');
+});
+
+test('DirectDraw\'s window: placed over the mode then made the foreground one, its changes'
+    + ' heard, following every mode set, and given back from above the others', ()=>{
+    const DDRAW = { focus: FOCUS, window: FOCUS, fullscreen: true, noWindowChanges: false,
+        extended: false, width: 640, height: 480, created: true, announce: true };
+    /** @param {ReturnType<typeof harness>} h */
+    const placing = h=>h.calls.filter(([name])=>name === 'SetWindowPos'
+        || name === 'SetForegroundWindow').map(([name, args])=>[name, ...args]);
+    // Another thread's window has the foreground: shown, then made the foreground.
+    const other = harness({ foreground: 0x30000, threads: { 0x30000: 2 } });
+    other.windows.take(other.device, DDRAW);
+    assert.deepEqual(placing(other), [['SetWindowPos', FOCUS, 0, 0, 0, 640, 480,
+        0x10 | 0x40 | 0x4], ['SetForegroundWindow', FOCUS]]);
+    assert.deepEqual(other.covered, [], 'its frame kept');
+    // It had the foreground: above the others too.
+    const own = harness({ foreground: FOCUS });
+    own.windows.take(own.device, DDRAW);
+    assert.deepEqual(placing(own)[0], ['SetWindowPos', FOCUS, 0xffffffff, 0, 0, 640, 480,
+        0x10 | 0x40]);
+    // Another window of its own thread has it: only placed.
+    const sibling = harness({ foreground: 0x30000 });
+    sibling.windows.take(sibling.device, DDRAW);
+    assert.deepEqual(placing(sibling), [['SetWindowPos', FOCUS, 0, 0, 0, 640, 480, 0x10 | 0x4]]);
+
+    const h = harness({ foreground: FOCUS });
+    let regained = 0;
+    h.windows.take(h.device, { ...DDRAW, regain: ()=>{
+        regained++;
+    } });
+    // A mode set by anyone: the window at its size first, then the program hears it.
+    h.calls.length = 0;
+    h.send(0x7e, 32, (600 << 16 | 800) >>> 0);
+    assert.deepEqual(h.calls.map(([name, args])=>[name, ...args.slice(0, 7)]), [
+        ['SetWindowPos', FOCUS, 0, 0, 0, 800, 600, 0x10 | 0x4],
+        ['CallWindowProcA', PROGRAM_PROC, FOCUS, 0x7e, 32, (600 << 16 | 800) >>> 0]]);
+    // SC_RESTORE is the program's to carry out.
+    h.calls.length = 0;
+    h.send(0x112, 0xf120);
+    assert.deepEqual(h.names(), ['CallWindowProcA']);
+    // Losing the activation: the registry's mode and the window minimised, heard by
+    // the program, which then hears it; nothing put above the others.
+    h.calls.length = 0;
+    h.send(0x1c, 0);
+    assert.deepEqual(h.names().filter(name=>name !== 'GetWindowLongA'), ['ChangeDisplaySettingsA',
+        'ShowWindow', 'CallWindowProcA', 'SetWindowPos', 'CallWindowProcA', 'CallWindowProcA'],
+    'what the minimising and its mode make reach the program meanwhile');
+    assert.deepEqual(h.losses.map(at=>h.names().slice(0, at)
+        .filter(name=>name !== 'GetWindowLongA')), [['ChangeDisplaySettingsA']],
+    'the screen gone before the window is minimised');
+    assert.equal(h.device.deviceState, STATES.LOST, 'its surfaces lost');
+    // Back: its mode set again, which is all the object does with it.
+    h.send(0x1c, 1);
+    assert.equal(regained, 1);
+    assert.equal(h.device.deviceState, STATES.LOST, 'no Reset for DirectDraw to wait for');
+    // Given back: from above the others, unless it keeps its windows.
+    h.calls.length = 0;
+    h.windows.take(h.device, { ...DDRAW, fullscreen: false });
+    assert.deepEqual(placing(h), [['SetWindowPos', FOCUS, 0xfffffffe, 0, 0, 0, 0,
+        0x1 | 0x2 | 0x10]]);
+});
+
+test('DirectDraw keeps the procedure it found when the program set another, and gives that'
+    + ' back at the end (test_wndproc)', ()=>{
+    const DDRAW = { ...HOW, focus: FOCUS, window: FOCUS, announce: true };
+    const { windows, device, procs } = harness({ foreground: FOCUS });
+    windows.take(device, DDRAW);
+    procs.set(FOCUS, 0x402000);
+    windows.take(device, { ...DDRAW, fullscreen: false });
+    assert.equal(procs.get(FOCUS), 0x402000, 'not the runtime\'s now: left');
+    windows.take(device, DDRAW);
+    assert.equal(procs.get(FOCUS), 0x402000, 'held again without setting its own');
+    procs.set(FOCUS, STUB);
+    windows.release(device);
+    assert.equal(procs.get(FOCUS), PROGRAM_PROC, 'the procedure it first found');
+});
+
+test('DirectDraw\'s window regaining the activation is fitted to the screen as it is now'
+    + ' (ddraw test_cursor_clipping)', ()=>{
+    const h = harness({ foreground: FOCUS, screen: [1024, 768] });
+    h.windows.take(h.device, { focus: FOCUS, window: FOCUS, fullscreen: true,
+        noWindowChanges: false, extended: false, width: 640, height: 480, created: true,
+        announce: true });
+    // Restored by the program while away, it is not minimised when it comes back.
+    h.hide();
+    h.send(0x1c, 0);
+    h.calls.length = 0;
+    h.send(0x1c, 1);
+    assert.deepEqual(h.calls.filter(([name])=>name === 'SetWindowPos').map(([, args])=>args),
+        [[FOCUS, 0, 0, 0, 1024, 768, 0x10 | 0x4]], 'the screen\'s size, not the mode taken with');
+});
+
+test('a device that never lost the activation takes nothing back when told it has it'
+    + ' (d3d8 test_wndproc: the activation passing between threads as the device is made)', ()=>{
+    const h = harness();
+    h.windows.take(h.device, HOW);
+    h.calls.length = 0;
+    h.send(0x1c, 1);
+    assert.deepEqual(h.names().filter(name=>name !== 'CallWindowProcA'
+        && name !== 'GetWindowLongA'), [], 'nothing placed or restored');
+    h.send(0x1c, 0);
+    h.calls.length = 0;
+    h.send(0x1c, 1);
+    assert.ok(h.names().includes('SetWindowPos') || h.names().includes('ShowWindow'),
+        'once lost, it is taken back');
 });

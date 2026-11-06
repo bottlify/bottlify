@@ -53,6 +53,8 @@ import {
     DDERR_DCALREADYCREATED,
     DDERR_CLIPPERISUSINGHWND,
     DDERR_EXCLUSIVEMODEALREADYSET,
+    DDERR_HWNDALREADYSET,
+    DDERR_NOFOCUSWINDOW,
     DDERR_WRONGMODE,
     DDERR_INVALIDCAPS,
     DDERR_INVALIDPIXELFORMAT,
@@ -103,7 +105,17 @@ import {
     DDSCAPS_VIDEOMEMORY,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
+    DDSCL_ALLOWMODEX,
+    DDSCL_ALLOWREBOOT,
+    DDSCL_CREATEDEVICEWINDOW,
     DDSCL_EXCLUSIVE,
+    DDSCL_FPUPRESERVE,
+    DDSCL_FPUSETUP,
+    DDSCL_FULLSCREEN,
+    DDSCL_MULTITHREADED,
+    DDSCL_NORMAL,
+    DDSCL_SETDEVICEWINDOW,
+    DDSCL_SETFOCUSWINDOW,
     DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS,
     DDSD_HEIGHT,
@@ -514,6 +526,17 @@ function sameRect(a, b){
  *           every surface is in system memory and depth is 16 or 32 bits.
  * @property {number} [screenWidth]
  * @property {number} [screenHeight]
+ * @property {() => { width: number, height: number }} [screenMode]
+ *           The display's size now, which a mode set elsewhere (another
+ *           object, ChangeDisplaySettings) changes under this one: its
+ *           surfaces in the display's memory are lost then, as by its own
+ *           SetDisplayMode. Absent, only this object changes the mode.
+ * @property {(gone: { window: number, mode: { width: number, height: number } }) => void}
+ *           [onPrimaryGone]  Told when a primary surface's last reference goes,
+ *           with the cooperative window and the mode the display is in.
+ * @property {() => { width: number, height: number }} [registryMode]
+ *           The mode RestoreDisplayMode goes back to: the registry's, read
+ *           when it is called. Absent, the screen this object was made on.
  * @property {(bytes: number) => number} [allocate]
  *           Where a surface's pixels live. Injected so the model is testable
  *           with no backend; the default hands out distinct, page-aligned
@@ -627,6 +650,8 @@ export function createDirectDraw(options = {}){
      */
     const nativeMode = { width: screenWidth, height: screenHeight, bitCount: 32, refreshRate: 0 };
     let displayMode = { ...nativeMode };
+    /** Whether this object set a mode it has not put back since (`modeSet`). */
+    let modeSet = false;
 
     /** Per-generation counts. A generation exists once it has been handed out. */
     /** @type {Map<string, number>} */
@@ -648,6 +673,16 @@ export function createDirectDraw(options = {}){
     let cooperativeLevel = 0;
     let cooperativeWindow = 0;
     let levelSet = false;
+    /** The window DDSCL_SETFOCUSWINDOW named, until normal mode. */
+    let focusWindow = 0;
+    /** The window DirectDraw made for the device (DDSCL_CREATEDEVICEWINDOW). */
+    let deviceWindow = 0;
+    /**
+     * Whether the first generation's SetCooperativeLevel has succeeded on
+     * this object: from then on no generation's normal level puts the mode
+     * back (Wine's test_coop_level_versions).
+     */
+    let levelOfFirst = false;
     let destroyed = false;
 
     const seed = GENERATION_OF[options.version ?? 7];
@@ -684,6 +719,7 @@ export function createDirectDraw(options = {}){
      * find a surface lost, because nothing tells this layer when it happens.
      */
     const noticeDeactivation = ()=>{
+        noticeScreen();
         const count = options.application?.deactivations() ?? 0;
         if (count !== deactivationsSeen)
         {
@@ -694,8 +730,16 @@ export function createDirectDraw(options = {}){
             }
         }
     };
+    /**
+     * Whether the window the screen is held through has lost the activation
+     * to another thread's window: the application is still the active one,
+     * and the screen is not this object's all the same (Wine's
+     * test_lost_device, a foreground window of the test's second thread).
+     */
+    let windowInactive = false;
     /** Whether the screen is out of this object's hands: exclusive, and in the background. */
-    const screenWithheld = ()=>exclusive() && options.application?.deactivated() === true;
+    const screenWithheld = ()=>exclusive()
+        && (options.application?.deactivated() === true || windowInactive);
     /**
      * Makes `next` the display mode. A change of size or depth takes the
      * display's memory back from every surface, whichever cooperative level
@@ -711,6 +755,25 @@ export function createDirectDraw(options = {}){
             loseVideoMemory();
         }
     };
+    /**
+     * Takes up a size the display was set to by someone else: the mode is the
+     * display's, and its memory is taken back from this object's surfaces as
+     * from those of the one that set it (Wine's test_coop_level_mode_set).
+     */
+    function noticeScreen(){
+        const screen = options.screenMode?.();
+        if (screen && (screen.width !== screenSeen.width || screen.height !== screenSeen.height))
+        {
+            screenSeen = { width: screen.width, height: screen.height };
+            changeDisplayMode({ width: screen.width, height: screen.height,
+                bitCount: nativeMode.bitCount, refreshRate: 0 });
+        }
+    }
+    /**
+     * The display's size as this object last knew it: a mode it sets is the
+     * display's from then on, before the display has been told.
+     */
+    let screenSeen = { width: displayMode.width, height: displayMode.height };
 
     function destroyIfUnreferenced(){
         if (destroyed)
@@ -1249,6 +1312,11 @@ export function createDirectDraw(options = {}){
             if (gammaRamp && (caps & DDSCAPS_PRIMARYSURFACE) !== 0)
             {
                 options.gamma?.set(surface, null);
+            }
+            if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+            {
+                noticeScreen();
+                options.onPrimaryGone?.({ window: cooperativeWindow, mode: { ...displayMode } });
             }
             // Whatever the surface holds now: a flip moves buffers between a
             // chain's members, and each member gives back the one it ends with.
@@ -2199,6 +2267,7 @@ export function createDirectDraw(options = {}){
      */
     function createSurfaceAs(request, callOptions, version){
         const generation = GENERATION_OF[version];
+        noticeScreen();
 
         // Order matters and is observable. Aggregation is refused before the
         // cooperative level is looked at, and the cooperative level before the
@@ -2496,6 +2565,36 @@ export function createDirectDraw(options = {}){
         get cooperativeWindow(){
             return cooperativeWindow;
         },
+        get focusWindow(){
+            return focusWindow;
+        },
+        get deviceWindow(){
+            return deviceWindow;
+        },
+        /** Whether leaving exclusive mode puts the display mode back. */
+        get restoresMode(){
+            return !levelOfFirst;
+        },
+        /** The first generation's SetCooperativeLevel succeeded. */
+        noteLevelOfFirst(){
+            levelOfFirst = true;
+        },
+
+        /**
+         * The window the screen is held through lost the activation, or
+         * regained it. Losing it takes the screen's memory, as the
+         * application's deactivation does.
+         *
+         * @param {boolean} inactive
+         */
+        setWindowInactive(inactive){
+            noticeDeactivation();
+            windowInactive = inactive;
+            if (inactive && exclusive())
+            {
+                loseVideoMemory();
+            }
+        },
         /**
          * The bytes its surfaces in video memory take, which the memory a
          * program is told is free goes down by (Wine's test_create_surface_pitch).
@@ -2569,21 +2668,100 @@ export function createDirectDraw(options = {}){
         legacyD3dGeneration: legacyD3dGenerationHeld,
 
         /**
+         * What SetCooperativeLevel's flags ask before anything changes: a
+         * refusal, a focus window named and nothing more (an answer as
+         * well), or the level to set, made for a window DirectDraw makes
+         * itself first when `deviceWindow` (Wine's
+         * test_coop_level_create_device_window).
+         *
          * @param {number} window
          * @param {number} flags
+         * @returns {number | { deviceWindow: boolean }}
          */
-        setCooperativeLevel(window, flags){
+        planCooperativeLevel(window, flags){
+            if ((flags & (DDSCL_SETFOCUSWINDOW | DDSCL_NORMAL | DDSCL_EXCLUSIVE)) === 0
+                || ((flags & DDSCL_CREATEDEVICEWINDOW) !== 0 && (flags & DDSCL_EXCLUSIVE) === 0))
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const naming = DDSCL_SETFOCUSWINDOW | DDSCL_CREATEDEVICEWINDOW;
+            if ((flags & naming) === DDSCL_SETFOCUSWINDOW)
+            {
+                // Naming the focus window is a call of its own.
+                const alone = DDSCL_MULTITHREADED | DDSCL_FPUSETUP | DDSCL_FPUPRESERVE
+                    | DDSCL_ALLOWREBOOT | DDSCL_ALLOWMODEX | DDSCL_SETDEVICEWINDOW | DDSCL_NORMAL
+                    | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+                return (flags & alone) !== 0 ? DDERR_INVALIDPARAMS : this.setFocusWindow(window);
+            }
+            if ((flags & DDSCL_EXCLUSIVE) === 0)
+            {
+                return { deviceWindow: false };
+            }
+            if ((flags & DDSCL_FULLSCREEN) === 0
+                || (window === 0 && (flags & DDSCL_CREATEDEVICEWINDOW) === 0))
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            if ((flags & DDSCL_CREATEDEVICEWINDOW) !== 0 && focusWindow === 0
+                && (flags & DDSCL_SETFOCUSWINDOW) === 0)
+            {
+                return DDERR_NOFOCUSWINDOW;
+            }
+            return { deviceWindow: (flags & DDSCL_CREATEDEVICEWINDOW) !== 0 };
+        },
+
+        /**
+         * The window made for the device. It is the object's whatever comes
+         * after: a focus window refused next leaves it made, and normal mode
+         * takes it away.
+         *
+         * @param {number} window
+         */
+        deviceWindowMade(window){
+            deviceWindow = window;
+        },
+
+        /** @param {number} window */
+        setFocusWindow(window){
+            if (exclusive() && cooperativeWindow !== 0)
+            {
+                return DDERR_HWNDALREADYSET;
+            }
+            focusWindow = window;
+            return DD_OK;
+        },
+
+        /**
+         * @param {number} window
+         * @param {number} flags
+         * @param {{ putsModeBack?: boolean }} [leaving]  giving exclusive mode back
+         *     puts the mode back, which takes the screen's memory even when the
+         *     mode was the registry's all along, unless the level stays full
+         *     screen (Wine's test_lost_device and test_flip, from IDirectDraw2 on)
+         */
+        setCooperativeLevel(window, flags, { putsModeBack = false } = {}){
             // Taking the screen exclusively is what invalidates what is on it.
             // Giving it back does not: the surfaces stay valid until somebody
             // claims the screen again, which is the order a program observes.
             const takingExclusive = (flags & DDSCL_EXCLUSIVE) !== 0 && !exclusive();
+            const givingBack = (flags & (DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)) === 0 && exclusive()
+                && putsModeBack;
             // A deactivation while the screen was held is settled before the
             // level changes, and one before it was taken is not this level's.
             noticeDeactivation();
             cooperativeLevel = flags >>> 0;
             cooperativeWindow = window;
             levelSet = true;
+            if ((flags & DDSCL_EXCLUSIVE) === 0)
+            {
+                focusWindow = 0;
+                deviceWindow = 0;
+            }
             if (takingExclusive)
+            {
+                windowInactive = false;
+            }
+            if (takingExclusive || givingBack)
             {
                 loseVideoMemory();
             }
@@ -2612,7 +2790,18 @@ export function createDirectDraw(options = {}){
         createSurface,
 
         get displayMode(){
+            noticeScreen();
             return { ...displayMode };
+        },
+
+        /** The mode as this object set it, before the display has been told. */
+        get ownMode(){
+            return { ...displayMode };
+        },
+
+        /** Whether this object set a mode it has not put back (RestoreDisplayMode). */
+        get modeSet(){
+            return modeSet;
         },
 
         /**
@@ -2633,12 +2822,21 @@ export function createDirectDraw(options = {}){
             {
                 return DDERR_INVALIDMODE;
             }
+            noticeScreen();
             changeDisplayMode({ width, height, bitCount, refreshRate });
+            screenSeen = { width, height };
+            modeSet = true;
             return DD_OK;
         },
 
+        /** The registry's mode back, read now: what the display was last told to keep. */
         restoreDisplayMode(){
-            changeDisplayMode({ ...nativeMode });
+            noticeScreen();
+            const registry = options.registryMode?.() ?? nativeMode;
+            changeDisplayMode({ width: registry.width, height: registry.height,
+                bitCount: nativeMode.bitCount, refreshRate: 0 });
+            screenSeen = { width: registry.width, height: registry.height };
+            modeSet = false;
             return DD_OK;
         },
 

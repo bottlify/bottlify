@@ -31,6 +31,7 @@ import {
     IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface4,
     IID_IDirectDrawSurface7, IID_IDirectDrawSurface2, IID_IDirectDrawColorControl,
     IID_IDirect3DDevice7, IID_IDirect3DTexture2, IID_IDirectDrawSurface, IID_IDirectDrawSurface3,
+    IID_IDirectDraw,
 } from './iids.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
@@ -49,10 +50,11 @@ import {
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
     DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
     DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED, DDSD_ZBUFFERBITDEPTH,
+    DDSCL_CREATEDEVICEWINDOW, DDSCL_SETFOCUSWINDOW, DDERR_NOFOCUSWINDOW, DDERR_NOHWND,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
-const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
+const SCREEN = { width: 16, height: 16, bitsPerPixel: 32, displayWidth: 16, displayHeight: 16 };
 
 /** @param {[string, number][]} slots @param {string} name */
 const slot = (slots, name)=>{
@@ -181,10 +183,12 @@ function machine(){
  *
  * @param {{ adapter?: any, gamma?: any, deactivated?: () => boolean,
  *     deactivations?: () => number, flipQueued?: () => Promise<void> | null,
- *     resolution?: (...args: any[]) => void, windowClient?: (hwnd: number) => any }} [build]
+ *     resolution?: (...args: any[]) => void, windowClient?: (hwnd: number) => any,
+ *     user32?: (name: string) => { handler: (args: number[]) => unknown },
+ *     procedure?: (name: string, handler: (args: number[]) => unknown) => number }} [build]
  *     What the build says the hardware is, where a primary's gamma ramp is
  *     shown, whether (and how often) the application has been deactivated,
- *     and what a flip waits on.
+ *     what a flip waits on, and user32 with the procedures it is given.
  */
 function seamed(build = {}){
     const box = machine();
@@ -213,11 +217,13 @@ function seamed(build = {}){
         available: ()=>false,
         adapter: ()=>build.adapter ?? null,
     };
+    // The display, as the app keeps it: a mode set is its size from then on.
+    const display = { ...SCREEN };
     const libraries = createGraphicsLibraries({
         graphics,
         memory: box.services,
         publishInterface: box.publishInterface,
-        screen: ()=>SCREEN,
+        screen: ()=>display,
         now: ()=>time,
         schedule: (ms, run)=>{
             timers.push({ at: time + ms, run });
@@ -240,12 +246,25 @@ function seamed(build = {}){
         gamma: build.gamma,
         deactivated: build.deactivated,
         deactivations: build.deactivations,
-        resolution: build.resolution,
+        user32: build.user32,
+        procedure: build.procedure,
+        scratch: build.user32 ? { allocate: box.allocateSurface } : undefined,
+        resolution: (/** @type {number} */ width, /** @type {number} */ height,
+            /** @type {any} */ ...where)=>
+        {
+            if (width > 0 && height > 0)
+            {
+                display.width = width;
+                display.height = height;
+            }
+            build.resolution?.(width, height, ...where);
+        },
     });
     const fields = createFields(box.services);
     const ddrawDll = libraries.libraries['DDRAW.dll'];
 
     return {
+        display,
         box,
         fields,
         roots,
@@ -2390,13 +2409,18 @@ test('an exclusive owner loses its video memory when deactivated, and restores i
             [DD_OK, DD_OK, DDERR_SURFACELOST], 'the chain comes back with its front, alone');
         assert.equal(h.surface7(vidmem, 'Restore', []), DD_OK);
 
-        // Normal mode holds no video memory to lose; taking exclusive mode
-        // again loses it all, system memory aside (10866-10878).
+        // Giving the screen back puts the mode back, which loses the video
+        // memory (10797-10809, Windows' answer); normal mode then holds none
+        // to lose; taking exclusive mode again loses it all, system memory
+        // aside (10866-10878).
         assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
             [HWND, DDSCL_NORMAL]), DD_OK);
+        assert.deepEqual([primary, sysmem, vidmem].map(isLost),
+            [DDERR_SURFACELOST, DD_OK, DDERR_SURFACELOST]);
+        assert.equal(h.surface7(vidmem, 'Restore', []), DD_OK);
         deactivated = true;
         deactivations = 3;
-        assert.deepEqual([primary, sysmem, vidmem].map(isLost), [DD_OK, DD_OK, DD_OK]);
+        assert.deepEqual([sysmem, vidmem].map(isLost), [DD_OK, DD_OK]);
         deactivated = false;
         assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
             [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
@@ -3056,5 +3080,239 @@ test('between two DirectDraw objects a copy that converts the format is not made
     }
     assert.equal(h.release(first), 0);
     assert.equal(h.release(second), 0);
+    h.assertAllReleased();
+});
+
+
+test('a mode set and left is put back to the registry\'s as the object goes; giving the screen'
+    + ' back puts it back from IDirectDraw2 on (test_coop_level_mode_set)', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [8, 4, 32, 0, 0]), DD_OK);
+    assert.deepEqual([h.display.width, h.display.height], [8, 4]);
+    assert.equal(h.release(ddraw), 0);
+    assert.deepEqual([h.display.width, h.display.height], [16, 16], 'the registry\'s again');
+
+    // Put back, the mode is the registry's, not the one the object was made in.
+    Object.assign(h.display, { width: 8, height: 4 });
+    const later = h.create7();
+    assert.equal(h.box.call(later, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [12, 12, 32, 0, 0]), DD_OK);
+    assert.equal(h.box.call(later, slot(IDIRECTDRAW7_SLOTS, 'RestoreDisplayMode'), []), DD_OK);
+    assert.deepEqual([h.display.width, h.display.height], [16, 16]);
+    assert.equal(h.release(later), 0);
+
+    // Made and gone with no mode set, it leaves the display as it found it.
+    h.display.width = 8;
+    const quiet = h.create7();
+    assert.equal(h.release(quiet), 0);
+    assert.equal(h.display.width, 8);
+    h.display.width = 16;
+
+    for (const [first, kept] of [[false, [16, 16]], [true, [8, 4]]])
+    {
+        let pointer;
+        if (first)
+        {
+            assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+            pointer = h.box.memory.readU32(0x4100);
+        }
+        else
+        {
+            pointer = h.create7();
+        }
+        const slots = first ? IDIRECTDRAW_SLOTS : IDIRECTDRAW7_SLOTS;
+        assert.equal(h.box.call(pointer, slot(slots, 'SetCooperativeLevel'),
+            [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+        assert.equal(h.box.call(pointer, slot(slots, 'SetDisplayMode'),
+            first ? [8, 4, 32] : [8, 4, 32, 0, 0]), DD_OK);
+        assert.equal(h.box.call(pointer, slot(slots, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        assert.deepEqual([h.display.width, h.display.height], kept,
+            first ? 'the first generation keeps it' : 'later ones put it back');
+        assert.equal(h.release(pointer), 0);
+        assert.deepEqual([h.display.width, h.display.height], [16, 16]);
+    }
+    h.assertAllReleased();
+});
+
+test('a device window is made for DDSCL_CREATEDEVICEWINDOW once a focus window is named, and'
+    + ' normal mode takes it away (test_coop_level_create_device_window)', ()=>{
+    /** @type {[string, number[]][]} */
+    const calls = [];
+    let next = 0x00020000;
+    const user32 = (/** @type {string} */ name)=>({
+        handler: (/** @type {number[]} */ args)=>{
+            calls.push([name, args]);
+            if (name === 'CreateWindowExA')
+            {
+                next += 4;
+                return next;
+            }
+            return name === 'RegisterClassA' ? 0xc001 : 0;
+        },
+    });
+    const h = seamed({ user32, procedure: ()=>0x7000 });
+    const ddraw = h.create7();
+    const level = (/** @type {number} */ window, /** @type {number} */ flags)=>h.box.call(ddraw,
+        slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'), [window, flags]) | 0;
+    const text = (/** @type {number} */ at)=>{
+        let end = at;
+        while (h.box.services.readMemory(end, 1)[0] !== 0)
+        {
+            end++;
+        }
+        return String.fromCharCode(...h.box.services.readMemory(at, end - at));
+    };
+    const made = ()=>calls.filter(([name])=>name === 'CreateWindowExA')
+        .map(([, args])=>text(args[1]));
+    const destroyed = ()=>calls.filter(([name])=>name === 'DestroyWindow').map(([, a])=>a[0]);
+    const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+
+    assert.equal(level(0, DDSCL_CREATEDEVICEWINDOW), DDERR_INVALIDPARAMS | 0);
+    assert.equal(level(0, DDSCL_CREATEDEVICEWINDOW | DDSCL_NORMAL), DDERR_INVALIDPARAMS | 0);
+    assert.equal(level(0, 0), DDERR_INVALIDPARAMS | 0, 'one of the three levels is needed');
+    assert.equal(level(HWND, DDSCL_EXCLUSIVE), DDERR_INVALIDPARAMS | 0, 'full screen as well');
+    assert.equal(level(0, both), DDERR_INVALIDPARAMS | 0, 'and a window');
+    assert.equal(level(0, DDSCL_CREATEDEVICEWINDOW | both), DDERR_NOFOCUSWINDOW | 0);
+    assert.equal(level(HWND, DDSCL_SETFOCUSWINDOW | DDSCL_NORMAL), DDERR_INVALIDPARAMS | 0,
+        'naming the focus window is a call of its own');
+    assert.deepEqual(made(), []);
+
+    assert.equal(level(HWND, DDSCL_SETFOCUSWINDOW), DD_OK);
+    assert.equal(level(0, DDSCL_CREATEDEVICEWINDOW | both), DD_OK);
+    assert.deepEqual(made(), ['DirectDrawDeviceWnd']);
+    const [, args] = /** @type {[string, number[]]} */ (
+        calls.find(([name])=>name === 'CreateWindowExA'));
+    assert.equal(text(args[2]), 'DirectDrawDeviceWnd', 'its title');
+    assert.deepEqual(args.slice(3, 8), [0x80000000, 0, 0, 16, 16], 'a popup over the screen');
+    assert.ok(calls.some(([name, a])=>name === 'ShowWindow' && a[0] === next), 'shown');
+    assert.equal(level(0, DDSCL_NORMAL), DD_OK);
+    assert.deepEqual(destroyed(), [next]);
+    assert.equal(level(0, DDSCL_CREATEDEVICEWINDOW | both), DDERR_NOFOCUSWINDOW | 0,
+        'normal mode forgets the focus window');
+
+    // A focus window refused after the device window is made leaves it made.
+    assert.equal(level(0, DDSCL_SETFOCUSWINDOW | DDSCL_CREATEDEVICEWINDOW | both),
+        DDERR_NOHWND | 0);
+    assert.equal(made().length, 2);
+    assert.equal(level(0, DDSCL_NORMAL), DD_OK);
+    assert.deepEqual(destroyed(), [next - 4, next]);
+    assert.equal(calls.filter(([name])=>name === 'RegisterClassA').length, 1,
+        'one class for every device window');
+
+    assert.equal(level(HWND, DDSCL_SETFOCUSWINDOW | DDSCL_CREATEDEVICEWINDOW | both), DD_OK);
+    assert.equal(h.release(ddraw), 0);
+    assert.deepEqual(destroyed().at(-1), next, 'gone with the object');
+    h.assertAllReleased();
+});
+
+test('a level the first generation set on an object leaves the mode set when a later one gives'
+    + ' the screen back; giving it back otherwise sizes the window to the mode put back'
+    + ' (test_coop_level_versions, test_coop_level_mode_set)', ()=>{
+    /** @type {[string, number[]][]} */
+    const calls = [];
+    const user32 = (/** @type {string} */ name)=>({
+        handler: (/** @type {number[]} */ args)=>{
+            calls.push([name, args]);
+            return 0;
+        },
+    });
+    const h = seamed({ user32, procedure: ()=>0x7000 });
+    for (const first of [false, true])
+    {
+        const ddraw = h.create7();
+        const level = (/** @type {number} */ flags)=>h.box.call(ddraw,
+            slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'), [HWND, flags]) | 0;
+        if (first)
+        {
+            const riid = h.box.putGuid(0x4000, IID_IDirectDraw);
+            assert.equal(h.box.call(ddraw, 0, [riid, 0x6200]), DD_OK);
+            const older = h.box.memory.readU32(0x6200);
+            assert.notEqual(h.box.call(older, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+                [0, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK, 'a refused call is no level');
+            assert.equal(h.box.call(older, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+                [0, DDSCL_NORMAL]), DD_OK);
+            h.release(older);
+        }
+        assert.equal(level(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+            [8, 4, 32, 0, 0]), DD_OK);
+        calls.length = 0;
+        assert.equal(level(DDSCL_NORMAL), DD_OK);
+        const sized = calls.filter(([name, args])=>name === 'SetWindowPos' && args[0] === HWND
+            && args[4] === 16);
+        if (first)
+        {
+            assert.deepEqual([h.display.width, h.display.height], [8, 4], 'left as it was set');
+            assert.deepEqual(sized, []);
+        }
+        else
+        {
+            assert.deepEqual([h.display.width, h.display.height], [16, 16]);
+            assert.deepEqual(sized.map(([, args])=>args.slice(1, 6)), [[0, 0, 0, 16, 16]]);
+            const told = calls.findIndex(([name, args])=>name === 'SendMessageA'
+                && args[1] === 0x7e);
+            assert.ok(told > calls.indexOf(sized[0]), 'sized before the windows hear of it');
+        }
+        assert.equal(h.release(ddraw), 0);
+    }
+    h.assertAllReleased();
+});
+
+test('the exclusive window losing the activation withholds the screen until it is back'
+    + ' (test_lost_device)', async()=>{
+    /** @type {((args: number[]) => unknown)[]} */
+    const procedures = [];
+    const user32 = (/** @type {string} */ name)=>({
+        handler: (/** @type {number[]} */ args)=>(name === 'GetForegroundWindow' ? HWND
+            : name === 'SetWindowLongA' && args[1] === -4 ? 0x6000 : 0),
+    });
+    /** @param {string} name @param {(args: number[]) => unknown} handler */
+    const procedure = (name, handler)=>{
+        procedures.push(handler);
+        return 0x7000;
+    };
+    const h = seamed({ user32, procedure });
+    const ddraw = h.create7();
+    const test7 = ()=>h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'TestCooperativeLevel'), []) | 0;
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    assert.equal(test7(), DD_OK);
+    const [stub] = procedures;
+    await stub([HWND, 0x1c, 0, 2]);
+    assert.equal(test7(), DDERR_NOEXCLUSIVEMODE | 0, 'another thread\'s window took it');
+    await stub([HWND, 0x1c, 1, 2]);
+    assert.equal(test7(), DD_OK);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('another object holding the screen exclusively refuses a mode set'
+    + ' (test_coop_level_mode_set_multi)', ()=>{
+    const h = seamed();
+    const holder = h.create7();
+    const other = h.create7();
+    const mode = (/** @type {number} */ ddraw, /** @type {number} */ width)=>h.box.call(ddraw,
+        slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'), [width, 8, 32, 0, 0]) | 0;
+    assert.equal(mode(other, 12), DD_OK, 'no one holds it yet');
+    assert.equal(h.box.call(holder, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    assert.equal(mode(other, 8), DDERR_NOEXCLUSIVEMODE | 0);
+    assert.equal(h.display.width, 12);
+    assert.equal(mode(holder, 8), DD_OK, 'its holder\'s to change');
+    assert.equal(h.release(holder), 0);
+    assert.equal(mode(other, 8), DD_OK, 'free again once the holder is gone');
+
+    // An object that goes while another holds the screen leaves the mode alone.
+    const holding = h.create7();
+    assert.equal(mode(holding, 10), DD_OK);
+    assert.equal(h.box.call(holding, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN]), DD_OK);
+    assert.equal(h.release(other), 0);
+    assert.equal(h.display.width, 10, 'the holder\'s mode stays');
+    assert.equal(h.release(holding), 0);
+    assert.equal(h.display.width, 16, 'the registry\'s once the holder goes');
     h.assertAllReleased();
 });

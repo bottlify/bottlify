@@ -25,6 +25,8 @@ import {
     DDERR_NOCOOPERATIVELEVELSET,
     DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE,
+    DDERR_NOFOCUSWINDOW,
+    DDERR_HWNDALREADYSET,
     DDERR_NOPALETTEATTACHED,
     DDERR_NOTFLIPPABLE,
     DDERR_NOTFOUND,
@@ -32,6 +34,7 @@ import {
     DDERR_SURFACEALREADYATTACHED,
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
+    DDERR_WRONGMODE,
     DDERR_SURFACENOTATTACHED,
     DDERR_NOTONMIPMAPSUBLEVEL,
     DDPCAPS_4BIT,
@@ -54,9 +57,11 @@ import {
     DDSCAPS_VIDEOMEMORY,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
+    DDSCL_CREATEDEVICEWINDOW,
     DDSCL_EXCLUSIVE,
     DDSCL_FULLSCREEN,
     DDSCL_NORMAL,
+    DDSCL_SETFOCUSWINDOW,
     DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS,
     DDSD_HEIGHT,
@@ -1965,4 +1970,95 @@ test('without hardware a depth buffer named by its pixel format is 16 or 32 bits
     { version: 4 }).hr >>> 0;
     assert.equal(depth(24), 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
     assert.equal(depth(16), DD_OK);
+});
+
+test('a mode set elsewhere is the object\'s mode too, and loses its video memory'
+    + ' (test_coop_level_mode_set)', ()=>{
+    const screen = { width: 64, height: 48 };
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48,
+        screenMode: ()=>screen, registryMode: ()=>({ width: 32, height: 24 }) });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(primary.isLost(), DD_OK);
+
+    // Its own mode is the display's before the display is told.
+    assert.equal(ddraw.setDisplayMode(40, 30, 32), DD_OK);
+    assert.equal(ddraw.ownMode.width, 40);
+    assert.equal(ddraw.modeSet, true);
+    Object.assign(screen, { width: 40, height: 30 });
+    assert.equal(ddraw.displayMode.width, 40);
+    assert.equal(primary.isLost(), DDERR_SURFACELOST, 'its own change loses it too');
+    assert.equal(ddraw.restoreDisplayMode(), DD_OK);
+    assert.deepEqual([ddraw.ownMode.width, ddraw.modeSet], [32, false], 'the registry\'s');
+    Object.assign(screen, { width: 32, height: 24 });
+    assert.equal(primary.restore(), DDERR_WRONGMODE);
+
+    // Another sets the display: this object's mode follows and its memory goes.
+    const other = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY });
+    assert.equal(other.isLost(), DD_OK);
+    Object.assign(screen, { width: 64, height: 48 });
+    assert.equal(other.isLost(), DDERR_SURFACELOST);
+    assert.equal(ddraw.displayMode.width, 64);
+    assert.equal(primary.restore(), DD_OK, 'the primary\'s own mode again');
+});
+
+test('the level\'s window losing the activation to another thread\'s window withholds the screen'
+    + ' as the application\'s deactivation does (test_lost_device)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48 });
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+    const vidmem = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY });
+    const sysmem = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY });
+
+    ddraw.setWindowInactive(true);
+    assert.deepEqual([vidmem.isLost(), sysmem.isLost()], [DDERR_SURFACELOST, DD_OK]);
+    assert.equal(ddraw.testCooperativeLevel(), DDERR_NOEXCLUSIVEMODE);
+    assert.equal(vidmem.restore(), DDERR_WRONGMODE, 'not while the window is in the background');
+    ddraw.setWindowInactive(false);
+    assert.equal(ddraw.testCooperativeLevel(), DD_OK);
+    assert.equal(vidmem.restore(), DD_OK);
+
+    // Giving the screen back with the mode put back takes the memory too,
+    // unless the level stays full screen.
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL | DDSCL_FULLSCREEN,
+        { putsModeBack: true }), DD_OK);
+    assert.equal(vidmem.isLost(), DD_OK);
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+    assert.equal(vidmem.restore(), DD_OK);
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL), DD_OK);
+    assert.equal(vidmem.isLost(), DD_OK, 'the first generation\'s way: kept');
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+    assert.equal(vidmem.restore(), DD_OK);
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL, { putsModeBack: true }), DD_OK);
+    assert.equal(vidmem.isLost(), DDERR_SURFACELOST);
+});
+
+test('SetCooperativeLevel\'s flags are weighed before anything changes'
+    + ' (test_coop_level_create_device_window)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48 });
+    const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+    assert.equal(ddraw.planCooperativeLevel(0, 0), DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(0, DDSCL_CREATEDEVICEWINDOW | DDSCL_NORMAL),
+        DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_EXCLUSIVE), DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(0, both), DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_SETFOCUSWINDOW | DDSCL_FULLSCREEN),
+        DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(0, DDSCL_CREATEDEVICEWINDOW | both),
+        DDERR_NOFOCUSWINDOW);
+    assert.deepEqual(ddraw.planCooperativeLevel(HWND, DDSCL_NORMAL), { deviceWindow: false });
+    assert.deepEqual(ddraw.planCooperativeLevel(HWND, both), { deviceWindow: false });
+    assert.deepEqual(ddraw.planCooperativeLevel(0,
+        DDSCL_SETFOCUSWINDOW | DDSCL_CREATEDEVICEWINDOW | both), { deviceWindow: true });
+
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_SETFOCUSWINDOW), DD_OK);
+    assert.equal(ddraw.focusWindow, HWND);
+    assert.deepEqual(ddraw.planCooperativeLevel(0, DDSCL_CREATEDEVICEWINDOW | both),
+        { deviceWindow: true });
+    ddraw.deviceWindowMade(0x20004);
+    assert.equal(ddraw.setCooperativeLevel(0x20004, DDSCL_CREATEDEVICEWINDOW | both), DD_OK);
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_SETFOCUSWINDOW), DDERR_HWNDALREADYSET,
+        'not while the screen is held through a window');
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL), DD_OK);
+    assert.deepEqual([ddraw.focusWindow, ddraw.deviceWindow], [0, 0], 'normal mode forgets both');
 });

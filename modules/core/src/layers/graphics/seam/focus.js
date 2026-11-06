@@ -31,6 +31,18 @@
  *
  * The procedure given back at the device's last release is the program's,
  * unless the program has set another since: that one stays.
+ *
+ * DirectDraw's exclusive full-screen level holds its window the same way, with
+ * three differences (`announce`): what the runtime does to the window the
+ * program hears; taking the level places the window over the mode first and
+ * activates it after, above the others and shown only when it was the
+ * foreground window, its frame kept; and a mode set while it is held, by
+ * anyone, brings the window to the new size before the program hears of the
+ * mode. Losing the activation loses the surfaces in video memory, the
+ * activation going to another thread's window as well; regaining it sets the
+ * object's own mode again, and giving the level back takes the window from
+ * above the others (Wine's ddraw test_wndproc, test_window_style,
+ * test_coop_level_mode_set, test_lost_device).
  */
 
 const GWLP_WNDPROC = -4;
@@ -46,7 +58,10 @@ const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
 const SW_RESTORE = 9;
 const HWND_TOPMOST = 0xffffffff;
+const HWND_NOTOPMOST = 0xfffffffe;
 const HWND_BROADCAST = 0xffff;
+const SM_CXSCREEN = 0;
+const SM_CYSCREEN = 1;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
@@ -83,6 +98,12 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  * @property {(() => { bitsPerPixel: number } | null) | undefined} reapply
  *           Sets the device's mode again, and answers how it was found when it
  *           was not the device's.
+ * @property {boolean} announce  DirectDraw's: its changes to the windows are the
+ *           program's to hear, and the window follows every mode set.
+ * @property {(() => unknown) | undefined} regain
+ *           DirectDraw's: sets the object's mode again as the application is
+ *           active again, telling every window itself.
+ * @property {boolean} away  whether the activation was lost since it was held
  */
 
 /**
@@ -134,9 +155,21 @@ export function createFocusWindows({ user32, procedure, cover, states }){
         {
             switch (message >>> 0){
                 case WM_ACTIVATEAPP:
-                    before.push(()=>filtered(one.focus, ()=>activate(one, (wParam >>> 0) !== 0)));
+                    before.push(()=>quietly(one, ()=>activate(one, (wParam >>> 0) !== 0)));
                     break;
                 case WM_DISPLAYCHANGE:
+                    // The window of an exclusive DirectDraw object is the new
+                    // mode's size before the program hears of the mode.
+                    if (one.announce)
+                    {
+                        if (one.changes)
+                        {
+                            before.push(()=>call('SetWindowPos', [one.window, 0, 0, 0,
+                                (lParam >>> 0) & 0xffff, (lParam >>> 16) & 0xffff,
+                                SWP_NOACTIVATE | SWP_NOZORDER]));
+                        }
+                        break;
+                    }
                     // The mode the device set itself loses it nothing.
                     if (!one.extended && !one.setting && one.device.deviceState === states.OK)
                     {
@@ -147,7 +180,8 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                     break;
             }
         }
-        if ((message >>> 0) === WM_SYSCOMMAND && ((wParam >>> 0) & 0xfff0) === SC_RESTORE)
+        if ((message >>> 0) === WM_SYSCOMMAND && ((wParam >>> 0) & 0xfff0) === SC_RESTORE
+            && [...entry.devices].some(one=>!one.announce))
         {
             before.push(()=>call('DefWindowProcA', [hwnd, message, wParam, lParam]));
         }
@@ -191,6 +225,14 @@ export function createFocusWindows({ user32, procedure, cover, states }){
     };
 
     /**
+     * The runtime's changes to a device's windows, sent to the default
+     * procedure (`filtered`) but for DirectDraw's, which the program hears.
+     *
+     * @param {Held} one @param {() => unknown} changes
+     */
+    const quietly = (one, changes)=>(one.announce ? changes() : filtered(one.focus, changes));
+
+    /**
      * A mode the device set, which every window hears of as it hears of a
      * mode ChangeDisplaySettings set, and which loses that device nothing.
      *
@@ -212,14 +254,47 @@ export function createFocusWindows({ user32, procedure, cover, states }){
     };
 
     /**
+     * The size a regained window is given: the device's mode, or for
+     * DirectDraw the screen's as it is now, whichever object set it (Wine's
+     * ddraw test_cursor_clipping: activation fits the window to the screen).
+     *
+     * @param {Held} one
+     * @returns {[number, number]}
+     */
+    const screenOf = one=>{
+        if (one.announce)
+        {
+            const width = Number(call('GetSystemMetrics', [SM_CXSCREEN])) | 0;
+            const height = Number(call('GetSystemMetrics', [SM_CYSCREEN])) | 0;
+            if (width > 0 && height > 0)
+            {
+                return [width, height];
+            }
+        }
+        return [one.size.width, one.size.height];
+    };
+
+    /**
      * The application losing the activation, or regaining it.
      *
      * @param {Held} one @param {boolean} active
      */
     const activate = (one, active)=>{
+        const back = one.away;
+        one.away = !active;
+        // A Direct3D device that never lost the activation has nothing to
+        // take back: the activation going between two threads of the
+        // program as the device is made is the creation's (Wine's d3d8
+        // test_wndproc, create_messages).
+        if (active && !back && !one.announce)
+        {
+            return 0;
+        }
         if (active)
         {
             return inTurn([
+                // DirectDraw sets its mode again itself.
+                ()=>(one.announce ? one.regain?.() ?? 0 : 0),
                 // An extended device takes its mode back itself, where
                 // another waits for a Reset to.
                 ()=>{
@@ -233,11 +308,11 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 ()=>(one.changes
                     ? (call('IsIconic', [one.window]) !== 0
                         ? call('ShowWindow', [one.window, SW_RESTORE])
-                        : call('SetWindowPos', [one.window, 0, 0, 0, one.size.width,
-                            one.size.height, SWP_NOACTIVATE | SWP_NOZORDER]))
+                        : call('SetWindowPos', [one.window, 0, 0, 0, ...screenOf(one),
+                            SWP_NOACTIVATE | SWP_NOZORDER]))
                     : 0),
                 ()=>{
-                    if (!one.extended && one.device.deviceState === states.LOST)
+                    if (!one.extended && !one.announce && one.device.deviceState === states.LOST)
                     {
                         one.device.injectDeviceLoss(true);
                     }
@@ -247,18 +322,22 @@ export function createFocusWindows({ user32, procedure, cover, states }){
         return inTurn([
             // The registry's mode, which every window hears of.
             ()=>call('ChangeDisplaySettingsA', [0, 0]),
+            // DirectDraw's screen is gone before its window is minimised: the
+            // program asks for it while it hears that (Wine's ddraw
+            // test_coop_level_mode_set, TestCooperativeLevel at WM_KILLFOCUS).
+            ()=>(one.announce ? one.device.injectDeviceLoss(false) : 0),
             // A hidden window stays as it is; an extended device's is not
-            // put above the others.
+            // put above the others, and DirectDraw's stays where it was.
             ()=>(one.changes && visible(one.window)
                 ? call('ShowWindow', [one.window, SW_MINIMIZE]) : 0),
-            ()=>(one.changes && !one.extended ? call('SetWindowPos', [one.window, HWND_TOPMOST,
-                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
+            ()=>(one.changes && !one.extended && !one.announce ? call('SetWindowPos', [one.window,
+                HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
             ()=>{
                 if (one.extended)
                 {
                     one.device.occlude?.(true);
                 }
-                else
+                else if (!one.announce)
                 {
                     one.device.injectDeviceLoss(false);
                 }
@@ -291,11 +370,18 @@ export function createFocusWindows({ user32, procedure, cover, states }){
         {
             return;
         }
-        hooked.delete(one.focus);
         // The program's procedure back, unless it set another meanwhile.
         if ((Number(call('GetWindowLongA', [one.focus, GWLP_WNDPROC])) >>> 0) === stub)
         {
+            hooked.delete(one.focus);
             call('SetWindowLongA', [one.focus, GWLP_WNDPROC, entry.original]);
+        }
+        // DirectDraw remembers the procedure it found, and holds the window
+        // again later without setting its own over the program's: the one it
+        // gives back at the end is that first one (test_wndproc).
+        else if (!one.announce)
+        {
+            hooked.delete(one.focus);
         }
     };
 
@@ -310,7 +396,8 @@ export function createFocusWindows({ user32, procedure, cover, states }){
          * @param {{ focus: number, window: number, fullscreen: boolean,
          *     noWindowChanges: boolean, extended: boolean, width: number,
          *     height: number, created: boolean, mode?: { bitsPerPixel: number } | null,
-         *     reapply?: () => { bitsPerPixel: number } | null }} how
+         *     reapply?: () => { bitsPerPixel: number } | null, announce?: boolean,
+         *     regain?: () => unknown }} how
          *        `mode` when the device set a mode other than the one it found;
          *        `reapply` sets it again, for an extended device regaining the
          *        activation.
@@ -324,6 +411,13 @@ export function createFocusWindows({ user32, procedure, cover, states }){
                 {
                     unhook(before);
                     held.delete(device);
+                    // DirectDraw's window comes down from above the others,
+                    // unless the program keeps its windows.
+                    if (before.announce && !how.noWindowChanges)
+                    {
+                        return call('SetWindowPos', [before.window, HWND_NOTOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]);
+                    }
                 }
                 return 0;
             }
@@ -335,12 +429,31 @@ export function createFocusWindows({ user32, procedure, cover, states }){
             /** @type {Held} */
             const one = before ?? { device, focus, window: how.window >>> 0, changes: false,
                 extended: how.extended, size: { width: 0, height: 0 }, setting: false,
-                reapply: undefined };
+                reapply: undefined, announce: false, regain: undefined, away: false };
             Object.assign(one, { focus, window: (how.window >>> 0) || focus,
                 changes: !how.noWindowChanges, size: { width: how.width, height: how.height },
-                reapply: how.reapply });
+                reapply: how.reapply, announce: how.announce === true, regain: how.regain });
             held.set(device, one);
             hook(focus).devices.add(one);
+            if (one.announce)
+            {
+                // Over the mode, frame and all. Unless another window of its
+                // own thread has the foreground, it is shown and made the
+                // foreground window, and above the others when it was that
+                // already (test_window_style, test_coop_level_activateapp).
+                const foreground = Number(call('GetForegroundWindow', [])) >>> 0;
+                const threadOf = (/** @type {number} */ hwnd)=>
+                    Number(call('GetWindowThreadProcessId', [hwnd, 0])) >>> 0;
+                const own = foreground === one.window;
+                const takes = own || foreground === 0
+                    || threadOf(foreground) !== threadOf(one.window);
+                return inTurn([
+                    ()=>(one.changes ? call('SetWindowPos', [one.window, own ? HWND_TOPMOST : 0,
+                        0, 0, how.width, how.height, SWP_NOACTIVATE
+                        | (takes ? SWP_SHOWWINDOW : 0) | (own ? 0 : SWP_NOZORDER)]) : 0),
+                    ()=>(takes ? call('SetForegroundWindow', [focus]) : 0),
+                ]);
+            }
             // Created or reset, an extended device's window is its own again.
             device.occlude?.(false);
             return inTurn([

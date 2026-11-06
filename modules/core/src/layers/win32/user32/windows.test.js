@@ -7497,3 +7497,48 @@ test('the window long and word calls on a handle that is no window fail with its
     fns.GetWindowLongA.handler([hwnd, GWL_STYLE]);
     assert.deepEqual(errors, [], 'a window there sets nothing');
 });
+
+test('the activation going to another thread\'s window tells each thread\'s top-level windows'
+    + ' WM_ACTIVATEAPP, naming the other thread (ddraw test_coop_level_activateapp)', ()=>{
+    const WM_ACTIVATEAPP = 0x001c;
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory, dispatched } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const mine = createWindow(fns, memory, { style: WS_VISIBLE });
+    const hidden = createWindow(fns, memory);
+    caller.current = another;
+    const theirs = createWindow(fns, memory, { style: WS_VISIBLE });
+    caller.current = maker;
+    fns.SetForegroundWindow.handler([mine]);
+    dispatched.length = 0;
+
+    fns.SetForegroundWindow.handler([theirs]);
+    const told = dispatched.filter(entry=>entry.message === WM_ACTIVATEAPP)
+        .map(({ hwnd, wParam, lParam })=>[hwnd, wParam, lParam]);
+    assert.deepEqual(told.filter(([hwnd])=>hwnd !== theirs).sort((a, b)=>a[0] - b[0]),
+        [[mine, 0, another.id], [hidden, 0, another.id]].sort((a, b)=>a[0] - b[0]),
+        'each of the losing thread\'s windows hears it, the gaining thread named');
+    assert.ok(told.every(([hwnd, wParam, lParam])=>hwnd !== theirs
+        || (wParam === 1 && lParam === maker.id)));
+});
+
+test('a top-level window minimised with the focus in it lets it go before it moves'
+    + ' (ddraw test_coop_level_mode_set)', async()=>{
+    const WM_KILLFOCUS = 0x0008;
+    const SW_MINIMIZE = 6;
+    const { fns, memory, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = await createWindow(fns, memory, { style: WS_VISIBLE });
+    await fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(fns.GetFocus.handler(), hwnd);
+    dispatched.length = 0;
+    await fns.ShowWindow.handler([hwnd, SW_MINIMIZE]);
+    const order = dispatched.filter(({ message })=>message === WM_KILLFOCUS
+        || message === WM_WINDOWPOSCHANGING).map(({ message })=>message);
+    assert.deepEqual(order.slice(0, 2), [WM_KILLFOCUS, WM_WINDOWPOSCHANGING]);
+    assert.equal(fns.GetFocus.handler(), 0);
+});
