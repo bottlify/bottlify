@@ -1031,6 +1031,31 @@ test('GetAvailableTextureMem falls as default-pool resources are made and comes 
         assert.equal(ex.device.release(), 0);
     });
 
+test('ATI1 and ATI2 lock a byte a pixel: the width for a pitch, a rectangle at top times it'
+    + ' plus left (test_lockrect_offset)', ()=>{
+    const device = createDevice();
+    for (const format of [D3DFMT.ATI1, D3DFMT.ATI2, D3DFMT.DXT1])
+    {
+        /** @type {{ surface?: any }} */
+        const made = {};
+        assert.equal(device.CreateOffscreenPlainSurface(128, 128, format, D3DPOOL.SCRATCH, made),
+            D3D_OK);
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const whole = {};
+        assert.equal(made.surface.LockRect(whole, null, 0), D3D_OK);
+        made.surface.UnlockRect();
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const part = {};
+        assert.equal(made.surface.LockRect(part, { left: 60, top: 60, right: 68, bottom: 68 }, 0),
+            D3D_OK);
+        made.surface.UnlockRect();
+        const [pitch, offset] = format === D3DFMT.DXT1 ? [256, 15 * 256 + 15 * 8] : [128, 7740];
+        assert.equal(whole.Pitch, pitch, `${format}`);
+        assert.equal((part.pBits ?? 0) - (whole.pBits ?? 0), offset, `${format}`);
+        made.surface.release();
+    }
+});
+
 test('a texture\'s levels lie one after another, a cube\'s faces each from a 16-byte boundary,'
     + ' ATI1 and ATI2 a pitch a row of pixels (test_miptree_layout)', ()=>{
     const device = createDevice();

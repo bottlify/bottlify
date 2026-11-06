@@ -54,7 +54,8 @@ import {
     S_PRESENT_OCCLUDED,
     D3DERR_NOTAVAILABLE,
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
-    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, surfaceBytes, surfacePitch, videoPoolAllowed,
+    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, storageBytes, surfaceBytes, surfacePitch,
+    videoPoolAllowed,
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
@@ -4438,11 +4439,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 format,
                 pool,
                 usage,
-                base: userMemory || allocate(surfaceBytes(format, width, height)),
+                base: userMemory || allocate(storageBytes(format, width, height)),
                 tight: userMemory !== 0,
                 // The program's own memory stays the program's.
                 count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
-                    : renderer?.retire(surface)), surfaceBytes(format, width, height)),
+                    : renderer?.retire(surface)), storageBytes(format, width, height)),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;

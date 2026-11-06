@@ -2508,7 +2508,9 @@ test('an ATI2 texture decodes to (y, x, 1, 1) and an ATI1 one to its channel in 
             /** @type {{ pBits?: number, Pitch?: number }} */
             const locked = {};
             assert.equal(out.texture.LockRect(0, locked, null, 0), D3D_OK);
-            assert.equal(locked.Pitch, block.length, 'a row of blocks');
+            // A byte a pixel as the lock counts it (test_lockrect_offset), the
+            // blocks from the start.
+            assert.equal(locked.Pitch, 4, 'the width');
             h.write(/** @type {number} */ (locked.pBits), block);
             assert.equal(out.texture.UnlockRect(0), D3D_OK);
             assert.equal(h.device.SetTexture(0, out.texture), D3D_OK);

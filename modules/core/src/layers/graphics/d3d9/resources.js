@@ -33,8 +33,8 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, offsetOfRect,
-    pitchedRows, surfaceBytes, surfacePitch,
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, lockPitch,
+    offsetOfRect, pitchedRows, pixelRowsTaken, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 import { halvesToStored, toHalf } from './half.js';
@@ -683,6 +683,8 @@ export function createSurface(options){
         ? options.width * (FORMAT_INFO[options.format]?.bytesPerPixel ?? 0) || surfacePitch(
             options.format, options.width)
         : surfacePitch(options.format, options.width);
+    /** What a lock hands out: the width for ATI1 and ATI2 (`pixelRowsTaken`). */
+    const handedPitch = options.tight === true ? pitch : lockPitch(options.format, options.width);
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
@@ -810,9 +812,9 @@ export function createSurface(options){
             locked = true;
             family.locks++;
             lockRect = rect;
-            out.Pitch = pitch;
+            out.Pitch = handedPitch;
             out.pBits = options.base
-                + (rect ? offsetOfRect(options.format, pitch, rect) : 0);
+                + (rect ? offsetOfRect(options.format, handedPitch, rect) : 0);
             // The flags decide whether the backend may rename the storage or
             // must write into it; whoever consumes this must see them.
             lockFlags = flags;
@@ -1214,8 +1216,8 @@ export function createTexture(options){
     // texture out: a program that locks the top level and writes on past its
     // end writes the next levels (Wine's d3d8 test_mipmap_upload, d3d9
     // test_miptree_layout). ATI1 and ATI2, which the runtime does not know as
-    // blocks, take a pitch for every row of pixels.
-    const rowsTaken = options.format === D3DFMT.ATI1 || options.format === D3DFMT.ATI2;
+    // blocks, take a pitch -- their width -- for every row of pixels.
+    const rowsTaken = pixelRowsTaken(options.format);
     /** @param {number} level @returns {number} bytes before it in its face's chain */
     const offsetOf = level=>{
         let bytes = 0;
@@ -1223,16 +1225,22 @@ export function createTexture(options){
         {
             const width = levelExtent(options.width, before);
             const height = levelExtent(options.height, before);
-            bytes += rowsTaken ? surfacePitch(options.format, width) * height
+            bytes += rowsTaken ? lockPitch(options.format, width) * height
                 : surfaceBytes(options.format, width, height);
         }
         return bytes;
     };
     const faceBytes = cube ? Math.ceil(offsetOf(options.levels) / 16) * 16
         : offsetOf(options.levels);
+    // The last level's blocks may reach past its rows -- a 1x1 ATI2 level is
+    // a block of sixteen bytes in one row of one -- and are read whole.
+    const last = options.levels - 1;
+    const past = Math.max(0, offsetOf(last) + surfaceBytes(options.format,
+        levelExtent(options.width, last), levelExtent(options.height, last)) - faceBytes);
     let block = 0;
     /** @param {number} face @returns {number} where its chain starts */
-    const chainOf = face=>(block ||= options.allocate(faceBytes * faces)) + face * faceBytes;
+    const chainOf = face=>(block ||= options.allocate(faceBytes * faces + past))
+        + face * faceBytes;
     const count = sharedCount(options.count, ()=>{
         if (block)
         {

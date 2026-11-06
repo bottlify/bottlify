@@ -457,6 +457,36 @@ export function sampledOnes(format){
 }
 
 /**
+ * Whether a lock of `format` is addressed as a byte a pixel: ATI1 and ATI2,
+ * drivers' formats the runtime does not know as blocks. Their pitch is the
+ * width and a rectangle starts at its top times that plus its left (Wine's
+ * d3d9 test_lockrect_offset, test_miptree_layout; wined3d's broken pitch),
+ * while the bytes themselves are the blocks, one after another from the start.
+ *
+ * @param {number} format  D3DFMT
+ */
+export const pixelRowsTaken = format=>format === D3DFMT.ATI1 || format === D3DFMT.ATI2;
+
+/**
+ * The pitch a lock of a surface hands out: `surfacePitch`, or the width where
+ * a lock is addressed a byte a pixel (`pixelRowsTaken`).
+ *
+ * @param {number} format  D3DFMT @param {number} width
+ */
+export const lockPitch = (format, width)=>(pixelRowsTaken(format) ? width
+    : surfacePitch(format, width));
+
+/**
+ * The bytes a surface's storage takes: `surfaceBytes`, or for a lock
+ * addressed a byte a pixel as many as its lock reaches, whichever is more.
+ *
+ * @param {number} format  D3DFMT @param {number} width @param {number} height
+ */
+export const storageBytes = (format, width, height)=>(pixelRowsTaken(format)
+    ? Math.max(surfaceBytes(format, width, height), width * height)
+    : surfaceBytes(format, width, height));
+
+/**
  * Where in a locked surface a sub-rectangle begins.
  *
  * A compressed surface can only be addressed by whole blocks, so a rectangle
@@ -473,6 +503,10 @@ export function offsetOfRect(format, pitch, rect){
     if (!info)
     {
         return 0;
+    }
+    if (pixelRowsTaken(format))
+    {
+        return rect.top * pitch + rect.left;
     }
     const { blockBytes, blockSize } = info;
     if (blockBytes === undefined || blockSize === undefined)
