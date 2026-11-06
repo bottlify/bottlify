@@ -39,7 +39,7 @@ import {
     translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
-import { createDefaultState, readState } from './state.js';
+import { createDefaultState, readState, settleDrawableState } from './state.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -442,6 +442,8 @@ export function createGlContext(options = {}){
          * the drawable's dimensions **at the first attachment** and are not
          * touched by a later one -- a program that makes a context current on
          * a second, differently sized window keeps the viewport it had.
+         * Anything else already set stays: wglCopyContext may have filled a
+         * context current nowhere yet (Wine's opengl32 test_copy_context).
          *
          * @param {Drawable} drawable
          */
@@ -452,7 +454,7 @@ export function createGlContext(options = {}){
                 return;
             }
             attached = true;
-            state = createDefaultState(drawable);
+            settleDrawableState(state, drawable);
             if (gpu)
             {
                 gpu.attach(context, drawable);
@@ -1559,6 +1561,36 @@ export function createGlContext(options = {}){
             kernel.side.restoreServerLighting(saved.lighting);
             kernel.side.restoreServerPrograms(saved.programs);
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
+        },
+
+        /**
+         * wglCopyContext's first half: the server attribute groups of `mask`
+         * as glPushAttrib saves them, for `pasteAttribs` of another context.
+         *
+         * @param {number} mask
+         */
+        copyAttribs(mask){
+            return {
+                mask,
+                values: snapshot(queriesSavedBy(SERVER_BITS, mask)),
+                textures: kernel.side.saveServerTextures(mask),
+                lighting: kernel.side.saveServerLighting(mask),
+                programs: kernel.side.saveServerPrograms(mask),
+            };
+        },
+
+        /**
+         * And its second: what `copyAttribs` took, laid onto this context
+         * as glPopAttrib restores it.
+         *
+         * @param {{ mask: number, values: any, textures: any, lighting: any,
+         *     programs: any }} saved
+         */
+        pasteAttribs(saved){
+            restore(saved.values);
+            kernel.side.restoreServerTextures(saved.mask, saved.textures);
+            kernel.side.restoreServerLighting(saved.lighting);
+            kernel.side.restoreServerPrograms(saved.programs);
         },
 
         /** @param {number} mask */

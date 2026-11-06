@@ -2058,8 +2058,10 @@ test('every DC of a window is one drawable, and any other DC is its own', ()=>{
 
     const bounded = gdi.windowContext(HWND, { left: 10, top: 20, right: 650, bottom: 500 });
     assert.deepEqual(gdi.describeDrawable(bounded),
-        { key: keyOf(first), window: HWND, width: 640, height: 480 },
+        { key: keyOf(first), window: HWND, width: 640, height: 480, memory: false },
         'a window context is the size of the area it was given');
+    assert.equal(gdi.describeDrawable(memoryDc)?.memory, true,
+        'a memory DC says so: OpenGL draws into its bitmap');
 });
 
 test('a region is readable and fillable from user32, and nothing else is', ()=>{

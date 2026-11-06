@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { graphicsModule, uncoveredRegion } from './module.js';
+import { clientDrawable, graphicsModule, uncoveredRegion } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
@@ -1196,4 +1196,21 @@ test('the card\'s memory is the choice\'s era, and a configured figure overrides
     assert.equal((await reported({})).module, 256 * MB, 'no choice is a DirectX 9 card');
     const configured = await reported({ choice: 'directx10', videoMemory: 512 });
     assert.equal(configured.module, 512 * MB, 'the configuration names the figure');
+});
+
+test('OpenGL draws on a window\'s client area, whichever of its DCs names it', ()=>{
+    // Wine's opengl32 test_window_dc: a context made on GetWindowDC's DC, whose
+    // bounds span the frame, still has the client area for its viewport.
+    const windows = [
+        { hwnd: 0x20, client: { left: 8, top: 30, right: 108, bottom: 130 } },
+        { hwnd: 0x10, client: { left: 4, top: 26, right: 204, bottom: 176 } },
+    ];
+    const framed = { key: 'window:16', window: 0x10, width: 216, height: 184, memory: false };
+    assert.deepEqual(clientDrawable(framed, windows),
+        { key: 'window:16', window: 0x10, width: 200, height: 150, memory: false });
+    const memory = { key: 'dc:5', window: 0, width: 16, height: 16, memory: true };
+    assert.equal(clientDrawable(memory, windows), memory, 'a memory DC is as gdi32 says');
+    const stranger = { ...framed, window: 0x30 };
+    assert.equal(clientDrawable(stranger, windows), stranger, 'a window not listed too');
+    assert.equal(clientDrawable(null, windows), null);
 });

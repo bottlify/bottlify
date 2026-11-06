@@ -402,6 +402,7 @@ function createNamespace(){
  *             programs: ReturnType<typeof createNamespace>,
  *             glsl: ReturnType<typeof createNamespace>,
  *             renderbuffers: ReturnType<typeof createNamespace>,
+ *             framebuffers: Map<number, FramebufferObject | null>,
  *             contexts: number, used: boolean }}
  */
 export function createShareGroup(){
@@ -413,6 +414,13 @@ export function createShareGroup(){
         // OpenGL 2.0's shaders and programs, which share one namespace.
         glsl: createNamespace(),
         renderbuffers: createNamespace(),
+        /**
+         * Framebuffer objects, as GL_EXT_framebuffer_object shares them; a
+         * generated name holds null until it is first bound.
+         *
+         * @type {Map<number, FramebufferObject | null>}
+         */
+        framebuffers: new Map(),
         /** How many contexts name this group. The objects outlive all but the last. */
         contexts: 0,
         /**
