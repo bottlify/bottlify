@@ -1459,6 +1459,15 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
+            // A full-screen size no mode has is refused, as Windows refuses
+            // it (Wine's d3d8 test_reset: 0x0, 32x32 and 801x600).
+            const raw = fields.readStruct(parameters >>> 0, D3DPRESENT_PARAMETERS8);
+            if (raw.Windowed === 0 && !displayModes(screen()).some(mode=>
+                mode.width === (raw.BackBufferWidth >>> 0)
+                && mode.height === (raw.BackBufferHeight >>> 0)))
+            {
+                return device.RefuseReset();
+            }
             const next = readPresentParameters(parameters >>> 0, deviceWindow);
             const hr = device.Reset(next);
             writePresentParameters(parameters >>> 0, next);

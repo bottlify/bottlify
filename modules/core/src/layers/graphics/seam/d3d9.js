@@ -1870,7 +1870,7 @@ export function createDirect3D9Seam(
             }
             if (fullScreenUnlikeAnyMode(parameters >>> 0))
             {
-                return D3DERR_INVALIDCALL;
+                return device.RefuseReset();
             }
             const next = readPresentParameters(parameters >>> 0, deviceWindow);
             const hr = device.Reset(next);

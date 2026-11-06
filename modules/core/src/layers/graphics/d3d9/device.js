@@ -2646,6 +2646,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * A Reset refused before it reached the device, for a full-screen
+         * size no mode has: the device is left to be reset as a refused
+         * Reset leaves it (Wine's test_reset: TestCooperativeLevel then
+         * answers D3DERR_DEVICENOTRESET).
+         *
+         * @returns {number} D3DERR_INVALIDCALL
+         */
+        RefuseReset(){
+            if (!extended && deviceState !== DEVICE_STATE.LOST)
+            {
+                deviceState = DEVICE_STATE.NOT_RESET;
+            }
+            return D3DERR_INVALIDCALL;
+        },
+
+        /**
          * Reset puts the device back to what it was created as: no scene open,
          * default state, implicit surfaces at the new size, usable again.
          *

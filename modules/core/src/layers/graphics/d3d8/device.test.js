@@ -2373,6 +2373,16 @@ test('Direct3D 8 answers display formats, buffers and intervals as Windows does'
     assertFullyReleased(device);
 });
 
+test('full screen: no additional swap chain, and a refused Reset leaves it to be reset', ()=>{
+    // Wine's d3d8 test_swapchain and test_reset.
+    const device = createDevice({ parameters: { windowed: false } });
+    assert.equal(device.CreateAdditionalSwapChain({ swapEffect: D3DSWAPEFFECT.DISCARD,
+        windowed: true, backBufferWidth: 32, backBufferHeight: 32 }, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.RefuseReset(), D3DERR_INVALIDCALL);
+    assert.equal(device.TestCooperativeLevel(), D3DERR_DEVICENOTRESET);
+    assertFullyReleased(device);
+});
+
 test('a lockable back buffer is given storage for the whole mode, not a fixed megabyte', ()=>{
     // A lock hands the program this address and it reads and writes the whole
     // surface through it. The allocation was a fixed megabyte whatever the mode,

@@ -1824,7 +1824,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ swapChain?: any }} out
          */
         CreateAdditionalSwapChain(asked, out){
-            if (!asked || asked.windowed === false || validatePresentParameters(asked) !== D3D_OK)
+            // A full-screen device has its one swap chain (Wine's d3d8 test_swapchain).
+            if (!asked || asked.windowed === false || presentParameters.windowed === false
+                || validatePresentParameters(asked) !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1993,6 +1995,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 shaders: [boundVertexShader >>> 0, boundPixelShader >>> 0],
                 targets: [renderTarget ?? null, depthStencil ?? null],
             };
+        },
+
+        /**
+         * A Reset refused before it reached the device, for a full-screen
+         * size no mode has: the device is left to be reset as a refused
+         * Reset leaves it (Wine's test_reset: TestCooperativeLevel then
+         * answers D3DERR_DEVICENOTRESET).
+         *
+         * @returns {number} D3DERR_INVALIDCALL
+         */
+        RefuseReset(){
+            if (deviceState !== DEVICE_STATE.LOST)
+            {
+                deviceState = DEVICE_STATE.NOT_RESET;
+            }
+            return D3DERR_INVALIDCALL;
         },
 
         /**
