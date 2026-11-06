@@ -2962,3 +2962,36 @@ test('R11G11B10_FLOAT is a vertex buffer format, read by the vertex stage itself
     assert.equal(device.CheckFormatSupport(DXGI_FORMAT.R11G11B10_FLOAT, out), S_OK);
     assert.ok(((out.support ?? 0) & 0x2) !== 0, 'IA_VERTEX_BUFFER');
 });
+
+test('Direct3D 10 copies into a depth-stencil texture only from another; 11 from a colour one'
+    + ' too (test_format_compatibility)', async()=>{
+    /** @param {any} device */
+    const copied = async device=>{
+        const texels = new Uint8Array(32).map((_, index)=>index + 1);
+        /** @type {{ resource?: any }} */
+        const colour = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2D, Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R16_UNORM, Usage: D3D10_USAGE.IMMUTABLE,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE }, [{ pSysMem: texels, SysMemPitch: 8,
+            SysMemSlicePitch: 0 }], colour), S_OK);
+        const depth = createTexture2D(device, { Width: 4, Height: 4,
+            Format: DXGI_FORMAT.D16_UNORM, BindFlags: D3D10_BIND.DEPTH_STENCIL });
+        device.CopyResource(depth, colour.resource);
+        const staging = createTexture2D(device, { Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R16_UNORM, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: 0x20000 });
+        device.CopyResource(staging, depth);
+        /** @type {{ data?: Uint8Array }} */
+        const mapped = {};
+        assert.equal(await staging.Map(0, 1, 0, mapped), S_OK);
+        const bytes = [...(mapped.data ?? []).slice(0, 32)];
+        staging.Unmap(0);
+        return bytes.every((byte, index)=>byte === texels[index]) ? 'copied'
+            : bytes.every(byte=>byte === 0) ? 'left' : 'mixed';
+    };
+    /** @type {any} */
+    const eleven = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(await copied(eleven.device), 'copied');
+    assert.equal(await copied(createDevice()), 'left');
+});

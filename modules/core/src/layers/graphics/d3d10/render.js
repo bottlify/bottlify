@@ -2250,7 +2250,12 @@ export function createRenderer(services){
             && !!firstBlend?.BlendEnable && [firstBlend.SrcBlend, firstBlend.DestBlend,
             firstBlend.SrcBlendAlpha, firstBlend.DestBlendAlpha].some(factor=>
             DUAL_SOURCE.has(factor));
-        const linking = { targets: bound, depthBias: emulatedBias, sampleCount: state.sampleCount,
+        // Each target's scalar, which its output is whatever the shader says.
+        const targetScalars = Object.fromEntries(bound.map(index=>[index,
+            /uint$/.test(formats[index] ?? '') ? 'u32'
+                : /sint$/.test(formats[index] ?? '') ? 'i32' : 'f32']));
+        const linking = { targets: bound, targetScalars, depthBias: emulatedBias,
+            sampleCount: state.sampleCount,
             alphaCoverage: !!blendTargetsOf(state.blendState).alphaToCoverage
                 && state.sampleCount === 1,
             clipDistances: backend.hasFeature?.('clip-distances') === true,

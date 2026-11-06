@@ -1316,3 +1316,14 @@ test('a pixel input is interpolated as declared, at its centroid or each sample,
     assert.match(linked(5).fragment, /@interpolate\(linear, centroid\) v1/);
     assert.match(linked(2).fragment, /@location\(0\) v1: vec4<f32>/);
 });
+
+test('a target\'s output takes the target\'s scalar, the shader\'s bits as they are'
+    + ' (d3d10core.c test_layered_rtv_mismatch)', ()=>{
+    const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
+    const ps = translateShader(/** @type {any} */ (parseDxbc(solidPixelShader([0, 1, 0, 1]))));
+    const asFloat = linkProgram(vs, ps).fragment;
+    assert.match(asFloat, /@location\(0\) target0: vec4<f32>/);
+    const asUint = linkProgram(vs, ps, { targets: [0], targetScalars: { 0: 'u32' } }).fragment;
+    assert.match(asUint, /@location\(0\) target0: vec4<u32>/,
+        'a float output written to an integer target keeps its bits');
+});

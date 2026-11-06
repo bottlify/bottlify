@@ -3000,7 +3000,11 @@ function vertexPullOf(pull, inputs, registers){
  *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
  *     alphaCoverage?: boolean, sampleCount?: number,
  *     earlyDepth?: { compare: string, multisampled: boolean }, dualSource?: boolean,
- *     viewportPass?: { index: number, count: number } }} [options]  `dualSource`:
+ *     viewportPass?: { index: number, count: number },
+ *     targetScalars?: Readonly<Record<number, string>> }} [options]  `targetScalars`:
+ *     each bound target's scalar (f32, u32 or i32) by location, which its output is
+ *     whatever the shader's signature says: Direct3D writes an output's bits to the
+ *     target as they are (d3d10core.c test_layered_rtv_mismatch). `dualSource`:
  *     the first target is blended by the second output as well (D3D11_BLEND_SRC1_*):
  *     both go to location 0, the second as its second blend source. `earlyDepth`: the
  *     fragment tests itself against the depth buffer, bound read-only at
@@ -3356,7 +3360,7 @@ export function linkProgram(vs, ps, options = {}){
             const slot = element.systemValue === SYSTEM_VALUE.TARGET
                 ? element.index : element.register;
             targets.push(slot);
-            const scalar = scalarOf(element.componentType);
+            const scalar = options.targetScalars?.[slot] ?? scalarOf(element.componentType);
             // The second output is the first target's second blend source,
             // whatever is bound at the second.
             if (options.dualSource && slot <= 1)

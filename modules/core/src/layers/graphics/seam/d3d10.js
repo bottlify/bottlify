@@ -4123,8 +4123,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 if (hr === S_OK)
                 {
                     const entry = held.entry;
+                    // The flags (a texture's component count) are Direct3D 11's
+                    // reflector's: Direct3D 10's answers none (test_reflection_bound_resources).
                     [pointerInto(reflection, entry.nameAt), entry.type, entry.bindPoint,
-                        entry.bindCount, entry.flags, entry.returnType, entry.dimension,
+                        entry.bindCount, 0, entry.returnType, entry.dimension,
                         entry.sampleCount]
                         .forEach((value, position)=>fields.writeU32(out + position * 4, value));
                 }
@@ -4514,10 +4516,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                     fields.writeU32(out, 0);
                     return E_FAIL;
                 }
-                // Direct3D 10 has the vertex, geometry and pixel stages: a
-                // program of a stage Direct3D 11 added is refused (test_reflection_cs,
-                // built for d3d10).
-                if ((reflected.desc.Version >>> 16) > SHADER_KIND.GEOMETRY)
+                // Direct3D 10's reflector knows the vertex, geometry and pixel
+                // stages up to shader model 5.0, and reads a program through its
+                // resource definitions: a stage Direct3D 11 added, model 5.1, or
+                // a container stripped of its RDEF is refused (reflection.c as
+                // d3d10 builds it: test_reflection_cs, _desc_ps_output,
+                // _bound_resources).
+                const version = reflected.desc.Version;
+                if ((version >>> 16) > SHADER_KIND.GEOMETRY || (version & 0xff) > 0x50
+                    || !reflected.hasDefinitions)
                 {
                     fields.writeU32(out, 0);
                     return E_INVALIDARG;

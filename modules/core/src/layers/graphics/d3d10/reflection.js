@@ -148,6 +148,7 @@ export const SHADER_TYPE_DESC_FIELDS = Object.freeze([
  * @typedef {Object} ShaderReflection
  * @property {Record<string, number>} desc  D3D10_SHADER_DESC by field name, with
  *     `Creator` an offset from the start of the container, or -1 for none.
+ * @property {boolean} hasDefinitions  Whether the container keeps its RDEF chunk.
  * @property {ReflectedConstantBuffer[]} constantBuffers
  * @property {ReflectedBinding[]} bindings
  * @property {ReflectedParameter[]} inputs
@@ -423,6 +424,7 @@ export function reflectShader(bytes){
     });
     return {
         desc,
+        hasDefinitions: container.chunks.has('RDEF'),
         constantBuffers: definitions.constantBuffers,
         bindings: definitions.bindings,
         inputs: located(bytes, container.chunks.get('ISGN'), container.inputs),

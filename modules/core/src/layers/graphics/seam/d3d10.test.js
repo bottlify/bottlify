@@ -43,7 +43,8 @@ import {
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
 import {
-    assemble, constantBufferShader, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret,
+    assemble, constantBufferShader, dclInputSiv, dclOutputSiv, o, passThroughVertexShader,
+    resourceDefinitions, ret, withChunks,
     solidPixelShader, utof, v as input,
 } from '../d3d10/shader-fixtures.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from '../d3d10/dxbc.js';
@@ -1070,6 +1071,30 @@ test('d3d10.dll makes blobs, cuts signatures out of a shader and reflects it', (
         >>> 0, E_INVALIDARG, 'a stage Direct3D 10 does not have (test_reflection_cs)');
     assert.equal(h.box.memory.readU32(reflectionAt), 0);
     assert.equal(h.d3d10.D3D10ReflectShader.handler([shaderAt, shader.length, reflectionAt])
+        >>> 0, E_INVALIDARG, 'a container stripped of its RDEF (test_reflection_desc_ps_output)');
+    // A model 5.1 program is past Direct3D 10's reflector (test_reflection_bound_resources).
+    const sm51 = withChunks(assemble({ kind: SHADER_KIND.VERTEX,
+        instructions: [ret()] }), [{ name: 'RDEF',
+        bytes: resourceDefinitions({ target: 0xfffe0501, flags: 0, model5: true }) }]);
+    // The program's version word, 4.0 as assembled, made 5.1.
+    const words = new DataView(sm51.buffer, sm51.byteOffset);
+    for (let at = 32; at < 32 + words.getUint32(28, true) * 4; at += 4)
+    {
+        const chunk = words.getUint32(at, true);
+        if (words.getUint32(chunk, true) === 0x52444853)
+        {
+            words.setUint32(chunk + 8, (words.getUint32(chunk + 8, true) & ~0xff) | 0x51, true);
+        }
+    }
+    const sm51At = h.box.placeBytes(sm51);
+    assert.equal(h.d3d10.D3D10ReflectShader.handler([sm51At, sm51.length, reflectionAt])
+        >>> 0, E_INVALIDARG, 'shader model 5.1');
+    const defined = withChunks(shader, [{ name: 'RDEF',
+        bytes: resourceDefinitions({ target: 0xfffe0400, flags: 0, buffers: [], bindings: [
+            { name: 'tex', type: 2, returnType: 5, dimension: 4, samples: 0xffffffff,
+                bindPoint: 3, flags: 12 }] }) }]);
+    const definedAt = h.box.placeBytes(defined);
+    assert.equal(h.d3d10.D3D10ReflectShader.handler([definedAt, defined.length, reflectionAt])
         >>> 0, S_OK);
     const reflection = h.box.memory.readU32(reflectionAt);
     const reflect = (/** @type {string} */ name, /** @type {number[]} */ args)=>
@@ -1089,7 +1114,12 @@ test('d3d10.dll makes blobs, cuts signatures out of a shader and reflects it', (
         [0, 0, 1, 3], 'index, register, D3D10_NAME_POSITION, float');
     assert.deepEqual([...h.box.services.readMemory(parameter + 20, 2)], [0xf, 0]);
     assert.equal(reflect('GetInputParameterDesc', [1, parameter]), E_INVALIDARG);
-    assert.equal(reflect('GetResourceBindingDesc', [0, parameter]), E_INVALIDARG);
+    const binding = h.box.allocate(32);
+    assert.equal(reflect('GetResourceBindingDesc', [0, binding]), S_OK);
+    assert.deepEqual([4, 8, 12, 16, 20, 24].map(at=>h.box.memory.readU32(binding + at)),
+        [2, 3, 1, 0, 5, 4], 'type, bind point, count, no flags under Direct3D 10, return type,'
+        + ' dimension');
+    assert.equal(reflect('GetResourceBindingDesc', [1, parameter]), E_INVALIDARG);
     assert.notEqual(reflect('GetConstantBufferByIndex', [0]), 0,
         'a program with no constant buffer is answered the invalid one, not null');
     const queried = h.box.place([0]);

@@ -1159,6 +1159,16 @@ export function createDevice(options = {}){
             diverge(`${call} into an immutable resource is ignored`);
             return false;
         }
+        // Direct3D 10's runtime copies into a depth-stencil texture only from
+        // another; 11's from a colour one of its family too
+        // (test_format_compatibility, d3d10core.c and d3d11.c).
+        if (!d3d11 && (destination.desc.BindFlags & D3D10_BIND.DEPTH_STENCIL) !== 0
+            && (source.desc.BindFlags & D3D10_BIND.DEPTH_STENCIL) === 0)
+        {
+            diverge(`${call} into a depth-stencil texture from a colour one is ignored,`
+                + ' as Direct3D 10 ignores it');
+            return false;
+        }
         // Bits move between formats of one family, and from level 10.1 between
         // a compressed format and an uncompressed one whose texel is as big
         // as its block; a copy between any other two families has no meaning
