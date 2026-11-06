@@ -879,6 +879,27 @@ the window is minimised, and otherwise sets its size as Windows does. What that 
 focus window goes to the default procedure, as the runtime's own changes do on Windows, so a
 program hears the same messages. *2026-11-06.*
 
+**A88. Temporary: bytes a program writes outside the range it locked in a static Direct3D 8 or 9
+buffer of the default or system pool reach the GPU only with a later lock that covers them.**
+On Windows such a buffer's lock hands out the memory the GPU reads, so a program that locks four
+bytes and writes the whole buffer draws all of it (Wine's d3d9 test_map_partial_range); a
+managed buffer, copied from the locked range, does not. Here an unlock sends the range it
+locked, as for a managed buffer, and a dynamic buffer's draws read what they reach out of guest
+memory. Doing that for static buffers too would put a write watch or a comparison of the whole
+buffer on every unlock or draw of buffers that are drawn thousands of times a frame and written
+almost never; a program that writes past its lock is relying on undefined behaviour. It stands
+until static buffers carry the write watch dynamic ones do and a measurement shows the draws do
+not pay for it. *2026-11-06.*
+
+**A89. A cube texture is filtered across its faces' edges.** Direct3D 9 hardware picks one face
+for a direction and filters inside it, clamped at its edge; WebGPU defines cube sampling as
+seamless, so a linear sample at an edge or a corner blends the texels of the faces that meet
+there (Wine's d3d9 test_cube_wrap samples the corner (1, 1, 1) and reads the +X face's texel
+alone, where here a third of each of three faces comes back). Reproducing the face-bound filter
+would mean sampling every cube as a six-layer array with the face, the coordinates and the
+four taps worked out in the shader, on every draw that reads a cube; the seamless result differs
+only within a texel of an edge, where it is the smoother one. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

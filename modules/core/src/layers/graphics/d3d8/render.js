@@ -10102,6 +10102,19 @@ export function createRenderer(options){
         },
 
         /**
+         * The GPU surfaces behind a list of target surfaces moved one place
+         * down: each takes the next one's, and the last the first's. A
+         * present's flip of a chain's back buffers.
+         *
+         * @param {readonly any[]} list
+         */
+        rotateSurfaces(list){
+            const behind = list.map(surface=>surfaceFor(surface));
+            list.forEach((surface, index)=>surfaces.set(surface,
+                behind[(index + 1) % behind.length]));
+        },
+
+        /**
          * A rectangle of one surface drawn over a rectangle of another on the GPU, at any
          * scale and between any two colour formats it renders -- StretchRect's stretch,
          * point or linear as the program asked. False when either side is not the GPU's,

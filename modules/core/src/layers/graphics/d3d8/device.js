@@ -1610,6 +1610,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
 
     /**
+     * The back buffers' contents move one place down after a present: the
+     * first takes the second's, and the last the one just presented (Wine's
+     * test_flip). Each surface stays the object it was; what is behind it on
+     * the GPU is what turns.
+     */
+    const flip = ()=>{
+        if (backBuffers.length > 1)
+        {
+            renderer?.rotateSurfaces?.(backBuffers);
+        }
+    };
+
+    /**
      * An additional swap chain's back buffer presented: onto the display
      * when it goes into the window the display shows, and otherwise drawn and
      * kept, which is reported once.
@@ -1624,8 +1637,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         }
         if (shown)
         {
-            return presented(renderer?.present(
-                Object.create(model, { backBuffer: { get: ()=>backBuffer } })));
+            const submitted = renderer?.present(
+                Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+            if (backBuffer === backBuffers[0])
+            {
+                flip();
+            }
+            return presented(submitted);
         }
         reportOnce('chain-window', 'a swap chain presented into a window the display does'
             + ' not show: its frame is drawn and its picture is not shown');
@@ -1811,7 +1829,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_DEVICELOST;
             }
-            return presented(renderer?.present(model));
+            const submitted = renderer?.present(model);
+            flip();
+            return presented(submitted);
         },
 
         /**

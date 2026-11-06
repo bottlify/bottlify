@@ -1717,6 +1717,61 @@ test('StretchRect scales one target over another on the GPU, filtered as asked',
         && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
 });
 
+test('a present moves the back buffers\' contents one place down', async()=>{
+    // Wine's d3d9 test_flip: three back buffers, each surface the object it
+    // was, the first holding what the second held after a present and the
+    // last what was presented.
+    const gpu = createFakeDevice({});
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        presentTo: ()=>{}, now: ()=>0 });
+    let next = RAM_BASE;
+    const d3d = createDirect3D9({
+        backend,
+        readMemory: (_address, length)=>new Uint8Array(length),
+        createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        allocate: bytes=>{
+            const address = next;
+            next += bytes + 0x100;
+            return address;
+        },
+    });
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 3,
+        backBufferWidth: 4, backBufferHeight: 4, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    const device = out.device;
+    const buffers = [0, 1, 2].map(index=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        assert.equal(device.GetBackBuffer(0, index, 0, held), D3D_OK);
+        return held.surface;
+    });
+    /** The GPU texture each back buffer is drawn into, by clearing it. */
+    const behind = async()=>{
+        const seen = [];
+        for (const surface of buffers)
+        {
+            assert.equal(device.SetRenderTarget(0, surface), D3D_OK);
+            assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0, 1, 0), D3D_OK);
+        }
+        assert.equal(device.SetRenderTarget(0, buffers[0]), D3D_OK);
+        const before = gpu.of('beginRenderPass').length;
+        assert.equal(device.Present(), D3D_OK);
+        await device.idle();
+        for (const call of gpu.of('beginRenderPass').slice(before))
+        {
+            seen.push(call.descriptor.colorAttachments[0].view.texture);
+        }
+        return seen;
+    };
+    const first = await behind();
+    const second = await behind();
+    assert.equal(first.length, 3);
+    assert.deepEqual(second, [first[1], first[2], first[0]]);
+    buffers.forEach(surface=>surface.release());
+});
+
 test('StretchRect scales an offscreen plain surface into a target, from its bytes', async()=>{
     // Wine's d3d9 stretchrect_test: offscreenplain into a render target,
     // scaling, is allowed. The plain surface's pixels are its guest bytes,
