@@ -6,8 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arenaRegion, createAddressIndex, createHeapAllocator, createHeapFunctions }
-    from './heap.js';
+import {
+    TABLES, arenaRegion, createAddressIndex, createHeapAllocator, createHeapFunctions,
+} from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
@@ -1085,6 +1086,26 @@ test('FlushInstructionCache succeeds, because a program that has written code ch
     // reason not to jump, and the processor already notices a written code page.
     assert.equal(fns.FlushInstructionCache.handler(), 1);
     assert.equal(fns.FlushInstructionCache.argBytes, 12);
+});
+
+test('the pages of COM\'s method tables are writable data to VirtualQuery and VirtualProtect, the'
+    + ' rest of the arena readable, writable and executable (ddraw1 test_vtbl_protection)', ()=>{
+    const host = fakeHost();
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    const tables = allocator.allocate(0x2000, { owner: TABLES });
+    const other = allocator.allocate(0x100);
+    const buffer = allocator.allocate(0x40);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const protection = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, buffer, MBI.SIZE]), MBI.SIZE);
+        return view.getUint32(buffer + MBI.Protect, true);
+    };
+    assert.equal(protection(tables + 0x10), 0x04, 'PAGE_READWRITE');
+    assert.equal(protection(other), 0x40, 'PAGE_EXECUTE_READWRITE');
+    assert.equal(fns.VirtualProtect.handler([tables, 0x10, 0x40, buffer]), 1);
+    assert.equal(view.getUint32(buffer, true), 0x04, 'the old protection, as it was told');
 });
 
 test('VirtualQuery on a gap outside the arena answers the whole run up to the next region', ()=>{

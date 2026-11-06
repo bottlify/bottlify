@@ -104,6 +104,29 @@ test('an interface that fits is published once and answers the same pointer afte
     assert.equal(table.diagnostics().comInterfacesRefused, 0);
 });
 
+test('a method table is laid where the heap keeps tables, apart from objects and code', ()=>{
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        register: ()=>(next += 0x10),
+        heap: {
+            /** @param {number} size */
+            allocate: size=>(next += size),
+            allocateTable: ()=>0x90000,
+        },
+    });
+    const pointer = table.publish(object, IID);
+    assert.notEqual(pointer, 0);
+    assert.equal(words.get(pointer), 0x90000, 'the object\'s first word names that table');
+});
+
 test('a method that runs in the guest takes its slot, and keeps its trap to fall back to', ()=>{
     // The object's state word sits one word past the vtable pointer, which is
     // where such a method finds the memory it works on.

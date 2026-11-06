@@ -119,6 +119,8 @@ const HEAP_SUMMARY_SIZE = 20;
  */
 const PAGE_NOACCESS = 0x01;
 const PAGE_EXECUTE_READWRITE = 0x40;
+/** What the pages of COM's method tables are (`TABLES`). */
+const PAGE_READWRITE = 0x04;
 
 /** VirtualQuery's State and Type, beside the MEM_COMMIT already declared above. */
 const MEM_FREE = 0x10000;
@@ -229,6 +231,12 @@ const PERFORMANCE_INFORMATION = Object.freeze({
 
 /** Marks the blocks VirtualAlloc handed out, so HeapFree cannot reach them. */
 const VIRTUAL = Symbol('virtual');
+
+/**
+ * Marks the pages COM's method tables are laid out on: writable data, as a
+ * system DLL's are, and no heap's (ddraw1 test_vtbl_protection).
+ */
+export const TABLES = Symbol('tables');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
@@ -1197,6 +1205,11 @@ export function createHeapFunctions(host){
      */
     const arenaAnswer = (page, arenaEnd)=>{
         const block = allocator.blockContaining(page);
+        if (block && block.owner === TABLES)
+        {
+            return [page, block.address, PAGE_READWRITE,
+                block.address + block.capacity - page, MEM_COMMIT, PAGE_READWRITE, MEM_PRIVATE];
+        }
         if (block && block.owner === VIRTUAL)
         {
             const end = block.address + block.capacity;
@@ -2457,7 +2470,8 @@ export function createHeapFunctions(host){
                 const first = ((address >>> 0) & ~(PAGE_SIZE - 1)) >>> 0;
                 const was = block?.owner === VIRTUAL
                     && unreadable.get(block.address)?.has(first) === true;
-                writeDword(oldProtect >>> 0, was ? PAGE_NOACCESS : PAGE_EXECUTE_READWRITE);
+                writeDword(oldProtect >>> 0, was ? PAGE_NOACCESS
+                    : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE);
                 if (block && block.owner === VIRTUAL)
                 {
                     const end = Math.min(roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE),

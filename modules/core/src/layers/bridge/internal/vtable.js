@@ -128,8 +128,10 @@ const COUNT_CODE = {
  * @param {any} deps.memory
  * @param {(name: string, fn: any) => number} deps.register  Bridge registration.
  * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void,
- *           allocateCode?: (bytes: number) => number }} deps.heap
- *        `allocateCode`, where it is given, places IUnknown's count routines.
+ *           allocateCode?: (bytes: number) => number,
+ *           allocateTable?: (bytes: number) => number }} deps.heap
+ *        `allocateCode`, where it is given, places IUnknown's count routines;
+ *        `allocateTable` the method tables, on pages of data rather than code.
  * @param {() => boolean} [deps.long]  Whether the process is a 64-bit one, asked
  *        when a table is laid out: its slots are eight bytes, and the methods
  *        and counts that run in the guest, which are i386 code, are traps there.
@@ -350,7 +352,8 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
             return 0;
         }
         const word = wordSize();
-        const vtable = heap.allocate(slots.length * word);
+        const vtable = heap.allocateTable ? heap.allocateTable(slots.length * word)
+            : heap.allocate(slots.length * word);
         if (vtable === 0)
         {
             refused++;

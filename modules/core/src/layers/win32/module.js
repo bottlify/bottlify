@@ -10,7 +10,9 @@ import { createFiberFunctions } from './kernel32/fibers.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
-import { ALIGNMENT_64, createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
+import {
+    ALIGNMENT_64, TABLES, createHeapAllocator, createHeapFunctions,
+} from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
@@ -1187,6 +1189,10 @@ export function createWin32Module(){
             // The guest code the engine writes itself, on pages nothing else is
             // handed (`code-arena.js`).
             const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
+            // COM's method tables on pages of their own, which VirtualQuery
+            // calls writable data rather than code.
+            const placeTable = createCodeArena(bytes=>allocator.allocate(bytes,
+                { owner: TABLES }));
             if (pointerSize === 8)
             {
                 // The code a 64-bit process's callbacks start at, which
@@ -1205,6 +1211,8 @@ export function createWin32Module(){
                 allocate: (bytes, options)=>allocator.allocate(bytes, options),
                 /** @param {number} bytes */
                 allocateCode: bytes=>placeCode(bytes),
+                /** @param {number} bytes */
+                allocateTable: bytes=>placeTable(bytes),
                 /** @param {number} address */
                 free: address=>allocator.free(address),
                 /** @param {number} address */
