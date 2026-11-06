@@ -857,6 +857,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     let material = defaultMaterial();
     /** @type {Map<number, Float32Array>} */
     let clipPlanes = new Map();
+    /** @param {number} index @returns {number} the plane an index names */
+    const clipPlaneAt = index=>Math.min(index >>> 0, caps.maxUserClipPlanes - 1);
     let nPatchMode = 0;
     let clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
     let gammaRamp = identityRamp();
@@ -2931,17 +2933,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * A plane past the device's last is the last: any index is taken,
+         * and every one from MaxUserClipPlanes - 1 up is the same plane
+         * (test_clip_planes_limits).
+         *
          * @param {number} index
          * @param {ArrayLike<number>} plane  Four floats.
          */
         SetClipPlane(index, plane){
-            if (index < 0 || index >= caps.maxUserClipPlanes || !plane || plane.length !== 4)
+            if (!plane || plane.length !== 4 || caps.maxUserClipPlanes === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            const at = clipPlaneAt(index);
             return setState(
-                record=>record.clipPlanes.set(index, Float32Array.from(plane)),
-                ()=>clipPlanes.set(index, Float32Array.from(plane)));
+                record=>record.clipPlanes.set(at, Float32Array.from(plane)),
+                ()=>clipPlanes.set(at, Float32Array.from(plane)));
         },
 
         /**
@@ -2949,11 +2956,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ plane?: Float32Array }} out
          */
         GetClipPlane(index, out){
-            if (index < 0 || index >= caps.maxUserClipPlanes)
+            if (caps.maxUserClipPlanes === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.plane = Float32Array.from(clipPlanes.get(index) ?? [0, 0, 0, 0]);
+            out.plane = Float32Array.from(clipPlanes.get(clipPlaneAt(index)) ?? [0, 0, 0, 0]);
             return D3D_OK;
         },
 
@@ -4101,7 +4108,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0, userMemory = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
-                || (info.video && !videoPoolAllowed(pool, true))
+                // A packed video surface needs the driver's support in system
+                // memory as in video memory; only scratch holds one without it
+                // (test_surface_blocks).
+                || (info.video && !videoPoolAllowed(pool, false))
                 || !(width > 0) || !(height > 0) || !blockAligned(format, width, height)
                 || (userMemory !== 0 && pool !== D3DPOOL.SYSTEMMEM))
             {

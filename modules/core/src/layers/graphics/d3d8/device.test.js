@@ -1586,10 +1586,9 @@ test('recording for a device that draws elsewhere, a target the program cannot l
         made('lockable target', out=>device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, true, out));
         made('texture', out=>device.CreateTexture(8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT,
             out));
-        // A cube's faces are six storages.
-        const faces = Array(6).fill(!elsewhere);
+        // A cube's faces are one storage, one after another.
         assert.deepEqual(answer, {
-            'target texture': [!elsewhere], 'target cube': faces, target: [!elsewhere],
+            'target texture': [!elsewhere], 'target cube': [!elsewhere], target: [!elsewhere],
             'lockable target': [true], texture: [true],
         }, elsewhere ? 'drawn elsewhere' : 'drawn here');
         assertFullyReleased(device);

@@ -488,26 +488,29 @@ test('the scissor rectangle is kept as given and follows a new target', ()=>{
     assert.equal(device.release(), 0);
 });
 
-test('clip planes are bounded by the capability and read back as zero until set', ()=>{
+test('clip planes read back as zero until set, and every index from the last up is the last'
+    + ' (test_clip_planes_limits)', ()=>{
     const { device } = make({ caps: { maxUserClipPlanes: 6 } });
     /** @type {{ plane?: Float32Array }} */
     const out = {};
-    assert.equal(device.GetClipPlane(0, out), D3D_OK);
-    assert.deepEqual([...(out.plane ?? [])], [0, 0, 0, 0]);
-    assert.equal(device.SetClipPlane(5, [1, 2, 3, 4]), D3D_OK);
-    assert.equal(device.GetClipPlane(5, out), D3D_OK);
-    assert.deepEqual([...(out.plane ?? [])], [1, 2, 3, 4]);
-    assert.equal(device.SetClipPlane(6, [1, 2, 3, 4]), D3DERR_INVALIDCALL);
-    assert.equal(device.GetClipPlane(6, out), D3DERR_INVALIDCALL);
+    for (const index of [0, 6, 63])
+    {
+        assert.equal(device.GetClipPlane(index, out), D3D_OK);
+        assert.deepEqual([...(out.plane ?? [])], [0, 0, 0, 0]);
+    }
+    for (let index = 0; index < 64; index++)
+    {
+        assert.equal(device.SetClipPlane(index, [2, 8, 5, index]), D3D_OK);
+    }
+    for (let index = 0; index < 64; index++)
+    {
+        assert.equal(device.GetClipPlane(index, out), D3D_OK);
+        assert.deepEqual([...(out.plane ?? [])], [2, 8, 5, index >= 5 ? 63 : index],
+            `plane ${index}`);
+    }
     assert.equal(device.SetClipPlane(0, null), D3DERR_INVALIDCALL);
     assert.equal(device.release(), 0);
 
-    // The default is six, the planes the renderer clips by; a device made
-    // with none takes none.
-    const bare = make().device;
-    assert.equal(bare.SetClipPlane(5, [1, 0, 0, 0]), D3D_OK);
-    assert.equal(bare.SetClipPlane(6, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
-    assert.equal(bare.release(), 0);
     const none = make({ caps: { maxUserClipPlanes: 0 } }).device;
     assert.equal(none.SetClipPlane(0, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
     assert.equal(none.release(), 0);
@@ -1203,14 +1206,13 @@ test('a target the program cannot lock, drawn elsewhere or not at all, is not cl
         device.release();
         return answer;
     };
-    // A cube's faces are six storages.
-    const faces = (/** @type {boolean} */ cleared)=>Array(6).fill(cleared);
+    // A cube's faces are one storage, one after another.
     const everything = {
-        'target texture': [true], 'target cube': faces(true), target: [true],
+        'target texture': [true], 'target cube': [true], target: [true],
         'lockable target': [true], texture: [true], 'dynamic texture': [true], plain: [true],
     };
     assert.deepEqual(clearedWhen({}), everything, 'drawing here, every resource is cleared');
-    const notTargets = { ...everything, 'target texture': [false], 'target cube': faces(false),
+    const notTargets = { ...everything, 'target texture': [false], 'target cube': [false],
         target: [false] };
     assert.deepEqual(clearedWhen({ renderedElsewhere: true }), notTargets);
     assert.deepEqual(clearedWhen({ drawsNothing: true }), notTargets);

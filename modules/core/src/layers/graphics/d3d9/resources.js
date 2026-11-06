@@ -737,6 +737,18 @@ export function createSurface(options){
             {
                 return D3DERR_INVALIDCALL;
             }
+            // A compressed surface in video memory locks whole blocks: a
+            // rectangle that cuts one is refused there, and taken in every
+            // other pool (test_surface_blocks).
+            const block = FORMAT_INFO[options.format]?.blockSize ?? 1;
+            if (rect && block > 1 && options.pool === D3DPOOL.DEFAULT
+                && options.format !== D3DFMT.ATI1 && options.format !== D3DFMT.ATI2
+                && ((rect.left | rect.top) % block !== 0
+                    || (rect.right % block !== 0 && rect.right !== options.width)
+                    || (rect.bottom % block !== 0 && rect.bottom !== options.height)))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             // A surface that lives on the GPU is not copied back into the
             // guest's own bytes, and the guest's bytes are not copied onto the
             // GPU when the lock ends. The lock is right to succeed -- refusing
@@ -1137,30 +1149,36 @@ export function createTexture(options){
     const faces = cube ? 6 : 1;
     /** @type {Map<string, Surface>} */
     const surfaces = new Map();
-    // Each face's levels lie one after another in one block, as Windows lays
-    // a texture's chain out: a program that locks the top level and writes
-    // on past its end writes the next levels (Wine's d3d8 test_mipmap_upload).
-    /** @type {number[]} */
-    const chains = new Array(faces).fill(0);
-    /** @param {number} level @returns {number} bytes before it in its face's block */
+    // Each face's levels lie one after another, and a cube's faces one after
+    // another, each from a 16-byte boundary, in one block, as Windows lays a
+    // texture out: a program that locks the top level and writes on past its
+    // end writes the next levels (Wine's d3d8 test_mipmap_upload, d3d9
+    // test_miptree_layout). ATI1 and ATI2, which the runtime does not know as
+    // blocks, take a pitch for every row of pixels.
+    const rowsTaken = options.format === D3DFMT.ATI1 || options.format === D3DFMT.ATI2;
+    /** @param {number} level @returns {number} bytes before it in its face's chain */
     const offsetOf = level=>{
         let bytes = 0;
         for (let before = 0; before < level; before++)
         {
-            bytes += surfaceBytes(options.format, levelExtent(options.width, before),
-                levelExtent(options.height, before));
+            const width = levelExtent(options.width, before);
+            const height = levelExtent(options.height, before);
+            bytes += rowsTaken ? surfacePitch(options.format, width) * height
+                : surfaceBytes(options.format, width, height);
         }
         return bytes;
     };
+    const faceBytes = cube ? Math.ceil(offsetOf(options.levels) / 16) * 16
+        : offsetOf(options.levels);
+    let block = 0;
+    /** @param {number} face @returns {number} where its chain starts */
+    const chainOf = face=>(block ||= options.allocate(faceBytes * faces)) + face * faceBytes;
     const count = sharedCount(options.count, ()=>{
-        for (const base of chains)
+        if (block)
         {
-            if (base)
-            {
-                options.free?.(base);
-            }
+            options.free?.(block);
         }
-        chains.fill(0);
+        block = 0;
         surfaces.clear();
     });
     /** @type {SurfaceFamily} */
@@ -1169,10 +1187,7 @@ export function createTexture(options){
     // level's at once and the others at the first draw that samples them; a
     // device made without one would place them later, and elsewhere, than its
     // twin with one (`remote/replay.js`) is given them.
-    for (let face = 0; face < faces; face++)
-    {
-        chains[face] = options.allocate(offsetOf(options.levels));
-    }
+    chainOf(0);
 
     /** @returns {LockRectangle} the whole top level */
     const whole = ()=>({ left: 0, top: 0, right: options.width, bottom: options.height });
@@ -1225,8 +1240,7 @@ export function createTexture(options){
             format: options.format,
             pool: options.pool,
             usage: options.usage,
-            base: (chains[face] ||= options.allocate(offsetOf(options.levels)))
-                + offsetOf(level),
+            base: chainOf(face) + offsetOf(level),
             count,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is
