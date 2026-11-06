@@ -3352,10 +3352,14 @@ export function linkProgram(vs, ps, options = {}){
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
-        // An output with no system value -- COLOR0 from a shader compiled for
-        // backwards compatibility (fxc /Gec) -- is the target its register names.
+        // An output with no system value is the target its register names --
+        // COLOR0 from a shader compiled for backwards compatibility (fxc
+        // /Gec), and SV_Target as fxc writes it -- unless its name says depth:
+        // fxc writes SV_Depth with no system value too, and the program
+        // writes oDepth.
+        const name = element.name.toUpperCase();
         if (element.systemValue === SYSTEM_VALUE.TARGET
-            || element.systemValue === SYSTEM_VALUE.UNDEFINED)
+            || (element.systemValue === SYSTEM_VALUE.UNDEFINED && !name.startsWith('SV_DEPTH')))
         {
             const slot = element.systemValue === SYSTEM_VALUE.TARGET
                 ? element.index : element.register;
@@ -3377,7 +3381,8 @@ export function linkProgram(vs, ps, options = {}){
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
         }
-        if (element.systemValue === SYSTEM_VALUE.DEPTH)
+        if (element.systemValue === SYSTEM_VALUE.DEPTH
+            || (element.systemValue === SYSTEM_VALUE.UNDEFINED && name === 'SV_DEPTH'))
         {
             psOut.push('    @builtin(frag_depth) depth: f32,');
             psReturn.push('oDepth');

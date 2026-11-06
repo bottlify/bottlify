@@ -77,7 +77,8 @@ const REGISTER_CONSTANT = 2;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 
 /** The libraries the Direct3D 10 and 11 seam answers: either version's, and DXGI's. */
-const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll'];
+const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
+    'D3DCompiler_43.dll', 'D3DCOMPILER_47.dll'];
 
 /**
  * Every entry point in one place.
@@ -364,7 +365,7 @@ export function createGraphicsLibraries(
     }));
     // Direct3D 10 and 11 are one seam over one device, and DXGI is theirs.
     const d3d10 = built(DXGI_LIBRARIES, ()=>createDirect3D10Seam({
-        publisher, memory, allocate, free, screen, resolution, gdi,
+        publisher, memory, allocate, free, screen, resolution, gdi, callGuest, currentThread,
         // The device's command ring, with guest code: none in a 64-bit
         // process, whose calls all trap.
         ringAllocate: guestAllocate,

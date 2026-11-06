@@ -33,10 +33,10 @@ test('a DirectX choice has every DirectX up to it, OpenGL has itself alone', ()=
         directx7: ['DDRAW.dll', 'ddraw', '7'],
         directx8: ['DDRAW.dll D3D8.dll', 'ddraw d3d8', '8'],
         directx9: ['DDRAW.dll D3D8.dll D3D9.dll', 'ddraw d3d8 d3d9', '9'],
-        directx10: ['DDRAW.dll D3D8.dll D3D9.dll D3D10.dll D3D10_1.dll DXGI.dll',
-            'ddraw d3d8 d3d9 d3d10', '9'],
-        directx11: ['DDRAW.dll D3D8.dll D3D9.dll D3D10.dll D3D10_1.dll D3D11.dll DXGI.dll',
-            'ddraw d3d8 d3d9 d3d10', '9'],
+        directx10: [['DDRAW.dll D3D8.dll D3D9.dll D3D10.dll D3D10_1.dll DXGI.dll',
+            'D3DCompiler_43.dll D3DCOMPILER_47.dll'].join(' '), 'ddraw d3d8 d3d9 d3d10', '9'],
+        directx11: [['DDRAW.dll D3D8.dll D3D9.dll D3D10.dll D3D10_1.dll D3D11.dll DXGI.dll',
+            'D3DCompiler_43.dll D3DCOMPILER_47.dll'].join(' '), 'ddraw d3d8 d3d9 d3d10', '9'],
         opengl: ['OPENGL32.dll GLU32.dll', 'opengl', null],
     });
 });
