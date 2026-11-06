@@ -520,3 +520,23 @@ test('a copy into DXTn blocks encodes the blocks it touched and leaves the rest'
     const picked = (indices >>> 20) & 3;
     assert.equal(picked === 0 ? c0 : picked === 1 ? c1 : -1, 0x001f);
 });
+
+test('a copy between the same colours, the source without alpha, moves the bits as they are'
+    + ' (test_surface_format_conversion_alpha)', ()=>{
+    const memory = ram();
+    const x1 = { ...surface(BASE, 2, 1, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0 } };
+    const a1 = { ...surface(BASE + 0x40, 2, 1, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0x8000 } };
+    writePixel(memory, x1, 0, 0, 0x03e0);
+    writePixel(memory, x1, 1, 0, 0x001f);
+    assert.equal(blt({ memory, dest: a1, src: x1, flags: 0 }), 0);
+    assert.deepEqual(grid(memory, a1), [[0x03e0, 0x001f]], 'the top bit stays clear');
+    // With alpha on the source side the alpha is converted as before.
+    const r5g6b5 = { ...surface(BASE + 0x80, 2, 1, 2),
+        channels: { red: 0xf800, green: 0x7e0, blue: 0x1f, alpha: 0 } };
+    writePixel(memory, r5g6b5, 0, 0, 0x07e0);
+    writePixel(memory, r5g6b5, 1, 0, 0x001f);
+    assert.equal(blt({ memory, dest: a1, src: r5g6b5, flags: 0 }), 0);
+    assert.deepEqual(grid(memory, a1), [[0x83e0, 0x801f]], 'another layout is made opaque');
+});

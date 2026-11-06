@@ -415,9 +415,13 @@ function snapshot(memory, src, rect){
 const converts = (src, dest)=>{
     const from = src.channels;
     const to = dest.channels;
+    // The same colours with no alpha on the source side are copied as they
+    // are: the bits the source leaves unused land in the destination's alpha
+    // (Wine's test_surface_format_conversion_alpha: X1R5G5B5 into A1R5G5B5
+    // keeps the clear top bit).
     return from !== undefined && to !== undefined && (src.bytesPerPixel !== dest.bytesPerPixel
         || from.red !== to.red || from.green !== to.green || from.blue !== to.blue
-        || from.alpha !== to.alpha);
+        || (from.alpha !== to.alpha && from.alpha !== 0));
 };
 
 /** @param {number} mask @returns {{ shift: number, bits: number, max: number }} */
