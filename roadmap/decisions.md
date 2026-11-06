@@ -919,6 +919,13 @@ the screen after windowed 640x480 devices have presented and again after a full-
 reset to a window, see 640 and then the registry's 1024 where Windows shows the same size twice.
 *2026-11-06.*
 
+**A92. A full-screen Direct3D 9 device's window the program resizes stays the size it was given.**
+Windows puts such a window back to the mode's size once, after the messages of the first resize
+are processed, and leaves the second resize alone (Wine's d3d9 test_window_position, which Wine
+marks todo too). What sets off that one restore is not documented and is seen only by a program
+that resizes its own full-screen window; a Reset puts the window back to the mode's size, as on
+Windows. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
