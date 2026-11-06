@@ -21,6 +21,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { createDirectDrawSeam } from './ddraw.js';
+import { displayModes } from '../../win32/user32/display.js';
 import {
     IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE7_SLOTS,
     IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
@@ -1398,6 +1399,17 @@ test('EnumDisplayModes names every mode at every depth, and stops when told', as
     assert.equal(h.calls[0].args[1], 0x77, 'the context travels');
     assert.equal(h.ddraw('EnumDisplayModes', [0, 0, 0, 0]), DDERR_INVALIDPARAMS, 'no callback');
 
+    // A descriptor names the modes by the fields it flags (test_enum_surfaces).
+    h.calls.length = 0;
+    h.box.bytes.fill(0, 0x6000, 0x6000 + DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(0x6000, DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(0x6000 + DDSURFACEDESC2.dwFlags, DDSD_PIXELFORMAT | DDSD_WIDTH);
+    h.box.memory.writeU32(0x6000 + DDSURFACEDESC2.dwWidth, 640);
+    h.box.memory.writeU32(0x6000 + DDSURFACEDESC2.ddpfPixelFormat + 12, 32);
+    assert.equal(await h.ddraw('EnumDisplayModes', [0, 0x6000, 0, 0x1234]), DD_OK);
+    assert.deepEqual(h.calls.map(call=>call.desc), [{ width: 640, height: 480, bitCount: 32,
+        caps: 0 }]);
+
     h.calls.length = 0;
     h.cancel(2);
     assert.equal(await h.ddraw('EnumDisplayModes', [0, 0, 0, 0x1234]), DD_OK);
@@ -1440,7 +1452,9 @@ test('EnumSurfaces names all of them, or those that match the caps described', a
     assert.equal(plain.hr, DD_OK);
     assert.equal(primary.hr, DD_OK);
 
-    assert.equal(await h.ddraw('EnumSurfaces', [1, 0, 0, 0x3000]), DD_OK);
+    // Neither what exists nor what could be made is no question.
+    assert.equal(await h.ddraw('EnumSurfaces', [1, 0, 0, 0x3000]), DDERR_INVALIDPARAMS);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 1, 0, 0, 0x3000]), DD_OK);
     assert.equal(h.calls.length, 2, 'DDENUMSURFACES_ALL');
     for (const call of h.calls)
     {
@@ -1449,17 +1463,53 @@ test('EnumSurfaces names all of them, or those that match the caps described', a
 
     h.calls.length = 0;
     const wanted = 0x6000;
+    h.box.bytes.fill(0, wanted, wanted + DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(wanted, DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_CAPS);
     h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwCaps, DDSCAPS_PRIMARYSURFACE);
-    assert.equal(await h.ddraw('EnumSurfaces', [2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 2, wanted, 0, 0x3000]), DD_OK);
     assert.equal(h.calls.length, 1, 'DDENUMSURFACES_MATCH');
     assert.equal(h.publisher.objectAt(h.calls[0].args[0]), primary.surface);
     primary.surface.release();
 
     h.calls.length = 0;
-    assert.equal(await h.ddraw('EnumSurfaces', [4, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 4, wanted, 0, 0x3000]), DD_OK);
     assert.equal(h.calls.length, 1, 'DDENUMSURFACES_NOMATCH');
     assert.equal(h.publisher.objectAt(h.calls[0].args[0]), plain.surface);
     plain.surface.release();
+
+    // Only the fields flagged are compared: the size alone names the 4x4 one.
+    h.calls.length = 0;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_WIDTH);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwWidth, 4);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwHeight, 999);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 1);
+    h.publisher.objectAt(h.calls[0].args[0]).release();
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_WIDTH | DDSD_HEIGHT);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwHeight, 4);
+
+    // What could be made: asked by a match alone, named with no surface, at
+    // the size asked or at every display size.
+    for (const how of [1, 4])
+    {
+        assert.equal(await h.ddraw('EnumSurfaces', [8 | how, wanted, 0, 0x3000]),
+            DDERR_INVALIDPARAMS);
+    }
+    h.calls.length = 0;
+    assert.equal(await h.ddraw('EnumSurfaces', [8 | 0x10 | 2, wanted, 0, 0x3000]), DD_OK);
+    assert.deepEqual(h.calls.map(call=>call.args[0]), [0], 'what exists is left out');
+    h.calls.length = 0;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_CAPS);
+    assert.equal(await h.ddraw('EnumSurfaces', [8 | 2, wanted, 0, 0x3000]), DD_OK);
+    const sizes = new Set(displayModes(SCREEN).map(mode=>`${mode.width}x${mode.height}`));
+    assert.equal(h.calls.length, sizes.size, 'one a display size');
+    h.calls.length = 0;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_CAPS | DDSD_PIXELFORMAT);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.ddpfPixelFormat + 4, DDPF_FOURCC);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.ddpfPixelFormat + 8, 0xdeadbeef);
+    assert.equal(await h.ddraw('EnumSurfaces', [8 | 2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 0, 'no surface is made in an unknown format');
 
     assert.equal(plain.surface.release(), 0);
     assert.equal(primary.surface.release(), 0);

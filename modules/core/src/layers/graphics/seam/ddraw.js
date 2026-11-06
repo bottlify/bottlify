@@ -170,6 +170,8 @@ const DDENUM_KNOWN = 0x00000007;
 const DDENUMSURFACES_ALL = 0x00000001;
 const DDENUMSURFACES_MATCH = 0x00000002;
 const DDENUMSURFACES_NOMATCH = 0x00000004;
+const DDENUMSURFACES_CANBECREATED = 0x00000008;
+const DDENUMSURFACES_DOESEXIST = 0x00000010;
 
 /** The depths a display mode can be set to; the sizes are the display's (user32/display.js). */
 const DEPTHS = Object.freeze([8, 16, 32]);
@@ -1577,6 +1579,97 @@ export function createDirectDrawSeam(
         return DD_OK;
     }
 
+    /**
+     * Whether a display mode is one a descriptor names, by the fields its
+     * flags name: the size, and the depth its pixel format has.
+     *
+     * @param {number} address  The descriptor, or zero for every mode.
+     * @param {typeof DDSURFACEDESC | typeof DDSURFACEDESC2} layout
+     * @returns {(width: number, height: number, depth: number) => boolean}
+     */
+    const describedMode = (address, layout)=>{
+        const asked = (address >>> 0) === 0 ? null : readSurfaceDesc(memory, address >>> 0, layout);
+        if (!asked)
+        {
+            return ()=>true;
+        }
+        return (width, height, depth)=>((asked.flags & DDSD_WIDTH) === 0 || asked.width === width)
+            && ((asked.flags & DDSD_HEIGHT) === 0 || asked.height === height)
+            && ((asked.flags & DDSD_PIXELFORMAT) === 0 || asked.pixelFormat.bitCount === depth);
+    };
+
+    /**
+     * Whether a surface is one a descriptor names, by the fields its flags
+     * name and no others.
+     *
+     * @param {import('../ddraw/structs.js').SurfaceDescFields} asked @param {any} surface
+     */
+    const describes = (asked, surface)=>{
+        const format = asked.pixelFormat;
+        const own = surface.pixelFormat;
+        return ((asked.flags & DDSD_CAPS) === 0 || ((asked.caps & ~surface.caps) === 0
+                && ((asked.caps2 ?? 0) & ~surface.caps2) === 0))
+            && ((asked.flags & DDSD_WIDTH) === 0 || asked.width === surface.width)
+            && ((asked.flags & DDSD_HEIGHT) === 0 || asked.height === surface.height)
+            && ((asked.flags & DDSD_PIXELFORMAT) === 0 || (format.flags === own.flags
+                && format.fourCC === own.fourCC && format.bitCount === own.bitCount
+                && format.redMask === own.redMask && format.greenMask === own.greenMask
+                && format.blueMask === own.blueMask && format.alphaMask === own.alphaMask));
+    };
+
+    /**
+     * The surfaces that could be made as a descriptor asks, each named to the
+     * callback with no surface: at its size, or at every display size, in its
+     * format or the display's. A format no surface is made in names none.
+     *
+     * @param {any} root
+     * @param {import('../ddraw/structs.js').SurfaceDescFields | null} asked
+     * @param {typeof DDSURFACEDESC | typeof DDSURFACEDESC2} layout
+     * @param {number} callback @param {number} context
+     */
+    async function enumerateCreatable(root, asked, layout, callback, context){
+        const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+        const askedBy = currentThread?.();
+        const named = asked && (asked.flags & DDSD_PIXELFORMAT) !== 0;
+        const pixelFormat = named
+            ? /** @type {import('../ddraw/structs.js').SurfaceDescFields} */ (asked).pixelFormat
+            : /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
+                pixelFormatForDepth(root.displayMode.bitCount));
+        if ((pixelFormat.flags & DDPF_FOURCC) !== 0
+            && !DXT_CODES.includes(pixelFormat.fourCC >>> 0))
+        {
+            return DD_OK;
+        }
+        const sized = asked && (asked.flags & (DDSD_WIDTH | DDSD_HEIGHT))
+            === (DDSD_WIDTH | DDSD_HEIGHT);
+        const sizes = sized
+            ? [[(asked).width, /** @type {any} */ (asked).height]]
+            : [...new Map(displayModes(screen()).map(mode=>[`${mode.width}x${mode.height}`,
+                [mode.width, mode.height]])).values()];
+        for (const [width, height] of sizes)
+        {
+            const desc = descriptorScratch();
+            writeSurfaceDesc(memory, desc, layout, {
+                flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT,
+                width,
+                height,
+                pitch: width * bytesPerPixel(pixelFormat),
+                backBufferCount: 0,
+                mipMapCount: 0,
+                caps: asked?.caps ?? 0,
+                caps2: asked?.caps2 ?? 0,
+                pixelFormat,
+            });
+            const answer = await call({ entry: callback, args: [0, desc, context],
+                thread: askedBy });
+            if ((answer >>> 0) === DDENUMRET_CANCEL)
+            {
+                break;
+            }
+        }
+        return DD_OK;
+    }
+
     // --- the ddraw object ---
 
     /** @type {Record<string, typeof GENERATIONS[keyof typeof GENERATIONS]>} */
@@ -1752,7 +1845,7 @@ export function createDirectDrawSeam(
          *
          * @param {any} root @param {number[]} args
          */
-        EnumDisplayModes: (root, [, , context, callback])=>{
+        EnumDisplayModes: (root, [, filter, context, callback])=>{
             if ((callback >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
@@ -1769,11 +1862,17 @@ export function createDirectDrawSeam(
             // rates it is listed at there.
             const sizes = [...new Map(displayModes(screen())
                 .map(mode=>[`${mode.width}x${mode.height}`, [mode.width, mode.height]])).values()];
+            // A descriptor names the modes wanted by the fields it flags.
+            const wanted = describedMode(filter, generation.layout);
             return (async()=>{
                 for (const [width, height] of sizes)
                 {
                     for (const depth of DEPTHS)
                     {
+                        if (!wanted(width, height, depth))
+                        {
+                            continue;
+                        }
                         const pixelFormat =
                             /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
                                 pixelFormatForDepth(depth));
@@ -1803,14 +1902,23 @@ export function createDirectDrawSeam(
         },
 
         /**
-         * Every surface this object made, or those whose capabilities match
-         * (or do not match) the ones described. Surfaces that could be created
-         * but do not exist are not enumerated: there is no table of them.
+         * The surfaces that exist, or the ones that could be made, that a
+         * descriptor names (or does not): only the fields its flags name are
+         * compared. What could be made is enumerated, with no surface, at the
+         * descriptor's size, or at every display size when it names none, in
+         * the descriptor's format or the display's; it is asked by a match
+         * alone and leaves out what exists (Wine's test_enum_surfaces).
          *
          * @param {any} root @param {number[]} args
          */
         EnumSurfaces: (root, [flags, desc, context, callback])=>{
-            if ((callback >>> 0) === 0)
+            const existing = (flags & DDENUMSURFACES_DOESEXIST) !== 0;
+            const creatable = (flags & DDENUMSURFACES_CANBECREATED) !== 0;
+            const how = flags
+                & (DDENUMSURFACES_ALL | DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH);
+            if ((callback >>> 0) === 0 || (!existing && !creatable)
+                || (creatable && (how !== DDENUMSURFACES_MATCH || (desc >>> 0) === 0))
+                || ((desc >>> 0) === 0 && how !== DDENUMSURFACES_ALL))
             {
                 return DDERR_INVALIDPARAMS;
             }
@@ -1818,21 +1926,17 @@ export function createDirectDrawSeam(
             {
                 return DD_OK;
             }
-            const wanted = (desc >>> 0) === 0
-                ? 0
-                : (fields.readU32((desc >>> 0) + generation.layout.dwCaps) >>> 0);
-            const matches = (/** @type {any} */ surface)=>(surface.caps & wanted) === wanted;
-            const chosen = root.allSurfaces().filter((/** @type {any} */ surface)=>{
-                if ((flags & DDENUMSURFACES_ALL) !== 0)
-                {
-                    return true;
-                }
-                if ((flags & DDENUMSURFACES_NOMATCH) !== 0)
-                {
-                    return !matches(surface);
-                }
-                return (flags & DDENUMSURFACES_MATCH) === 0 || matches(surface);
-            });
+            const asked = (desc >>> 0) === 0 ? null
+                : readSurfaceDesc(memory, desc >>> 0, generation.layout);
+            if (creatable)
+            {
+                return enumerateCreatable(root, asked, generation.layout, callback >>> 0,
+                    context >>> 0);
+            }
+            const matches = (/** @type {any} */ surface)=>!asked || describes(asked, surface);
+            const chosen = root.allSurfaces().filter((/** @type {any} */ surface)=>(how
+                === DDENUMSURFACES_ALL ? true : how === DDENUMSURFACES_NOMATCH
+                    ? !matches(surface) : matches(surface)));
             return enumerateSurfaces(chosen, { id: generation.surface, layout: generation.layout },
                 callback >>> 0, context >>> 0);
         },
