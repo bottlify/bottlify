@@ -571,6 +571,29 @@ test('a multiplied transform is the given one times the current one', ()=>{
     assert.equal(device.release(), 0);
 });
 
+test('a cube texture forgives an unlock of a face not locked; the face itself does not', ()=>{
+    // Wine's d3d9 test_lockrect_invalid: the second UnlockRect of a cube
+    // face is D3D_OK, and a lock of the face's surface while the face is
+    // locked is refused.
+    const { device } = make();
+    /** @type {{ texture?: any }} */
+    const cube = {};
+    assert.equal(device.CreateCubeTexture(16, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const face = {};
+    assert.equal(cube.texture.GetCubeMapSurface(1, 0, face), D3D_OK);
+    assert.equal(cube.texture.LockCubeRect(1, 0, {}, null, 0), D3D_OK);
+    assert.equal(face.surface.LockRect({}, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(cube.texture.UnlockCubeRect(1, 0), D3D_OK);
+    assert.equal(cube.texture.UnlockCubeRect(1, 0), D3D_OK, 'not locked, and forgiven');
+    assert.equal(face.surface.UnlockRect(), D3DERR_INVALIDCALL, 'the face itself does not');
+    assert.equal(cube.texture.UnlockCubeRect(6, 0), D3DERR_INVALIDCALL, 'no such face');
+    face.surface.release();
+    cube.texture.release();
+    assert.equal(device.release(), 0);
+});
+
 test('a buffer is no render target or depth-stencil, and lives in no scratch pool', ()=>{
     // Wine's test_resource_access.
     const { device } = make();

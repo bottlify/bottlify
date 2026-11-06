@@ -692,6 +692,25 @@ export function createDirect3D9Seam(
         }
         return hr;
     };
+    /**
+     * A cube face's lock or unlock the host made, told to the face's block as
+     * its surface's own: a lock of the face's surface the guest then tries
+     * finds it held (Wine's test_lockrect_invalid, a cube face locked twice
+     * through two interfaces).
+     *
+     * @param {any} texture @param {number} face @param {number} level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteFace = (texture, face, level, locked, hr)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        if (hr === D3D_OK && texture.GetCubeMapSurface(face >>> 0, level >>> 0, held) === D3D_OK)
+        {
+            noteLevel(held.surface, null, locked, hr);
+            held.surface.release();
+        }
+        return hr;
+    };
     /** @param {string} name */
     const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
         : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
@@ -927,11 +946,12 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0), LOCKED_RECT),
+        LockRect: (texture, [face, level, out, rect, flags])=>noteFace(texture, face, level, true,
+            lockRectInto(fields, out, locked=>texture.LockCubeRect(face >>> 0, level >>> 0,
+                locked, readRect(rect), flags >>> 0), LOCKED_RECT)),
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        UnlockRect: (texture, [face, level])=>noteFace(texture, face, level, false,
+            texture.UnlockCubeRect(face >>> 0, level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
     };

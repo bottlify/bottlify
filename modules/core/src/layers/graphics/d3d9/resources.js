@@ -1155,6 +1155,9 @@ export function levelExtent(size, level){
  *     build whose storage is a fabricated address rather than guest memory.
  * @property {boolean} [cube]
  * @property {boolean} [rejectsMalformedRects]  Passed to every level's surface.
+ * @property {boolean} [faceForgivesUnlock]  A cube's UnlockRect of a face not
+ *     locked answers D3D_OK, as Direct3D 9's does (Wine's
+ *     test_lockrect_invalid); its face's own surface still refuses one.
  */
 
 /**
@@ -1435,7 +1438,8 @@ export function createTexture(options){
          */
         UnlockCubeRect(face, level){
             const surface = surfaceFor(face, level);
-            return surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
+            const hr = surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
+            return surface && hr !== D3D_OK && options.faceForgivesUnlock === true ? D3D_OK : hr;
         },
     });
     return texture;

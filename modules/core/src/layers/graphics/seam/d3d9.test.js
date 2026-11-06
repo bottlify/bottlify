@@ -928,7 +928,8 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 32);
     const fifth = h.fields.readU32(locked + D3DLOCKED_RECT.pBits);
     assert.equal(call('UnlockRect', [5, 0]), D3D_OK);
-    assert.equal(call('UnlockRect', [5, 0]), D3DERR_INVALIDCALL, 'a face owes its unlock');
+    assert.equal(call('UnlockRect', [5, 0]), D3D_OK,
+        'a face not locked is forgiven (test_lockrect_invalid)');
     assert.equal(call('LockRect', [0, 0, locked, 0, 0]), D3D_OK);
     assert.notEqual(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), fifth);
     assert.equal(call('UnlockRect', [0, 0]), D3D_OK);

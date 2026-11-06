@@ -2143,7 +2143,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * A texture's storage, for whoever needs to know what a lock hands out.
      *
      * @param {{ width: number, height: number, levels: number, format: number, pool: number,
-     *           usage: number, cube?: boolean, allocate?: (bytes: number) => number,
+     *           usage: number, cube?: boolean, faceForgivesUnlock?: boolean,
+     *           allocate?: (bytes: number) => number,
      *           free?: (address: number) => void }} spec
      *        `allocate` and `free`: where the levels are kept, when not in
      *        memory of the device's own.
@@ -4109,6 +4110,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool,
                 usage,
                 cube: true,
+                faceForgivesUnlock: true,
                 ...chainOf(usage, format, levels, fullMipCount(edgeLength, edgeLength)),
             });
             return D3D_OK;
