@@ -143,6 +143,12 @@ const PRESSES = new Set([WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, 0x020b,
     WM_NCLBUTTONDOWN, 0x00a4, 0x00a7, 0x00ab]);
 /** SC_CLOSE: what the close box asks for. */
 const SC_CLOSE = 0xf060;
+/** The window menu's other three commands, which DefWindowProc carries out as ShowWindow would. */
+const SC_MINIMIZE = 0xf020;
+const SC_MAXIMIZE = 0xf030;
+const SC_RESTORE = 0xf120;
+/** SW_RESTORE: back from minimised or maximised. */
+const SW_RESTORE = 9;
 /** System colours the frame is painted from. */
 const COLOR_BACKGROUND = 1;
 
@@ -5819,11 +5825,22 @@ export function createWindowFunctions(host){
                 // A CBT hook hears the command before it is carried out.
                 return andThen(askCbt(HCBT_SYSCOMMAND, message.wParam, message.lParam,
                     thread ?? host.callerThread?.()), refused=>{
-                    if ((refused | 0) === 0 && (message.wParam & 0xfff0) === SC_CLOSE)
+                    const command = message.wParam & 0xfff0;
+                    if ((refused | 0) !== 0)
+                    {
+                        return 0;
+                    }
+                    if (command === SC_CLOSE)
                     {
                         return send(record.hwnd, WM_CLOSE, 0, 0, thread);
                     }
-                    return 0;
+                    // The window menu's size commands, as ShowWindow carries
+                    // them out (Wine's d3d9 test_wndproc: sc_restore_messages,
+                    // sc_minimize_messages, sc_maximize_messages).
+                    const show = command === SC_MINIMIZE ? SW_MINIMIZE
+                        : command === SC_MAXIMIZE ? SW_SHOWMAXIMIZED
+                            : command === SC_RESTORE ? SW_RESTORE : 0;
+                    return show !== 0 ? andThen(showWindow(record, show, thread), ()=>0) : 0;
                 });
             case WM_SETCURSOR: {
                 // The parent decides first -- a dialog chooses for its
