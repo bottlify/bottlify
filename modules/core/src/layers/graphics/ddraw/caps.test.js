@@ -281,3 +281,8 @@ test('a managed texture is a texture placed by the runtime, in system memory'
     }
     assert.equal(ask({ caps: DDSCAPS_TEXTURE }).caps, DDSCAPS_TEXTURE | IN_VIDEO);
 });
+
+test('a primary that asks to be a front buffer is refused (test_primary_caps)', ()=>{
+    assert.equal(ask({ caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER }).hr, DDERR_INVALIDCAPS);
+    assert.equal(ask({ caps: DDSCAPS_FRONTBUFFER }).hr, DD_OK, 'a plain surface may');
+});
