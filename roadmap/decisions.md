@@ -989,6 +989,41 @@ specification says the call fails with ERROR_INVALID_DATA; programs pass attribu
 they found in another driver's string, and refusing them leaves such a program without a format.
 The attribute is reported once as a divergence. *2026-11-06.*
 
+**A103. An OpenGL depth or stencil texture is kept with both aspects.** It lives as
+`depth24plus-stencil8`, or `depth32float-stencil8` where the device has that feature; a float
+depth on a device without it keeps 24 bits. The draw pipelines carry a stencil state, which
+WebGPU refuses over a depth-only format. *2026-11-06.*
+
+**A104. glTexImage of a compressed internal format keeps an uncompressed twin.** Section 8.5
+allows any format at least as precise as the one asked for; the internal-format query answers the
+one asked for, and glGetCompressedTexImage the blocks. *2026-11-06.*
+
+**A105. Temporary: a 16-bit normalised OpenGL texture on a device without
+`texture-formats-tier1` lives as half floats,** 11 bits of precision instead of 16. A program
+that relies on the full 16 bits (a height map, a depth stored in colour) reads it coarser.
+*2026-11-06.*
+
+**A106. A texture WebGPU does not filter is read nearest:** a 32-bit float one on a device
+without `float32-filterable`, and a depth one sampled as a value. The dropped filter is reported
+once as a divergence. *2026-11-06.*
+
+**A107. Integer client values written into a narrower integer internal format are clamped to its
+range.** The specification leaves the result undefined. *2026-11-06.*
+
+**A108. Out-of-range values written into R11F_G11F_B10F follow section 2.3.4.3's rule for the
+small floats:** negatives become 0, finite values past the largest become the largest finite
+value (65024 for the 11-bit channels, 64512 for the 10-bit one), and +Inf stays infinite.
+*2026-11-06.*
+
+**A109. The images OpenGL 3.0 added refuse a border.** A 3D, array or sized-format image with a
+border other than 0 is GL_INVALID_VALUE, as the core profile has it; borders came out of use with
+the compatibility formats they are still kept for. *2026-11-06.*
+
+**A110. Temporary: a framebuffer attachment this renderer cannot draw into answers
+GL_FRAMEBUFFER_UNSUPPORTED:** integer formats, RGB9_E5, compressed formats and 3D slices. The
+specification allows the answer for any combination an implementation cannot draw; integer
+targets come with the GLSL emitter's integer outputs. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
