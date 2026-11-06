@@ -1127,9 +1127,9 @@ export function createDirectDrawSeam(
                 // the surface has none of is refused. The destination key is
                 // the destination's own through IDirectDrawSurface4 and 7, and
                 // through an older interface the source's: the one it last
-                // had, taken away since or not (Wine's test_ck_operation).
+                // had, taken away since or not, though the destination must
+                // still have one (Wine's test_ck_operation).
                 const newer = wide;
-                const destKeyOf = newer ? surface : from;
                 const oldDestKey = newer ? null : from?.lastColorKey?.(DDCKEY_DESTBLT) ?? null;
                 if (((flags & DDBLT_KEYSRC) !== 0 && (flags & DDBLT_KEYSRCOVERRIDE) !== 0)
                     || ((flags & DDBLT_KEYDEST) !== 0 && (flags & DDBLT_KEYDESTOVERRIDE) !== 0)
@@ -1138,7 +1138,7 @@ export function createDirectDrawSeam(
                     || ((flags & DDBLT_KEYSRC) !== 0
                         && !from?.getColorKey(DDCKEY_SRCBLT).key)
                     || ((flags & DDBLT_KEYDEST) !== 0
-                        && !(newer ? destKeyOf?.getColorKey(DDCKEY_DESTBLT).key : oldDestKey)))
+                        && !surface.getColorKey(DDCKEY_DESTBLT).key))
                 {
                     return DDERR_INVALIDPARAMS;
                 }
@@ -1163,7 +1163,7 @@ export function createDirectDrawSeam(
                             : undefined,
                         destColorKey: (flags & DDBLT_KEYDESTOVERRIDE) !== 0
                             ? keyFor(surface, DDCKEY_DESTBLT, true, fx, DDBLTFX.ddckDestColorkey)
-                            : (newer ? destKeyOf?.getColorKey(DDCKEY_DESTBLT).key : oldDestKey)
+                            : (newer ? surface.getColorKey(DDCKEY_DESTBLT).key : oldDestKey)
                                 ?? undefined,
                     },
                     clipList: clipListOf(surface),

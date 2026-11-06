@@ -2987,6 +2987,8 @@ test('a blit keys by the surface\'s key or the override, never both, and by a ke
     assert.equal(blt(dst, src, KEYDEST), DD_OK, 'the destination still has its own');
     setKey(dst, DESTBLT, null);
     assert.equal(blt(dst, src, KEYDEST), DDERR_INVALIDPARAMS >>> 0);
+    assert.equal(blt(dst1, src1, KEYDEST), DDERR_INVALIDPARAMS >>> 0,
+        'the source\'s last key keys only a destination that has one (ddraw2 test_ck_operation)');
     for (const one of [dst1, src1, src, dst])
     {
         h.release(one);
