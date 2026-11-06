@@ -1180,6 +1180,17 @@ test('a surface keeps private data under a GUID, an interface entry with a refer
     assert.equal(h.surface7(surface, 'FreePrivateData', [guid]), DD_OK);
     assert.equal(count(), before);
 
+    // The reference is taken through the interface the pointer is, as the
+    // program's AddRef would be (ddraw4 test_private_data).
+    assert.equal(h.box.call(ddraw, 0, [h.box.putGuid(0x7a20, IID_IDirectDraw4), 0x7a30]), DD_OK);
+    const ddraw4 = h.box.memory.readU32(0x7a30);
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw4, 4, DDSPD_IUNKNOWNPOINTER]),
+        DD_OK);
+    assert.deepEqual([model.refCount('IDirectDraw4'), count()], [2, before]);
+    assert.equal(h.surface7(surface, 'FreePrivateData', [guid]), DD_OK);
+    assert.equal(model.refCount('IDirectDraw4'), 1);
+    assert.equal(h.release(ddraw4), 0);
+
     assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw, 4, DDSPD_IUNKNOWNPOINTER]),
         DD_OK);
     const data = 0x7b00;

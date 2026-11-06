@@ -76,6 +76,7 @@ export const DDRAW_PRIVATE_DATA = Object.freeze({
  * @property {Uint8Array | null} bytes
  * @property {number} pointer   The interface pointer, for an interface entry.
  * @property {any} adapter      Who holds the reference that entry took, if it took one.
+ * @property {string | null} held  The interface that reference was taken through.
  * @property {boolean} guest    Whether that reference is the program's object's own.
  * @property {number | null} stamp  The surface's uniqueness when a volatile entry was set.
  */
@@ -146,7 +147,7 @@ export function createPrivateData({ memory, publisher, rules, callGuest, current
      * @returns {unknown} a promise while the program's Release runs
      */
     const letGo = entry=>{
-        entry?.adapter?.release();
+        entry?.adapter?.release(entry?.held ?? undefined);
         return holdsGuest(entry) ? callUnknown(/** @type {PrivateEntry} */ (entry).pointer, 2) : 0;
     };
 
@@ -154,15 +155,17 @@ export function createPrivateData({ memory, publisher, rules, callGuest, current
     const sizeOf = entry=>(entry.bytes ? entry.bytes.length : 4);
 
     /**
-     * The adapter of an object this layer published, with a reference taken;
-     * null for a pointer that names none of ours.
+     * The adapter of an object this layer published, with a reference taken
+     * through the interface the pointer is, as the program's AddRef through
+     * it would (ddraw4 test_private_data: an IDirectDraw4 counts on its
+     * own); null for a pointer that names none of ours.
      *
      * @param {number} pointer
      */
     const hold = pointer=>{
         const object = publisher.objectAt(pointer);
         const adapter = object ? publisher.adapterFor(object) : null;
-        adapter?.addRef();
+        adapter?.addRef(publisher.interfaceAt(pointer) ?? undefined);
         return adapter;
     };
 
@@ -175,7 +178,9 @@ export function createPrivateData({ memory, publisher, rules, callGuest, current
                     return rules.invalid;
                 }
                 /** @type {PrivateEntry} */
-                const entry = { bytes: null, pointer: 0, adapter: null, stamp: null, guest: false };
+                const entry = {
+                    bytes: null, pointer: 0, adapter: null, held: null, stamp: null, guest: false,
+                };
                 if ((flags & IUNKNOWN) !== 0)
                 {
                     if ((size >>> 0) !== 4)
@@ -184,6 +189,7 @@ export function createPrivateData({ memory, publisher, rules, callGuest, current
                     }
                     entry.pointer = data >>> 0;
                     entry.adapter = hold(entry.pointer);
+                    entry.held = entry.adapter ? publisher.interfaceAt(entry.pointer) : null;
                     entry.guest = !entry.adapter && entry.pointer !== 0 && !!callGuest;
                 }
                 else
