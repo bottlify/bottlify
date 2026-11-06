@@ -2366,10 +2366,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stride
          */
         DrawPrimitiveUP(type, primitiveCount, vertexData, stride){
-            // No primitives is nothing to draw, and still a user-pointer draw.
-            if (primitiveCount === 0 && inScene && vertexData && stride > 0)
+            // No primitives is nothing to draw, answered before anything is
+            // looked at: the vertices may be none and the stream stays bound
+            // (Wine's d3d8 test_draw_primitive, test_render_zero_triangles).
+            if (primitiveCount === 0)
             {
-                unbindStreamZero();
                 return D3D_OK;
             }
             const hr = drawPreconditions(type, primitiveCount);
@@ -2401,6 +2402,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             stride,
         )
         {
+            if (primitiveCount === 0)
+            {
+                return D3D_OK;
+            }
             // The indices count from the first vertex, not from minIndex, which
             // only says where the range they use begins (Wine's d3d8
             // test_drawindexedprimitiveup).
@@ -2646,6 +2651,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /** @param {number} handle */
         ApplyStateBlock(handle){
+            // The handle no block has: nothing to apply (Wine's d3d8
+            // test_ApplyStateBlock).
+            if (handle === 0 && !recording)
+            {
+                return D3D_OK;
+            }
             const block = stateBlocks.get(handle);
             // Not while a block is being recorded (Wine's d3d8
             // test_begin_end_state_block).

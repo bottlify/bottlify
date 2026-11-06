@@ -194,8 +194,10 @@ const ALL_COMPARE_CAPS = 0x000000ff;
  * Every source and destination blend factor D3D8 names, including the two
  * BOTH* forms. The renderer maps each onto its own; a factor left unclaimed
  * makes a program pick a worse path for an effect we can draw exactly.
+ * D3DPBLENDCAPS_BLENDFACTOR (0x2000) is Direct3D 9's and not claimed here
+ * (Wine's d3d8 test_device_caps).
  */
-const ALL_BLEND_CAPS = 0x00003fff;
+const ALL_BLEND_CAPS = 0x00001fff;
 
 const D3DPSHADECAPS_COLORGOURAUDRGB = 0x00000008;
 const D3DPSHADECAPS_SPECULARGOURAUDRGB = 0x00000200;

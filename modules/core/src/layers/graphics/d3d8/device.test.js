@@ -1466,6 +1466,27 @@ test('a handle from one shader kind is not a handle of the other', ()=>{
     assertFullyReleased(device);
 });
 
+test('a user-pointer draw of no primitives is answered before anything is looked at', ()=>{
+    // Wine's d3d8 test_render_zero_triangles and test_draw_primitive: no
+    // vertices, no indices, no scene; and the stream stays bound.
+    const device = createDevice();
+    /** @type {{ buffer?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, made), D3D_OK);
+    assert.equal(device.SetStreamSource(0, made.buffer, 16), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(4, 0, null, 0), D3D_OK);
+    assert.equal(device.DrawIndexedPrimitiveUP(4, 0, 0, 0, null, 101, null, 16), D3D_OK);
+    /** @type {{ buffer?: any, stride?: number }} */
+    const bound = {};
+    assert.equal(device.GetStreamSource(0, bound), D3D_OK);
+    assert.equal(bound.buffer, made.buffer);
+    bound.buffer?.release();
+    // And applying the handle no block has applies nothing.
+    assert.equal(device.ApplyStateBlock(0), D3D_OK);
+    made.buffer.release();
+    assert.equal(device.release(), 0);
+});
+
 test('an image surface of a side of zero is refused', ()=>{
     // Wine's d3d8 test_surface_dimensions.
     const device = createDevice();

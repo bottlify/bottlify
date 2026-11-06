@@ -1777,6 +1777,8 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     // The bits land in the fields they belong to rather than one field over.
     assert.equal(caps.ZCmpCaps, caps.AlphaCmpCaps, 'both comparison sets are the same set');
     assert.equal(caps.SrcBlendCaps, caps.DestBlendCaps);
+    assert.equal(caps.SrcBlendCaps, 0x1fff,
+        'every factor up to BOTHINVSRCALPHA, and not Direct3D 9\'s BLENDFACTOR');
     assert.ok((caps.TextureCaps & 0x00004000) !== 0, 'D3DPTEXTURECAPS_MIPMAP');
     assert.ok((caps.TextureAddressCaps & 0x00000001) !== 0, 'D3DPTADDRESSCAPS_WRAP');
     // Each by the value d3d8caps.h gives it. A driver that will not draw
