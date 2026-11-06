@@ -100,6 +100,10 @@ export function recordedDirect3D(factory, services, transport){
         // What the played device has to say about the program is the whole
         // of it; this one would add what only lacking a renderer makes it say.
         divergence: undefined,
+        // The recording's diagnostic, not the device's: an option the device
+        // does not take lands in its caps, and a function there makes the caps
+        // an object to number, which the played side's never are.
+        checkDraws: undefined,
         renderedElsewhere: true,
         allocate: (/** @type {number} */ bytes)=>{
             const address = guest(Math.max(bytes, 1));
