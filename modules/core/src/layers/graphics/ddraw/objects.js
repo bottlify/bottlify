@@ -502,6 +502,9 @@ function sameRect(a, b){
  * @property {(key: string, own: string) => number | undefined} [surfaceRefusal]
  *           What a surface's QueryInterface answers for an interface it does not
  *           have, by the generation it was created as; E_NOINTERFACE without it.
+ * @property {(format: import("./structs.js").PixelFormatFields) => boolean} [textureFormat]
+ *           Whether the device makes textures in a format: one it does not is
+ *           made in system memory, and refused in video memory.
  * @property {boolean} [emulated]
  *           Made by DirectDrawCreate(DDCREATE_EMULATIONONLY): no hardware, so
  *           every surface is in system memory and depth is 16 or 32 bits.
@@ -2199,6 +2202,23 @@ export function createDirectDraw(options = {}){
             }
             if ((request.caps & (DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY
                 | DDSCAPS_PRIMARYSURFACE)) === 0)
+            {
+                request = { ...request, caps: (request.caps | DDSCAPS_SYSTEMMEMORY) >>> 0 };
+            }
+        }
+        // A texture in a format the device does not offer is the
+        // emulation's: in system memory, and never in video memory (Wine's
+        // test_unsupported_formats).
+        if ((request.caps & DDSCAPS_TEXTURE) !== 0 && (request.flags & DDSD_PIXELFORMAT) !== 0
+            && request.pixelFormat && options.textureFormat
+            && !options.textureFormat(request.pixelFormat))
+        {
+            if ((request.caps & DDSCAPS_VIDEOMEMORY) !== 0)
+            {
+                return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
+            }
+            if ((request.caps & DDSCAPS_SYSTEMMEMORY) === 0 && ((request.caps2 ?? 0)
+                & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0)
             {
                 request = { ...request, caps: (request.caps | DDSCAPS_SYSTEMMEMORY) >>> 0 };
             }

@@ -93,6 +93,7 @@ import { blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import { textureFormatOffered } from './texture-formats.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 
 /** The classes DDRAW.dll's DllGetClassObject makes. */
@@ -2413,6 +2414,7 @@ export function createDirectDrawSeam(
             const options = {
                 version,
                 emulated,
+                textureFormat: textureFormatOffered,
                 surfaceCountOf,
                 surfaceRefusal,
                 surfaceSupports,

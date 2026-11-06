@@ -1919,3 +1919,21 @@ test('a palette of alphas is attached to a texture alone (test_palette_alpha)', 
     assert.equal(plain.release(), 0);
     assert.equal(palette.release(), 0);
 });
+
+test('a texture in a format the device does not offer is made in system memory, never in video'
+    + ' memory (test_unsupported_formats)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, textureFormat: format=>format.bitCount === 32 });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const p8 = { size: 0x20, flags: DDPF_PALETTEINDEXED8 | DDPF_RGB, fourCC: 0, bitCount: 8,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const make = (/** @type {number} */ caps, /** @type {any} */ pixelFormat, caps2 = 0)=>
+        ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT, caps: DDSCAPS_TEXTURE | caps,
+            caps2, width: 4, height: 4, pixelFormat });
+    assert.equal(make(DDSCAPS_VIDEOMEMORY, p8).hr >>> 0, 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    const placed = make(0, p8);
+    assert.equal(placed.hr, DD_OK);
+    assert.ok((/** @type {any} */ (placed.surface).caps & DDSCAPS_SYSTEMMEMORY) !== 0);
+    assert.equal(make(0, p8, DDSCAPS2_TEXTUREMANAGE).hr, DD_OK, 'a managed one is placed anyway');
+    const offered = make(0, RGB32);
+    assert.ok((/** @type {any} */ (offered.surface).caps & DDSCAPS_VIDEOMEMORY) !== 0);
+});
