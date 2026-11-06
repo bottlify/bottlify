@@ -363,6 +363,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {(other: Surface, via?: string) => number} addAttachedSurface
  *           `via` the interface called through (`surfaceCountOf`'s key).
  * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
+ * @property {(which: number) => ColorKey | null} lastColorKey  The key last set, taken
+ *           away since or not.
  * @property {string} generation  The generation it was created through: '1', '4' or '7'.
  * @property {boolean} programMemory  Whether its pixels are in memory the program gave it.
  * @property {string | undefined} attachedVia  What its flip successor was attached through.
@@ -1143,6 +1145,8 @@ export function createDirectDraw(options = {}){
         let lost = false;
         /** Colour keys by the DDCKEY flag that names them. @type {Map<number, ColorKey>} */
         const colorKeys = new Map();
+        /** Each kind's key as last set. @type {Map<number, ColorKey>} */
+        const lastKeys = new Map();
         let uniqueness = 1;
         /** @type {Uint16Array | null} */
         let gammaRamp = null;
@@ -1373,6 +1377,7 @@ export function createDirectDraw(options = {}){
                     colorKeys.delete(kind);
                     return DD_OK;
                 }
+                lastKeys.set(kind, { low: key.low >>> 0, high: key.low >>> 0 });
                 if ((which & DDCKEY_COLORSPACE) !== 0 && key.low >>> 0 !== key.high >>> 0)
                 {
                     return DDERR_NOCOLORKEYHW;
@@ -1385,6 +1390,18 @@ export function createDirectDraw(options = {}){
             getColorKey(which){
                 const key = colorKeys.get(which);
                 return key ? { hr: DD_OK, key: { ...key } } : { hr: DDERR_NOCOLORKEY, key: null };
+            },
+
+            /**
+             * The key last set, taken away since or not: what an older
+             * interface's destination-keyed blit still keys by (Wine's ddraw1
+             * and ddraw2 test_ck_operation).
+             *
+             * @param {number} which
+             */
+            lastColorKey(which){
+                const key = lastKeys.get(which);
+                return key ? { ...key } : null;
             },
 
             uniquenessValue(){

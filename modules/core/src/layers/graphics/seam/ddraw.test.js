@@ -2856,11 +2856,24 @@ test('a blit keys by the surface\'s key or the override, never both, and by a ke
     pixels(dst, [0xbb, 0xaa]);
     assert.equal(blt(dst1, src1, KEYDEST), DD_OK);
     assert.deepEqual(pixels(dst, null), [0xbb, 0x22]);
+    // Through the fourth, the destination's own as in the seventh.
+    const riid4 = h.box.putGuid(0x4000, IID_IDirectDrawSurface4);
+    assert.equal(h.box.call(dst, 0, [riid4, 0x6308]), DD_OK);
+    assert.equal(h.box.call(src, 0, [riid4, 0x630c]), DD_OK);
+    const [dst4, src4] = [h.box.memory.readU32(0x6308), h.box.memory.readU32(0x630c)];
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst4, src4, KEYDEST), DD_OK);
+    assert.deepEqual(pixels(dst, null), [0x11, 0xaa]);
+    h.release(dst4);
+    h.release(src4);
     // A key the surface has none of is refused.
     setKey(src, SRCBLT, null);
     setKey(src, DESTBLT, null);
     assert.equal(blt(dst, src, KEYSRC), DDERR_INVALIDPARAMS >>> 0);
-    assert.equal(blt(dst1, src1, KEYDEST), DDERR_INVALIDPARAMS >>> 0, 'the source has none');
+    // Through the first generation the source's last key still keys.
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst1, src1, KEYDEST), DD_OK, 'the source\'s key as it last was');
+    assert.deepEqual(pixels(dst, null), [0xbb, 0x22]);
     assert.equal(blt(dst, src, KEYDEST), DD_OK, 'the destination still has its own');
     setKey(dst, DESTBLT, null);
     assert.equal(blt(dst, src, KEYDEST), DDERR_INVALIDPARAMS >>> 0);
