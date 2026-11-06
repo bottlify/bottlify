@@ -297,7 +297,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {Rect[]} clipList
- * @property {(rects: Rect[]) => number} setClipList
+ * @property {(rects: Rect[] | null) => number} setClipList
+ * @property {boolean} listed  Whether it has a list of its own.
  * @property {number} window
  * @property {(handle: number) => number} setHWnd
  * @property {() => boolean} isClipListChanged
@@ -948,6 +949,8 @@ export function createDirectDraw(options = {}){
     /** @returns {Clipper} */
     function makeClipper(){
         let clipList = /** @type {Rect[]} */ ([]);
+        /** Whether a list was given, an empty one included. */
+        let listed = false;
         let window = 0;
         let changed = false;
         const life = counted(()=>{
@@ -965,18 +968,24 @@ export function createDirectDraw(options = {}){
             get clipList(){
                 return clipList;
             },
+            /** Whether it has a list of its own: none until one is set, and none after a null. */
+            get listed(){
+                return listed;
+            },
             /**
              * A clipper bound to a window takes its list from the window, so a
-             * list set by hand is refused while one is bound.
+             * list set by hand is refused while one is bound. Null takes the
+             * list away (Wine's test_clipper_blt).
              *
-             * @param {Rect[]} rects
+             * @param {Rect[] | null} rects
              */
             setClipList(rects){
                 if (window !== 0)
                 {
                     return DDERR_CLIPPERISUSINGHWND;
                 }
-                clipList = rects.map(rect=>({ ...rect }));
+                clipList = (rects ?? []).map(rect=>({ ...rect }));
+                listed = rects !== null;
                 changed = true;
                 return DD_OK;
             },

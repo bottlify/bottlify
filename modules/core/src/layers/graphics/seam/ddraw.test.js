@@ -1200,6 +1200,10 @@ test('a clipper carries its list as RGNDATA, both ways', ()=>{
         DD_OK);
     const clipper = h.box.memory.readU32(0x5900);
     assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5900)).refCount, 1);
+    const listSize = ()=>h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetClipList'),
+        [0, 0, 0x5e00]) >>> 0;
+    // Made, it has no list until one is given (test_clipper_blt).
+    assert.equal(listSize(), 0x887600cd, 'DDERR_NOCLIPLIST');
 
     const region = 0x5d00;
     h.box.memory.writeU32(region + 4, 1);
@@ -1226,9 +1230,21 @@ test('a clipper carries its list as RGNDATA, both ways', ()=>{
     assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'IsClipListChanged'),
         [0x6000]), DD_OK);
     assert.equal(h.box.memory.readU32(0x6000), 1);
+    // A null list takes it away, and a surface with that clipper is refused a blit.
+    assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetClipList'), [0, 0]),
+        DD_OK);
+    assert.equal(listSize(), 0x887600cd);
+    const surface = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8 });
+    assert.equal(h.surface7(surface, 'SetClipper', [clipper]), DD_OK);
+    h.box.bytes.fill(0, 0x6100, 0x6100 + 100);
+    h.box.memory.writeU32(0x6100, 100);
+    assert.equal(h.surface7(surface, 'Blt', [0, 0, 0, DDBLT_COLORFILL, 0x6100]) >>> 0,
+        0x887600cd);
+    assert.equal(h.release(surface), 0);
     assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'), [0, HWND]), DD_OK);
     assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetHWnd'), [0x6000]), DD_OK);
     assert.equal(h.box.memory.readU32(0x6000), HWND);
+    assert.equal(listSize(), DD_OK, 'a window is a list');
 
     assert.equal(h.release(clipper), 0);
     assert.equal(h.release(ddraw), 0);
@@ -2499,6 +2515,11 @@ test('a clipper given a window clips to its client area on the screen; BltFast w
         assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateClipper'), [0, 0x5900, 0]),
             DD_OK);
         const clipper = h.box.memory.readU32(0x5900);
+        // A window that is gone has no list (test_clipper_blt).
+        assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'),
+            [0, HWND + 4]), DD_OK);
+        assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetClipList'),
+            [0, 0, 0x5e00]) >>> 0, 0x80004005);
         assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'), [0, HWND]),
             DD_OK);
         const size = 0x5e00;

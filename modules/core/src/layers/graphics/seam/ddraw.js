@@ -65,6 +65,7 @@ import {
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL,
     DDBLT_KEYDEST, DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_WAIT, DDERR_DCALREADYCREATED,
+    DDERR_NOCLIPLIST, E_FAIL,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
@@ -726,6 +727,21 @@ export function createDirectDrawSeam(
         return visible.left < visible.right && visible.top < visible.bottom ? [visible] : [];
     };
 
+    /**
+     * Why a clipper has no list to clip by, or DD_OK: a window it was bound to
+     * that is gone (E_FAIL), or neither a window nor a list (DDERR_NOCLIPLIST).
+     *
+     * @param {any} clipper
+     * @returns {number}
+     */
+    const clipperWindowGone = clipper=>{
+        if (clipper.window !== 0)
+        {
+            return windowClient && windowClient(clipper.window >>> 0) === null ? E_FAIL : DD_OK;
+        }
+        return clipper.listed ? DD_OK : DDERR_NOCLIPLIST;
+    };
+
     const clipperMethods = describe(IID_IDirectDrawClipper, IDIRECTDRAWCLIPPER_SLOTS, {
         /**
          * A null region buffer asks how large one has to be; a size too small
@@ -737,6 +753,13 @@ export function createDirectDrawSeam(
             if ((size >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            // A window gone has no list to give; a clipper with neither a
+            // window nor a list of its own has none either (test_clipper_blt).
+            const gone = clipperWindowGone(clipper);
+            if (gone !== DD_OK)
+            {
+                return gone;
             }
             const bounds = readRect(rect);
             const listed = clipRectsOf(clipper);
@@ -778,7 +801,7 @@ export function createDirectDrawSeam(
         SetClipList: (clipper, [region])=>{
             if ((region >>> 0) === 0)
             {
-                return clipper.setClipList([]);
+                return clipper.setClipList(null);
             }
             const rects = readRegion(region);
             return rects === null ? DDERR_INVALIDPARAMS : clipper.setClipList(rects);
@@ -1066,6 +1089,11 @@ export function createDirectDrawSeam(
                 {
                     reportRefusal('Blt', surface, from ?? surface, hr);
                     return hr;
+                }
+                // A clipper with nothing to clip by refuses the blit.
+                if (surface.clipper && clipperWindowGone(surface.clipper) === DDERR_NOCLIPLIST)
+                {
+                    return DDERR_NOCLIPLIST;
                 }
                 // A key is the surface's or the override's, never both; an
                 // override is read from the DDBLTFX there has to be; a key

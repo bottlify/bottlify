@@ -47,6 +47,10 @@ export const DDERR_SURFACEBUSY = dderr(430);
 export const DDERR_SURFACELOST = dderr(450);
 export const DDERR_SURFACENOTATTACHED = dderr(460);
 export const DDERR_NOCLIPPERATTACHED = dderr(568);
+/** DDERR_NOCLIPLIST: a clipper with neither a window nor a list of its own. */
+export const DDERR_NOCLIPLIST = dderr(205);
+/** E_FAIL: a clipper whose window is gone. */
+export const E_FAIL = 0x80004005 | 0;
 export const DDERR_HWNDALREADYSET = dderr(571);
 export const DDERR_CLIPPERISUSINGHWND = dderr(567);
 export const DDERR_NOPALETTEATTACHED = dderr(572);
