@@ -2184,6 +2184,62 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
+     * One block of a DXT format holding a single colour, D3DCOLOR in: its two
+     * end colours that colour as R5G6B5 and every index the first; the alpha
+     * four bits a texel (DXT2, DXT3) or two equal end alphas (DXT4, DXT5).
+     *
+     * @param {number} format @param {number} colour
+     * @returns {Uint8Array | null}  null for a compressed format with no such block here
+     */
+    const solidBlock = (format, colour)=>{
+        const r = (colour >>> 16) & 0xff;
+        const g = (colour >>> 8) & 0xff;
+        const b = colour & 0xff;
+        const a = colour >>> 24;
+        const packed = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        const colourBlock = [packed & 0xff, packed >> 8, packed & 0xff, packed >> 8, 0, 0, 0, 0];
+        switch (format)
+        {
+            case D3DFMT.DXT1:
+                return Uint8Array.from(colourBlock);
+            case D3DFMT.DXT2:
+            case D3DFMT.DXT3:
+                return Uint8Array.from([...new Array(8).fill(((a >> 4) << 4) | (a >> 4)),
+                    ...colourBlock]);
+            case D3DFMT.DXT4:
+            case D3DFMT.DXT5:
+                return Uint8Array.from([a, a, 0, 0, 0, 0, 0, 0, ...colourBlock]);
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * Fills a rectangle of a compressed surface's guest bytes with blocks of
+     * one colour: a rectangle on whole blocks, or reaching the surface's edge.
+     *
+     * @param {any} surface @param {Rect} rect @param {Uint8Array} block
+     */
+    const fillBlocks = (surface, rect, block)=>{
+        if (!services.writeMemory)
+        {
+            return;
+        }
+        const desc = describe(surface);
+        const across = Math.ceil(rect.right / 4) - rect.left / 4;
+        const row = new Uint8Array(across * block.length);
+        for (let x = 0; x < across; x++)
+        {
+            row.set(block, x * block.length);
+        }
+        const pitch = pitchOf(desc);
+        for (let y = rect.top / 4; y < Math.ceil(rect.bottom / 4); y++)
+        {
+            services.writeMemory(surface.base + y * pitch + (rect.left / 4) * block.length, row);
+        }
+    };
+
+    /**
      * A texture's storage, for whoever needs to know what a lock hands out.
      *
      * @param {{ width: number, height: number, levels: number, format: number, pool: number,
@@ -4932,7 +4988,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const desc = describe(surface);
             const info = FORMAT_INFO[desc.Format];
             const plain = surface.kind === SURFACE_TYPE.PLAIN;
-            if (desc.Pool !== D3DPOOL.DEFAULT || !info || info.depth || isCompressed(desc.Format)
+            if (desc.Pool !== D3DPOOL.DEFAULT || !info || info.depth
                 || (!plain && (desc.Usage & D3DUSAGE.RENDERTARGET) === 0))
             {
                 return D3DERR_INVALIDCALL;
@@ -4941,6 +4997,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (!rectWithin(area, desc))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (isCompressed(desc.Format))
+            {
+                // Whole blocks, or to the surface's edge (Wine's d3d9
+                // color_fill_test fills DXT1 at 4,4-8,8 and is refused 5,5-7,7).
+                const block = plain ? solidBlock(desc.Format, colour >>> 0) : null;
+                const edge = (/** @type {number} */ at, /** @type {number} */ size)=>at % 4 === 0
+                    || at === size;
+                if (!block || area.left % 4 !== 0 || area.top % 4 !== 0
+                    || !edge(area.right, desc.Width) || !edge(area.bottom, desc.Height))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                fillBlocks(surface, area, block);
+                renderer?.markDirty?.(surface);
+                return D3D_OK;
             }
             if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && !renderer
                 && (services.renderedElsewhere === true || services.drawsNothing === true))

@@ -1245,6 +1245,31 @@ test('ColorFill writes the colour in the format\'s own layout, over the rectangl
     assert.equal(device.release(), 0);
 });
 
+test('ColorFill fills a DXT surface with blocks of the colour, on whole blocks only', ()=>{
+    // Wine's d3d9 color_fill_test: DXT1 filled whole and at 4,4-8,8, and
+    // refused at 5,5-7,7.
+    const { device, memory } = makeWithMemory();
+    /** @type {{ surface?: any }} */
+    const plain = {};
+    assert.equal(device.CreateOffscreenPlainSurface(8, 8, D3DFMT.DXT1, D3DPOOL.DEFAULT, plain),
+        D3D_OK);
+    assert.equal(device.ColorFill(plain.surface, null, 0xff00ff00), D3D_OK);
+    const at = plain.surface.base;
+    // Green in 5:6:5 is 0x07e0, both end colours, every index the first.
+    assert.deepEqual([...memory.slice(at, at + 8)], [0xe0, 0x07, 0xe0, 0x07, 0, 0, 0, 0]);
+    assert.deepEqual([...memory.slice(at + 24, at + 32)], [0xe0, 0x07, 0xe0, 0x07, 0, 0, 0, 0],
+        'the last block');
+    assert.equal(device.ColorFill(plain.surface, { left: 4, top: 4, right: 8, bottom: 8 },
+        0xff0000ff), D3D_OK);
+    assert.deepEqual([...memory.slice(at + 24, at + 28)], [0x1f, 0x00, 0x1f, 0x00],
+        'blue in the block at 4,4');
+    assert.deepEqual([...memory.slice(at, at + 4)], [0xe0, 0x07, 0xe0, 0x07], 'and only there');
+    assert.equal(device.ColorFill(plain.surface, { left: 5, top: 5, right: 7, bottom: 7 }, 0),
+        D3DERR_INVALIDCALL, 'part of a block');
+    plain.surface.release();
+    assert.equal(device.release(), 0);
+});
+
 test('StretchRect copies equal rectangles and refuses a stretch, saying why', ()=>{
     const { device, memory } = makeWithMemory();
     /** @type {{ surface?: any }} */
