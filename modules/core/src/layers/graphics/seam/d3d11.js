@@ -309,6 +309,9 @@ const STAGE_SHADERS = Object.freeze({
  * @property {((address: number) => void) | undefined} free
  * @property {Record<string, any[]>} lists  the published interface lists, by kind
  * @property {(resource: any) => any[]} resourceInterfaces
+ * @property {(device: any, method: string, key: number | null, iid: number, out: number)
+ *     => number} openShared  A device's object over a shared texture (`d3d10.js`).
+ * @property {(handle: number) => number | null} sharedKeyOf  What an NT handle names.
  */
 
 /**
@@ -712,7 +715,8 @@ export function createDirect3D11Seam(describe, kit, guests){
                 out) : failed(out, hr);
         },
         /** @param {any} device @param {number[]} args */
-        OpenSharedResource: (device, [, , out])=>failed(out, device.OpenSharedResource()),
+        OpenSharedResource: (device, [handle, iid, out])=>
+            k().openShared(device, 'OpenSharedResource', handle >>> 0, iid, out),
         /** @param {any} device @param {number[]} args */
         CheckFormatSupport: (device, [format, out])=>{
             /** @type {{ support?: number }} */
@@ -864,7 +868,8 @@ export function createDirect3D11Seam(describe, kit, guests){
                 IID.ID3DDeviceContextState, out) : failed(out, hr);
         },
         /** @param {any} device @param {number[]} args */
-        OpenSharedResource1: (device, [, , out])=>failed(out, device.OpenSharedResource()),
+        OpenSharedResource1: (device, [handle, iid, out])=>
+            k().openShared(device, 'OpenSharedResource1', k().sharedKeyOf(handle), iid, out),
     };
 
     /**

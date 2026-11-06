@@ -454,6 +454,64 @@ test('a clear of a buffer view writes its range in turn; of a texture, by a disp
             [1, 0, Math.fround(128 / 255), 1]);
     });
 
+test('a texture the GPU cannot keep is cleared through a view in its own bytes, each slice of'
+    + ' it (test_clear_image_unordered_access_view)', async()=>{
+    const h = harness();
+    const format = DXGI_FORMAT.R16G16_UNORM;
+    const base = { Width: 4, Height: 2, MipLevels: 2, Format: format,
+        Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D11_BIND_UNORDERED_ACCESS, CPUAccessFlags: 0,
+        MiscFlags: 0 };
+    /** @param {boolean} volume @param {any} viewDesc @param {boolean} float */
+    const cleared = async(volume, viewDesc, float)=>{
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        /** @type {{ resource?: any }} */
+        const staging = {};
+        const create = (/** @type {any} */ desc, /** @type {any} */ out)=>(volume
+            ? h.device.CreateTexture3D({ ...desc, Depth: 3 }, null, out)
+            : h.device.CreateTexture2D({ ...desc, ArraySize: 3,
+                SampleDesc: { Count: 1, Quality: 0 } }, null, out));
+        assert.equal(create(base, texture), S_OK);
+        assert.equal(create({ ...base, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: 0x20000 }, staging), S_OK);
+        const view = uavOf(h, texture.resource, { Format: format, ...viewDesc });
+        if (float)
+        {
+            h.context.ClearUnorderedAccessViewFloat(view, [0.5, 1, 0, 0]);
+        }
+        else
+        {
+            h.context.ClearUnorderedAccessViewUint(view, [1, 2, 3, 4]);
+        }
+        h.context.CopyResource(staging.resource, texture.resource);
+        /** @type {number[][]} */
+        const slices = [];
+        for (let slice = 0; slice < 3; slice++)
+        {
+            /** @type {{ data?: Uint8Array, rowPitch?: number, depthPitch?: number }} */
+            const mapped = {};
+            const subresource = volume ? 0 : slice * 2;
+            assert.equal(await staging.resource.Map(subresource, 1, 0, mapped), S_OK);
+            const at = volume ? slice * (mapped.depthPitch ?? 0) : 0;
+            const words = new Uint32Array(/** @type {Uint8Array} */ (mapped.data).slice(at,
+                at + (mapped.rowPitch ?? 0) * 2).buffer);
+            slices.push([words[0], words[3], words[(mapped.rowPitch ?? 0) / 4 + 3]]);
+            staging.resource.Unmap(subresource);
+        }
+        return slices;
+    };
+    const half = 0xffff8000;
+    assert.deepEqual(await cleared(false, { ViewDimension: 4, MipSlice: 0 }, true),
+        [[half, half, half], [0, 0, 0], [0, 0, 0]], 'a 2D view clears its one layer');
+    assert.deepEqual(await cleared(false, { ViewDimension: 5, MipSlice: 0, FirstArraySlice: 1,
+        ArraySize: 2 }, false), [[0, 0, 0], [0x20001, 0x20001, 0x20001],
+        [0x20001, 0x20001, 0x20001]], 'an array view its layers');
+    assert.deepEqual(await cleared(true, { ViewDimension: 8, MipSlice: 0, FirstWSlice: 0,
+        WSize: 2 }, true), [[half, half, half], [half, half, half], [0, 0, 0]],
+    'a volume view its depth slices');
+    assert.ok(!h.divergences.some(detail=>/writes nothing/.test(detail)), h.divergences.join());
+});
+
 test('DispatchIndirect from a buffer a shader writes reads its grid on the GPU', async()=>{
     const h = harness();
     const args = uavBuffer(h, null, { MiscFlags11: D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS });

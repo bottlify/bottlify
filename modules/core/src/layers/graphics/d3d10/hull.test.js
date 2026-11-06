@@ -10,12 +10,14 @@ import { SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
 import {
     assemble, dclInputControlPointCount, dclOutput, dclOutputControlPointCount, dclTessDomain,
     dclTessOutputPrimitive, dclTessPartitioning, dclOutputSiv, forkPhaseHullShader,
-    hsControlPointPhase, hsDecls, mov, o, quadHullShader, ret, vicp, vPoint,
+    hsControlPointPhase, hsDecls, mov, o, quadDomainShader, quadHullShader, ret,
+    triangleGeometryShader, vicp, vPoint,
 } from './shader-fixtures.js';
 import {
-    NO_PIXEL_SHADER, linkDomain, linkHull, translateShader, vertexFetch,
+    DOMAIN_POSITION_BINDING, NO_PIXEL_SHADER, geometryStage, linkDomain, linkDomainPositions,
+    linkGeometry, linkHull, translateShader, vertexFetch,
 } from './wgsl.js';
-import { VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from './gpuformats.js';
+import { PULLED_VERTEX_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from './gpuformats.js';
 
 test('a hull shader links as one compute program: each phase a function, the stage read from'
     + ' its declarations', ()=>{
@@ -37,7 +39,8 @@ test('a hull shader links as one compute program: each phase a function, the sta
 
 test('a vertex format is read as a vertex fetch reads it: each format\'s bytes, nothing else',
     ()=>{
-        for (const format of new Set(Object.values(VERTEX_FORMAT)))
+        for (const format of new Set([...Object.values(VERTEX_FORMAT),
+            ...Object.values(PULLED_VERTEX_FORMAT)]))
         {
             const fetch = vertexFetch(format);
             assert.ok(fetch, format);
@@ -74,6 +77,40 @@ test('a domain shader reads each control point and patch constant by its name, w
     assert.match(linked.vertex, /vpc\[0\]\.z = dsConstants\[dsPatch \* 6u \+ 1u\]\.x;/,
         'the second edge factor, from the hull\'s register 1 .x into the domain\'s register 0 .z');
     assert.match(linked.vertex, /var<private> vicp: array<array<vec4<u32>, 3>, 4>;/);
+});
+
+test('a domain shader run as compute for the stage after it reads an index the tessellator'
+    + ' wrote as its draw does, stops at the indices written, and stores what the next stage reads'
+    + ' at its registers', ()=>{
+    const hull = /** @type {any} */ (parseDxbc(quadHullShader()));
+    const ds = /** @type {any} */ (parseDxbc(quadDomainShader()));
+    // The next stage reads the position at register 2.
+    const inputs = [{ name: 'SV_POSITION', index: 0, systemValue: SYSTEM_VALUE.POSITION,
+        register: 2, mask: 15, componentType: 3, readWriteMask: 15 }];
+    const linked = linkDomainPositions(translateShader(ds), ds, hull, linkHull(hull).stage,
+        /** @type {any} */ (inputs), 3);
+    assert.deepEqual(linked.unsupported, []);
+    assert.match(linked.code, /@compute @workgroup_size\(64\)\nfn domainPositions/);
+    assert.match(linked.code, new RegExp(`@group\\(1\\) @binding\\(${
+        DOMAIN_POSITION_BINDING.count}\\) var<storage, read> dsCount`));
+    assert.match(linked.code, /if \(id\.x >= dsCount\[0\]\) \{ return; \}/);
+    assert.match(linked.code, /let dsAt = dsUv\[dsOffsets\[dsPatch\]\.x \+ dsIndices\[dsVertex\]\];/,
+        'the index read as the draw of the domain shader reads it');
+    assert.match(linked.code, /next\[2\]\.x = o0\.x;/);
+    assert.match(linked.code, /dsOut\[id\.x \* 3u \+ reg\] = next\[reg\];/);
+});
+
+test('a geometry shader after the tessellator stops at the primitives it wrote, and one with'
+    + ' none before it reads no limit', ()=>{
+    const container = /** @type {any} */ (parseDxbc(triangleGeometryShader()));
+    const gs = translateShader(container);
+    const stage = geometryStage(container, gs);
+    const limited = linkGeometry(gs, stage, { limited: true }).code;
+    assert.match(limited, /var<storage, read> gsLimit: array<u32>;/);
+    assert.match(limited, /if \(gsPrim >= gsLimit\[0\] \/ 3u\) \{ gsWhole = false; \}/);
+    // The counts are written all the same: an invocation past them counts nothing.
+    assert.match(limited, /gsCounts\[id\.x \* 2u\] = gsMade;/);
+    assert.doesNotMatch(linkGeometry(gs, stage).code, /gsLimit/);
 });
 
 test('a control point phase reads its input points as v[point][register]'

@@ -27,11 +27,12 @@ const entries = rows=>rows.map(([Stream, SemanticName, SemanticIndex, StartCompo
 
 /**
  * @param {any} declared @param {number[] | null} strides @param {number} rasterizedStream
- * @param {{ eleven?: boolean, vertex?: boolean }} [options]
+ * @param {{ eleven?: boolean, vertex?: boolean, oneStride?: boolean }} [options]
  */
 const valid = (declared, strides, rasterizedStream, options = {})=>validStreamOutput({
     outputs: OUTPUTS, entries: declared, strides, rasterizedStream,
     eleven: options.eleven ?? true, vertex: options.vertex ?? false,
+    oneStride: options.oneStride ?? false,
 });
 
 const POSITION = entries([[0, 'SV_Position', 0, 0, 4, 0]]);
@@ -141,6 +142,20 @@ test('level 10: one stride, stream 0 rasterized, and several buffers one output 
     assert.ok(!valid(POSITION, [64, 63], 0, ten));
     assert.ok(!valid(POSITION, null, NONE, ten));
     assert.ok(!valid(POSITION, null, 1, ten));
+});
+
+test('Direct3D 10\'s one stride is slot zero\'s: given when only slot zero is written, zero'
+    + ' when a later slot is (d3d10core.c test_stream_output)', ()=>{
+    const ten = { eleven: false, oneStride: true };
+    assert.ok(valid(null, null, 0, ten), 'nothing streamed out, no stride');
+    assert.ok(!valid(null, [64], 0, ten));
+    assert.ok(valid(POSITION, [64], 0, ten));
+    assert.ok(!valid(POSITION, null, 0, ten), 'slot zero alone needs its stride');
+    const later = entries([[0, 'attrib', 1, 0, 4, 2]]);
+    assert.ok(valid(later, null, 0, ten), 'a later slot\'s buffer takes one element');
+    assert.ok(!valid(later, [64], 0, ten));
+    assert.ok(valid(later, null, 0, { eleven: false }), 'Direct3D 11 at level 10 is not');
+    assert.ok(valid(POSITION, null, 0, { eleven: false }));
 });
 
 test('an entry\'s components count from its element\'s first: an element packed into .z has one'

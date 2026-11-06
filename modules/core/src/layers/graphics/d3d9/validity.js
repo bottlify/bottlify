@@ -19,8 +19,9 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK, FORMAT_INFO,
 } from './constants.js';
+import { PRESENTATION_INTERVALS } from './caps.js';
 
 /** What the pool/usage table distinguishes about a format, and nothing more. */
 export const FORMAT_KIND = Object.freeze({ COLOUR: 'colour', DEPTH: 'depth' });
@@ -255,8 +256,11 @@ export function volumeCreateResult(request){
 /**
  * Whether a created surface answers a lock. A depth stencil never does, however
  * it was asked for; a render target does exactly when it was created lockable.
+ * A texture's level in video memory does when it is dynamic, or in ATI1 or
+ * ATI2, which lock in any pool (Wine's test_resource_access).
  *
- * @param {{ type: string, pool: number, usage: number, lockable?: boolean }} surface
+ * @param {{ type: string, pool: number, usage: number, lockable?: boolean,
+ *           format?: number }} surface
  * @returns {boolean}
  */
 export function surfaceIsLockable(surface){
@@ -272,7 +276,8 @@ export function surfaceIsLockable(surface){
     {
         return surface.lockable === true;
     }
-    return surface.pool !== D3DPOOL.DEFAULT || (surface.usage & D3DUSAGE.DYNAMIC) !== 0;
+    return surface.pool !== D3DPOOL.DEFAULT || (surface.usage & D3DUSAGE.DYNAMIC) !== 0
+        || surface.format === D3DFMT.ATI1 || surface.format === D3DFMT.ATI2;
 }
 
 /**
@@ -313,6 +318,9 @@ const EX_SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
  * @property {number} [backBufferHeight]
  * @property {number} [backBufferFormat]
  * @property {boolean} [lockableBackBuffer]  D3DPRESENTFLAG_LOCKABLE_BACKBUFFER was asked for.
+ * @property {number} [hDeviceWindow]
+ * @property {number} [flags]
+ * @property {number} [presentationInterval]  D3DPRESENT_INTERVAL_*; 0 is DEFAULT.
  */
 
 /**
@@ -324,6 +332,14 @@ export function validatePresentParameters(parameters, extended = false){
     const limit = (extended ? EX_SWAP_EFFECT_MAX_BACK_BUFFERS
         : SWAP_EFFECT_MAX_BACK_BUFFERS)[parameters.swapEffect];
     if (limit === undefined)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // DEFAULT, or one interval the caps offer: three, or two bits at once,
+    // is none (Wine's test_swapchain_parameters).
+    const interval = (parameters.presentationInterval ?? 0) >>> 0;
+    if (interval !== 0 && ((interval & (interval - 1)) !== 0
+        || (interval & PRESENTATION_INTERVALS) === 0))
     {
         return D3DERR_INVALIDCALL;
     }

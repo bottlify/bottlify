@@ -57,7 +57,7 @@ import {
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
-    IDENTITY, STAGE_COUNT, createRenderer, gpuFormatOf, multiplyMatrices, sameLight,
+    IDENTITY, STAGE_COUNT, createRenderer, expandTexels, gpuFormatOf, multiplyMatrices, sameLight,
     srgbViewFormats,
     vertexCountOf,
 } from '../d3d8/render.js';
@@ -65,8 +65,8 @@ import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
     HeldBindings, chainBytes, countedBuffer, createPriority, createReferenceCount, createSurface,
-    createTexture, createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel,
-    volumeUpdate, writeFrontBuffer, writePixels,
+    createTexture, createVideoMemory, createVolumeTexture, packBits, packColour, rectMoveOf,
+    regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from './resources.js';
 import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
@@ -422,6 +422,9 @@ function normalisePresentParameters(parameters){
         enableAutoDepthStencil: parameters.enableAutoDepthStencil ?? false,
         autoDepthStencilFormat: parameters.autoDepthStencilFormat ?? D3DFMT.D24S8,
         lockableBackBuffer: parameters.lockableBackBuffer === true,
+        hDeviceWindow: parameters.hDeviceWindow ?? 0,
+        flags: parameters.flags ?? 0,
+        presentationInterval: parameters.presentationInterval ?? 0,
     };
 }
 
@@ -436,6 +439,23 @@ const ALPHA_TWINS = new Map([
 ]);
 /** @param {number} format @returns {number | undefined} */
 const alphaTwin = format=>ALPHA_TWINS.get(format);
+
+/** The formats a display can be in. @type {ReadonlySet<number>} */
+const DISPLAY_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.X8R8G8B8, D3DFMT.A2R10G10B10]));
+/**
+ * The display formats the adapter lists modes in: 32-bit and 16-bit.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const DISPLAY_MODE_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.X8R8G8B8,
+    D3DFMT.R5G6B5]));
+/**
+ * The colour formats StretchRect converts between in guest bytes, each
+ * pixel through its D3DCOLOR (`expandTexels`, `packBits`).
+ */
+const CONVERTED = new Set(/** @type {number[]} */ ([D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.R5G6B5, D3DFMT.A1R5G5B5,
+    D3DFMT.X1R5G5B5, D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4]));
 /** @param {number} format */
 const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[format].depth;
 
@@ -577,9 +597,26 @@ export function createDirect3D9(options = {}){
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
          * @param {number} format
-         * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
+         * @param {number} [adapterFormat]  The display format asked about.
+         * @returns {number} D3D_OK, D3DERR_NOTAVAILABLE, or D3DERR_INVALIDCALL for
+         *     no adapter format at all
          */
-        CheckDeviceFormat(usage, resourceType, format){
+        CheckDeviceFormat(usage, resourceType, format, adapterFormat = D3DFMT.X8R8G8B8){
+            // Asked against no display format at all, the question is not
+            // one (Wine's test_check_device_format: D3DFMT_UNKNOWN).
+            if (adapterFormat === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (!DISPLAY_FORMATS.has(adapterFormat))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A buffer has no format to ask about: the question is not one.
+            if (resourceType === D3DRTYPE.VERTEXBUFFER || resourceType === D3DRTYPE.INDEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const info = FORMAT_INFO[format];
             if (!info || info.video)
             {
@@ -591,6 +628,13 @@ export function createDirect3D9(options = {}){
             // encoded (D3DRS_SRGBWRITEENABLE); a floating-point one is neither.
             if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0
                 && (info.depth || srgbViewFormats(gpuFormatOf(format, 4, 4, true)).length === 0))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A plain surface is written encoded only as a target (Wine's
+            // test_check_device_format).
+            if ((usage & USAGE_QUERY_SRGBWRITE) !== 0 && resourceType === D3DRTYPE.SURFACE
+                && (usage & D3DUSAGE.RENDERTARGET) === 0)
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -658,6 +702,13 @@ export function createDirect3D9(options = {}){
                     {
                         return info.depth ? D3D_OK : D3DERR_NOTAVAILABLE;
                     }
+                    // ATI1 and ATI2 are texture formats: no plain surface in
+                    // them but a scratch one (test_resource_access,
+                    // test_surface_blocks).
+                    if (format === D3DFMT.ATI1 || format === D3DFMT.ATI2)
+                    {
+                        return D3DERR_NOTAVAILABLE;
+                    }
                     return !info.depth || resolved.depthPlain ? D3D_OK : D3DERR_NOTAVAILABLE;
                 default:
                     // Buffers have no format to ask about.
@@ -671,12 +722,30 @@ export function createDirect3D9(options = {}){
          * @param {boolean} [windowed]
          */
         CheckDeviceType(adapterFormat, backBufferFormat, windowed = true){
-            // D3DFMT_UNKNOWN as the back buffer means "the adapter's", and is
-            // legal only windowed.
-            const back = backBufferFormat === D3DFMT.UNKNOWN
-                ? (windowed ? adapterFormat : -1)
-                : backBufferFormat;
-            return isColourFormat(adapterFormat) && isColourFormat(back)
+            // The four display formats; A2R10G10B10 only full screen
+            // (Wine's test_display_formats).
+            if (!DISPLAY_FORMATS.has(adapterFormat)
+                || (windowed && adapterFormat === D3DFMT.A2R10G10B10))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            if (windowed)
+            {
+                // D3DFMT_UNKNOWN as the back buffer means "the adapter's".
+                // Any target colour format a present converts from will do.
+                const back = backBufferFormat === D3DFMT.UNKNOWN ? adapterFormat
+                    : backBufferFormat;
+                return this.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.SURFACE, back)
+                    === D3D_OK
+                    && this.CheckDeviceFormatConversion(back, adapterFormat) === D3D_OK
+                    ? D3D_OK
+                    : D3DERR_NOTAVAILABLE;
+            }
+            // Full screen the display has to have modes in the format, and the
+            // back buffer is that format or the same with alpha.
+            return DISPLAY_MODE_FORMATS.has(adapterFormat)
+                && (backBufferFormat === adapterFormat
+                    || backBufferFormat === alphaTwin(adapterFormat))
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
@@ -803,6 +872,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {number} pool
      */
     const unmanaged = pool=>extended && pool === D3DPOOL.MANAGED;
+    /**
+     * Whether a buffer can be made with this usage in this pool: none is a
+     * render target or a depth-stencil, and none lives in the scratch pool
+     * (Wine's test_resource_access).
+     *
+     * @param {number} usage @param {number} pool
+     */
+    const bufferTakes = (usage, pool)=>pool !== D3DPOOL.SCRATCH
+        && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) === 0;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
     let inScene = false;
@@ -857,6 +935,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     let material = defaultMaterial();
     /** @type {Map<number, Float32Array>} */
     let clipPlanes = new Map();
+    /** @param {number} index @returns {number} the plane an index names */
+    const clipPlaneAt = index=>Math.min(index >>> 0, caps.maxUserClipPlanes - 1);
     let nPatchMode = 0;
     let clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
     let gammaRamp = identityRamp();
@@ -1997,6 +2077,62 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const wholeOf = desc=>({ left: 0, top: 0, right: desc.Width, bottom: desc.Height });
 
     /**
+     * Copies a rectangle between two colour formats in guest bytes, each
+     * pixel through its colour: what StretchRect does between the formats
+     * CheckDeviceFormatConversion names when neither surface is on the GPU.
+     * False, and nothing written, where a format is not one of them or guest
+     * memory is out of reach.
+     *
+     * @param {any} source @param {Rect} rect @param {any} destination
+     * @param {{ x: number, y: number }} point
+     */
+    const convertBytes = (source, rect, destination, point)=>{
+        const read = services.windowMemory ?? services.readMemory;
+        const from = describe(source);
+        const to = describe(destination);
+        if (!services.writeMemory || !read || !CONVERTED.has(from.Format)
+            || !CONVERTED.has(to.Format))
+        {
+            return false;
+        }
+        const fromBytes = FORMAT_INFO[from.Format].bytesPerPixel;
+        const toBytes = FORMAT_INFO[to.Format].bytesPerPixel;
+        const width = rect.right - rect.left;
+        const row = new Uint8Array(width * toBytes);
+        for (let y = 0; y < rect.bottom - rect.top; y++)
+        {
+            const at = source.base + (rect.top + y) * pitchOf(from) + rect.left * fromBytes;
+            const bgra = expandTexels(from.Format, read(at, width * fromBytes), width);
+            for (let x = 0; x < width; x++)
+            {
+                const bits = packBits(to.Format, ((bgra[x * 4 + 3] << 24) | (bgra[x * 4 + 2] << 16)
+                    | (bgra[x * 4 + 1] << 8) | bgra[x * 4]) >>> 0);
+                for (let byte = 0; byte < toBytes; byte++)
+                {
+                    row[x * toBytes + byte] = (bits >>> (byte * 8)) & 0xff;
+                }
+            }
+            services.writeMemory(destination.base + (point.y + y) * pitchOf(to)
+                + point.x * toBytes, row);
+        }
+        return true;
+    };
+
+    /**
+     * What a surface is to StretchRect: a render target (a target surface or
+     * a target texture's level), a depth surface, a texture's level that is
+     * not a target, or an offscreen plain surface.
+     *
+     * @param {any} surface @returns {'target' | 'depth' | 'texture' | 'plain'}
+     */
+    const stretchKindOf = surface=>{
+        const desc = describe(surface);
+        return FORMAT_INFO[desc.Format].depth ? 'depth'
+            : (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 ? 'target'
+                : surface.container ? 'texture' : 'plain';
+    };
+
+    /**
      * Fills a rectangle of a surface's guest bytes with one colour, packed the
      * way the format lays a pixel out.
      *
@@ -2026,7 +2162,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * A texture's storage, for whoever needs to know what a lock hands out.
      *
      * @param {{ width: number, height: number, levels: number, format: number, pool: number,
-     *           usage: number, cube?: boolean, allocate?: (bytes: number) => number,
+     *           usage: number, cube?: boolean, faceForgivesUnlock?: boolean,
+     *           allocate?: (bytes: number) => number,
      *           free?: (address: number) => void }} spec
      *        `allocate` and `free`: where the levels are kept, when not in
      *        memory of the device's own.
@@ -2509,6 +2646,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * A Reset refused before it reached the device, for a full-screen
+         * size no mode has: the device is left to be reset as a refused
+         * Reset leaves it (Wine's test_reset: TestCooperativeLevel then
+         * answers D3DERR_DEVICENOTRESET).
+         *
+         * @returns {number} D3DERR_INVALIDCALL
+         */
+        RefuseReset(){
+            if (!extended && deviceState !== DEVICE_STATE.LOST)
+            {
+                deviceState = DEVICE_STATE.NOT_RESET;
+            }
+            return D3DERR_INVALIDCALL;
+        },
+
+        /**
          * Reset puts the device back to what it was created as: no scene open,
          * default state, implicit surfaces at the new size, usable again.
          *
@@ -2904,9 +3057,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const product = multiplyMatrices(matrix, transforms.get(type) ?? IDENTITY);
-            return setState(
-                record=>record.transforms.set(type, product),
-                ()=>transforms.set(type, product));
+            // It goes into the device's own state even while a block
+            // records, and the block does not hold it (Wine's
+            // test_multiply_transform).
+            transforms.set(type, product);
+            return stateChanged(false);
         },
 
         /** @param {Material} value */
@@ -2931,17 +3086,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * A plane past the device's last is the last: any index is taken,
+         * and every one from MaxUserClipPlanes - 1 up is the same plane
+         * (test_clip_planes_limits).
+         *
          * @param {number} index
          * @param {ArrayLike<number>} plane  Four floats.
          */
         SetClipPlane(index, plane){
-            if (index < 0 || index >= caps.maxUserClipPlanes || !plane || plane.length !== 4)
+            if (!plane || plane.length !== 4 || caps.maxUserClipPlanes === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            const at = clipPlaneAt(index);
             return setState(
-                record=>record.clipPlanes.set(index, Float32Array.from(plane)),
-                ()=>clipPlanes.set(index, Float32Array.from(plane)));
+                record=>record.clipPlanes.set(at, Float32Array.from(plane)),
+                ()=>clipPlanes.set(at, Float32Array.from(plane)));
         },
 
         /**
@@ -2949,11 +3109,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ plane?: Float32Array }} out
          */
         GetClipPlane(index, out){
-            if (index < 0 || index >= caps.maxUserClipPlanes)
+            if (caps.maxUserClipPlanes === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.plane = Float32Array.from(clipPlanes.get(index) ?? [0, 0, 0, 0]);
+            out.plane = Float32Array.from(clipPlanes.get(clipPlaneAt(index)) ?? [0, 0, 0, 0]);
             return D3D_OK;
         },
 
@@ -3101,7 +3261,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const desc = describe(surface);
+            // Both sides a power of two (Wine's test_cursor).
+            const powerOfTwo = (/** @type {number} */ side)=>side > 0 && (side & (side - 1)) === 0;
             if (!desc || desc.Format !== D3DFMT.A8R8G8B8
+                || !powerOfTwo(desc.Width) || !powerOfTwo(desc.Height)
                 || x < 0 || y < 0 || x >= desc.Width || y >= desc.Height)
             {
                 return D3DERR_INVALIDCALL;
@@ -3111,12 +3274,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * Shown only once there is a cursor to show: asked before any is set,
+         * it stays hidden (Wine's test_cursor).
+         *
          * @param {boolean} show
          * @returns {boolean} whether it was shown before
          */
         ShowCursor(show){
             const was = cursor.shown;
-            cursor.shown = show;
+            cursor.shown = show && Boolean(cursor.surface);
             return was;
         },
 
@@ -3141,7 +3307,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             let declaration = fvfDeclarations.get(fvf);
             if (!declaration)
             {
-                const elements = elementsOfFvf(fvf);
+                const elements = elementsOfFvf(fvf, { asDirect3D9: true });
                 if (!elements)
                 {
                     return D3DERR_INVALIDCALL;
@@ -3174,7 +3340,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ fvf?: number }} out
          */
         GetFVF(out){
-            out.fvf = vertexDeclaration.fvf;
+            out.fvf = vertexDeclaration.fvf || (vertexDeclaration.declaration?.reportedFvf ?? 0);
             return D3D_OK;
         },
 
@@ -3979,6 +4145,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool,
                 usage,
                 cube: true,
+                faceForgivesUnlock: true,
                 ...chainOf(usage, format, levels, fullMipCount(edgeLength, edgeLength)),
             });
             return D3D_OK;
@@ -4101,7 +4268,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0, userMemory = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
-                || (info.video && !videoPoolAllowed(pool, true))
+                // A packed video surface needs the driver's support in system
+                // memory as in video memory; only scratch holds one without it
+                // (test_surface_blocks).
+                || (info.video && !videoPoolAllowed(pool, false))
+                // ATI1 and ATI2 are texture formats: a plain surface in them
+                // is only a scratch one (test_resource_access).
+                || ((format === D3DFMT.ATI1 || format === D3DFMT.ATI2) && pool !== D3DPOOL.SCRATCH)
                 || !(width > 0) || !(height > 0) || !blockAligned(format, width, height)
                 || (userMemory !== 0 && pool !== D3DPOOL.SYSTEMMEM))
             {
@@ -4136,7 +4309,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ buffer?: any }} out
          */
         CreateVertexBuffer(length, usage, vertexFormat, pool, out){
-            if (!(length > 0) || unmanaged(pool))
+            if (!(length > 0) || unmanaged(pool) || !bufferTakes(usage, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4158,7 +4331,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ buffer?: any }} out
          */
         CreateIndexBuffer(length, usage, format, pool, out){
-            if (!(length > 0) || unmanaged(pool))
+            if (!(length > 0) || unmanaged(pool) || !bufferTakes(usage, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4374,7 +4547,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ swapChain?: any }} out
          */
         CreateAdditionalSwapChain(asked, out){
-            if (!asked || asked.windowed === false
+            // A full-screen device has its one swap chain, windowed or not
+            // the one asked for (Wine's test_swapchain).
+            if (!asked || asked.windowed === false || presentParameters.windowed === false
                 || validatePresentParameters(asked, extended) !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
@@ -4465,6 +4640,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return refuse('pool', 'a surface outside the default pool');
             }
+            // A texture's level that is not a target takes no copy, and an
+            // offscreen plain surface only another's; a texture's level goes
+            // only into a target (Wine's d3d9 test_stretch_rect).
+            const fromKind = stretchKindOf(source);
+            const toKind = stretchKindOf(destination);
+            if (toKind === 'texture' || (toKind === 'plain' && fromKind !== 'plain'))
+            {
+                return refuse('kind', `a ${fromKind} surface into a ${toKind} one`);
+            }
             const depth = FORMAT_INFO[from.Format].depth;
             if (depth !== FORMAT_INFO[to.Format].depth || (depth && from.Format !== to.Format))
             {
@@ -4522,6 +4706,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (from.Format !== to.Format && alphaTwin(from.Format) !== to.Format)
             {
+                if (!isGpuResident(source) && convertBytes(source, rect, destination,
+                    { x: target.left, y: target.top }))
+                {
+                    out.moves = [];
+                    renderer?.markDirty?.(destination);
+                    return D3D_OK;
+                }
                 return refuse('convert', 'a conversion between these formats is not made here');
             }
             if (isGpuResident(source))
@@ -4786,7 +4977,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            captureRecord(record, view);
+            captureRecord(record, view, { keepOffsets: true });
             return D3D_OK;
         },
         apply: ()=>{

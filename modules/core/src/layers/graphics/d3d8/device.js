@@ -68,7 +68,8 @@ import {
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
 import {
-    DEVICE_STATE, LIGHT_ENABLED, answerViewport, createPalettes, depthWordsOf, rebound,
+    DEVICE_STATE, DISPLAY_MODE_FORMATS, LIGHT_ENABLED, answerViewport, createPalettes,
+    depthWordsOf, rebound,
 } from '../d3d9/device.js';
 import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -416,6 +417,23 @@ function reportPresentParameters(parameters){
     parameters.backBufferCount = reportedBackBufferCount(parameters);
 }
 
+/** The display format a question names when none is given. @type {number} */
+const D3D8_DEFAULT_ADAPTER = D3DFMT.X8R8G8B8;
+
+/** The formats a Direct3D 8 display can be in. @type {ReadonlySet<number>} */
+const D3D8_DISPLAY_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.X8R8G8B8]));
+
+/**
+ * Whether a buffer can be made with this usage in this pool: none is a render
+ * target or a depth-stencil, and none lives in the scratch pool (Wine's d3d8
+ * test_resource_access).
+ *
+ * @param {number} usage @param {number} pool
+ */
+const bufferTakes = (usage, pool)=>pool !== D3DPOOL.SCRATCH
+    && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) === 0;
+
 /**
  * The object a program gets from Direct3DCreate8. It exists here for one
  * reason: device creation can fail on its parameters, and the caller has to be
@@ -468,9 +486,26 @@ export function createDirect3D8(options = {}){
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
          * @param {number} format
-         * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
+         * @param {number} [adapterFormat]  The display format asked about.
+         * @returns {number} D3D_OK, D3DERR_NOTAVAILABLE, or D3DERR_INVALIDCALL for
+         *     no adapter format at all
          */
-        CheckDeviceFormat(usage, resourceType, format){
+        CheckDeviceFormat(usage, resourceType, format, adapterFormat = D3D8_DEFAULT_ADAPTER){
+            // Asked against no display format, the question is not one
+            // (Wine's d3d8 test_check_device_format).
+            if (adapterFormat === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (!D3D8_DISPLAY_FORMATS.has(adapterFormat))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A buffer has no format to ask about: the question is not one.
+            if (resourceType === D3DRTYPE.VERTEXBUFFER || resourceType === D3DRTYPE.INDEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if (resourceType === D3DRTYPE.VOLUMETEXTURE)
             {
                 return volumeCreateResult({
@@ -497,8 +532,18 @@ export function createDirect3D8(options = {}){
          * @param {number} backBufferFormat
          * @returns {number}
          */
-        CheckDeviceType(adapterFormat, backBufferFormat){
-            return isColourFormat(adapterFormat) && isColourFormat(backBufferFormat)
+        CheckDeviceType(adapterFormat, backBufferFormat, windowed = true){
+            // One of the three display formats, with modes in it full screen,
+            // and a back buffer of it or its alpha twin: Direct3D 8 converts
+            // none when it presents, windowed or not (Wine's d3d8
+            // test_display_formats).
+            // D3DFMT_UNKNOWN is no back buffer here, windowed or not.
+            const back = backBufferFormat;
+            const twin = { [D3DFMT.X8R8G8B8]: D3DFMT.A8R8G8B8,
+                [D3DFMT.X1R5G5B5]: D3DFMT.A1R5G5B5 }[adapterFormat];
+            return D3D8_DISPLAY_FORMATS.has(adapterFormat)
+                && (windowed || DISPLAY_MODE_FORMATS.has(adapterFormat))
+                && (back === adapterFormat || back === twin)
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
@@ -1713,7 +1758,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const out = {};
             surface.GetDesc(out);
             const desc = out.desc;
+            // Both sides a power of two (Wine's test_cursor).
+            const powerOfTwo = (/** @type {number} */ side)=>side > 0 && (side & (side - 1)) === 0;
             if (!desc || desc.Format !== D3DFMT.A8R8G8B8
+                || !powerOfTwo(desc.Width) || !powerOfTwo(desc.Height)
                 || x < 0 || y < 0 || x >= desc.Width || y >= desc.Height)
             {
                 return D3DERR_INVALIDCALL;
@@ -1723,12 +1771,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * Shown only once there is a cursor to show: asked before any is set,
+         * it stays hidden (Wine's test_cursor).
+         *
          * @param {boolean} show
          * @returns {boolean} whether it was shown before
          */
         ShowCursor(show){
             const was = cursor.shown;
-            cursor.shown = show;
+            cursor.shown = show && Boolean(cursor.surface);
             return was;
         },
 
@@ -1773,7 +1824,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ swapChain?: any }} out
          */
         CreateAdditionalSwapChain(asked, out){
-            if (!asked || asked.windowed === false || validatePresentParameters(asked) !== D3D_OK)
+            // A full-screen device has its one swap chain (Wine's d3d8 test_swapchain).
+            if (!asked || asked.windowed === false || presentParameters.windowed === false
+                || validatePresentParameters(asked) !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1942,6 +1995,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 shaders: [boundVertexShader >>> 0, boundPixelShader >>> 0],
                 targets: [renderTarget ?? null, depthStencil ?? null],
             };
+        },
+
+        /**
+         * A Reset refused before it reached the device, for a full-screen
+         * size no mode has: the device is left to be reset as a refused
+         * Reset leaves it (Wine's test_reset: TestCooperativeLevel then
+         * answers D3DERR_DEVICENOTRESET).
+         *
+         * @returns {number} D3DERR_INVALIDCALL
+         */
+        RefuseReset(){
+            if (deviceState !== DEVICE_STATE.LOST)
+            {
+                deviceState = DEVICE_STATE.NOT_RESET;
+            }
+            return D3DERR_INVALIDCALL;
         },
 
         /**
@@ -2151,11 +2220,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     product[row * 4 + column] = sum;
                 }
             }
-            if (recording)
-            {
-                recording.transforms.set(type, product);
-                return D3D_OK;
-            }
+            // It goes into the device's own state even while a block
+            // records, and the block does not hold it (Wine's
+            // test_multiply_transform).
             transforms.set(type, product);
             if (type !== D3DTS.WORLD)
             {
@@ -2540,9 +2607,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ passes?: number }} out  Written only on success.
          */
         ValidateDevice(out){
+            // Direct3D 8 validates any filter, none and those past the last
+            // included, with or without a texture (Wine's d3d8 test_filter);
+            // Direct3D 9 refuses a filter of none.
             const hr = boundPixelShader !== 0
                 ? D3D_OK
-                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true });
+                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true, filters: false });
             if (hr === D3D_OK)
             {
                 out.passes = 1;
@@ -2908,6 +2978,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 count: explicitCount(pool, undefined, chainBytes(format, width, height, 1, chain)),
                 allocate: storageFor(usage),
                 free,
+                // Video memory checks a lock's rectangle (Wine's d3d8
+                // test_surface_blocks); other pools take any.
+                rejectsMalformedRects: true,
             });
             if (renderer)
             {
@@ -2978,6 +3051,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 allocate: storageFor(usage),
                 free,
                 cube: true,
+                rejectsMalformedRects: true,
+                strictFaces: true,
             });
             renderer?.trackTexture(texture,
                 { width: edgeLength, height: edgeLength, format, levels: chain, usage });
@@ -3076,6 +3151,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage: 0,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.SYSTEMMEM, ()=>retireSurface(surface)),
+                // An image surface checks a lock's rectangle and clears a
+                // refused lock's answer (Wine's d3d8 test_lockrect_invalid).
+                checksRectsInEveryPool: true,
+                clearsFailedLock: true,
             });
             out.surface = surface;
             return D3D_OK;
@@ -3089,6 +3168,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ buffer?: any }} out
          */
         CreateVertexBuffer(length, usage, fvf, pool, out){
+            if (!bufferTakes(usage, pool))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             out.buffer = createBuffer({ length, usage, pool, fvf, type: D3DRTYPE.VERTEXBUFFER });
             return D3D_OK;
         },
@@ -3101,6 +3184,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ buffer?: any }} out
          */
         CreateIndexBuffer(length, usage, format, pool, out){
+            if (!bufferTakes(usage, pool))
+            {
+                return D3DERR_INVALIDCALL;
+            }
             out.buffer = createBuffer({ length, usage, pool, format, type: D3DRTYPE.INDEXBUFFER });
             return D3D_OK;
         },

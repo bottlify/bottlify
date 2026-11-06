@@ -45,10 +45,13 @@ import {
     D3D_FEATURE_LEVEL, E_FAIL,
     E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
-import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
+import {
+    SHADER_KIND, SYSTEM_VALUE, declaresBufferViews, parseDxbc, parseShaderOfKind,
+} from './dxbc.js';
+import { createSharing } from './sharing.js';
 import { createFactory } from './dxgi.js';
 import {
-    INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
+    INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, PULLED_VERTEX_FORMAT, VERTEX_FORMAT,
     gpuRenderable, multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
@@ -142,7 +145,32 @@ const PREDICATE_QUERIES = new Set([
  *     what the present waits on before it answers the program.
  * @property {import('./render.js').GuestStorage} [guest]  Guest memory for the bytes of
  *     the resources a program maps, which a map then hands out as they are.
+ * @property {ReturnType<typeof createSharing>} [sharing]  The shared resources of every
+ *     device made with the same options (`sharing.js`).
  */
+
+/**
+ * The devices made with one options object, as a root makes all of its own,
+ * share their shared resources.
+ *
+ * @type {WeakMap<object, ReturnType<typeof createSharing>>}
+ */
+const SHARINGS = new WeakMap();
+
+/** @param {DeviceOptions} options */
+function sharingOf(options){
+    if (options.sharing)
+    {
+        return options.sharing;
+    }
+    let sharing = SHARINGS.get(options);
+    if (!sharing)
+    {
+        sharing = createSharing();
+        SHARINGS.set(options, sharing);
+    }
+    return sharing;
+}
 
 /**
  * @param {any} adapter
@@ -187,7 +215,7 @@ export function D3D10CreateDevice(adapter, driverType, software, flags, sdkVersi
     {
         return DXGI_ERROR_SDK_COMPONENT_MISSING;
     }
-    out.device = createDevice({ ...options, adapter, flags });
+    out.device = createDevice({ ...options, sharing: sharingOf(options), adapter, flags });
     return S_OK;
 }
 
@@ -374,7 +402,8 @@ export function blockCopyable(a, b){
 
 /**
  * Whether a copy moves R9G9B9E5_SHAREDEXP texels into a 32-bit family's or
- * back, which Windows makes (test_format_compatibility, d3d11.c:29476).
+ * back, which Direct3D 11's runtime makes (test_format_compatibility,
+ * d3d11.c:29476) and Direct3D 10's does not (d3d10core.c:16362).
  *
  * @param {number} a @param {number} b
  */
@@ -482,7 +511,8 @@ export function D3D11CreateDevice(adapter, driverType, software, flags, levels, 
     {
         return S_FALSE;
     }
-    const device = createDevice({ ...options, adapter, flags, api: 'd3d11', featureLevel: level });
+    const device = createDevice({ ...options, sharing: sharingOf(options), adapter, flags,
+        api: 'd3d11', featureLevel: level });
     out.made = device;
     if (out.wantContext)
     {
@@ -745,6 +775,7 @@ export function createDevice(options = {}){
     // program's last reference, and nothing else (test_state_refcounting).
     const state = createPipelineState({ diverge, keepsBound: d3d11, keepsRasterizer: true });
     const featureLevel = options.featureLevel ?? D3D_FEATURE_LEVEL.LEVEL_10_0;
+    const sharing = options.sharing ?? createSharing();
     /** The newest shader model the device takes, as 0xMm (`dxbc.js`). */
     const shaderModel = !d3d11 ? 0x40
         : featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0 ? 0x50
@@ -809,6 +840,19 @@ export function createDevice(options = {}){
     let maximumFrameLatency = DEFAULT_FRAME_LATENCY;
 
     /**
+     * Says a format kept as another with what it changes (decisions.md A83,
+     * temporary).
+     *
+     * @param {number} format
+     */
+    const noteKept = format=>{
+        if (format === DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM)
+        {
+            diverge('R10G10B10_XR_BIAS_A2_UNORM is kept as R10G10B10A2_UNORM: its bias is'
+                + ' not applied when it is drawn, read or shown');
+        }
+    };
+    /**
      * @param {any} desc
      * @param {number} dimension
      * @param {any} initialData
@@ -835,6 +879,7 @@ export function createDevice(options = {}){
         {
             return hr;
         }
+        noteKept(desc.Format);
         if ((desc.SampleDesc?.Count ?? 1) > 1 && (desc.ArraySize ?? 1) > 1)
         {
             diverge('a multisampled texture array is refused: WebGPU multisamples a texture'
@@ -849,18 +894,73 @@ export function createDevice(options = {}){
                 : (desc.ArraySize ?? 1),
             SampleDesc: Object.freeze({ ...(desc.SampleDesc ?? { Count: 1, Quality: 0 }) }),
         });
+        const keyed = (resolved.MiscFlags & D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX) !== 0;
+        const interfaces = elevenOnly(resolved, textureInterfaces(resolved, iid, dimension));
         out.resource = createResource({
             dimension,
             desc: resolved,
-            interfaces: elevenOnly(resolved, textureInterfaces(resolved, iid, dimension)),
+            interfaces: keyed ? [...interfaces, IID.IDXGIKeyedMutex] : interfaces,
             retainDevice,
             releaseDevice,
             device: deviceHandle,
             storage,
-            onLastRef: ()=>renderer.resourceReleased(made),
+            onLastRef: ()=>released(made),
         });
         const made = out.resource;
         renderer.resourceCreated(out.resource, data);
+        if (keyed || (resolved.MiscFlags & D3D10_RESOURCE_MISC.SHARED) !== 0)
+        {
+            made.share = sharing.share(made, renderer.shareBacking(made), { keyed,
+                nt: ((resolved.MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.SHARED_NTHANDLE) !== 0,
+                interfaces: keyed ? [...interfaces, IID.IDXGIKeyedMutex] : interfaces });
+        }
+        return S_OK;
+    };
+
+    /**
+     * A resource's last reference is gone: its storage with it, unless
+     * another device's object of the same share still holds it.
+     *
+     * @param {any} resource
+     */
+    const released = resource=>{
+        if (!resource.share || sharing.letGo(resource.share, deviceHandle()))
+        {
+            renderer.resourceReleased(resource);
+        }
+    };
+
+    /**
+     * ID3D11Device::OpenSharedResource and ID3D11Device1::OpenSharedResource1:
+     * an object of this device over a texture another device made shared,
+     * named by its legacy handle or by the key an NT handle names
+     * (test_shared_resource). Each opens only what its kind of handle names.
+     *
+     * @param {number} key @param {{ resource?: any }} out @param {boolean} [nt]
+     * @returns {number}
+     */
+    const openShared = (key, out, nt = false)=>{
+        out.resource = null;
+        const share = sharing.find(key);
+        if (!share || share.nt !== nt)
+        {
+            return E_INVALIDARG;
+        }
+        const source = share.resource;
+        const opened = createResource({
+            dimension: source.dimension,
+            desc: source.desc,
+            interfaces: share.interfaces,
+            retainDevice,
+            releaseDevice,
+            device: deviceHandle,
+            storage,
+            onLastRef: ()=>released(opened),
+        });
+        sharing.hold(share);
+        opened.share = share;
+        renderer.adoptBacking(opened, share.backing);
+        out.resource = opened;
         return S_OK;
     };
 
@@ -928,11 +1028,17 @@ export function createDevice(options = {}){
         {
             return E_INVALIDARG;
         }
+        if (featureLevel < D3D_FEATURE_LEVEL.LEVEL_11_0
+            && declaresBufferViews(/** @type {any} */ (container.shader)))
+        {
+            return E_INVALIDARG;
+        }
         out.shader = attachCom({
             container,
-            // A geometry shader made of a vertex shader's bytecode to stream
-            // its vertices out: no stage of its own.
-            passThrough: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX,
+            // A geometry shader made of a vertex or domain shader's bytecode
+            // to stream its vertices out: no stage of its own.
+            passThrough: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX
+                || /** @type {any} */ (container.shader).kind === SHADER_KIND.DOMAIN,
             /** @param {{ device?: any }} target */
             GetDevice(target){
                 retainDevice();
@@ -1053,6 +1159,16 @@ export function createDevice(options = {}){
             diverge(`${call} into an immutable resource is ignored`);
             return false;
         }
+        // Direct3D 10's runtime copies into a depth-stencil texture only from
+        // another; 11's from a colour one of its family too
+        // (test_format_compatibility, d3d10core.c and d3d11.c).
+        if (!d3d11 && (destination.desc.BindFlags & D3D10_BIND.DEPTH_STENCIL) !== 0
+            && (source.desc.BindFlags & D3D10_BIND.DEPTH_STENCIL) === 0)
+        {
+            diverge(`${call} into a depth-stencil texture from a colour one is ignored,`
+                + ' as Direct3D 10 ignores it');
+            return false;
+        }
         // Bits move between formats of one family, and from level 10.1 between
         // a compressed format and an uncompressed one whose texel is as big
         // as its block; a copy between any other two families has no meaning
@@ -1062,7 +1178,7 @@ export function createDevice(options = {}){
                 !== FORMAT_INFO[source.desc.Format]?.family
             && !(featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1
                 && blockCopyable(destination.desc.Format, source.desc.Format))
-            && !sharedExponentCopyable(destination.desc.Format, source.desc.Format))
+            && !(d3d11 && sharedExponentCopyable(destination.desc.Format, source.desc.Format)))
         {
             diverge(`${call} between formats of different families is ignored`);
             return false;
@@ -1127,7 +1243,7 @@ export function createDevice(options = {}){
                         ? desc.StructureByteStride : 0 }),
                 interfaces: elevenOnly(desc, [IID.ID3D10DeviceChild, IID.ID3D10Resource,
                     IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGIResource,
-                    IID.ID3D10Buffer]),
+                    IID.IDXGIResource1, IID.ID3D10Buffer]),
                 retainDevice,
                 releaseDevice,
                 device: deviceHandle,
@@ -1161,6 +1277,16 @@ export function createDevice(options = {}){
 
         /** @param {any} resource @param {any} desc @param {{ view?: any }} out */
         CreateRenderTargetView(resource, desc, out){
+            // Only a swap chain's first buffer is drawn into; the others are
+            // there to be read (test_swapchain_flip).
+            if ((resource?.backBufferIndex ?? 0) > 0)
+            {
+                if (out)
+                {
+                    out.view = null;
+                }
+                return E_INVALIDARG;
+            }
             return createViewOf(resource, desc, VIEW_KINDS.RENDER_TARGET, out);
         },
 
@@ -1426,13 +1552,17 @@ export function createDevice(options = {}){
             out)
         {
             out.shader = null;
+            // From level 11 the stage before may be the domain shader: what
+            // the tessellator made is streamed out.
+            const eleven = featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0;
             const container = bytecode ? (parseShaderOfKind(bytecode, SHADER_KIND.GEOMETRY,
-                shaderModel) ?? parseShaderOfKind(bytecode, SHADER_KIND.VERTEX, shaderModel))
+                shaderModel) ?? parseShaderOfKind(bytecode, SHADER_KIND.VERTEX, shaderModel)
+                ?? (eleven ? parseShaderOfKind(bytecode, SHADER_KIND.DOMAIN, shaderModel) : null))
                 : null;
             if (!container || !validStreamOutput({
                 outputs: container.outputs, entries: declaration, strides, rasterizedStream,
-                eleven: featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0,
-                vertex: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX,
+                eleven, oneStride: !d3d11,
+                vertex: /** @type {any} */ (container.shader).kind !== SHADER_KIND.GEOMETRY,
             }))
             {
                 return E_INVALIDARG;
@@ -1601,7 +1731,7 @@ export function createDevice(options = {}){
             // A buffer holds elements a view can name: no blocks, and no depth.
             let support = FORMAT_SUPPORT.CPU_LOCKABLE
                 | (block || depth ? 0 : FORMAT_SUPPORT.BUFFER);
-            if (VERTEX_FORMAT[format])
+            if (VERTEX_FORMAT[format] || PULLED_VERTEX_FORMAT[format])
             {
                 support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
             }
@@ -2114,12 +2244,25 @@ export function createDevice(options = {}){
         },
 
         /**
-         * Nothing here is ever shared, so no handle names a resource.
+         * A texture another device of the same root made shared, by its
+         * legacy handle.
          *
+         * @param {number} handle @param {{ resource?: any }} out
          * @returns {number}
          */
-        OpenSharedResource(){
-            return E_INVALIDARG;
+        OpenSharedResource(handle, out){
+            return openShared(handle, out);
+        },
+
+        /**
+         * By the key an NT handle names (`ntShareKey`): only a texture made
+         * with SHARED_NTHANDLE.
+         *
+         * @param {number} key @param {{ resource?: any }} out
+         * @returns {number}
+         */
+        OpenSharedResource1(key, out){
+            return openShared(key, out, true);
         },
 
         // --- ID3D10Multithread ---
@@ -2306,6 +2449,7 @@ export function createDevice(options = {}){
          * @returns {any}
          */
         createSwapChainBuffer(request){
+            noteKept(request.format);
             const desc = Object.freeze({
                 Width: request.width,
                 Height: request.height,
@@ -2323,7 +2467,7 @@ export function createDevice(options = {}){
                 MiscFlags: request.gdiCompatible ? D3D10_RESOURCE_MISC.GDI_COMPATIBLE : 0,
                 DXGIUsage: request.usage,
             });
-            return createResource({
+            const buffer = createResource({
                 dimension: D3D10_RESOURCE_DIMENSION.TEXTURE2D,
                 desc,
                 interfaces: textureInterfaces(desc, IID.ID3D10Texture2D,
@@ -2336,6 +2480,8 @@ export function createDevice(options = {}){
                 onFirstRef: request.onFirstRef,
                 onLastRef: request.onLastRef,
             });
+            /** @type {any} */ (buffer).backBufferIndex = request.index ?? 0;
+            return buffer;
         },
     }, {
         // Direct3D 10's device is Direct3D 11's too; one made by Direct3D 11
@@ -2343,7 +2489,8 @@ export function createDevice(options = {}){
         also: iid=>stateEmulation && (iid === IID.ID3D10Device || iid === IID.ID3D10Device1),
         interfaces: [...(d3d11 ? [IID.ID3D11Device1] : [IID.ID3D10Device, IID.ID3D10Device1]),
             IID.ID3D11Device,
-            IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice, IID.IDXGIDevice1],
+            IID.ID3D10Multithread, IID.IDXGIObject, IID.IDXGIDevice, IID.IDXGIDevice1,
+            IID.IDXGIDevice2, IID.IDXGIDevice3, IID.IDXGIDevice4],
         parent: adapter,
         // The adapter is the device's to hold: a program that releases its own
         // reference to the adapter and keeps the device must still be able to

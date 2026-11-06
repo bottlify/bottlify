@@ -1153,6 +1153,10 @@ export function createGraphicsModule(){
                 // A 64-bit process's layouts, and no i386 guest code in it.
                 pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 floatResult: config?.floatResult,
+                // DXGI's swap chain hands out a kernel event, and its device sets one.
+                events: win32.events?.(),
+                // A shared resource's NT handle is a kernel object of the process.
+                sharedHandles: win32.sharedHandles?.(),
                 guestTraps: config?.guestTraps,
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.

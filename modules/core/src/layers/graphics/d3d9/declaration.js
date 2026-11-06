@@ -22,7 +22,7 @@
  * means "unused" is only ever legal in the sentinel.
  */
 
-import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { D3DERR_INVALIDCALL, D3D_OK, E_FAIL } from './constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { D3DDECL_END_STREAM } from './structs.js';
 
@@ -132,12 +132,17 @@ export function validateElements(elements){
     for (const element of elements)
     {
         if (element.Stream >= MAX_STREAMS
-            || element.Type >= D3DDECLTYPE.UNUSED
             || element.Method > D3DDECLMETHOD.LOOKUPPRESAMPLED
-            || element.Usage > D3DDECLUSAGE.SAMPLE
-            || (element.Offset & 3) !== 0)
+            || element.Usage > D3DDECLUSAGE.SAMPLE)
         {
             return D3DERR_INVALIDCALL;
+        }
+        // An element of no type, or not on a dword, is one Windows cannot lay
+        // out: E_FAIL rather than an invalid call (Wine's
+        // test_vertex_declaration_alignment and test_unused_declaration_type).
+        if (element.Type >= D3DDECLTYPE.UNUSED || (element.Offset & 3) !== 0)
+        {
+            return E_FAIL;
         }
         const key = (element.Usage << 8) | element.UsageIndex;
         if (seen.has(key))
@@ -190,9 +195,12 @@ const FVF_POSITION_MASK = 0x00e;
  * its vertex.
  *
  * @param {number} fvf
+ * @param {{ asDirect3D9?: boolean }} [options]  asDirect3D9: the declaration
+ *     Direct3D 9 makes of the format, which differs for XYZB2 with a D3DCOLOR
+ *     last beta; a fixed-function draw reads the format itself.
  * @returns {VertexElement[] | null} null when the format is not one
  */
-export function elementsOfFvf(fvf){
+export function elementsOfFvf(fvf, options = {}){
     /** @type {VertexElement[]} */
     const elements = [];
     let offset = 0;
@@ -230,11 +238,32 @@ export function elementsOfFvf(fvf){
         {
             betas--;
         }
-        if (betas > 0)
+        // Five betas as floats are four weights and one float of indices
+        // (Wine's test_fvf_decl_conversion, XYZB5).
+        const floatIndices = betas === 5;
+        if (floatIndices)
+        {
+            betas = 4;
+        }
+        // Two betas, the last a D3DCOLOR, come out as Direct3D 9 makes them:
+        // the weight a D3DCOLOR and the indices UBYTE4
+        // (test_fvf_decl_conversion).
+        const colourPair = options.asDirect3D9 === true && betas === 1
+            && (fvf & FVF_LASTBETA_D3DCOLOR) !== 0 && position === FVF.XYZB2;
+        if (colourPair)
+        {
+            push(D3DDECLTYPE.D3DCOLOR, D3DDECLUSAGE.BLENDWEIGHT, 0);
+            push(D3DDECLTYPE.UBYTE4, D3DDECLUSAGE.BLENDINDICES, 0);
+        }
+        else if (betas > 0)
         {
             push(D3DDECLTYPE.FLOAT1 + betas - 1, D3DDECLUSAGE.BLENDWEIGHT, 0);
         }
-        if (lastIsIndices)
+        if (floatIndices)
+        {
+            push(D3DDECLTYPE.FLOAT1, D3DDECLUSAGE.BLENDINDICES, 0);
+        }
+        if (lastIsIndices && !colourPair)
         {
             push((fvf & FVF_LASTBETA_UBYTE4) !== 0 ? D3DDECLTYPE.UBYTE4 : D3DDECLTYPE.D3DCOLOR,
                 D3DDECLUSAGE.BLENDINDICES, 0);
@@ -421,8 +450,12 @@ export function fixedFunctionLayoutOf(declaration){
             case D3DDECLUSAGE.POSITION:
             case D3DDECLUSAGE.POSITIONT: {
                 const transformed = element.Usage === D3DDECLUSAGE.POSITIONT;
-                if (position || element.UsageIndex !== 0 || element.Type
-                    !== (transformed ? D3DDECLTYPE.FLOAT4 : D3DDECLTYPE.FLOAT3))
+                // An untransformed position of four floats (D3DFVF_XYZW) is
+                // read as three: the pipeline takes its w as one, which the
+                // matrices then scale (test_ffp_w, test_fog).
+                if (position || element.UsageIndex !== 0 || (transformed
+                    ? element.Type !== D3DDECLTYPE.FLOAT4
+                    : element.Type !== D3DDECLTYPE.FLOAT3 && element.Type !== D3DDECLTYPE.FLOAT4))
                 {
                     return null;
                 }
@@ -486,6 +519,9 @@ export function fixedFunctionLayoutOf(declaration){
  * @property {number} fvf   The format this was made from, or zero when it was
  *                          made by the program -- even when the elements
  *                          happen to describe one.
+ * @property {number} reportedFvf  What GetFVF answers while it is bound: its
+ *     format, or for one the program made the position it is alone, XYZ or
+ *     XYZRHW, and zero for any other (Wine's test_fvf_decl_conversion).
  * @property {number} refCount
  * @property {boolean} destroyed  whether its last reference has gone for good
  * @property {any} counter  its count, which guest code may keep (`ReferenceCount.place`)
@@ -507,10 +543,18 @@ let lastDeclarationId = 0;
  */
 export function createVertexDeclaration(options){
     const elements = Object.freeze(options.elements.map(element=>({ ...element })));
+    const [only] = elements;
+    const alone = elements.length === 1 && only.Stream === 0 && only.Offset === 0
+        && only.UsageIndex === 0;
+    const positionOnly = alone && only.Usage === D3DDECLUSAGE.POSITION
+        && only.Type === D3DDECLTYPE.FLOAT3 ? FVF.XYZ
+        : alone && only.Usage === D3DDECLUSAGE.POSITIONT && only.Type === D3DDECLTYPE.FLOAT4
+            ? FVF.XYZRHW : 0;
     return {
         id: ++lastDeclarationId,
         elements,
         fvf: options.fvf ?? 0,
+        reportedFvf: options.fvf || positionOnly,
         get refCount(){
             return options.count.value;
         },

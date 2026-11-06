@@ -134,7 +134,11 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
  * @property {number} [backBufferFormat]
  * @property {number} [flags]  D3DPRESENTFLAG_*, which decide what the swap
  *           chain itself will allow -- locking the back buffer, above all.
+ * @property {number} [fullScreenPresentationInterval]  D3DPRESENT_INTERVAL_*; 0 is DEFAULT.
  */
+
+/** The present intervals a device offers: once a refresh, or at once. */
+export const PRESENTATION_INTERVALS = 0x80000000 | 0x00000001;
 
 /**
  * The rule is the same in windowed and fullscreen mode, which is worth stating
@@ -147,6 +151,14 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
 export function validatePresentParameters(parameters){
     const limit = SWAP_EFFECT_MAX_BACK_BUFFERS[parameters.swapEffect];
     if (limit === undefined)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // DEFAULT, or one interval the caps offer (Wine's d3d8
+    // test_swapchain_parameters).
+    const interval = (parameters.fullScreenPresentationInterval ?? 0) >>> 0;
+    if (interval !== 0 && ((interval & (interval - 1)) !== 0
+        || (interval & PRESENTATION_INTERVALS) === 0))
     {
         return D3DERR_INVALIDCALL;
     }

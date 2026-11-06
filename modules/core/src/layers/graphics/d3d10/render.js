@@ -52,7 +52,8 @@ const NO_VIEWS = Object.freeze([]);
 const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
-    INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
+    INDEX_FORMAT, PULLED_VERTEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
+    copyCompatible,
     MIPS_GENERATED, gpuRenderable, isDepthFormat, resolvable, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
@@ -1190,6 +1191,33 @@ export function createRenderer(services){
     };
 
     /**
+     * Every texel of a level's slices in a texture's own bytes set to one
+     * texel's bytes: an array's layers, or a volume's depth slices.
+     *
+     * @param {any} resource
+     * @param {{ mip: number, first: number, count: number }} range
+     * @param {Uint8Array} element
+     */
+    const clearHeld = (resource, range, element)=>{
+        const { layout, bytes } = backingOf(resource);
+        const geometry = layout.levels[range.mip];
+        const volume = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D;
+        for (let slice = range.first; slice < range.first + range.count; slice++)
+        {
+            const base = volume ? geometry.offset + slice * geometry.depthPitch
+                : slice * layout.sliceBytes + geometry.offset;
+            for (let row = 0; row < geometry.height; row++)
+            {
+                const start = base + row * geometry.rowPitch;
+                for (let x = 0; x < geometry.width; x++)
+                {
+                    bytes.set(element, start + x * element.length);
+                }
+            }
+        }
+    };
+
+    /**
      * A box in texels as the host layout counts it: whole blocks, a row in
      * bytes, and clipped to the level it lies in.
      *
@@ -1965,6 +1993,15 @@ export function createRenderer(services){
     };
 
     /**
+     * A vertex format's spelling: WebGPU's, or one the vertex stage reads
+     * itself (`PULLED_VERTEX_FORMAT`), whose slot is always pulled.
+     *
+     * @param {number} format
+     * @returns {string | undefined}
+     */
+    const vertexFormatOf = format=>VERTEX_FORMAT[format] ?? PULLED_VERTEX_FORMAT[format];
+
+    /**
      * The streams of an input layout the vertex stage reads from storage
      * itself (`VertexPull`): those WebGPU does not fetch as vertex buffers -
      * a stride or an element offset it does not align (Direct3D steps a
@@ -1986,12 +2023,12 @@ export function createRenderer(services){
         /** @type {Map<number, number>} */
         const cursor = new Map();
         const placed = inputLayout.elements.map((/** @type {any} */ element)=>{
-            const format = VERTEX_FORMAT[element.Format];
+            const format = vertexFormatOf(element.Format);
             const slot = element.InputSlot;
             const offset = element.AlignedByteOffset === D3D10_APPEND_ALIGNED_ELEMENT
                 ? roundUp(cursor.get(slot) ?? 0, 4)
                 : element.AlignedByteOffset;
-            cursor.set(slot, offset + (VERTEX_FORMAT_BYTES[format] ?? 0));
+            cursor.set(slot, offset + (format ? VERTEX_FORMAT_BYTES[format] : 0));
             const perInstance = element.InputSlotClass
                 === D3D10_INPUT_CLASSIFICATION.PER_INSTANCE_DATA;
             return { element, format, slot, offset, perInstance,
@@ -1999,11 +2036,12 @@ export function createRenderer(services){
         });
         /** @type {number[]} */
         const slots = [];
-        for (const { format, slot, offset, rate, perInstance } of placed)
+        for (const { element, format, slot, offset, rate, perInstance } of placed)
         {
             const bytes = VERTEX_FORMAT_BYTES[format] ?? 4;
             if (format && !slots.includes(slot) && ((strides[slot] ?? 0) % 4 !== 0
-                || offset % Math.min(4, bytes) !== 0 || rate > 1 || (indirect && perInstance)))
+                || offset % Math.min(4, bytes) !== 0 || rate > 1 || (indirect && perInstance)
+                || PULLED_VERTEX_FORMAT[element.Format]))
             {
                 slots.push(slot);
             }
@@ -2042,7 +2080,7 @@ export function createRenderer(services){
         const cursor = new Map();
         for (const element of inputLayout.elements)
         {
-            const format = VERTEX_FORMAT[element.Format];
+            const format = vertexFormatOf(element.Format);
             if (!format)
             {
                 return `input element format ${element.Format} has no vertex spelling`;
@@ -2212,7 +2250,12 @@ export function createRenderer(services){
             && !!firstBlend?.BlendEnable && [firstBlend.SrcBlend, firstBlend.DestBlend,
             firstBlend.SrcBlendAlpha, firstBlend.DestBlendAlpha].some(factor=>
             DUAL_SOURCE.has(factor));
-        const linking = { targets: bound, depthBias: emulatedBias, sampleCount: state.sampleCount,
+        // Each target's scalar, which its output is whatever the shader says.
+        const targetScalars = Object.fromEntries(bound.map(index=>[index,
+            /uint$/.test(formats[index] ?? '') ? 'u32'
+                : /sint$/.test(formats[index] ?? '') ? 'i32' : 'f32']));
+        const linking = { targets: bound, targetScalars, depthBias: emulatedBias,
+            sampleCount: state.sampleCount,
             alphaCoverage: !!blendTargetsOf(state.blendState).alphaToCoverage
                 && state.sampleCount === 1,
             clipDistances: backend.hasFeature?.('clip-distances') === true,
@@ -4029,6 +4072,26 @@ export function createRenderer(services){
 
     return {
         /**
+         * The storage a resource made shared keeps, for another device's
+         * renderer to take as its object's own (`sharing.js`).
+         *
+         * @param {any} resource
+         */
+        shareBacking(resource){
+            return backingOf(resource);
+        },
+
+        /**
+         * A resource opened over a share: its storage is the share's, bytes,
+         * GPU texture and what the guest maps alike.
+         *
+         * @param {any} resource @param {any} backing
+         */
+        adoptBacking(resource, backing){
+            backings.set(resource, backing);
+        },
+
+        /**
          * The program's last reference to a resource is gone: its guest
          * memory goes back. A view still holding it keeps what the GPU has;
          * one that hands it out again (GetResource) maps it into new memory.
@@ -4196,8 +4259,11 @@ export function createRenderer(services){
                 left: 0, top: 0, front: 0,
                 right: geometry.width, bottom: geometry.height, back: geometry.depth,
             });
-            const pitch = rowPitch || region.rowBytes;
-            const slicePitch = depthPitch || pitch * region.rows;
+            // A pitch is the program's to the byte: zero reads every row,
+            // or slice, from the same bytes, as Direct3D does
+            // (test_copy_subresource_region's UpdateSubresource1).
+            const pitch = rowPitch;
+            const slicePitch = depthPitch;
             for (let z = 0; z < region.depth; z++)
             {
                 for (let row = 0; row < region.rows; row++)
@@ -4525,13 +4591,29 @@ export function createRenderer(services){
          * @param {number[]} values @param {boolean} float
          */
         clearUnorderedAccessView(view, values, float){
+            const resource = resourceOf(view);
+            const backing = backingOf(resource);
+            const desc = stateDesc(view);
+            if (view.dimensionName !== 'BUFFER' && !backing.texture)
+            {
+                // A texture the GPU cannot keep lives in its bytes alone, so
+                // that is where it is cleared (test_clear_image_unordered_access_view).
+                const element = clearElement(desc.Format, values, float);
+                if (element && element.length === backing.layout.texelBytes)
+                {
+                    clearHeld(resource, view.range, element);
+                }
+                else
+                {
+                    diverge(`a ${float ? 'Float' : 'Uint'} clear of a texture view in format`
+                        + ` ${desc.Format} writes nothing`);
+                }
+                return;
+            }
             if (!backend)
             {
                 return;
             }
-            const resource = resourceOf(view);
-            const backing = backingOf(resource);
-            const desc = stateDesc(view);
             if (view.dimensionName === 'BUFFER')
             {
                 const words = (desc.Flags & D3D11_BUFFER_UAV_FLAG.RAW) !== 0
@@ -4671,15 +4753,22 @@ export function createRenderer(services){
             let geometry = null;
             if (geometryShader)
             {
-                if (pipeline.stages.hs?.shader || pipeline.stages.ds?.shader)
+                // After the tessellator the geometry shader takes what the
+                // domain shader makes of each index it wrote (`geometry.js`).
+                const tessellated = pipeline.stages.hs?.shader || pipeline.stages.ds?.shader
+                    || pipeline.topology >= FIRST_PATCH_LIST
+                    ? tessellationOf().prepare(pipeline, draw) : undefined;
+                if (tessellated === null)
                 {
                     counters.skipped.stage++;
-                    lose('a draw through the tessellator and a geometry shader is skipped: the'
-                        + ' domain shader\'s vertices are not taken on to a geometry shader');
                     return;
                 }
-                geometry = geometryOf().prepare(pipeline, draw);
+                geometry = geometryOf().prepare(pipeline, draw, tessellated);
                 syncTwins(false);
+                if (geometry)
+                {
+                    tessellated?.commands.forEach(record);
+                }
                 geometry?.commands.forEach(record);
                 if (geometryShader.passThrough
                     ? geometryShader.rasterizedStream === SO_NO_RASTERIZED_STREAM
@@ -5565,7 +5654,7 @@ export function createRenderer(services){
                     {
                         counters.skipped[built.reason?.untranslatable ? 'untranslatable'
                             : 'pipeline']++;
-                        diverge(`${command.what}: ${built.reason && built.reason.message
+                        lose(`${command.what}: ${built.reason && built.reason.message
                             || built.reason}`);
                         continue;
                     }
@@ -5618,7 +5707,7 @@ export function createRenderer(services){
                     const built = pipelinesNeeded[position];
                     if (built.status === 'rejected')
                     {
-                        diverge(`${command.what}: ${built.reason && built.reason.message
+                        lose(`${command.what}: ${built.reason && built.reason.message
                             || built.reason}`);
                         continue;
                     }
@@ -5666,7 +5755,7 @@ export function createRenderer(services){
                     counters.skipped[settled.reason?.untranslatable
                         ? 'untranslatable'
                         : 'pipeline']++;
-                    diverge(`a draw was skipped: ${settled.reason && settled.reason.message
+                    lose(`a draw was skipped: ${settled.reason && settled.reason.message
                         || settled.reason}`);
                     continue;
                 }

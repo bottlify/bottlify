@@ -66,7 +66,8 @@
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import {
-    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, sampledWithOnes,
+    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, processedCoordinate,
+    sampledWithOnes, sphereMapOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
@@ -288,6 +289,9 @@ export function varyingLocation(usage, index){
  * @property {number} [viewportRegister]
  * @property {number} [fogRegister]  A vertex shader carrying fog: the fog colour's
  *           register, with the table curve's range in the one after it.
+ * @property {boolean} [fogOver]  A vertex shader under table fog whose oFog
+ *           the curve runs over (decisions.md A43); without it the amount
+ *           carried is the shader's z times its w, for the depth.
  *     A vertex shader's: the float register past the ones it reads, where the
  *     viewport's scale is carried for the half-pixel move of its position.
  * @property {number} [alphaRegister]  A pixel shader under the alpha test:
@@ -993,7 +997,10 @@ export function translateShader(parsed, options = {}){
     const stageCoordinates = stage=>{
         pixelCoordinates.add(stage);
         const by = options.projectedBy?.[stage] ?? '';
-        return by ? `(in.t${stage} / in.t${stage}.${by})` : `in.t${stage}`;
+        // A zero divisor reads at the origin, as Windows does (Wine's d3d9
+        // test_texture_transform_flags).
+        return by ? `select(in.t${stage} / in.t${stage}.${by}, vec4f(0.0),`
+            + ` in.t${stage}.${by} == 0.0)` : `in.t${stage}`;
     };
 
     /**
@@ -1808,6 +1815,7 @@ export function translateShader(parsed, options = {}){
     let viewportRegister;
     /** @type {number | undefined} */
     let fogRegister;
+    let fogOver = false;
     /** @type {number | undefined} */
     let pointRegister;
     /** A pixel shader under the alpha test: the reference's register. @type {number | undefined} */
@@ -1930,16 +1938,21 @@ export function translateShader(parsed, options = {}){
             {
                 emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
             }
-            const amount = wrote ? 'out.oFog.x' : '0.0';
+            // Table fog over the depth carries the shader's z times its w
+            // in the amount's place (`tableFog` in the fixed function).
+            const table = carried === FOG_SOURCE.TABLE;
+            fogOver = table && wrote && options.tableFogOverDepth !== true;
+            const amount = table && !fogOver ? 'out.oPos.z * out.oPos.w'
+                : wrote ? 'out.oFog.x' : '0.0';
             body.push(`    out.oFog = vec4f(${amount}, c[${fogRegister}].rgb);`);
-            if (carried === FOG_SOURCE.TABLE)
+            if (table)
             {
                 outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
                     + ` o${FOG_RANGE_LOCATION}: vec4f,`);
                 outputs.push(FOG_RANGE_LOCATION);
                 // A w of 2 tells the pixel stage the curve runs over the
                 // shader's oFog rather than the depth (decisions.md A43).
-                const overFog = wrote && options.tableFogOverDepth !== true;
+                const overFog = fogOver;
                 body.push(`    out.o${FOG_RANGE_LOCATION} = ${overFog
                     ? `vec4f(c[${fogRegister + 1}].xyz, 2.0)` : `c[${fogRegister + 1}]`};`);
             }
@@ -2008,7 +2021,8 @@ export function translateShader(parsed, options = {}){
             // the curve reads its range from a module variable, since a
             // function cannot see the entry point's input.
             const amount = table
-                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0),'
+                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.fog.x * in.vPos.w,'
+                    + ' fogRange.w != 0.0),'
                     + ' in.fog.x, fogRange.w > 1.5))'
                 : 'in.fog.x';
             const fogLines = [
@@ -2164,6 +2178,7 @@ export function translateShader(parsed, options = {}){
         wgsl, entry, inputs, outputs, reads, samplers, constants: declared,
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
         ...(fogRegister === undefined ? {} : { fogRegister }),
+        ...(fogOver ? { fogOver } : {}),
         ...(pointRegister === undefined ? {} : { pointRegister }),
         ...(alphaRegister === undefined ? {} : { alphaRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
@@ -2176,6 +2191,7 @@ export function translateShader(parsed, options = {}){
 /** D3DTSS_TCI_ modes a hybrid's vertex stage generates a coordinate under. */
 const TCI_CAMERASPACENORMAL = 0x10000;
 const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
+const TCI_SPHEREMAP = 0x40000;
 
 /**
  * A vertex stage for a draw that binds a pixel shader and no vertex shader:
@@ -2214,7 +2230,7 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
  *     points?: { sprite: boolean, scale: boolean },
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
- *     carried?: ({ set: number, transformed: boolean } | null)[],
+ *     carried?: ({ set: number, transform: number } | null)[],
  *     clipsBehindEye?: boolean }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
@@ -2226,13 +2242,14 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        `clip`: the user clip planes, in the vertex's own space -- world
  *        planes through the world matrix, which the caller puts there -- one
  *        register each from `HYBRID_CONSTANTS.COUNT`. A pre-transformed
- *        vertex is not clipped. `carried`: per coordinate set, the vertex's
- *        set the stage of that number reads (its D3DTSS_TEXCOORDINDEX) and
- *        whether the stage's transform (`c[TRANSFORMS..]`) applies, for a
- *        stage that reads another set than its own or transforms it: the
- *        fixed function hands a pixel shader each stage's coordinates, not
- *        the declaration's sets by number. A two-component set goes through
- *        the matrix as (u, v, 1), so a translation is the third row.
+ *        vertex is not clipped. `carried`: per coordinate set the pixel
+ *        shader reads, the vertex's set the stage of that number reads (its
+ *        D3DTSS_TEXCOORDINDEX) and what its transform flags make of it
+ *        (`coordinateTransformOf`, the matrix in `c[TRANSFORMS..]`): the fixed function
+ *        hands a pixel shader each stage's coordinates, not the
+ *        declaration's sets by number, made as `processedCoordinate` says. A
+ *        pre-transformed vertex's set goes through as declared, through no
+ *        matrix.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -2255,6 +2272,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let specularAlpha = '1.0';
     let pointBase = `c[${HYBRID_CONSTANTS.POINT}].x`;
     const carried = options.carried ?? [];
+    const pretransformed = elements.some(element=>element.usage === D3DDECLUSAGE.POSITIONT);
+    /** The stage's texture transform by columns. @param {number} stage */
+    const transformColumn = stage=>(/** @type {number} */ axis)=>
+        `c[${HYBRID_CONSTANTS.TRANSFORMS + stage * 4 + axis}]`;
     /** The declaration's coordinate sets by number, as read and as wide. @type {Map<number, { value: string, components: number }>} */
     const sets = new Map();
     for (const element of elements)
@@ -2339,12 +2360,12 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         const coordinate = mode === TCI_CAMERASPACENORMAL ? 'cameraNormal'
             : mode === TCI_CAMERASPACEREFLECTIONVECTOR
                 ? 'reflect(d3dNrm(cameraPosition), cameraNormal)'
-                : 'cameraPosition';
-        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 4;
-        body.push(`    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
+                : mode === TCI_SPHEREMAP
+                    ? sphereMapOf('reflect(d3dNrm(cameraPosition), cameraNormal)')
+                    : 'cameraPosition';
+        body.push(`    let generated${set} = vec4f(${coordinate}, 0.0);`,
+            `    out.o${location} = ${processedCoordinate(`generated${set}`, 3,
+                carried[set]?.transform ?? 0, transformColumn(set))};`);
     }
     for (const [stage, source] of carried.entries())
     {
@@ -2362,17 +2383,18 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             body.push(`    out.o${location} = vec4f(0.0);`);
             continue;
         }
-        if (!source.transformed)
+        if (pretransformed)
         {
             body.push(`    out.o${location} = ${from.value};`);
             continue;
         }
-        const extended = from.components <= 2 ? `vec4f(${from.value}.xy, 1.0, 0.0)` : from.value;
-        const row = HYBRID_CONSTANTS.TRANSFORMS + stage * 4;
-        body.push(`    let set${stage} = ${extended};`,
-            `    out.o${location} = vec4f(dot(c[${row}], set${stage}),`
-            + ` dot(c[${row + 1}], set${stage}), dot(c[${row + 2}], set${stage}),`
-            + ` dot(c[${row + 3}], set${stage}));`);
+        // Its missing components zero, not as the declaration fills them.
+        const count = Math.min(from.components, 4);
+        const kept = count >= 4 ? from.value
+            : `vec4f(${from.value}.${'xyz'.slice(0, count)}${', 0.0'.repeat(4 - count)})`;
+        body.push(`    let set${stage} = ${kept};`,
+            `    out.o${location} = ${processedCoordinate(`set${stage}`, count,
+                source.transform, transformColumn(stage))};`);
     }
     // The fog the fixed-function stage adds after the pixel shader, with the
     // colour beside it so a fogged pixel shader needs nothing but varyings to
@@ -2389,7 +2411,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         const wv = HYBRID_CONSTANTS.WORLD_VIEW;
         const camera = `(mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
             + ` * vec4f(${vertex}, 1.0))`;
-        const amount = fogSource === FOG_SOURCE.TABLE ? '0.0'
+        const amount = fogSource === FOG_SOURCE.TABLE ? 'out.oPos.z * out.oPos.w'
             : vertexFog
                 ? `fogFactorOf(${options.rangeFog ? `length(${camera}.xyz)` : `abs(${camera}.z)`})`
                 : specularAlpha;

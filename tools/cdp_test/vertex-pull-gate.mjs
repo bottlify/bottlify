@@ -18,6 +18,11 @@
  * - the same elements repacked at an aligned stride, one per instance, drawn
  *   directly from instance zero - the streams WebGPU fetches.
  *
+ * A format WebGPU has no vertex spelling for (`PULLED_VERTEX_FORMAT`) is
+ * always read by the vertex stage; its second arm is the same elements
+ * decoded on the processor (`uavclear.js` `smallFloatOf`) and given as
+ * R32G32B32A32_FLOAT, which WebGPU fetches.
+ *
  * Every pixel of the two targets must hold the same bits, and every one
  * must have been drawn.
  *
@@ -36,8 +41,18 @@ import {
 } from '../../modules/core/src/layers/graphics/d3d10/shader-fixtures.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from
     '../../modules/core/src/layers/graphics/d3d10/dxbc.js';
-import { VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from
+import { PULLED_VERTEX_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from
     '../../modules/core/src/layers/graphics/d3d10/gpuformats.js';
+import { smallFloatOf } from '../../modules/core/src/layers/graphics/d3d10/uavclear.js';
+
+/** DXGI_FORMAT_R32G32B32A32_FLOAT, the decoded arm of a pulled-only format. */
+const RGBA32_FLOAT = 2;
+
+/**
+ * R11G11B10_FLOAT's three channels, as (shift, mantissa bits): what a
+ * pulled-only element is decoded into on the processor.
+ */
+const SMALL_FLOATS = [[0, 6], [11, 6], [22, 5]];
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -95,8 +110,11 @@ function caseOf(seed){
     const next = random(seed * 2654435761);
     /** @param {number} n */
     const below = n=>Math.floor(next() * n);
-    const formats = Object.entries(VERTEX_FORMAT);
+    // A quarter of the cases a format only the vertex stage reads.
+    const formats = next() < 0.25 ? Object.entries(PULLED_VERTEX_FORMAT)
+        : Object.entries(VERTEX_FORMAT);
     const [dxgi, format] = formats[below(formats.length)];
+    const pulledOnly = Object.values(PULLED_VERTEX_FORMAT).includes(format);
     const size = VERTEX_FORMAT_BYTES[format];
     const vertices = 1 + below(5);
     const instances = 1 + below(6);
@@ -128,16 +146,53 @@ function caseOf(seed){
             }
         }
     }
+    // An unsigned small float of exponent 31 is an infinity or NaN, whose
+    // payload the interstage need not keep: the case keeps them finite.
+    if (pulledOnly)
+    {
+        for (let element = 0; element < elements; element++)
+        {
+            const at = bufferOffset + element * stride + elementOffset;
+            let word = (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+                | bytes[at + 3] << 24) >>> 0;
+            for (const [shift, mantissa] of SMALL_FLOATS)
+            {
+                const exponent = shift + mantissa;
+                if (((word >>> exponent) & 0x1f) === 0x1f)
+                {
+                    word = (word & ~(1 << exponent)) >>> 0;
+                }
+                // Denormals, a quarter of the channels.
+                if (next() < 0.25)
+                {
+                    word = (word & ~(0x1f << exponent)) >>> 0;
+                }
+            }
+            bytes.splice(at, 4, word & 0xff, (word >>> 8) & 0xff, (word >>> 16) & 0xff,
+                word >>> 24);
+        }
+    }
     /** @param {number} element @returns {number[]} its bytes */
     const elementBytes = element=>bytes.slice(bufferOffset + element * stride + elementOffset,
         bufferOffset + element * stride + elementOffset + size);
+    /** @param {number[]} one an element's bytes @returns {number[]} as the reference arm gives it */
+    const decoded = one=>{
+        if (!pulledOnly)
+        {
+            return [...one, ...new Array(Math.ceil(size / 4) * 4 - size).fill(0)];
+        }
+        const word = (one[0] | one[1] << 8 | one[2] << 16 | one[3] << 24) >>> 0;
+        const channels = SMALL_FLOATS.map(([shift, mantissa])=>
+            smallFloatOf((word >>> shift) & ((1 << (mantissa + 5)) - 1), mantissa));
+        return [...new Uint8Array(Float32Array.from([...channels, 1]).buffer)];
+    };
     // The repacked arm: one element a vertex, or a instance from instance zero.
-    const packedStride = Math.ceil(size / 4) * 4;
+    const packedStride = pulledOnly ? 16 : Math.ceil(size / 4) * 4;
     const packed = (perInstance
         ? Array.from({ length: instances }, (_, i)=>elementBytes(rate === 0 ? startInstance
             : startInstance + Math.floor(i / rate)))
         : Array.from({ length: startVertex + vertices }, (_, e)=>elementBytes(e)))
-        .flatMap(one=>[...one, ...new Array(packedStride - size).fill(0)]);
+        .flatMap(decoded);
     /** @param {number} first @returns {number[]} the per-instance places from `first` */
     const places = first=>Array.from({ length: first + instances }, (_, e)=>[0,
         -2 * (Math.max(0, e - first) + 0.5) / instances, 0, 0]).flat();
@@ -153,7 +208,7 @@ function caseOf(seed){
                 places: places(startInstance) },
             { bytes: packed, stride: packedStride, elementOffset: 0, bufferOffset: 0,
                 rate: perInstance ? 1 : 0, startInstance: 0, indirect: false,
-                places: places(0) },
+                places: places(0), ...(pulledOnly ? { dxgi: RGBA32_FLOAT } : {}) },
         ],
     };
 }
@@ -240,7 +295,8 @@ function pageRunner(){
                     AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 },
                 { SemanticName: 'PLACE', SemanticIndex: 0, Format: 2, InputSlot: 1,
                     AlignedByteOffset: 0, InputSlotClass: 1, InstanceDataStepRate: 1 },
-                { SemanticName: 'ATTR', SemanticIndex: 0, Format: scene.dxgi, InputSlot: 2,
+                { SemanticName: 'ATTR', SemanticIndex: 0, Format: arm.dxgi ?? scene.dxgi,
+                    InputSlot: 2,
                     AlignedByteOffset: arm.elementOffset, InputSlotClass: perInstance ? 1 : 0,
                     InstanceDataStepRate: perInstance ? arm.rate : 0 },
             ], vs, made));
@@ -337,11 +393,12 @@ async function main(){
         await cdp.send('Runtime.evaluate', { expression: `(${pageRunner.toString()})(); null` },
             sessionId);
         /** @type {Record<string, number>} */
-        const kinds = { pulled: 0, indirect: 0, stepped: 0, everyInstance: 0 };
+        const kinds = { pulled: 0, indirect: 0, stepped: 0, everyInstance: 0, pulledOnly: 0 };
         for (let seed = firstSeed; seed < firstSeed + cases; seed++)
         {
             const scene = caseOf(seed);
             kinds.pulled += scene.stride % 4 !== 0 ? 1 : 0;
+            kinds.pulledOnly += scene.arms[1].dxgi === RGBA32_FLOAT ? 1 : 0;
             kinds.indirect += scene.indirect ? 1 : 0;
             kinds.stepped += scene.perInstance && scene.rate > 1 ? 1 : 0;
             kinds.everyInstance += scene.perInstance && scene.rate === 0 ? 1 : 0;

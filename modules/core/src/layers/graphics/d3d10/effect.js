@@ -91,8 +91,12 @@ export const ASSIGNMENT = Object.freeze({
     ANONYMOUS_SHADER: 7,
 });
 
-/** The type a constant in an assignment is stored as. */
-export const CONSTANT_TYPE = Object.freeze({ FLOAT: 1, INT: 2, UINT: 3, BOOL: 4 });
+/**
+ * The type a constant in an assignment is stored as. AS_TAKEN is none the
+ * file stores: a value an expression computed, whose bits are already of the
+ * type the state takes (a StencilEnable it sets reads back 0xffffffff).
+ */
+export const CONSTANT_TYPE = Object.freeze({ AS_TAKEN: 0, FLOAT: 1, INT: 2, UINT: 3, BOOL: 4 });
 
 /**
  * A numeric type's base type as the file stores it, and as a program is told it.
@@ -173,6 +177,9 @@ const HEADER = Object.freeze([
  * @property {FxConstant[]} [constants]
  * @property {string} [variable]  The variable named.
  * @property {number} [element]   The constant index into it.
+ * @property {string} [indexVariable]  The variable whose value is the index.
+ * @property {Uint8Array} [expression]  The expression giving the index or the
+ *     value, as a container of its own (effect-expression.js).
  * @property {FxShader | null} [shader]  A shader compiled in place, or null.
  */
 
@@ -239,6 +246,16 @@ const HEADER = Object.freeze([
  */
 
 /**
+ * A constant buffer a child effect shares with its pool: its name and its
+ * variables' names, which the pool's must have.
+ *
+ * @typedef {Object} FxSharedBuffer
+ * @property {string} name
+ * @property {number} size
+ * @property {{ name: string, type: FxType }[]} variables
+ */
+
+/**
  * @typedef {Object} EffectData
  * @property {number} version
  * @property {Record<string, number>} counts  The header's counts by name.
@@ -246,6 +263,8 @@ const HEADER = Object.freeze([
  * @property {FxBuffer[]} buffers
  * @property {FxObjectVariable[]} objects
  * @property {FxTechnique[]} techniques
+ * @property {FxSharedBuffer[]} [sharedBuffers]  What a child effect takes from its pool.
+ * @property {{ name: string, type: FxType }[]} [sharedObjects]
  */
 
 /** A reason the bytes are not an effect this runtime reads. */
@@ -291,10 +310,6 @@ function readEffect(chunk){
     {
         throw new NotAnEffect(`effect version 0x${counts.version.toString(16)} is not fx_4_0 or`
             + ' fx_4_1');
-    }
-    if (counts.sharedBuffers || counts.sharedNumericVariables || counts.sharedObjectVariables)
-    {
-        throw new NotAnEffect('an effect that shares variables with a pool');
     }
     const base = HEADER.length * 4;
     if (base + counts.unstructuredSize > chunk.length)
@@ -517,10 +532,17 @@ function readEffect(chunk){
                     assignment.shader = readShader(word(offset), word(offset + 4));
                     break;
                 case ASSIGNMENT.VARIABLE_INDEX:
-                case ASSIGNMENT.INDEX_EXPRESSION:
+                    assignment.variable = string(word(offset));
+                    assignment.indexVariable = string(word(offset + 4));
+                    break;
+                case ASSIGNMENT.INDEX_EXPRESSION: {
+                    assignment.variable = string(word(offset));
+                    const sized = word(offset + 4);
+                    assignment.expression = bytesAt(sized + 4, word(sized));
+                    break;
+                }
                 case ASSIGNMENT.VALUE_EXPRESSION:
-                    // Kept as what it is: evaluating it needs the effect's
-                    // expression machine, which this runtime does not have.
+                    assignment.expression = bytesAt(offset + 4, word(offset));
                     break;
                 default:
                     throw new NotAnEffect(`an assignment of kind ${kind}`);
@@ -618,6 +640,43 @@ function readEffect(chunk){
         });
     }
 
+    // What a child effect takes from its pool, by name: the buffers and
+    // objects it declares shared, with no value, annotation or state of
+    // their own, which are the pool's.
+    /** @type {FxSharedBuffer[]} */
+    const sharedBuffers = [];
+    for (let index = 0; index < counts.sharedBuffers; index++)
+    {
+        const nameAt = next();
+        const size = next();
+        next();
+        const variableCount = next();
+        next();
+        /** @type {FxSharedBuffer} */
+        const buffer = { name: string(nameAt), size, variables: [] };
+        for (let variable = 0; variable < variableCount; variable++)
+        {
+            const variableNameAt = next();
+            const type = readType(next());
+            next();
+            next();
+            next();
+            next();
+            buffer.variables.push({ name: string(variableNameAt), type });
+        }
+        sharedBuffers.push(buffer);
+    }
+    /** @type {{ name: string, type: FxType }[]} */
+    const sharedObjects = [];
+    for (let index = 0; index < counts.sharedObjectVariables; index++)
+    {
+        const nameAt = next();
+        const type = readType(next());
+        next();
+        next();
+        sharedObjects.push({ name: string(nameAt), type });
+    }
+
     /** @type {FxTechnique[]} */
     const techniques = [];
     for (let index = 0; index < counts.techniques; index++)
@@ -640,5 +699,6 @@ function readEffect(chunk){
         techniques.push(technique);
     }
 
-    return { version: counts.version, counts, unstructured, buffers, objects, techniques };
+    return { version: counts.version, counts, unstructured, buffers, objects, techniques,
+        sharedBuffers, sharedObjects };
 }

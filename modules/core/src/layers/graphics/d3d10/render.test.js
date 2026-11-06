@@ -2408,6 +2408,8 @@ test('a shader with an instruction that has no translation refuses its draws by 
             h.device.diagnostics().skipped.pipeline], [1, 0],
         'counted as untranslatable, apart from a pipeline the GPU refused');
         assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
+        assert.ok(h.divergences.some(line=>line.includes('lost: a draw was skipped')),
+            'a draw not made is a loss, not a warning');
     });
 
 test('a swap chain\'s present past the bound waits for the oldest frame to finish', async()=>{
@@ -2716,6 +2718,78 @@ test('a draw through the tessellator is five compute passes and a draw of the do
     assert.match(vertex, /dsDomain = /);
     assert.equal(device.diagnostics().tessellation.draws, 1);
     assert.equal(device.diagnostics().tessellation.patches, 3);
+});
+
+test('a draw through the tessellator and a geometry shader runs the domain shader over the'
+    + ' indices the tessellator wrote, and the geometry shader over them as a list, both counted'
+    + ' on the GPU (test_clip_distance)', async()=>{
+    const { gpu, device, context, divergences } = quadPatches();
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateGeometryShader(triangleGeometryShader(), made), S_OK);
+    context.GSSetShader(made.shader);
+    assert.equal(device.CreatePixelShader(solidPixelShader([0, 1, 0, 1]), made), S_OK);
+    context.PSSetShader(made.shader);
+    context.Draw(3, 0);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(divergences, []);
+    assert.deepEqual(gpu.errors, [], 'the GPU took the frame');
+    assert.equal(device.diagnostics().skipped.stage, 0);
+    const passes = gpu.of('dispatchWorkgroups');
+    assert.deepEqual(passes.map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.replace(/#\d+$/, '')),
+    ['d3d11:vs-patches', 'd3d11:hs', 'd3d11:tessellator', 'd3d11:tessellator-scan',
+        'd3d11:tessellator', 'd3d11:ds-geometry', 'd3d11:gs', 'd3d11:geometry-scan',
+        'd3d11:geometry-list'], 'in the order they run');
+    assert.equal(gpu.count('drawIndexedIndirect'), 1, 'what the geometry shader made');
+    assert.equal(gpu.count('drawIndirect'), 0, 'and no draw of the domain shader');
+    // The tessellator's own count is what both passes stop at.
+    const counted = passes[3].groups[0].descriptor.entries.find((/** @type {any} */ entry)=>
+        entry.binding === 3).resource;
+    /** @param {any} pass @param {number} binding */
+    const bound = (pass, binding)=>pass.groups[1].descriptor.entries.find(
+        (/** @type {any} */ entry)=>entry.binding === binding).resource;
+    assert.equal(bound(passes[5], 7).buffer, counted.buffer);
+    assert.equal(bound(passes[5], 7).offset, counted.offset);
+    assert.equal(bound(passes[6], 6).buffer, counted.buffer);
+    /** @param {any} pass */
+    const code = pass=>gpu.of('createShaderModule').find((/** @type {any} */ call)=>
+        call.module === pass.pipeline.descriptor.compute.module).descriptor.code;
+    assert.match(code(passes[5]), /if \(id\.x >= dsCount\[0\]\) \{ return; \}/);
+    assert.match(code(passes[5]), /let dsVertex = id\.x;/);
+    assert.match(code(passes[6]), /if \(gsPrim >= gsLimit\[0\] \/ 3u\) \{ gsWhole = false; \}/);
+    // Sized by the most the tessellator may write: 3 patches of 3x3 quads.
+    assert.ok(passes[6].grid[0] >= 1);
+    assert.equal(device.diagnostics().geometry.draws, 1);
+});
+
+test('stream output after the tessellator streams the domain shader\'s triangles out, and the'
+    + ' draw of them goes on (test_quad_tessellation)', async()=>{
+    const { gpu, device, context, divergences } = quadPatches();
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateGeometryShaderWithStreamOutput(quadDomainShader(),
+        [{ Stream: 0, SemanticName: 'SV_POSITION', SemanticIndex: 0, StartComponent: 0,
+            ComponentCount: 4, OutputSlot: 0 }], [16], 0, made), S_OK);
+    context.GSSetShader(made.shader);
+    assert.equal(device.CreateBuffer({ ByteWidth: 1024, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.STREAM_OUTPUT, CPUAccessFlags: 0, MiscFlags: 0 }, null, made),
+    S_OK);
+    context.SOSetTargets([made.resource], [0]);
+    context.Draw(3, 0);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(divergences, []);
+    assert.deepEqual(gpu.errors, []);
+    assert.deepEqual(gpu.of('dispatchWorkgroups').map((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.replace(/#\d+$/, '')),
+    ['d3d11:stream-out-set', 'd3d11:vs-patches', 'd3d11:hs', 'd3d11:tessellator',
+        'd3d11:tessellator-scan', 'd3d11:tessellator', 'd3d11:ds-geometry', 'd3d11:gs',
+        'd3d11:geometry-scan', 'd3d11:geometry-list', 'd3d11:stream-out', 'd3d11:stream-out-done',
+        'd3d11:vs-patches', 'd3d11:hs', 'd3d11:tessellator', 'd3d11:tessellator-scan',
+        'd3d11:tessellator']);
+    assert.equal(gpu.count('drawIndirect'), 1, 'the domain shader drawn as without the stage');
 });
 
 test('a draw through the tessellator Direct3D would not draw is skipped and said: one of the'

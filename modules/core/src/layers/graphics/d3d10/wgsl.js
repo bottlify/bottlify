@@ -3000,7 +3000,11 @@ function vertexPullOf(pull, inputs, registers){
  *     vertexPull?: VertexPull, layerPass?: { index: number, count: number },
  *     alphaCoverage?: boolean, sampleCount?: number,
  *     earlyDepth?: { compare: string, multisampled: boolean }, dualSource?: boolean,
- *     viewportPass?: { index: number, count: number } }} [options]  `dualSource`:
+ *     viewportPass?: { index: number, count: number },
+ *     targetScalars?: Readonly<Record<number, string>> }} [options]  `targetScalars`:
+ *     each bound target's scalar (f32, u32 or i32) by location, which its output is
+ *     whatever the shader's signature says: Direct3D writes an output's bits to the
+ *     target as they are (d3d10core.c test_layered_rtv_mismatch). `dualSource`:
  *     the first target is blended by the second output as well (D3D11_BLEND_SRC1_*):
  *     both go to location 0, the second as its second blend source. `earlyDepth`: the
  *     fragment tests itself against the depth buffer, bound read-only at
@@ -3348,15 +3352,19 @@ export function linkProgram(vs, ps, options = {}){
         const value = element.register < ps.outputRegisters
             ? `o${element.register}`
             : `${REG}(0u)`;
-        // An output with no system value -- COLOR0 from a shader compiled for
-        // backwards compatibility (fxc /Gec) -- is the target its register names.
+        // An output with no system value is the target its register names --
+        // COLOR0 from a shader compiled for backwards compatibility (fxc
+        // /Gec), and SV_Target as fxc writes it -- unless its name says depth:
+        // fxc writes SV_Depth with no system value too, and the program
+        // writes oDepth.
+        const name = element.name.toUpperCase();
         if (element.systemValue === SYSTEM_VALUE.TARGET
-            || element.systemValue === SYSTEM_VALUE.UNDEFINED)
+            || (element.systemValue === SYSTEM_VALUE.UNDEFINED && !name.startsWith('SV_DEPTH')))
         {
             const slot = element.systemValue === SYSTEM_VALUE.TARGET
                 ? element.index : element.register;
             targets.push(slot);
-            const scalar = scalarOf(element.componentType);
+            const scalar = options.targetScalars?.[slot] ?? scalarOf(element.componentType);
             // The second output is the first target's second blend source,
             // whatever is bound at the second.
             if (options.dualSource && slot <= 1)
@@ -3373,7 +3381,8 @@ export function linkProgram(vs, ps, options = {}){
             psReturn.push(scalar === 'u32' ? value : `bitcast<vec4<${scalar}>>(${value})`);
             continue;
         }
-        if (element.systemValue === SYSTEM_VALUE.DEPTH)
+        if (element.systemValue === SYSTEM_VALUE.DEPTH
+            || (element.systemValue === SYSTEM_VALUE.UNDEFINED && name === 'SV_DEPTH'))
         {
             psOut.push('    @builtin(frag_depth) depth: f32,');
             psReturn.push('oDepth');
@@ -3884,9 +3893,12 @@ export function passThroughGeometry(vs, vertices){
     };
 }
 
-/** Group 1 of a geometry shader run as compute (`linkGeometry`). */
+/**
+ * Group 1 of a geometry shader run as compute (`linkGeometry`); `limit` only
+ * for one fed by the tessellator, whose positions are counted on the GPU.
+ */
 export const GEOMETRY_BINDING = Object.freeze({
-    inputs: 0, indices: 1, vertices: 2, starts: 3, counts: 4, params: 5,
+    inputs: 0, indices: 1, vertices: 2, starts: 3, counts: 4, params: 5, limit: 6,
 });
 
 /** The topologies whose primitives share vertices, as Direct3D numbers them. */
@@ -3907,11 +3919,17 @@ const STRIP_TOPOLOGIES = Object.freeze([3, 5, 11, 13]);
  * topology, the positions an instance, the index size in bytes (0 for none),
  * the index buffer's byte offset and the first index.
  *
+ * `limited`: the positions are what the tessellator wrote, a list whose
+ * length the GPU holds (`gsLimit`, its first word): the invocations are
+ * sized by the most it may write, and one past the primitives it did write
+ * runs no body and counts nothing.
+ *
  * @param {TranslatedShader} gs
  * @param {GeometryStage} stage
+ * @param {{ limited?: boolean }} [options]
  * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
  */
-export function linkGeometry(gs, stage){
+export function linkGeometry(gs, stage, options = {}){
     const declared = declarations(gs, 0, STAGE.COMPUTE);
     const unsupported = [...gs.unsupported, ...declared.unsupported];
     const vertices = stage.inputVertices;
@@ -3933,6 +3951,8 @@ export function linkGeometry(gs, stage){
         `@group(1) @binding(${GEOMETRY_BINDING.counts}) var<storage, read_write> gsCounts: `
             + 'array<vec4<u32>>;',
         `@group(1) @binding(${GEOMETRY_BINDING.params}) var<uniform> gsParams: GsParams;`,
+        ...(options.limited ? [`@group(1) @binding(${GEOMETRY_BINDING.limit}) var<storage, read>`
+            + ' gsLimit: array<u32>;'] : []),
         `var<private> vgs: array<array<${REG}, ${inputs}>, ${vertices}>;`,
         ...Array.from({ length: outputs }, (_, index)=>`var<private> o${index}: ${REG};`),
         'var<private> primitiveId: u32;',
@@ -3996,6 +4016,8 @@ export function linkGeometry(gs, stage){
         `        gsAt[j] = select(gsPrim * ${vertices}u + j, gsPrim + j, gsStripped);`,
         '        if (gsStripped && gsCutAt(gsAt[j])) { gsWhole = false; }',
         '    }',
+        ...(options.limited ? [`    if (gsPrim >= gsLimit[0] / ${vertices}u) { gsWhole = false; }`]
+            : []),
         ...(vertices === 3 ? [
             '    if (gsWhole && gsParams.topology == 5u) {',
             // The strip's first triangle: after the last cut index, or the first.
@@ -4129,6 +4151,25 @@ const floatBits = value=>`bitcast<u32>(${value})`;
  * @returns {{ bytes: number, register: (words: string[]) => string } | null}
  */
 export function vertexFetch(format){
+    if (format === 'rg11b10ufloat')
+    {
+        // Floats with no sign: five bits of exponent biased by 15 over six
+        // mantissa bits (red, green) or five (blue); exponent 31 is infinity
+        // or NaN, exponent 0 a denormal.
+        /** @param {string} word @param {number} shift @param {number} mantissa */
+        const small = (word, shift, mantissa)=>{
+            const e = `extractBits(${word}, ${shift + mantissa}u, 5u)`;
+            const m = `extractBits(${word}, ${shift}u, ${mantissa}u)`;
+            const placed = `(${m} << ${23 - mantissa}u)`;
+            return `select(select(((${e} + 112u) << 23u) | ${placed}, 0x7f800000u | ${placed}, `
+                + `${e} == 31u), bitcast<u32>(f32(${m}) * ${2 ** -(14 + mantissa)}), ${e} == 0u)`;
+        };
+        return {
+            bytes: 4,
+            register: ([word])=>`${REG}(${small(word, 0, 6)}, ${small(word, 11, 6)}, `
+                + `${small(word, 22, 5)}, 0x3f800000u)`,
+        };
+    }
     if (format === 'unorm10-10-10-2')
     {
         return {
@@ -4353,6 +4394,27 @@ export const DOMAIN_BINDING = Object.freeze({
  * @returns {LinkedProgram}
  */
 export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
+    const load = domainLoad(ds, dsContainer, hull, stage, 2);
+    return linkProgram(ds, ps, { ...options, vertexLoad: {
+        text: load.text,
+        params: '@builtin(vertex_index) dsVertex: u32',
+        load: load.load,
+    } });
+}
+
+/**
+ * What a domain shader reads for the tessellator's index `dsVertex`: its
+ * patch, domain point, control points and patch constants (`linkDomain`),
+ * the declarations in group `group`.
+ *
+ * @param {TranslatedShader} ds
+ * @param {import('./dxbc.js').DxbcContainer} dsContainer
+ * @param {import('./dxbc.js').DxbcContainer} hull
+ * @param {LinkedHull['stage']} stage
+ * @param {number} group
+ * @returns {{ text: string[], load: string[] }}
+ */
+function domainLoad(ds, dsContainer, hull, stage, group){
     /** @param {import('./dxbc.js').DxbcContainer} container */
     const constantsOf = container=>(container.chunks.has('PCSG')
         ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : []);
@@ -4362,25 +4424,25 @@ export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
     const constants = constantsOf(dsContainer);
     const points = stage.outputPoints;
     const third = stage.domain === 'tri' ? '1.0 - dsAt.x - dsAt.y' : '0.0';
-    const linked = linkProgram(ds, ps, { ...options, vertexLoad: {
+    return {
         text: [
-            `@group(2) @binding(${DOMAIN_BINDING.points}) var<storage, read> dsPoints: `
+            `@group(${group}) @binding(${DOMAIN_BINDING.points}) var<storage, read> dsPoints: `
                 + `array<${REG}>;`,
-            `@group(2) @binding(${DOMAIN_BINDING.constants}) var<storage, read> dsConstants: `
-                + `array<${REG}>;`,
-            `@group(2) @binding(${DOMAIN_BINDING.domain}) var<storage, read> dsUv: `
+            `@group(${group}) @binding(${DOMAIN_BINDING.constants}) var<storage, read>`
+                + ` dsConstants: array<${REG}>;`,
+            `@group(${group}) @binding(${DOMAIN_BINDING.domain}) var<storage, read> dsUv: `
                 + 'array<vec2<f32>>;',
-            `@group(2) @binding(${DOMAIN_BINDING.indices}) var<storage, read> dsIndices: `
+            `@group(${group}) @binding(${DOMAIN_BINDING.indices}) var<storage, read> dsIndices: `
                 + 'array<u32>;',
-            `@group(2) @binding(${DOMAIN_BINDING.offsets}) var<storage, read> dsOffsets: `
+            `@group(${group}) @binding(${DOMAIN_BINDING.offsets}) var<storage, read> dsOffsets: `
                 + 'array<vec2<u32>>;',
-            `@group(2) @binding(${DOMAIN_BINDING.params}) var<uniform> dsParams: vec4<u32>;`,
+            `@group(${group}) @binding(${DOMAIN_BINDING.params}) var<uniform> dsParams:`
+                + ' vec4<u32>;',
             `var<private> vicp: array<array<${REG}, ${inputs}>, ${points}>;`,
             `var<private> vpc: array<${REG}, ${registersOf(constants)}>;`,
             `var<private> dsDomain: ${REG};`,
             'var<private> primitiveId: u32;',
         ],
-        params: '@builtin(vertex_index) dsVertex: u32',
         load: [
             // The last patch whose indices start at or before this one: a
             // patch that made none starts where the next one does.
@@ -4406,6 +4468,65 @@ export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
                 register=>`dsConstants[dsPatch * ${stage.constantRegisters}u + ${register}u]`,
                 register=>`    vpc[${register}]`),
         ],
-    } });
-    return linked;
+    };
+}
+
+/**
+ * Group 1 of a domain shader run as compute over the tessellator's indices
+ * (`linkDomainPositions`): what the draw would read, where the registers go,
+ * and the tessellator's arguments, whose first word is how many indices it
+ * wrote.
+ */
+export const DOMAIN_POSITION_BINDING = Object.freeze({ ...DOMAIN_BINDING, out: 6, count: 7 });
+
+/**
+ * A domain shader as one compute program, one invocation an index the
+ * tessellator wrote, for a geometry shader or stream output after it: the
+ * index read as the draw of the domain shader reads it (`linkDomain`), the
+ * body run, and what it wrote stored (`dsOut`) at the registers the next
+ * stage reads it from, matched by semantic, at the index's position. Past
+ * the indices written (`dsCount`) nothing is.
+ *
+ * @param {TranslatedShader} ds
+ * @param {import('./dxbc.js').DxbcContainer} dsContainer
+ * @param {import('./dxbc.js').DxbcContainer} hull
+ * @param {LinkedHull['stage']} stage
+ * @param {import('./dxbc.js').SignatureElement[]} inputs  The next stage's inputs.
+ * @param {number} registers  Its input registers a vertex.
+ * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
+ */
+export function linkDomainPositions(ds, dsContainer, hull, stage, inputs, registers){
+    const declared = declarations(ds, 0, STAGE.COMPUTE);
+    const load = domainLoad(ds, dsContainer, hull, stage, 1);
+    const out = Math.max(1, registers);
+    const code = [
+        ...declared.text,
+        ...load.text,
+        `@group(1) @binding(${DOMAIN_POSITION_BINDING.out}) var<storage, read_write> dsOut: `
+            + `array<${REG}>;`,
+        `@group(1) @binding(${DOMAIN_POSITION_BINDING.count}) var<storage, read> dsCount: `
+            + 'array<u32>;',
+        ...Array.from({ length: ds.outputRegisters }, (_, index)=>
+            `var<private> o${index}: ${REG};`),
+        'fn dsBody() {',
+        ...Array.from({ length: ds.temps }, (_, index)=>`    var r${index}: ${REG};`),
+        ...ds.indexableTemps.map(temp=>`    var x${temp.index}: array<${REG}, ${temp.size}>;`),
+        ...bodyText(ds, null),
+        '}',
+        '@compute @workgroup_size(64)',
+        'fn domainPositions(@builtin(global_invocation_id) id: vec3<u32>) {',
+        '    if (id.x >= dsCount[0]) { return; }',
+        '    let dsVertex = id.x;',
+        ...load.load,
+        '    dsBody();',
+        `    var next: array<${REG}, ${out}>;`,
+        ...copyBySemantic(ds.outputs.filter(element=>element.register < ds.outputRegisters),
+            inputs, register=>`o${register}`, register=>`    next[${register}]`),
+        `    for (var reg = 0u; reg < ${out}u; reg++) {`,
+        `        dsOut[id.x * ${out}u + reg] = next[reg];`,
+        '    }',
+        '}',
+    ].join('\n');
+    return { code, entries: declared.entries,
+        unsupported: [...new Set([...ds.unsupported, ...declared.unsupported])] };
 }

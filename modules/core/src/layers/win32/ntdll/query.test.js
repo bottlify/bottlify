@@ -373,9 +373,47 @@ test('NtQueryObject answers the basic class for a handle that names something', 
         STATUS.INFO_LENGTH_MISMATCH);
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38, 'the size needed is still told');
     assert.equal(fns.NtQueryObject.handler([0x48, 0, BUFFER, 0x38, 0]), STATUS.INVALID_HANDLE);
-    assert.equal(fns.NtQueryObject.handler([0x44, 2, BUFFER, 0x100, 0]),
+    assert.equal(fns.NtQueryObject.handler([0x44, 4, BUFFER, 0x100, 0]),
         STATUS.INVALID_INFO_CLASS);
-    assert.ok(said.some(line=>line.includes('class 2')), 'a refused class is reported');
+    assert.ok(said.some(line=>line.includes('class 4')), 'a refused class is reported');
+});
+
+test('NtQueryObject names the type of the object a handle names (test_shared_resource,'
+    + ' d3d11.c: DxgkSharedResource)', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const host = fakeHost();
+    /** @type {Record<number, string>} */
+    const kinds = { 0x44: 'event', 0x48: 'dxgk-shared-resource', 0x4c: 'find', 0x50: 'mutex' };
+    const fns = createQueryFunctions({
+        ...host,
+        handleType: handle=>kinds[handle] ?? null,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    /** @param {number} handle */
+    const typeOf = handle=>{
+        const status = fns.NtQueryObject.handler([handle, 2, BUFFER, 0x100, RETURN_LENGTH]);
+        if (status !== STATUS.SUCCESS)
+        {
+            return status;
+        }
+        const length = host.view.getUint16(BUFFER, true);
+        const text = host.view.getUint32(BUFFER + 4, true);
+        assert.equal(text, BUFFER + 0x60, 'the name follows the structure');
+        assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x60 + length + 2);
+        return String.fromCharCode(...new Uint16Array(
+            host.bytes.slice(text, text + length).buffer));
+    };
+    assert.equal(typeOf(0x44), 'Event');
+    assert.equal(typeOf(0x48), 'DxgkSharedResource');
+    assert.equal(typeOf(0x50), 'Mutant');
+    assert.equal(typeOf(0xffffffff), 'Process', 'the current process');
+    assert.equal(typeOf(0x4c), STATUS.INVALID_HANDLE, 'a find handle is no kernel object');
+    assert.ok(said.some(line=>line.includes('find handle')), said.join());
+    assert.equal(typeOf(0x54), STATUS.INVALID_HANDLE, 'a handle that names nothing');
+    assert.equal(fns.NtQueryObject.handler([0x44, 2, BUFFER, 0x60, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH, 'no room for the name');
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x60 + 12, 'the size needed told');
 });
 
 test('the debug-help queries are refused as unsupported and say so', ()=>{

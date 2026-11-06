@@ -211,11 +211,13 @@ test('a partial lock reports the pixel it names, at an unchanged pitch', ()=>{
     assertFullyReleased(device);
 });
 
-test('a malformed lock rectangle is refused by this version, and the record left alone', ()=>{
+test('a malformed lock rectangle is refused in video memory, and the record left alone; in'
+    + ' other pools it is taken (test_surface_blocks, test_lockrect_invalid)', ()=>{
     /**
      * Shapes the later runtime rejects: empty, inverted, off either edge. A
-     * Direct3D 9 device refuses them before the lock is taken, so the caller's
-     * record keeps whatever it held and no unlock is owed.
+     * Direct3D 9 device refuses them in video memory before the lock is
+     * taken, so the caller's record keeps whatever it held and no unlock is
+     * owed; system, scratch and managed memory take them, as Windows XP did.
      */
     const malformed = [
         { left: 60, top: 60, right: 60, bottom: 68 },
@@ -229,9 +231,23 @@ test('a malformed lock rectangle is refused by this version, and the record left
     ];
     const device = createDevice();
     /** @type {{ surface?: any }} */
+    const scratch = {};
+    assert.equal(device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8,
+        D3DPOOL.SCRATCH, scratch), D3D_OK);
+    for (const rect of malformed)
+    {
+        const locked = { pBits: 7, Pitch: 7 };
+        assert.equal(scratch.surface.LockRect(locked, rect, 0), D3D_OK);
+        assert.equal(locked.pBits - scratch.surface.base,
+            rect.top * PITCH + rect.left * BYTES_PER_PIXEL, 'located as it was given');
+        assert.equal(scratch.surface.UnlockRect(), D3D_OK);
+    }
+    scratch.surface.release();
+
+    /** @type {{ surface?: any }} */
     const out = {};
     assert.equal(
-        device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out),
+        device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out),
         D3D_OK);
 
     for (const rect of malformed)
@@ -362,6 +378,11 @@ test('GetDC answers for the formats GDI draws into, and refuses the rest untouch
             {
                 assert.equal(shown.format, layout);
             }
+            // The section says no image size, and a 16-bit one its masks.
+            assert.deepEqual([shown.sizeImage, shown.compression, shown.bitfields],
+                bitCount === 16
+                    ? [0, 3, layout === '565' ? [0xf800, 0x07e0, 0x001f] : [0x7c00, 0x03e0, 0x001f]]
+                    : [0, undefined, undefined]);
             assert.equal(surface.ReleaseDC(out.dc, gdi), D3D_OK);
             assert.equal(gdi.deleted[gdi.deleted.length - 1], out.dc);
         }
@@ -649,8 +670,11 @@ test("packColour gives a pixel of a format's width, listed layout or not", ()=>{
     assert.equal(packColour(D3DFMT.A2R10G10B10, 0xff123456).length, 4);
 });
 
-test('packColour gives a wide format each channel as its fraction of 255, red first', ()=>{
-    // Red 255, green 0, blue 51 (0.2), alpha 128.
+test('packColour gives a wide format each channel as its fraction of 255, red first, in the'
+    + ' format\'s own precision', ()=>{
+    // Red 255, green 0, blue 51 (0.2), alpha 128: a 32-bit float keeps the
+    // fraction whole and a 16-bit one spreads the byte over both of its bytes
+    // (Wine's d3d9 test_colorfill).
     const colour = 0x80ff0033;
     const half = (/** @type {Uint8Array} */ bytes)=>[...new Uint16Array(bytes.buffer)];
     const float = (/** @type {Uint8Array} */ bytes)=>[...new Float32Array(bytes.buffer)];
@@ -659,12 +683,11 @@ test('packColour gives a wide format each channel as its fraction of 255, red fi
     assert.deepEqual(half(packColour(D3DFMT.G16R16F, colour)), [0x3c00, 0]);
     assert.deepEqual(half(packColour(D3DFMT.R16F, colour)), [0x3c00]);
     assert.deepEqual(float(packColour(D3DFMT.A32B32G32R32F, colour)),
-        [1, 0, fromHalf(toHalf(0.2)), fromHalf(toHalf(128 / 255))]);
+        [1, 0, Math.fround(51 / 255), Math.fround(128 / 255)]);
     assert.deepEqual(float(packColour(D3DFMT.G32R32F, colour)), [1, 0]);
     assert.deepEqual(float(packColour(D3DFMT.R32F, colour)), [1]);
-    const fraction = (/** @type {number} */ value)=>Math.round(fromHalf(toHalf(value)) * 0xffff);
     assert.deepEqual(half(packColour(D3DFMT.A16B16G16R16, colour)),
-        [0xffff, 0, fraction(0.2), fraction(128 / 255)]);
+        [0xffff, 0, 0x3333, 0x8080]);
     assert.deepEqual(half(packColour(D3DFMT.G16R16, colour)), [0xffff, 0]);
 });
 

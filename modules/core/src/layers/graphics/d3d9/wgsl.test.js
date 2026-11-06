@@ -71,6 +71,15 @@ const pixelBody = tokens=>{
 const assertLine = (wgsl, line)=>assert.ok(wgsl.split('\n').some(one=>one.trim() === line),
     `expected the line\n    ${line}\nin\n${wgsl}`);
 
+/**
+ * A 1.x stage's coordinates divided as it projects, a zero divisor reading
+ * at the origin.
+ *
+ * @param {number} stage @param {string} by
+ */
+const projected = (stage, by)=>`(select(in.t${stage} / in.t${stage}.${by}, vec4f(0.0),`
+    + ` in.t${stage}.${by} == 0.0))`;
+
 test('the arithmetic instructions become the statements they mean', ()=>{
     const r = REGISTER.TEMP;
     const c = REGISTER.CONST;
@@ -714,8 +723,8 @@ test('a 1.x read samples the texture bound at its stage, divided as the stage pr
         { stageDimensions: ['cube', '2d', '3d'], projectedBy: ['', 'w', 'z'] });
     assert.equal(shader.error, null);
     assertLine(shader.wgsl, 't0 = textureSample(tex0, samp0, in.t0.xyz);');
-    assertLine(shader.wgsl, 't1 = textureSample(tex1, samp1, (in.t1 / in.t1.w).xy);');
-    assertLine(shader.wgsl, 't2 = textureSample(tex2, samp2, (in.t2 / in.t2.z).xyz);');
+    assertLine(shader.wgsl, `t1 = textureSample(tex1, samp1, ${projected(1, 'w')}.xy);`);
+    assertLine(shader.wgsl, `t2 = textureSample(tex2, samp2, ${projected(2, 'z')}.xyz);`);
     assert.deepEqual(shader.samplers, [
         { index: 0, type: 'texture_cube<f32>' },
         { index: 1, type: 'texture_2d<f32>' },
@@ -753,9 +762,9 @@ test('texbem and texbeml move a stage\'s coordinates by its bump matrix', ()=>{
         END_TOKEN];
     const bumped = translateShader(parseShader(tokens(0x00000043)), { projectedBy: ['', 'w'] });
     assert.equal(bumped.error, null);
-    assertLine(bumped.wgsl, 't1 = textureSample(tex1, samp1, (vec4f((in.t1 / in.t1.w).xy'
+    assertLine(bumped.wgsl, `t1 = textureSample(tex1, samp1, (vec4f(${projected(1, 'w')}.xy`
         + ' + vec2f(dot(t0.xy, c[_bump + 2].xz), dot(t0.xy, c[_bump + 2].yw)),'
-        + ' (in.t1 / in.t1.w).zw)).xy);');
+        + ` ${projected(1, 'w')}.zw)).xy);`);
     assertLine(bumped.wgsl, 'const _bump = 0;');
     assert.equal(bumped.bumpRegister, 0, 'after the none it reads');
     assert.equal(bumped.constants, 16, 'eight stages of two registers');
@@ -1152,7 +1161,12 @@ test('a vertex shader carries fog to the pixel stage: its oFog, or all fog witho
         `out.oFog = vec4f(out.oFog.x, c[${tableWrites.fogRegister}].rgb);`);
     assertLine(tableWrites.wgsl, `out.o${FOG_RANGE_LOCATION} = vec4f(c[${
         /** @type {number} */ (tableWrites.fogRegister) + 1}].xyz, 2.0);`);
-    assertLine(table.wgsl, `out.oFog = vec4f(0.0, c[${table.fogRegister}].rgb);`);
+    // Without one it carries its z times w for the depth, which the pixel
+    // stage takes back by the position's 1/w.
+    assertLine(table.wgsl,
+        `out.oFog = vec4f(out.oPos.z * out.oPos.w, c[${table.fogRegister}].rgb);`);
+    assert.equal(table.fogOver, undefined);
+    assert.equal(tableWrites.fogOver, true);
     // Later drivers take it over the depth all the same.
     const later = translateShader(shader([
         op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 1, 0x1), src(REGISTER.CONST, 0),
@@ -1220,30 +1234,32 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         [0, { components: 3, scalar: 'f32', bgra: false }],
         [1, { components: 3, scalar: 'f32', bgra: false }],
         [2, { components: 2, scalar: 'f32', bgra: false }],
-    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true });
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true,
+        carried: [{ set: 0, transform: 4 }, { set: 1, transform: 0 }, null, null,
+            { set: 4, transform: 4 }] });
     assert.equal(generated.error, null);
     const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
     const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
     const t4 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 4);
     assert.deepEqual(generated.outputs, [t0, t1, t4]);
-    // A fifth set goes through the fifth stage's own rows: a terrain's
+    // A fifth set goes through the fifth stage's own columns: a terrain's
     // blend map is that far along the cascade, and a coordinate left raw
     // there moved with the camera.
-    assertLine(generated.wgsl, `out.o${t4} = vec4f(dot(c[25], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[26], vec4f(cameraPosition, 1.0)), dot(c[27], vec4f(cameraPosition, 1.0)),'
-        + ' dot(c[28], vec4f(cameraPosition, 1.0)));');
+    const through = (/** @type {number} */ index, /** @type {number} */ from)=>
+        `vec4f(${[0, 1, 2, 3].map(axis=>`dot(c[${from + axis}], vec4f(generated${index}.xyz, 1.0))`)
+            .join(', ')})`;
+    assertLine(generated.wgsl, `out.o${t4} = ${through(4, 25)};`);
     assertLine(generated.wgsl, 'let worldView = mat4x4f(c[5], c[6], c[7], c[8]);');
     assertLine(generated.wgsl,
         'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
     assertLine(generated.wgsl,
         'let cameraNormal = d3dNrm((mat4x4f(c[43], c[44], c[45], c[46])'
             + ' * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
-    assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
-        + ' dot(c[12], vec4f(cameraPosition, 1.0)));');
-    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[13], vec4f(cameraNormal, 1.0)),`
-        + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
-        + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
+    assertLine(generated.wgsl, 'let generated0 = vec4f(cameraPosition, 0.0);');
+    assertLine(generated.wgsl, `out.o${t0} = ${through(0, 9)};`);
+    // With no count in the flags, the normal goes on as made, w zero.
+    assertLine(generated.wgsl, 'let generated1 = vec4f(cameraNormal, 0.0);');
+    assertLine(generated.wgsl, `out.o${t1} = generated1;`);
     assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
 
     // With D3DRS_NORMALIZENORMALS off -- its default -- the camera-space
@@ -1323,8 +1339,9 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assert.ok(!specular.wgsl.includes('fogFactorOf'));
 
-    // Table fog is the pixel's: the stage carries the colour, and the curve's
-    // range with the affine flag beside it, flat, for the pixel shader.
+    // Table fog is the pixel's: the stage carries its z times w for the
+    // depth, the colour, and the curve's range with the affine flag beside
+    // it, flat, for the pixel shader.
     const table = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
     ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
@@ -1333,7 +1350,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(table.wgsl, `@location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
         + ` o${FOG_RANGE_LOCATION}: vec4f,`);
     assertLine(table.wgsl, `out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
-    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(0.0,`
+    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(out.oPos.z * out.oPos.w,`
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
 });
 
@@ -1394,7 +1411,7 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     assertLine(table.wgsl, 'return clamp(exp(-fogRange.z * dist), 0.0, 1.0);');
     assertLine(table.wgsl, 'fogRange = in.fogRange;');
     assertLine(table.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(fogFactorOf('
-        + 'select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0), in.fog.x,'
+        + 'select(select(d3dRcp(in.vPos.w), in.fog.x * in.vPos.w, fogRange.w != 0.0), in.fog.x,'
         + ' fogRange.w > 1.5)), 0.0, 1.0)), oC0.a);');
 });
 

@@ -66,8 +66,8 @@ import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import { changedSpans, createCompared, pageMarksOf, writtenSpans }
     from '../webgpu/internal/changed.js';
 import {
-    CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
-    vertexTailOf,
+    CLIP_LOCATION, TRANSFORM_PROJECTED, clipStateOf, fixedFragmentStage, generates, generationOf,
+    readsNormal, tailOf, coordinateTransformOf, vertexTailOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 
@@ -211,33 +211,6 @@ const variantsKey = variants=>Array.from(variants, variant=>(variant
         + `/${variant.border ? `${variant.border.mask}:${variant.border.colour}` : ''}`
     : '')).join(',');
 
-/**
- * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
- * D3DTTFF_COUNTn: the last of the count, or w with no count; one coordinate
- * has nothing to divide by.
- *
- * @type {Readonly<Record<number, string>>}
- */
-const PROJECTED_BY = Object.freeze({ 0: 'w', 2: 'y', 3: 'z', 4: 'w' });
-
-/** D3DTTFF_COUNTn: how many coordinates go through the matrix; PROJECTED divides by the last. */
-const TTFF_COUNT_MASK = 0xff;
-const TTFF_PROJECTED = 0x100;
-const TTFF_COUNT2 = 2;
-const TTFF_COUNT4 = 4;
-
-/**
- * Whether a stage's transform flags are ones the sampler applies: two to
- * four coordinates, with a projective divide only where the coordinate is
- * generated, since a carried set is two components with nothing to divide by.
- *
- * @param {number} flags @param {boolean} generated
- */
-const transformApplies = (flags, generated)=>{
-    const count = flags & TTFF_COUNT_MASK;
-    return count >= TTFF_COUNT2 && count <= TTFF_COUNT4
-        && ((flags & TTFF_PROJECTED) === 0 || generated);
-};
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
 const TEXTURE_DUMP_LIMIT = 96;
@@ -911,7 +884,6 @@ const DEPTH_FORMAT = Object.freeze({
     [D3DFMT.D16]: 'depth16unorm',
     [D3DFMT.D24X8]: 'depth24plus',
     [D3DFMT.D24S8]: 'depth24plus-stencil8',
-    [D3DFMT.D32]: 'depth32float',
 });
 
 /**
@@ -2029,10 +2001,9 @@ export function uniformsOf(model, lighting, take, mips = true, tail = undefined)
 }
 
 /**
- * The transform of each sampled stage, when the stage's flags are ones the
- * sampler applies (`transformApplies`). Any other -- one coordinate, a
- * projective divide of a carried set -- is not applied and is reported per
- * draw.
+ * The transform of each stage whose flags name a count the matrix runs over
+ * (`coordinateTransformOf`), by columns, as the fixed vertex stage reads it; the
+ * identity for the rest, which no stage reads.
  *
  * @param {RenderModel} model
  */
@@ -2041,11 +2012,9 @@ const stageTransforms = model=>{
     const transforms = [];
     for (let index = 0; index < TRANSFORM_STAGES; index++)
     {
-        const states = model.stageStates(index);
-        const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        const flags = model.stageStates(index)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
         const matrix = model.transforms.get(D3DTS.TEXTURE0 + index);
-        const generated = generates(states?.get(D3DTSS.TEXCOORDINDEX) ?? 0);
-        transforms.push(transformApplies(flags, generated) && matrix
+        transforms.push((coordinateTransformOf(flags) & 0xff) !== 0 && matrix
             ? PLANAR_ROWS.map(at=>matrix[at])
             : PLANAR_IDENTITY);
     }
@@ -2321,12 +2290,9 @@ export function stageCascade(model, layout, how = {}){
             ...bumpOf(get),
             ...resultOf(get),
             texCoordIndex,
-            // A projected generated coordinate is divided by its third or
-            // fourth component at the sample, which is the count's last.
-            projected: generates(texCoordIndex) && (transformFlags & TTFF_PROJECTED) !== 0
-                && (transformFlags & TTFF_COUNT_MASK) >= 3
-                ? Math.min(transformFlags & TTFF_COUNT_MASK, 4)
-                : 0,
+            // The count the fixed vertex stage runs the stage's matrix over,
+            // and whether the pixel divides by w (`processedCoordinate`).
+            transform: coordinateTransformOf(transformFlags),
         };
         const texture = model.textures.get(stage) ?? null;
         if (!texture)
@@ -3290,11 +3256,6 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const tableFogOverDepth = options.driverRules === 'current';
-    // Under a vertex shader a 1.0 to 1.3 pixel shader's D3DTTFF_PROJECTED
-    // divides by the coordinate's w whatever count the flags name, as the
-    // drivers of that generation did (decisions.md A44); later drivers and
-    // Wine divide by the count's last component.
-    const projectByCount = options.driverRules === 'current';
     // A pre-transformed vertex with a negative RHW is clipped behind the eye
     // in every draw, as Wine takes the RHW back as w; the drivers of the
     // fixed-function era drew it, and only the runtime's clipping of a
@@ -4496,19 +4457,6 @@ export function createRenderer(options){
     };
 
     /**
-     * Whether a stage's transform asks for what the sampler does not do:
-     * one coordinate, or a projective divide of a carried set.
-     *
-     * @param {RenderModel} model @param {number} stage
-     */
-    const transformMoves = (model, stage)=>{
-        const states = model.stageStates(stage);
-        const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
-        return flags !== 0
-            && !transformApplies(flags, generates(states?.get(D3DTSS.TEXCOORDINDEX) ?? 0));
-    };
-
-    /**
      * A material as diffuse, ambient and emissive colours, one short clause.
      *
      * @param {Material | undefined} material
@@ -5264,9 +5212,9 @@ export function createRenderer(options){
     };
 
     /**
-     * Says once that a stage asked for coordinates this engine does not
-     * generate. The set it names is used regardless, which is the coordinates
-     * the vertex carried rather than the ones the program asked to be computed.
+     * Says once that a stage asked for a generation mode Direct3D does not
+     * define. The set it names is used regardless, which is the coordinates
+     * the vertex carried.
      *
      * @param {import('../webgpu/internal/pipeline.js').StageKey[]} stages
      */
@@ -5279,40 +5227,9 @@ export function createRenderer(options){
             && !generates(stage.texCoordIndex)))
         {
             divergence('Direct3D 8',
-                'a sphere-map texture coordinate generation is accepted and not applied'
-                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_SPHEREMAP): the set named in the'
-                + ' low bits is sampled as the vertex carries it');
-        }
-    };
-
-    /**
-     * Says once that a stage asked for a texture transform this engine does
-     * not do: three or four coordinates, or a projected divide.
-     *
-     * The state is accepted -- refusing SetTransform or the stage state would
-     * change what a program does -- and then not acted on, which is the defect
-     * class that shows up as a picture rather than an error. Reported per draw
-     * because that is where it is observable; the reporter deduplicates.
-     *
-     * @param {RenderModel} model
-     * @param {number} stages  How many the cascade runs.
-     */
-    const reportTextureTransform = (model, stages)=>{
-        if (!divergence)
-        {
-            return;
-        }
-        for (let stage = 0; stage < stages; stage++)
-        {
-            if (transformMoves(model, stage))
-            {
-                divergence('Direct3D 8',
-                    'a texture transform of one coordinate, or a projected one'
-                    + ' over a set the vertex carries, is accepted and not applied'
-                    + ' (D3DTSS_TEXTURETRANSFORMFLAGS, D3DTS_TEXTURE0..7):'
-                    + ' coordinates are sampled as the vertex carries them');
-                return;
-            }
+                'a texture coordinate generation mode past D3DTSS_TCI_SPHEREMAP is accepted'
+                + ' and not applied (D3DTSS_TEXCOORDINDEX): the set named in the low bits is'
+                + ' sampled as the vertex carries it');
         }
     };
 
@@ -6918,16 +6835,16 @@ export function createRenderer(options){
         const stageDimensions = [];
         /** @type {string[]} */
         const projectedBy = [];
-        const shaded = Boolean(program.vertex) && !projectByCount;
         for (let stage = 0; stage < LEGACY_STAGES; stage++)
         {
             stageDimensions.push(textureDimensionOf(model.textures.get(stage)));
             const flags = version.minor >= 4
                 ? 0
                 : model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
-            projectedBy.push((flags & TTFF_PROJECTED) === 0
-                ? ''
-                : shaded ? 'w' : PROJECTED_BY[flags & 0xff] ?? '');
+            // By w whatever the count: the fixed vertex stage puts the
+            // count's last component there, and a vertex shader's w is its
+            // own (decisions.md A44, Wine's d3d9 test_texture_transform_flags).
+            projectedBy.push((flags & TRANSFORM_PROJECTED) === 0 ? '' : 'w');
         }
         const stages = `${stageDimensions.join(',')}|${projectedBy.join(',')}`;
         return {
@@ -7110,7 +7027,7 @@ export function createRenderer(options){
         // Where the made vertex stage takes each coordinate from, which the
         // pipeline's key has to say: its state names no stage of a shader draw.
         const hybridKey = program.vertex ? '' : `|g${generated.join(',')}|c${carried.map(
-            source=>(source ? `${source.set}${source.transformed ? 't' : ''}` : '')).join(',')}`;
+            source=>(source ? `${source.set}t${source.transform}` : '')).join(',')}`;
         // The fog varyings a vertex shader's translation writes itself, below.
         const fogCarried = program.vertex && fog.source !== FOG_SOURCE.NONE
             ? [varyingLocation(D3DDECLUSAGE.FOG, 0), FOG_RANGE_LOCATION] : [];
@@ -7367,16 +7284,22 @@ export function createRenderer(options){
                 stage.texCoordIndex & COORD_SET_MASK)))]
             : [];
         const planes = clipStateOf(clippingOf(model, { clipDistances }));
+        // Table fog over the depth needs the shader's z beside its oFog: the
+        // translation carries both as it does for a pixel shader.
+        const table = fogOf(model, fogApplied).source === FOG_SOURCE.TABLE;
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
         const vertex = translationOf(/** @type {object} */ (program.vertexShader),
             `vs:${shapes}${flat ? '|flat' : ''}${points
                 ? `|p${points.sprite ? 's' : ''}w${spriteSets.join(',')}` : ''}`
-                + (planes ? `|k${planes.count}${planes.distances ? 'd' : 'v'}` : ''),
+                + (planes ? `|k${planes.count}${planes.distances ? 'd' : 'v'}` : '')
+                + (table ? `|f${FOG_SOURCE.TABLE}${tableFogOverDepth ? '|zfog' : ''}` : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                 { inputs: layout.shapes, flatColours: flat,
                     ...(points ? { points, alsoWrite: spriteSets } : {}),
-                    ...(planes ? { clip: planes } : {}) }));
+                    ...(planes ? { clip: planes } : {}),
+                    ...(table ? { fogSource: FOG_SOURCE.TABLE } : {}),
+                    ...(table && tableFogOverDepth ? { tableFogOverDepth } : {}) }));
         if (vertex.error)
         {
             skip('program');
@@ -7406,7 +7329,8 @@ export function createRenderer(options){
             vertexShader: program.vertexId,
             pixelShader: -1,
         };
-        const pixel = fixedFragmentStage(state, vertex.outputs, { tableFogOverDepth });
+        const pixel = fixedFragmentStage(state, vertex.outputs,
+            { tableOverFog: vertex.fogOver === true });
         counters.prepared.built++;
         reportWrap(model);
         return {
@@ -7483,7 +7407,7 @@ export function createRenderer(options){
      * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean,
      *     points?: import('../webgpu/internal/pipeline.js').PointState,
      *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
-     *     carried?: ({ set: number, transformed: boolean } | null)[],
+     *     carried?: ({ set: number, transform: number } | null)[],
      *     clipsBehindEye?: boolean }} shading
      *     See `fixedVertexStage`.
      */
@@ -7524,18 +7448,17 @@ export function createRenderer(options){
     };
 
     /**
-     * Per coordinate set a pixel shader reads, where the fixed vertex stage
-     * takes the stage of that number's coordinates from when it is not the
-     * vertex's set of that number as it stands: the set the stage's
-     * TEXCOORDINDEX names, and whether its texture transform applies. Null
-     * for a set carried through as it is, and for a generated one, which
-     * `hybridGeneration` answers for. A pixel shader reads its stages'
-     * coordinates whatever their COLOROP says.
+     * Per coordinate set a pixel shader reads, how the fixed vertex stage
+     * makes the stage of that number's coordinate: from the set the stage's
+     * TEXCOORDINDEX names, or the coordinate it generates, through what its
+     * transform flags ask (`coordinateTransformOf`). Null for a set the pixel shader
+     * does not read. A pixel shader reads its stages' coordinates whatever
+     * their COLOROP says.
      *
      * @param {RenderModel} model @param {readonly number[]} reads  the pixel stage's varyings
      */
     const hybridCarried = (model, reads)=>{
-        /** @type {({ set: number, transformed: boolean } | null)[]} */
+        /** @type {({ set: number, transform: number } | null)[]} */
         const carried = [];
         for (let stage = 0; stage < TRANSFORM_STAGES; stage++)
         {
@@ -7546,13 +7469,10 @@ export function createRenderer(options){
             }
             const states = model.stageStates(stage);
             const index = states?.get(D3DTSS.TEXCOORDINDEX) ?? 0;
-            const set = index & COORD_SET_MASK;
             // By the flags alone: the pieces are kept by the stage states,
             // not the transforms, and a matrix never set is the identity.
-            const transformed = !generates(index)
-                && transformApplies(states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0, false);
-            carried.push(!generates(index) && (set !== stage || transformed)
-                ? { set, transformed } : null);
+            carried.push({ set: index & COORD_SET_MASK,
+                transform: coordinateTransformOf(states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0) });
         }
         while (carried.length > 0 && carried[carried.length - 1] === null)
         {
@@ -7586,12 +7506,11 @@ export function createRenderer(options){
             // What the fixed vertex stage reads for the same: the colour,
             // then the curve's range, as `hybridVertexBlocks` writes them.
             // A curve the shader's oFog does not run (decisions.md A43) runs
-            // over the depth: by the drivers of the shader-model-1 and -2
-            // generations, z or w as the fixed projection says, as the fixed
-            // function's -- a program of theirs sets a range in eye units
-            // for its shader draws and leaves the projection set for its
-            // fixed ones --, and by later ones and Wine's fog rules (its
-            // fog_with_shader_test) over z, whatever the projection.
+            // over the depth, z or w as the fixed projection says, as the
+            // fixed function's: a program sets a range in eye units for its
+            // shader draws and leaves the projection set for its fixed ones,
+            // and Windows takes w through a shader under a perspective
+            // projection (Wine's d3d9 test_fog).
             const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
             const fogColour = colorToFloats(rs('FOGCOLOR'));
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
@@ -7600,7 +7519,7 @@ export function createRenderer(options){
                 dwordToFloat(rs('FOGSTART')),
                 dwordToFloat(rs('FOGEND')),
                 dwordToFloat(rs('FOGDENSITY')),
-                tableFogOverDepth || isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
+                isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
             ], (vertex.fogRegister + 1) * 4);
         }
         // The user planes, as set: a vertex shader's are in clip space.
@@ -9296,7 +9215,6 @@ export function createRenderer(options){
             };
         });
         const lighting = lightingOf(model, layout);
-        reportTextureTransform(model, cascade.stages.length);
         reportCoordGeneration(cascade.stages);
         reportWrap(model);
         counters.prepared.built++;

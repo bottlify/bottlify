@@ -8,9 +8,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
-    D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER, D3DPOOL, D3DPT, D3DRS,
-    D3DRS_MAX,
-    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
+    D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER,
+    D3DPOOL, D3DPT, D3DRS, D3DRS_MAX,
+    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DRTYPE, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS,
+    D3DTSS,
     D3DUSAGE, D3D_OK,
     dwordToFloat, floatToDword, isShaderHandle, surfaceBytes,
 } from './constants.js';
@@ -436,6 +437,27 @@ test('a world written over the one held reads back new, and a block captured bef
         assert.equal(device.DeleteStateBlock(block), D3D_OK);
         assertFullyReleased(device);
     });
+
+test('a multiplied transform goes into the device while a block records, not into the block', ()=>{
+    // Wine's test_multiply_transform.
+    const device = createDevice();
+    /** @type {{ matrix?: Float32Array, handle?: number }} */
+    const out = {};
+    const scale = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2];
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.MultiplyTransform(D3DTS.WORLD, scale), D3D_OK);
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    const block = /** @type {number} */ (out.handle);
+    assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+    assert.deepEqual([...(/** @type {Float32Array} */ (out.matrix))], scale);
+    assert.equal(device.SetTransform(D3DTS.WORLD, identity), D3D_OK);
+    assert.equal(device.ApplyStateBlock(block), D3D_OK);
+    assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+    assert.deepEqual([...(/** @type {Float32Array} */ (out.matrix))], identity);
+    assert.equal(device.DeleteStateBlock(block), D3D_OK);
+    assertFullyReleased(device);
+});
 
 // --- the viewport, which is one value with two halves ---
 
@@ -1586,10 +1608,9 @@ test('recording for a device that draws elsewhere, a target the program cannot l
         made('lockable target', out=>device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, true, out));
         made('texture', out=>device.CreateTexture(8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT,
             out));
-        // A cube's faces are six storages.
-        const faces = Array(6).fill(!elsewhere);
+        // A cube's faces are one storage, one after another.
         assert.deepEqual(answer, {
-            'target texture': [!elsewhere], 'target cube': faces, target: [!elsewhere],
+            'target texture': [!elsewhere], 'target cube': [!elsewhere], target: [!elsewhere],
             'lockable target': [true], texture: [true],
         }, elsewhere ? 'drawn elsewhere' : 'drawn here');
         assertFullyReleased(device);
@@ -1969,6 +1990,16 @@ test('ValidateDevice refuses a stage the combiner does not draw, and writes no p
     assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 17), D3D_OK, 'PREMODULATE');
     assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
     assert.equal(refused.passes, undefined);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 4), D3D_OK);
+
+    // Any filter validates in Direct3D 8, none and past the last included
+    // (Wine's d3d8 test_filter).
+    for (const filter of [0, 5])
+    {
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MAGFILTER, filter), D3D_OK);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, filter), D3D_OK);
+        assert.equal(device.ValidateDevice(out), D3D_OK, `filter ${filter}`);
+    }
 
     // A pixel shader replaces the cascade, so the cascade is not what is drawn.
     /** @type {{ handle?: number }} */
@@ -2258,7 +2289,16 @@ test('the cursor is kept as the program set it, and refused when it could not be
     /** @type {{ surface?: any }} */
     const wrong = {};
     device.CreateImageSurface(32, 32, D3DFMT.X8R8G8B8, wrong);
+    /** @type {{ surface?: any }} */
+    const odd = {};
+    device.CreateImageSurface(32, 24, D3DFMT.A8R8G8B8, odd);
 
+    // Wine's test_cursor: no cursor to show keeps it hidden, and a cursor's
+    // sides are powers of two.
+    assert.equal(device.ShowCursor(true), false);
+    assert.equal(device.ShowCursor(true), false, 'still hidden: nothing to show');
+    assert.equal(device.SetCursorProperties(0, 0, odd.surface), D3DERR_INVALIDCALL);
+    odd.surface.release();
     assert.equal(device.SetCursorProperties(0, 0, null), D3DERR_INVALIDCALL);
     assert.equal(device.SetCursorProperties(0, 0, wrong.surface), D3DERR_INVALIDCALL,
         'a cursor is A8R8G8B8 and nothing else');
@@ -2273,6 +2313,73 @@ test('the cursor is kept as the program set it, and refused when it could not be
     assert.equal(device.GetCursor().shown, false);
     made.surface.release();
     wrong.surface.release();
+    assertFullyReleased(device);
+});
+
+test('an image surface and a cube face check a lock rectangle in every pool, a level not', ()=>{
+    // Wine's d3d8 test_lockrect_invalid: they refuse a rectangle past the
+    // surface, a managed texture's level takes it.
+    const device = createDevice();
+    const past = { left: 60, top: 60, right: 136, bottom: 68 };
+    /** @type {{ surface?: any }} */
+    const image = {};
+    assert.equal(device.CreateImageSurface(128, 128, D3DFMT.A8R8G8B8, image), D3D_OK);
+    assert.equal(image.surface.LockRect({}, past, 0), D3DERR_INVALIDCALL);
+    assert.equal(image.surface.clearsFailedLock, true, 'and a refused lock clears its answer');
+    /** @type {{ texture?: any }} */
+    const cube = {};
+    assert.equal(device.CreateCubeTexture(128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+        D3D_OK);
+    assert.equal(cube.texture.LockCubeRect(1, 0, {}, past, 0), D3DERR_INVALIDCALL);
+    /** @type {{ texture?: any }} */
+    const flat = {};
+    assert.equal(device.CreateTexture(128, 128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, flat),
+        D3D_OK);
+    assert.equal(flat.texture.LockRect(0, {}, past, 0), D3D_OK);
+    assert.equal(flat.texture.UnlockRect(0), D3D_OK);
+    image.surface.release();
+    cube.texture.release();
+    flat.texture.release();
+    assertFullyReleased(device);
+});
+
+test('Direct3D 8 answers display formats, buffers and intervals as Windows does', ()=>{
+    // Wine's d3d8 test_display_formats, test_check_device_format,
+    // test_resource_access and test_swapchain_parameters.
+    const d3d = createDirect3D8();
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8, false), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X1R5G5B5, true), D3DERR_NOTAVAILABLE,
+        'no conversion when a windowed chain presents');
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.X1R5G5B5, false),
+        D3DERR_NOTAVAILABLE, 'no modes in X1R5G5B5');
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.UNKNOWN, true), D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'no display is in A8R8G8B8');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VERTEXBUFFER, 100), D3DERR_INVALIDCALL);
+    assert.equal(d3d.CheckDepthStencilMatch(D3DFMT.A8R8G8B8, 71), D3DERR_NOTAVAILABLE, 'no D32');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.UNKNOWN),
+        D3DERR_INVALIDCALL);
+    for (const interval of [2, 3, 0x80000001])
+    {
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD,
+            fullScreenPresentationInterval: interval }, {}), D3DERR_INVALIDCALL, `${interval}`);
+    }
+    const device = createDevice();
+    for (const [usage, pool] of [[1, D3DPOOL.DEFAULT], [2, D3DPOOL.MANAGED], [0, 3]])
+    {
+        assert.equal(device.CreateVertexBuffer(16, usage, 0, pool, {}), D3DERR_INVALIDCALL);
+        assert.equal(device.CreateIndexBuffer(16, usage, 101, pool, {}), D3DERR_INVALIDCALL);
+    }
+    assertFullyReleased(device);
+});
+
+test('full screen: no additional swap chain, and a refused Reset leaves it to be reset', ()=>{
+    // Wine's d3d8 test_swapchain and test_reset.
+    const device = createDevice({ parameters: { windowed: false } });
+    assert.equal(device.CreateAdditionalSwapChain({ swapEffect: D3DSWAPEFFECT.DISCARD,
+        windowed: true, backBufferWidth: 32, backBufferHeight: 32 }, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.RefuseReset(), D3DERR_INVALIDCALL);
+    assert.equal(device.TestCooperativeLevel(), D3DERR_DEVICENOTRESET);
     assertFullyReleased(device);
 });
 

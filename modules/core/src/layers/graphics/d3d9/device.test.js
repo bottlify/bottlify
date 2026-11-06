@@ -1009,3 +1009,85 @@ test('GetAvailableTextureMem falls as default-pool resources are made and comes 
         assert.equal(device.GetAvailableTextureMem(), start);
         assert.equal(device.release(), 0);
     });
+
+test('a texture\'s levels lie one after another, a cube\'s faces each from a 16-byte boundary,'
+    + ' ATI1 and ATI2 a pitch a row of pixels (test_miptree_layout)', ()=>{
+    const device = createDevice();
+    for (const format of [D3DFMT.A8R8G8B8, D3DFMT.ATI1, D3DFMT.ATI2])
+    {
+        for (const pool of [D3DPOOL.MANAGED, D3DPOOL.SYSTEMMEM, D3DPOOL.SCRATCH])
+        {
+            /** @type {{ texture?: any }} */
+            const made = {};
+            assert.equal(device.CreateTexture(257, 257, 0, 0, format, pool, made), D3D_OK);
+            const levels = made.texture.levels;
+            let base = 0;
+            let offset = 0;
+            for (let level = 0; level < levels; level++)
+            {
+                /** @type {{ pBits?: number, Pitch?: number }} */
+                const locked = {};
+                assert.equal(made.texture.LockRect(level, locked, null, 0), D3D_OK);
+                if (level === 0)
+                {
+                    base = locked.pBits ?? 0;
+                }
+                assert.equal(locked.pBits, base + offset, `${format}, level ${level}`);
+                offset += (257 >> level) * (locked.Pitch ?? 0);
+                made.texture.UnlockRect(level);
+            }
+            made.texture.release();
+
+            assert.equal(device.CreateCubeTexture(257, 0, 0, format, pool, made), D3D_OK);
+            offset = 0;
+            for (let face = 0; face < 6; face++)
+            {
+                for (let level = 0; level < levels; level++)
+                {
+                    /** @type {{ pBits?: number, Pitch?: number }} */
+                    const locked = {};
+                    assert.equal(made.texture.LockCubeRect(face, level, locked, null, 0), D3D_OK);
+                    if (face === 0 && level === 0)
+                    {
+                        base = locked.pBits ?? 0;
+                    }
+                    assert.equal(locked.pBits, base + offset, `cube ${format}, face ${face},`
+                        + ` level ${level}`);
+                    offset += (257 >> level) * (locked.Pitch ?? 0);
+                    made.texture.UnlockCubeRect(face, level);
+                }
+                offset = (offset + 15) & ~15;
+            }
+            made.texture.release();
+        }
+    }
+});
+
+test('a packed video surface needs the driver in system memory too, and a compressed one in'
+    + ' video memory locks whole blocks (test_surface_blocks)', ()=>{
+    const device = createDevice();
+    /** @type {{ surface?: any, texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateOffscreenPlainSurface(8, 8, D3DFMT.YUY2, D3DPOOL.SYSTEMMEM, out),
+        D3DERR_INVALIDCALL);
+    assert.equal(device.CreateOffscreenPlainSurface(8, 8, D3DFMT.YUY2, D3DPOOL.SCRATCH, out),
+        D3D_OK);
+    out.surface.release();
+    for (const [pool, usage, answer] of [[D3DPOOL.DEFAULT, D3DUSAGE.DYNAMIC, D3DERR_INVALIDCALL],
+        [D3DPOOL.MANAGED, 0, D3D_OK], [D3DPOOL.SYSTEMMEM, 0, D3D_OK]])
+    {
+        assert.equal(device.CreateTexture(128, 128, 1, usage, D3DFMT.DXT1, pool, out), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.texture.LockRect(0, locked, { left: 2, top: 0, right: 4, bottom: 4 }, 0),
+            answer, `pool ${pool}`);
+        if (answer === D3D_OK)
+        {
+            out.texture.UnlockRect(0);
+        }
+        assert.equal(out.texture.LockRect(0, locked, { left: 4, top: 4, right: 8, bottom: 8 }, 0),
+            D3D_OK, 'a whole block');
+        out.texture.UnlockRect(0);
+        out.texture.release();
+    }
+});

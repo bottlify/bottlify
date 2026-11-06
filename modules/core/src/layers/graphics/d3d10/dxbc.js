@@ -270,3 +270,38 @@ export function parseShaderOfKind(bytes, kind, most = 0x40){
     }
     return container;
 }
+
+/** The opcodes that declare views of raw and structured memory, and UAVs. */
+const FIRST_BUFFER_DECLARATION = 156; // dcl_uav_typed
+const LAST_BUFFER_DECLARATION = 162; // dcl_resource_structured
+const CUSTOMDATA = 53;
+
+/**
+ * Whether a program declares an unordered-access view, or a raw or structured
+ * resource or group memory. Shader model 4 has these only on hardware that
+ * reports compute through shader model 4, which no device here does: a
+ * feature level 10 device refuses such a program as Windows does there
+ * (test_unaligned_raw_buffer_access).
+ *
+ * @param {ShaderProgram} shader
+ */
+export function declaresBufferViews(shader){
+    const tokens = shader.tokens;
+    let at = 0;
+    while (at < tokens.length)
+    {
+        const token = tokens[at];
+        const opcode = token & 0x7ff;
+        if (opcode >= FIRST_BUFFER_DECLARATION && opcode <= LAST_BUFFER_DECLARATION)
+        {
+            return true;
+        }
+        const length = opcode === CUSTOMDATA ? tokens[at + 1] : (token >>> 24) & 0x7f;
+        if (!length)
+        {
+            return false;
+        }
+        at += length;
+    }
+    return false;
+}

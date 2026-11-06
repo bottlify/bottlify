@@ -589,7 +589,8 @@ const D3DTEXF_LINEAR = 2;
 /**
  * @typedef {Object} SurfaceGdi  How a device context over guest pixels is made and unmade.
  * @property {(attributes: { width: number, height: number, pitch: number, bitCount: number,
- *   bits: number, palette: null, format: '565' | '555' }) => number} createSurfaceDc
+ *   bits: number, palette: null, format: '565' | '555', sizeImage?: number,
+ *   compression?: number, bitfields?: number[] }) => number} createSurfaceDc
  * @property {(handle: number) => void} deleteSurfaceDc
  *
  * @typedef {Object} SurfaceFamily
@@ -604,15 +605,19 @@ const D3DTEXF_LINEAR = 2;
  * the bit count GDI is told, and for sixteen bits which layout. R8G8B8 is on
  * that list too, and no surface here is made in it.
  *
- * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555' }>>}
+ * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555',
+ *     bitfields?: number[] }>>}
  */
 const DC_FORMATS = Object.freeze({
     [D3DFMT.A8R8G8B8]: { bitCount: 32, format: '555' },
     [D3DFMT.X8R8G8B8]: { bitCount: 32, format: '555' },
-    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565' },
-    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555' },
-    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555' },
+    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565', bitfields: [0xf800, 0x07e0, 0x001f] },
+    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555', bitfields: [0x7c00, 0x03e0, 0x001f] },
+    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555', bitfields: [0x7c00, 0x03e0, 0x001f] },
 });
+
+/** BI_BITFIELDS: what GetObject says a 16-bit surface's section is laid out as. */
+const BI_BITFIELDS = 3;
 
 /**
  * @typedef {Object} SurfaceOptions
@@ -631,6 +636,13 @@ const DC_FORMATS = Object.freeze({
  *           the wrong way round, is refused. The later runtime refuses it;
  *           the earlier accepted it and programs relied on that, so which
  *           applies is the device's to say.
+ * @property {boolean} [checksRectsInEveryPool]
+ *           Such a rectangle is refused in every pool, not only video
+ *           memory: Direct3D 8's image surfaces and cube faces.
+ * @property {boolean} [clearsFailedLock]
+ *           A lock refused hands back a null address and a pitch of zero:
+ *           Direct3D 8's image surfaces and cube faces (Wine's d3d8
+ *           test_lockrect_invalid).
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
  * @property {((api: string, detail: string, severity?: 'loss') => void) | null} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
@@ -665,6 +677,7 @@ export function createSurface(options){
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
+    const checksRectsInEveryPool = options.checksRectsInEveryPool === true;
     let locked = false;
     let lockFlags = 0;
     /** @type {LockRectangle | null} */
@@ -697,6 +710,8 @@ export function createSurface(options){
         base: options.base,
         /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
         kind: options.type,
+        /** A refused lock hands back a null address and a zero pitch (`clearsFailedLock`). */
+        clearsFailedLock: options.clearsFailedLock === true,
         reachable: ()=>!options.count.destroyed,
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: options.count,
@@ -730,10 +745,26 @@ export function createSurface(options){
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (rect && rejectsMalformedRects
+            // Only video memory checks the rectangle: a lock of system,
+            // scratch or managed memory takes any, as Windows does
+            // (test_surface_blocks, test_lockrect_invalid).
+            if (rect && ((rejectsMalformedRects && options.pool === D3DPOOL.DEFAULT)
+                || checksRectsInEveryPool)
                 && !(rect.left >= 0 && rect.top >= 0 && rect.left < rect.right
                     && rect.top < rect.bottom && rect.right <= options.width
                     && rect.bottom <= options.height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            // A compressed surface in video memory locks whole blocks: a
+            // rectangle that cuts one is refused there, and taken in every
+            // other pool (test_surface_blocks).
+            const block = FORMAT_INFO[options.format]?.blockSize ?? 1;
+            if (rect && block > 1 && options.pool === D3DPOOL.DEFAULT
+                && options.format !== D3DFMT.ATI1 && options.format !== D3DFMT.ATI2
+                && ((rect.left | rect.top) % block !== 0
+                    || (rect.right % block !== 0 && rect.right !== options.width)
+                    || (rect.bottom % block !== 0 && rect.bottom !== options.height)))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -784,7 +815,10 @@ export function createSurface(options){
             {
                 // A context held on another surface of the resource is the
                 // resource's lock, and this is one of its surfaces.
-                return forgivesDoubleUnlock || (family.dc !== null && family.dc !== self)
+                // Only a level that could have been locked forgives: one in
+                // video memory that never could refuses (test_resource_access).
+                return (forgivesDoubleUnlock && lockable)
+                    || (family.dc !== null && family.dc !== self)
                     ? D3D_OK
                     : D3DERR_INVALIDCALL;
             }
@@ -834,6 +868,11 @@ export function createSurface(options){
                 width: options.width, height: options.height, pitch,
                 bitCount: layout.bitCount, bits: options.base, palette: null,
                 format: layout.format,
+                // The section GetObject describes says no image size, and a
+                // 16-bit one its masks (Wine's test_getdc).
+                sizeImage: 0,
+                ...(layout.bitfields ? { compression: BI_BITFIELDS, bitfields: layout.bitfields }
+                    : {}),
             });
             if (handle === 0)
             {
@@ -991,11 +1030,20 @@ export function packColour(format, colour){
     if (wide)
     {
         // Each channel the colour's fraction of 255, red first, as many as the
-        // format has.
+        // format has, in the format's own precision: a 32-bit float keeps all
+        // of it and a 16-bit fraction spreads the byte over both of its bytes
+        // (Wine's d3d9 test_colorfill), where through a half each lost bits.
         const channels = [16, 8, 0, 24].slice(0, wide.channels)
-            .map(shift=>toHalf(((colour >>> shift) & 0xff) / 0xff));
-        return halvesToStored(wide.stored, new Uint8Array(Uint16Array.from(channels).buffer),
-            wide.channels);
+            .map(shift=>(colour >>> shift) & 0xff);
+        if (wide.stored === 'float')
+        {
+            return new Uint8Array(Float32Array.from(channels, byte=>byte / 0xff).buffer);
+        }
+        if (wide.stored === 'unorm16')
+        {
+            return new Uint8Array(Uint16Array.from(channels, byte=>byte * 0x101).buffer);
+        }
+        return new Uint8Array(Uint16Array.from(channels, byte=>toHalf(byte / 0xff)).buffer);
     }
     const width = FORMAT_INFO[format]?.bytesPerPixel ?? 4;
     const bits = packBits(format, colour);
@@ -1121,6 +1169,11 @@ export function levelExtent(size, level){
  *     build whose storage is a fabricated address rather than guest memory.
  * @property {boolean} [cube]
  * @property {boolean} [rejectsMalformedRects]  Passed to every level's surface.
+ * @property {boolean} [strictFaces]  A cube's faces refuse a malformed rectangle in
+ *     every pool and clear a refused lock's answer, as Direct3D 8's do.
+ * @property {boolean} [faceForgivesUnlock]  A cube's UnlockRect of a face not
+ *     locked answers D3D_OK, as Direct3D 9's does (Wine's
+ *     test_lockrect_invalid); its face's own surface still refuses one.
  */
 
 /**
@@ -1137,30 +1190,36 @@ export function createTexture(options){
     const faces = cube ? 6 : 1;
     /** @type {Map<string, Surface>} */
     const surfaces = new Map();
-    // Each face's levels lie one after another in one block, as Windows lays
-    // a texture's chain out: a program that locks the top level and writes
-    // on past its end writes the next levels (Wine's d3d8 test_mipmap_upload).
-    /** @type {number[]} */
-    const chains = new Array(faces).fill(0);
-    /** @param {number} level @returns {number} bytes before it in its face's block */
+    // Each face's levels lie one after another, and a cube's faces one after
+    // another, each from a 16-byte boundary, in one block, as Windows lays a
+    // texture out: a program that locks the top level and writes on past its
+    // end writes the next levels (Wine's d3d8 test_mipmap_upload, d3d9
+    // test_miptree_layout). ATI1 and ATI2, which the runtime does not know as
+    // blocks, take a pitch for every row of pixels.
+    const rowsTaken = options.format === D3DFMT.ATI1 || options.format === D3DFMT.ATI2;
+    /** @param {number} level @returns {number} bytes before it in its face's chain */
     const offsetOf = level=>{
         let bytes = 0;
         for (let before = 0; before < level; before++)
         {
-            bytes += surfaceBytes(options.format, levelExtent(options.width, before),
-                levelExtent(options.height, before));
+            const width = levelExtent(options.width, before);
+            const height = levelExtent(options.height, before);
+            bytes += rowsTaken ? surfacePitch(options.format, width) * height
+                : surfaceBytes(options.format, width, height);
         }
         return bytes;
     };
+    const faceBytes = cube ? Math.ceil(offsetOf(options.levels) / 16) * 16
+        : offsetOf(options.levels);
+    let block = 0;
+    /** @param {number} face @returns {number} where its chain starts */
+    const chainOf = face=>(block ||= options.allocate(faceBytes * faces)) + face * faceBytes;
     const count = sharedCount(options.count, ()=>{
-        for (const base of chains)
+        if (block)
         {
-            if (base)
-            {
-                options.free?.(base);
-            }
+            options.free?.(block);
         }
-        chains.fill(0);
+        block = 0;
         surfaces.clear();
     });
     /** @type {SurfaceFamily} */
@@ -1169,10 +1228,7 @@ export function createTexture(options){
     // level's at once and the others at the first draw that samples them; a
     // device made without one would place them later, and elsewhere, than its
     // twin with one (`remote/replay.js`) is given them.
-    for (let face = 0; face < faces; face++)
-    {
-        chains[face] = options.allocate(offsetOf(options.levels));
-    }
+    chainOf(0);
 
     /** @returns {LockRectangle} the whole top level */
     const whole = ()=>({ left: 0, top: 0, right: options.width, bottom: options.height });
@@ -1225,14 +1281,15 @@ export function createTexture(options){
             format: options.format,
             pool: options.pool,
             usage: options.usage,
-            base: (chains[face] ||= options.allocate(offsetOf(options.levels)))
-                + offsetOf(level),
+            base: chainOf(face) + offsetOf(level),
             count,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is
             // measured rather than reasoned about.
             forgivesDoubleUnlock: !cube,
             rejectsMalformedRects: options.rejectsMalformedRects,
+            checksRectsInEveryPool: cube && options.strictFaces === true,
+            clearsFailedLock: cube && options.strictFaces === true,
             family,
             // A level's rectangle is a region of the top level scaled up; a
             // rectangle that is not one is all of it.
@@ -1399,7 +1456,8 @@ export function createTexture(options){
          */
         UnlockCubeRect(face, level){
             const surface = surfaceFor(face, level);
-            return surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
+            const hr = surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
+            return surface && hr !== D3D_OK && options.faceForgivesUnlock === true ? D3D_OK : hr;
         },
     });
     return texture;

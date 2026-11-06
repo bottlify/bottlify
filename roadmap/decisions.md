@@ -400,11 +400,15 @@ projection, w under a perspective one, by the projection set on the device. Far 
 writes no oFog and sets LINEAR 30 to 350 in eye units for its shader draws, the range its NV2x
 path computes into oFog itself; over z, which never leaves 0..1, its world was drawn without
 fog and its far forest dark (reports 2026-10-12, Chrome on macOS). A program written for later
-drivers, which take the curve over z whatever the shader wrote and whatever the projection
-(Wine's `fog_with_shader_test`, measured on a GeForce 7600GS), runs with the graphics setting
+drivers, which take the curve over the depth whatever the shader wrote (Wine's
+`fog_with_shader_test`, measured on a GeForce 7600GS; `test_fog`), runs with the graphics setting
 `driverRules: 'current'` (docs/core/configuration.md); `'legacy'` is the default, since the
-programs that leave fog to this stage at all are of the earlier generations. *2026-10-10,
-the case without oFog 2026-10-12.*
+programs that leave fog to this stage at all are of the earlier generations. Either way the depth
+is z or w as the projection says, the projection set on the device even under a shader (Wine's
+d3d9 `test_fog`), and the z is the vertex's own, not the depth with the device's bias in it:
+Windows answers either the vertex's output z or the pixel's z with D3DRS_DEPTHBIAS in depth
+units, and WebGPU's bias is in steps of a format the program did not choose. *2026-10-10,
+the case without oFog 2026-10-12, the depth's z and w 2026-11-06.*
 
 **A44. Under a vertex shader, a 1.0 to 1.3 pixel shader's projective read divides by w.**
 D3DTTFF_PROJECTED on a stage a `ps_1_1` to `ps_1_3` reads divides that stage's coordinates
@@ -416,8 +420,10 @@ writes (u w, v w, w, w) from its vertex shader (z equal to w, so that a driver d
 either reads the same place) and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by y, the
 screen copy it refracts was read far outside itself and the water drawn in stripes; divided by
 w, as by the default here, it is water (the person's run, 2026-10-13, browser, graphics worker,
-Parallels GPU). `driverRules: 'current'` divides by the count, as later drivers and Wine do.
-*2026-10-13.*
+Parallels GPU). Windows divides by w too, under either driver rules: Wine's later d3d9
+`test_texture_transform_flags` shows the fixed vertex stage putting the count's last component in
+w and every projected read dividing by w, so this is no longer a departure and `driverRules`
+does not change it. *2026-10-13, both rules 2026-11-06.*
 
 **A45. A pre-transformed vertex with a negative RHW is clipped behind the eye only where the
 runtime clipped it.** A Direct3D 7 or 6 vertex buffer that ProcessVertices transformed with
@@ -810,6 +816,47 @@ Nothing here validates calls as the layer does or keeps its ID3D11InfoQueue of m
 program did wrong is said in the journal instead, as a divergence), and a device made with the
 flag and without the interfaces the layer adds would be one a program could not tell from a
 broken one. *2026-11-05.*
+
+**A82. Temporary: a swap chain for composition is refused with DXGI_ERROR_UNSUPPORTED, and one
+for a core window with DXGI_ERROR_INVALID_CALL.** IDXGIFactory2::CreateSwapChainForComposition
+makes a swap chain that DirectComposition places into a window's visual tree, which nothing here
+has yet; a desktop program has no CoreWindow, and Windows answers it so too. A program that
+draws through composition (a launcher, a browser engine inside a game) is told its swap chain
+cannot be made and falls back to a window's, or says so; the refusal is said in the journal. It
+stands until DirectComposition's visuals are drawn into the window's surface. *2026-11-06.*
+
+**A83. Temporary: R10G10B10_XR_BIAS_A2_UNORM is kept as R10G10B10A2_UNORM, without its
+bias.** Feature level 11 requires the extended-range format as a swap chain format, and a
+program may make its back buffer in it. Its colour channels are 10-bit values with a bias:
+a stored n means (n - 384) / 510, so 0..1 sits in the middle of the range and values past it
+can be shown on a display that takes them. Here its bits are those of R10G10B10A2_UNORM: a
+value v is stored as v * 1023, not v * 510 + 384, so 0..1 is drawn and shown as it is, values
+outside it are clamped, and the bits a copy or a map reads are not Windows'. Each device says
+so once in the journal when such a texture or buffer is made. It stands until a texture of the
+format reads and writes through the bias (an affine step at sampling and at the output) and the
+presenter decodes it.
+*2026-11-06.*
+
+**A84. Temporary: a draw or dispatch whose stage binds more shader resources than the GPU device
+lets WebGPU bind is not made, and the loss is said.** Direct3D 11 promises 128 shader resource
+views a stage; WebGPU binds as many sampled textures and storage buffers a stage as the adapter
+allows, which is asked for at its most (`webgpu/features.js`) and is far fewer on some (16
+textures and 10 buffers a stage on SwiftShader). A typed or raw buffer view is a storage buffer
+here, so it counts against the second. The pipeline past the limit cannot be made; the draw is
+skipped and said as a loss in the journal, and the program goes on (test_high_resource_count
+binds 50 of each). It stands until buffer views past the limit are packed into one binding and
+textures past it are bound through WebGPU's binding arrays where a browser has them.
+*2026-11-06.*
+
+**A85. Temporary: Direct3D 8 and 9 make a multisampled target with one sample a pixel.**
+CheckDeviceMultiSampleType answers D3DERR_NOTAVAILABLE for every type but none, so a program
+that asks first renders single-sampled as it chose to. One that asks a create for samples
+anyway (CreateRenderTarget, CreateDepthStencilSurface, their Ex forms, present parameters)
+is not refused, as Windows refuses a type its caps deny (Wine's test_invalid_multisample):
+every card a program of the era meets draws multisampled, and a program that never asked
+would stop at a refusal no real machine gave it. The target is drawn and read with one
+sample, and the journal says so once. It stands until targets are drawn multisampled and resolved where a
+program reads or presents them. *2026-11-06.*
 
 ## B. From measured optimisation work
 

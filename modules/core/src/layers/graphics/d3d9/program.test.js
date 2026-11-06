@@ -350,7 +350,8 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
             .find(module=>module.label.startsWith('ps:'));
         assert.ok(pixelModule.code.includes('var tex1: texture_cube<f32>;'),
             'stage one samples the cube bound there');
-        assert.ok(pixelModule.code.includes('(in.t1 / in.t1.w)'), 'and divides by w');
+        assert.ok(pixelModule.code.includes('select(in.t1 / in.t1.w, vec4f(0.0),'
+            + ' in.t1.w == 0.0)'), 'and divides by w');
         assert.ok(pixelModule.code.includes('const _bump = 0;'));
 
         // The bump registers, two a stage from the first past the constants
@@ -377,12 +378,12 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         assert.equal(h.device.release(), 0);
     });
 
-test('under a vertex shader a ps_1_1 projects by w whatever count the flags name, by the count'
-    + ' under current driver rules', async()=>{
+test('a ps_1_1 projects by w whatever count the flags name,'
+    + ' under either driver rules', async()=>{
     // Prince of Persia: Warrior Within's water writes (u w, v w, w, w) from its
-    // vertex shader and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: drivers of
-    // its time divided by w, Wine divides by the count's last, y, and the
-    // screen it reads was drawn as stripes (decisions.md A44).
+    // vertex shader and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by
+    // y, the screen it reads was drawn as stripes. Windows divides by w
+    // (Wine's d3d9 test_texture_transform_flags, decisions.md A44).
     /** @param {'legacy' | 'current' | undefined} driverRules */
     const divided = async driverRules=>{
         const h = harness({ driverRules });
@@ -417,8 +418,9 @@ test('under a vertex shader a ps_1_1 projects by w whatever count the flags name
         assert.equal(h.device.release(), 0);
         return code;
     };
-    assert.ok((await divided(undefined)).includes('(in.t0 / in.t0.w)'), 'legacy, the default');
-    assert.ok((await divided('current')).includes('(in.t0 / in.t0.y)'), 'current');
+    const byW = 'select(in.t0 / in.t0.w, vec4f(0.0), in.t0.w == 0.0)';
+    assert.ok((await divided(undefined)).includes(byW), 'legacy, the default');
+    assert.ok((await divided('current')).includes(byW), 'current');
 });
 
 test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline for each',
@@ -938,10 +940,10 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         assert.ok(fragment.code.includes('@group(1) @binding(0) var<uniform> uniforms'));
         assert.ok(fragment.code.includes('@group(2) @binding(0) var texture0'));
         assert.ok(fragment.code.includes('input.diffuse = in.v0;'));
-        assert.ok(fragment.code.includes('input.texCoord0 = in.t0.xy;'));
+        assert.ok(fragment.code.includes('input.coord0 = in.t0;'));
         assert.ok(fragment.code.includes('input.specular = vec4f(0.0);'),
             'a varying the shader does not write is the fixed function default');
-        assert.ok(fragment.code.includes('sampleStage0(input.texCoord0)'));
+        assert.ok(fragment.code.includes('sampleStage0(input.coord0)'));
         assert.ok(fragment.code.includes('current.a > uniforms.alphaRef'));
         assert.ok(!fragment.code.includes('@location(1) v1'),
             'and is not declared as an input the vertex stage would have to supply');
@@ -1208,7 +1210,7 @@ test('a vertex shader that writes no coordinate set leaves a sampling stage read
             .find(module=>module.label.startsWith('ps:'));
         assert.ok(fragment);
         assert.ok(fragment.code.includes('sampleStage0'), 'the stage still samples');
-        assert.match(fragment.code, /input\.texCoord0 = vec2f\(0\.0\);/,
+        assert.match(fragment.code, /input\.coord0 = vec4f\(0\.0\);/,
             'at zero: coordinate set zero is one the shader never wrote');
         h.device.SetTexture(0, null);
         h.device.SetVertexShader(null);
@@ -1384,23 +1386,24 @@ async()=>{
     const row = HYBRID_CONSTANTS.TRANSFORMS + 4;
     const modules = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
         .filter(module=>module.label.startsWith('vs:'));
-    assert.ok(modules().some(module=>module.code.includes(
-        `out.o${t1} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`)),
+    assert.ok(modules().some(module=>module.code
+        .includes('let generated1 = vec4f(cameraPosition, 0.0);')
+        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], vec4f(generated1.xyz, 1.0)),`)),
     'generated for the disabled stage the shader samples');
 
     // Stage 1 reading the vertex's set 0 through its own transform: (u, v, 1)
-    // through stage 1's rows, not the set 1 the vertex does not have.
+    // through stage 1's columns, not the set 1 the vertex does not have.
     h.device.SetTextureStageState(1, D3DTSS.TEXCOORDINDEX, 0);
     await h.draw();
     assert.ok(modules().some(module=>module.code.includes(`let set1 = vec4f(`)
-        && module.code.includes(`.xy, 1.0, 0.0);`)
-        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], set1),`)),
+        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], vec4f(set1.xy, 1.0, 0.0)),`)),
     'set 0 through the transform of stage 1');
-    // Untransformed, the set as it stands under stage 1's number.
+    // Untransformed, the set as it stands, w zero, under stage 1's number.
     h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 0);
     await h.draw();
-    assert.ok(modules().some(module=>module.code.includes(`out.o${t1} = vec4f(in.v`)),
-        'set 0 carried to t1');
+    assert.ok(modules().some(module=>module.code.includes(`out.o${t1} = set1;`)
+        && /let set1 = vec4f\(vec4f\(in\.v\d+, 0\.0, 1\.0\)\.xy, 0\.0, 0\.0\);/.test(module.code)),
+    'set 0 carried to t1');
 
     h.device.SetTexture(1, null);
     h.device.SetPixelShader(null);
@@ -1448,7 +1451,7 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
         const row = HYBRID_CONSTANTS.TRANSFORMS;
         assert.ok(vertexModule.code.includes(
-            `out.o${t0} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`),
+            `out.o${t0} = vec4f(dot(c[${row}], vec4f(generated0.xyz, 1.0)),`),
         'the set the pixel shader reads is generated');
         assert.ok(!vertexModule.code.includes(`out.o${t0} = vec4f(in.v2`),
             'the carried set is not sent');
@@ -2111,13 +2114,12 @@ test('a shader draw into a texture bound to its own sampler samples a copy taken
 });
 
 test('table fog through a vertex shader without oFog runs over z or w as the projection says,'
-    + ' or over z by later rules', async()=>{
+    + ' by either rules', async()=>{
     // A program of the shader-model-2 generation sets an eye-unit range for
     // its shader draws (Far Cry's R300 path: LINEAR 30..350, no oFog) and
     // leaves a perspective projection set for its fixed ones: its drivers
-    // took the curve over w then, as the fixed function does. Later drivers
-    // and Wine's fog rules take it over z whatever the projection
-    // (fog_with_shader_test), which is `driverRules: 'current'`.
+    // took the curve over w then, as the fixed function does, and Windows
+    // still does (Wine's d3d9 test_fog, the shader rows without ortho).
     /**
      * @param {'legacy' | 'current' | undefined} driverRules
      * @param {number[]} projection
@@ -2148,7 +2150,8 @@ test('table fog through a vertex shader without oFog runs over z or w as the pro
     assert.deepEqual(await rangeOf(undefined, perspective), [30, 350, 1, 0], 'over w, density 1');
     assert.deepEqual(await rangeOf('legacy', perspective), [30, 350, 1, 0]);
     assert.deepEqual(await rangeOf('legacy', affine), [30, 350, 1, 1], 'over z');
-    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 1]);
+    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 0]);
+    assert.deepEqual(await rangeOf('current', affine), [30, 350, 1, 1]);
 });
 
 test('table fog through a shader that writes oFog runs over it, or over the depth by later rules',

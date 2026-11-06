@@ -42,7 +42,7 @@ import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
-    D3DSURFACE_DESC8, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
+    D3DSURFACE_DESC8, D3DLOCKED_RECT, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
@@ -56,7 +56,7 @@ import { createCursorTeller } from './cursor.js';
 import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
-import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
+import { PRESENTATION_INTERVALS, TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
@@ -148,7 +148,6 @@ const D3DCURSORCAPS_LOWRES = 0x00000002;
 const D3DCAPS2_CANRENDERWINDOWED = 0x00080000;
 const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 
-const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
 /** A windowed chain that waits for the retrace before its copy. */
 const D3DSWAPEFFECT_COPY_VSYNC = 4;
@@ -515,6 +514,37 @@ export function createDirect3D8Seam(
         }
         return hr;
     };
+    /**
+     * A cube face's lock or unlock the host made, told to the face's block as
+     * its surface's own: a lock of the face's surface the guest then tries
+     * finds it held (Wine's d3d8 test_lockrect_invalid).
+     *
+     * @param {any} texture @param {number} face @param {number} level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteFace = (texture, face, level, locked, hr)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        if (hr === D3D_OK && texture.GetCubeMapSurface(face >>> 0, level >>> 0, held) === D3D_OK)
+        {
+            noteLevelLock(held.surface, null, locked, hr);
+            held.surface.release();
+        }
+        return hr;
+    };
+    /**
+     * A refused lock of a level that clears its answer (`clearsFailedLock`)
+     * hands back a null address and a zero pitch.
+     *
+     * @param {any} level @param {number} out @param {any} hr
+     */
+    const clearRefused = (level, out, hr)=>{
+        if (hr !== D3D_OK && typeof hr === 'number' && level?.clearsFailedLock && (out >>> 0) !== 0)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_RECT, { Pitch: 0, pBits: 0 });
+        }
+        return hr;
+    };
     /** @param {string} name */
     const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
         : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
@@ -689,6 +719,22 @@ export function createDirect3D8Seam(
     const chainWindows = new WeakMap();
 
     /**
+     * A target or depth-stencil asked for with samples is made with one, and
+     * said (decision A85).
+     *
+     * @param {number} samples  D3DMULTISAMPLE_TYPE.
+     * @returns {undefined}
+     */
+    const singleSampled = samples=>{
+        if ((samples >>> 0) !== 0)
+        {
+            divergence?.('Direct3D 8', 'a multisampled target or depth-stencil is made with one'
+                + ' sample a pixel');
+        }
+        return undefined;
+    };
+
+    /**
      * A present of part of the back buffer, or into part of the window, shows
      * the whole of it: said. The dirty region is a hint, and is not.
      *
@@ -823,9 +869,9 @@ export function createDirect3D8Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>noteLevelLock(surface, null, true,
-            lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
-                flags >>> 0))),
+        LockRect: (surface, [out, rect, flags])=>clearRefused(surface, out,
+            noteLevelLock(surface, null, true, lockRectInto(fields, out,
+                locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)))),
         /** @param {any} surface */
         UnlockRect: surface=>noteLevelLock(surface, null, false, surface.UnlockRect()),
     }, guestsBut(levelGroup, allocate
@@ -923,11 +969,23 @@ export function createDirect3D8Seam(
             return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0)),
+        LockRect: (texture, [face, level, out, rect, flags])=>{
+            const hr = noteFace(texture, face, level, true, lockRectInto(fields, out,
+                locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                    flags >>> 0)));
+            /** @type {{ surface?: any }} */
+            const held = {};
+            if (hr !== D3D_OK
+                && texture.GetCubeMapSurface(face >>> 0, level >>> 0, held) === D3D_OK)
+            {
+                clearRefused(held.surface, out, hr);
+                held.surface.release();
+            }
+            return hr;
+        },
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        UnlockRect: (texture, [face, level])=>noteFace(texture, face, level, false,
+            texture.UnlockCubeRect(face >>> 0, level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
     };
@@ -1401,6 +1459,15 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
+            // A full-screen size no mode has is refused, as Windows refuses
+            // it (Wine's d3d8 test_reset: 0x0, 32x32 and 801x600).
+            const raw = fields.readStruct(parameters >>> 0, D3DPRESENT_PARAMETERS8);
+            if (raw.Windowed === 0 && !displayModes(screen()).some(mode=>
+                mode.width === (raw.BackBufferWidth >>> 0)
+                && mode.height === (raw.BackBufferHeight >>> 0)))
+            {
+                return device.RefuseReset();
+            }
             const next = readPresentParameters(parameters >>> 0, deviceWindow);
             const hr = device.Reset(next);
             writePresentParameters(parameters >>> 0, next);
@@ -1786,7 +1853,16 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, publisher.objectAt(surface));
+            const bitmap = publisher.objectAt(surface);
+            // No larger than the display it is shown on (Wine's test_cursor).
+            /** @type {{ desc?: any }} */
+            const shape = {};
+            if (bitmap?.GetDesc?.(shape) === D3D_OK && shape.desc
+                && (shape.desc.Width > screen().width || shape.desc.Height > screen().height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, bitmap);
             if (hr === D3D_OK)
             {
                 tellCursor(device);
@@ -1841,9 +1917,10 @@ export function createDirect3D8Seam(
         // The multisample type is dropped rather than refused, the same way the
         // presentation parameters' is: this device renders one sample per pixel
         // whatever it is asked for, and a target that differs from the back
-        // buffer only in that is still a target it can draw into.
+        // buffer only in that is still a target it can draw into (decision A85).
         /** @param {any} device @param {number[]} args */
-        CreateRenderTarget: (device, [width, height, format, , lockable, out])=>{
+        CreateRenderTarget: (device, [width, height, format, samples, lockable, out])=>{
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateRenderTarget(
@@ -1857,7 +1934,8 @@ export function createDirect3D8Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        CreateDepthStencilSurface: (device, [width, height, format, , out])=>{
+        CreateDepthStencilSurface: (device, [width, height, format, samples, out])=>{
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateDepthStencilSurface(
@@ -2539,7 +2617,7 @@ export function createDirect3D8Seam(
             backBufferHeight: asked.height === 0 ? taken.height : asked.height,
             backBufferFormat: raw.BackBufferFormat,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: raw.MultiSampleType,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
             swapEffect: raw.SwapEffect,
             hDeviceWindow: raw.hDeviceWindow,
             windowed: raw.Windowed !== 0,
@@ -2660,7 +2738,7 @@ export function createDirect3D8Seam(
             // A full-screen device's ramp is claimed where the display shows it.
             Caps2: D3DCAPS2_CANRENDERWINDOWED
                 | (caps.fullscreenGamma === true ? D3DCAPS2_FULLSCREENGAMMA : 0),
-            PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
+            PresentationIntervals: PRESENTATION_INTERVALS,
             CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
             DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION
                 | D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2
@@ -2811,12 +2889,14 @@ export function createDirect3D8Seam(
         // is answered by the object behind this from the same tables its own
         // creates consult, so a format approved here is one that can be made.
         /** @param {any} root @param {number[]} args */
-        CheckDeviceType: (root, [, , adapterFormat, backBufferFormat])=>
-            root.CheckDeviceType(adapterFormat >>> 0, backBufferFormat >>> 0),
+        CheckDeviceType: (root, [, , adapterFormat, backBufferFormat, windowed])=>
+            root.CheckDeviceType(adapterFormat >>> 0, backBufferFormat >>> 0,
+                (windowed >>> 0) !== 0),
 
         /** @param {any} root @param {number[]} args */
-        CheckDeviceFormat: (root, [, , , usage, resourceType, format])=>
-            root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0),
+        CheckDeviceFormat: (root, [, , adapterFormat, usage, resourceType, format])=>
+            root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0,
+                adapterFormat >>> 0),
 
         /** @param {any} root @param {number[]} args */
         CheckDeviceMultiSampleType: (root, [, , , , type])=>

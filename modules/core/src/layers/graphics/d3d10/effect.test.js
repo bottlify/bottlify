@@ -10,6 +10,7 @@ import {
     ASSIGNMENT, CONSTANT_TYPE, D3D10_SVC, D3D10_SVT, FX_VERSION, parseEffect,
 } from './effect.js';
 import { FX_KIND, effectBinary } from './effect-fixtures.js';
+import { stateIndexNotTaken } from './effect-states.js';
 import { parseDxbc } from './dxbc.js';
 import { container, passThroughVertexShader, solidPixelShader } from './shader-fixtures.js';
 
@@ -137,8 +138,8 @@ test('object variables are read with their kind, and a shader, string or state p
 
 test('techniques and passes are read with what each pass assigns', ()=>{
     // After Wine's fx_local_shader: a pass assigning NULL, a variable, an
-    // element of one and shaders compiled in place; and the two kinds that
-    // need an expression evaluated, kept as they are.
+    // element of one and shaders compiled in place; and an index and a
+    // value expression, read as their own containers.
     const ps = solidPixelShader([0, 1, 0, 1]);
     const effect = effectOf(effectBinary({
         objects: [{ name: 'v', type: { name: 'VertexShader', object: FX_KIND.VERTEXSHADER,
@@ -153,8 +154,9 @@ test('techniques and passes are read with what each pass assigns', ()=>{
                     { state: 7, constant: [[CONSTANT_TYPE.INT, 0]] },
                     { state: 6, variable: 'v', element: 1 },
                     { state: 8, shader: ps, streamOutput: 'SV_POSITION.y' },
-                    { state: 2, kind: ASSIGNMENT.INDEX_EXPRESSION },
-                    { state: 0xa, kind: ASSIGNMENT.VALUE_EXPRESSION },
+                    { state: 2, kind: ASSIGNMENT.INDEX_EXPRESSION, variable: 'v',
+                        bytes: Uint8Array.of(1, 2, 3, 4, 5) },
+                    { state: 0xa, kind: ASSIGNMENT.VALUE_EXPRESSION, bytes: Uint8Array.of(6, 7) },
                 ] },
             ] }],
     }));
@@ -173,8 +175,10 @@ test('techniques and passes are read with what each pass assigns', ()=>{
     assert.equal(inline.kind, ASSIGNMENT.ANONYMOUS_SHADER);
     assert.deepEqual([...(inline.shader?.bytecode ?? [])], [...ps]);
     assert.equal(inline.shader?.streamOutput, 'SV_POSITION.y');
-    assert.deepEqual([index.kind, value.kind],
-        [ASSIGNMENT.INDEX_EXPRESSION, ASSIGNMENT.VALUE_EXPRESSION]);
+    assert.deepEqual([index.kind, index.variable, [...index.expression ?? []]],
+        [ASSIGNMENT.INDEX_EXPRESSION, 'v', [1, 2, 3, 4, 5]]);
+    assert.deepEqual([value.kind, [...value.expression ?? []]],
+        [ASSIGNMENT.VALUE_EXPRESSION, [6, 7]]);
 });
 
 test('an effect this runtime cannot read says why rather than answering half of one', ()=>{
@@ -189,14 +193,29 @@ test('an effect this runtime cannot read says why rather than answering half of 
     assert.match(errorOf(effectBinary({ version: 0xfeff2001 })), /fx_4_0/,
         'fx_5_0 is Direct3D 11\'s');
     assert.ok('effect' in parseEffect(effectBinary({ version: FX_VERSION.FX_4_1 })));
+    // fx_4_1 writes SrcBlend for each render target, which is read; d3d10's
+    // state has one (Wine's test_effect_fx_4_1_blend_state).
+    /** @param {number} state @param {number} index */
+    const blendAt = (state, index)=>{
+        const read = parseEffect(effectBinary({
+            objects: [{ name: 'b', type: { name: 'BlendState', object: FX_KIND.BLEND },
+                elements: [{ assignments: [{ state, index, constant: [[3, 2]] }] }] }] }));
+        assert.ok('effect' in read);
+        return stateIndexNotTaken(read.effect);
+    };
+    assert.match(blendAt(0x26, 1) ?? '', /b gives state 0x26 at index 1/);
+    assert.equal(blendAt(0x25, 7), null, 'BlendEnable has eight');
+    assert.match(blendAt(0x25, 8) ?? '', /index 8/);
 
     const whole = effectBinary({ techniques: [{ name: 't', passes: [{ name: 'p' }] }] });
     const chunk = /** @type {Uint8Array} */ (parseDxbc(whole)?.chunks.get('FX10'));
     const cut = container([{ name: 'FX10', bytes: chunk.slice(0, chunk.length - 8) }]);
     assert.match(errorOf(cut), /cut short/);
 
+    // A header that says the effect shares a buffer with a pool, over a
+    // structured part that holds none.
     const pooled = chunk.slice();
     new DataView(pooled.buffer).setUint32(16, 1, true);
-    assert.match(errorOf(container([{ name: 'FX10', bytes: pooled }])), /pool/,
-        'a child of a pool');
+    assert.match(errorOf(container([{ name: 'FX10', bytes: pooled }])), /cut short/,
+        'a shared buffer the structured part does not hold');
 });

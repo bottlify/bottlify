@@ -7,9 +7,11 @@
 /**
  * The semantic types of the Direct3D 9 HLSL dialect, and the values that inhabit them.
  *
- * Only three element types exist here: `bool`, `int` and `float`. `half` and `double` are
- * `float` (every Shader Model 1-3 register is a 32-bit float), and `uint`/`dword` are `int`:
- * the dialect has no distinct unsigned arithmetic, so an unsigned operand is an int32 here.
+ * Three element types exist for Shader Models 1-3: `bool`, `int` and `float`. `half` and
+ * `double` are `float` (every Shader Model 1-3 register is a 32-bit float), and `uint`/`dword`
+ * are `int`: that dialect has no distinct unsigned arithmetic, so an unsigned operand is an
+ * int32 there. Shader Model 4 has unsigned registers, and its compile keeps `uint` apart (a
+ * uint32 in values).
  *
  * Values of the types, as the evaluator and the intrinsics hold them: a scalar is a number
  * (a bool is 0 or 1, an int is an int32, a float is rounded to float32), a vector is an array
@@ -23,7 +25,7 @@
 /** @typedef {import('./hlsl-parser.js').TechniqueDecl} TechniqueDecl */
 /** @typedef {import('./hlsl-parser.js').Register} Register */
 
-/** @typedef {'bool' | 'int' | 'float'} Base */
+/** @typedef {'bool' | 'int' | 'uint' | 'float'} Base */
 
 /**
  * @typedef {{ kind: 'void' }
@@ -36,10 +38,17 @@
  *   | { kind: 'array', elem: Type, length: number }
  *   | { kind: 'struct', name: string, members: Member[] }
  *   | { kind: 'sampler', dim: Dim }
- *   | { kind: 'texture', dim: Dim }} Type
+ *   | { kind: 'texture', dim: Dim, elem?: Type, samples?: number }} Type
+ * A Shader Model 4 texture carries what a texel holds (`Texture2D<uint4>`), float4 when absent.
  */
 
-/** @typedef {'any' | '1d' | '2d' | '3d' | 'cube'} Dim */
+/**
+ * The Shader Model 1-3 kinds, and those of Shader Model 4's resources: arrays, multisampled
+ * textures and buffers.
+ *
+ * @typedef {'any' | '1d' | '2d' | '3d' | 'cube' | '1darray' | '2darray' | 'cubearray' | '2dms'
+ *     | '2dmsarray' | 'buffer' | 'comparison'} Dim
+ */
 
 /**
  * @typedef {Object} Member
@@ -118,6 +127,7 @@ export const STRING = Object.freeze(/** @type {Type} */ ({ kind: 'string' }));
 export const SHADER = Object.freeze(/** @type {Type} */ ({ kind: 'shader' }));
 export const BOOL = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'bool' }));
 export const INT = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'int' }));
+export const UINT = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'uint' }));
 export const FLOAT = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'float' }));
 
 /** @type {Map<string, Type>} */
@@ -139,7 +149,7 @@ function intern(key, make){
 
 /** @param {Base} base @returns {Type} */
 export function scalarOf(base){
-    return base === 'bool' ? BOOL : base === 'int' ? INT : FLOAT;
+    return base === 'bool' ? BOOL : base === 'int' ? INT : base === 'uint' ? UINT : FLOAT;
 }
 
 /**
@@ -172,9 +182,19 @@ export function samplerOf(dim){
     return intern(`s${dim}`, ()=>({ kind: 'sampler', dim }));
 }
 
-/** @param {Dim} dim @returns {Type} */
-export function textureOf(dim){
-    return intern(`t${dim}`, ()=>({ kind: 'texture', dim }));
+/**
+ * @param {Dim} dim
+ * @param {Type} [elem]   What a texel holds, for a Shader Model 4 texture that says.
+ * @param {number} [samples]   Of a multisampled texture that names them.
+ * @returns {Type}
+ */
+export function textureOf(dim, elem, samples){
+    if (!elem && !samples)
+    {
+        return intern(`t${dim}`, ()=>({ kind: 'texture', dim }));
+    }
+    return intern(`t${dim}<${elem ? typeToString(elem) : ''},${samples ?? 0}>`, ()=>({
+        kind: 'texture', dim, ...(elem ? { elem } : {}), ...(samples ? { samples } : {}) }));
 }
 
 /**
@@ -199,22 +219,27 @@ export function withBase(t, base){
  *
  * @param {import('./hlsl-parser.js').TypeRef} ref
  * @param {(name: string) => Type | null | undefined} resolveNamed
+ * @param {boolean} [unsigned]   `uint` its own type (Shader Model 4), not `int`.
  * @returns {Type | null}
  */
-export function fromTypeRef(ref, resolveNamed){
+export function fromTypeRef(ref, resolveNamed, unsigned = false){
     switch (ref.cls)
     {
         case 'void': return VOID;
         case 'string': return STRING;
         case 'shader': return SHADER;
         case 'sampler': return samplerOf(ref.dim ?? 'any');
-        case 'texture': return textureOf(ref.dim ?? 'any');
+        case 'texture': {
+            const elem = ref.elem ? fromTypeRef(ref.elem, resolveNamed, unsigned) : null;
+            return textureOf(ref.dim ?? 'any', elem ?? undefined, ref.samples);
+        }
         case 'named': return resolveNamed(/** @type {string} */ (ref.name)) ?? null;
         default: break;
     }
     const s = ref.scalar;
     /** @type {Base} */
-    const base = s === 'bool' ? 'bool' : (s === 'int' || s === 'uint') ? 'int' : 'float';
+    const base = s === 'bool' ? 'bool' : s === 'int' ? 'int'
+        : s === 'uint' ? (unsigned ? 'uint' : 'int') : 'float';
     if (ref.cls === 'scalar')
     {
         return scalarOf(base);
@@ -251,8 +276,19 @@ export function typeToString(t){
         case 'struct': return t.name;
         case 'sampler': return t.dim === 'any' ? 'sampler' : `sampler${t.dim === 'cube' ? 'CUBE'
             : t.dim.toUpperCase()}`;
-        case 'texture': return t.dim === 'any' ? 'texture' : `texture${t.dim === 'cube' ? 'CUBE'
-            : t.dim.toUpperCase()}`;
+        case 'texture': {
+            if (t.elem || /array|ms|buffer/.test(t.dim))
+            {
+                const names = /** @type {Record<string, string>} */ ({ '1d': 'Texture1D',
+                    '2d': 'Texture2D', '3d': 'Texture3D', cube: 'TextureCube',
+                    '1darray': 'Texture1DArray', '2darray': 'Texture2DArray',
+                    cubearray: 'TextureCubeArray', '2dms': 'Texture2DMS',
+                    '2dmsarray': 'Texture2DMSArray', buffer: 'Buffer', any: 'texture' });
+                return `${names[t.dim]}<${typeToString(t.elem ?? vectorOf('float', 4))}>`;
+            }
+            return t.dim === 'any' ? 'texture' : `texture${t.dim === 'cube' ? 'CUBE'
+                : t.dim.toUpperCase()}`;
+        }
         default: return '?';
     }
 }
@@ -283,8 +319,12 @@ export function sameType(a, b){
             return a.length === o.length && sameType(a.elem, o.elem);
         }
         case 'struct': return a.name === /** @type {typeof a} */ (b).name;
-        case 'sampler':
-        case 'texture': return a.dim === /** @type {typeof a} */ (b).dim;
+        case 'sampler': return a.dim === /** @type {typeof a} */ (b).dim;
+        case 'texture': {
+            const o = /** @type {typeof a} */ (b);
+            return a.dim === o.dim && (a.elem === o.elem || Boolean(a.elem && o.elem
+                && sameType(a.elem, o.elem)));
+        }
         default: return true;
     }
 }
@@ -421,6 +461,9 @@ export function conversionRank(from, to){
 /**
  * One number as an element type.
  *
+ * A uint takes an int's bits (-1 is 4294967295) and an int a uint's: `convertValue` wraps
+ * those before they come here, so what is converted here is a float or a bool.
+ *
  * @param {number} x @param {Base} base
  * @returns {number}
  */
@@ -428,6 +471,13 @@ export function toBase(x, base){
     switch (base)
     {
         case 'bool': return x !== 0 ? 1 : 0;
+        case 'uint': {
+            if (Number.isNaN(x) || x <= 0)
+            {
+                return 0;
+            }
+            return x >= 4294967295 ? 4294967295 : Math.trunc(x) >>> 0;
+        }
         case 'int': {
             if (Number.isNaN(x))
             {
@@ -626,7 +676,13 @@ export function convertValue(value, from, to){
         }
         return buildValue(to, lanes);
     }
-    const lanes = flattenValue(value, from);
+    const fromBase = baseOf(from);
+    const toBaseName = baseOf(to);
+    // Between int and uint, the bits stay: -1 is 4294967295 and back.
+    const lanes = fromBase === 'int' && toBaseName === 'uint'
+        ? flattenValue(value, from).map(x=>x >>> 0)
+        : fromBase === 'uint' && toBaseName === 'int' ? flattenValue(value, from).map(x=>x | 0)
+            : flattenValue(value, from);
     if (lanes.length === 1 && scalarCount(to) > 1)
     {
         return buildValue(to, new Array(scalarCount(to)).fill(lanes[0]));

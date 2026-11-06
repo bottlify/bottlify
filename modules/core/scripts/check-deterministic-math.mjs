@@ -23,18 +23,24 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIRECTORY = fileURLToPath(new URL('../src/layers/win32/d3dx9/', import.meta.url));
+// The Shader Model 4 compiler folds constants into its bytecode the same way.
+const MODEL4 = fileURLToPath(new URL('../src/layers/graphics/d3dcompiler/', import.meta.url));
 const APPROXIMATED = /\bMath\.(?:sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|asinh|acosh|atanh|exp|expm1|log|log1p|log2|log10|pow|cbrt|hypot)\b/g;
 const POWER = /\*\*/;
 
-const files = readdirSync(DIRECTORY)
-    .filter(name=>/^(?:hlsl-|preprocess).*\.js$/.test(name)
-        && !/\.(?:test|itest|fixture)\.js$/.test(name) && name !== 'hlsl-math.js');
+const files = [
+    ...readdirSync(DIRECTORY)
+        .filter(name=>/^(?:hlsl-|preprocess).*\.js$/.test(name)
+            && !/\.(?:test|itest|fixture)\.js$/.test(name) && name !== 'hlsl-math.js')
+        .map(name=>join(DIRECTORY, name)),
+    ...readdirSync(MODEL4).filter(name=>name.endsWith('.js')
+        && !/\.(?:test|itest|fixture)\.js$/.test(name)).map(name=>join(MODEL4, name)),
+];
 
 /** @type {string[]} */
 const problems = [];
-for (const name of files)
+for (const path of files)
 {
-    const path = join(DIRECTORY, name);
     // Split on CRLF too: a Windows checkout's lines end in \r, which `.`
     // does not match, so no comment was taken out and every `/**` read as a
     // power.

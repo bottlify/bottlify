@@ -28,6 +28,8 @@ export const D3DERR_NOTFOUND = 0x88760866;
 export const D3DOK_NOAUTOGEN = 0x0876086f;
 /** Direct3D 9Ex's answer for a device whose adapter is gone. */
 export const D3DERR_DEVICEREMOVED = 0x88760870;
+/** E_FAIL: what a vertex declaration Windows cannot lay out is answered. */
+export const E_FAIL = 0x80004005;
 
 /** D3DRENDERSTATETYPE. Sparse by design: the gaps are states D3D8 dropped. */
 export const D3DRS = Object.freeze({
@@ -395,7 +397,8 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A16B16G16R16]: wideFormat(8, true, false, 4, 'unorm16'),
     [D3DFMT.L16]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false,
         wide: Object.freeze({ channels: 1, stored: 'unorm16', luminance: true }) }),
-    [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
+    // No D32: no card a program of the era meets offers it, and Windows says so
+    // (Wine's test_check_device_format, CheckDepthStencilMatch with D32).
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true, alpha: false }),

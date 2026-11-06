@@ -159,6 +159,7 @@ import { createNtdllFunctions } from './ntdll/functions.js';
 import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
+import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 
 /**
  * win32 — the API surface the guest was compiled against.
@@ -4585,6 +4586,49 @@ export function createWin32Module(){
             const api = {
                 /** @returns {Record<string, Record<string, any>>} library name -> its exports */
                 libraries: ()=>libraries,
+
+                /**
+                 * Kernel events by handle, for a library that hands one to the
+                 * program or sets one the program gave it (DXGI's swap chain
+                 * frame latency object, IDXGIDevice2::EnqueueSetEvent).
+                 */
+                events: ()=>({
+                    /** @param {{ manualReset: boolean, signalled: boolean }} options */
+                    create: options=>kernel.handles.open('event', kernel.createEvent(options)),
+                    /** @param {number} handle */
+                    set: handle=>{
+                        // A stale handle is the program's mistake.
+                        try
+                        {
+                            kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                        }
+                        catch (e){
+                            void e;
+                        }
+                    },
+                }),
+
+                /**
+                 * The NT handles a DXGI resource made shared is named by
+                 * (IDXGIResource1::CreateSharedHandle): kernel objects of the
+                 * type Windows gives them, each naming a share's key, closed
+                 * and duplicated as any handle.
+                 */
+                sharedHandles: ()=>({
+                    /** @param {number} key */
+                    open: key=>kernel.handles.open(SHARED_RESOURCE_HANDLE, { key }),
+                    /** @param {number} handle @returns {number | null} */
+                    resolve: handle=>{
+                        try
+                        {
+                            return kernel.handles.resolve(handle, SHARED_RESOURCE_HANDLE).key;
+                        }
+                        catch (e){
+                            void e;
+                            return null;
+                        }
+                    },
+                }),
 
                 /**
                  * The process's variables as they are now, as SetEnvironmentVariable

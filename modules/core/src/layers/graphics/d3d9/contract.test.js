@@ -68,8 +68,34 @@ test('the adapter answers format questions from the table its creates consult', 
     assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.UNKNOWN, false),
         D3DERR_NOTAVAILABLE, 'and is not allowed full screen');
     assert.equal(d3d.CheckDeviceType(D3DFMT.D24S8, D3DFMT.X8R8G8B8, true), D3DERR_NOTAVAILABLE);
+    // Wine's test_display_formats: full screen, a display format with modes
+    // and a back buffer of it or its alpha twin; windowed, any target a
+    // present converts from, but not onto a 10-bit display or a non-display
+    // format.
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8, false), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.R5G6B5, false), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X1R5G5B5, false), D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.X1R5G5B5, false),
+        D3DERR_NOTAVAILABLE, 'no modes in X1R5G5B5');
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X8R8G8B8, true), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.A2R10G10B10, D3DFMT.A2R10G10B10, true),
+        D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.A8R8G8B8, D3DFMT.A8R8G8B8, true), D3DERR_NOTAVAILABLE,
+        'A8R8G8B8 is no display format');
 
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.UNKNOWN),
+        D3DERR_INVALIDCALL, 'no adapter format (test_check_device_format)');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'an adapter format no display is in');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8, D3DFMT.R5G6B5),
+        D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VERTEXBUFFER, 100), D3DERR_INVALIDCALL,
+        'a buffer has no format to ask about');
+    assert.equal(d3d.CheckDeviceFormat(0x40000, D3DRTYPE.SURFACE, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'sRGB writes to a plain surface');
+    assert.equal(d3d.CheckDeviceFormat(0x40001, D3DRTYPE.SURFACE, D3DFMT.A8R8G8B8), D3D_OK,
+        'sRGB writes to a target');
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),
         D3D_OK);
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.SURFACE, D3DFMT.D24S8),
@@ -191,6 +217,20 @@ test('a declaration the program made reports no format, even when it describes o
     const fvf = {};
     device.GetFVF(fvf);
     assert.equal(fvf.fvf, 0);
+    // Alone, a position is answered as the format it is (test_fvf_decl_conversion).
+    for (const [type, usage, expected] of [[D3DDECLTYPE.FLOAT3, D3DDECLUSAGE.POSITION, 2],
+        [D3DDECLTYPE.FLOAT4, D3DDECLUSAGE.POSITIONT, 4],
+        [D3DDECLTYPE.FLOAT3, D3DDECLUSAGE.NORMAL, 0]])
+    {
+        /** @type {{ declaration?: any }} */
+        const alone = {};
+        assert.equal(device.CreateVertexDeclaration([element(usage, type, 0)], alone), D3D_OK);
+        assert.equal(device.SetVertexDeclaration(alone.declaration), D3D_OK);
+        device.GetFVF(fvf);
+        assert.equal(fvf.fvf, expected);
+        alone.declaration.release();
+    }
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
     // But a fixed-function draw still reads it as the format it describes.
     assert.equal(device.stageProcessing.fvf, FVF_XYZ_DIFFUSE);
 
@@ -203,7 +243,7 @@ test('a declaration the program made reports no format, even when it describes o
     assert.equal(device.CreateVertexDeclaration(null, made), D3DERR_INVALIDCALL);
     assert.equal(device.CreateVertexDeclaration([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 2),
-    ], made), D3DERR_INVALIDCALL, 'a misaligned offset');
+    ], made), 0x80004005, 'a misaligned offset is E_FAIL (test_vertex_declaration_alignment)');
     made.declaration.release();
     assert.equal(device.release(), 0);
 });
@@ -488,26 +528,29 @@ test('the scissor rectangle is kept as given and follows a new target', ()=>{
     assert.equal(device.release(), 0);
 });
 
-test('clip planes are bounded by the capability and read back as zero until set', ()=>{
+test('clip planes read back as zero until set, and every index from the last up is the last'
+    + ' (test_clip_planes_limits)', ()=>{
     const { device } = make({ caps: { maxUserClipPlanes: 6 } });
     /** @type {{ plane?: Float32Array }} */
     const out = {};
-    assert.equal(device.GetClipPlane(0, out), D3D_OK);
-    assert.deepEqual([...(out.plane ?? [])], [0, 0, 0, 0]);
-    assert.equal(device.SetClipPlane(5, [1, 2, 3, 4]), D3D_OK);
-    assert.equal(device.GetClipPlane(5, out), D3D_OK);
-    assert.deepEqual([...(out.plane ?? [])], [1, 2, 3, 4]);
-    assert.equal(device.SetClipPlane(6, [1, 2, 3, 4]), D3DERR_INVALIDCALL);
-    assert.equal(device.GetClipPlane(6, out), D3DERR_INVALIDCALL);
+    for (const index of [0, 6, 63])
+    {
+        assert.equal(device.GetClipPlane(index, out), D3D_OK);
+        assert.deepEqual([...(out.plane ?? [])], [0, 0, 0, 0]);
+    }
+    for (let index = 0; index < 64; index++)
+    {
+        assert.equal(device.SetClipPlane(index, [2, 8, 5, index]), D3D_OK);
+    }
+    for (let index = 0; index < 64; index++)
+    {
+        assert.equal(device.GetClipPlane(index, out), D3D_OK);
+        assert.deepEqual([...(out.plane ?? [])], [2, 8, 5, index >= 5 ? 63 : index],
+            `plane ${index}`);
+    }
     assert.equal(device.SetClipPlane(0, null), D3DERR_INVALIDCALL);
     assert.equal(device.release(), 0);
 
-    // The default is six, the planes the renderer clips by; a device made
-    // with none takes none.
-    const bare = make().device;
-    assert.equal(bare.SetClipPlane(5, [1, 0, 0, 0]), D3D_OK);
-    assert.equal(bare.SetClipPlane(6, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
-    assert.equal(bare.release(), 0);
     const none = make({ caps: { maxUserClipPlanes: 0 } }).device;
     assert.equal(none.SetClipPlane(0, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
     assert.equal(none.release(), 0);
@@ -528,6 +571,119 @@ test('a multiplied transform is the given one times the current one', ()=>{
     // inside the translation, which it leaves as it was.
     assert.deepEqual([...(out.matrix ?? [])].slice(12), [10, 20, 30, 1]);
     assert.equal(out.matrix?.[0], 2);
+
+    // Wine's test_multiply_transform: while a block records, the product
+    // goes into the device, and the block does not hold it.
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    device.MultiplyTransform(D3DTS.WORLD, [
+        3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1,
+    ]);
+    /** @type {{ block?: any }} */
+    const block = {};
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    device.GetTransform(D3DTS.WORLD, out);
+    assert.equal(out.matrix?.[0], 6);
+    device.SetTransform(D3DTS.WORLD, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    assert.equal(block.block.Apply(), D3D_OK);
+    device.GetTransform(D3DTS.WORLD, out);
+    assert.equal(out.matrix?.[0], 1);
+    block.block.release();
+    assert.equal(device.release(), 0);
+});
+
+test('a cube texture forgives an unlock of a face not locked; the face itself does not', ()=>{
+    // Wine's d3d9 test_lockrect_invalid: the second UnlockRect of a cube
+    // face is D3D_OK, and a lock of the face's surface while the face is
+    // locked is refused.
+    const { device } = make();
+    /** @type {{ texture?: any }} */
+    const cube = {};
+    assert.equal(device.CreateCubeTexture(16, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+        D3D_OK);
+    /** @type {{ surface?: any }} */
+    const face = {};
+    assert.equal(cube.texture.GetCubeMapSurface(1, 0, face), D3D_OK);
+    assert.equal(cube.texture.LockCubeRect(1, 0, {}, null, 0), D3D_OK);
+    assert.equal(face.surface.LockRect({}, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(cube.texture.UnlockCubeRect(1, 0), D3D_OK);
+    assert.equal(cube.texture.UnlockCubeRect(1, 0), D3D_OK, 'not locked, and forgiven');
+    assert.equal(face.surface.UnlockRect(), D3DERR_INVALIDCALL, 'the face itself does not');
+    assert.equal(cube.texture.UnlockCubeRect(6, 0), D3DERR_INVALIDCALL, 'no such face');
+    face.surface.release();
+    cube.texture.release();
+    assert.equal(device.release(), 0);
+});
+
+test('a video-memory level locks when dynamic or in ATI1/ATI2, and owes an unlock only then', ()=>{
+    // Wine's test_resource_access.
+    const { device } = make();
+    /** @param {number} format @param {number} usage */
+    const levelOf = (format, usage)=>{
+        /** @type {{ texture?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture(16, 16, 1, usage, format, D3DPOOL.DEFAULT, texture),
+            D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(texture.texture.GetSurfaceLevel(0, level), D3D_OK);
+        texture.texture.release();
+        return level.surface;
+    };
+    const plain = levelOf(D3DFMT.A8R8G8B8, 0);
+    assert.equal(plain.LockRect({}, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(plain.UnlockRect(), D3DERR_INVALIDCALL, 'never lockable, so nothing forgiven');
+    const dynamic = levelOf(D3DFMT.A8R8G8B8, D3DUSAGE.DYNAMIC);
+    assert.equal(dynamic.LockRect({}, null, 0), D3D_OK);
+    assert.equal(dynamic.UnlockRect(), D3D_OK);
+    assert.equal(dynamic.UnlockRect(), D3D_OK, 'a lockable level forgives');
+    const ati2 = levelOf(D3DFMT.ATI2, 0);
+    assert.equal(ati2.LockRect({}, null, 0), D3D_OK);
+    assert.equal(ati2.UnlockRect(), D3D_OK);
+    for (const surface of [plain, dynamic, ati2])
+    {
+        surface.release();
+    }
+    for (const [pool, expected] of [[D3DPOOL.DEFAULT, D3DERR_INVALIDCALL],
+        [D3DPOOL.SYSTEMMEM, D3DERR_INVALIDCALL], [D3DPOOL.SCRATCH, D3D_OK]])
+    {
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateOffscreenPlainSurface(16, 16, D3DFMT.ATI2, pool, out), expected,
+            `an ATI2 plain surface in pool ${pool}`);
+        out.surface?.release();
+    }
+    const { d3d } = make();
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.SURFACE, D3DFMT.ATI1), D3DERR_NOTAVAILABLE,
+        'and the adapter says so');
+    assert.equal(device.release(), 0);
+});
+
+test('a buffer is no render target or depth-stencil, and lives in no scratch pool', ()=>{
+    // Wine's test_resource_access.
+    const { device } = make();
+    /** @type {{ buffer?: any }[]} */
+    const made = [];
+    const out = ()=>{
+        made.push({});
+        return made[made.length - 1];
+    };
+    for (const create of [
+        (/** @type {number} */ usage, /** @type {number} */ pool)=>device.CreateVertexBuffer(16,
+            usage, 0, pool, out()),
+        (/** @type {number} */ usage, /** @type {number} */ pool)=>device.CreateIndexBuffer(16,
+            usage, 101, pool, out()),
+    ])
+    {
+        assert.equal(create(0x200, D3DPOOL.DEFAULT), D3D_OK, 'dynamic');
+        assert.equal(create(0, D3DPOOL.MANAGED), D3D_OK);
+        assert.equal(create(1, D3DPOOL.DEFAULT), D3DERR_INVALIDCALL, 'render target');
+        assert.equal(create(0x202, D3DPOOL.DEFAULT), D3DERR_INVALIDCALL, 'depth-stencil');
+        assert.equal(create(0, D3DPOOL.SCRATCH), D3DERR_INVALIDCALL, 'scratch');
+    }
+    for (const held of made)
+    {
+        held.buffer?.release();
+    }
     assert.equal(device.release(), 0);
 });
 
@@ -1099,16 +1255,25 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
         /** @type {{ surface?: any }} */
         const plain = {};
         device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plain);
+        /** @type {{ surface?: any }} */
+        const plainSource = {};
+        device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plainSource);
         memory.fill(7, source.surface.base, source.surface.base + 64);
+        memory.fill(7, plainSource.surface.base, plainSource.surface.base + 64);
         const before = writes;
         assert.equal(device.StretchRect(source.surface, null, target.surface, null, 1), D3D_OK);
         const between = writes - before;
         const intoTarget = memory[target.surface.base];
-        assert.equal(device.StretchRect(source.surface, null, plain.surface, null, 1), D3D_OK);
+        // A target into a plain surface is refused, as Windows refuses it
+        // (Wine's d3d9 test_stretch_rect); a plain one into another is not.
+        assert.equal(device.StretchRect(source.surface, null, plain.surface, null, 1),
+            D3DERR_INVALIDCALL);
+        assert.equal(device.StretchRect(plainSource.surface, null, plain.surface, null, 1), D3D_OK);
         const intoPlain = memory[plain.surface.base];
         source.surface.release();
         target.surface.release();
         plain.surface.release();
+        plainSource.surface.release();
         device.release();
         return { between, intoTarget, intoPlain };
     };
@@ -1117,6 +1282,69 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
         { between: 0, intoTarget: 0, intoPlain: 7 },
         'into a target nothing moves; into a plain surface the bytes still do');
     assert.deepEqual(copied({ drawsNothing: true }), { between: 0, intoTarget: 0, intoPlain: 7 });
+});
+
+test('StretchRect takes a texture level only into a target, a plain surface only from another,'
+    + ' and converts plain colour formats pixel by pixel (test_stretch_rect)', ()=>{
+    const memory = new Uint8Array(1 << 20);
+    let next = 0x1000;
+    const { device } = make({ services: {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        },
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            memory.slice(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+            memory.set(bytes, address);
+        },
+    } });
+    /** @param {number} format */
+    const textureLevel = format=>{
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(4, 4, 1, 0, format, D3DPOOL.DEFAULT, made), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+        made.texture.release();
+        return level.surface;
+    };
+    /** @param {number} format */
+    const plainOf = format=>{
+        /** @type {{ surface?: any }} */
+        const made = {};
+        assert.equal(device.CreateOffscreenPlainSurface(4, 4, format, D3DPOOL.DEFAULT, made),
+            D3D_OK);
+        return made.surface;
+    };
+    /** @type {{ surface?: any }} */
+    const target = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, target), D3D_OK);
+    const texture = textureLevel(D3DFMT.A8R8G8B8);
+    const otherTexture = textureLevel(D3DFMT.A8R8G8B8);
+    const plain = plainOf(D3DFMT.A8R8G8B8);
+    const narrow = plainOf(D3DFMT.R5G6B5);
+    assert.equal(device.StretchRect(texture, null, otherTexture, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(target.surface, null, texture, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(texture, null, plain, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(plain, null, texture, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(target.surface, null, plain, null, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.StretchRect(texture, null, target.surface, null, 0), D3D_OK);
+    assert.equal(device.StretchRect(plain, null, target.surface, null, 0), D3D_OK);
+    // Pure red, opaque, into five-six-five: 0xf800 a pixel.
+    for (let at = 0; at < 64; at += 4)
+    {
+        memory.set([0, 0, 0xff, 0xff], plain.base + at);
+    }
+    assert.equal(device.StretchRect(plain, null, narrow, null, 0), D3D_OK);
+    assert.deepEqual([...memory.subarray(narrow.base, narrow.base + 4)], [0x00, 0xf8, 0x00, 0xf8]);
+    for (const surface of [target.surface, texture, otherTexture, plain, narrow])
+    {
+        surface.release();
+    }
+    device.release();
 });
 
 test('ColorFill of a target drawn elsewhere, or not at all, writes no guest bytes', ()=>{
@@ -1203,14 +1431,13 @@ test('a target the program cannot lock, drawn elsewhere or not at all, is not cl
         device.release();
         return answer;
     };
-    // A cube's faces are six storages.
-    const faces = (/** @type {boolean} */ cleared)=>Array(6).fill(cleared);
+    // A cube's faces are one storage, one after another.
     const everything = {
-        'target texture': [true], 'target cube': faces(true), target: [true],
+        'target texture': [true], 'target cube': [true], target: [true],
         'lockable target': [true], texture: [true], 'dynamic texture': [true], plain: [true],
     };
     assert.deepEqual(clearedWhen({}), everything, 'drawing here, every resource is cleared');
-    const notTargets = { ...everything, 'target texture': [false], 'target cube': faces(false),
+    const notTargets = { ...everything, 'target texture': [false], 'target cube': [false],
         target: [false] };
     assert.deepEqual(clearedWhen({ renderedElsewhere: true }), notTargets);
     assert.deepEqual(clearedWhen({ drawsNothing: true }), notTargets);

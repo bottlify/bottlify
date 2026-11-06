@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { D3DERR_INVALIDCALL, D3D_OK, E_FAIL } from './constants.js';
 import { createReferenceCount } from './resources.js';
 import {
     D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, MAX_DECLARATION_LENGTH,
@@ -73,6 +73,26 @@ test('blend weights follow the position, and a last beta of indices is its own e
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
         element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT3, 12),
     ]);
+    // Five as floats are four weights and a float of indices
+    // (test_fvf_decl_conversion).
+    // XYZB2 with a D3DCOLOR last beta is, as Direct3D 9 declares it, a
+    // D3DCOLOR weight and UBYTE4 indices; the format itself is a float and
+    // a D3DCOLOR.
+    assert.deepEqual(elementsOfFvf(0x0008 | 0x8000), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT1, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.D3DCOLOR, 16),
+    ]);
+    assert.deepEqual(elementsOfFvf(0x0008 | 0x8000, { asDirect3D9: true }), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.D3DCOLOR, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.UBYTE4, 16),
+    ]);
+    assert.deepEqual(elementsOfFvf(0x000e), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT4, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.FLOAT1, 28),
+    ]);
 });
 
 test('the conversion round-trips for every format a fixed-function draw can read', ()=>{
@@ -122,10 +142,10 @@ test('validation refuses what the header puts out of range', ()=>{
     ]), D3DERR_INVALIDCALL, 'a stream past the last');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.UNUSED, 0),
-    ]), D3DERR_INVALIDCALL, 'the unused type outside the sentinel');
+    ]), E_FAIL, 'the unused type outside the sentinel');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, 18, 0),
-    ]), D3DERR_INVALIDCALL, 'a type past the last');
+    ]), E_FAIL, 'a type past the last');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0, { method: 7 }),
     ]), D3DERR_INVALIDCALL, 'a method past the last');
@@ -137,7 +157,7 @@ test('validation refuses what the header puts out of range', ()=>{
         assert.equal(validateElements([
             element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
             element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 12 + offset),
-        ]), D3DERR_INVALIDCALL, `an offset of ${12 + offset} is not dword-aligned`);
+        ]), E_FAIL, `an offset of ${12 + offset} is not dword-aligned`);
     }
     assert.equal(validateElements([
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 0),
@@ -211,4 +231,15 @@ test('fixed function reads a declaration by its offsets and refuses what it cann
         element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 28)] }), null, 'a colour in R, G, B, A');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [
         element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 0)] }), null, 'no position');
+});
+
+test('a position of four floats (D3DFVF_XYZW) is drawn by the fixed function as three, its'
+    + ' colours where the format puts them (test_fog, test_ffp_w)', ()=>{
+    const layout = fixedFunctionLayoutOf(
+        { id: 9, elements: elementsOfFvf(0x4002 | 0x40 | 0x80) ?? [] });
+    assert.ok(layout, 'drawn by the fixed function');
+    const byName = Object.fromEntries((layout?.attributes ?? []).map(attribute=>
+        [attribute.name, [attribute.offset, attribute.format]]));
+    assert.deepEqual(byName, { position: [0, 'float32x3'], diffuse: [16, 'unorm8x4'],
+        specular: [20, 'unorm8x4'] });
 });

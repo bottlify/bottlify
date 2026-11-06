@@ -396,8 +396,12 @@ export function levelExtent(size, level){
  * @returns {number} S_OK or E_INVALIDARG
  */
 export function bufferCreateResult(desc, hasInitialData, rules = NO_RULES){
-    // A buffer has no levels to generate (test_generate_mips).
-    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.GENERATE_MIPS) !== 0)
+    // A buffer has no levels to generate (test_generate_mips), no faces and
+    // nothing GDI draws into: Direct3D 10's GDI_COMPATIBLE is the bit
+    // Direct3D 11's BUFFER_ALLOW_RAW_VIEWS is, which a Direct3D 10 device
+    // refuses (d3d10core.c test_create_buffer).
+    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & (D3D10_RESOURCE_MISC.GENERATE_MIPS
+        | D3D10_RESOURCE_MISC.TEXTURECUBE | D3D10_RESOURCE_MISC.GDI_COMPATIBLE)) !== 0)
     {
         return E_INVALIDARG;
     }
@@ -580,7 +584,11 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData, rules
         return E_INVALIDARG;
     }
     const shared = D3D10_RESOURCE_MISC.SHARED | D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX;
-    if ((desc.MiscFlags & shared) === shared)
+    // A texture is shared one way: a plain share or a keyed mutex, and an NT
+    // handle only names one of those (test_shared_resource).
+    if ((desc.MiscFlags & shared) === shared
+        || (((/** @type {any} */ (desc).MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.SHARED_NTHANDLE)
+            !== 0 && (desc.MiscFlags & shared) === 0))
     {
         return E_INVALIDARG;
     }
@@ -759,15 +767,16 @@ export function swapChainDescResult(desc){
 /**
  * The formats a swap chain's buffers can be shown from, which are also the
  * ones CheckFormatSupport says DISPLAY for and an output lists modes in: the
- * four Direct3D 10 requires (d3d10core.c display_format_support) and the
- * BGRA pair it allows.
+ * four Direct3D 10 requires (d3d10core.c display_format_support), the
+ * BGRA pair it allows, and the extended-range format level 11 requires
+ * (kept without its bias: decisions.md A83).
  *
  * @type {ReadonlySet<number>}
  */
 export const DISPLAY_FORMATS = new Set([
     DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_UNORM,
     DXGI_FORMAT.B8G8R8A8_UNORM_SRGB, DXGI_FORMAT.R16G16B16A16_FLOAT,
-    DXGI_FORMAT.R10G10B10A2_UNORM,
+    DXGI_FORMAT.R10G10B10A2_UNORM, DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM,
 ]);
 
 /**

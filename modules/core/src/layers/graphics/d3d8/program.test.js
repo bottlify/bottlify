@@ -344,8 +344,9 @@ test('under a vertex shader a stage samples the set of its own number, whatever 
         const fragment = h.gpu.of('createShaderModule').map(call=>call.descriptor.code)
             .find(code=>code.includes('fn ps_main'));
         assert.ok(fragment);
-        assert.match(fragment, /sampleStage1\(input\.texCoord1\b/, 'stage 1 reads oT1');
-        assert.doesNotMatch(fragment, /sampleStage1\(input\.texCoord0\b/);
+        assert.match(fragment, /input\.coord1 = in\.t1;/, 'stage 1 reads oT1');
+        assert.match(fragment, /sampleStage1\(input\.coord1\b/);
+        assert.doesNotMatch(fragment, /input\.coord1 = in\.t0;/);
 
         assert.equal(h.device.SetTexture(1, null), D3D_OK);
         texture.texture.release();

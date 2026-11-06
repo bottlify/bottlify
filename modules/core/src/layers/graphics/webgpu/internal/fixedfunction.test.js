@@ -81,7 +81,7 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
     // D3DTSS_TCI_CAMERASPACEPOSITION and its two siblings: the coordinate
     // is the vertex through world and view, put through the stage's texture
     // transform in the vertex stage -- where Direct3D applies it -- and
-    // sampled from a varying of its own, so a vertex carrying no set at all
+    // sampled from the stage's varying, so a vertex carrying no set at all
     // still textures, and the sample does not transform it a second time.
     const stage = (/** @type {number} */ texCoordIndex)=>({
         colorOp: D3DTOP.SELECTARG1,
@@ -97,35 +97,32 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
     })).code;
     assert.ok(position.includes(
         'let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;'));
-    assert.ok(position.includes('@location(2) generated0: vec4f,'));
-    assert.ok(position.includes('out.generated0 = vec4f('
-        + 'dot(uniforms.texTransform[0], vec4f(cameraPosition, 1.0)),'
-        + ' dot(uniforms.texTransform[1], vec4f(cameraPosition, 1.0)),'
-        + ' dot(uniforms.texTransform[2], vec4f(cameraPosition, 1.0)),'
-        + ' dot(uniforms.texTransform[3], vec4f(cameraPosition, 1.0)));'));
-    assert.ok(position.includes('sampleStage0(input.generated0)'));
-    assert.ok(!position.includes('input.texCoord0'), 'no carried set is read');
-    // The sample function of a generated stage applies no transform of its
-    // own, and takes the coordinate's first two components.
+    assert.ok(position.includes('@location(2) coord0: vec4f,'));
+    // With no count in its flags it goes on as made, w zero.
+    assert.ok(position.includes('let generated0 = vec4f(cameraPosition, 0.0);'));
+    assert.ok(position.includes('out.coord0 = generated0;'));
+    assert.ok(position.includes('sampleStage0(input.coord0)'));
+    assert.doesNotMatch(position, /texCoord0/, 'no carried set is read');
+    // The sample function applies no transform of its own, and takes the
+    // coordinate's first two components.
     const sampler = position.slice(position.indexOf('fn sampleStage0'));
     assert.ok(sampler.startsWith('fn sampleStage0(carried: vec4f)'));
     assert.ok(sampler.slice(0, sampler.indexOf('}')).includes('let raw = carried.xy;'));
 
-    // Projected: divided per pixel by the third component of the transformed
-    // coordinate for a three-coordinate transform, the fourth for four --
-    // which is how a texture is thrown onto the ground from a point.
+    // Through a count of three, (x, y, z, 1) goes through the matrix's first
+    // three columns; projected, w is the third, and the pixel divides by it
+    // -- which is how a texture is thrown onto the ground from a point.
     const projected = generate(baseState({
         fvf: FVF.XYZ | FVF.DIFFUSE,
-        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), projected: 3 }],
+        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), transform: 0x103 }],
     })).code;
+    const padded = 'vec4f(generated0.xyz, 1.0)';
+    assert.ok(projected.includes(`out.coord0 = vec4f(dot(uniforms.texTransform[0], ${padded}),`
+        + ` dot(uniforms.texTransform[1], ${padded}), dot(uniforms.texTransform[2], ${padded}),`
+        + ` dot(uniforms.texTransform[2], ${padded}));`), projected);
     const projectedSampler = projected.slice(projected.indexOf('fn sampleStage0'));
     assert.ok(projectedSampler.slice(0, projectedSampler.indexOf('}'))
-        .includes('let raw = carried.xy / carried.z;'));
-    const four = generate(baseState({
-        fvf: FVF.XYZ | FVF.DIFFUSE,
-        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), projected: 4 }],
-    })).code;
-    assert.ok(four.includes('let raw = carried.xy / carried.w;'));
+        .includes('let raw = select(carried.xy / carried.w, vec2f(0.0), carried.w == 0.0);'));
 
     // Without a normal in the vertex the camera-space normal is the one the
     // fixed function assumes, straight at the camera.
@@ -133,7 +130,7 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
         fvf: FVF.XYZ | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACENORMAL)],
     })).code;
     assert.ok(normal.includes('let cameraNormal = vec3f(0.0, 0.0, 1.0);'));
-    assert.ok(normal.includes('vec4f(cameraNormal, 1.0)'));
+    assert.ok(normal.includes('vec4f(cameraNormal, 0.0)'));
     const lit = generate(baseState({
         fvf: FVF.XYZ | FVF.NORMAL, stages: [stage(TCI.CAMERASPACEREFLECTIONVECTOR)],
         normalizeNormals: true,
@@ -142,11 +139,21 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
         + ' normalize((uniforms.cameraNormalMatrix * vec4f(vertex.normal, 0.0)).xyz);'));
     assert.ok(lit.includes('reflect(normalize(cameraPosition), cameraNormal)'));
 
+    // A sphere map: the reflection's x and y over twice the length of
+    // (x, y, z - 1), moved to the middle of the map (Wine's d3d9
+    // test_generated_texcoords, 0x836900 at the centre).
+    const sphere = generate(baseState({
+        fvf: FVF.XYZ | FVF.NORMAL, stages: [stage(TCI.SPHEREMAP)],
+    })).code;
+    const reflection = 'reflect(normalize(cameraPosition), cameraNormal)';
+    assert.ok(sphere.includes(`let generated0 = vec4f(vec3f(${reflection}.xy / (2.0 * length(`
+        + `vec3f(${reflection}.xy, ${reflection}.z - 1.0))) + 0.5, 0.0), 0.0);`), sphere);
+
     // A pre-transformed vertex has no camera space to be taken in.
     const flat = generate(baseState({
         fvf: FVF.XYZRHW | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACEPOSITION)],
     })).code;
-    assert.ok(flat.includes('out.generated0 = vec4f(0.0, 0.0, 1.0, 1.0);'));
+    assert.ok(flat.includes('out.coord0 = vec4f(0.0, 0.0, 1.0, 1.0);'));
     assert.ok(!flat.includes('cameraPosition'));
 });
 
@@ -162,24 +169,24 @@ test('the blending operations weigh the two arguments by an alpha', ()=>{
     });
     const codeOf = (/** @type {number} */ op)=>generate(baseState({ fvf, stages: [stage(op)] })).code;
     assert.ok(codeOf(D3DTOP.BLENDDIFFUSEALPHA).includes(
-        'mix(current, sampleStage0(input.texCoord0), (input.diffuse).a)'));
+        'mix(current, sampleStage0(input.coord0), (input.diffuse).a)'));
     assert.ok(codeOf(D3DTOP.BLENDTEXTUREALPHA).includes(
-        'mix(current, sampleStage0(input.texCoord0), (sampleStage0(input.texCoord0)).a)'));
+        'mix(current, sampleStage0(input.coord0), (sampleStage0(input.coord0)).a)'));
     assert.ok(codeOf(D3DTOP.BLENDFACTORALPHA).includes(
-        'mix(current, sampleStage0(input.texCoord0), (uniforms.textureFactor).a)'));
+        'mix(current, sampleStage0(input.coord0), (uniforms.textureFactor).a)'));
     assert.ok(codeOf(D3DTOP.BLENDCURRENTALPHA).includes(
-        'mix(current, sampleStage0(input.texCoord0), (current).a)'));
+        'mix(current, sampleStage0(input.coord0), (current).a)'));
     assert.ok(codeOf(D3DTOP.BLENDTEXTUREALPHAPM).includes(
-        'sampleStage0(input.texCoord0) + current * (1.0 - (sampleStage0(input.texCoord0)).a)'));
+        'sampleStage0(input.coord0) + current * (1.0 - (sampleStage0(input.coord0)).a)'));
     assert.ok(codeOf(D3DTOP.ADDSMOOTH).includes(
-        'sampleStage0(input.texCoord0) + current - sampleStage0(input.texCoord0) * current'));
+        'sampleStage0(input.coord0) + current - sampleStage0(input.coord0) * current'));
     assert.ok(codeOf(D3DTOP.ADDSIGNED2X).includes(
-        '(sampleStage0(input.texCoord0) + current - vec4f(0.5)) * 2.0'));
+        '(sampleStage0(input.coord0) + current - vec4f(0.5)) * 2.0'));
 });
 
 test('the colour-plus-alpha forms, the signed dot product and ARG0 as a third operand', ()=>{
     const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
-    const T = 'sampleStage0(input.texCoord0)';
+    const T = 'sampleStage0(input.coord0)';
     const codeOf = (/** @type {number} */ colorOp, /** @type {number} */ colorArg0 = D3DTA.CURRENT)=>
         generate(baseState({ fvf, stages: [{
             colorOp, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.DIFFUSE, colorArg0,
@@ -225,11 +232,11 @@ test('a bump stage moves the coordinate of the next stage, and with luminance sc
         ] })).code;
         // The matrix and the luminance are the block's, so a program moving
         // them draw by draw draws through one pipeline.
-        const moved = 'sampleStage1((input.texCoord1 + vec2f(uniforms.bumpEnv[0].x * bump0.r'
+        const moved = 'sampleStage1(vec4f(input.coord1.xy + vec2f(uniforms.bumpEnv[0].x * bump0.r'
             + ' + uniforms.bumpEnv[0].z * bump0.g, uniforms.bumpEnv[0].y * bump0.r'
-            + ' + uniforms.bumpEnv[0].w * bump0.g)))';
+            + ' + uniforms.bumpEnv[0].w * bump0.g), input.coord1.zw))';
         const plain = codeOf(D3DTOP.BUMPENVMAP);
-        assert.ok(plain.includes('let bump0 = sampleStage0(input.texCoord0);'));
+        assert.ok(plain.includes('let bump0 = sampleStage0(input.coord0);'));
         assert.ok(plain.includes(`current = vec4f(saturate((${moved} * input.diffuse).rgb),`));
         assert.ok(!plain.includes('saturate(bump0.b'), 'no luminance without the luminance op');
         const lit = codeOf(D3DTOP.BUMPENVMAPLUMINANCE);
@@ -245,7 +252,7 @@ test('a bump stage moves the coordinate of the next stage, and with luminance sc
             colorArg2: D3DTA.CURRENT, alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT,
             alphaArg2: D3DTA.CURRENT, texCoordIndex: 0, bump: [1, 0, 0, 1, 0, 0] }] })).code,
         'one source whatever the matrix');
-        // A generated coordinate is four wide: the offset moves its first two.
+        // A generated coordinate as well: the offset moves its first two.
         const generatedNext = generate(baseState({ fvf, stages: [
             { colorOp: D3DTOP.BUMPENVMAP, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
                 alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
@@ -254,7 +261,7 @@ test('a bump stage moves the coordinate of the next stage, and with luminance sc
                 alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
                 texCoordIndex: TCI.CAMERASPACEPOSITION },
         ] })).code;
-        assert.ok(generatedNext.includes('sampleStage1(vec4f(input.generated1.xy + vec2f('),
+        assert.ok(generatedNext.includes('sampleStage1(vec4f(input.coord1.xy + vec2f('),
             generatedNext);
     });
 
@@ -518,13 +525,15 @@ test('a stage samples the coordinate set it names, not its own number', ()=>{
         stages: [textured, textured],
     })).code;
 
-    assert.match(code, /sampleStage1\(input\.texCoord0\)/);
+    assert.match(code, /out\.coord1 = carried1;/);
+    assert.match(code, /let carried1 = vec4f\(vertex\.texCoord0, 0\.0, 0\.0\);/);
+    assert.match(code, /sampleStage1\(input\.coord1\)/);
     assert.doesNotMatch(code, /texCoord1/, 'the vertex carries one set and only one is read');
     // The stage samples through the one hardware sampler with its own state
     // from the block: the address mode, the filters and the mip mode are
     // applied in the shader, and the level is chosen there.
     assert.match(code,
-        /fn sampleStage1\(carried: vec2f\) -> vec4f \{\n(.*\n){3} {4}let flags = uniforms\.stage1;/);
+        /fn sampleStage1\(carried: vec4f\) -> vec4f \{\n(.*\n){1} {4}let flags = uniforms\.stage1;/);
     assert.match(code, /textureSampleLevel\(texture1, sampler1, uv, level\)/);
     assert.match(code, /fn addressCoordinate\(t: f32, mode: u32, texels: f32\) -> f32/);
 });
@@ -542,9 +551,9 @@ test('a cube stage samples a direction of three components, a volume stage three
             stages: [{ ...textured, dimension: 'cube' }],
         })).code;
         assert.match(cube, /var texture0: texture_cube<f32>;/);
-        assert.match(cube, /@location\(\d+\) texCoord0: vec4f,/);
-        assert.match(cube, /out\.texCoord0 = vec4f\(vertex\.texCoord0, 0\.0\);/);
-        assert.match(cube, /sampleStage0\(input\.texCoord0\.xyz\)/);
+        assert.match(cube, /@location\(\d+\) coord0: vec4f,/);
+        assert.match(cube, /let carried0 = vec4f\(vertex\.texCoord0, 0\.0\);/);
+        assert.match(cube, /sampleStage0\(input\.coord0\.xyz\)/);
         const sampler = cube.slice(cube.indexOf('fn sampleStage0'));
         const body = sampler.slice(0, sampler.indexOf('\n}\n'));
         assert.ok(body.startsWith('fn sampleStage0(direction: vec3f) -> vec4f {'));
@@ -560,7 +569,7 @@ test('a cube stage samples a direction of three components, a volume stage three
             fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
             stages: [{ ...textured, dimension: 'cube' }],
         })).code;
-        assert.match(flat, /out\.texCoord0 = vec4f\(vertex\.texCoord0, 0\.0, 0\.0\);/);
+        assert.match(flat, /let carried0 = vec4f\(vertex\.texCoord0, 0\.0, 0\.0\);/);
 
         // A generated reflection vector is a direction already.
         const reflected = generate(baseState({
@@ -568,7 +577,7 @@ test('a cube stage samples a direction of three components, a volume stage three
             stages: [{ ...textured, texCoordIndex: TCI.CAMERASPACEREFLECTIONVECTOR,
                 dimension: 'cube' }],
         })).code;
-        assert.match(reflected, /sampleStage0\(input\.generated0\.xyz\)/);
+        assert.match(reflected, /sampleStage0\(input\.coord0\.xyz\)/);
 
         const volume = generate(baseState({
             fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT) | threeComponents,
@@ -790,16 +799,17 @@ test('user clip planes are distances the device clips by, or varyings the fragme
             clipDistances: true }), [0]).wgsl.includes('clip'));
     });
 
-test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
-    // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
-    // set: two dot products against the rows the block carries, computed
-    // before the level and the address mode, which see the moved coordinate.
-    // A sprite sheet's cell is chosen this way, so a stage that sampled the
-    // carried coordinate would draw every sheet's first cell.
+test('a stage puts its coordinate through its own texture transform in the vertex stage', ()=>{
+    // Direct3D applies D3DTS_TEXTURE0..7 in vertex processing: the
+    // components the vertex carries, a one after the last, through the
+    // matrix by columns, the count's first kept (Wine's d3d9
+    // test_texture_transform_flags). A sprite sheet's cell is chosen this
+    // way, so a stage that sampled the carried coordinate would draw every
+    // sheet's first cell. Each stage has its own varying and its own rows.
     const textured = {
         colorOp: D3DTOP.MODULATE, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
         alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
-        texCoordIndex: 0,
+        texCoordIndex: 0, transform: 2,
     };
     const code = generate(baseState({
         fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
@@ -807,24 +817,39 @@ test('a stage puts its coordinate through its own texture transform before sampl
     })).code;
 
     assert.match(code, /texTransform: array<vec4f, 32>,/);
-    for (const stage of [0, 1, 2])
+    for (const stage of [0, 1, 2, 3])
     {
-        const rows = `${stage * 4}`;
-        const next = `${stage * 4 + 1}`;
-        assert.match(code, new RegExp(
-            `fn sampleStage${stage}\\(carried: vec2f\\) -> vec4f \\{\\n`
-            + ` {4}let extended = vec3f\\(carried, 1\\.0\\);\\n`
-            + ` {4}let raw = vec2f\\(dot\\(uniforms\\.texTransform\\[${rows}\\]\\.xyz,`
-            + ` extended\\),\\n`
-            + ` {8}dot\\(uniforms\\.texTransform\\[${next}\\]\\.xyz, extended\\)\\);\\n`
-            + ` {4}let flags = uniforms\\.stage${stage};\\n`
-            + ` {4}let size = vec2f\\(textureDimensions\\(texture${stage}, 0\\)\\);`),
-        `stage ${stage} transforms with its own two rows, then measures its level`);
+        const padded = `vec4f(carried${stage}.xy, 1.0, 0.0)`;
+        assert.ok(code.includes(`out.coord${stage} = vec4f(`
+            + `dot(uniforms.texTransform[${stage * 4}], ${padded}),`
+            + ` dot(uniforms.texTransform[${stage * 4 + 1}], ${padded}), 0.0, 0.0);`),
+        `stage ${stage} transforms with its own columns`);
     }
-    // The block carries rows for every stage; a fourth transforms with its
-    // own, and reads its own sampler state -- with none, it sampled with WRAP,
-    // linear and its top level whatever it was set to.
-    assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let extended = vec3f\(carried, 1\.0\);\n {4}let raw = vec2f\(dot\(uniforms\.texTransform\[12\]\.xyz, extended\),\n {8}dot\(uniforms\.texTransform\[13\]\.xyz, extended\)\);\n {4}let flags = uniforms\.stagesHigh\[0\]\[0\];/);
+    // The sample applies no transform, and reads its own sampler state --
+    // the fourth stage's from the rows past the first three.
+    assert.match(code, /fn sampleStage3\(carried: vec4f\) -> vec4f \{\n {4}let raw = carried\.xy;\n {4}let flags = uniforms\.stagesHigh\[0\]\[0\];/);
+    assert.doesNotMatch(code.slice(code.indexOf('@fragment')), /texTransform/);
+
+    // Each count keeps its own components; projected, w is the count's last
+    // or, with no count, the last the vertex carries; one coordinate through
+    // a count of four is padded (u, 1, 0, 0).
+    const one = (/** @type {number} */ transform)=>generate(baseState({
+        fvf: FVF.XYZ | (1 << FVF.TEXCOUNT_SHIFT) | (3 << 16),
+        stages: [{ ...textured, transform }],
+    })).code;
+    const u = 'vec4f(carried0.x, 1.0, 0.0, 0.0)';
+    const dot = (/** @type {number} */ column)=>`dot(uniforms.texTransform[${column}], ${u})`;
+    assert.ok(one(4).includes(`out.coord0 = vec4f(${dot(0)}, ${dot(1)}, ${dot(2)}, ${dot(3)});`));
+    assert.ok(one(0x102).includes(`out.coord0 = vec4f(${dot(0)}, ${dot(1)}, 0.0, ${dot(1)});`));
+    assert.ok(one(0).includes('out.coord0 = carried0;'));
+    assert.ok(one(0x100).includes('out.coord0 = vec4f(carried0.xyz, carried0.x);'));
+    // A pre-transformed vertex's coordinate goes through nothing, w one.
+    const screen = generate(baseState({
+        fvf: FVF.XYZRHW | (1 << FVF.TEXCOUNT_SHIFT),
+        stages: [{ ...textured, transform: 0x104 }],
+    })).code;
+    assert.ok(screen.includes('out.coord0 = vec4f(vertex.texCoord0, 0.0, 1.0);'));
+    assert.doesNotMatch(screen.slice(0, screen.indexOf('@fragment')), /texTransform\[/);
 });
 
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{
@@ -909,14 +934,19 @@ test('table fog is the pixel\'s: the curve over its z or its w, in the fragment 
     // Wine's d3d9 test_fog_interpolation draws a quad whose z runs from 0 to 1
     // under table EXP fog and finds the middle at the curve's value there,
     // not at the mean of the two ends; test_fog has the depth be z under an
-    // affine projection and w otherwise, which the block's fog row says.
+    // affine projection and w otherwise, which the block's fog row says. The
+    // z is the vertex's, carried times its w and taken back by the
+    // position's 1/w: the position's own z has the device's depth bias in
+    // it, in the steps of a format Direct3D 9's DEPTHBIAS does not count in.
     const code = generate(baseState({
         fogMode: D3DFOG.EXP, fogSource: FOG_SOURCE.TABLE,
     })).code;
     const fragment = code.slice(code.indexOf('@fragment'));
     assert.ok(fragment.includes('clamp(fogFactorOf(select(1.0 / input.position.w,'
-        + ' input.position.z, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'), fragment);
-    assert.doesNotMatch(code, /fogAmount/, 'no factor travels from the vertex');
+        + ' input.fogAmount * input.position.w, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'),
+    fragment);
+    assert.ok(code.includes('out.fogAmount = out.position.z * out.position.w;'));
+    assert.doesNotMatch(fragment, /position\.z/);
     assert.match(code, /exp\(-uniforms\.fogFactors\.z \* dist\)/);
 
     // A pre-transformed vertex is fogged by the same pixel depth -- its z, or
@@ -926,6 +956,8 @@ test('table fog is the pixel\'s: the curve over its z or its w, in the fragment 
         fogMode: D3DFOG.LINEAR, fogSource: FOG_SOURCE.TABLE,
     })).code;
     assert.ok(screen.includes('fogFactorOf(select(1.0 / input.position.w,'));
+    assert.ok(screen.includes('out.fogAmount = vertex.position.z * out.position.w;'),
+        'its z before it is held inside the range');
     assert.doesNotMatch(screen, /specular\.a/);
 });
 
@@ -956,18 +988,18 @@ test('a vertex shader over the fixed pixel stage is fogged by what it wrote, or 
         .includes('input.fogAmount = in.fog.x;'));
     assert.ok(fixedFragmentStage(state({}), [0, 1]).wgsl
         .includes('input.fogAmount = in.v1.a;'));
-    // Table fog runs its curve over the shader's oFog when it wrote one, over
-    // the depth when it did not (decisions.md).
-    const table = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10]).wgsl;
+    // Table fog runs its curve over the shader's oFog when its translation
+    // says so (decisions.md A43), and otherwise over the depth the shader
+    // carried in the same varying, z or w as the projection says (Wine's
+    // d3d9 test_fog).
+    const table = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10],
+        { tableOverFog: true }).wgsl;
     assert.ok(table.includes('@location(10) fog: vec4f,'));
     assert.ok(table.includes('clamp(fogFactorOf(in.fog.x), 0.0, 1.0)'));
     assert.doesNotMatch(table, /fogAmount/);
-    const depth = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1]).wgsl;
-    assert.ok(depth.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
-    assert.doesNotMatch(depth, /in\.fog\b/);
-    const later = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10],
-        { tableFogOverDepth: true }).wgsl;
-    assert.ok(later.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
+    const depth = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10]).wgsl;
+    assert.ok(depth.includes('clamp(fogFactorOf(select(1.0 / in.position.w,'
+        + ' in.fog.x * in.position.w, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'), depth);
 });
 
 test('a pre-transformed vertex takes its fog factor from the specular alpha', ()=>{
@@ -1166,7 +1198,7 @@ test('a point is moved to its corner of a quad of its size, and a sprite is its 
         }],
     })).code;
     assert.match(sprite, /out\.sprite = pointCorner \* 0\.5 \+ 0\.5;/);
-    assert.match(sprite, /sampleStage0\(input\.sprite\)/, 'the stage samples the quad');
+    assert.match(sprite, /sampleStage0\(vec4f\(input\.sprite, 0\.0, 1\.0\)\)/, 'the stage samples the quad');
 });
 
 test('the specular term is computed only when it is enabled, and added after the cascade', ()=>{

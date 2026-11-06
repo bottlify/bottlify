@@ -20,7 +20,7 @@ import {
     D3D10CreateDevice, D3D10CreateDevice1, D3D10CreateDeviceAndSwapChain,
     D3D10CreateDeviceAndSwapChain1, D3D11CreateDevice, D3D11CreateDeviceAndSwapChain,
 } from './device.js';
-import { CreateDXGIFactory, CreateDXGIFactory1 } from './dxgi.js';
+import { CreateDXGIFactory, CreateDXGIFactory1, CreateDXGIFactory2 } from './dxgi.js';
 
 /**
  * @param {import('./device.js').DeviceOptions} options  what every device and factory it
@@ -35,6 +35,8 @@ export function createDirect3D10(options = {}){
         CreateDXGIFactory: (iid, out)=>CreateDXGIFactory(iid, out, factoryOptions),
         /** @param {string} iid @param {{ object?: any }} out */
         CreateDXGIFactory1: (iid, out)=>CreateDXGIFactory1(iid, out, factoryOptions),
+        /** @param {number} flags @param {string} iid @param {{ object?: any }} out */
+        CreateDXGIFactory2: (flags, iid, out)=>CreateDXGIFactory2(flags, iid, out, factoryOptions),
         /**
          * @param {any} adapter @param {number} driverType @param {any} software
          * @param {number} flags @param {number} sdkVersion @param {{ device?: any }} out

@@ -66,7 +66,7 @@ import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { capabilityWords } from '../d3d9/caps.js';
-import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
+import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
@@ -160,12 +160,6 @@ const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 /** D3DPRESENTFLAG_LOCKABLE_BACKBUFFER. */
 const LOCKABLE_BACKBUFFER = 0x00000001;
 
-/**
- * The adapter formats a display mode is listed in: 32-bit and 16-bit.
- *
- * @type {ReadonlySet<number>}
- */
-const ADAPTER_FORMATS = new Set([D3DFMT.X8R8G8B8, D3DFMT.R5G6B5]);
 
 /** The most dwords a shader read from guest memory may run to before it is given up on. */
 const MAX_SHADER_DWORDS = 1 << 16;
@@ -698,6 +692,25 @@ export function createDirect3D9Seam(
         }
         return hr;
     };
+    /**
+     * A cube face's lock or unlock the host made, told to the face's block as
+     * its surface's own: a lock of the face's surface the guest then tries
+     * finds it held (Wine's test_lockrect_invalid, a cube face locked twice
+     * through two interfaces).
+     *
+     * @param {any} texture @param {number} face @param {number} level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteFace = (texture, face, level, locked, hr)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        if (hr === D3D_OK && texture.GetCubeMapSurface(face >>> 0, level >>> 0, held) === D3D_OK)
+        {
+            noteLevel(held.surface, null, locked, hr);
+            held.surface.release();
+        }
+        return hr;
+    };
     /** @param {string} name */
     const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
         : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
@@ -933,11 +946,12 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0), LOCKED_RECT),
+        LockRect: (texture, [face, level, out, rect, flags])=>noteFace(texture, face, level, true,
+            lockRectInto(fields, out, locked=>texture.LockCubeRect(face >>> 0, level >>> 0,
+                locked, readRect(rect), flags >>> 0), LOCKED_RECT)),
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        UnlockRect: (texture, [face, level])=>noteFace(texture, face, level, false,
+            texture.UnlockCubeRect(face >>> 0, level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
     };
@@ -1458,6 +1472,22 @@ export function createDirect3D9Seam(
     };
 
     /**
+     * A target or depth-stencil asked for with samples is made with one, and
+     * said (decision A85).
+     *
+     * @param {number} samples  D3DMULTISAMPLE_TYPE.
+     * @returns {undefined}
+     */
+    const singleSampled = samples=>{
+        if ((samples >>> 0) !== 0)
+        {
+            divergence?.('Direct3D 9', 'a multisampled target or depth-stencil is made with one'
+                + ' sample a pixel');
+        }
+        return undefined;
+    };
+
+    /**
      * A present of part of the back buffer, or into part of the window, shows
      * the whole of it: said. The dirty region is a hint, and is not.
      *
@@ -1757,7 +1787,16 @@ export function createDirect3D9Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, publisher.objectAt(surface));
+            const bitmap = publisher.objectAt(surface);
+            // No larger than the display it is shown on (Wine's test_cursor).
+            /** @type {{ desc?: any }} */
+            const shape = {};
+            if (bitmap?.GetDesc?.(shape) === D3D_OK && shape.desc
+                && (shape.desc.Width > screen().width || shape.desc.Height > screen().height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, bitmap);
             if (hr === D3D_OK)
             {
                 tellCursor(device);
@@ -1831,7 +1870,7 @@ export function createDirect3D9Seam(
             }
             if (fullScreenUnlikeAnyMode(parameters >>> 0))
             {
-                return D3DERR_INVALIDCALL;
+                return device.RefuseReset();
             }
             const next = readPresentParameters(parameters >>> 0, deviceWindow);
             const hr = device.Reset(next);
@@ -2047,13 +2086,14 @@ export function createDirect3D9Seam(
         },
 
         // The multisample type and quality are dropped: this device renders
-        // one sample per pixel whatever it is asked for.
+        // one sample per pixel whatever it is asked for (decision A85).
         /** @param {any} device @param {number[]} args */
-        CreateRenderTarget: (device, [width, height, format, , , lockable, out, shared])=>{
+        CreateRenderTarget: (device, [width, height, format, samples, , lockable, out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateRenderTarget(
@@ -2067,11 +2107,12 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        CreateDepthStencilSurface: (device, [width, height, format, , , , out, shared])=>{
+        CreateDepthStencilSurface: (device, [width, height, format, samples, , , out, shared])=>{
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.CreateDepthStencilSurface(
@@ -3048,10 +3089,11 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         CheckDeviceState: (device, [window])=>device.CheckDeviceState(window >>> 0),
         CreateRenderTargetEx: exSurfaceCreate('CreateRenderTargetEx',
-            ([width, height, format, , , lockable, out, shared, usage])=>({
+            ([width, height, format, samples, , lockable, out, shared, usage])=>({
                 out, shared,
-                call: (device, held)=>device.CreateRenderTargetEx(width >>> 0, height >>> 0,
-                    format >>> 0, lockable !== 0, usage >>> 0, held),
+                call: (device, held)=>singleSampled(samples)
+                    ?? device.CreateRenderTargetEx(width >>> 0, height >>> 0,
+                        format >>> 0, lockable !== 0, usage >>> 0, held),
             })),
         CreateOffscreenPlainSurfaceEx: exSurfaceCreate('CreateOffscreenPlainSurfaceEx',
             ([width, height, format, pool, out, shared, usage])=>({
@@ -3060,10 +3102,11 @@ export function createDirect3D9Seam(
                     height >>> 0, format >>> 0, pool >>> 0, usage >>> 0, held),
             })),
         CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
-            ([width, height, format, , , , out, shared, usage])=>({
+            ([width, height, format, samples, , , out, shared, usage])=>({
                 out, shared,
-                call: (device, held)=>device.CreateDepthStencilSurfaceEx(width >>> 0,
-                    height >>> 0, format >>> 0, usage >>> 0, held),
+                call: (device, held)=>singleSampled(samples)
+                    ?? device.CreateDepthStencilSurfaceEx(width >>> 0,
+                        height >>> 0, format >>> 0, usage >>> 0, held),
             })),
         /** @param {any} device @param {number[]} args */
         ResetEx: (device, [parameters, mode])=>((parameters >>> 0) === 0
@@ -3150,9 +3193,11 @@ export function createDirect3D9Seam(
             backBufferHeight: (raw.BackBufferHeight >>> 0) || taken.height,
             backBufferFormat: raw.BackBufferFormat || D3DFMT.X8R8G8B8,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: raw.MultiSampleType,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
             swapEffect: raw.SwapEffect,
-            hDeviceWindow: raw.hDeviceWindow,
+            // None named is the window the device was made for, and what
+            // GetPresentParameters then answers (test_swapchain_parameters).
+            hDeviceWindow: (raw.hDeviceWindow >>> 0) || (window >>> 0),
             windowed,
             enableAutoDepthStencil: raw.EnableAutoDepthStencil !== 0,
             autoDepthStencilFormat: raw.AutoDepthStencilFormat,
@@ -3268,7 +3313,7 @@ export function createDirect3D9Seam(
      *
      * @param {number} format
      */
-    const adapterModes = format=>(ADAPTER_FORMATS.has(format) ? displayModes(screen()) : []);
+    const adapterModes = format=>(DISPLAY_MODE_FORMATS.has(format) ? displayModes(screen()) : []);
 
     /** @type {ReadonlySet<number>} the device types this version names */
     const DEVICE_TYPES = new Set(Object.values(D3DDEVTYPE));
@@ -3329,10 +3374,11 @@ export function createDirect3D9Seam(
                     (windowed >>> 0) !== 0)),
 
         /** @param {any} root @param {number[]} args */
-        CheckDeviceFormat: (root, [adapter, , , usage, resourceType, format])=>(
+        CheckDeviceFormat: (root, [adapter, , adapterFormat, usage, resourceType, format])=>(
             (adapter >>> 0) !== 0
                 ? D3DERR_INVALIDCALL
-                : root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0)),
+                : root.CheckDeviceFormat(usage >>> 0, resourceType >>> 0, format >>> 0,
+                    adapterFormat >>> 0)),
 
         /** @param {any} root @param {number[]} args */
         CheckDeviceMultiSampleType: (root, [adapter, , , , type, out])=>{

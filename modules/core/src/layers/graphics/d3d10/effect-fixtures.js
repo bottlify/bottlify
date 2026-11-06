@@ -61,6 +61,7 @@ import { FX_VERSION } from './effect.js';
  * @property {number} [element]
  * @property {Uint8Array | null} [shader]      A shader compiled in place.
  * @property {string} [streamOutput]
+ * @property {string} [indexVariable]        The variable whose value picks the element.
  * @property {number} [kind]                   An expression's kind, with `bytes`.
  * @property {Uint8Array} [bytes]
  */
@@ -81,6 +82,11 @@ import { FX_VERSION } from './effect.js';
  * @property {{ name: string, annotations?: FixtureAnnotation[],
  *              passes: { name: string, annotations?: FixtureAnnotation[],
  *                        assignments?: FixtureAssignment[] }[] }[]} [techniques]
+ * @property {{ name: string, size: number,
+ *              variables: { name: string, type: FixtureEffectType, offset: number,
+ *                           semantic?: string }[] }[]} [sharedBuffers]
+ *     What a child effect shares with its pool, as fxc writes a `shared` buffer.
+ * @property {{ name: string, type: FixtureEffectType }[]} [sharedObjects]
  */
 
 /** The numeric type's sizes, laid out in 16-byte registers as a constant buffer is. */
@@ -219,7 +225,19 @@ export function effectBinary(spec){
         {
             let kind;
             let data;
-            if (assignment.constant)
+            if (assignment.indexVariable !== undefined)
+            {
+                kind = 4;
+                data = wordsAt([stringAt(assignment.variable ?? ''),
+                    stringAt(assignment.indexVariable)]);
+            }
+            else if (assignment.kind === 5)
+            {
+                kind = 5;
+                data = wordsAt([stringAt(assignment.variable ?? ''),
+                    shaderAt(assignment.bytes ?? new Uint8Array(4))]);
+            }
+            else if (assignment.constant)
             {
                 kind = 1;
                 data = wordsAt([assignment.constant.length, ...assignment.constant.flat()]);
@@ -299,6 +317,23 @@ export function effectBinary(spec){
         }
         putAnnotations(object.annotations);
     }
+    const sharedBuffers = spec.sharedBuffers ?? [];
+    const sharedObjects = spec.sharedObjects ?? [];
+    let sharedNumeric = 0;
+    for (const buffer of sharedBuffers)
+    {
+        put([stringAt(buffer.name), buffer.size, 0, buffer.variables.length, 0xffffffff]);
+        for (const variable of buffer.variables)
+        {
+            sharedNumeric++;
+            put([stringAt(variable.name), typeAt(variable.type),
+                variable.semantic ? stringAt(variable.semantic) : 0, variable.offset, 0, 0]);
+        }
+    }
+    for (const object of sharedObjects)
+    {
+        put([stringAt(object.name), typeAt(object.type), 0, 0xffffffff]);
+    }
     for (const technique of techniques)
     {
         put([stringAt(technique.name), technique.passes.length]);
@@ -316,7 +351,8 @@ export function effectBinary(spec){
     }
 
     const header = [spec.version ?? FX_VERSION.FX_4_0, buffers.length, numericVariables,
-        objects.length, 0, 0, 0, techniques.length, block.length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        objects.length, sharedBuffers.length, sharedNumeric, sharedObjects.length,
+        techniques.length, block.length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     const words = [...header];
     const bytes = new Uint8Array(words.length * 4 + block.length + structured.length * 4);
     const view = new DataView(bytes.buffer);
@@ -334,3 +370,70 @@ export const FX_KIND = Object.freeze({
     TEXTURE2D: 12, TEXTURE2DARRAY: 13, TEXTURE2DMS: 14, TEXTURE2DMSARRAY: 15, TEXTURE3D: 16,
     TEXTURECUBE: 17, RENDERTARGETVIEW: 19, DEPTHSTENCILVIEW: 20, SAMPLER: 21,
 });
+
+/**
+ * @typedef {Object} FixtureExpression
+ * @property {{ name: string, register: number, registers?: number }[]} [inputs]
+ * @property {number[]} [literals]  As words.
+ * @property {[number, number, boolean, [number, number][], [number, number]][]} code
+ *     Each instruction: its operation, the components it runs over, whether
+ *     its first input is one component, its inputs and its result, each a
+ *     table and an offset.
+ */
+
+/**
+ * An effect's expression as fxc writes one: its constant table, literals
+ * and instructions in a container of their own.
+ *
+ * @param {FixtureExpression} spec
+ * @returns {Uint8Array}
+ */
+export function expressionBinary(spec){
+    const inputs = spec.inputs ?? [];
+    /** @param {number[]} words */
+    const bytesOf = words=>new Uint8Array(Uint32Array.from(words).buffer);
+
+    const infoAt = 28;
+    const namesAt = infoAt + inputs.length * 20;
+    /** @type {number[]} */
+    const names = [];
+    const nameOffsets = inputs.map(input=>{
+        const at = namesAt + names.length;
+        names.push(...[...input.name].map(char=>char.charCodeAt(0)), 0);
+        return at;
+    });
+    const table = new Uint8Array(namesAt + names.length);
+    const view = new DataView(table.buffer);
+    view.setUint32(0, 28, true);
+    view.setUint32(12, inputs.length, true);
+    view.setUint32(16, infoAt, true);
+    inputs.forEach((input, index)=>{
+        const at = infoAt + index * 20;
+        view.setUint32(at, nameOffsets[index], true);
+        view.setUint16(at + 6, input.register, true);
+        view.setUint16(at + 8, input.registers ?? 1, true);
+    });
+    table.set(names, namesAt);
+
+    /** @type {number[]} */
+    const code = [spec.code.length];
+    for (const [op, count, scalar, ins, out] of spec.code)
+    {
+        code.push(((scalar ? 0x800 : 0) | op) * 0x100000 + count, ins.length);
+        for (const [tableOf, offset] of [...ins, out])
+        {
+            code.push(0, tableOf, offset);
+        }
+    }
+    const literals = spec.literals ?? [];
+    const padded = (/** @type {Uint8Array} */ bytes)=>{
+        const out = new Uint8Array((bytes.length + 3) & ~3);
+        out.set(bytes);
+        return out;
+    };
+    return container([
+        { name: 'CLI4', bytes: bytesOf([literals.length, ...literals]) },
+        { name: 'CTAB', bytes: padded(table) },
+        { name: 'FXLC', bytes: bytesOf(code) },
+    ]);
+}

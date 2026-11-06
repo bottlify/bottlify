@@ -401,6 +401,19 @@ const NORMALISERS = Object.freeze({
  * @returns {string}
  */
 function cacheKey(kind, normalised){
+    if (kind === STATE_KIND.BLEND || kind === STATE_KIND.BLEND1)
+    {
+        // One blend state, whichever description made it: Direct3D 10's and
+        // 10.1's of the same blending, as Direct3D 11 asks for it through
+        // the same device, are one object (test_create_blend_state), and
+        // independent blending is whether the targets differ.
+        const desc1 = kind === STATE_KIND.BLEND ? blendDesc1Of(normalised) : normalised;
+        const targets = desc1.RenderTarget.map((/** @type {any} */ target)=>
+            JSON.stringify(target));
+        return `blend:${JSON.stringify({ ...desc1,
+            IndependentBlendEnable: targets.some((/** @type {string} */ target)=>
+                target !== targets[0]) })}`;
+    }
     return `${kind}:${JSON.stringify(normalised)}`;
 }
 

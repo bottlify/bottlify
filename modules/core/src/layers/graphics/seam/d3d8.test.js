@@ -513,7 +513,8 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const vertexBuffer = 6;
     assert.equal(ask('CheckDeviceFormat',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 0, vertexBuffer, D3DFMT.A8R8G8B8]),
-    D3DERR_NOTAVAILABLE, 'and a kind of resource that has no format is never available');
+    D3DERR_INVALIDCALL, 'and a kind of resource that has no format is not a question'
+        + ' (test_check_device_format)');
 
     assert.equal(ask('CheckDeviceMultiSampleType',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, 1, 0]), D3D_OK, 'one sample per pixel');
@@ -2141,12 +2142,17 @@ test('a reset that changes the mode names the window it presents into', ()=>{
     };
 
     write({ BackBufferWidth: 320, BackBufferHeight: 240, Windowed: 0 });
+    assert.equal(h.device(device, 'Reset', [at]), D3DERR_INVALIDCALL,
+        'no mode is 320x240 (test_reset)');
+    assert.equal(h.device(device, 'TestCooperativeLevel', []), 0x88760869,
+        'and the device is left to be reset');
+    write({ BackBufferWidth: 640, BackBufferHeight: 480, Windowed: 0 });
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true], 'fullscreen names the window');
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true], 'fullscreen names the window');
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true],
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true],
         'back to windowed, the screen waits for a frame');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],

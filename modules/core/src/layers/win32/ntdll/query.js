@@ -188,6 +188,48 @@ function objectTypes(at){
     return struct;
 }
 
+const OBJECT_TYPE_INFORMATION = 2;
+
+/** The handle table's kind of a DXGI shared resource's NT handle. */
+export const SHARED_RESOURCE_HANDLE = 'dxgk-shared-resource';
+
+/**
+ * The kernel type of each kind of handle the handle table keeps that Windows
+ * keeps as a kernel object. A kind not here (a find handle, an icon, a hook)
+ * is no kernel object on Windows.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const KERNEL_TYPE_OF = Object.freeze({
+    event: 'Event', mutex: 'Mutant', semaphore: 'Semaphore', timer: 'Timer',
+    file: 'File', pipe: 'File', 'pipe-read': 'File', 'pipe-write': 'File', mailslot: 'File',
+    'mailslot-client': 'File', device: 'File', directory: 'File', socket: 'File',
+    mapping: 'Section', process: 'Process', thread: 'Thread', 'process-thread': 'Thread',
+    token: 'Token', job: 'Job', iocp: 'IoCompletion',
+    [SHARED_RESOURCE_HANDLE]: 'DxgkSharedResource',
+});
+
+/**
+ * OBJECT_TYPE_INFORMATION for one type at a guest address, its name after it.
+ *
+ * @param {string} name @param {number} at
+ * @returns {Uint8Array}
+ */
+function objectType(name, at){
+    const struct = new Uint8Array(OBJECT_TYPE.SIZE + (name.length + 1) * 2);
+    const view = new DataView(struct.buffer);
+    view.setUint16(OBJECT_TYPE.NAME_LENGTH, name.length * 2, true);
+    view.setUint16(OBJECT_TYPE.NAME_MAXIMUM, (name.length + 1) * 2, true);
+    view.setUint32(OBJECT_TYPE.NAME_BUFFER, (at + OBJECT_TYPE.SIZE) >>> 0, true);
+    const index = OBJECT_TYPE_NAMES.indexOf(name);
+    struct[OBJECT_TYPE.TYPE_INDEX] = (index < 0 ? OBJECT_TYPE_NAMES.length : index) + 2;
+    for (let i = 0; i < name.length; i++)
+    {
+        view.setUint16(OBJECT_TYPE.SIZE + i * 2, name.charCodeAt(i), true);
+    }
+    return struct;
+}
+
 /** STANDARD_RIGHTS_ALL | SPECIFIC_RIGHTS_ALL: every right any object has. */
 const ALL_ACCESS = 0x001fffff;
 
@@ -746,7 +788,8 @@ export function createQueryFunctions(host){
          * NTSTATUS NtQueryObject(HANDLE Handle, OBJECT_INFORMATION_CLASS Class,
          *                        PVOID Information, ULONG Length, PULONG ReturnLength)
          *
-         * The basic class and the list of object types. The handle table
+         * The basic class, the type of the object a handle names, and the
+         * list of object types. The handle table
          * keeps neither the access a handle was opened with nor how many
          * handles share an object, so a handle is answered with every right
          * and counts of one, and says so. The types are the system's and name
@@ -773,6 +816,26 @@ export function createQueryFunctions(host){
                     && (host.handleType?.(named) ?? null) === null)
                 {
                     return STATUS.INVALID_HANDLE;
+                }
+                if ((infoClass >>> 0) === OBJECT_TYPE_INFORMATION)
+                {
+                    const kind = named === CURRENT_PROCESS ? 'process'
+                        : named === CURRENT_THREAD ? 'thread' : host.handleType?.(named) ?? '';
+                    const name = KERNEL_TYPE_OF[kind];
+                    if (!name)
+                    {
+                        host.divergence?.('NtQueryObject',
+                            `a ${kind} handle is no kernel object; its type is refused`);
+                        return STATUS.INVALID_HANDLE;
+                    }
+                    const struct = objectType(name, buffer >>> 0);
+                    writeU32If(returnLength >>> 0, struct.length);
+                    if ((length >>> 0) < struct.length || buffer === 0)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    host.writeMemory(buffer >>> 0, struct);
+                    return STATUS.SUCCESS;
                 }
                 if ((infoClass >>> 0) !== OBJECT_BASIC_INFORMATION)
                 {
