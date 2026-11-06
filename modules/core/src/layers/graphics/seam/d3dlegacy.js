@@ -1226,7 +1226,13 @@ export function createLegacyDirect3DSeam(
                 indexCount >>> 0, flags >>> 0, d3d7.clippedDraw(vertices, flags));
         },
 
-        ComputeSphereVisibility: onInner('ComputeSphereVisibility'),
+        // The seventh generation's call, its answer in this one's D3DVIS bits.
+        /** @param {any} device @param {number[]} args */
+        ComputeSphereVisibility: (device, args)=>deviceMethods.ComputeSphereVisibility({
+            ComputeSphereVisibility: (/** @type {number[][]} */ centers,
+                /** @type {number[]} */ radii, /** @type {{ results?: number[] }} */ out)=>
+                device.inner.ComputeSphereVisibility(centers, radii, out, true),
+        }, args),
 
         /** @param {any} device @param {number[]} args */
         GetTexture: (device, [stage, out])=>{

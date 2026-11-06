@@ -426,6 +426,34 @@ test('ComputeSphereVisibility names the planes a sphere crosses and the ones it 
         assert.deepEqual(out.results, expected, `case ${index}`);
     });
 
+    // Wine's ddraw4 test_compute_sphere_visibility: the same spheres in D3DVIS
+    // bits, a sphere touching a side crossing it. Its cases 2 and 5 are left
+    // out: Windows answers them otherwise (decisions.md A93).
+    assert.equal(device.SetRenderState(CLIPPLANEENABLE, 0), D3D_OK);
+    /** @type {[number[], number[], number[][], number[], number[]][]} */
+    const third = [
+        [view1, proj1, [[11.461533, -4.761727, -1.171646]], [38.252632], [0x1555]],
+        [view1, proj1, [[-3.515620, -1.560661, -12.464638], [14.290396, -2.981143, -24.311312],
+            [1.461626, -6.093709, -13.901010]], [4.354097, 12.500704, 17.251318],
+        [0x154a, 0x1555, 0x1555]],
+        [IDENTITY, IDENTITY, [[0, 0, 0.5]], [0.5], [0x1401]],
+        [IDENTITY, IDENTITY, [[0, 0, 0]], [0], [0x401]],
+        [IDENTITY, IDENTITY, [[-20, 0, 0.5]], [3], [0x154a]],
+        [IDENTITY, IDENTITY, [[20, 0, 0.5]], [3], [0x1562]],
+        [IDENTITY, IDENTITY, [[0, -20, 0.5]], [3], [0x1616]],
+        [IDENTITY, IDENTITY, [[0, 20, 0.5]], [3], [0x1496]],
+        [IDENTITY, IDENTITY, [[0, 0, -20]], [3], [0x956]],
+        [IDENTITY, IDENTITY, [[0, 0, 20]], [3], [0x2156]],
+    ];
+    third.forEach(([view, projection, centers, radii, expected], index)=>{
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.VIEW, view), D3D_OK);
+        assert.equal(device.SetTransform(D3DTRANSFORMSTATE.PROJECTION, projection), D3D_OK);
+        /** @type {{ results?: number[] }} */
+        const out = {};
+        assert.equal(device.ComputeSphereVisibility(centers, radii, out, true), D3D_OK);
+        assert.deepEqual(out.results, expected, `third generation, case ${index}`);
+    });
+
     releaseAll(f);
 });
 

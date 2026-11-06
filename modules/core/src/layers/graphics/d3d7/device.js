@@ -227,6 +227,33 @@ function defaultMaterial(){
     return { Diffuse: black(), Ambient: black(), Specular: black(), Emissive: black(), Power: 0 };
 }
 
+/**
+ * D3DSTATUS clip bits of the six sides as IDirect3DDevice3's D3DVIS: per side
+ * INTERSECT (1) or OUTSIDE (2) two bits apiece from bit 2, and the frustum's
+ * own pair in bits 0 and 1, OUTSIDE over INTERSECT.
+ *
+ * @param {number} status
+ */
+function visibilityOf(status){
+    let result = 0;
+    let crossing = false;
+    let outside = false;
+    for (let side = 0; side < 6; side++)
+    {
+        if ((status & (1 << (side + 12))) !== 0)
+        {
+            result |= 2 << (2 + side * 2);
+            outside = true;
+        }
+        else if ((status & (1 << side)) !== 0)
+        {
+            result |= 1 << (2 + side * 2);
+            crossing = true;
+        }
+    }
+    return result | (outside ? 2 : crossing ? 1 : 0);
+}
+
 /** @param {Material} material @returns {Material} */
 const copyMaterial = material=>({
     Diffuse: { ...material.Diffuse },
@@ -1673,10 +1700,17 @@ export function createDirect3D7(ddraw, services = {}){
              * up. The volume's sides come out of world, view and projection
              * together, a user plane out of the world transform alone.
              *
+             * IDirect3DDevice3 asks for D3DVIS bits instead: two a side, from
+             * left at bit 2 up to far, crossing or wholly beyond, and the
+             * frustum as a whole in the lowest two; it counts a sphere that
+             * touches a side as crossing it (Wine's ddraw4
+             * test_compute_sphere_visibility).
+             *
              * @param {readonly number[][]} centers @param {readonly number[]} radii
              * @param {{ results?: number[] }} out
+             * @param {boolean} [visibility]  D3DVIS bits, as the third generation answers
              */
-            ComputeSphereVisibility(centers, radii, out){
+            ComputeSphereVisibility(centers, radii, out, visibility = false){
                 const world = transforms.get(transformStateOf(D3DTRANSFORMSTATE.WORLD) ?? 0)
                     ?? IDENTITY;
                 const all = multiplyMatrices(multiplyMatrices(world,
@@ -1721,7 +1755,11 @@ export function createDirect3D7(ddraw, services = {}){
                         const length = Math.hypot(plane[0], plane[1], plane[2]) || 1;
                         const distance = (plane[0] * center[0] + plane[1] * center[1]
                             + plane[2] * center[2] + plane[3]) / length;
-                        if (distance < -radius)
+                        if (visibility && Math.abs(distance) <= radius)
+                        {
+                            result |= 1 << bit;
+                        }
+                        else if (visibility ? distance <= -radius : distance < -radius)
                         {
                             result |= (1 << bit) | (1 << (bit + 12));
                         }
@@ -1730,7 +1768,7 @@ export function createDirect3D7(ddraw, services = {}){
                             result |= 1 << bit;
                         }
                     });
-                    return result >>> 0;
+                    return (visibility ? visibilityOf(result) : result) >>> 0;
                 });
                 return D3D_OK;
             },

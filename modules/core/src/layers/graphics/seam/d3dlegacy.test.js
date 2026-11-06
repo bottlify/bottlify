@@ -1387,6 +1387,23 @@ test('a surface no device could draw into refuses the device GUID with why (test
     h.assertAllReleased();
 });
 
+test('IDirect3DDevice3::ComputeSphereVisibility answers in D3DVIS bits', ()=>{
+    const h = seamed();
+    const ddraw = h.create4();
+    const { device, target } = h.createDevice(ddraw);
+    h.box.putFloats(0x6000, [0, 0, 0.5]);
+    h.box.putFloats(0x6100, [0.5]);
+    h.box.memory.writeU32(0x6200, 0xdeadbeef);
+    assert.equal(h.device(device, 'ComputeSphereVisibility', [0x6000, 0x6100, 1, 0, 0x6200]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(0x6200), 0x1401,
+        'crossing the frustum, its near and far sides (test_compute_sphere_visibility)');
+    assert.equal(h.release(device), 0);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 test('later devices answer IDirect3DDevice too, with their own count', ()=>{
     const h = seamed();
     const fourth = h.create4();
