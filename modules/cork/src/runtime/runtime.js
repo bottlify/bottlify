@@ -672,6 +672,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
         }
         const b = bucketOf(hotness);
+        noteWay(eip, 'queued');
         queue.set(key, eip);
         buckets[b].set(key, eip);
         heatOf.set(key, b);
@@ -775,10 +776,25 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // is read for. Bounded like `misses`; the coldest target makes room. With
     // the count, the tops its exits were at, a bit each.
     /** @type {Map<number, { count: number, held: number, tops: number, first: number,
-     *     last: number }>} */
+     *     last: number, way?: Record<string, number> }>} */
     const exitTargets = new Map();
     /** When the runtime was made, for the exits' times. */
     const bornAt = performance.now();
+    /**
+     * Where a target that exits waited for its translation (`way`, with
+     * `timings`): the first time it was queued, taken into a batch (and the
+     * batch's size), sent to a worker, answered, and published - so a stall on
+     * cold code says whether the queue, the worker or the publishing held it.
+     * @param {number} address @param {string} step @param {number} [value]
+     */
+    const noteWay = (address, step, value = Math.round(performance.now() - bornAt))=>{
+        const target = exitTargets.get(address);
+        if (settings.timings === true && target !== undefined)
+        {
+            target.way ??= {};
+            target.way[step] ??= value;
+        }
+    };
     const EXIT_TARGETS_CAP = 4096;
     /**
      * How often the machine stood at an address that has a region for another
@@ -1087,6 +1103,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // queued behind the one out -- what a second worker, or a second
         // batch out, would have taken -- and the longest the queue grew.
         workerBusyMs: 0, inFlightMs: 0, behindMs: 0, queueMax: 0,
+        // With `timings`: the worker's busy time by part - emitting, encoding,
+        // compiling its modules, and hashing and packing them for the store.
+        workerEmitMs: 0, workerEncodeMs: 0, workerCompileMs: 0, workerPackMs: 0,
     };
     /** When `translateNow` last looked, for `behindMs`. */
     let lookedAt = 0;
@@ -2613,6 +2632,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             // this region's loops rather than in a flat dispatch.
             const empty = settings.emptyCalls !== false
                 ? emptyCode(at=>blockAt.get(at), start) : 0;
+            noteWay(start, 'published');
             let slot = entries.add(start, fn, label, top, record.table, empty);
             const held = entries.at(slot);
             const holder = recordOf.get(slot);
@@ -3850,7 +3870,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      *
      * @param {Translator} translator
      * @param {{ id: number, batch: import('./emit-built.js').BuiltBatch | null,
-     *     compiled?: WebAssembly.Module | null, message?: string, busyMs?: number }} data
+     *     compiled?: WebAssembly.Module | null, message?: string, busyMs?: number,
+     *     compileMs?: number, packMs?: number }} data
      */
     const onWorkerResults = (translator, data)=>{
         const pending = translator.pending;
@@ -3875,7 +3896,18 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
         if (settings.timings === true)
         {
+            for (const one of pending.metas ?? [])
+            {
+                for (const block of one.region.blocks)
+                {
+                    noteWay(block.start, 'answered');
+                }
+            }
             counts.workerBusyMs += data.busyMs ?? 0;
+            counts.workerEmitMs += data.batch.emitMs;
+            counts.workerEncodeMs += data.batch.encodeMs;
+            counts.workerCompileMs += data.compileMs ?? 0;
+            counts.workerPackMs += data.packMs ?? 0;
             counts.inFlightMs += performance.now() - pending.at;
         }
         const publishedAt = clock();
@@ -4540,6 +4572,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             for (const one of unbuilt)
             {
                 one.waited = true;
+                for (const block of one.region.blocks)
+                {
+                    noteWay(block.start, 'sent');
+                }
             }
             const copies = copyPages(unbuilt.map(one=>one.region.reads ?? one.region.pages));
             translator.adapter.post({
@@ -4799,6 +4835,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 counts.toStoredRegion++;
             }
             inFlight.set(key, takenAt);
+            noteWay(eip, 'taken');
+            noteWay(eip, 'batch', batch.length);
             const entryTop = key % 16;
             // A candidate that has an entry by now -- a block of a region
             // published while it waited, the return address of a call the
@@ -5563,6 +5601,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 publishMs: counts.publishMs,
                 workerMs: counts.workerMs,
                 workerBusyMs: counts.workerBusyMs,
+                workerEmitMs: counts.workerEmitMs,
+                workerEncodeMs: counts.workerEncodeMs,
+                workerCompileMs: counts.workerCompileMs,
+                workerPackMs: counts.workerPackMs,
                 inFlightMs: counts.inFlightMs,
                 behindMs: counts.behindMs,
                 queueMax: counts.queueMax,
@@ -5665,8 +5707,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // (HELD) is `held` -- its address is translated and no link is
                 // missing; the reason of the rest is read now, not at the exit.
                 exitsByTarget: [...exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
-                    .map(([address, { count, held, first, last }])=>({ address, count, held,
-                        first, last, reason: held === count ? 'held' : missReason(address) })),
+                    .map(([address, { count, held, first, last, way }])=>({ address, count, held,
+                        first, last, way, reason: held === count ? 'held' : missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 // Where a program reads what `precise: false` leaves: a title that

@@ -111,6 +111,7 @@ function connection(send){
             // only instantiates -- the compile was most of its cost on a loading
             // phase.
             let compiled = null;
+            const compileAt = performance.now();
             try
             {
                 compiled = new WebAssembly.Module(
@@ -119,6 +120,7 @@ function connection(send){
             catch {
                 compiled = null;
             }
+            const packAt = performance.now();
             // What the engine stores the module under, and as: hashing and
             // copying its megabytes there held the thread a few milliseconds
             // an answer.
@@ -129,13 +131,17 @@ function connection(send){
                     entryTop: 0, instructions: 0 }, storeVersion);
             }
             const busyMs = performance.now() - started;
+            // The parts of `busyMs` the batch does not time itself (its emitting
+            // and encoding are `emitMs` and `encodeMs`).
+            const compileMs = packAt - compileAt;
+            const packMs = started + busyMs - packAt;
             if (busyCell !== null)
             {
                 Atomics.add(busyCell.cells, busyCell.at, Math.round(busyMs * 10));
                 Atomics.add(busyCell.cells, busyCell.at + 1, batch.results.length);
                 Atomics.store(busyCell.cells, busyCell.at + 2, 0);
             }
-            send({ id, batch, compiled, busyMs }, [batch.module.buffer,
+            send({ id, batch, compiled, busyMs, compileMs, packMs }, [batch.module.buffer,
                 ...batch.packed === undefined ? [] : [batch.packed.buffer]]);
         }
         catch (e){
