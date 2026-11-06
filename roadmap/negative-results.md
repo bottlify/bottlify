@@ -2602,3 +2602,26 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU; power plan not recorded.
 - **Decision.** `holdMs` stays 4. Changes to the translator's pacing are judged on a node bench
   of new code met mid-frame, not on these runs.
+
+### 2026-11-06: less garbage a draw in the graphics worker (Direct3D 8/9 `render.js`)
+
+- **Idea.** The graphics worker allocated about 18 MB/s in 3DMark2001 SE's feature tests and
+  spent 4% of its time collecting it; on the frames the engine dropped, its collector ran 7.5 ms
+  against 0.1 ms on an ordinary frame. Scratch arrays in `stageFlags` and `stageTransforms`, one
+  reused uniform object in `pixelUniformsOf`, `samplerFlagsOf` without closures, and the last
+  draw's `samplingOf` kept while its state version, shaders and sampled textures are the same.
+- **Workload.** 3DMark2001 SE (`--route`), `--worker --graphics-worker --coi --store local
+  --prefetch`, a fresh profile, 470 s; CPU and sampling heap profiles from 355 s for 100 s (the
+  feature tests). One run each arm on ce2d250db; DXT textures decoded in the worker in both (no
+  `compressedTextures`, which the launcher's configuration turns on).
+- **Values.** Graphics worker, bytes sampled by the heap profile: 1901 MB against 1607 MB (-15%);
+  its collector 3800 ms against 3608 ms of 100 s; whole run 185.6 against 196.6 fps, 1% low 6.9
+  against 7.1 (eight unchanged runs of this workload spread from 190 to 235 fps).
+- **Why.** The collector is driven by something else: what the engine posts to the worker is a
+  new `ArrayBuffer` every batch (12 GB in 166 000 batches a run), and V8 starts a full collection
+  on the external memory that adds up (a node model: a worker sent 350 buffers of 72 KB a second
+  ran a mark-compact every 3 s; the same buffers sent back and reused, none). A batch cannot
+  simply be recycled: the reader hands out views of its bytes (`wire.js`), which may be kept.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, the VM's hardware WebGPU adapter; Chrome
+  version and power plan not recorded.
+- **Decision.** Not kept (the patch is not in the tree). The lever is the batches' memory.
