@@ -16,7 +16,9 @@
  * side has more than `framesAhead` presents still to finish, and then when it
  * has caught up -- the bound on how far behind the program the pictures are.
  *
- * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
+ * Sender to receiver:  { type: 'calls', buffer, length }
+ *                                                      a batch, as `wire.js` writes it: the
+ *                                                      first `length` bytes of the buffer
  * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
  *                      { type: 'presented', count }
  *                      { type: 'counts', counts }      occlusion counts the GPU has just
@@ -30,6 +32,7 @@
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail, severity? }
+ *                      { type: 'spent', buffer }       a batch's buffer, read, to write on again
  *                      { type: 'lost' }                its GPU went away
  *                      { type: 'failed', message }     a call could not be played
  */
@@ -222,8 +225,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let timed = false;
     /** Calls since the clock was last read. */
     let unchecked = 0;
-    /** The batches posted, and their bytes. */
-    const sent = { batches: 0, bytes: 0, ms: 0 };
+    /** The batches posted, their bytes, and how many buffers the receiver gave back. */
+    const sent = { batches: 0, bytes: 0, ms: 0, returned: 0 };
     /**
      * Of those bytes, the guest memory copied into them, by what copied it --
      * what a lend of buffers, or of anything else, would have left in place --
@@ -262,10 +265,10 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             return;
         }
         sentAt = now();
-        const buffer = writer.take();
+        const { buffer, length } = writer.give();
         sent.batches++;
-        sent.bytes += buffer.byteLength;
-        post({ type: 'calls', buffer, at: shared() }, [buffer]);
+        sent.bytes += length;
+        post({ type: 'calls', buffer, length, at: shared() }, [buffer]);
         lender?.sent();
         // What taking and posting the batch cost the program's thread.
         sent.ms += now() - sentAt;
@@ -451,6 +454,10 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 case 'divergence':
                     on.divergence?.(message.api, message.detail, message.severity);
                     break;
+                case 'spent':
+                    sent.returned++;
+                    writer.reuse(message.buffer);
+                    break;
                 case 'lost':
                     on.lost?.();
                     break;
@@ -470,7 +477,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         /** How many presents the played side still owes. */
         behind: ()=>presents - presented,
 
-        /** The batches posted so far, and their bytes. */
+        /** The batches posted so far, their bytes, and the buffers given back. */
         sent: ()=>({ ...sent }),
 
         /**
@@ -695,7 +702,8 @@ export function createReceiver({ played, post, latency, gpuMemory }){
             const queued = typeof message.at === 'number' ? arrived - message.at : 0;
             try
             {
-                const swept = played.read(message.buffer, call=>{
+                const { buffer, length } = message;
+                const swept = played.read(buffer, call=>{
                     const began = shared();
                     const answer = played.play(call);
                     if (call.m === 'diagnostics')
@@ -711,7 +719,20 @@ export function createReceiver({ played, post, latency, gpuMemory }){
                     {
                         present(answer);
                     }
-                });
+                }, length);
+                // The buffer goes back to be written on again, moved out of
+                // this side: a view the played side kept past the reading is
+                // then empty here rather than one the sender's next batch
+                // writes over. Posting it moves it between threads; moving it
+                // first does where `post` is a call, as in the tests (a
+                // browser without `transfer`, Safari before 17.4, only posts).
+                if (typeof length === 'number')
+                {
+                    played.spent(buffer, ()=>{
+                        const back = buffer.transfer?.() ?? buffer;
+                        post({ type: 'spent', buffer: back }, [back]);
+                    });
+                }
                 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
                 {
                     const ms = shared() - arrived;

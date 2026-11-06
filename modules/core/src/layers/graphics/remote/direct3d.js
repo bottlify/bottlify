@@ -276,8 +276,10 @@ export function createTargetReads(){
  *     shared, reads what the recording lent (`lending.js`)
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     counts: () => import('./replay.js').OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBuffer, give: () => void) => void }}
  *     `read` reads a batch of calls for `play`, and answers how long the look
  *     at its objects at a count of zero took when the batch made one
  */
@@ -330,6 +332,7 @@ export function playedDirect3D(factory, services){
             }
         },
         read: live.read,
+        spent: live.spent,
         counts: live.counts,
     };
 }
@@ -338,7 +341,7 @@ export function playedDirect3D(factory, services){
  * A carrier that plays each call where it is made: the recorded and the
  * played root in one thread.
  *
- * @param {ReturnType<typeof playedDirect3D>} played
+ * @param {Pick<ReturnType<typeof playedDirect3D>, 'read' | 'play'>} played
  * @returns {import('./replay.js').Transport}
  */
 export function playedAtOnce(played){

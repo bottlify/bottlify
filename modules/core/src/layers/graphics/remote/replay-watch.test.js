@@ -149,7 +149,7 @@ function run(seed, watched, dynamic = true, checking = null){
         { ...services, backend: {}, readMemory: true });
     const sender = createSender({
         post: message=>{
-            played.read(message.buffer, call=>{
+            played.read(message.buffer.slice(0, message.length), call=>{
                 played.play(call);
             });
         },
@@ -321,7 +321,7 @@ test('a buffer moved between storages of its own is sent whole once a storage, t
     });
     const played = playedDirect3D(twoStorages, { ...services, backend: {}, readMemory: true });
     const sender = createSender({
-        post: message=>played.read(message.buffer, call=>{
+        post: message=>played.read(message.buffer.slice(0, message.length), call=>{
             played.play(call);
         }),
         later: flush=>flush(),

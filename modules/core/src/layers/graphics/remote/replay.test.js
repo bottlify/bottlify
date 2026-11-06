@@ -35,7 +35,8 @@ const RAM_BASE = 0x40000000;
 function toy(sides){
     return (/** @type {any} */ services)=>{
         const side = { services, played: services.backend !== undefined,
-            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]), looks: 0 };
+            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]), looks: 0,
+            fills: /** @type {(() => void)[]} */ ([]) };
         sides.push(side);
         return {
             /** @param {{ thing?: any }} out */
@@ -124,6 +125,22 @@ function toy(sides){
             Present(){
                 return side.played ? Promise.resolve(D3D_OK) : D3D_OK;
             },
+            /**
+             * Fills what it is given later, when the test settles it: an
+             * answer still to come that keeps a view of its batch.
+             *
+             * @param {Uint8Array} bytes
+             */
+            Fill(bytes){
+                if (!side.played)
+                {
+                    return D3D_OK;
+                }
+                return new Promise(resolve=>side.fills.push(()=>{
+                    bytes.fill(9);
+                    resolve(bytes.length);
+                }));
+            },
         };
     };
 }
@@ -181,10 +198,10 @@ function toyAcross(lend, least = 0){
     const swept = /** @type {(number | undefined)[]} */ ([]);
     /**
      * @param {ArrayBuffer} buffer
-     * @param {(call: any) => boolean | void} each
+     * @param {(call: any) => boolean | void} each @param {number} [length]
      */
-    const read = (buffer, each)=>{
-        const answered = played.read(buffer, each);
+    const read = (buffer, each, length)=>{
+        const answered = played.read(buffer, each, length);
         swept.push(answered);
         return answered;
     };
@@ -988,8 +1005,8 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
         const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
         const sender = createSender({
             post: message=>{
-                sent += message.buffer.byteLength;
-                played.read(message.buffer, call=>{
+                sent += message.length;
+                played.read(message.buffer.slice(0, message.length), call=>{
                     played.play(call);
                 });
             },
@@ -1038,7 +1055,7 @@ test('a dynamic buffer unlocked and drawn from in one pause is compared once; ap
         const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
         const sender = createSender({
             post: message=>{
-                played.read(message.buffer, call=>{
+                played.read(message.buffer.slice(0, message.length), call=>{
                     played.play(call);
                 });
             },
@@ -1104,7 +1121,7 @@ test('an event query answers on the program\'s side; an occlusion query asks the
     const sender = createSender({
         post: message=>{
             posts++;
-            played.read(message.buffer, call=>{
+            played.read(message.buffer.slice(0, message.length), call=>{
                 played.play(call);
             });
         },
@@ -1141,7 +1158,7 @@ test('objects are numbered alike when the recording has a diagnostic the played 
     {
         const played = playedDirect3D(factory, {});
         const sender = createSender({
-            post: message=>played.read(message.buffer, call=>{
+            post: message=>played.read(message.buffer.slice(0, message.length), call=>{
                 played.play(call);
             }),
             later: flush=>flush(),
@@ -1165,8 +1182,8 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     const played = playedDirect3D(createDirect3D9, {});
     const sender = createSender({
         post: message=>{
-            sent += message.buffer.byteLength;
-            played.read(message.buffer, call=>{
+            sent += message.length;
+            played.read(message.buffer.slice(0, message.length), call=>{
                 played.play(call);
             });
         },
@@ -1218,7 +1235,7 @@ test('a run of the command ring is one call recorded, and the played device make
         const names = [];
         const sender = createSender({
             post: message=>{
-                played.read(message.buffer, call=>{
+                played.read(message.buffer.slice(0, message.length), call=>{
                     names.push(String(call.m));
                     played.play(call);
                 });
@@ -1504,4 +1521,42 @@ test('a batch that looks at the objects at zero says how long the look took', ()
     assert.deepEqual(swept.slice(0, 63), new Array(63).fill(undefined));
     assert.equal(typeof swept[63], 'number');
     assert.ok(/** @type {number} */ (swept[63]) >= 0);
+});
+
+test('a batch\'s buffer goes back to the sender once read, moved out of the played side, and is '
+    + 'written on again', ()=>{
+    // A fresh buffer for every batch was hundreds a second, whose memory
+    // outside the heap drove the played thread's full collections.
+    const { root, play, said, sender, played } = toyAcross(false);
+    for (let batch = 0; batch < 8; batch++)
+    {
+        root.CreateThing({});
+        play();
+        const spent = said.filter(message=>message.type === 'spent');
+        assert.equal(spent.length, 1, 'each batch read gives its buffer back at once');
+        said.length = 0;
+        assert.ok(spent[0].buffer.byteLength > 0);
+        sender.receive(spent[0]);
+    }
+    assert.equal(sender.sent().returned, 8);
+    assert.equal(played.seen.length, 0, 'nothing played wrong');
+});
+
+test('a batch\'s buffer an answer still to come keeps a view of goes back only once it has '
+    + 'settled and been sent', async()=>{
+    const { root, play, said, played } = toyAcross(false);
+    const filled = new Uint8Array([1, 2, 3, 4]);
+    root.Fill(filled);
+    play();
+    assert.equal(said.filter(message=>message.type === 'spent').length, 0,
+        'held while the fill is owed');
+    root.CreateThing({});
+    play();
+    assert.equal(said.filter(message=>message.type === 'spent').length, 1,
+        'a batch with nothing owed goes back past it');
+    const fill = played.fills.shift();
+    assert.ok(fill);
+    fill();
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.equal(said.filter(message=>message.type === 'spent').length, 2);
 });

@@ -150,18 +150,19 @@ export function createCapture(deps = {}){
         },
 
         /**
-         * A batch as it came, before it is played: copied, since the played
-         * side keeps views of what it reads.
+         * A batch as it came, before it is played: copied, since its buffer
+         * goes back to be written again once the played side has read it.
          *
          * @param {number} id @param {ArrayBuffer} buffer
+         * @param {number} [length]  how much of the buffer the batch is, all of it by default
          */
-        calls(id, buffer){
+        calls(id, buffer, length = buffer.byteLength){
             const reader = readers.get(id);
             if (stopped || !reader)
             {
                 return;
             }
-            const copy = buffer.slice(0);
+            const copy = buffer.slice(0, length);
             let presents = 0;
             reader.read(copy, call=>{
                 counts.zeroed += zeroMemory(call.ship) + zeroMemory(call.wrote);
