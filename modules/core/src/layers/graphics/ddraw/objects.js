@@ -78,6 +78,7 @@ import {
     DDERR_SURFACELOST,
     DDERR_SURFACENOTATTACHED,
     DDPCAPS_1BIT,
+    DDPCAPS_ALPHA,
     DDPCAPS_2BIT,
     DDPCAPS_4BIT,
     DDPCAPS_PRIMARYSURFACE,
@@ -237,6 +238,29 @@ const SETTABLE_FIELDS = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH |
     | DDSD_CAPS;
 
 /**
+ * The depth buffer DDSD_ZBUFFERBITDEPTH makes: depth only, at that many bits,
+ * and 24 of them in a 32-bit pixel whose top byte is unused (X8D24), which is
+ * how a program that asked for 24 steps through it (Wine's ddraw2
+ * test_depth_readback: 16, 24 and 32 bits with masks 0xffff, 0xffffff and
+ * 0xffffffff, read four bytes apart above 16).
+ *
+ * @param {number} bitDepth
+ * @returns {import("./structs.js").PixelFormatFields}
+ */
+export function depthFormatOfBitDepth(bitDepth){
+    return {
+        size: 0x20,
+        flags: DDPF_ZBUFFER,
+        fourCC: 0,
+        bitCount: bitDepth === 24 ? 32 : bitDepth,
+        redMask: 0,
+        greenMask: 0xffffffff >>> (32 - bitDepth),
+        blueMask: 0,
+        alphaMask: 0,
+    };
+}
+
+/**
  * The pixel format of a depth buffer asked for by bit depth alone, which is
  * how the older descriptor describes one: a depth of sixteen is depth only,
  * thirty-two is twenty-four bits of depth and eight of stencil, the way the
@@ -286,7 +310,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {Rect[]} clipList
- * @property {(rects: Rect[]) => number} setClipList
+ * @property {(rects: Rect[] | null) => number} setClipList
+ * @property {boolean} listed  Whether it has a list of its own.
  * @property {number} window
  * @property {(handle: number) => number} setHWnd
  * @property {() => boolean} isClipListChanged
@@ -337,7 +362,8 @@ export function depthFormatForDepth(bitDepth){
  * @property {(value: number) => void} setBuffer
  * @property {(value: number) => void} setCaps
  * @property {(previous: Surface | null) => void} setFlipPrev
- * @property {(next: Surface | null, isImplicit: boolean, via?: string) => void} setFlipNext
+ * @property {(next: Surface | null, isImplicit: boolean, via?: string, held?: string) => void}
+ *           setFlipNext
  * @property {() => void} markLost
  * @property {() => number} isLost
  * @property {() => number} restore
@@ -349,13 +375,17 @@ export function depthFormatForDepth(bitDepth){
  * @property {(rect?: Rect | null) => number} unlock
  * @property {() => { hr: number, dc: number | null }} getDC
  * @property {(handle: number) => number} releaseDC
- * @property {(other: Surface, via?: string) => number} addAttachedSurface
+ * @property {(other: Surface, via?: string, held?: string) => number} addAttachedSurface
  *           `via` the interface called through (`surfaceCountOf`'s key).
  * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
+ * @property {(which: number) => ColorKey | null} lastColorKey  The key last set, taken
+ *           away since or not.
  * @property {string} generation  The generation it was created through: '1', '4' or '7'.
  * @property {boolean} programMemory  Whether its pixels are in memory the program gave it.
  * @property {string | undefined} attachedVia  What its flip successor was attached through.
  * @property {boolean} attachedImplicitly  Whether the runtime made the link to its successor.
+ * @property {string | undefined} attachedHeld  The interface the reference on its
+ *           successor is held on.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
  *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
@@ -487,6 +517,9 @@ function sameRect(a, b){
  * @property {(key: string, own: string) => number | undefined} [surfaceRefusal]
  *           What a surface's QueryInterface answers for an interface it does not
  *           have, by the generation it was created as; E_NOINTERFACE without it.
+ * @property {(format: import("./structs.js").PixelFormatFields) => boolean} [textureFormat]
+ *           Whether the device makes textures in a format: one it does not is
+ *           made in system memory, and refused in video memory.
  * @property {boolean} [emulated]
  *           Made by DirectDrawCreate(DDCREATE_EMULATIONONLY): no hardware, so
  *           every surface is in system memory and depth is 16 or 32 bits.
@@ -986,6 +1019,8 @@ export function createDirectDraw(options = {}){
     /** @returns {Clipper} */
     function makeClipper(){
         let clipList = /** @type {Rect[]} */ ([]);
+        /** Whether a list was given, an empty one included. */
+        let listed = false;
         let window = 0;
         let changed = false;
         const life = counted(()=>{
@@ -1003,18 +1038,24 @@ export function createDirectDraw(options = {}){
             get clipList(){
                 return clipList;
             },
+            /** Whether it has a list of its own: none until one is set, and none after a null. */
+            get listed(){
+                return listed;
+            },
             /**
              * A clipper bound to a window takes its list from the window, so a
-             * list set by hand is refused while one is bound.
+             * list set by hand is refused while one is bound. Null takes the
+             * list away (Wine's test_clipper_blt).
              *
-             * @param {Rect[]} rects
+             * @param {Rect[] | null} rects
              */
             setClipList(rects){
                 if (window !== 0)
                 {
                     return DDERR_CLIPPERISUSINGHWND;
                 }
-                clipList = rects.map(rect=>({ ...rect }));
+                clipList = (rects ?? []).map(rect=>({ ...rect }));
+                listed = rects !== null;
                 changed = true;
                 return DD_OK;
             },
@@ -1183,6 +1224,8 @@ export function createDirectDraw(options = {}){
         let lost = false;
         /** Colour keys by the DDCKEY flag that names them. @type {Map<number, ColorKey>} */
         const colorKeys = new Map();
+        /** Each kind's key as last set. @type {Map<number, ColorKey>} */
+        const lastKeys = new Map();
         let uniqueness = 1;
         /** @type {Uint16Array | null} */
         let gammaRamp = null;
@@ -1214,6 +1257,12 @@ export function createDirectDraw(options = {}){
         let depthVia;
         /** @type {string | undefined} */
         let flipVia;
+        // The interfaces their references are held on: the pointer's the
+        // program passed, which need not be the one it called through.
+        /** @type {string | undefined} */
+        let depthHeld;
+        /** @type {string | undefined} */
+        let flipHeld;
         // The counts its interfaces keep, by `surfaceCountOf`'s name: the one
         // it was created through holds the creation's reference and every
         // reference the model takes itself.
@@ -1234,12 +1283,12 @@ export function createDirectDraw(options = {}){
             if (flipNext)
             {
                 flipNext.setFlipPrev(null);
-                flipNext.release(flipVia);
+                flipNext.release(flipHeld);
                 flipNext = null;
             }
             if (depth)
             {
-                depth.release(depthVia);
+                depth.release(depthHeld);
                 depth = null;
             }
             if (mipNext)
@@ -1418,6 +1467,7 @@ export function createDirectDraw(options = {}){
                     colorKeys.delete(kind);
                     return DD_OK;
                 }
+                lastKeys.set(kind, { low: key.low >>> 0, high: key.low >>> 0 });
                 if ((which & DDCKEY_COLORSPACE) !== 0 && key.low >>> 0 !== key.high >>> 0)
                 {
                     return DDERR_NOCOLORKEYHW;
@@ -1430,6 +1480,18 @@ export function createDirectDraw(options = {}){
             getColorKey(which){
                 const key = colorKeys.get(which);
                 return key ? { hr: DD_OK, key: { ...key } } : { hr: DDERR_NOCOLORKEY, key: null };
+            },
+
+            /**
+             * The key last set, taken away since or not: what an older
+             * interface's destination-keyed blit still keys by (Wine's ddraw1
+             * and ddraw2 test_ck_operation).
+             *
+             * @param {number} which
+             */
+            lastColorKey(which){
+                const key = lastKeys.get(which);
+                return key ? { ...key } : null;
             },
 
             uniquenessValue(){
@@ -1526,14 +1588,20 @@ export function createDirectDraw(options = {}){
             get attachedImplicitly(){
                 return flipImplicit;
             },
+            /** The interface the reference on the buffer behind it is held on. */
+            get attachedHeld(){
+                return flipHeld;
+            },
             /**
              * @param {Surface | null} next @param {boolean} isImplicit
              * @param {string} [via]  The interface the link was made through.
+             * @param {string} [held]  The interface its reference is held on.
              */
-            setFlipNext(next, isImplicit, via = undefined){
+            setFlipNext(next, isImplicit, via = undefined, held = via){
                 flipNext = next;
                 flipImplicit = isImplicit;
                 flipVia = via;
+                flipHeld = held;
             },
             markLost(){
                 lost = true;
@@ -1587,6 +1655,11 @@ export function createDirectDraw(options = {}){
                 if (sublevel && spec.version === 7)
                 {
                     return DDERR_NOTONMIPMAPSUBLEVEL;
+                }
+                // A palette of alphas is a texture's (Wine's test_palette_alpha).
+                if (next && (next.caps & DDPCAPS_ALPHA) !== 0 && (caps & DDSCAPS_TEXTURE) === 0)
+                {
+                    return DDERR_INVALIDSURFACETYPE;
                 }
                 if (palette)
                 {
@@ -1733,11 +1806,13 @@ export function createDirectDraw(options = {}){
                     pitch,
                     bitCount: bpp * 8,
                     bits: buffer,
-                    // The palette's own live array: a program that animates its
-                    // palette while holding the DC draws in the new colours. A
-                    // surface with none of its own draws in the primary's, the
-                    // colours its pixels are shown in once blitted there.
-                    palette: bpp === 1 ? (palette ?? primaryPalette())?.pixels ?? null : null,
+                    // The palette as it is now: one changed or set again while
+                    // the DC is held does not reach it (Wine's
+                    // test_palette_gdi). A surface with none of its own draws
+                    // in the primary's, the colours its pixels are shown in
+                    // once blitted there.
+                    palette: bpp === 1
+                        ? (palette ?? primaryPalette())?.pixels.slice() ?? null : null,
                     format: pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                     // The section a surface's DC reports: no image size, and a
                     // 16-bit one laid out by its masks (test_getdc).
@@ -1774,8 +1849,10 @@ export function createDirectDraw(options = {}){
             /**
              * @param {Surface} other
              * @param {string} [via]  The interface called through.
+             * @param {string} [held]  The interface `other` was passed as,
+             *        which holds the reference the attachment takes.
              */
-            addAttachedSurface(other, via){
+            addAttachedSurface(other, via, held = via){
                 if (other === surface)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
@@ -1809,7 +1886,8 @@ export function createDirectDraw(options = {}){
                     }
                     depth = other;
                     depthVia = via;
-                    other.addRef(via);
+                    depthHeld = held;
+                    other.addRef(held);
                     return DD_OK;
                 }
                 // A flip chain is a line: the one being attached must be in no
@@ -1828,14 +1906,15 @@ export function createDirectDraw(options = {}){
                 const after = flipNext;
                 if (after !== null)
                 {
-                    other.setFlipNext(after, flipImplicit, flipVia);
+                    other.setFlipNext(after, flipImplicit, flipVia, flipHeld);
                     after.setFlipPrev(other);
                 }
                 flipNext = other;
                 flipVia = via;
+                flipHeld = held;
                 flipImplicit = false;
                 other.setFlipPrev(surface);
-                other.addRef(via);
+                other.addRef(held);
                 restyleChain(surface);
                 return DD_OK;
             },
@@ -1873,8 +1952,9 @@ export function createDirectDraw(options = {}){
                         return DDERR_SURFACENOTATTACHED;
                     }
                     depth = null;
-                    other.release(depthVia);
+                    other.release(depthHeld);
                     depthVia = undefined;
+                    depthHeld = undefined;
                     return DD_OK;
                 }
                 if (mipNext === other)
@@ -1904,13 +1984,15 @@ export function createDirectDraw(options = {}){
                 // surface moves up to take its place, and the reference it held
                 // on that successor transfers here rather than being retaken.
                 const successor = other.flipNext;
-                const released = flipVia;
+                const released = flipHeld;
                 const successorVia = other.attachedVia;
+                const successorHeld = other.attachedHeld;
                 const successorImplicit = other.attachedImplicitly;
                 other.setFlipNext(null, false);
                 other.setFlipPrev(null);
                 flipNext = successor;
                 flipVia = successorVia;
+                flipHeld = successorHeld;
                 flipImplicit = successorImplicit;
                 successor?.setFlipPrev(surface);
                 other.release(released);
@@ -2205,14 +2287,35 @@ export function createDirectDraw(options = {}){
         // is refused (Wine's test_caps, DDCREATE_EMULATIONONLY).
         if (options.emulated)
         {
-            if ((request.caps & DDSCAPS_ZBUFFER) !== 0
-                && (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0
-                && request.zBufferBitDepth !== 16 && request.zBufferBitDepth !== 32)
+            const depthBits = (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0
+                ? request.zBufferBitDepth
+                : (request.flags & DDSD_PIXELFORMAT) !== 0
+                    && ((request.pixelFormat?.flags ?? 0) & DDPF_ZBUFFER) !== 0
+                    ? request.pixelFormat?.bitCount : undefined;
+            if ((request.caps & DDSCAPS_ZBUFFER) !== 0 && depthBits !== undefined
+                && depthBits !== 16 && depthBits !== 32)
             {
                 return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
             }
             if ((request.caps & (DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY
                 | DDSCAPS_PRIMARYSURFACE)) === 0)
+            {
+                request = { ...request, caps: (request.caps | DDSCAPS_SYSTEMMEMORY) >>> 0 };
+            }
+        }
+        // A texture in a format the device does not offer is the
+        // emulation's: in system memory, and never in video memory (Wine's
+        // test_unsupported_formats).
+        if ((request.caps & DDSCAPS_TEXTURE) !== 0 && (request.flags & DDSD_PIXELFORMAT) !== 0
+            && request.pixelFormat && options.textureFormat
+            && !options.textureFormat(request.pixelFormat))
+        {
+            if ((request.caps & DDSCAPS_VIDEOMEMORY) !== 0)
+            {
+                return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
+            }
+            if ((request.caps & DDSCAPS_SYSTEMMEMORY) === 0 && ((request.caps2 ?? 0)
+                & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) === 0)
             {
                 request = { ...request, caps: (request.caps | DDSCAPS_SYSTEMMEMORY) >>> 0 };
             }
@@ -2269,7 +2372,7 @@ export function createDirectDraw(options = {}){
         // not, and the surface is in the display mode's format.
         const named = (request.flags & DDSD_PIXELFORMAT) !== 0 ? request.pixelFormat : undefined;
         const pixelFormat = depthRequest
-            ? depthFormatForDepth(request.zBufferBitDepth ?? 16)
+            ? depthFormatOfBitDepth(request.zBufferBitDepth ?? 16)
             : (primary || !named ? modeFormat : named);
         const levels = mipLevelCount({
             caps: validity.caps,
@@ -2307,6 +2410,12 @@ export function createDirectDraw(options = {}){
             {
                 return { hr: DDERR_INVALIDCAPS, surface: null };
             }
+            // The program's own memory is taken from IDirectDraw4 on (Wine's
+            // ddraw1 and ddraw2 test_create_surface_pitch).
+            if (version < 4)
+            {
+                return { hr: DDERR_INVALIDPARAMS, surface: null };
+            }
             const given = (request.pitch ?? 0) | 0;
             const blockRow = blockRowBytes(pixelFormat, width);
             const row = blockRow ?? rowBytes(pixelFormat, width, bytesPerPixel(pixelFormat));
@@ -2314,13 +2423,16 @@ export function createDirectDraw(options = {}){
             {
                 return { hr: DDERR_INVALIDPARAMS, surface: null };
             }
-            // Blocks are named by their whole size, never a pitch: dwLinearSize
-            // shares lPitch's place, and holds every block row (Wine's
-            // test_block_formats_creation).
+            // Blocks are named by their whole size: dwLinearSize shares
+            // lPitch's place, and holds every block row. IDirectDraw7 refuses
+            // a pitch for them; IDirectDraw4 takes one, whatever its value
+            // (Wine's test_block_formats_creation, ddraw4 and ddraw7).
             if (blockRow !== null)
             {
-                if ((request.flags & (DDSD_PITCH | DDSD_LINEARSIZE)) !== DDSD_LINEARSIZE
-                    || (given >>> 0) < blockRow * Math.ceil(height / 4))
+                const pitched = (request.flags & DDSD_PITCH) !== 0;
+                const sized = (request.flags & DDSD_LINEARSIZE) !== 0
+                    && (given >>> 0) >= blockRow * Math.ceil(height / 4);
+                if (version === 7 ? pitched || !sized : !pitched && !sized)
                 {
                     return { hr: DDERR_INVALIDPARAMS, surface: null };
                 }

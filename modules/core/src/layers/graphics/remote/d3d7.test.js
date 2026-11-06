@@ -216,6 +216,7 @@ async function framesThrough(make, ring = false){
 
     /** @type {string[]} */
     const frames = [];
+    let depthRead = new Uint8Array(0);
     for (let frame = 0; frame < 3; frame++)
     {
         const strip = corners([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
@@ -310,6 +311,13 @@ async function framesThrough(make, ring = false){
             assert.equal(target.lock(null, 0).hr, D3D_OK);
             ram.set([1, 2, 3, 4], target.buffer);
             assert.equal(target.unlock(null), D3D_OK);
+            // So are the depths it tested against, and what it writes there
+            // goes up before the next draw tests them.
+            await depth.pixelsCurrent();
+            assert.equal(depth.lock(null, 0).hr, D3D_OK);
+            depthRead = ram.slice(depth.buffer, depth.buffer + depth.pitch * depth.height);
+            ram.fill(0x40, depth.buffer, depth.buffer + depth.pitch);
+            assert.equal(depth.unlock(null), D3D_OK);
         }
         ram.fill(0x40 + frame, levels[1].buffer, levels[1].buffer + 16);
         assert.equal(levels[1].lock(null).hr, D3D_OK);
@@ -327,7 +335,7 @@ async function framesThrough(make, ring = false){
     assert.equal(vb.buffer.release(), 0);
     assert.equal(device.release(), 0);
     assert.deepEqual(refused, [], 'the device took every call');
-    return { frames, ram: ram.slice(target.buffer, target.buffer + 8), claims };
+    return { frames, ram: ram.slice(target.buffer, target.buffer + 8), claims, depthRead };
 }
 
 /**
@@ -348,6 +356,9 @@ test('Direct3D 7 frames played from a record ask of the GPU what the device itse
             `frame ${index} asked the same`));
         assert.deepEqual([...played.ram], [...direct.ram],
             'the target read back reached the program\'s bytes alike');
+        assert.ok(direct.depthRead.length > 0);
+        assert.deepEqual([...played.depthRead], [...direct.depthRead],
+            'and the depths read back alike');
         assert.equal(played.claims.size, 0, 'and the addresses drawn into went with the device');
     });
 

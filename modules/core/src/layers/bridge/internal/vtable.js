@@ -73,6 +73,9 @@ const LONG_WORD = 8;
  *           device's setter's record written into its command ring -- or
  *           undefined, for a call the slot's code is to make itself.
  * @property {string} [builtin]           IUnknown's three, which we implement here.
+ * @property {number} [stranger]
+ *           What a call through a pointer nobody published answers, where the
+ *           runtime has its own word for it; E_POINTER otherwise.
  * @property {Record<number, 'f32' | 'f64'>} [floats]
  *           The float and double arguments, by their first dword counting the
  *           interface pointer, which a 64-bit caller passes among its first
@@ -287,7 +290,7 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                             // through a released pointer or 0xdeadbeef.
                             return method.builtin === 'addRef' || method.builtin === 'release'
                                 ? 0
-                                : 0x80004003;
+                                : method.stranger ?? 0x80004003;
                         }
                         const given = rest;
                         for (let i = 1; i < args.length; i++)

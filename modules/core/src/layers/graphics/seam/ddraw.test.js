@@ -21,14 +21,17 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { createDirectDrawSeam } from './ddraw.js';
+import { displayModes } from '../../win32/user32/display.js';
 import {
-    IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE7_SLOTS,
+    IDIRECTDRAW7_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS,
+    IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE3_SLOTS,
     IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
 import {
     IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface4,
     IID_IDirectDrawSurface7, IID_IDirectDrawSurface2, IID_IDirectDrawColorControl,
-    IID_IDirect3DDevice7, IID_IDirect3DTexture2, IID_IDirectDrawSurface, IID_IDirectDraw,
+    IID_IDirect3DDevice7, IID_IDirect3DTexture2, IID_IDirectDrawSurface, IID_IDirectDrawSurface3,
+    IID_IDirectDraw,
 } from './iids.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
@@ -36,6 +39,7 @@ import {
     DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import { createDirectDraw } from '../ddraw/objects.js';
+import { DEVICE_IDS } from '../d3d7/constants.js';
 import {
     DDBLT_COLORFILL, DDCAPS2_PRIMARYGAMMA, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
     DDGDI_GETHOSTIDENTIFIER, DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
@@ -45,8 +49,8 @@ import {
     DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK, DDERR_UNSUPPORTED,
     DDERR_EXCLUSIVEMODEALREADYSET, DDERR_NOEXCLUSIVEMODE, DDERR_SURFACELOST, DDERR_WRONGMODE,
-    DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED, DDSCL_CREATEDEVICEWINDOW,
-    DDSCL_SETFOCUSWINDOW, DDERR_NOFOCUSWINDOW, DDERR_NOHWND,
+    DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED, DDSD_ZBUFFERBITDEPTH,
+    DDSCL_CREATEDEVICEWINDOW, DDSCL_SETFOCUSWINDOW, DDERR_NOFOCUSWINDOW, DDERR_NOHWND,
 } from '../ddraw/constants.js';
 
 const HWND = 0x00010044;
@@ -225,6 +229,7 @@ function seamed(build = {}){
             deleteSurfaceDc: handle=>{
                 dcs.push({ event: 'delete', handle });
             },
+            displayDc: ()=>0x1d1d,
         },
         present: surface=>presented.push(surface),
         flipQueued: build.flipQueued,
@@ -499,11 +504,34 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
     // DDRAW.dll's export finds the surface by the DC alone, as the first generation.
     assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0x5500, 0x5504]), DD_OK);
     assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5500)), model);
+    assert.equal(h.box.memory.readU32(0x5504), 0x1d1d, 'the display\'s DC beside it');
     h.release(h.box.memory.readU32(0x5500));
     assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([hdc, 0, 0x5504]) >>> 0, 0x80070057);
     assert.equal(h.ddrawDll.GetSurfaceFromDC.handler([0x1234, 0x5500, 0x5504]) >>> 0,
         DDERR_NOTFOUND);
     assert.deepEqual([h.box.memory.readU32(0x5500), h.box.memory.readU32(0x5504)], [0, 0]);
+    // The object's own method: a DC it did not hand out names nothing.
+    h.box.memory.writeU32(0x5508, 0xdeadbeef);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetSurfaceFromDC'),
+        [0x1234, 0x5508]) >>> 0, DDERR_NOTFOUND);
+    assert.equal(h.box.memory.readU32(0x5508), 0);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetSurfaceFromDC'),
+        [hdc, 0x5508]), DD_OK);
+    assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5508)), model);
+    h.release(h.box.memory.readU32(0x5508));
+    // IDirectDraw4's hands back the first generation's interface.
+    const riid4 = h.box.putGuid(0x4000, IID_IDirectDraw4);
+    assert.equal(h.box.call(ddraw, 0, [riid4, 0x550c]), DD_OK);
+    const fourth = h.box.memory.readU32(0x550c);
+    assert.equal(h.box.call(fourth, slot(IDIRECTDRAW4_SLOTS, 'GetSurfaceFromDC'),
+        [hdc, 0x5508]), DD_OK);
+    const first = h.box.memory.readU32(0x5508);
+    const riid1 = h.box.putGuid(0x4000, IID_IDirectDrawSurface);
+    assert.equal(h.box.call(surface, 0, [riid1, 0x5510]), DD_OK);
+    assert.equal(first, h.box.memory.readU32(0x5510), 'the IDirectDrawSurface pointer');
+    h.release(first);
+    h.release(h.box.memory.readU32(0x5510));
+    h.release(fourth);
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
         width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
         format: '555', sizeImage: 0,
@@ -1010,6 +1038,45 @@ test('DeleteAttachedSurface with no surface detaches all of them', ()=>{
     h.assertAllReleased();
 });
 
+test('an attachment holds its reference on the interface it was passed as', ()=>{
+    // After Wine's ddraw1 test_surface_interface_mismatch: a first-generation
+    // depth buffer attached through IDirectDrawSurface3 is held on its first
+    // count, which its own Release then does not take to zero.
+    const h = seamed();
+    assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
+    const ddraw = h.box.memory.readU32(0x4100);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_NORMAL]), DD_OK);
+    /** @param {number} flags @param {number} caps @param {number} [depthBits] */
+    const create = (flags, caps, depthBits = 0)=>{
+        h.box.bytes.fill(0, 0x5000, 0x5000 + DDSURFACEDESC.SIZE);
+        h.box.memory.writeU32(0x5000, DDSURFACEDESC.SIZE);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwFlags, flags | DDSD_WIDTH | DDSD_HEIGHT);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwWidth, 8);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwHeight, 8);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwCaps, caps);
+        h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwMipMapCount, depthBits);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+            [0x5000, 0x5100, 0]), DD_OK);
+        return h.box.memory.readU32(0x5100);
+    };
+    const target = create(DDSD_CAPS, DDSCAPS_OFFSCREENPLAIN);
+    const depth = create(DDSD_CAPS | DDSD_ZBUFFERBITDEPTH, DDSCAPS_ZBUFFER, 16);
+    const riid = h.box.putGuid(0x4000, IID_IDirectDrawSurface3);
+    assert.equal(h.box.call(target, 0, [riid, 0x4300]), DD_OK);
+    const target3 = h.box.memory.readU32(0x4300);
+
+    assert.equal(h.box.call(target3, slot(IDIRECTDRAWSURFACE3_SLOTS, 'AddAttachedSurface'),
+        [depth]), DD_OK);
+    assert.equal(h.release(depth), 1, 'the attachment holds the first interface');
+    assert.equal(h.box.call(target3, slot(IDIRECTDRAWSURFACE3_SLOTS, 'DeleteAttachedSurface'),
+        [0, depth]), DD_OK);
+    assert.equal(h.release(target3), 0);
+    assert.equal(h.release(target), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
 test('the GDI surface is the primary: none without one, flipped to only on a flip chain', ()=>{
     // After Wine's ddraw1 test_gdi_surface.
     const h = seamed();
@@ -1132,6 +1199,17 @@ test('a surface keeps private data under a GUID, an interface entry with a refer
     assert.equal(h.surface7(surface, 'FreePrivateData', [guid]), DD_OK);
     assert.equal(count(), before);
 
+    // The reference is taken through the interface the pointer is, as the
+    // program's AddRef would be (ddraw4 test_private_data).
+    assert.equal(h.box.call(ddraw, 0, [h.box.putGuid(0x7a20, IID_IDirectDraw4), 0x7a30]), DD_OK);
+    const ddraw4 = h.box.memory.readU32(0x7a30);
+    assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw4, 4, DDSPD_IUNKNOWNPOINTER]),
+        DD_OK);
+    assert.deepEqual([model.refCount('IDirectDraw4'), count()], [2, before]);
+    assert.equal(h.surface7(surface, 'FreePrivateData', [guid]), DD_OK);
+    assert.equal(model.refCount('IDirectDraw4'), 1);
+    assert.equal(h.release(ddraw4), 0);
+
     assert.equal(h.surface7(surface, 'SetPrivateData', [guid, ddraw, 4, DDSPD_IUNKNOWNPOINTER]),
         DD_OK);
     const data = 0x7b00;
@@ -1217,6 +1295,18 @@ test('a clipper carries its list as RGNDATA, both ways', ()=>{
         DD_OK);
     const clipper = h.box.memory.readU32(0x5900);
     assert.equal(h.publisher.objectAt(h.box.memory.readU32(0x5900)).refCount, 1);
+    const listSize = ()=>h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetClipList'),
+        [0, 0, 0x5e00]) >>> 0;
+    // Its methods called through memory that only holds its table answer
+    // DDERR_INVALIDPARAMS and touch nothing (test_clipper_refcount).
+    const fake = 0x7e00;
+    h.box.memory.writeU32(fake, h.box.memory.readU32(clipper));
+    h.box.memory.writeU32(0x7f00, 0x1234);
+    assert.equal(h.box.call(fake, slot(IDIRECTDRAWCLIPPER_SLOTS, 'IsClipListChanged'), [0x7f00]),
+        DDERR_INVALIDPARAMS >>> 0);
+    assert.equal(h.box.memory.readU32(0x7f00), 0x1234);
+    // Made, it has no list until one is given (test_clipper_blt).
+    assert.equal(listSize(), 0x887600cd, 'DDERR_NOCLIPLIST');
 
     const region = 0x5d00;
     h.box.memory.writeU32(region + 4, 1);
@@ -1243,9 +1333,21 @@ test('a clipper carries its list as RGNDATA, both ways', ()=>{
     assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'IsClipListChanged'),
         [0x6000]), DD_OK);
     assert.equal(h.box.memory.readU32(0x6000), 1);
+    // A null list takes it away, and a surface with that clipper is refused a blit.
+    assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetClipList'), [0, 0]),
+        DD_OK);
+    assert.equal(listSize(), 0x887600cd);
+    const surface = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8 });
+    assert.equal(h.surface7(surface, 'SetClipper', [clipper]), DD_OK);
+    h.box.bytes.fill(0, 0x6100, 0x6100 + 100);
+    h.box.memory.writeU32(0x6100, 100);
+    assert.equal(h.surface7(surface, 'Blt', [0, 0, 0, DDBLT_COLORFILL, 0x6100]) >>> 0,
+        0x887600cd);
+    assert.equal(h.release(surface), 0);
     assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'), [0, HWND]), DD_OK);
     assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetHWnd'), [0x6000]), DD_OK);
     assert.equal(h.box.memory.readU32(0x6000), HWND);
+    assert.equal(listSize(), DD_OK, 'a window is a list');
 
     assert.equal(h.release(clipper), 0);
     assert.equal(h.release(ddraw), 0);
@@ -1416,6 +1518,17 @@ test('EnumDisplayModes names every mode at every depth, and stops when told', as
     assert.equal(h.calls[0].args[1], 0x77, 'the context travels');
     assert.equal(h.ddraw('EnumDisplayModes', [0, 0, 0, 0]), DDERR_INVALIDPARAMS, 'no callback');
 
+    // A descriptor names the modes by the fields it flags (test_enum_surfaces).
+    h.calls.length = 0;
+    h.box.bytes.fill(0, 0x6000, 0x6000 + DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(0x6000, DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(0x6000 + DDSURFACEDESC2.dwFlags, DDSD_PIXELFORMAT | DDSD_WIDTH);
+    h.box.memory.writeU32(0x6000 + DDSURFACEDESC2.dwWidth, 640);
+    h.box.memory.writeU32(0x6000 + DDSURFACEDESC2.ddpfPixelFormat + 12, 32);
+    assert.equal(await h.ddraw('EnumDisplayModes', [0, 0x6000, 0, 0x1234]), DD_OK);
+    assert.deepEqual(h.calls.map(call=>call.desc), [{ width: 640, height: 480, bitCount: 32,
+        caps: 0 }]);
+
     h.calls.length = 0;
     h.cancel(2);
     assert.equal(await h.ddraw('EnumDisplayModes', [0, 0, 0, 0x1234]), DD_OK);
@@ -1458,7 +1571,9 @@ test('EnumSurfaces names all of them, or those that match the caps described', a
     assert.equal(plain.hr, DD_OK);
     assert.equal(primary.hr, DD_OK);
 
-    assert.equal(await h.ddraw('EnumSurfaces', [1, 0, 0, 0x3000]), DD_OK);
+    // Neither what exists nor what could be made is no question.
+    assert.equal(await h.ddraw('EnumSurfaces', [1, 0, 0, 0x3000]), DDERR_INVALIDPARAMS);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 1, 0, 0, 0x3000]), DD_OK);
     assert.equal(h.calls.length, 2, 'DDENUMSURFACES_ALL');
     for (const call of h.calls)
     {
@@ -1467,17 +1582,53 @@ test('EnumSurfaces names all of them, or those that match the caps described', a
 
     h.calls.length = 0;
     const wanted = 0x6000;
+    h.box.bytes.fill(0, wanted, wanted + DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(wanted, DDSURFACEDESC2.SIZE);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_CAPS);
     h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwCaps, DDSCAPS_PRIMARYSURFACE);
-    assert.equal(await h.ddraw('EnumSurfaces', [2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 2, wanted, 0, 0x3000]), DD_OK);
     assert.equal(h.calls.length, 1, 'DDENUMSURFACES_MATCH');
     assert.equal(h.publisher.objectAt(h.calls[0].args[0]), primary.surface);
     primary.surface.release();
 
     h.calls.length = 0;
-    assert.equal(await h.ddraw('EnumSurfaces', [4, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 4, wanted, 0, 0x3000]), DD_OK);
     assert.equal(h.calls.length, 1, 'DDENUMSURFACES_NOMATCH');
     assert.equal(h.publisher.objectAt(h.calls[0].args[0]), plain.surface);
     plain.surface.release();
+
+    // Only the fields flagged are compared: the size alone names the 4x4 one.
+    h.calls.length = 0;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_WIDTH);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwWidth, 4);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwHeight, 999);
+    assert.equal(await h.ddraw('EnumSurfaces', [0x10 | 2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 1);
+    h.publisher.objectAt(h.calls[0].args[0]).release();
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_WIDTH | DDSD_HEIGHT);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwHeight, 4);
+
+    // What could be made: asked by a match alone, named with no surface, at
+    // the size asked or at every display size.
+    for (const how of [1, 4])
+    {
+        assert.equal(await h.ddraw('EnumSurfaces', [8 | how, wanted, 0, 0x3000]),
+            DDERR_INVALIDPARAMS);
+    }
+    h.calls.length = 0;
+    assert.equal(await h.ddraw('EnumSurfaces', [8 | 0x10 | 2, wanted, 0, 0x3000]), DD_OK);
+    assert.deepEqual(h.calls.map(call=>call.args[0]), [0], 'what exists is left out');
+    h.calls.length = 0;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_CAPS);
+    assert.equal(await h.ddraw('EnumSurfaces', [8 | 2, wanted, 0, 0x3000]), DD_OK);
+    const sizes = new Set(displayModes(SCREEN).map(mode=>`${mode.width}x${mode.height}`));
+    assert.equal(h.calls.length, sizes.size, 'one a display size');
+    h.calls.length = 0;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwFlags, DDSD_CAPS | DDSD_PIXELFORMAT);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.ddpfPixelFormat + 4, DDPF_FOURCC);
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.ddpfPixelFormat + 8, 0xdeadbeef);
+    assert.equal(await h.ddraw('EnumSurfaces', [8 | 2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 0, 'no surface is made in an unknown format');
 
     assert.equal(plain.surface.release(), 0);
     assert.equal(primary.surface.release(), 0);
@@ -2472,6 +2623,11 @@ test('a clipper given a window clips to its client area on the screen; BltFast w
         assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateClipper'), [0, 0x5900, 0]),
             DD_OK);
         const clipper = h.box.memory.readU32(0x5900);
+        // A window that is gone has no list (test_clipper_blt).
+        assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'),
+            [0, HWND + 4]), DD_OK);
+        assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'GetClipList'),
+            [0, 0, 0x5e00]) >>> 0, 0x80004005);
         assert.equal(h.box.call(clipper, slot(IDIRECTDRAWCLIPPER_SLOTS, 'SetHWnd'), [0, HWND]),
             DD_OK);
         const size = 0x5e00;
@@ -2566,6 +2722,11 @@ test('a surface\'s interfaces each keep a count of their own, and an older surfa
         const refused = query(surface, IID_IDirect3DDevice7);
         assert.equal(refused.hr, seventh ? 0x80004002 | 0 : 0x80070057 | 0);
         assert.equal(refused.pointer, 0);
+        if (seventh)
+        {
+            // No first-generation device is made of a seventh-generation surface.
+            assert.equal(query(surface, DEVICE_IDS.RGB).hr, 0x80004002 | 0);
+        }
         assert.equal(query(surface, IID_IDirectDrawColorControl).hr, 0x80004002 | 0,
             'the colour control is E_NOINTERFACE in every generation');
         if (seventh)
@@ -2769,6 +2930,123 @@ test('blocks in the program\'s memory report no size of their own (test_block_fo
         assert.equal(h.release(ddraw), 0);
         h.assertAllReleased();
     });
+
+test('a blit keys by the surface\'s key or the override, never both, and by a key there is;'
+    + ' the destination key is the destination\'s in v7, the source\'s before'
+    + ' (test_ck_operation)', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const make = ()=>h.createSurface7(ddraw, { caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN,
+        width: 2, height: 1 });
+    const src = make();
+    const dst = make();
+    const pixels = (/** @type {number} */ surface, /** @type {number[] | null} */ values)=>{
+        const at = lockedAt(h, surface);
+        values?.forEach((value, i)=>h.box.memory.writeU32(at + i * 4, value));
+        return [0, 1].map(i=>h.box.memory.readU32(at + i * 4));
+    };
+    /** @param {number} surface @param {number} which @param {number | null} value */
+    const setKey = (surface, which, value)=>{
+        if (value !== null)
+        {
+            h.box.memory.writeU32(0x6100, value);
+            h.box.memory.writeU32(0x6104, value);
+        }
+        assert.equal(h.surface7(surface, 'SetColorKey', [which, value === null ? 0 : 0x6100]),
+            DD_OK);
+    };
+    const DESTBLT = 2;
+    const SRCBLT = 8;
+    const KEYDEST = 0x2000;
+    const KEYDESTOVERRIDE = 0x4000;
+    const KEYSRC = 0x8000;
+    const KEYSRCOVERRIDE = 0x10000;
+    h.box.bytes.fill(0, 0x5f00, 0x5f00 + 100);
+    h.box.memory.writeU32(0x5f00, 100);
+    const blt = (/** @type {number} */ through, /** @type {number} */ from,
+        /** @type {number} */ flags, fx = 0x5f00)=>h.box.call(through,
+        slot(IDIRECTDRAWSURFACE_SLOTS, 'Blt'), [0, from, 0, flags, fx]) >>> 0;
+    pixels(src, [0x11, 0x22]);
+    setKey(src, SRCBLT, 0x11);
+    setKey(src, DESTBLT, 0xaa);
+    setKey(dst, DESTBLT, 0xbb);
+    for (const flags of [KEYSRC | KEYSRCOVERRIDE, KEYDEST | KEYDESTOVERRIDE])
+    {
+        assert.equal(blt(dst, src, flags), DDERR_INVALIDPARAMS >>> 0);
+    }
+    for (const flags of [KEYSRCOVERRIDE, KEYDESTOVERRIDE])
+    {
+        assert.equal(blt(dst, src, flags, 0), DDERR_INVALIDPARAMS >>> 0, 'an override needs fx');
+    }
+    // Through the seventh generation the destination's own key decides.
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst, src, KEYDEST), DD_OK);
+    assert.deepEqual(pixels(dst, null), [0x11, 0xaa]);
+    // Through the first, the source's destination key.
+    const riid = h.box.putGuid(0x4000, IID_IDirectDrawSurface);
+    assert.equal(h.box.call(dst, 0, [riid, 0x6300]), DD_OK);
+    assert.equal(h.box.call(src, 0, [riid, 0x6304]), DD_OK);
+    const [dst1, src1] = [h.box.memory.readU32(0x6300), h.box.memory.readU32(0x6304)];
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst1, src1, KEYDEST), DD_OK);
+    assert.deepEqual(pixels(dst, null), [0xbb, 0x22]);
+    // Through the fourth, the destination's own as in the seventh.
+    const riid4 = h.box.putGuid(0x4000, IID_IDirectDrawSurface4);
+    assert.equal(h.box.call(dst, 0, [riid4, 0x6308]), DD_OK);
+    assert.equal(h.box.call(src, 0, [riid4, 0x630c]), DD_OK);
+    const [dst4, src4] = [h.box.memory.readU32(0x6308), h.box.memory.readU32(0x630c)];
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst4, src4, KEYDEST), DD_OK);
+    assert.deepEqual(pixels(dst, null), [0x11, 0xaa]);
+    h.release(dst4);
+    h.release(src4);
+    // A key the surface has none of is refused.
+    setKey(src, SRCBLT, null);
+    setKey(src, DESTBLT, null);
+    assert.equal(blt(dst, src, KEYSRC), DDERR_INVALIDPARAMS >>> 0);
+    // Through the first generation the source's last key still keys.
+    pixels(dst, [0xbb, 0xaa]);
+    assert.equal(blt(dst1, src1, KEYDEST), DD_OK, 'the source\'s key as it last was');
+    assert.deepEqual(pixels(dst, null), [0xbb, 0x22]);
+    assert.equal(blt(dst, src, KEYDEST), DD_OK, 'the destination still has its own');
+    setKey(dst, DESTBLT, null);
+    assert.equal(blt(dst, src, KEYDEST), DDERR_INVALIDPARAMS >>> 0);
+    assert.equal(blt(dst1, src1, KEYDEST), DDERR_INVALIDPARAMS >>> 0,
+        'the source\'s last key keys only a destination that has one (ddraw2 test_ck_operation)');
+    for (const one of [dst1, src1, src, dst])
+    {
+        h.release(one);
+    }
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('between two DirectDraw objects a copy that converts the format is not made'
+    + ' (test_cross_device_blt)', ()=>{
+    const h = seamed();
+    const first = h.create7();
+    const second = h.create7();
+    const sysmem = DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN;
+    const dest = h.createSurface7(first, { caps: sysmem, width: 4, height: 4 });
+    const alike = h.createSurface7(second, { caps: sysmem, width: 4, height: 4 });
+    const narrow = h.createSurface7(second, { caps: sysmem, width: 4, height: 4,
+        pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16, redMask: 0x7c00,
+            greenMask: 0x3e0, blueMask: 0x1f, alphaMask: 0 } });
+    const local = h.createSurface7(first, { caps: sysmem, width: 4, height: 4,
+        pixelFormat: { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16, redMask: 0x7c00,
+            greenMask: 0x3e0, blueMask: 0x1f, alphaMask: 0 } });
+    assert.equal(h.surface7(dest, 'Blt', [0, narrow, 0, 0, 0]) >>> 0, 0x80004001);
+    assert.equal(h.surface7(dest, 'Blt', [0, alike, 0, 0, 0]), DD_OK, 'the same format copies');
+    assert.equal(h.surface7(dest, 'Blt', [0, local, 0, 0, 0]), DD_OK, 'within one it converts');
+    for (const surface of [dest, alike, narrow, local])
+    {
+        assert.equal(h.release(surface), 0);
+    }
+    assert.equal(h.release(first), 0);
+    assert.equal(h.release(second), 0);
+    h.assertAllReleased();
+});
+
 
 test('a mode set and left is put back to the registry\'s as the object goes; giving the screen'
     + ' back puts it back from IDirectDraw2 on (test_coop_level_mode_set)', ()=>{

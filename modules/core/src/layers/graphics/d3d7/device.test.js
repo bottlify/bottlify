@@ -28,7 +28,7 @@ import { FVF } from '../webgpu/internal/vertexformat.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
-import { createDirectDraw } from '../ddraw/objects.js';
+import { createDirectDraw, depthFormatForDepth } from '../ddraw/objects.js';
 import {
     DDCKEY_SRCBLT, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDPF_STENCILBUFFER, DDSCAPS_3DDEVICE,
     DDSCAPS_COMPLEX,
@@ -1192,7 +1192,6 @@ test('recorded: a render target\'s pixels are read back into its guest bytes whe
     device.present(target.buffer);
     await device.idle();
     assert.equal(texture.pixelsCurrent(), null, 'a texture\'s bytes are its pixels already');
-    assert.equal(depth.pixelsCurrent(), null, 'and a depth buffer is not read back');
 
     // What the GPU holds for the target: the fake keeps texels, so they are
     // put there as a draw would have left them.
@@ -1233,6 +1232,80 @@ test('recorded: a render target\'s pixels are read back into its guest bytes whe
     assert.equal(device.release(), 0);
     assert.equal(target.pixelsCurrent(), null, 'a released device holds no copy');
     assert.equal(texture.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(depth.release(), 0);
+    assert.equal(root.release('IDirectDraw7'), 0);
+    assert.ok(root.destroyed);
+});
+
+test('recorded: a depth buffer drawn against is read back in its own depth format, and what the'
+    + ' program wrote into it is drawn into the GPU\'s copy (test_depth_readback, test_depth_blit)',
+async()=>{
+    const f = recorded({ writable: true });
+    const { device, gpu, ram, root, target } = f;
+    const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
+    assert.equal(target.addAttachedSurface(depth), D3D_OK);
+    assert.equal(depth.pixelsCurrent(), null, 'one never drawn against holds its own bytes');
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL,
+        vertices([[0, 0], [8, 0], [0, 8]], false), 3), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await device.idle();
+
+    // What the GPU holds: the fake runs no shader, so the words the read's
+    // pass writes are put in its buffer as the pass would leave them.
+    const made = gpu.device.createBuffer;
+    gpu.device.createBuffer = (/** @type {any} */ descriptor)=>{
+        const buffer = made(descriptor);
+        if (descriptor.label === 'depth-read')
+        {
+            const floats = new Float32Array(buffer.bytes.buffer, 0, 64);
+            floats.forEach((_, index)=>{
+                floats[index] = index / 63;
+            });
+        }
+        return buffer;
+    };
+    const pending = depth.pixelsCurrent();
+    assert.ok(pending, 'a depth buffer drawn against is read back');
+    await pending;
+    gpu.device.createBuffer = made;
+    assert.equal(gpu.of('dispatchWorkgroups').length, 1, 'by a pass that loads its depths');
+    const depthTexture = gpu.of('createTexture')
+        .find(call=>call.descriptor.format === 'depth16unorm');
+    assert.ok(depthTexture && (depthTexture.descriptor.usage & 0x04) !== 0,
+        'which binds the depth texture');
+    const row = (/** @type {number} */ y)=>Array.from({ length: 8 },
+        (_, x)=>ram[depth.buffer + y * depth.pitch + x * 2]
+            | ram[depth.buffer + y * depth.pitch + x * 2 + 1] << 8);
+    assert.deepEqual(row(0), Array.from({ length: 8 }, (_, x)=>Math.round(x / 63 * 65535)),
+        'each pixel a share of D16\'s range');
+    assert.equal(row(7)[7], 65535, 'at the surface\'s own pitch');
+
+    // A blit into it: its bytes drawn into the GPU's copy before the next draw.
+    assert.equal(depth.lock(null, 0).hr, D3D_OK);
+    ram.fill(0, depth.buffer, depth.buffer + depth.pitch * 8);
+    ram[depth.buffer + 2] = 0xff;
+    ram[depth.buffer + 3] = 0xff;
+    assert.equal(depth.unlock(null), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL,
+        vertices([[0, 0], [8, 0], [0, 8]], false), 3), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    device.present(target.buffer);
+    await device.idle();
+    const passes = gpu.of('beginRenderPass').map(call=>call.descriptor.label);
+    const written = passes.indexOf('depth-write');
+    assert.ok(written >= 0, 'a pass draws the depths in');
+    assert.ok(passes.slice(written + 1).length > 0, 'ahead of the draw after it');
+    const words = gpu.of('writeBuffer').find(call=>call.buffer.descriptor.label === 'depth-write');
+    assert.ok(words);
+    const values = new Uint32Array(words.bytes.buffer, words.bytes.byteOffset, 2 + 64);
+    assert.deepEqual([values[0], values[1]], [8, 64], 'the width and the texel count first');
+    assert.deepEqual([...new Float32Array(values.buffer, values.byteOffset + 8, 3)], [0, 1, 0],
+        'then each pixel\'s depth, 0 to 1');
+
+    assert.equal(device.release(), 0);
     assert.equal(target.release(), 0);
     assert.equal(depth.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
@@ -1310,7 +1383,9 @@ test('recorded: a stencil test the caps claim is drawn, over the depth format wi
     async()=>{
         const f = recorded();
         const { device, gpu, root, target } = f;
-        const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 32 });
+        // The format EnumZBufferFormats offers with stencil, named whole.
+        const depth = surface(root, { caps: DDSCAPS_ZBUFFER,
+            pixelFormat: depthFormatForDepth(32) });
         assert.equal(depth.pixelFormat.flags & DDPF_STENCILBUFFER, DDPF_STENCILBUFFER,
             'a depth format with stencil says so, as a program picks one by the flag');
         assert.equal(target.addAttachedSurface(depth), D3D_OK);

@@ -55,6 +55,9 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
  *           and the host has not yet read is adopted then, or never.
+ * @property {number} [stranger]
+ *           What its methods answer when called through a pointer that never
+ *           was one of its objects (DirectDraw's clipper: DDERR_INVALIDPARAMS).
  * @property {boolean} [countedInHost]
  *           AddRef and Release go to the host, not the guest routine that
  *           counts through the pointer it is given: for an interface whose
@@ -103,6 +106,7 @@ function methodsFor(descriptor){
                 ...method.floats ? { floats: method.floats } : {},
                 guest: method.guest,
                 inPlace: method.inPlace,
+                ...descriptor.stranger === undefined ? {} : { stranger: descriptor.stranger },
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
                         method.invoke(adapter.api, args) ?? 0
@@ -396,6 +400,7 @@ export function createCountCells({ allocate, memory }){
  *             owe: (call: (thread: unknown) => unknown) => void,
  *             unpublish: (api: any) => void,
  *             objectAt: (pointer: number) => any,
+ *             interfaceAt: (pointer: number) => string | null,
  *             adapterFor: (api: any) => any, count: () => number,
  *             countCell: (api: any) => number }}
  */
@@ -463,7 +468,7 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
         const pointer = publishInterface(adapter, id);
         if (pointer !== 0 && !adapter.pointers.has(pointer >>> 0))
         {
-            byPointer.set(pointer >>> 0, adapter.api);
+            byPointer.set(pointer >>> 0, { api: adapter.api, id });
             adapter.pointers.add(pointer >>> 0);
             adapter.ids.add(id);
         }
@@ -508,7 +513,9 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
      * memoises by object: anything published again comes back as the same
      * pointer and is recorded here again.
      *
-     * @type {Map<number, any>}
+     * Each entry keeps the interface the pointer is, as well as its object.
+     *
+     * @type {Map<number, { api: any, id: string }>}
      */
     const byPointer = new Map();
 
@@ -533,7 +540,7 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
             const pointer = publishInterface(adapter, id);
             if (pointer !== 0)
             {
-                byPointer.set(pointer >>> 0, api);
+                byPointer.set(pointer >>> 0, { api, id });
                 adapter.pointers.add(pointer >>> 0);
                 adapter.ids.add(id);
             }
@@ -573,7 +580,17 @@ export function createPublisher({ publishInterface, unpublishInterface, cells, c
          */
         objectAt: pointer=>((pointer >>> 0) === 0
             ? null
-            : byPointer.get(pointer >>> 0) ?? null),
+            : byPointer.get(pointer >>> 0)?.api ?? null),
+
+        /**
+         * Which interface a pointer is, or null: a reference taken through a
+         * pointer the program passed is that interface's, whatever interface
+         * the call came through (ddraw's AddAttachedSurface).
+         *
+         * @param {number} pointer
+         * @returns {string | null}
+         */
+        interfaceAt: pointer=>byPointer.get(pointer >>> 0)?.id ?? null,
 
         /** @param {any} api */
         adapterFor: api=>adapters.get(api) ?? null,

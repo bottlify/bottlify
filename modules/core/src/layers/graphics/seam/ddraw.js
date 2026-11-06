@@ -64,7 +64,8 @@ import {
 } from '../ddraw/structs.js';
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL,
-    DDBLT_KEYDESTOVERRIDE, DDBLT_WAIT, DDERR_DCALREADYCREATED,
+    DDBLT_KEYDEST, DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_WAIT, DDERR_DCALREADYCREATED,
+    DDERR_NOCLIPLIST, E_FAIL,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
@@ -94,6 +95,7 @@ import { blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
+import { textureFormatOffered } from './texture-formats.js';
 import { REFRESH_HZ, displayModes, registryMode } from '../../win32/user32/display.js';
 
 /** The classes DDRAW.dll's DllGetClassObject makes. */
@@ -172,6 +174,8 @@ const DDENUM_KNOWN = 0x00000007;
 const DDENUMSURFACES_ALL = 0x00000001;
 const DDENUMSURFACES_MATCH = 0x00000002;
 const DDENUMSURFACES_NOMATCH = 0x00000004;
+const DDENUMSURFACES_CANBECREATED = 0x00000008;
+const DDENUMSURFACES_DOESEXIST = 0x00000010;
 
 /** A message to every top-level window, and the one that tells them the display's size. */
 const HWND_BROADCAST = 0xffff;
@@ -183,7 +187,6 @@ const WS_POPUP = 0x80000000;
 const SW_SHOW = 5;
 const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
-const E_FAIL = 0x80004005;
 
 /** @param {unknown} value @param {(answer: any) => any} then */
 const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
@@ -298,12 +301,14 @@ const surfaceCountOf = (key, own)=>{
 
 /**
  * Whether a surface answers QueryInterface for an interface: a surface of the
- * seventh generation is no Direct3D texture (test_surface_qi).
+ * seventh generation is no Direct3D texture, and no first-generation device is
+ * made of it (test_surface_qi).
  *
  * @param {string} key @param {string} own
  */
 const surfaceSupports = (key, own)=>own !== '7'
-    || (key !== IID_IDirect3DTexture && key !== IID_IDirect3DTexture2);
+    || (key !== IID_IDirect3DTexture && key !== IID_IDirect3DTexture2
+        && !(/** @type {string[]} */ (Object.values(DEVICE_IDS))).includes(key));
 
 /**
  * What a surface's QueryInterface answers for an interface it has not: a
@@ -354,6 +359,8 @@ export function versionOf(id){
  *     GDI owns device contexts; this seam only knows where the pixels are.
  * @property {(attributes: import('../ddraw/objects.js').DcAttributes) => number} createSurfaceDc
  * @property {(handle: number) => void} deleteSurfaceDc
+ * @property {() => number} [displayDc]  A device context of the display, which
+ *     GetSurfaceFromDC names as the one a surface's DC is made for.
  */
 
 /**
@@ -779,6 +786,29 @@ export function createDirectDrawSeam(
         return visible.left < visible.right && visible.top < visible.bottom ? [visible] : [];
     };
 
+    /**
+     * @param {import('../ddraw/structs.js').PixelFormatFields} a
+     * @param {import('../ddraw/structs.js').PixelFormatFields} b
+     */
+    const samePixelFormat = (a, b)=>a.flags === b.flags && a.fourCC === b.fourCC
+        && a.bitCount === b.bitCount && a.redMask === b.redMask && a.greenMask === b.greenMask
+        && a.blueMask === b.blueMask && a.alphaMask === b.alphaMask;
+
+    /**
+     * Why a clipper has no list to clip by, or DD_OK: a window it was bound to
+     * that is gone (E_FAIL), or neither a window nor a list (DDERR_NOCLIPLIST).
+     *
+     * @param {any} clipper
+     * @returns {number}
+     */
+    const clipperWindowGone = clipper=>{
+        if (clipper.window !== 0)
+        {
+            return windowClient && windowClient(clipper.window >>> 0) === null ? E_FAIL : DD_OK;
+        }
+        return clipper.listed ? DD_OK : DDERR_NOCLIPLIST;
+    };
+
     const clipperMethods = describe(IID_IDirectDrawClipper, IDIRECTDRAWCLIPPER_SLOTS, {
         /**
          * A null region buffer asks how large one has to be; a size too small
@@ -790,6 +820,13 @@ export function createDirectDrawSeam(
             if ((size >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            // A window gone has no list to give; a clipper with neither a
+            // window nor a list of its own has none either (test_clipper_blt).
+            const gone = clipperWindowGone(clipper);
+            if (gone !== DD_OK)
+            {
+                return gone;
             }
             const bounds = readRect(rect);
             const listed = clipRectsOf(clipper);
@@ -831,7 +868,7 @@ export function createDirectDrawSeam(
         SetClipList: (clipper, [region])=>{
             if ((region >>> 0) === 0)
             {
-                return clipper.setClipList([]);
+                return clipper.setClipList(null);
             }
             const rects = readRegion(region);
             return rects === null ? DDERR_INVALIDPARAMS : clipper.setClipList(rects);
@@ -839,7 +876,8 @@ export function createDirectDrawSeam(
         /** @param {any} clipper @param {number[]} args */
         SetHWnd: (clipper, [, window])=>clipper.setHWnd(window >>> 0),
     });
-    const clipperInterfaces = [{ ...clipperMethods, countedInHost: true }];
+    const clipperInterfaces = [{ ...clipperMethods, countedInHost: true,
+        stranger: DDERR_INVALIDPARAMS }];
 
     // --- surface ---
 
@@ -1231,7 +1269,12 @@ export function createDirectDrawSeam(
             /** @param {any} surface @param {number[]} args */
             AddAttachedSurface: (surface, [other])=>{
                 const attached = publisher.objectAt(other);
-                return attached ? surface.addAttachedSurface(attached, generation.id)
+                // The reference the attachment holds is taken through the
+                // pointer passed, whichever interface that is: a first
+                // surface attached through IDirectDrawSurface3 keeps its
+                // first count (test_surface_interface_mismatch).
+                return attached ? surface.addAttachedSurface(attached, generation.id,
+                    publisher.interfaceAt(other) ?? generation.id)
                     : DDERR_INVALIDPARAMS;
             },
 
@@ -1252,6 +1295,39 @@ export function createDirectDrawSeam(
                     reportRefusal('Blt', surface, from ?? surface, hr);
                     return hr;
                 }
+                // A clipper with nothing to clip by refuses the blit.
+                if (surface.clipper && clipperWindowGone(surface.clipper) === DDERR_NOCLIPLIST)
+                {
+                    return DDERR_NOCLIPLIST;
+                }
+                // Between two DirectDraw objects a copy moves bytes as they are:
+                // one that converts the format is not made (Wine's
+                // test_cross_device_blt).
+                if (from && from.directDraw !== surface.directDraw
+                    && !samePixelFormat(from.pixelFormat, surface.pixelFormat))
+                {
+                    return DDERR_UNSUPPORTED;
+                }
+                // A key is the surface's or the override's, never both; an
+                // override is read from the DDBLTFX there has to be; a key
+                // the surface has none of is refused. The destination key is
+                // the destination's own through IDirectDrawSurface4 and 7, and
+                // through an older interface the source's: the one it last
+                // had, taken away since or not, though the destination must
+                // still have one (Wine's test_ck_operation).
+                const newer = wide;
+                const oldDestKey = newer ? null : from?.lastColorKey?.(DDCKEY_DESTBLT) ?? null;
+                if (((flags & DDBLT_KEYSRC) !== 0 && (flags & DDBLT_KEYSRCOVERRIDE) !== 0)
+                    || ((flags & DDBLT_KEYDEST) !== 0 && (flags & DDBLT_KEYDESTOVERRIDE) !== 0)
+                    || ((flags & (DDBLT_KEYSRCOVERRIDE | DDBLT_KEYDESTOVERRIDE)) !== 0
+                        && (fx >>> 0) === 0)
+                    || ((flags & DDBLT_KEYSRC) !== 0
+                        && !from?.getColorKey(DDCKEY_SRCBLT).key)
+                    || ((flags & DDBLT_KEYDEST) !== 0
+                        && !surface.getColorKey(DDCKEY_DESTBLT).key))
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
                 // dwFillDepth shares dwFillColor's place in the structure.
                 const fill = (fx >>> 0) === 0
                     ? 0
@@ -1271,8 +1347,10 @@ export function createDirectDrawSeam(
                             ? keyFor(from, DDCKEY_SRCBLT,
                                 (flags & DDBLT_KEYSRCOVERRIDE) !== 0, fx, DDBLTFX.ddckSrcColorkey)
                             : undefined,
-                        destColorKey: keyFor(surface, DDCKEY_DESTBLT,
-                            (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey),
+                        destColorKey: (flags & DDBLT_KEYDESTOVERRIDE) !== 0
+                            ? keyFor(surface, DDCKEY_DESTBLT, true, fx, DDBLTFX.ddckDestColorkey)
+                            : (newer ? surface.getColorKey(DDCKEY_DESTBLT).key : oldDestKey)
+                                ?? undefined,
                     },
                     clipList: clipListOf(surface),
                     fxGiven: (fx >>> 0) !== 0,
@@ -1744,6 +1822,91 @@ export function createDirectDrawSeam(
         return DD_OK;
     }
 
+    /**
+     * Whether a display mode is one a descriptor names, by the fields its
+     * flags name: the size, and the depth its pixel format has.
+     *
+     * @param {number} address  The descriptor, or zero for every mode.
+     * @param {typeof DDSURFACEDESC | typeof DDSURFACEDESC2} layout
+     * @returns {(width: number, height: number, depth: number) => boolean}
+     */
+    const describedMode = (address, layout)=>{
+        const asked = (address >>> 0) === 0 ? null : readSurfaceDesc(memory, address >>> 0, layout);
+        if (!asked)
+        {
+            return ()=>true;
+        }
+        return (width, height, depth)=>((asked.flags & DDSD_WIDTH) === 0 || asked.width === width)
+            && ((asked.flags & DDSD_HEIGHT) === 0 || asked.height === height)
+            && ((asked.flags & DDSD_PIXELFORMAT) === 0 || asked.pixelFormat.bitCount === depth);
+    };
+
+    /**
+     * Whether a surface is one a descriptor names, by the fields its flags
+     * name and no others.
+     *
+     * @param {import('../ddraw/structs.js').SurfaceDescFields} asked @param {any} surface
+     */
+    const describes = (asked, surface)=>((asked.flags & DDSD_CAPS) === 0
+            || ((asked.caps & ~surface.caps) === 0 && ((asked.caps2 ?? 0) & ~surface.caps2) === 0))
+        && ((asked.flags & DDSD_WIDTH) === 0 || asked.width === surface.width)
+        && ((asked.flags & DDSD_HEIGHT) === 0 || asked.height === surface.height)
+        && ((asked.flags & DDSD_PIXELFORMAT) === 0
+            || samePixelFormat(asked.pixelFormat, surface.pixelFormat));
+
+    /**
+     * The surfaces that could be made as a descriptor asks, each named to the
+     * callback with no surface: at its size, or at every display size, in its
+     * format or the display's. A format no surface is made in names none.
+     *
+     * @param {any} root
+     * @param {import('../ddraw/structs.js').SurfaceDescFields | null} asked
+     * @param {typeof DDSURFACEDESC | typeof DDSURFACEDESC2} layout
+     * @param {number} callback @param {number} context
+     */
+    async function enumerateCreatable(root, asked, layout, callback, context){
+        const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+        const askedBy = currentThread?.();
+        const named = asked && (asked.flags & DDSD_PIXELFORMAT) !== 0;
+        const pixelFormat = named
+            ? /** @type {import('../ddraw/structs.js').SurfaceDescFields} */ (asked).pixelFormat
+            : /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
+                pixelFormatForDepth(root.displayMode.bitCount));
+        if ((pixelFormat.flags & DDPF_FOURCC) !== 0
+            && !DXT_CODES.includes(pixelFormat.fourCC >>> 0))
+        {
+            return DD_OK;
+        }
+        const sized = asked && (asked.flags & (DDSD_WIDTH | DDSD_HEIGHT))
+            === (DDSD_WIDTH | DDSD_HEIGHT);
+        const sizes = sized
+            ? [[(asked).width, /** @type {any} */ (asked).height]]
+            : [...new Map(displayModes(screen()).map(mode=>[`${mode.width}x${mode.height}`,
+                [mode.width, mode.height]])).values()];
+        for (const [width, height] of sizes)
+        {
+            const desc = descriptorScratch();
+            writeSurfaceDesc(memory, desc, layout, {
+                flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT,
+                width,
+                height,
+                pitch: width * bytesPerPixel(pixelFormat),
+                backBufferCount: 0,
+                mipMapCount: 0,
+                caps: asked?.caps ?? 0,
+                caps2: asked?.caps2 ?? 0,
+                pixelFormat,
+            });
+            const answer = await call({ entry: callback, args: [0, desc, context],
+                thread: askedBy });
+            if ((answer >>> 0) === DDENUMRET_CANCEL)
+            {
+                break;
+            }
+        }
+        return DD_OK;
+    }
+
     // --- the ddraw object ---
 
     /** @type {Record<string, typeof GENERATIONS[keyof typeof GENERATIONS]>} */
@@ -1961,7 +2124,7 @@ export function createDirectDrawSeam(
          *
          * @param {any} root @param {number[]} args
          */
-        EnumDisplayModes: (root, [, , context, callback])=>{
+        EnumDisplayModes: (root, [, filter, context, callback])=>{
             if ((callback >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
@@ -1978,11 +2141,17 @@ export function createDirectDrawSeam(
             // rates it is listed at there.
             const sizes = [...new Map(displayModes(screen())
                 .map(mode=>[`${mode.width}x${mode.height}`, [mode.width, mode.height]])).values()];
+            // A descriptor names the modes wanted by the fields it flags.
+            const wanted = describedMode(filter, generation.layout);
             return (async()=>{
                 for (const [width, height] of sizes)
                 {
                     for (const depth of DEPTHS)
                     {
+                        if (!wanted(width, height, depth))
+                        {
+                            continue;
+                        }
                         const pixelFormat =
                             /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
                                 pixelFormatForDepth(depth));
@@ -2012,14 +2181,23 @@ export function createDirectDrawSeam(
         },
 
         /**
-         * Every surface this object made, or those whose capabilities match
-         * (or do not match) the ones described. Surfaces that could be created
-         * but do not exist are not enumerated: there is no table of them.
+         * The surfaces that exist, or the ones that could be made, that a
+         * descriptor names (or does not): only the fields its flags name are
+         * compared. What could be made is enumerated, with no surface, at the
+         * descriptor's size, or at every display size when it names none, in
+         * the descriptor's format or the display's; it is asked by a match
+         * alone and leaves out what exists (Wine's test_enum_surfaces).
          *
          * @param {any} root @param {number[]} args
          */
         EnumSurfaces: (root, [flags, desc, context, callback])=>{
-            if ((callback >>> 0) === 0)
+            const existing = (flags & DDENUMSURFACES_DOESEXIST) !== 0;
+            const creatable = (flags & DDENUMSURFACES_CANBECREATED) !== 0;
+            const how = flags
+                & (DDENUMSURFACES_ALL | DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH);
+            if ((callback >>> 0) === 0 || (!existing && !creatable)
+                || (creatable && (how !== DDENUMSURFACES_MATCH || (desc >>> 0) === 0))
+                || ((desc >>> 0) === 0 && how !== DDENUMSURFACES_ALL))
             {
                 return DDERR_INVALIDPARAMS;
             }
@@ -2027,21 +2205,17 @@ export function createDirectDrawSeam(
             {
                 return DD_OK;
             }
-            const wanted = (desc >>> 0) === 0
-                ? 0
-                : (fields.readU32((desc >>> 0) + generation.layout.dwCaps) >>> 0);
-            const matches = (/** @type {any} */ surface)=>(surface.caps & wanted) === wanted;
-            const chosen = root.allSurfaces().filter((/** @type {any} */ surface)=>{
-                if ((flags & DDENUMSURFACES_ALL) !== 0)
-                {
-                    return true;
-                }
-                if ((flags & DDENUMSURFACES_NOMATCH) !== 0)
-                {
-                    return !matches(surface);
-                }
-                return (flags & DDENUMSURFACES_MATCH) === 0 || matches(surface);
-            });
+            const asked = (desc >>> 0) === 0 ? null
+                : readSurfaceDesc(memory, desc >>> 0, generation.layout);
+            if (creatable)
+            {
+                return enumerateCreatable(root, asked, generation.layout, callback >>> 0,
+                    context >>> 0);
+            }
+            const matches = (/** @type {any} */ surface)=>!asked || describes(asked, surface);
+            const chosen = root.allSurfaces().filter((/** @type {any} */ surface)=>(how
+                === DDENUMSURFACES_ALL ? true : how === DDENUMSURFACES_NOMATCH
+                    ? !matches(surface) : matches(surface)));
             return enumerateSurfaces(chosen, { id: generation.surface, layout: generation.layout },
                 callback >>> 0, context >>> 0);
         },
@@ -2287,13 +2461,23 @@ export function createDirectDrawSeam(
 
         /** @param {any} root @param {number[]} args */
         GetSurfaceFromDC: (root, [handle, out])=>{
-            const surface = root.surfaceWithDc(handle >>> 0);
-            if (!surface || (out >>> 0) === 0)
+            if ((out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
+            const surface = root.surfaceWithDc(handle >>> 0);
+            // A DC no surface of this object handed out names none.
+            if (!surface)
+            {
+                fields.writeU32(out >>> 0, 0);
+                return DDERR_NOTFOUND;
+            }
             surface.addRef();
-            handBack(surface, surfaceInterfaces, generation.surface, out >>> 0);
+            // IDirectDraw4 hands back the first generation's interface, as
+            // DDRAW.dll's export does; IDirectDraw7 its own (Wine's ddraw4 and
+            // ddraw7 test_get_surface_from_dc).
+            handBack(surface, surfaceInterfaces, generation.surface === IID_IDirectDrawSurface4
+                ? IID_IDirectDrawSurface : generation.surface, out >>> 0);
             return DD_OK;
         },
 
@@ -2471,7 +2655,9 @@ export function createDirectDrawSeam(
                 {
                     surface.addRef();
                     handBack(surface, surfaceInterfaces, IID_IDirectDrawSurface, out >>> 0);
-                    fields.writeU32(deviceOut >>> 0, hdc >>> 0);
+                    // The display's DC, which the surface's is made like
+                    // (Wine's test_get_surface_from_dc: OBJ_DC, a raster display).
+                    fields.writeU32(deviceOut >>> 0, (gdi?.displayDc?.() ?? 0) || (hdc >>> 0));
                     return DD_OK;
                 }
             }
@@ -2492,6 +2678,7 @@ export function createDirectDrawSeam(
             const options = {
                 version,
                 emulated,
+                textureFormat: textureFormatOffered,
                 surfaceCountOf,
                 surfaceRefusal,
                 surfaceSupports,

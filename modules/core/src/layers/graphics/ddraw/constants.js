@@ -47,6 +47,10 @@ export const DDERR_SURFACEBUSY = dderr(430);
 export const DDERR_SURFACELOST = dderr(450);
 export const DDERR_SURFACENOTATTACHED = dderr(460);
 export const DDERR_NOCLIPPERATTACHED = dderr(568);
+/** DDERR_NOCLIPLIST: a clipper with neither a window nor a list of its own. */
+export const DDERR_NOCLIPLIST = dderr(205);
+/** E_FAIL: a clipper whose window is gone. */
+export const E_FAIL = 0x80004005 | 0;
 export const DDERR_HWNDALREADYSET = dderr(571);
 export const DDERR_NOHWND = dderr(569);
 export const DDERR_NOFOCUSWINDOW = dderr(602);
@@ -213,6 +217,8 @@ export const DDPCAPS_8BIT = 0x00000004;
 export const DDPCAPS_INITIALIZE = 0x00000008;
 export const DDPCAPS_PRIMARYSURFACE = 0x00000010;
 export const DDPCAPS_ALLOW256 = 0x00000040;
+/** A palette whose entries' flags are each texel's alpha: a texture's alone. */
+export const DDPCAPS_ALPHA = 0x00000400;
 export const DDPCAPS_1BIT = 0x00000100;
 export const DDPCAPS_2BIT = 0x00000200;
 

@@ -564,7 +564,7 @@ test('an indexed surface with no palette of its own draws in the primary\'s', ()
     assert.equal(offscreen.getDC().hr, DD_OK);
     assert.equal(made[0].palette?.[0], 0x00800000);
     colours.setEntries(0, [0x00008000]);
-    assert.equal(made[0].palette?.[0], 0x00008000);
+    assert.equal(made[0].palette?.[0], 0x00800000, 'as it was when the DC was made');
 });
 
 test('a device context on one surface says nothing about another', ()=>{
@@ -1484,10 +1484,8 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     assert.ok(ddraw.destroyed);
 });
 
-test('a device context over an indexed surface sees the palette change while it is held', ()=>{
-    // A program that animates its palette while drawing text through the DC
-    // expects the new colours: the DC is given the palette's live table, not
-    // a copy made when it was asked for.
+test('a device context over an indexed surface keeps the palette it was made with'
+    + ' (test_palette_gdi)', ()=>{
     /** @type {any[]} */
     const made = [];
     const ddraw = createDirectDraw({
@@ -1510,8 +1508,8 @@ test('a device context over an indexed surface sees the palette change while it 
     assert.equal(table[3], 0, 'an entry never written is black');
     // A PALETTEENTRY is red in its low byte; the pixel is 0x00RRGGBB.
     assert.equal(palette.setEntries(3, [0x00112233]), DD_OK);
-    assert.equal(made[0].palette[3], 0x00332211, 'the held DC reads the new entry');
-    assert.equal(made[0].palette, table, 'through the same table');
+    assert.equal(made[0].palette[3], 0, 'the held DC keeps the entry it was made with');
+    assert.equal(made[0].palette, table);
 });
 
 // --- what the object knows about its primary, and a surface about its changes ---
@@ -1883,6 +1881,89 @@ test('blocks in the program\'s memory are named by their whole size, never a pit
     assert.equal(request(PITCH, 32).hr, DDERR_INVALIDPARAMS, 'blocks have no pitch');
     assert.equal(request(PITCH | LINEARSIZE, 32).hr, DDERR_INVALIDPARAMS);
     assert.equal(request(0, 32).hr, DDERR_INVALIDPARAMS, 'a size has to be named');
+    // Through IDirectDraw4 a pitch names them, whatever it says.
+    const older = (/** @type {number} */ flags, /** @type {number} */ size)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | 0x800 | flags,
+        caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE,
+        width: 8, height: 8, pixelFormat: dxt1, pitch: size, surfacePointer: 0x7000 },
+    { version: 4 }).hr;
+    assert.equal(older(PITCH, 0), DD_OK);
+    assert.equal(older(PITCH | LINEARSIZE, 32), DD_OK);
+    assert.equal(older(LINEARSIZE, 31), DDERR_INVALIDPARAMS);
+    assert.equal(older(0, 32), DDERR_INVALIDPARAMS);
+});
+
+test('a depth buffer asked for by bits alone is depth only, 24 of them in a 32-bit pixel'
+    + ' (test_depth_readback, ddraw2)', ()=>{
+    const ddraw = withLevel();
+    for (const [bits, bytes, mask] of [[16, 2, 0xffff], [24, 4, 0xffffff], [32, 4, 0xffffffff]])
+    {
+        const made = ddraw.createSurface({ flags: SIZED | 0x40, caps: 0x20000, width: 4, height: 4,
+            zBufferBitDepth: bits });
+        assert.equal(made.hr, DD_OK);
+        const surface = /** @type {NonNullable<typeof made.surface>} */ (made.surface);
+        assert.equal(surface.bytesPerPixel, bytes, `${bits} bits`);
+        assert.equal(surface.pixelFormat.greenMask >>> 0, mask, 'the depth mask');
+        assert.equal(surface.pixelFormat.flags, 0x400, 'DDPF_ZBUFFER, no stencil');
+        assert.equal(surface.release(), 0);
+    }
+});
+
+test('a palette of alphas is attached to a texture alone (test_palette_alpha)', ()=>{
+    const ddraw = withLevel();
+    const made = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256 | 0x400,
+        new Array(256).fill(0));
+    const palette = /** @type {any} */ (made.palette);
+    const texture = makeOffscreen(ddraw, { caps: DDSCAPS_TEXTURE });
+    const plain = makeOffscreen(ddraw);
+    assert.equal(plain.setPalette(palette), 0x88760250, 'DDERR_INVALIDSURFACETYPE');
+    assert.equal(texture.setPalette(palette), DD_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(plain.release(), 0);
+    assert.equal(palette.release(), 0);
+});
+
+test('a texture in a format the device does not offer is made in system memory, never in video'
+    + ' memory (test_unsupported_formats)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, textureFormat: format=>format.bitCount === 32 });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const p8 = { size: 0x20, flags: DDPF_PALETTEINDEXED8 | DDPF_RGB, fourCC: 0, bitCount: 8,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const make = (/** @type {number} */ caps, /** @type {any} */ pixelFormat, caps2 = 0)=>
+        ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT, caps: DDSCAPS_TEXTURE | caps,
+            caps2, width: 4, height: 4, pixelFormat });
+    assert.equal(make(DDSCAPS_VIDEOMEMORY, p8).hr >>> 0, 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    const placed = make(0, p8);
+    assert.equal(placed.hr, DD_OK);
+    assert.ok((/** @type {any} */ (placed.surface).caps & DDSCAPS_SYSTEMMEMORY) !== 0);
+    assert.equal(make(0, p8, DDSCAPS2_TEXTUREMANAGE).hr, DD_OK, 'a managed one is placed anyway');
+    const offered = make(0, RGB32);
+    assert.ok((/** @type {any} */ (offered.surface).caps & DDSCAPS_VIDEOMEMORY) !== 0);
+});
+
+test('before IDirectDraw4 a surface is never made over the program\'s memory'
+    + ' (test_create_surface_pitch, ddraw1 and ddraw2)', ()=>{
+    for (const version of /** @type {const} */ ([1, 2]))
+    {
+        const ddraw = withLevel({ version });
+        const made = ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT | 0x800 | 0x8,
+            caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN, width: 63, height: 63,
+            pixelFormat: RGB32, pitch: 0x100, surfacePointer: 0x7000 }, { version });
+        assert.equal(made.hr, DDERR_INVALIDPARAMS, `version ${version}`);
+    }
+});
+
+test('without hardware a depth buffer named by its pixel format is 16 or 32 bits too'
+    + ' (test_caps, ddraw4)', ()=>{
+    const ddraw = createDirectDraw({ version: 4, emulated: true });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const depth = (/** @type {number} */ bits)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT, caps: DDSCAPS_ZBUFFER, width: 8, height: 8,
+        pixelFormat: { size: 0x20, flags: 0x400, fourCC: 0, bitCount: bits, redMask: 0,
+            greenMask: 0xffffffff >>> (32 - bits), blueMask: 0, alphaMask: 0 } },
+    { version: 4 }).hr >>> 0;
+    assert.equal(depth(24), 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(depth(16), DD_OK);
 });
 
 test('a mode set elsewhere is the object\'s mode too, and loses its video memory'

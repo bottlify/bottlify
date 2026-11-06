@@ -415,9 +415,13 @@ function snapshot(memory, src, rect){
 const converts = (src, dest)=>{
     const from = src.channels;
     const to = dest.channels;
+    // The same colours with no alpha on the source side are copied as they
+    // are: the bits the source leaves unused land in the destination's alpha
+    // (Wine's test_surface_format_conversion_alpha: X1R5G5B5 into A1R5G5B5
+    // keeps the clear top bit).
     return from !== undefined && to !== undefined && (src.bytesPerPixel !== dest.bytesPerPixel
         || from.red !== to.red || from.green !== to.green || from.blue !== to.blue
-        || from.alpha !== to.alpha);
+        || (from.alpha !== to.alpha && from.alpha !== 0));
 };
 
 /** @param {number} mask @returns {{ shift: number, bits: number, max: number }} */
@@ -513,9 +517,21 @@ function snapshotCompressed(memory, src, rect, dest){
         const from = ((rect.top + row) * src.width + rect.left) * 4;
         snapshotBytes.set(texels.subarray(from, from + width * 4), row * width * 4);
     }
-    convertSnapshot(DECODED, dest, width * rows);
+    // Bits a destination without alpha leaves unused take the texels'
+    // alpha, opaque for most: X8R8G8B8 decoded has 0xff above its colours
+    // (Wine's test_surface_format_conversion_alpha, DXT1 into RGBX).
+    const to = /** @type {NonNullable<BlitSurface['channels']>} */ (dest.channels);
+    const whole = dest.bytesPerPixel >= 4 ? 0xffffffff : (1 << (dest.bytesPerPixel * 8)) - 1;
+    const unused = (whole & ~(to.red | to.green | to.blue)) >>> 0;
+    const run = unused >>> ctz(unused);
+    const contiguous = unused !== 0 && (run & (run + 1)) === 0;
+    convertSnapshot(DECODED, to.alpha === 0 && contiguous
+        ? { ...dest, channels: { ...to, alpha: unused } } : dest, width * rows);
     return true;
 }
+
+/** @param {number} mask a non-zero mask @returns {number} its lowest set bit's index */
+const ctz = mask=>31 - Math.clz32(mask & -mask);
 
 /**
  * A depth buffer's depth bits, set to one value over a rectangle; the stencil
@@ -630,7 +646,9 @@ export function blt(request){
     const fills = flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL);
     if (((fills !== 0 || (flags & DDBLT_ROP) !== 0) && request.fxGiven === false)
         || (fills !== 0 && request.src)
-        || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0))
+        || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0)
+        // A copy needs its source, before its rectangles (Wine's test_blt).
+        || (fills === 0 && (flags & DDBLT_ROP) === 0 && !request.src))
     {
         return DDERR_INVALIDPARAMS;
     }

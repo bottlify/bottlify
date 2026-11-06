@@ -1248,6 +1248,7 @@ export function createGraphicsModule(){
                     createSurfaceDc: attributes=>win32.gdi().createSurfaceDc(attributes),
                     /** @param {number} handle */
                     deleteSurfaceDc: handle=>win32.gdi().deleteSurfaceDc(handle),
+                    displayDc: ()=>Number(win32.user32?.('GetDC')?.handler([0]) ?? 0) >>> 0,
                 },
 
                 present: presentPrimary,

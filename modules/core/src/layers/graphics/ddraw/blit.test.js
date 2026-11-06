@@ -482,6 +482,8 @@ test('a fill or raster operation is checked before its rectangles: it needs its 
         assert.equal(blt({ memory, dest, src, srcRect, flags: DDBLT_ROP, fx }), DDERR_INVALIDRECT);
     }
     assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx }), 0);
+    // A copy with no source, before its inverted rectangle (test_blt).
+    assert.equal(blt({ memory, dest, destRect: inverted, flags: 0 }), DDERR_INVALIDPARAMS);
     // Both fills on a colour surface: the colour fill is made.
     assert.equal(blt({ memory, dest, flags: DDBLT_COLORFILL | DEPTHFILL, fx }), 0);
     assert.equal(readPixel(memory, dest, 2, 2), 0x11223344);
@@ -517,4 +519,45 @@ test('a copy into DXTn blocks encodes the blocks it touched and leaves the rest'
     // Texel (2,2) is index 10 of the block: its colour is pure blue.
     const picked = (indices >>> 20) & 3;
     assert.equal(picked === 0 ? c0 : picked === 1 ? c1 : -1, 0x001f);
+});
+
+test('a copy between the same colours, the source without alpha, moves the bits as they are'
+    + ' (test_surface_format_conversion_alpha)', ()=>{
+    const memory = ram();
+    const x1 = { ...surface(BASE, 2, 1, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0 } };
+    const a1 = { ...surface(BASE + 0x40, 2, 1, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0x8000 } };
+    writePixel(memory, x1, 0, 0, 0x03e0);
+    writePixel(memory, x1, 1, 0, 0x001f);
+    assert.equal(blt({ memory, dest: a1, src: x1, flags: 0 }), 0);
+    assert.deepEqual(grid(memory, a1), [[0x03e0, 0x001f]], 'the top bit stays clear');
+    // With alpha on the source side the alpha is converted as before.
+    const r5g6b5 = { ...surface(BASE + 0x80, 2, 1, 2),
+        channels: { red: 0xf800, green: 0x7e0, blue: 0x1f, alpha: 0 } };
+    writePixel(memory, r5g6b5, 0, 0, 0x07e0);
+    writePixel(memory, r5g6b5, 1, 0, 0x001f);
+    assert.equal(blt({ memory, dest: a1, src: r5g6b5, flags: 0 }), 0);
+    assert.deepEqual(grid(memory, a1), [[0x83e0, 0x801f]], 'another layout is made opaque');
+});
+
+test('blocks decoded into a format without alpha fill its unused bits with the texels\' alpha'
+    + ' (test_surface_format_conversion_alpha)', ()=>{
+    const memory = ram();
+    // One DXT1 block, every texel colour 0 = pure blue, opaque.
+    const block = new Uint8Array([0x1f, 0x00, 0x00, 0x00, 0, 0, 0, 0]);
+    memory.bytes.set(block, BASE);
+    const src = { ...surface(BASE, 4, 4, 0, 8), compressed: /** @type {const} */ ('dxt1') };
+    const rgbx = { ...surface(BASE + 0x100, 4, 4, 4),
+        channels: { red: 0xff0000, green: 0xff00, blue: 0xff, alpha: 0 } };
+    assert.equal(blt({ memory, dest: rgbx, src, flags: 0 }), 0);
+    assert.equal(readPixel(memory, rgbx, 0, 0) >>> 0, 0xff0000ff);
+    const x1 = { ...surface(BASE + 0x200, 4, 4, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0 } };
+    assert.equal(blt({ memory, dest: x1, src, flags: 0 }), 0);
+    assert.equal(readPixel(memory, x1, 3, 3), 0x801f);
+    const r5g6b5 = { ...surface(BASE + 0x280, 4, 4, 2),
+        channels: { red: 0xf800, green: 0x7e0, blue: 0x1f, alpha: 0 } };
+    assert.equal(blt({ memory, dest: r5g6b5, src, flags: 0 }), 0);
+    assert.equal(readPixel(memory, r5g6b5, 0, 0), 0x001f, 'no bits to spare');
 });
