@@ -40,8 +40,8 @@ import { createDynamicVerify } from './verify-dynamic.js';
 import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
-    D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat,
-    isCompressed, surfaceBytes, tightRows,
+    D3DSTENCILOP, D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead,
+    dwordToFloat, isCompressed, surfaceBytes, tightRows,
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
@@ -3644,7 +3644,6 @@ export function createRenderer(options){
             pixelShader: 0,
             stride: 0,
             indexFormat: 0,
-            stencilRect: 0,
             texture: 0,
             /** A draw through shaders this renderer could not build a pipeline for. */
             program: 0,
@@ -6090,20 +6089,27 @@ export function createRenderer(options){
 
     /**
      * Depth surfaces of a target's own size, standing in for a depth
-     * surface larger than the target it is bound with. Direct3D allows a
-     * depth surface at least as large as the colour target and uses its
-     * top-left corner; WebGPU attaches only equal sizes, and a pass that
-     * disagrees invalidates the whole frame's command buffer -- a black
-     * frame with nothing else wrong in it. A program drawing a glow into a
-     * quarter-size target with its screen-size depth still bound is the
-     * ordinary case. The stand-in is per depth surface and size, kept for
-     * the run; what it holds is not what the corner of the larger one
-     * would, which a program that reads depth back across that boundary
-     * would notice and nothing else does.
+     * surface narrower or shorter than the target it is bound with, which
+     * WebGPU cannot attach beside it. A depth surface larger than its target
+     * is attached as it is, and the pass draws into a colour stand-in of the
+     * depth's size (`colourStandIns`). The stand-in is per depth surface and
+     * size, kept for the run.
      *
      * @type {WeakMap<object, Map<string, import('../webgpu/contract.js').Surface>>}
      */
     const standInDepths = new WeakMap();
+    /**
+     * Colour surfaces of a depth surface's size, standing in for a target
+     * smaller than the depth surface bound with it. Direct3D draws into the
+     * target over the depth's top-left corner and WebGPU attaches only equal
+     * sizes: the pass draws into this instead, the target's pixels copied into
+     * its corner as the pass opens and back as it closes, and the depth its
+     * draws test and write is the one the program bound (Wine's d3d9
+     * depth_buffer_test). Per target and size, kept for the run.
+     *
+     * @type {WeakMap<object, Map<string, import('../webgpu/contract.js').Surface>>}
+     */
+    const colourStandIns = new WeakMap();
     /**
      * Surfaces given up by the device, destroyed once the frame being
      * recorded when they were has been replayed.
@@ -6113,8 +6119,8 @@ export function createRenderer(options){
 
     /**
      * The depth attachment for the model's targets: the bound depth surface
-     * when it is the target's size, a stand-in of the target's size when
-     * it is larger, and none when there is none.
+     * when it is at least the target's size, a stand-in of the target's
+     * size when it is smaller either way, and none when there is none.
      *
      * @param {RenderModel} model
      * @param {import('../webgpu/contract.js').Surface} target
@@ -6125,7 +6131,7 @@ export function createRenderer(options){
             return null;
         }
         const depth = surfaceFor(model.depthStencil);
-        if (depth.width === target.width && depth.height === target.height)
+        if (depth.width >= target.width && depth.height >= target.height)
         {
             return depth;
         }
@@ -10349,8 +10355,13 @@ export function createRenderer(options){
             {
                 frameStats.clearColor = color >>> 0;
             }
+            // A depth surface larger than the target is cleared only under
+            // the target's corner: a pass's load clear would take all of it.
+            const depthDesc = model.depthStencil ? describe(model.depthStencil) : null;
+            const widerDepth = depthDesc !== null && (flags & ~D3DCLEAR.TARGET) !== 0
+                && (depthDesc.Width > target.Width || depthDesc.Height > target.Height);
             const whole = areas.length === 1 && areas[0].x1 === 0 && areas[0].y1 === 0
-                && areas[0].x2 === target.Width && areas[0].y2 === target.Height;
+                && areas[0].x2 === target.Width && areas[0].y2 === target.Height && !widerDepth;
             if (whole)
             {
                 const value = colorToFloats(color);
@@ -10368,11 +10379,11 @@ export function createRenderer(options){
                 });
                 return;
             }
-            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER)) === 0)
+            const depthFormat = formatsOf(model).depthFormat;
+            const writesStencil = (flags & D3DCLEAR.STENCIL) !== 0 && depthFormat !== undefined
+                && hasStencil(depthFormat);
+            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER)) === 0 && !writesStencil)
             {
-                // A stencil-only clear of part of the target needs stencil
-                // state the pipeline does not carry yet.
-                skip('stencilRect');
                 return;
             }
             // A clear of less than the target is a scissored quad through the
@@ -10398,8 +10409,9 @@ export function createRenderer(options){
                 blend: false,
                 srcBlend: D3DBLEND.ONE,
                 destBlend: D3DBLEND.ZERO,
-                colorWrite: ((flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0)
-                    & (formatsOf(model).targetHasAlpha ? ~0 : ~COLORWRITEENABLE_ALPHA),
+                // A target without alpha keeps one there, as a whole clear
+                // leaves it: a blend by the destination's alpha reads one.
+                colorWrite: (flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0,
                 alphaTest: false,
                 // Its source too: table fog left on by the scene asked the
                 // shader for a curve the mode of nothing does not declare,
@@ -10411,8 +10423,15 @@ export function createRenderer(options){
                 specularEnable: false,
                 lighting: null,
                 // Clear writes every pixel of its rectangles whatever the
-                // stencil holds: it is no draw under the stencil test.
-                stencil: undefined,
+                // stencil holds: it is no draw under the stencil test, and
+                // the value it was given replaces the stencil whole.
+                stencil: writesStencil ? {
+                    func: D3DCMP.ALWAYS, fail: D3DSTENCILOP.KEEP, zfail: D3DSTENCILOP.KEEP,
+                    pass: D3DSTENCILOP.REPLACE, ccwFunc: D3DCMP.ALWAYS,
+                    ccwFail: D3DSTENCILOP.KEEP, ccwZfail: D3DSTENCILOP.KEEP,
+                    ccwPass: D3DSTENCILOP.REPLACE, readMask: 0xff, writeMask: 0xff,
+                    ref: stencil & 0xff,
+                } : undefined,
             };
             const prepared = /** @type {PreparedDraw} */ ({
                 version: undefined,
@@ -10438,6 +10457,8 @@ export function createRenderer(options){
                 pipelineIndex: 0,
                 program: null,
             });
+            const quadColour = formatsOf(model).targetHasAlpha ? color >>> 0
+                : (color | 0xff000000) >>> 0;
             for (const area of areas)
             {
                 const vertices = new DataView(new ArrayBuffer(CLEAR_STRIDE * 6));
@@ -10451,7 +10472,7 @@ export function createRenderer(options){
                     vertices.setFloat32(at + 4, y, true);
                     vertices.setFloat32(at + 8, z, true);
                     vertices.setFloat32(at + 12, 1, true);
-                    vertices.setUint32(at + 16, color >>> 0, true);
+                    vertices.setUint32(at + 16, quadColour, true);
                 });
                 frame.commands.push({ kind: 'scissor', rect: {
                     x: area.x1, y: area.y1, width: area.x2 - area.x1, height: area.y2 - area.y1,
@@ -11454,6 +11475,61 @@ export function createRenderer(options){
         let viewport = null;
         /** @type {any} */
         let scissor = null;
+        /**
+         * One surface's top-left corner into another's.
+         *
+         * @param {any} from @param {any} into @param {any} size  the smaller of the two
+         */
+        const copyCorner = (from, into, size)=>frame.copyTexture(
+            { texture: from.texture, mipLevel: from.mipLevel ?? 0,
+                origin: { x: 0, y: 0, z: from.layer ?? 0 } },
+            { texture: into.texture, mipLevel: into.mipLevel ?? 0,
+                origin: { x: 0, y: 0, z: into.layer ?? 0 } },
+            { width: size.width, height: size.height, depthOrArrayLayers: 1 });
+        /**
+         * The pass a command opens, drawing into a colour stand-in when its
+         * depth surface is larger than its target (`colourStandIns`).
+         *
+         * @param {any} command
+         */
+        const widened = command=>{
+            const { target, depth } = command;
+            if (!depth || (depth.width === target.width && depth.height === target.height))
+            {
+                return command;
+            }
+            let sizes = colourStandIns.get(target);
+            if (!sizes)
+            {
+                sizes = new Map();
+                colourStandIns.set(target, sizes);
+            }
+            const key = `${depth.width}x${depth.height}`;
+            let standIn = sizes.get(key);
+            if (!standIn)
+            {
+                const made = backend.createSurface({
+                    width: depth.width,
+                    height: depth.height,
+                    format: target.format,
+                    label: 'colour-stand-in',
+                    usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC
+                        | TextureUsage.COPY_DST,
+                });
+                sizes.set(key, made);
+                standIn = made;
+            }
+            return { ...command, target: standIn, within: target };
+        };
+        // A pass drawing into a stand-in gives the target its pixels back as
+        // it closes: before anything else reads or writes the target.
+        const giveBack = ()=>{
+            if (pass && opened?.within)
+            {
+                copyCorner(opened.target, opened.within, opened.within);
+            }
+            pass = null;
+        };
         // An upload or a copy closes the pass it lands in; the pass is
         // reopened, loading what is there, before the next command that
         // needs one.
@@ -11461,6 +11537,10 @@ export function createRenderer(options){
             if (pass || !opened)
             {
                 return;
+            }
+            if (opened.within)
+            {
+                copyCorner(opened.within, opened.target, opened.within);
             }
             pass = countingPass({
                 target: opened.target,
@@ -11503,10 +11583,15 @@ export function createRenderer(options){
             }
             if (command.kind === 'pass')
             {
-                opened = command;
+                giveBack();
+                opened = widened(command);
                 drawArea = reachableArea(command.target);
+                if (opened.within && command.clearColor === undefined)
+                {
+                    copyCorner(opened.within, opened.target, opened.within);
+                }
                 pass = countingPass({
-                    target: command.target,
+                    target: opened.target,
                     clear: command.clearColor !== undefined,
                     clearValue: command.clearColor,
                     depthStencilAttachment: command.depth
@@ -11517,6 +11602,7 @@ export function createRenderer(options){
             }
             if (command.kind === 'upload')
             {
+                giveBack();
                 backend.uploadTexture({
                     texture: command.surface.texture,
                     format: command.format,
@@ -11533,6 +11619,7 @@ export function createRenderer(options){
             }
             if (command.kind === 'mips')
             {
+                giveBack();
                 const made = pipelines[command.pipeline];
                 if (made.status === 'rejected')
                 {
@@ -11547,6 +11634,7 @@ export function createRenderer(options){
             }
             if (command.kind === 'stretch')
             {
+                giveBack();
                 const made = pipelines[command.pipeline];
                 if (made.status === 'rejected')
                 {
@@ -11561,6 +11649,7 @@ export function createRenderer(options){
             }
             if (command.kind === 'copy')
             {
+                giveBack();
                 frame.copyTexture(
                     { texture: command.source.texture, mipLevel: command.source.mipLevel ?? 0,
                         origin: { ...command.sourceOrigin, z: command.source.layer ?? 0 } },
@@ -11945,6 +12034,7 @@ export function createRenderer(options){
                 }
             }
         }
+        giveBack();
         if (surface)
         {
             frame.present(surface);

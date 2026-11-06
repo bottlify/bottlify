@@ -987,6 +987,26 @@ test('a clear of less than the target writes its depth over all of 0..1', async(
     assert.ok(Math.abs(drawnUnder[1][1] - 0.001) < 1e-6, 'the draw over the viewport\'s own');
 });
 
+test('a clear of part of the target replaces the stencil there, whatever the stencil states say',
+    async()=>{
+        // A stencil-only clear of a rectangle is a quad that writes the value
+        // it was given and tests nothing; it was dropped before.
+        const h = harness();
+        const { device, gpu } = h;
+        assert.equal(device.SetRenderState(D3DRS.STENCILWRITEMASK, 0x0f), D3D_OK);
+        assert.equal(device.Clear(1, [{ x1: 1, y1: 1, x2: 3, y2: 3 }], D3DCLEAR.STENCIL, 0, 1,
+            0x5a), D3D_OK);
+        await h.present();
+        assert.equal(gpu.of('draw').length, 1, 'the quad is drawn');
+        const stencil = h.device.diagnostics().lastFrame.find((/** @type {any} */ command)=>
+            command.kind === 'draw')?.state?.stencil;
+        assert.deepEqual(stencil && [stencil.func, stencil.pass, stencil.ccwPass, stencil.writeMask,
+            stencil.ref], [D3DCMP.ALWAYS, 3, 3, 0xff, 0x5a]);
+        assert.ok(gpu.of('setStencilReference').some((/** @type {any} */ call)=>
+            call.reference === 0x5a), JSON.stringify(gpu.of('setStencilReference')));
+        assert.deepEqual(gpu.errors, []);
+    });
+
 test('recorded: a draw binds its pipeline, its stream and a viewport inside its pass', async()=>{
     const h = harness();
     const { device, gpu } = h;
@@ -2102,8 +2122,12 @@ test('recorded: a whole clear is a clearing pass, a partial clear a scissored qu
     // and a transparent clear would make the presented frame see through.
     assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(1, 2, 3, 0), 1, 0), D3D_OK);
     assert.equal(device.Clear(1, [{ x1: 1, y1: 1, x2: 3, y2: 3 }],
-        D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(4, 5, 6), 0.25, 0), D3D_OK);
+        D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(4, 5, 6, 0), 0.25, 0), D3D_OK);
     await h.present();
+    // The quad's colour, opaque on a target without alpha.
+    assert.ok(gpu.of('writeBuffer').some((/** @type {any} */ call)=>
+        call.bytes.length >= 24 && call.bytes[16] === 6 && call.bytes[17] === 5
+        && call.bytes[18] === 4 && call.bytes[19] === 0xff), 'an opaque quad');
 
     const pass = gpu.of('beginRenderPass')[0].descriptor;
     assert.equal(gpu.count('beginRenderPass'), 1, 'the partial clear joined the pass');
@@ -2117,11 +2141,10 @@ test('recorded: a whole clear is a clearing pass, a partial clear a scissored qu
     const descriptor = gpu.of('createRenderPipeline')[0].descriptor;
     assert.equal(descriptor.depthStencil.depthWriteEnabled, true);
     assert.equal(descriptor.depthStencil.depthCompare, 'always');
-    // Colour only. This asserted 0xf and was wrong: the target is X8R8G8B8 and
-    // has no alpha channel, so nothing may write one -- and the clear above
-    // already relies on that, having put an opaque alpha there for the frame
-    // to be presented with.
-    assert.equal(descriptor.fragment.targets[0].writeMask, 0x7);
+    // The target is X8R8G8B8, with no alpha channel: the quad writes an
+    // opaque one there, as a whole clear does, so a blend by the
+    // destination's alpha reads one under it too (Wine's d3d9 test_blend).
+    assert.equal(descriptor.fragment.targets[0].writeMask, 0xf);
     assert.equal(h.device.diagnostics().clears, 2);
 });
 
