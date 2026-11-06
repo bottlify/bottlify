@@ -530,6 +530,55 @@ test('a state block holds what was set between begin and end, and can be refresh
     releaseAll(f);
 });
 
+test('what is set while a block is recorded goes into the block, not the device', ()=>{
+    // Wine's ddraw7 test_begin_end_state_block.
+    const f = fixture();
+    const { device } = f;
+    /** @type {{ handle?: number }} */
+    const out = {};
+    /** @type {{ value?: number }} */
+    const value = {};
+    /** @type {{ value?: number }} */
+    const stage = {};
+    /** @type {{ matrix?: Float32Array }} */
+    const world = {};
+    const lighting = D3DRENDERSTATE.LIGHTING;
+    const scaled = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 1, 'lighting starts on');
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetRenderState(lighting, 0), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.ADD), D3D_OK);
+    assert.equal(device.SetTransform(D3DTRANSFORMSTATE.WORLD, scaled), D3D_OK);
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 1, 'the device kept its own');
+    assert.equal(device.GetTextureStageState(0, D3DTSS.COLOROP, stage), D3D_OK);
+    assert.equal(stage.value, D3DTOP.MODULATE);
+    assert.equal(device.GetTransform(D3DTRANSFORMSTATE.WORLD, world), D3D_OK);
+    assert.equal(world.matrix?.[0], 1);
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    const block = /** @type {number} */ (out.handle);
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 1, 'and keeps it after the end');
+
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.ApplyStateBlock(block), D3DERR_INBEGINSTATEBLOCK);
+    assert.equal(device.CaptureStateBlock(block), D3DERR_INBEGINSTATEBLOCK);
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, out), D3DERR_INBEGINSTATEBLOCK);
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+
+    assert.equal(device.ApplyStateBlock(block), D3D_OK);
+    assert.equal(device.GetRenderState(lighting, value), D3D_OK);
+    assert.equal(value.value, 0, 'the block applied');
+    assert.equal(device.GetTextureStageState(0, D3DTSS.COLOROP, stage), D3D_OK);
+    assert.equal(stage.value, D3DTOP.ADD);
+    assert.equal(device.GetTransform(D3DTRANSFORMSTATE.WORLD, world), D3D_OK);
+    assert.equal(world.matrix?.[0], 2);
+
+    releaseAll(f);
+});
+
 test('a vertex buffer gives its guest memory back with its last reference', ()=>{
     /** @type {number[]} */
     const freed = [];

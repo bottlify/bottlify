@@ -893,15 +893,22 @@ export function createDirect3D7(ddraw, services = {}){
             return 0;
         };
 
-        /** Records a state set while a block is being recorded. */
         /**
+         * A state set while a block is being recorded goes into the block
+         * and not to the device: the device keeps what it had until the block
+         * is applied (ddraw7 test_begin_end_state_block). True when it was
+         * taken so.
+         *
          * @param {string} kind @param {number} key @param {any} value
+         * @returns {boolean}
          */
-        function record(kind, key, value){
-            if (recording)
+        function recorded(kind, key, value){
+            if (!recording)
             {
-                recording[kind].set(key, value);
+                return false;
             }
+            recording[kind].set(key, value);
+            return true;
         }
 
         /** @param {any} block */
@@ -1231,8 +1238,10 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
-                transforms.set(key, Float32Array.from(matrix));
-                record('transforms', key, Float32Array.from(matrix));
+                if (!recorded('transforms', key, Float32Array.from(matrix)))
+                {
+                    transforms.set(key, Float32Array.from(matrix));
+                }
                 return D3D_OK;
             },
 
@@ -1380,8 +1389,11 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return DDERR_INVALIDPARAMS;
                 }
+                if (recorded('renderStates', state, value >>> 0))
+                {
+                    return D3D_OK;
+                }
                 renderStates.set(state, value >>> 0);
-                record('renderStates', state, value >>> 0);
                 if (LEGACY_SAMPLER_STATES.has(state))
                 {
                     services.divergence?.('Direct3D 7', 'the texture filter, address and border'
@@ -1459,8 +1471,10 @@ export function createDirect3D7(ddraw, services = {}){
                 for (const each of types)
                 {
                     const stored = FILTER_NUMBERING[each]?.stored(value >>> 0) ?? value >>> 0;
-                    states.set(each, stored);
-                    record('stageStates', (stage << 8) | each, stored);
+                    if (!recorded('stageStates', (stage << 8) | each, stored))
+                    {
+                        states.set(each, stored);
+                    }
                 }
                 return D3D_OK;
             },
@@ -1648,6 +1662,10 @@ export function createDirect3D7(ddraw, services = {}){
 
             /** @param {number} handle */
             ApplyStateBlock(handle){
+                if (recording)
+                {
+                    return D3DERR_INBEGINSTATEBLOCK;
+                }
                 const block = stateBlocks.get(handle);
                 if (!block)
                 {
@@ -1664,6 +1682,10 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {number} handle
              */
             CaptureStateBlock(handle){
+                if (recording)
+                {
+                    return D3DERR_INBEGINSTATEBLOCK;
+                }
                 const block = stateBlocks.get(handle);
                 if (!block)
                 {
@@ -1698,6 +1720,10 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {{ handle?: number }} out
              */
             CreateStateBlock(type, out){
+                if (recording)
+                {
+                    return D3DERR_INBEGINSTATEBLOCK;
+                }
                 if (!/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
                 {
                     return DDERR_INVALIDPARAMS;
