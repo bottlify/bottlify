@@ -731,7 +731,7 @@ function fragmentOutputsOf(fs, bindings, error){
  * vertex stage's first, each by its index; a block both stages declare is
  * one block and is declared alike in both. A shared or packed block is laid
  * out as a std140 one: where it lies is the implementation's to say, and
- * the program asks (decision A98).
+ * the program asks.
  *
  * @param {LinkedStage | null} vs @param {LinkedStage | null} fs
  * @param {(message: string) => void} error

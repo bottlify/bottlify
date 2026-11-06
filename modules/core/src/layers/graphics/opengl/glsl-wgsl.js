@@ -1997,7 +1997,7 @@ export function emitStage(program, which, options, given, partner){
             // texture's TEXTURE_COMPARE_FUNC gives it. WGSL compares at an
             // implicit level in the fragment stage only, and otherwise at the
             // base level: a level, gradients or a bias asked of a comparison
-            // read the base level or the implicit one (decision A111).
+            // read the base level or the implicit one.
             const compareHead = `${tex}, ${smp}, ${coords}${layer}, ${reference}`;
             const compared = !vertex && level === null && !gradients
                 ? `textureSampleCompare(${compareHead}${offsetCode})`
