@@ -3112,7 +3112,9 @@ export function createDirect3D9Seam(
                         ? E_OUTOFMEMORY
                         : D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            // A refused one clears the pointer, as the plain creates do
+            // (Wine's d3d9ex test_format_unknown).
+            return clearAndRefuse(out, hr);
         };
 
     /**

@@ -615,8 +615,33 @@ test('a call given nothing to act on is refused, and GetInfo reports nothing', (
     assert.equal(h.device(device, 'ProcessVertices', [0, 0, 3, 0, 0]), D3DERR_INVALIDCALL);
 
     // GetInfo succeeded and reported nothing, which is what a program checks
-    // for before reading the structure it passed.
-    assert.equal(h.device(device, 'GetInfo', [1, 0x6100, 16]), S_FALSE);
+    // for before reading the structure it passed; an id below
+    // D3DDEVINFOID_RESOURCEMANAGER names nothing (Wine's d3d8 test_get_info).
+    assert.equal(h.device(device, 'GetInfo', [4, 0x6100, 16]), S_FALSE);
+    assert.equal(h.device(device, 'GetInfo', [9, 0x6100, 16]), S_FALSE);
+    for (const id of [0, 1, 3])
+    {
+        assert.equal(h.device(device, 'GetInfo', [id, 0x6100, 16]), 0x80004005, `id ${id}`);
+    }
+
+    // No format is refused before the pointer is touched, but by
+    // CreateImageSurface (Wine's d3d8 test_format_unknown).
+    const out = 0x6200;
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateTexture', [64, 64, 1, 0, 0, 0, out]],
+        ['CreateCubeTexture', [64, 1, 0, 0, 0, out]],
+        ['CreateVolumeTexture', [64, 64, 1, 1, 0, 0, 0, out]],
+        ['CreateRenderTarget', [64, 64, 0, 0, 0, out]],
+        ['CreateDepthStencilSurface', [64, 64, 0, 0, out]],
+    ]))
+    {
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, `${name} left the pointer`);
+    }
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(h.device(device, 'CreateImageSurface', [64, 64, 0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(out), 0, 'CreateImageSurface cleared it');
 
     assert.equal(h.release(device), 0);
     h.release(root);

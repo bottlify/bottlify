@@ -45,7 +45,7 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
-import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
+import { D3DDEVTYPE, D3DFMT, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
@@ -272,6 +272,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 
 /** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
 const S_FALSE = 1;
+/** GetInfo's answer for an id below D3DDEVINFOID_RESOURCEMANAGER. */
+const E_FAIL = 0x80004005 | 0;
 
 /**
  * The program's cursor, as the device was given it.
@@ -1548,6 +1550,13 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateTexture: (device, [width, height, levels, usage, format, pool, out])=>{
+            // No format is refused before the pointer is touched, here and in
+            // the four creates like it; CreateImageSurface clears it first
+            // (Wine's d3d8 test_format_unknown).
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ texture?: any }} */
             const held = {};
             const hr = device.CreateTexture(
@@ -1940,6 +1949,10 @@ export function createDirect3D8Seam(
         // buffer only in that is still a target it can draw into (decision A85).
         /** @param {any} device @param {number[]} args */
         CreateRenderTarget: (device, [width, height, format, samples, lockable, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
@@ -1955,6 +1968,10 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateDepthStencilSurface: (device, [width, height, format, samples, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
@@ -1970,6 +1987,10 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if ((out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -1989,6 +2010,10 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateVolumeTexture: (device, [width, height, depth, levels, usage, format, pool, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if ((out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2224,8 +2249,10 @@ export function createDirect3D8Seam(
 
         // The retail answer: the call succeeded and there is nothing to report,
         // which is what a program checks for before reading the structure it
-        // passed. Nothing is written into it.
-        GetInfo: ()=>S_FALSE,
+        // passed; the ids below D3DDEVINFOID_RESOURCEMANAGER name nothing and
+        // fail (Wine's d3d8 test_get_info). Nothing is written into it.
+        /** @param {any} _ @param {number[]} args */
+        GetInfo: (_, [id])=>((id >>> 0) < 4 ? E_FAIL : S_FALSE),
 
         // --- state blocks ---
 
