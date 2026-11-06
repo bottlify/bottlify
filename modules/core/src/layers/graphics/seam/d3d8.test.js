@@ -2697,7 +2697,8 @@ test('d3d9.dll\'s Direct3DCreate9 carries the store a device\'s constructor make
     /** @type {{ at: number, target: number }[]} */
     const jumps = [];
     const code = create.code({ register: ()=>0x1234,
-        jump: (at, target)=>jumps.push({ at, target }) });
+        jump: (/** @type {number} */ at, /** @type {number} */ target)=>jumps.push({ at,
+            target }) });
     assert.equal(code[0], 0xe9, 'a jump to the handler first');
     assert.deepEqual(jumps, [{ at: 1, target: 0x1234 }]);
     // What a program searching the image looks for: c7 06 imm32, 89 86, 89 86.
