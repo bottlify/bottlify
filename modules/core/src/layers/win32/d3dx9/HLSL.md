@@ -101,6 +101,15 @@ target (`LowerTarget`): the builder, the constant buffers, the textures and the 
 the target's, in `graphics/d3dcompiler/` (its `compile.js` says what it compiles and what it
 refuses).
 
+An fx_4_0 or fx_4_1 effect (`graphics/d3dcompiler/fx-compile.js`) is read in two parts: the
+effect's own syntax (state blocks, shader variables, techniques and passes) out of the
+preprocessed text, and the rest, HLSL, through the parser and the checker without the bodies.
+Each `CompileShader` is a compile of the same text by `compile.js`, its arguments bound to the
+entry's `uniform` parameters. The file it writes is the FX10 chunk `graphics/d3d10/effect.js`
+reads; `fx-compile.test.js` holds it to what fxc wrote for the same declarations in Wine's d3d10
+tests (layouts, the constant type of each state field, the order of a pass's assignments, the
+per-target blend of fx_4_1).
+
 ## Assembly
 
 `D3DXAssembleShader` and `D3DXDisassembleShader` are `shader-asm.js`, one table of

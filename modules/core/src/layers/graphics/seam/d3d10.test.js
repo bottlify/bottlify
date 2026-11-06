@@ -1170,6 +1170,60 @@ test('D3D10CompileShader compiles, and a compile that fails says why in the erro
         assert.ok(h.divergences.some(line=>line.includes('effect pools')));
     });
 
+test('D3D10CompileEffectFromMemory compiles an effect D3D10CreateEffectFromMemory makes',
+    async()=>{
+        // Wine's d3d10 effect tests compile these and walk the effect they make.
+        const h = seamed();
+        const E_FAIL = 0x80004005;
+        const { device } = h.createDeviceAndSwapChain();
+        const outs = h.box.place([0xdeadbeef, 0xdeadbeef]);
+        const source = [
+            'cbuffer cb : register(b1) { float f1 : SV_POSITION; float f2 : COLOR0; };',
+            'cbuffer cb2 : register(b0) { float f3 : packoffset(c2); };',
+            'float4 vs(float4 p : POSITION) : SV_POSITION { return p * f1; }',
+            'BlendState blend { SrcBlend = one; };',
+            'technique10 render { pass p0 {',
+            '    SetVertexShader(CompileShader(vs_4_0, vs()));',
+            '    SetBlendState(blend, float4(0, 0, 0, 0), 0xffffffff);',
+            '} }',
+        ].join('\n');
+        const compile = (/** @type {string} */ text)=>h.d3d10.D3D10CompileEffectFromMemory
+            .handler([h.box.placeString(text), text.length, 0, 0, 0, 0, 0, outs, outs + 4]);
+        assert.equal(h.d3d10.D3D10CompileEffectFromMemory.argBytes, 36);
+        assert.equal(await compile(source) >>> 0, S_OK);
+        assert.equal(h.box.memory.readU32(outs + 4), 0, 'no messages, no error blob');
+        const code = blobBytes(h, h.box.memory.readU32(outs));
+        const at = h.box.placeBytes(code);
+        const effectAt = h.box.place([0]);
+        assert.equal(h.d3d10.D3D10CreateEffectFromMemory.handler([at, code.length, 0, device, 0,
+            effectAt]) >>> 0, S_OK);
+        const effect = h.box.memory.readU32(effectAt);
+        const desc = h.box.place([0, 0, 0, 0, 0, 0]);
+        assert.equal(h.box.call(effect, slot(ID3D10EFFECT_SLOTS, 'GetDesc'), [desc]), S_OK);
+        assert.deepEqual(Array.from({ length: 6 }, (_, i)=>h.box.memory.readU32(desc + i * 4)),
+            [0, 3, 0, 4, 0, 1], 'IsChildEffect, ConstantBuffers ($Globals too), shared, '
+            + 'GlobalVariables (three numbers and the blend state), shared, Techniques');
+        const technique = h.box.call(effect, slot(ID3D10EFFECT_SLOTS, 'GetTechniqueByIndex'),
+            [0]);
+        assert.equal(h.box.call(technique, bareSlot(ID3D10EFFECTTECHNIQUE_SLOTS, 'IsValid')), 1);
+        const pass = h.box.call(technique, bareSlot(ID3D10EFFECTTECHNIQUE_SLOTS,
+            'GetPassByIndex'), [0]);
+        assert.equal(h.box.call(pass, bareSlot(ID3D10EFFECTPASS_SLOTS, 'IsValid')), 1);
+        assert.equal(h.box.call(pass, bareSlot(ID3D10EFFECTPASS_SLOTS, 'Apply'), [0]), S_OK);
+        const bound = h.box.place([0]);
+        h.device(device, 'VSGetShader', [bound]);
+        assert.notEqual(h.box.memory.readU32(bound), 0, 'the pass set the compiled shader');
+        h.box.call(h.box.memory.readU32(bound), 2);
+        assert.equal(h.box.call(effect, 2), 0);
+
+        // Wine's d3d10_1 tests: an empty block compiles, a 10.1 field does not under fx_4_0.
+        assert.equal(await compile('BlendState default_blend_state {};') >>> 0, S_OK);
+        assert.equal(await compile('BlendState b {\n     srcblend[0] = zero;\n};') >>> 0, E_FAIL);
+        assert.equal(h.box.memory.readU32(outs), 0, 'no effect');
+        const text = String.fromCharCode(...blobBytes(h, h.box.memory.readU32(outs + 4)));
+        assert.match(text, /memory\(2,6\): error X3000: 'srcblend\[\]': per render target/);
+    });
+
 test('D3DCompile: model 4 and 5 containers, model 2 and 3 tokens, macros, and refusals',
     async()=>{
         const h = seamed();

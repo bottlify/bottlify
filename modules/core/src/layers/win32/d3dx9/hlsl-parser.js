@@ -134,8 +134,10 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  * @typedef {Object} CBufferDecl
  * @property {'cbuffer'} kind
  * @property {string} name
+ * @property {boolean} tbuffer
  * @property {Register | null} register
  * @property {Variable[]} members
+ * @property {Annotation[]} annotations
  * @property {Position} pos
  */
 
@@ -1451,7 +1453,7 @@ export function parse(source, file = 'memory'){
             next();
             const name = expectIdent();
             const semantics = parseSemantics();
-            parseAnnotations();
+            const annotations = parseAnnotations();
             expectPunct('{');
             /** @type {Variable[]} */
             const members = [];
@@ -1463,8 +1465,8 @@ export function parse(source, file = 'memory'){
             }
             next();
             acceptPunct(';');
-            decls.push({ kind: 'cbuffer', name: name.text, register: semantics.register, members,
-                pos: token.pos });
+            decls.push({ kind: 'cbuffer', name: name.text, tbuffer: token.text === 'tbuffer',
+                register: semantics.register, members, annotations, pos: token.pos });
             return;
         }
         if (token.text === 'typedef')
