@@ -928,8 +928,8 @@ export function emitStage(program, which, options, given, partner){
             /** @param {number} stride */
             const moved = stride=>(constant !== null
                 ? { at: inner.at + constant * stride, plus: inner.plus }
-                : { at: inner.at, plus: `${inner.plus === null ? '' : `${inner.plus} + `}`
-                    + `u32(${expr(node.index, out)}) * ${stride}u` });
+                : { at: inner.at, plus: temp(out, `${inner.plus === null ? ''
+                    : `${inner.plus} + `}u32(${expr(node.index, out)}) * ${stride}u`, 'u32') });
             if (type.kind === 'array')
             {
                 const { at, plus } = moved(inner.arrayStride);
@@ -1717,7 +1717,8 @@ export function emitStage(program, which, options, given, partner){
     function builtinCall(node, out){
         const name = node.name;
         const type = node.type;
-        if (name.startsWith('texture') || name.startsWith('shadow'))
+        if (name.startsWith('texture') || name.startsWith('shadow')
+            || name.startsWith('texelFetch'))
         {
             return textureCall(node, out);
         }
@@ -1775,8 +1776,9 @@ export function emitStage(program, which, options, given, partner){
                     : `(${bits} == ${u}(0x7f800000u))`;
             }
             case 'modf': {
-                const parts = temp(out, `modf(${expr(node.args[0], out)})`,
-                    `__modf_result${type.kind === 'vector' ? `_vec${type.size}` : ''}_f32`);
+                // WGSL's result struct has no name a declaration may write.
+                const parts = `t${temps++}`;
+                out.pre.push(`let ${parts} = modf(${expr(node.args[0], out)});`);
                 store(node.args[1], `${parts}.whole`, out);
                 return `${parts}.fract`;
             }
@@ -2110,6 +2112,29 @@ export function emitStage(program, which, options, given, partner){
     const LEAVES = new Set(['break', 'continue', 'return', 'discard']);
 
     /**
+     * Whether control never goes on past a statement: one that leaves, a
+     * block whose last statement does, an if both of whose branches do.
+     *
+     * @param {any} node @returns {boolean}
+     */
+    const leaves = node=>{
+        if (!node)
+        {
+            return false;
+        }
+        if (LEAVES.has(node.node))
+        {
+            return true;
+        }
+        if (node.node === 'block')
+        {
+            return leaves(node.body[node.body.length - 1]);
+        }
+        return node.node === 'if' && !!node.otherwise && leaves(node.then)
+            && leaves(node.otherwise);
+    };
+
+    /**
      * A GLSL switch as WGSL's, which has no fall-through: each label's clause
      * is its own statements and those of the labels it falls into, up to one
      * that leaves. A declaration is the whole switch body's in GLSL, which a
@@ -2173,8 +2198,7 @@ export function emitStage(program, which, options, given, partner){
             for (let at = k; at < groups.length; at++)
             {
                 body.push(...groups[at].statements);
-                const last = groups[at].statements[groups[at].statements.length - 1];
-                if (last && LEAVES.has(last.node))
+                if (leaves(groups[at].statements[groups[at].statements.length - 1]))
                 {
                     break;
                 }

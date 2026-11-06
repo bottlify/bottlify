@@ -44,7 +44,7 @@ import { componentsOf } from './glsl-types.js';
  * (`glsl-wgsl.js`). A later one fails to compile with the specification's
  * message for a version the implementation does not support.
  */
-export const EMITTED_VERSIONS = Object.freeze([110, 120]);
+export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330]);
 
 /**
  * The built-in constants of 1.30 and later as this implementation answers
