@@ -4205,6 +4205,7 @@ export function createWin32Module(){
                             + ' process, answered RPC_E_SERVERFAULT'),
                     }),
                     callerThread: ()=>bridge.callerThread(),
+                    answering: (thread, fn)=>bridge.answering(thread, fn),
                     // Read at call time: the table they live in is built above,
                     // but the object holding it is assigned after this literal.
                     libraries: {

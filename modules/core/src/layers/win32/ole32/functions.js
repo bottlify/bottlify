@@ -314,6 +314,10 @@ const MAX_PROGID = 255;
  *           stream: its GetClassID and Save are the program's. The thread
  *           names whose call a second, awaited-after call answers.
  * @property {() => unknown} [callerThread]  Whose call is being handled.
+ * @property {<T>(thread: unknown, fn: () => T) => T} [answering]
+ *           Runs `fn` as the call of `thread`: one of this layer's handlers
+ *           called from another after an await reads its caller then, when the
+ *           processor may be running a different thread.
  * @property {(clsid: string, definition: import('./objects.js').ComClassDefinition)
  *           => import('./objects.js').ComObject} [makeObject]
  *           An object of our own that no CLSID produces: the class object
@@ -1884,13 +1888,23 @@ export function createOleFunctions(host){
     const hexOf = bytes=>Array.from(bytes, byte=>byte.toString(16).padStart(2, '0')).join('');
 
     /**
+     * `fn` run as `thread`'s call, where one is known and the host can say so.
+     *
+     * @template T
+     * @param {unknown} thread @param {() => T} fn
+     * @returns {T}
+     */
+    const asCallOf = (thread, fn)=>(thread && host.answering ? host.answering(thread, fn) : fn());
+
+    /**
      * A call of one of this layer's own exports, with a slot of scratch
      * memory for what it writes out: the HRESULT and the word in the slot.
      *
      * @param {string} name @param {(slot: number) => number[]} args
+     * @param {unknown} [thread]  Whose call this is, when it is made after an await.
      * @returns {Promise<{ hr: number, value: number }>}
      */
-    const callExport = async(name, args)=>{
+    const callExport = async(name, args, thread)=>{
         const entry = /** @type {Record<string, any>} */ (functions)[name];
         const slot = host.heap.allocate(OUT_SLOT);
         if (!entry || slot === 0)
@@ -1898,7 +1912,7 @@ export function createOleFunctions(host){
             return { hr: entry ? E_OUTOFMEMORY : E_NOTIMPL, value: 0 };
         }
         writeU32(slot, 0);
-        const hr = (await entry.handler(args(slot))) | 0;
+        const hr = (await asCallOf(thread, ()=>entry.handler(args(slot)))) | 0;
         const value = readU32(slot);
         host.heap.free(slot);
         return { hr, value };
@@ -1932,7 +1946,7 @@ export function createOleFunctions(host){
             host.heap.free(block);
             return key;
         }
-        const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+        const context = await callExport('CreateBindCtx', slot=>[0, slot], thread);
         if (context.hr < 0 || context.value === 0)
         {
             return null;
@@ -1981,7 +1995,7 @@ export function createOleFunctions(host){
      */
     const savedMoniker = async(moniker, thread)=>{
         const work = host.heap.allocate(GUID_SIZE + 8);
-        const made = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot]);
+        const made = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot], thread);
         if (work === 0 || made.hr < 0 || made.value === 0)
         {
             if (work !== 0)
@@ -2029,13 +2043,13 @@ export function createOleFunctions(host){
         host.writeMemory(ids, /** @type {Uint8Array} */ (parseGuid(saved.clsid)));
         host.writeMemory(ids + GUID_SIZE, /** @type {Uint8Array} */ (parseGuid(IID_IMONIKER)));
         const made = await callExport('CoCreateInstance',
-            slot=>[ids, 0, CLSCTX_INPROC_SERVER, ids + GUID_SIZE, slot]);
+            slot=>[ids, 0, CLSCTX_INPROC_SERVER, ids + GUID_SIZE, slot], thread);
         host.heap.free(ids);
         if (made.hr < 0 || made.value === 0)
         {
             return 0;
         }
-        const stream = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot]);
+        const stream = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot], thread);
         const block = host.heap.allocate(Math.max(saved.bytes.length, 1));
         if (stream.hr < 0 || stream.value === 0 || block === 0)
         {
@@ -4905,7 +4919,7 @@ export function createOleFunctions(host){
                 writeU32(out >>> 0, 0);
                 const thread = host.callerThread?.();
                 return (async()=>{
-                    const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+                    const context = await callExport('CreateBindCtx', slot=>[0, slot], thread);
                     if (context.hr < 0)
                     {
                         return context.hr;
@@ -4927,8 +4941,8 @@ export function createOleFunctions(host){
                             }
                         }
                         writeU32(work + 4, 0);
-                        const parsed = (await functions.MkParseDisplayName.handler(
-                            [context.value, name, work, work + 4])) | 0;
+                        const parsed = (await asCallOf(thread, ()=>functions.MkParseDisplayName
+                            .handler([context.value, name, work, work + 4]))) | 0;
                         const moniker = readU32(work + 4);
                         if (parsed < 0 || moniker === 0)
                         {

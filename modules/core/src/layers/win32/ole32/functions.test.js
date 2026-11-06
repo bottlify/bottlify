@@ -1880,3 +1880,65 @@ test('a registered clipboard format crosses to another machine by the name user3
         assert.equal(fns.CLIPFORMAT_UserSize.handler([FLAGS, 1, FORMAT]),
             12 + 12 + (name.length + 1) * 2, 'the number, then the name as a string');
     });
+
+test('CoGetObject calls back as its caller, whichever thread runs while it waits', async()=>{
+    const { host } = setup();
+    const { first, second } = host.threads;
+    /** @type {unknown[]} */
+    const threads = [];
+    /** @type {any} */ (host).answering = (/** @type {any} */ thread, /** @type {() => any} */ fn)=>{
+        const before = host.currentThread();
+        host.run(thread);
+        try
+        {
+            return fn();
+        }
+        finally
+        {
+            host.run(before);
+        }
+    };
+    // Every guest call waits, and the scheduler hands the processor to the
+    // other thread meanwhile: what a handler reads as its caller after that
+    // is the wrong thread.
+    /** @param {number} entry @param {number[]} args @param {unknown} thread */
+    const call = async(entry, args, thread)=>{
+        threads.push(thread);
+        await Promise.resolve();
+        host.run(second);
+        return 0;
+    };
+    /** @type {any} */ (host).call = call;
+    // Our own objects get a vtable inside this memory, so a call on one is a
+    // guest call the test sees.
+    const view = new DataView(host.bytes.buffer);
+    const publish = host.vtables.publish;
+    /** @type {Map<number, number>} */
+    const placed = new Map();
+    let next = 0xc000;
+    host.vtables.publish = (object, interfaceId)=>{
+        const pointer = publish(object, interfaceId);
+        if (pointer !== 0 && !placed.has(pointer))
+        {
+            placed.set(pointer, next);
+            view.setUint32(next, next + 4, true);
+            for (let slot = 0; slot < 32; slot++)
+            {
+                view.setUint32(next + 4 + slot * 4, METHOD_BASE + slot * 0x10, true);
+            }
+            next += 0x100;
+        }
+        return placed.get(pointer) ?? 0;
+    };
+    const fns = createOleFunctions(/** @type {any} */ (host));
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    const NAME = 0x2000;
+    const OPTIONS = 0x2400;
+    host.putWide(NAME, 'Elevation:Administrator!new:{F21AABF7-4F63-48FB-9524-822429922224}\0');
+    view.setUint32(OPTIONS, 16, true);
+    host.run(first);
+    await fns.CoGetObject.handler([NAME, OPTIONS, IID_ARG, PPV]);
+    assert.ok(threads.length > 1, 'it calls into the guest more than once');
+    assert.ok(threads.every(thread=>thread === first),
+        `every call the caller's: ${threads.map(thread=>(thread === first ? 'first' : 'other'))}`);
+});
