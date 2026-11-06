@@ -563,15 +563,21 @@ export function createGraphicsLibraries(
             /**
              * HRESULT ValidatePixelShader(const DWORD *code, const D3DCAPS8 *caps,
              *                             BOOL errorReturn, char **errors)
+             *
+             * No code at all is refused with no string: unlike the vertex
+             * shader's, the errors pointer is left as it was (Wine's d3d8
+             * test_validate_ps).
              */
             ValidatePixelShader: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([code, caps, errorReturn, errors])=>validated(
-                    shaderFault(code, caps, 0, {
-                        versions: PIXEL_SHADER_VERSIONS,
-                        capsVersion: D3DCAPS8.PixelShaderVersion,
-                    }), errorReturn, errors),
+                handler: ([code, caps, errorReturn, errors])=>((code >>> 0) === 0
+                    ? E_FAIL
+                    : validated(
+                        shaderFault(code, caps, 0, {
+                            versions: PIXEL_SHADER_VERSIONS,
+                            capsVersion: D3DCAPS8.PixelShaderVersion,
+                        }), errorReturn, errors)),
             },
 
             /**

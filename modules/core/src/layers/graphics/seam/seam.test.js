@@ -790,6 +790,12 @@ test('Direct3D 8 validates a shader by its version token, and never has messages
     box.memory.writeU32(code, 0xffff0200);
     assert.equal(d3d8.ValidatePixelShader.handler([code, 0, 0, 0]), E_FAIL);
     assert.equal(d3d8.ValidatePixelShader.argBytes, 16);
+    // No code is refused, and the errors pointer is left (Wine's d3d8
+    // test_validate_ps); a vertex shader's gets a string.
+    const untouched = 0x9400;
+    box.memory.writeU32(untouched, 0xcafeface);
+    assert.equal(d3d8.ValidatePixelShader.handler([0, 0, 1, untouched]), E_FAIL);
+    assert.equal(box.memory.readU32(untouched), 0xcafeface);
 });
 
 test('Direct3DShaderValidatorCreate9 hands out a validator that answers the stream through', ()=>{

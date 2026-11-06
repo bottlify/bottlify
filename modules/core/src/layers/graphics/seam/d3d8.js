@@ -1461,6 +1461,13 @@ export function createDirect3D8Seam(
         // Present's rectangles are said; the window is the browser's.
         /** @param {any} device @param {number[]} args */
         Present: (/** @type {any} */ device, /** @type {number[]} */ args = [])=>{
+            // Into a window that is gone, nothing is presented (Wine's d3d8
+            // test_destroyed_window; Direct3D 9 answers D3D_OK there).
+            const window = (args[2] >>> 0) || deviceWindow;
+            if (window !== 0 && windowClientSize && windowClientSize(window) === null)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             presentRects(args[0], args[1]);
             showScreen(device);
             return pacedPresent(device.Present());

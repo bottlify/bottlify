@@ -2299,6 +2299,20 @@ test('a back buffer asked for as zero by zero is the window, described and store
     h.release(root);
 });
 
+test('a present into a window that is gone is refused', ()=>{
+    // Wine's d3d8 test_destroyed_window.
+    let gone = false;
+    const h = seamed({ windowClientSize: window=>(window === HWND && !gone
+        ? { width: 640, height: 480 } : null) });
+    const root = h.create();
+    const device = h.createDevice(root);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    gone = true;
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a back buffer asked for as zero by zero, with no window to measure, is the display', ()=>{
     const h = seamed({ windowClientSize: ()=>null });
     const root = h.create();
