@@ -3386,8 +3386,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 const update = source.volume && destination.volume && source !== destination
                     && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
-                    && source.width >= destination.width && source.height >= destination.height
-                    && source.depth >= destination.depth
+                    // A smaller source is taken too, as a copy of what it has
+                    // (Wine's test_update_volumetexture, case 6).
                     ? volumeUpdate(source, destination, { bySize: true })
                     : null;
                 if (!update)

@@ -2727,6 +2727,9 @@ test('UpdateTexture into a smaller texture starts from the source level of its s
     assert.equal(kept.result, D3D_OK);
     assert.equal(kept.moves.length, 8 + 4, 'a volume of the same size keeps its top levels,'
         + ' a slice at a time');
+    assert.equal(update(volume(4, 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        volume(8, 1, D3DFMT.A8R8G8B8, DEFAULT)).result, D3D_OK,
+    'a smaller volume is carried where it overlaps (Wine\'s test_update_volumetexture)');
     // Only video memory is updated (Wine's test_update_texture_pool).
     for (const pool of [D3DPOOL.MANAGED, D3DPOOL.SCRATCH])
     {

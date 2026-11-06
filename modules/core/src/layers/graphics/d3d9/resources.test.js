@@ -1006,9 +1006,10 @@ test('UpdateTexture carries a volume texture\'s dirty box, level by level and sl
         const managed = volume(D3DPOOL.MANAGED);
         assert.equal(device.UpdateTexture(source, managed), D3DERR_INVALIDCALL);
         assert.equal(device.UpdateTexture(managed, destination), D3DERR_INVALIDCALL);
+        // Levels of two sizes are taken, what overlaps carried (Wine's
+        // test_update_volumetexture, case 6).
         const larger = volume(D3DPOOL.DEFAULT, 2, 8);
-        assert.equal(device.UpdateTexture(source, larger), D3DERR_INVALIDCALL,
-            'levels of two sizes');
+        assert.equal(device.UpdateTexture(source, larger), D3D_OK, 'levels of two sizes');
         /** @type {{ texture?: any }} */
         const flat = {};
         assert.equal(device.CreateTexture(4, 4, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, flat),

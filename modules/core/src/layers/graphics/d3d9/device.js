@@ -4418,13 +4418,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (source.volume || destination.volume)
             {
+                // Volumes of other sizes or formats are taken, as Windows takes
+                // them (Wine's test_update_volumetexture, cases 6 and 7): what
+                // overlaps is carried, bytes only between formats of one texel size.
                 const update = source.volume && destination.volume
                     && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
-                    ? volumeUpdate(source, destination)
+                    ? volumeUpdate(source, destination, { bySize: true })
                     : null;
                 if (!update)
                 {
                     return D3DERR_INVALIDCALL;
+                }
+                if (update.overlapped)
+                {
+                    report('update-size', 'UpdateTexture between volumes with no level of one'
+                        + ' size: they were carried where they overlap');
+                }
+                if (update.converted)
+                {
+                    report('update-format', 'UpdateTexture between volume formats of two texel'
+                        + ' sizes carried nothing: the texels are not converted');
                 }
                 deliverMoves(update.moves, out);
                 for (const volume of update.written)
