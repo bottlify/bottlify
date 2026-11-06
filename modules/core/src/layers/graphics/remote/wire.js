@@ -81,6 +81,14 @@ export const SERVICE_REF = -1;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/**
+ * Buffers given back to a writer, kept to write on again: as many as the
+ * batches in flight at once, and none past 1 MiB, so one large upload's batch
+ * does not hold its memory for good.
+ */
+const SPARE_BUFFERS = 4;
+const SPARE_LARGEST = 1 << 20;
+
 /** The writing end. */
 export function createWriter(){
     let buffer = new ArrayBuffer(1 << 16);
@@ -93,6 +101,8 @@ export function createWriter(){
     const defined = [];
     /** The places whose shapes were sent, by the shape's number. @type {Site[]} */
     const shaped = [];
+    /** Buffers given back (`reuse`). @type {ArrayBuffer[]} */
+    const spare = [];
 
     /** @param {number} more */
     const room = more=>{
@@ -440,6 +450,36 @@ export function createWriter(){
             at = 0;
             return taken;
         },
+        /**
+         * The buffer written on itself, and how much of it is written: what
+         * is sent away and comes back (`reuse`), where a buffer of its own
+         * for every batch would be hundreds of fresh ones a second, whose
+         * memory outside the heap drives the receiving thread's full
+         * collections. Writing goes on in one given back, or a fresh one.
+         *
+         * @returns {{ buffer: ArrayBuffer, length: number }}
+         */
+        give(){
+            const given = { buffer, length: at };
+            buffer = spare.pop() ?? new ArrayBuffer(1 << 16);
+            view = new DataView(buffer);
+            bytes = new Uint8Array(buffer);
+            at = 0;
+            return given;
+        },
+        /**
+         * Takes back a buffer `give` gave, read and done with, to write on
+         * again: a few of them, none grown past `SPARE_LARGEST`.
+         *
+         * @param {ArrayBuffer} returned
+         */
+        reuse(returned){
+            if (spare.length < SPARE_BUFFERS && returned.byteLength <= SPARE_LARGEST
+                && returned.byteLength > 0)
+            {
+                spare.push(returned);
+            }
+        },
         /** How many bytes are written. */
         size: ()=>at,
     };
@@ -483,14 +523,17 @@ export function createReader({ ref, service }){
     return {
         /**
          * Every record of a batch, in order. What a record holds of the
-         * batch's bytes is a view of them, so the batch is never written again.
+         * batch's bytes is a view of them, good until the reading returns:
+         * the buffer is then given back to be written again (`give`), so
+         * what is kept of it past `each` is copied.
          *
          * @param {ArrayBuffer} buffer
          * @param {(call: ReadCall) => boolean | void} each  false stops the reading
+         * @param {number} [size]  how much of the buffer the batch is, all of it by default
          */
-        read(buffer, each){
-            const view = new DataView(buffer);
-            const bytes = new Uint8Array(buffer);
+        read(buffer, each, size = buffer.byteLength){
+            const view = new DataView(buffer, 0, size);
+            const bytes = new Uint8Array(buffer, 0, size);
             let at = 0;
             const u8 = ()=>bytes[at++];
             const u32 = ()=>{

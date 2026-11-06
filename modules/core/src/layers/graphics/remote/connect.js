@@ -591,10 +591,10 @@ export function connectGraphicsWorker(options){
                     abandoned: { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
                         trace: /** @type {any[]} */ ([]) } }),
                 sent: senders.reduce((sum, sender)=>{
-                    const { batches, bytes, ms } = sender.sent();
+                    const { batches, bytes, ms, returned } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,
-                        ms: Math.round(sum.ms + ms) };
-                }, { batches: 0, bytes: 0, ms: 0 }),
+                        ms: Math.round(sum.ms + ms), returned: sum.returned + returned };
+                }, { batches: 0, bytes: 0, ms: 0, returned: 0 }),
                 // The guest bytes copied into those batches, by what copied
                 // them: what lending buffers would have left in place.
                 // A diagnostic's (`checkDraws`): draws whose bytes the played

@@ -24,7 +24,7 @@ function sender(gapMs){
     /** @type {number[]} */
     const batches = [];
     const made = createSender({
-        post: message=>batches.push(message.buffer.byteLength),
+        post: message=>batches.push(message.length),
         later: send=>turnEnds.push(send),
         now: ()=>clock,
         gapMs,

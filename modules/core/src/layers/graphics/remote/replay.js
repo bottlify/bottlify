@@ -2131,6 +2131,30 @@ export function createRecording(options){
 }
 
 /**
+ * Whether a call's arguments hold a view of a batch's bytes: as the reader
+ * makes them, typed arrays in arrays and plain objects, not a played object's
+ * members.
+ *
+ * @param {unknown} value @param {ArrayBuffer} buffer @returns {boolean}
+ */
+const viewsInto = (value, buffer)=>{
+    if (ArrayBuffer.isView(value))
+    {
+        return value.buffer === buffer;
+    }
+    if (Array.isArray(value))
+    {
+        return value.some(member=>viewsInto(member, buffer));
+    }
+    if (value !== null && typeof value === 'object'
+        && Object.getPrototypeOf(value) === Object.prototype)
+    {
+        return Object.values(value).some(member=>viewsInto(member, buffer));
+    }
+    return false;
+};
+
+/**
  * The playing side: the calls a recording wrote, made in their order on a
  * root of the same build, with the same objects by the same numbers.
  *
@@ -2145,14 +2169,18 @@ export function createRecording(options){
  *     the guest memory a recording lent, read in place
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
  *     object: (number: number) => any, counts: () => OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBuffer, give: () => void) => void }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
  *     one), a paced one with the promise its device holds the caller on, and
  *     any other with what the call answered;
  *     `allocate` is the played device's, the next address its recorded call
- *     was given; `read` reads a batch of calls, and answers how long the look
- *     at the objects at a count of zero took when the batch made one
+ *     was given; `read` reads a batch of calls (the first `length` bytes of the
+ *     buffer, all of them by default), and answers how long the look
+ *     at the objects at a count of zero took when the batch made one;
+ *     `spent` gives a read batch's buffer back once nothing played from it needs it
  */
 export function createPlayer({ root, ship, read, borrow }){
     /**
@@ -2191,6 +2219,16 @@ export function createPlayer({ root, ship, read, borrow }){
     /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
     let presentedSinceSweep = false;
     let batchesSinceSweep = 0;
+    /** The batch being read. @type {ArrayBuffer | null} */
+    let reading = null;
+    /**
+     * The batches an answer still to come keeps a view of, as its arguments
+     * a device fills when it settles: how many such answers, and what gives
+     * the buffer back once the last one has (`spent`).
+     *
+     * @type {Map<ArrayBuffer, { owed: number, give: (() => void) | null }>}
+     */
+    const kept = new Map();
     /** Where the last look stopped (`SWEEP_SLICE`); a set's iterator follows its changes. */
     let sweeping = uncounted.values();
     /**
@@ -2284,6 +2322,27 @@ export function createPlayer({ root, ship, read, borrow }){
             known.add(object);
             objects.push(object);
         }
+    };
+
+    /**
+     * Holds a batch's buffer until an answer that keeps a view of it is
+     * settled and sent: the receiver sends it on `settled`, after this, so the
+     * buffer goes back a microtask later still.
+     *
+     * @param {ArrayBuffer} buffer @param {Promise<unknown>} settled
+     */
+    const keep = (buffer, settled)=>{
+        const entry = kept.get(buffer) ?? { owed: 0, give: null };
+        entry.owed++;
+        kept.set(buffer, entry);
+        const done = ()=>queueMicrotask(()=>{
+            if (--entry.owed === 0)
+            {
+                kept.delete(buffer);
+                entry.give?.();
+            }
+        });
+        settled.then(done, done);
     };
 
     /**
@@ -2419,6 +2478,10 @@ export function createPlayer({ root, ship, read, borrow }){
                     move(args);
                     return { answer: value, outs: args, ...beside() };
                 });
+                if (reading && viewsInto(args, reading))
+                {
+                    keep(reading, settled);
+                }
                 if (call.wait === WAIT.ANSWER)
                 {
                     return settled;
@@ -2453,8 +2516,34 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             return address;
         },
-        read: (buffer, each)=>{
-            reader.read(buffer, each);
+        /**
+         * Gives a batch's buffer back once nothing played from it needs it:
+         * at once, or when the last answer still to come that keeps a view of
+         * it has settled and been sent.
+         *
+         * @param {ArrayBuffer} buffer @param {() => void} give
+         */
+        spent(buffer, give){
+            const entry = kept.get(buffer);
+            if (entry)
+            {
+                entry.give = give;
+            }
+            else
+            {
+                give();
+            }
+        },
+        read: (buffer, each, length = buffer.byteLength)=>{
+            reading = buffer;
+            try
+            {
+                reader.read(buffer, each, length);
+            }
+            finally
+            {
+                reading = null;
+            }
             // Looked at once a frame, or every so many batches for a program
             // that is not presenting: what it decides is only when a
             // destroyed object is let go, and a look after every batch went

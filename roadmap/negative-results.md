@@ -2625,3 +2625,31 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, the VM's hardware WebGPU adapter; Chrome
   version and power plan not recorded.
 - **Decision.** Not kept (the patch is not in the tree). The lever is the batches' memory.
+
+### 2026-11-06: a batch's buffer sent back and written on again (graphics remote, frame rate)
+
+- **Idea.** The lever the entry above names: every batch the engine posts to the graphics worker
+  was a new `ArrayBuffer`. Since 1c4ef4b14 the worker sends a batch's buffer back once read (later
+  if a deferred answer still views it) and the writer keeps up to four for its next batches. On one
+  run each arm with profiles (p05 against p06, 3DMark2001 SE feature tests) the graphics worker's
+  collector took 48% less time and the engine allocated 30% less; this entry is about frame rate.
+- **Workload.** 3DMark2001 SE (`--route`), `--worker --graphics-worker --coi --graphics-config
+  '{"compressedTextures":true}' --store local --prefetch`, 600 s, one profile kept for the six runs
+  of an arm (run 1 fills the translation store; runs 2-6 compared). Before: s01w on 1150e0170.
+  After: s01wr on 1c4ef4b14, which also merges ea33f150b (Direct3D 8/9 focus hook; cork unchanged).
+  Every batch came back in s01wr (214 843 of 214 843 in run 4). Bundle hash not recorded.
+- **Values.** Runs 2-6, fps / 1% low / drops:
+  before 255.2/11.9/327, 246.7/11.6/331, 241.6/11.3/456, 264.2/12.6/261, 251.1/11.9/325
+  (median 251.1/11.9/327); after 254.8/11.8/300, 265.0/12.5/245, 266.3/12.5/342, 257.1/11.5/326,
+  259.0/12.3/317 (median 259.0/12.3/317). The arms overlap (Mann-Whitney U 4 of 25, p about 0.15).
+  Drops waiting on bundle blocks ("fetch") fell from 24-44 to 6-15 a run, which batches do not
+  explain; without them the median is 283 before and 302 after. Two runs after (3 and 5) have a
+  3 s burst at about 225 s where guest code runs at half speed (2.3 ns an instruction against
+  1.2); the same burst is in a run before the change (s01d, 07-35-08, at 235 s), so it is the
+  machine, not the change.
+- **Why.** The batches' memory was the graphics worker's collector, not what drops frames: on this
+  workload most drops are translation and host turns.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, the VM's hardware WebGPU adapter; Chrome
+  version and power plan not recorded.
+- **Decision.** Kept for memory and collection (the product's memory goal); not counted as a
+  frame-rate gain.

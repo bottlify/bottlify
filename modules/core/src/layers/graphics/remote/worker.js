@@ -638,7 +638,7 @@ export function serveGraphics(scope, deps){
             {
                 try
                 {
-                    capture.calls(captured, event.data.buffer);
+                    capture.calls(captured, event.data.buffer, event.data.length);
                 }
                 catch (e){
                     // What is written down never stands in the way of what is

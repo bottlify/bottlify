@@ -140,8 +140,10 @@ export function recordedDirect3D10(factory, options, transport){
  *     call goes -- a staging resource read back, which the program waits for
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     counts: () => import('./replay.js').OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBuffer, give: () => void) => void }}
  */
 export function playedDirect3D10(factory, options){
     const mirror = createMirror();
@@ -193,6 +195,7 @@ export function playedDirect3D10(factory, options){
             }
         },
         read: live.read,
+        spent: live.spent,
         counts: live.counts,
     };
 }
