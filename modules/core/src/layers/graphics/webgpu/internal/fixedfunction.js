@@ -426,8 +426,10 @@ export function fogFunctionDeclaration(mode, factors = 'uniforms.fogFactors', pe
     // A range of nothing is a program asking for a step at that distance, not
     // a division by zero that erases the frame -- per pixel. At the vertices
     // Windows fogs it whole (Wine's d3d8 fog_special_test): a step there would
-    // interpolate into a gradient across every primitive that spans it.
-    if (end <= start)
+    // interpolate into a gradient across every primitive that spans it. A
+    // range the wrong way round is the same formula, the fog thinning with
+    // distance (Wine's d3d9 fog_test, reversed fog).
+    if (end == start)
     {
         return ${perVertex ? '0.0' : 'select(1.0, 0.0, dist >= end)'};
     }

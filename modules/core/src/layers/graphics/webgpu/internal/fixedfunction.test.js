@@ -895,6 +895,9 @@ test('each fog mode gets its own curve, and only its own', ()=>{
     const linear = generate(baseState({ fogMode: D3DFOG.LINEAR })).code;
     assert.match(linear, /\(end - dist\) \/ \(end - start\)/);
     assert.doesNotMatch(linear, /exp\(/);
+    // Only a range of nothing is a step: one the wrong way round thins with
+    // distance through the same formula (Wine's d3d9 fog_test, reversed fog).
+    assert.match(linear, /if \(end == start\)/);
 
     const exponential = generate(baseState({ fogMode: D3DFOG.EXP })).code;
     assert.match(exponential, /exp\(-uniforms\.fogFactors\.z \* dist\)/);
