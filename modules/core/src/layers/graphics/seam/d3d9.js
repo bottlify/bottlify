@@ -66,7 +66,7 @@ import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { capabilityWords } from '../d3d9/caps.js';
-import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
+import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
@@ -160,12 +160,6 @@ const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 /** D3DPRESENTFLAG_LOCKABLE_BACKBUFFER. */
 const LOCKABLE_BACKBUFFER = 0x00000001;
 
-/**
- * The adapter formats a display mode is listed in: 32-bit and 16-bit.
- *
- * @type {ReadonlySet<number>}
- */
-const ADAPTER_FORMATS = new Set([D3DFMT.X8R8G8B8, D3DFMT.R5G6B5]);
 
 /** The most dwords a shader read from guest memory may run to before it is given up on. */
 const MAX_SHADER_DWORDS = 1 << 16;
@@ -3268,7 +3262,7 @@ export function createDirect3D9Seam(
      *
      * @param {number} format
      */
-    const adapterModes = format=>(ADAPTER_FORMATS.has(format) ? displayModes(screen()) : []);
+    const adapterModes = format=>(DISPLAY_MODE_FORMATS.has(format) ? displayModes(screen()) : []);
 
     /** @type {ReadonlySet<number>} the device types this version names */
     const DEVICE_TYPES = new Set(Object.values(D3DDEVTYPE));

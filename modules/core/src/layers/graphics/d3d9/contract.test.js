@@ -68,6 +68,20 @@ test('the adapter answers format questions from the table its creates consult', 
     assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.UNKNOWN, false),
         D3DERR_NOTAVAILABLE, 'and is not allowed full screen');
     assert.equal(d3d.CheckDeviceType(D3DFMT.D24S8, D3DFMT.X8R8G8B8, true), D3DERR_NOTAVAILABLE);
+    // Wine's test_display_formats: full screen, a display format with modes
+    // and a back buffer of it or its alpha twin; windowed, any target a
+    // present converts from, but not onto a 10-bit display or a non-display
+    // format.
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8, false), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.R5G6B5, false), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X1R5G5B5, false), D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.X1R5G5B5, D3DFMT.X1R5G5B5, false),
+        D3DERR_NOTAVAILABLE, 'no modes in X1R5G5B5');
+    assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X8R8G8B8, true), D3D_OK);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.A2R10G10B10, D3DFMT.A2R10G10B10, true),
+        D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceType(D3DFMT.A8R8G8B8, D3DFMT.A8R8G8B8, true), D3DERR_NOTAVAILABLE,
+        'A8R8G8B8 is no display format');
 
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),

@@ -436,6 +436,17 @@ const ALPHA_TWINS = new Map([
 ]);
 /** @param {number} format @returns {number | undefined} */
 const alphaTwin = format=>ALPHA_TWINS.get(format);
+
+/** The formats a display can be in. @type {ReadonlySet<number>} */
+const DISPLAY_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.X8R8G8B8, D3DFMT.A2R10G10B10]));
+/**
+ * The display formats the adapter lists modes in: 32-bit and 16-bit.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const DISPLAY_MODE_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.X8R8G8B8,
+    D3DFMT.R5G6B5]));
 /**
  * The colour formats StretchRect converts between in guest bytes, each
  * pixel through its D3DCOLOR (`expandTexels`, `packBits`).
@@ -677,12 +688,30 @@ export function createDirect3D9(options = {}){
          * @param {boolean} [windowed]
          */
         CheckDeviceType(adapterFormat, backBufferFormat, windowed = true){
-            // D3DFMT_UNKNOWN as the back buffer means "the adapter's", and is
-            // legal only windowed.
-            const back = backBufferFormat === D3DFMT.UNKNOWN
-                ? (windowed ? adapterFormat : -1)
-                : backBufferFormat;
-            return isColourFormat(adapterFormat) && isColourFormat(back)
+            // The four display formats; A2R10G10B10 only full screen
+            // (Wine's test_display_formats).
+            if (!DISPLAY_FORMATS.has(adapterFormat)
+                || (windowed && adapterFormat === D3DFMT.A2R10G10B10))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            if (windowed)
+            {
+                // D3DFMT_UNKNOWN as the back buffer means "the adapter's".
+                // Any target colour format a present converts from will do.
+                const back = backBufferFormat === D3DFMT.UNKNOWN ? adapterFormat
+                    : backBufferFormat;
+                return this.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.SURFACE, back)
+                    === D3D_OK
+                    && this.CheckDeviceFormatConversion(back, adapterFormat) === D3D_OK
+                    ? D3D_OK
+                    : D3DERR_NOTAVAILABLE;
+            }
+            // Full screen the display has to have modes in the format, and the
+            // back buffer is that format or the same with alpha.
+            return DISPLAY_MODE_FORMATS.has(adapterFormat)
+                && (backBufferFormat === adapterFormat
+                    || backBufferFormat === alphaTwin(adapterFormat))
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
