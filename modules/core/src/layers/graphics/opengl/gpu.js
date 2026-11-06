@@ -3111,13 +3111,21 @@ export function createGpuRenderer(services){
     /**
      * @param {Recording} recording
      * @param {DrawableSurfaces} target
-     * @param {any} shown   the opaque copy this frame is shown through
-     * @param {number} cut   the backend's cut this recording was queued as
+     * @param {any} shown   the opaque copy this frame is shown through, or null
+     *        for the part of a frame a read needs drawn, which is not shown
+     * @param {number | undefined} cut   the backend's cut this recording was
+     *        queued as; none for that part of a frame
+     * @param {any} [read]   a surface whose texels the frame ends by copying out
+     * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
+     *     what `read` held once the recording was drawn
      */
-    const replay = async(recording, target, shown, cut)=>{
-        const show = pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
-            showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
-        const built = await Promise.allSettled([...recording.pipelines, show]);
+    const replay = async(recording, target, shown, cut, read)=>{
+        const show = shown ? pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
+            showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN) : null;
+        const built = await Promise.allSettled(show ? [...recording.pipelines, show]
+            : recording.pipelines);
+        /** @type {(() => Promise<any>) | null} */
+        let copied = null;
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -3315,8 +3323,13 @@ export function createGpuRenderer(services){
                     pass = null;
                 }
             }
-            const shownBy = built[built.length - 1];
-            if (shownBy.status === 'fulfilled')
+            if (read)
+            {
+                copied = frame.snapshot(read);
+            }
+            // A frame drawn for a read shows nothing.
+            const shownBy = shown ? built[built.length - 1] : null;
+            if (shownBy?.status === 'fulfilled')
             {
                 pass = frame.beginPass({ target: shown, clear: false });
                 pass.setPipeline(shownBy.value.gpu);
@@ -3328,7 +3341,7 @@ export function createGpuRenderer(services){
                 pass.draw(3, 1, 0);
                 frame.present(shown);
             }
-            else
+            else if (shownBy)
             {
                 lose(String(shownBy.reason?.message ?? shownBy.reason));
             }
@@ -3351,6 +3364,7 @@ export function createGpuRenderer(services){
                     .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
                     .join(' ')}]`;
         }
+        return copied ? copied() : null;
     };
 
     /** @param {any} a @param {any} b */
@@ -3469,12 +3483,98 @@ export function createGpuRenderer(services){
             target.current ^= 1;
             const cut = backend.markPresent();
             chain = chain
-                .then(()=>replay(recording, target, shown, cut))
+                .then(async()=>{
+                    await replay(recording, target, shown, cut);
+                })
                 .catch(error=>{
                     unflushed.delete(recording.id);
                     lose(error instanceof Error ? error.message : String(error));
                 });
             return { width: target.width, height: target.height };
+        },
+
+        /**
+         * glReadPixels' colour on the device: what the context drew so far is
+         * drawn now, and the read framebuffer's read buffer -- or the window's
+         * back buffer -- copied out once it is. Null for a context with no
+         * drawable, or a read buffer that is no colour image this renderer
+         * reads.
+         *
+         * @param {object} context
+         * @param {{ x: number, y: number, width: number, height: number }} rect
+         *     in window coordinates, y up
+         * @param {any} readFbo  the read framebuffer object, or null for the window's
+         * @returns {Promise<Uint8Array | null> | null} the rectangle as RGBA, its bottom
+         *     row first, zero where it lies outside the buffer
+         */
+        readPixels(context, rect, readFbo){
+            const surfaces = drawables.get(context);
+            if (!surfaces)
+            {
+                return null;
+            }
+            const recording = recordingOf(context);
+            const source = sourceOf(surfaces, readFbo, recording);
+            if (!source)
+            {
+                return null;
+            }
+            const attachment = readFbo ? readFbo.attachments.get(readFbo.readBuffer) : null;
+            const read = { texture: source.view.texture, width: source.width,
+                height: source.height, format: source.view.format,
+                mipLevel: attachment?.kind === 'texture' ? attachment.level : 0,
+                layer: attachment?.kind === 'texture' ? attachment.face : 0 };
+            const swapped = read.format === COLOUR_FORMAT;
+            if (!swapped && read.format !== TEXTURE_FORMAT)
+            {
+                return null;
+            }
+            // Everything drawn so far is drawn now; what the context draws
+            // after the read goes into a recording of its own over the result.
+            recordings.delete(context);
+            /** @type {{ width: number, height: number, data: Uint8Array } | null} */
+            let shot = null;
+            chain = chain
+                .then(async()=>{
+                    shot = await replay(recording, surfaces, null, undefined, read);
+                })
+                .catch(error=>{
+                    unflushed.delete(recording.id);
+                    lose(error instanceof Error ? error.message : String(error));
+                });
+            return chain.then(()=>{
+                if (!shot)
+                {
+                    return null;
+                }
+                const { width, height } = rect;
+                const out = new Uint8Array(width * height * 4);
+                const taken = /** @type {{ width: number, height: number, data: Uint8Array }} */ (shot);
+                for (let row = 0; row < height; row++)
+                {
+                    const y = rect.y + row;
+                    if (y < 0 || y >= taken.height)
+                    {
+                        continue;
+                    }
+                    const line = source.flipped ? y : taken.height - 1 - y;
+                    for (let column = 0; column < width; column++)
+                    {
+                        const x = rect.x + column;
+                        if (x < 0 || x >= taken.width)
+                        {
+                            continue;
+                        }
+                        const from = (line * taken.width + x) * 4;
+                        const to = (row * width + column) * 4;
+                        out[to] = taken.data[from + (swapped ? 2 : 0)];
+                        out[to + 1] = taken.data[from + 1];
+                        out[to + 2] = taken.data[from + (swapped ? 0 : 2)];
+                        out[to + 3] = taken.data[from + 3];
+                    }
+                }
+                return out;
+            });
         },
 
         /** Every replay queued so far has run. */

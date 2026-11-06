@@ -256,6 +256,80 @@ test('a recorded context answers the program as a context on a device does', asy
 });
 
 /**
+ * glReadPixels through OPENGL32's exports on a device: the window's colour
+ * filled on the fake device (its top row blue, the rest red, BGRA), a 2x2
+ * read across its top edge, and what lands in the program's memory.
+ *
+ * @param {(factory: any, services: any) => any} [remote]
+ * @returns {Promise<number[]>}
+ */
+async function readThrough(remote){
+    const gpu = createFakeDevice();
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(0x10000);
+    const opengl = createOpengl({
+        readMemory: (at, length)=>bytes.subarray(at, at + length),
+        windowMemory: (at, length)=>bytes.subarray(at, at + length),
+        writeMemory: (at, value)=>bytes.set(value, at),
+        scratch: { allocate: ()=>0x8000 },
+        screen: ()=>({ width: 16, height: 16 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        frameQueued: ()=>null,
+        remote,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    assert.equal(gl('wglSetPixelFormat', 0x900d, 1, 0), 1);
+    assert.equal(gl('wglMakeCurrent', 0x900d, gl('wglCreateContext', 0x900d)), 1);
+    gl('glClear', GL.COLOR_BUFFER_BIT);
+    // The played side makes the window's surfaces when the context is made current there.
+    let colour = null;
+    while (!colour)
+    {
+        colour = gpu.of('createTexture').map((/** @type {any} */ call)=>call.texture)
+            .reverse().find((/** @type {any} */ texture)=>/gl-colour/.test(
+                texture.descriptor.label ?? ''));
+        if (!colour)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    for (let at = 0; at < colour.bytes.length; at += 4)
+    {
+        colour.bytes.set(at < colour.extent.width * 4 ? [255, 0, 0, 255] : [0, 0, 255, 255], at);
+    }
+    const height = colour.extent.height;
+    const answer = gl('glReadPixels', 0, height - 1, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 0x4000);
+    assert.ok(answer instanceof Promise, 'the call waits for the pixels');
+    assert.equal(await answer, 0);
+    return [...bytes.subarray(0x4000, 0x4010)];
+}
+
+test('glReadPixels on a device writes what was drawn, wherever the device is', async()=>{
+    // Bottom row first: the window's top row is the read's bottom one.
+    const expected = [0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert.deepEqual(await readThrough(), expected);
+    assert.deepEqual(await readThrough(loopback), expected);
+    try
+    {
+        assert.deepEqual(await readThrough(acrossAPort), expected);
+    }
+    finally
+    {
+        for (const port of ports.splice(0))
+        {
+            port.close();
+        }
+    }
+});
+
+/**
  * A recorded OpenGL root whose calls cross a port to their played twin, as
  * they cross to the graphics worker.
  *

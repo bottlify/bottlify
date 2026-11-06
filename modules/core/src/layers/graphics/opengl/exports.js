@@ -2023,15 +2023,6 @@ export function createOpengl(services){
 
         // --- pixels ---
 
-        glReadPixels: ([x, y, width, height, format, type, out])=>call(context=>{
-            wgl.meetBitmap(context);
-            const packed = context.glReadPixels(
-                x | 0, y | 0, width | 0, height | 0, format >>> 0, type >>> 0);
-            if (packed && (out >>> 0) !== 0)
-            {
-                services.writeMemory(out >>> 0, packed);
-            }
-        }),
         glDrawPixels: ([width, height, format, type, pixels])=>call(context=>{
             const unpack = unpackState(context);
             const needed = imageBytes(width | 0, height | 0, format >>> 0, type >>> 0, unpack);
@@ -2083,15 +2074,35 @@ export function createOpengl(services){
     }
 
     /**
-     * The two calls here that may wait before they answer: a swap on the
-     * device waits, once it is enough frames behind, for the oldest to
-     * finish. Kept apart from `implemented` so that `entry` never hands one
-     * out -- a caller already on this side of the boundary has no thread to
-     * park.
+     * The calls here that may wait before they answer: a swap on the device
+     * waits, once it is enough frames behind, for the oldest to finish, and a
+     * read of pixels on the device for them to be drawn and copied back. Kept
+     * apart from `implemented` so that `entry` never hands one out -- a
+     * caller already on this side of the boundary has no thread to park.
      *
      * @type {Record<string, (args: number[]) => number | Promise<number>>}
      */
     const swaps = {
+        glReadPixels: ([x, y, width, height, format, type, out])=>{
+            const context = current();
+            if (!context)
+            {
+                return 0;
+            }
+            wgl.meetBitmap(context);
+            const packed = context.glReadPixels(
+                x | 0, y | 0, width | 0, height | 0, format >>> 0, type >>> 0);
+            /** @param {Uint8Array | null} bytes */
+            const write = bytes=>{
+                if (bytes && (out >>> 0) !== 0)
+                {
+                    services.writeMemory(out >>> 0, bytes);
+                }
+                return 0;
+            };
+            return packed instanceof Promise ? packed.then(write) : write(packed);
+        },
+
         wglSwapBuffers: ([hdc])=>{
             if (!wgl.SwapBuffers(hdc >>> 0))
             {
@@ -2211,13 +2222,13 @@ export function createOpengl(services){
          * a GLfloat as its bits, a GLdouble as two words low first, a pointer as a
          * guest address -- so a kernel that reads a pointer out of guest memory hands
          * it straight through. Null for a name this library does not implement,
-         * and for the two swaps, which may wait.
+         * and for the calls that may wait.
          *
          * @param {string} name
          * @returns {((args: number[]) => number) | null}
          */
         entry: name=>(implemented[name]
-            // The swaps, which may wait, are not among these.
+            // The calls that may wait are not among these.
             ? /** @type {(args: number[]) => number} */ (table[name].handler)
             : null),
 

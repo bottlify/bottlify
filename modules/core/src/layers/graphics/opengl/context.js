@@ -403,6 +403,11 @@ export function createGlContext(options = {}){
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
                     width, height, kernel.side.readFramebuffer?.() ?? null)
             : null,
+        readBack: gpu?.readPixels
+            ? rect=>(attached
+                ? gpu.readPixels(context, rect, kernel.side.readFramebuffer?.() ?? null)
+                : null)
+            : null,
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,

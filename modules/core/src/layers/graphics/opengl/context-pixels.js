@@ -266,8 +266,9 @@ export function installPixelCalls(context, kernel){
          * @param {number} height
          * @param {number} format
          * @param {number} type
-         * @returns {Uint8Array | null} the packed pixels, for the caller to
-         *          write where the program asked
+         * @returns {Uint8Array | Promise<Uint8Array | null> | null} the packed
+         *          pixels, for the caller to write where the program asked: a
+         *          promise of them for a framebuffer on the device
          */
         glReadPixels(x, y, width, height, format, type){
             if (!enter('glReadPixels', [x, y, width, height, format, type]))
@@ -280,13 +281,14 @@ export function installPixelCalls(context, kernel){
                 return null;
             }
             const frame = kernel.framebuffer();
-            if (kernel.gpuBacked())
-            {
-                kernel.diverge('glReadPixels was accepted and read black: the framebuffer'
-                    + ' lives on the device and is not read back');
-            }
+            const onDevice = kernel.gpuBacked();
             if (format === GL.DEPTH_COMPONENT)
             {
+                if (onDevice)
+                {
+                    kernel.diverge('glReadPixels of depth was accepted and read zero: the'
+                        + ' depth buffer lives on the device and is not read back');
+                }
                 if (!frame.depth)
                 {
                     setError(GL.INVALID_OPERATION);
@@ -330,6 +332,19 @@ export function installPixelCalls(context, kernel){
                     + ' int and float types are written');
                 setError(GL.INVALID_ENUM);
                 return null;
+            }
+            if (onDevice)
+            {
+                const pack = packState();
+                const reading = kernel.readBack?.({ x, y, width, height }) ?? null;
+                if (reading)
+                {
+                    return reading.then(texels=>packImage(
+                        texels ?? new Uint8Array(width * height * 4), width, height, format,
+                        type, pack));
+                }
+                kernel.diverge('glReadPixels was accepted and read black: the read buffer'
+                    + ' lives on the device and is not one it reads back');
             }
             const texels = new Uint8Array(width * height * 4);
             for (let row = 0; row < height; row++)

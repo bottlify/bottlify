@@ -948,11 +948,11 @@ test('a depth range run backwards is the viewport\'s range with the depth turned
         assert.equal(forward[UNIFORM.misc + 1], 1, 'and leaves a forward range alone');
     });
 
-test('a read of the framebuffer on the device path is reported, not answered', ()=>{
+test('a read of depth on the device path is reported, not answered', ()=>{
     const r = rig();
     const { context } = r;
-    context.glReadPixels(0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 0x3000);
-    assert.ok(r.divergences.some(d=>/glReadPixels was accepted and read black/.test(d)));
+    context.glReadPixels(0, 0, 2, 2, GL.DEPTH_COMPONENT, GL.FLOAT);
+    assert.ok(r.divergences.some(d=>/glReadPixels of depth was accepted and read zero/.test(d)));
 });
 
 test('the stencil test on the device path is not reported: the depth attachment carries it',
@@ -2220,3 +2220,70 @@ test('a divisor past one copies each instance\'s element out, and a draw of no i
     assert.deepEqual([...colour.buffer.bytes.subarray(colour.offset, colour.offset + 12)],
         [10, 0, 0, 255, 10, 0, 0, 255, 20, 0, 0, 255], 'the elements copied out in instance order');
 });
+
+/** @param {ReturnType<typeof rig>} r @param {RegExp} label */
+function textureLabelled(r, label){
+    return r.gpu.of('createTexture').map((/** @type {any} */ call)=>call.texture)
+        .reverse().find((/** @type {any} */ texture)=>label.test(texture.descriptor.label ?? ''));
+}
+
+test('glReadPixels on the device draws what was recorded first, then copies the back buffer',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        // The window's colour, BGRA with its top row first: the top row blue,
+        // the rest red.
+        const colour = textureLabelled(r, /gl-colour/);
+        for (let at = 0; at < colour.bytes.length; at += 4)
+        {
+            colour.bytes.set(at < 64 * 4 ? [255, 0, 0, 255] : [0, 0, 255, 255], at);
+        }
+        context.glClearColor(1, 0, 0, 1);
+        context.glScissor(0, 0, 1, 1);
+        context.glEnable(GL.SCISSOR_TEST);
+        context.glClear(GL.COLOR_BUFFER_BIT);
+        const reading = context.glReadPixels(62, 30, 3, 2, GL.RGBA, GL.UNSIGNED_BYTE);
+        assert.ok(reading instanceof Promise, 'the pixels come once the device has drawn them');
+        assert.deepEqual([...await reading], [
+            255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 0,
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0,
+        ], 'GL\'s rows bottom first, RGBA, nothing outside the buffer');
+        const order = r.gpu.calls.filter((/** @type {any} */ c)=>c.op === 'draw'
+            || c.op === 'copyTextureToBuffer').map((/** @type {any} */ c)=>c.op);
+        assert.deepEqual(order, ['draw', 'copyTextureToBuffer'],
+            'the clear recorded before the read is drawn before the copy');
+        assert.match(r.gpu.of('copyTextureToBuffer')[0].source.texture.descriptor.label,
+            /gl-colour/);
+        // Drawn already, the clear is not drawn again at the swap.
+        await r.swap();
+        assert.equal(r.gpu.of('draw').filter((/** @type {any} */ c)=>c.args?.[0] === 3).length,
+            2, 'the clear once, and the frame shown');
+        assert.deepEqual(r.divergences.filter(d=>/glReadPixels/.test(d)), []);
+    });
+
+test('glReadPixels on the device reads a framebuffer object\'s texture the way GL lays it',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        // Two rows: the first given, GL's bottom one, red; the second green.
+        r.bytes.set([255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255], 0x3000);
+        context.glGenTextures(1);
+        context.glBindTexture(GL.TEXTURE_2D, 1);
+        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 2, 2, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            0x3000);
+        context.glGenFramebuffers(1);
+        context.bindFramebuffer(GL.FRAMEBUFFER, 1, false);
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0);
+        assert.deepEqual([...await context.glReadPixels(1, 0, 1, 2, GL.RGBA, GL.UNSIGNED_BYTE)],
+            [255, 0, 0, 255, 0, 255, 0, 255]);
+        // A level past the first is copied from that level (the fake device
+        // keeps the texels of the first alone).
+        r.bytes.set([0, 0, 255, 255], 0x3100);
+        context.glTexImage2D(GL.TEXTURE_2D, 1, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            0x3100);
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 1);
+        await context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE);
+        const copy = r.gpu.of('copyTextureToBuffer').at(-1);
+        assert.equal(copy.source.mipLevel, 1);
+        assert.deepEqual([copy.size.width, copy.size.height], [1, 1]);
+    });
