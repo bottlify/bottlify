@@ -630,7 +630,9 @@ export function blt(request){
     const fills = flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL);
     if (((fills !== 0 || (flags & DDBLT_ROP) !== 0) && request.fxGiven === false)
         || (fills !== 0 && request.src)
-        || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0))
+        || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0)
+        // A copy needs its source, before its rectangles (Wine's test_blt).
+        || (fills === 0 && (flags & DDBLT_ROP) === 0 && !request.src))
     {
         return DDERR_INVALIDPARAMS;
     }

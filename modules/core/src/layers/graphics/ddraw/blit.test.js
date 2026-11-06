@@ -482,6 +482,8 @@ test('a fill or raster operation is checked before its rectangles: it needs its 
         assert.equal(blt({ memory, dest, src, srcRect, flags: DDBLT_ROP, fx }), DDERR_INVALIDRECT);
     }
     assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx }), 0);
+    // A copy with no source, before its inverted rectangle (test_blt).
+    assert.equal(blt({ memory, dest, destRect: inverted, flags: 0 }), DDERR_INVALIDPARAMS);
     // Both fills on a colour surface: the colour fill is made.
     assert.equal(blt({ memory, dest, flags: DDBLT_COLORFILL | DEPTHFILL, fx }), 0);
     assert.equal(readPixel(memory, dest, 2, 2), 0x11223344);
