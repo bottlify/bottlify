@@ -249,28 +249,28 @@ export function deviceBytes(data, sized, storage, width, height, depth){
 }
 
 /**
- * A depth level's depths, and its stencils, as the words the device's depth
- * write takes (`webgpu/internal/depth.js`): the depths as floats, then a
- * stencil a word.
+ * A depth level's depths and stencils, one slice of it, as the device's
+ * depth write takes them (`webgpu/internal/depth.js` `depthWriteWords`): the
+ * depths as floats clamped to [0, 1] (a depth attachment holds no other), and
+ * the stencils, zero for a format without any.
  *
  * @param {Uint8Array} data @param {SizedFormat} sized
- * @param {boolean} stencil  whether the device's format has a stencil to write
- * @returns {Float32Array}
+ * @param {number} texels  a slice's texels @param {number} slice
+ * @returns {{ depths: Float32Array, stencils: Uint8Array }}
  */
-export function depthWords(data, sized, stencil){
-    const values = decodeStorage(data, sized);
-    const count = values.length / 4;
-    const out = new Float32Array(count * (stencil ? 2 : 1));
-    const stencils = new Uint32Array(out.buffer);
-    for (let i = 0; i < count; i++)
+export function depthSlice(data, sized, texels, slice){
+    const bytes = modelTexelBytes(sized);
+    const values = decodeStorage(data.subarray(slice * texels * bytes,
+        (slice + 1) * texels * bytes), sized);
+    const depths = new Float32Array(texels);
+    const stencils = new Uint8Array(texels);
+    for (let i = 0; i < texels; i++)
     {
-        out[i] = sized.kind === 'stencil' ? 0 : values[i * 4];
-        if (stencil)
-        {
-            stencils[count + i] = values[i * 4 + 1];
-        }
+        const depth = sized.kind === 'stencil' ? 0 : values[i * 4];
+        depths[i] = Number.isNaN(depth) ? 0 : Math.min(1, Math.max(0, depth));
+        stencils[i] = values[i * 4 + 1];
     }
-    return out;
+    return { depths, stencils };
 }
 
 /**

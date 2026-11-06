@@ -1931,8 +1931,13 @@ export function createOpengl(services){
         glCompressedTexSubImage3DARB: a=>answer(current()?.glCompressedTexSubImage3DARB(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0,
             a[8] >>> 0, a[9] | 0, a[10] >>> 0)),
-        glGetCompressedTexImageARB: ([target, level])=>
-            answer(current()?.glGetCompressedTexImageARB(target >>> 0, level | 0)),
+        glGetCompressedTexImageARB: ([target, level, out])=>call(context=>{
+            const blocks = context.glGetCompressedTexImageARB(target >>> 0, level | 0);
+            if (blocks && (out >>> 0) !== 0)
+            {
+                services.writeMemory(out >>> 0, blocks);
+            }
+        }),
 
         // --- display lists ---
 

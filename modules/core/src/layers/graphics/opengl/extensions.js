@@ -124,6 +124,12 @@ export const GL_EXTENSIONS = Object.freeze({
         'glCompressedTexSubImage3DARB', 'glGetCompressedTexImageARB',
     ],
     GL_EXT_texture_compression_s3tc: [],
+    // Formats kept as their own bytes (`formats.js`), each whole: its images,
+    // its client layouts both ways, its sampling.
+    GL_EXT_texture_shared_exponent: [],
+    GL_ARB_texture_compression_rgtc: [],
+    GL_EXT_texture_compression_rgtc: [],
+    GL_ARB_texture_compression_bptc: [],
     GL_ARB_vertex_buffer_object: [
         'glBindBufferARB', 'glDeleteBuffersARB', 'glGenBuffersARB', 'glIsBufferARB',
         'glBufferDataARB', 'glBufferSubDataARB', 'glGetBufferSubDataARB', 'glMapBufferARB',

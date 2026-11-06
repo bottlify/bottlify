@@ -230,12 +230,13 @@ export function clientBytes(width, height, depth, format, type, state){
 
 // --- half floats and the small floats of the packed formats ---
 
-const scratch = new DataView(new ArrayBuffer(4));
+const scratchFloat = new Float32Array(1);
+const scratchBits = new Uint32Array(scratchFloat.buffer);
 
 /** @param {number} value @returns {number} the nearest half float's bits */
 export function toHalf(value){
-    scratch.setFloat32(0, value);
-    const bits = scratch.getUint32(0);
+    scratchFloat[0] = value;
+    const bits = scratchBits[0];
     const sign = (bits >>> 16) & 0x8000;
     const exponent = (bits >>> 23) & 0xff;
     let mantissa = bits & 0x7fffff;
@@ -903,8 +904,142 @@ export function unpackToStorage(bytes, width, height, depth, format, type, state
         }
         return out;
     }
+    const fast = unpackByRows(bytes, width, height, depth, format, type, state, sized);
+    if (fast !== undefined)
+    {
+        return fast;
+    }
     const values = decodeClient(bytes, width, height, depth, format, type, state);
     return values ? encodeStorage(values, sized) : null;
+}
+
+/** The typed array each unpacked client type reads as. */
+const ELEMENTS = new Map(/** @type {[number, any][]} */ ([
+    [GL.UNSIGNED_BYTE, Uint8Array], [GL.BYTE, Int8Array], [GL.UNSIGNED_SHORT, Uint16Array],
+    [GL.SHORT, Int16Array], [GL.UNSIGNED_INT, Uint32Array], [GL.INT, Int32Array],
+    [GL.FLOAT, Float32Array], [TEX.HALF_FLOAT, Uint16Array],
+]));
+
+/**
+ * What one client component is as a value: `readValue`'s conversion, for a
+ * typed array's element.
+ *
+ * @param {number} type @param {boolean} integer
+ * @returns {(raw: number) => number}
+ */
+function componentReader(type, integer){
+    if (type === TEX.HALF_FLOAT)
+    {
+        return fromHalf;
+    }
+    if (type === GL.FLOAT || integer)
+    {
+        return raw=>raw;
+    }
+    switch (type)
+    {
+        case GL.UNSIGNED_BYTE:
+            return raw=>raw / 255;
+        case GL.BYTE:
+            return raw=>Math.max(raw / 127, -1);
+        case GL.UNSIGNED_SHORT:
+            return raw=>raw / 65535;
+        case GL.SHORT:
+            return raw=>Math.max(raw / 32767, -1);
+        case GL.UNSIGNED_INT:
+            return raw=>raw / 4294967295;
+        default:
+            return raw=>Math.max(raw / 2147483647, -1);
+    }
+}
+
+/**
+ * How a value becomes one component of a format's storage: `writeValue`'s
+ * conversion, into the typed array of the storage's components.
+ *
+ * @param {import('./formats.js').SizedFormat} sized
+ * @returns {{ Elements: any, write: (value: number) => number }}
+ */
+function componentWriter(sized){
+    const type = storageType(sized);
+    const Elements = type === TEX.HALF_FLOAT ? Uint16Array : ELEMENTS.get(type);
+    const bits = sized.bits[0];
+    if (sized.kind === 'float')
+    {
+        return { Elements, write: bits === 16 ? toHalf : value=>value };
+    }
+    const integer = isIntegerFormat(sized);
+    const signed = sized.kind === 'snorm' || sized.kind === 'int';
+    const max = signed ? 2 ** (bits - 1) - 1 : 2 ** bits - 1;
+    const min = signed ? (integer ? -max - 1 : -1) : 0;
+    return {
+        Elements,
+        write: integer
+            ? value=>(Number.isNaN(value) ? 0 : Math.min(max, Math.max(min, Math.trunc(value))))
+            : value=>(Number.isNaN(value) ? 0
+                : Math.round(Math.min(1, Math.max(min, value)) * max)),
+    };
+}
+
+/**
+ * The conversion a row at a time, through typed arrays, where the client's
+ * components are the format's in its order (RED, RG, RGB, RGBA and their
+ * integer twins) of an unpacked type: the same values `decodeClient` and
+ * `encodeStorage` make, without four values a texel in between.
+ *
+ * @param {Uint8Array} bytes @param {number} width @param {number} height
+ * @param {number} depth @param {number} format @param {number} type
+ * @param {TransferState} state @param {import('./formats.js').SizedFormat} sized
+ * @returns {Uint8Array | null | undefined} undefined where this does not apply
+ */
+function unpackByRows(bytes, width, height, depth, format, type, state, sized){
+    const Source = ELEMENTS.get(type);
+    const slots = SLOTS.get(colourOf(format));
+    if (!Source || !slots || sized.packing || sized.compressed || sized.kind === 'depth'
+        || sized.kind === 'stencil' || slots.some((slot, k)=>slot !== k)
+        || (state.swapBytes && Source.BYTES_PER_ELEMENT > 1))
+    {
+        return undefined;
+    }
+    const layout = /** @type {NonNullable<ReturnType<typeof clientLayout>>} */ (
+        clientLayout(width, height, format, type, state));
+    if (bytes.byteLength < clientBytes(width, height, depth, format, type, state))
+    {
+        return null;
+    }
+    const given = slots.length;
+    const kept = componentsOf(sized);
+    const read = componentReader(type, INTEGER_CLIENT_FORMATS.has(format));
+    const { Elements, write } = componentWriter(sized);
+    const out = new Uint8Array(width * height * depth * modelTexelBytes(sized));
+    const into = new Elements(out.buffer);
+    // What a component the client gave none of holds: zero, alpha one.
+    const missing = [0, 1, 2, 3].map(k=>write(k === 3 ? 1 : 0));
+    const rgb = sized.base === GL.RGB;
+    const rowBytes = width * layout.pixelBytes;
+    let at = 0;
+    for (let z = 0; z < depth; z++)
+    {
+        for (let y = 0; y < height; y++)
+        {
+            const from = layout.first + z * layout.imageStride + y * layout.rowStride;
+            let row = bytes.subarray(from, from + rowBytes);
+            if ((row.byteOffset % Source.BYTES_PER_ELEMENT) !== 0)
+            {
+                row = row.slice();
+            }
+            const source = new Source(row.buffer, row.byteOffset, width * given);
+            for (let x = 0; x < width; x++)
+            {
+                for (let k = 0; k < kept; k++)
+                {
+                    into[at++] = k < given && !(rgb && k === 3)
+                        ? write(read(source[x * given + k])) : missing[k];
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /**

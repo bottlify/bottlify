@@ -2512,17 +2512,32 @@ export function installTextureCalls(context, kernel){
         },
 
         /**
-         * The compressed bytes are not kept, only their decoding, so there is
-         * nothing to hand back: an operation error, and a divergence, because
-         * the real driver would have answered.
+         * A level of a compressed sized format hands back its blocks. An S3TC
+         * level's are not kept here, only their decoding, so there is nothing
+         * to hand back: an operation error, and a divergence, because the
+         * real driver would have answered.
          *
          * @param {number} target
          * @param {number} level
-         * @returns {null}
+         * @returns {Uint8Array | null}
          */
         glGetCompressedTexImageARB(target, level){
             if (!enter('glGetCompressedTexImageARB', [target, level]))
             {
+                return null;
+            }
+            const image = imageTarget(target);
+            const stored = image?.texture.levels.get(levelKey(level, image.face));
+            if (stored?.sized?.compressed)
+            {
+                const sized = stored.sized;
+                return stored.data?.slice() ?? new Uint8Array(storageBytes(sized, stored.width,
+                    stored.height, stored.depth ?? 1));
+            }
+            if (stored && !stored.compressedFormat)
+            {
+                // Not a compressed level at all (OpenGL 4.6 section 8.11).
+                setError(GL.INVALID_OPERATION);
                 return null;
             }
             diverge('glGetCompressedTexImage was refused: compressed levels are kept decoded'

@@ -268,6 +268,12 @@ test('RGTC blocks are kept as blocks and decode for the processor', ()=>{
     context.glCompressedTexSubImage2DARB(GL.TEXTURE_2D, 0, 2, 0, 4, 4, TEX.COMPRESSED_RED_RGTC1,
         8, block);
     assert.equal(context.glGetError(), GL.INVALID_OPERATION, 'off the block grid');
+    const blocks = context.glGetCompressedTexImageARB(GL.TEXTURE_2D, 0);
+    assert.deepEqual(Array.from(blocks), [...new Uint8Array(8), ...block], 'its blocks back');
+    context.glTexImage2D(GL.TEXTURE_2D, 0, TEX.R8, 1, 1, 0, GL.RED, GL.UNSIGNED_BYTE,
+        new Uint8Array(1));
+    assert.equal(context.glGetCompressedTexImageARB(GL.TEXTURE_2D, 0), null);
+    assert.equal(context.glGetError(), GL.INVALID_OPERATION, 'not a compressed level');
 });
 
 test('a glTexImage of a compressed format keeps its uncompressed twin', ()=>{

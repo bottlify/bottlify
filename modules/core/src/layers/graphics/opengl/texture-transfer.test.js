@@ -394,3 +394,62 @@ test('packing writes the packed types back as it reads them', ()=>{
             `0x${format.toString(16)} 0x${type.toString(16)}`);
     }
 });
+
+test('the conversion a row at a time gives the bytes the value-by-value one gives', ()=>{
+    const next = random(23);
+    const types = [GL.UNSIGNED_BYTE, GL.BYTE, GL.UNSIGNED_SHORT, GL.SHORT, GL.UNSIGNED_INT,
+        GL.INT, GL.FLOAT, TEX.HALF_FLOAT];
+    const colour = [GL.RED, TEX.RG, GL.RGB, GL.RGBA];
+    const integer = [TEX.RED_INTEGER, TEX.RG_INTEGER, TEX.RGB_INTEGER, TEX.RGBA_INTEGER];
+    let checked = 0;
+    for (const format of SIZED_FORMATS.values())
+    {
+        if (format.packing || format.compressed || format.kind === 'depth'
+            || format.kind === 'stencil')
+        {
+            continue;
+        }
+        const ints = format.kind === 'int' || format.kind === 'uint';
+        for (const client of ints ? integer : colour)
+        {
+            for (const type of types)
+            {
+                if (transferError(format, client, type) !== 0)
+                {
+                    continue;
+                }
+                const [width, height, depth] = [3, 2, 2];
+                // An odd skip puts rows off their elements' alignment.
+                const state = { ...TIGHT, skipPixels: 1 };
+                const bytes = new Uint8Array(clientBytes(width, height, depth, client, type,
+                    state) + 1).subarray(1);
+                bytes.forEach((_, i)=>{
+                    bytes[i] = next() >>> 24;
+                });
+                const view = new DataView(bytes.buffer, bytes.byteOffset);
+                if (type === GL.FLOAT)
+                {
+                    for (let at = 0; at + 4 <= bytes.byteLength; at += 4)
+                    {
+                        view.setFloat32(at, [next() / 2 ** 31 - 1, 70000, -Infinity, 3.5][
+                            next() & 3], true);
+                    }
+                }
+                if (type === TEX.HALF_FLOAT)
+                {
+                    for (let at = 0; at + 2 <= bytes.byteLength; at += 2)
+                    {
+                        view.setUint16(at, next() & 0x7bff, true);
+                    }
+                }
+                const values = some(decodeClient(bytes, width, height, depth, client, type,
+                    state));
+                assert.deepEqual(some(unpackToStorage(bytes, width, height, depth, client, type,
+                    state, format)), encodeStorage(values, format),
+                `${format.name} 0x${client.toString(16)} 0x${type.toString(16)}`);
+                checked++;
+            }
+        }
+    }
+    assert.ok(checked > 300, `${checked} pairs`);
+});
