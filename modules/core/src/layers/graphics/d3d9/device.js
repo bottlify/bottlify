@@ -422,6 +422,9 @@ function normalisePresentParameters(parameters){
         enableAutoDepthStencil: parameters.enableAutoDepthStencil ?? false,
         autoDepthStencilFormat: parameters.autoDepthStencilFormat ?? D3DFMT.D24S8,
         lockableBackBuffer: parameters.lockableBackBuffer === true,
+        hDeviceWindow: parameters.hDeviceWindow ?? 0,
+        flags: parameters.flags ?? 0,
+        presentationInterval: parameters.presentationInterval ?? 0,
     };
 }
 

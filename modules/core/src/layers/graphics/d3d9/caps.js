@@ -33,6 +33,8 @@ const D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES = 0x00000010;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+/** The present intervals a device offers: once a refresh, or at once. */
+export const PRESENTATION_INTERVALS = D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE;
 
 const D3DCURSORCAPS_COLOR = 0x00000001;
 const D3DCURSORCAPS_LOWRES = 0x00000002;
@@ -186,7 +188,7 @@ export function capabilityWords(caps, identity = {}){
         // Blending is the pipeline's, whatever the swap chain presents with; no copy
         // between video and system memory through StretchRect.
         Caps3: D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD,
-        PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
+        PresentationIntervals: PRESENTATION_INTERVALS,
         CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
         DevCaps: D3DDEVCAPS_EXECUTESYSTEMMEMORY | D3DDEVCAPS_EXECUTEVIDEOMEMORY
             | D3DDEVCAPS_TLVERTEXSYSTEMMEMORY | D3DDEVCAPS_TLVERTEXVIDEOMEMORY

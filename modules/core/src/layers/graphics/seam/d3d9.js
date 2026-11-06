@@ -3146,7 +3146,9 @@ export function createDirect3D9Seam(
             backBufferCount: raw.BackBufferCount,
             multiSampleType: raw.MultiSampleType,
             swapEffect: raw.SwapEffect,
-            hDeviceWindow: raw.hDeviceWindow,
+            // None named is the window the device was made for, and what
+            // GetPresentParameters then answers (test_swapchain_parameters).
+            hDeviceWindow: (raw.hDeviceWindow >>> 0) || (window >>> 0),
             windowed,
             enableAutoDepthStencil: raw.EnableAutoDepthStencil !== 0,
             autoDepthStencilFormat: raw.AutoDepthStencilFormat,

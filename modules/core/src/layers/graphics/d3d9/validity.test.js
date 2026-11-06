@@ -259,6 +259,38 @@ test('the swap effect and the back-buffer count are checked together', ()=>{
     }
 });
 
+test('a present interval is DEFAULT or one the caps offer, and reads back as given', ()=>{
+    // Wine's test_swapchain_parameters: intervals 0 to 9, IMMEDIATE and ONE
+    // offered.
+    const d3d = createDirect3D9();
+    for (const [interval, expected] of /** @type {[number, number][]} */ ([
+        [0, D3D_OK], [1, D3D_OK], [0x80000000, D3D_OK], [2, D3DERR_INVALIDCALL],
+        [3, D3DERR_INVALIDCALL], [9, D3DERR_INVALIDCALL], [0x80000001, D3DERR_INVALIDCALL],
+    ]))
+    {
+        const parameters = { swapEffect: D3DSWAPEFFECT.DISCARD, presentationInterval: interval,
+            hDeviceWindow: 0x1234 };
+        assert.equal(validatePresentParameters(parameters), expected, `interval ${interval}`);
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice(parameters, out), expected, `interval ${interval}`);
+        if (!out.device)
+        {
+            continue;
+        }
+        /** @type {{ swapChain?: any }} */
+        const chain = {};
+        assert.equal(out.device.GetSwapChain(0, chain), D3D_OK);
+        /** @type {{ parameters?: any }} */
+        const read = {};
+        assert.equal(chain.swapChain.GetPresentParameters(read), D3D_OK);
+        assert.deepEqual([read.parameters.presentationInterval, read.parameters.hDeviceWindow],
+            [interval, 0x1234]);
+        chain.swapChain.release();
+        assertFullyReleased(out.device);
+    }
+});
+
 test('a zero back-buffer count is reported back as one', ()=>{
     const device = createDevice();
     /** @type {{ swapChain?: any }} */
