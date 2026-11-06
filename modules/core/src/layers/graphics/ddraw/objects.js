@@ -1896,7 +1896,11 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
-                if (flipNext === other || other.flipNext === surface || depth === other)
+                // The other way round, the two of a chain of two are attached
+                // already (test_surface_attachment, every version); within a
+                // longer chain it is an attachment to refuse (ddraw1 6494-6495).
+                if (flipNext === other || depth === other
+                    || (other.flipNext === surface && flipNext === null && other.flipPrev === null))
                 {
                     return DDERR_SURFACEALREADYATTACHED;
                 }
@@ -1985,10 +1989,13 @@ export function createDirectDraw(options = {}){
                 }
                 if (flipNext !== other)
                 {
-                    // Attached the other way round, or attached only by the
-                    // closure of the loop, is still attached -- it just cannot
-                    // be taken apart from this end.
-                    if (other.flipNext === surface || (flipPrev !== null && chainHead() === other))
+                    // Attached the other way round by the program, or attached
+                    // only by the closure of the loop, is still attached -- it
+                    // just cannot be taken apart from this end. A link the
+                    // runtime made the other way is none of this surface's
+                    // (test_surface_attachment, ddraw1 6469-6470).
+                    if ((other.flipNext === surface && !other.attachedImplicitly)
+                        || (flipPrev !== null && chainHead() === other))
                     {
                         return DDERR_CANNOTDETACHSURFACE;
                     }

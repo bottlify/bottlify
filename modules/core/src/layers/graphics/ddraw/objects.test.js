@@ -850,6 +850,22 @@ test('an attachment refuses the reverse, a mismatched size, and itself', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('a link the runtime made the other way is none of the far surface\'s to detach', ()=>{
+    // ddraw1 test_surface_attachment: a buffer added behind the front goes in
+    // between, and the runtime's link from it onward is no attachment of the
+    // buffer behind it.
+    const { ddraw, front, back1 } = withFlipChain();
+    const added = makeOffscreen(ddraw, { width: front.width, height: front.height });
+    assert.equal(front.addAttachedSurface(added), DD_OK);
+    assert.equal(back1.deleteAttachedSurface(added), DDERR_SURFACENOTATTACHED);
+    assert.equal(added.deleteAttachedSurface(back1), DDERR_CANNOTDETACHSURFACE);
+    assert.equal(front.deleteAttachedSurface(added), DD_OK);
+    assert.equal(added.release(), 0);
+    assert.equal(front.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
 test('detaching from the middle of a chain splices rather than truncates', ()=>{
     const ddraw = withLevel();
     const head = makeOffscreen(ddraw);
@@ -860,6 +876,8 @@ test('detaching from the middle of a chain splices rather than truncates', ()=>{
     assert.equal(middle.addAttachedSurface(tail), DD_OK);
     assert.equal(head.addAttachedSurface(tail), DDERR_CANNOTATTACHSURFACE,
         'a chain is a line: nothing takes a second buffer behind it');
+    assert.equal(tail.addAttachedSurface(middle), DDERR_CANNOTATTACHSURFACE,
+        'nor, within a longer chain, the other way round (ddraw1 test_surface_attachment)');
 
     // The loop closes for the walk without a stored link, so the far end is
     // attached to the head and yet cannot be detached from there.
