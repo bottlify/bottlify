@@ -301,3 +301,39 @@ test('the version, the shading language and the limits are what is implemented',
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VARYING_FLOATS), [32]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS), [8]);
 });
+
+test('GL_ARB_shader_objects reads the same objects by handle (Wine\'s test_sharelists)', ()=>{
+    const PROGRAM_OBJECT_ARB = 0x8b40;
+    const SHADER_OBJECT_ARB = 0x8b48;
+    const OBJECT_TYPE_ARB = 0x8b4e;
+    const OBJECT_SUBTYPE_ARB = 0x8b4f;
+    const gl = fixture();
+    const vs = shader(gl, GL.VERTEX_SHADER, VS);
+    const prog = program(gl);
+    assert.deepEqual(gl.getObjectParameterARB(prog, OBJECT_TYPE_ARB), [PROGRAM_OBJECT_ARB]);
+    assert.deepEqual(gl.getObjectParameterARB(vs, OBJECT_TYPE_ARB), [SHADER_OBJECT_ARB]);
+    assert.deepEqual(gl.getObjectParameterARB(vs, OBJECT_SUBTYPE_ARB), [GL.VERTEX_SHADER]);
+    assert.deepEqual(gl.getObjectParameterARB(vs, GL.COMPILE_STATUS), [1], 'the shader\'s own');
+    assert.deepEqual(gl.getObjectParameterARB(prog, GL.LINK_STATUS), [1], 'the program\'s own');
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.equal(gl.getObjectParameterARB(99, OBJECT_TYPE_ARB), null, 'no object of that name');
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
+    assert.equal(gl.getObjectParameterARB(prog, OBJECT_SUBTYPE_ARB), null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a program has no subtype');
+
+    assert.equal(gl.getHandleARB(PROGRAM_OBJECT_ARB), 0);
+    gl.glUseProgram(prog);
+    assert.equal(gl.getHandleARB(PROGRAM_OBJECT_ARB), prog, 'the program in use');
+    assert.equal(gl.getHandleARB(SHADER_OBJECT_ARB), 0);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    assert.equal(gl.getInfoLogARB(vs), gl.glGetShaderInfoLog(vs));
+    assert.equal(gl.getInfoLogARB(prog), gl.glGetProgramInfoLog(prog));
+
+    gl.deleteObjectARB(vs);
+    assert.equal(gl.glIsShader(vs), GL.FALSE, 'deleted as a shader');
+    gl.glUseProgram(0);
+    gl.deleteObjectARB(prog);
+    assert.equal(gl.glIsProgram(prog), GL.FALSE, 'and as a program');
+    gl.deleteObjectARB(77);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
+});

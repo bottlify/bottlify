@@ -40,6 +40,11 @@ import { linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
 
+// GL_ARB_shader_objects' own enums; its other queries are the 2.0 ones.
+const PROGRAM_OBJECT_ARB = 0x8b40;
+const SHADER_OBJECT_ARB = 0x8b48;
+const OBJECT_TYPE_ARB = 0x8b4e;
+const OBJECT_SUBTYPE_ARB = 0x8b4f;
 /**
  * @typedef {import('./glsl-types.js').GlslType} GlslType
  * @typedef {import('./glsl-check.js').ShaderUnit} ShaderUnit
@@ -825,6 +830,94 @@ export function installShaderCalls(context, kernel){
                 return null;
             }
             return objectOf(programName, 'program')?.shaders.map(shader=>shader.name) ?? null;
+        },
+
+        // --- GL_ARB_shader_objects: the same objects, by handle ---
+
+        /**
+         * glGetObjectParameter{if}vARB. A handle is the object's name, and
+         * both kinds answer the type; the other queries are the object
+         * kind's own (glGetShaderiv, glGetProgramiv), the subtype a shader's.
+         *
+         * @param {number} name @param {number} pname @returns {number[] | null}
+         */
+        getObjectParameterARB(name, pname){
+            if (!enter('glGetObjectParameterivARB', [name, pname]))
+            {
+                return null;
+            }
+            const kind = namespace().objects.get(name)?.kind;
+            if (kind !== 'shader' && kind !== 'program')
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            if (pname === OBJECT_TYPE_ARB)
+            {
+                return [kind === 'program' ? PROGRAM_OBJECT_ARB : SHADER_OBJECT_ARB];
+            }
+            if (pname === OBJECT_SUBTYPE_ARB)
+            {
+                if (kind === 'program')
+                {
+                    setError(GL.INVALID_OPERATION);
+                    return null;
+                }
+                return context.glGetShaderiv(name, GL.SHADER_TYPE);
+            }
+            return kind === 'program' ? context.glGetProgramiv(name, pname)
+                : context.glGetShaderiv(name, pname);
+        },
+
+        /** @param {number} pname @returns {number} glGetHandleARB */
+        getHandleARB(pname){
+            if (!enter('glGetHandleARB', [pname]))
+            {
+                return 0;
+            }
+            if (pname !== PROGRAM_OBJECT_ARB)
+            {
+                setError(GL.INVALID_ENUM);
+                return 0;
+            }
+            return currentName;
+        },
+
+        /** @param {number} name glDeleteObjectARB: either kind, by its handle */
+        deleteObjectARB(name){
+            if (!enter('glDeleteObjectARB', [name]) || name === 0)
+            {
+                return;
+            }
+            const kind = namespace().objects.get(name)?.kind;
+            if (kind === 'program')
+            {
+                context.glDeleteProgram(name);
+            }
+            else if (kind === 'shader')
+            {
+                context.glDeleteShader(name);
+            }
+            else
+            {
+                setError(GL.INVALID_VALUE);
+            }
+        },
+
+        /** @param {number} name @returns {string | null} glGetInfoLogARB */
+        getInfoLogARB(name){
+            if (!enter('glGetInfoLogARB', [name]))
+            {
+                return null;
+            }
+            const kind = namespace().objects.get(name)?.kind;
+            if (kind !== 'shader' && kind !== 'program')
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return kind === 'program' ? context.glGetProgramInfoLog(name)
+                : context.glGetShaderInfoLog(name);
         },
 
         // --- attributes ---

@@ -117,6 +117,24 @@ export function laterEntryPoints(h){
     const deleter = remove=>(/** @type {number[]} */ [count, list])=>call(context=>remove(context,
         (count | 0) > 0 && (list >>> 0) !== 0 ? readTyped('ui', list, count | 0) : []));
 
+    /** glGetAttachedShaders and its handle spelling: the names written out, and their count. */
+    const attached = (/** @type {number[]} */ [program, most, countOut, out])=>call(context=>{
+        const names = context.glGetAttachedShaders(program >>> 0);
+        if (!names)
+        {
+            return;
+        }
+        const kept = names.slice(0, Math.max(0, most | 0));
+        if (kept.length > 0 && (out >>> 0) !== 0)
+        {
+            writeU32s(out, kept);
+        }
+        if ((countOut >>> 0) !== 0)
+        {
+            writeU32s(countOut, [kept.length]);
+        }
+    });
+
     /** @type {Record<string, (args: number[]) => number>} */
     const handlers = {
         // --- shaders and programs ---
@@ -172,22 +190,8 @@ export function laterEntryPoints(h){
             context.glGetProgramiv(program >>> 0, pname >>> 0), 'word')),
         glGetProgramInfoLog: ([program, size, length, out])=>call(context=>answerString(
             context.glGetProgramInfoLog(program >>> 0), size, length, out)),
-        glGetAttachedShaders: ([program, most, countOut, out])=>call(context=>{
-            const names = context.glGetAttachedShaders(program >>> 0);
-            if (!names)
-            {
-                return;
-            }
-            const kept = names.slice(0, Math.max(0, most | 0));
-            if (kept.length > 0 && (out >>> 0) !== 0)
-            {
-                writeU32s(out, kept);
-            }
-            if ((countOut >>> 0) !== 0)
-            {
-                writeU32s(countOut, [kept.length]);
-            }
-        }),
+        glGetAttachedShaders: attached,
+        glGetAttachedObjectsARB: attached,
         glGetAttribLocation: ([program, name])=>(current()?.glGetAttribLocation(program >>> 0,
             h.readName(name)) ?? -1),
         glGetUniformLocation: ([program, name])=>(current()?.glGetUniformLocation(
@@ -209,6 +213,24 @@ export function laterEntryPoints(h){
                     : answered.values, 'word');
             }
         }),
+
+        // --- GL_ARB_shader_objects: the objects above by handle ---
+
+        glCreateShaderObjectARB: ([type])=>current()?.glCreateShader(type >>> 0) ?? 0,
+        glCreateProgramObjectARB: ()=>current()?.glCreateProgram() ?? 0,
+        glAttachObjectARB: ([program, shader])=>answer(
+            current()?.glAttachShader(program >>> 0, shader >>> 0)),
+        glDetachObjectARB: ([program, shader])=>answer(
+            current()?.glDetachShader(program >>> 0, shader >>> 0)),
+        glUseProgramObjectARB: ([program])=>answer(current()?.glUseProgram(program >>> 0)),
+        glDeleteObjectARB: ([name])=>answer(current()?.deleteObjectARB(name >>> 0)),
+        glGetHandleARB: ([pname])=>current()?.getHandleARB(pname >>> 0) ?? 0,
+        glGetObjectParameterivARB: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getObjectParameterARB(name >>> 0, pname >>> 0), 'word')),
+        glGetObjectParameterfvARB: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getObjectParameterARB(name >>> 0, pname >>> 0), 'float')),
+        glGetInfoLogARB: ([name, size, length, out])=>call(context=>answerString(
+            context.getInfoLogARB(name >>> 0), size, length, out)),
 
         // --- framebuffer objects ---
 

@@ -30,6 +30,46 @@
  * `GL_VERSIONS`, which the extension string does not name.
  */
 
+/** GL_ARB_shader_objects' functions and their stack words. */
+/** @type {readonly [string, number][]} */
+const SHADER_OBJECT_WORDS = [
+    ['glDeleteObjectARB', 1], ['glGetHandleARB', 1], ['glDetachObjectARB', 2],
+    ['glCreateShaderObjectARB', 1], ['glShaderSourceARB', 4], ['glCompileShaderARB', 1],
+    ['glCreateProgramObjectARB', 0], ['glAttachObjectARB', 2], ['glLinkProgramARB', 1],
+    ['glUseProgramObjectARB', 1], ['glValidateProgramARB', 1],
+    ...[1, 2, 3, 4].flatMap(n=>/** @type {[string, number][]} */ ([
+        [`glUniform${n}fARB`, 1 + n], [`glUniform${n}iARB`, 1 + n], [`glUniform${n}fvARB`, 3],
+        [`glUniform${n}ivARB`, 3]])),
+    ['glUniformMatrix2fvARB', 4], ['glUniformMatrix3fvARB', 4], ['glUniformMatrix4fvARB', 4],
+    ['glGetObjectParameterfvARB', 3], ['glGetObjectParameterivARB', 3], ['glGetInfoLogARB', 4],
+    ['glGetAttachedObjectsARB', 4], ['glGetUniformLocationARB', 2], ['glGetActiveUniformARB', 7],
+    ['glGetUniformfvARB', 3], ['glGetUniformivARB', 3], ['glGetShaderSourceARB', 4],
+];
+
+/**
+ * GL_ARB_vertex_shader's generic attribute calls, which GL_ARB_vertex_program
+ * defines under the same names: a program that finds the one finds them all.
+ */
+const VERTEX_ATTRIB_ARB = [
+    'glVertexAttrib1sARB', 'glVertexAttrib1fARB', 'glVertexAttrib1dARB',
+    'glVertexAttrib2sARB', 'glVertexAttrib2fARB', 'glVertexAttrib2dARB',
+    'glVertexAttrib3sARB', 'glVertexAttrib3fARB', 'glVertexAttrib3dARB',
+    'glVertexAttrib4sARB', 'glVertexAttrib4fARB', 'glVertexAttrib4dARB',
+    'glVertexAttrib4NubARB',
+    'glVertexAttrib1svARB', 'glVertexAttrib1fvARB', 'glVertexAttrib1dvARB',
+    'glVertexAttrib2svARB', 'glVertexAttrib2fvARB', 'glVertexAttrib2dvARB',
+    'glVertexAttrib3svARB', 'glVertexAttrib3fvARB', 'glVertexAttrib3dvARB',
+    'glVertexAttrib4bvARB', 'glVertexAttrib4svARB', 'glVertexAttrib4ivARB',
+    'glVertexAttrib4ubvARB', 'glVertexAttrib4usvARB', 'glVertexAttrib4uivARB',
+    'glVertexAttrib4fvARB', 'glVertexAttrib4dvARB',
+    'glVertexAttrib4NbvARB', 'glVertexAttrib4NsvARB', 'glVertexAttrib4NivARB',
+    'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
+    'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
+    'glDisableVertexAttribArrayARB',
+    'glGetVertexAttribdvARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribivARB',
+    'glGetVertexAttribPointervARB',
+];
+
 /** GL extensions: name -> the functions it defines. */
 export const GL_EXTENSIONS = Object.freeze({
     GL_ARB_multitexture: [
@@ -122,25 +162,19 @@ export const GL_EXTENSIONS = Object.freeze({
         'glGetProgramEnvParameterdvARB', 'glGetProgramEnvParameterfvARB',
         'glGetProgramLocalParameterdvARB', 'glGetProgramLocalParameterfvARB',
         'glGetProgramivARB', 'glGetProgramStringARB',
-        'glVertexAttrib1sARB', 'glVertexAttrib1fARB', 'glVertexAttrib1dARB',
-        'glVertexAttrib2sARB', 'glVertexAttrib2fARB', 'glVertexAttrib2dARB',
-        'glVertexAttrib3sARB', 'glVertexAttrib3fARB', 'glVertexAttrib3dARB',
-        'glVertexAttrib4sARB', 'glVertexAttrib4fARB', 'glVertexAttrib4dARB',
-        'glVertexAttrib4NubARB',
-        'glVertexAttrib1svARB', 'glVertexAttrib1fvARB', 'glVertexAttrib1dvARB',
-        'glVertexAttrib2svARB', 'glVertexAttrib2fvARB', 'glVertexAttrib2dvARB',
-        'glVertexAttrib3svARB', 'glVertexAttrib3fvARB', 'glVertexAttrib3dvARB',
-        'glVertexAttrib4bvARB', 'glVertexAttrib4svARB', 'glVertexAttrib4ivARB',
-        'glVertexAttrib4ubvARB', 'glVertexAttrib4usvARB', 'glVertexAttrib4uivARB',
-        'glVertexAttrib4fvARB', 'glVertexAttrib4dvARB',
-        'glVertexAttrib4NbvARB', 'glVertexAttrib4NsvARB', 'glVertexAttrib4NivARB',
-        'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
-        'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
-        'glDisableVertexAttribArrayARB',
-        'glGetVertexAttribdvARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribivARB',
-        'glGetVertexAttribPointervARB',
+        ...VERTEX_ATTRIB_ARB,
     ],
     GL_EXT_stencil_two_side: ['glActiveStencilFaceEXT'],
+    // GLSL through handles, the objects of 2.0 under their first names: a
+    // driver of the era reported them beside 2.0 (Wine's test_sharelists
+    // asks a handle's type through glGetObjectParameterivARB).
+    GL_ARB_shader_objects: SHADER_OBJECT_WORDS.map(([name])=>name),
+    GL_ARB_vertex_shader: [
+        'glBindAttribLocationARB', 'glGetActiveAttribARB', 'glGetAttribLocationARB',
+        ...VERTEX_ATTRIB_ARB,
+    ],
+    GL_ARB_fragment_shader: [],
+    GL_ARB_shading_language_100: [],
     GL_ARB_fragment_program: [
         'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
         'glProgramStringARB',
@@ -280,6 +314,8 @@ const LATER_EXTENSION_WORDS = [
         [`glRenderbufferStorageMultisample${suffix}`, 5],
     ])),
     ['glFramebufferTextureLayer', 5],
+    ...SHADER_OBJECT_WORDS,
+    ['glBindAttribLocationARB', 3], ['glGetActiveAttribARB', 7], ['glGetAttribLocationARB', 2],
     ['glBlendColorEXT', 4], ['glBlendEquationEXT', 1], ['glBlendFuncSeparateEXT', 4],
 ];
 
