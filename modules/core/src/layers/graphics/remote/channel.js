@@ -63,6 +63,16 @@ const LENT_GAP_MS = 0.25;
  */
 
 /**
+ * The played side's frames, summed since it began and sent with every present:
+ * how many finished, how long from their presenting call until their work was
+ * on the queue, the GPU's own share after that (`latency.js`), and how long
+ * the worker spent reading and playing batches. A reader places them in its
+ * own frames by the difference between two readings.
+ *
+ * @typedef {{ frames: number, toQueueMs: number, gpuMs: number, replayMs: number }}
+ *     WorkerFrameTimes
+ */
+/**
  * The bound on the frames the played side's GPU may still be drawing
  * (`latency.js`), as it stood: a present that queued one past it waited for
  * the GPU (`held`, `heldMs`), which is the only account of a GPU too slow for
@@ -197,6 +207,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let latency = null;
     /** What the worker's device held, as it said last (`ledger.js`). @type {any} */
     let gpuMemory = null;
+    /** The played side's frame times as of its last present (`WorkerFrameTimes`). */
+    /** @type {WorkerFrameTimes | null} */
+    let frameTimes = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -433,6 +446,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     break;
                 case 'presented':
                     presented = message.count;
+                    frameTimes = message.times ?? frameTimes;
                     while (held.length > 0 && held[0].count <= presented)
                     {
                         /** @type {{ release: () => void }} */ (held.shift()).release();
@@ -596,6 +610,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         /** What the worker's device held with its last diagnostics, or null. */
         gpuMemory: ()=>gpuMemory,
 
+        /** The played side's frame times as of its last present, or null. */
+        frameTimes: ()=>frameTimes,
+
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
@@ -622,8 +639,10 @@ export { shared as sharedNow };
  * @param {() => FrameLatencyState} [options.latency]  the bound the played device's
  *     presents wait on, where it has one
  * @param {() => any} [options.gpuMemory]  what the worker's device holds (`ledger.js`)
+ * @param {() => { frames: number, toQueueMs: number, gpuMs: number }} [options.times]
+ *     the finished frames' time so far (`latency.js`), sent with every present
  */
-export function createReceiver({ played, post, latency, gpuMemory }){
+export function createReceiver({ played, post, latency, gpuMemory, times }){
     let presented = 0;
     /** @type {WorkerPhases} */
     const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
@@ -666,7 +685,9 @@ export function createReceiver({ played, post, latency, gpuMemory }){
         const done = held instanceof Promise ? held : Promise.resolve();
         presents = presents.then(()=>done).then(()=>{
             presented++;
-            post({ type: 'presented', count: presented });
+            post({ type: 'presented', count: presented,
+                times: import.meta.BOTTLIFY_DIAGNOSTICS !== false && times
+                    ? { ...times(), replayMs: phases['batch-read'].ms } : undefined });
         }, fail);
     };
 

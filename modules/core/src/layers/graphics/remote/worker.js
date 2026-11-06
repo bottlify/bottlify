@@ -488,8 +488,10 @@ export function serveGraphics(scope, deps){
         // when this thread hears so from the browser's GPU process, which a
         // driver's fence does not wait on: the run's `maxFrameLatency` decides
         // how many, as it does for a device drawn on the run's own thread.
+        // DirectDraw's flips are held by nothing (none ever were), so a
+        // Direct3D 7 root's frames are counted and timed under no bound.
         const latency = createFrameLatency({ queue: device.queue, lost: device.lost,
-            limit: frameLatency });
+            limit: api === 'd3d7' ? 0 : frameLatency });
         const backend = source === undefined ? shared : drawingFor(shared, source);
         if (source !== undefined)
         {
@@ -539,6 +541,7 @@ export function serveGraphics(scope, deps){
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 writeMemory: wrote,
+                frameQueued,
             });
         }
         else if (api === 'd3d10')
@@ -608,7 +611,7 @@ export function serveGraphics(scope, deps){
             });
         }
         receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics(),
-            gpuMemory: ()=>ledger?.diagnostics() ?? null });
+            gpuMemory: ()=>ledger?.diagnostics() ?? null, times: ()=>latency.times() });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,
