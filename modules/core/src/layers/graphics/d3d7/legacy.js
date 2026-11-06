@@ -922,6 +922,15 @@ function createLegacyDevice(inner, version, legacy){
     /** @type {Map<number, Float32Array>} the first generation's matrices, by handle */
     const matrices = new Map();
     let nextMatrix = 1;
+    /**
+     * The handle each transform was last set from by an execute buffer: the
+     * transform is that matrix, and SetMatrix on it moves the transform with
+     * it (Wine's ddraw1 test_lighting sets the world once and its matrix
+     * after).
+     *
+     * @type {Map<number, number>}
+     */
+    const boundMatrices = new Map();
 
     /**
      * An immediate-mode primitive being built by Begin, Vertex and Index.
@@ -1416,8 +1425,29 @@ function createLegacyDevice(inner, version, legacy){
             return D3D_OK;
         },
 
+        /**
+         * A transform set from a matrix handle, which it then follows.
+         *
+         * @param {number} type @param {number} handle
+         * @returns {number}
+         */
+        bindMatrix(type, handle){
+            const matrix = matrices.get(handle);
+            if (!matrix)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const hr = device.setTransform(type, matrix);
+            if (hr === D3D_OK)
+            {
+                boundMatrices.set(type, handle);
+            }
+            return hr;
+        },
+
         /** @param {number} type @param {ArrayLike<number>} matrix */
         setTransform(type, matrix){
+            boundMatrices.delete(type);
             if (type !== D3DTRANSFORMSTATE.PROJECTION)
             {
                 return inner.SetTransform(type, matrix);
@@ -1658,6 +1688,11 @@ function createLegacyDevice(inner, version, legacy){
                 return D3DERR_MATRIX_SETDATA_FAILED;
             }
             matrices.set(handle, Float32Array.from(matrix));
+            const following = [...boundMatrices].filter(([, bound])=>bound === handle);
+            for (const [type] of following)
+            {
+                device.bindMatrix(type, handle);
+            }
             return D3D_OK;
         },
         /** @param {number} handle @returns {Float32Array | null} */

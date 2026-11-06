@@ -259,11 +259,7 @@ export function executeBuffer({ memory, device, buffer, viewport }){
             case D3DOP.STATETRANSFORM:
                 for (let k = 0; k < repeat; k++)
                 {
-                    const matrix = device.getMatrix(dword(k, 4));
-                    if (matrix)
-                    {
-                        device.setTransform(dword(k, 0), matrix);
-                    }
+                    device.bindMatrix(dword(k, 0), dword(k, 4));
                 }
                 return D3D_OK;
             case D3DOP.MATRIXLOAD:

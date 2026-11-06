@@ -45,9 +45,9 @@ function fixture(){
     const draws = [];
     const watched = {
         ...d3d7,
-        /** @param {string} id @param {any} target */
-        createDevice(id, target){
-            const made = d3d7.createDevice(id, target);
+        /** @param {string} id @param {any} target @param {any} [options] */
+        createDevice(id, target, options){
+            const made = d3d7.createDevice(id, target, options);
             const inner = made.device;
             const draw = inner.DrawIndexedPrimitive;
             inner.DrawIndexedPrimitive = (/** @type {any[]} */ ...args)=>{
@@ -79,8 +79,9 @@ function fixture(){
      *
      * @param {number[]} normal @param {number[]} extra  Instruction bytes before processing.
      * @param {number} [vertexCount]  What D3DEXECUTEDATA says.
+     * @param {number | null} [world]  The world matrix's handle; null sets no transform.
      */
-    const run = (normal, extra = [], vertexCount = 4)=>{
+    const run = (normal, extra = [], vertexCount = 4, world = identity)=>{
         [[-1, -1], [-1, 1], [1, 1], [1, -1]].forEach(([x, y], k)=>{
             [x, y, 0, ...normal, 0, 0].forEach((value, index)=>
                 view.setFloat32(base + k * 32 + index * 4, value, true));
@@ -89,11 +90,11 @@ function fixture(){
         const stream = [];
         const dword = (/** @type {number} */ value)=>stream.push(value & 0xff,
             value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff);
-        for (const type of [1, 2, 3])
+        for (const type of world === null ? [] : [1, 2, 3])
         {
             stream.push(6, 8, 1, 0);
             dword(type);
-            dword(identity);
+            dword(type === 1 ? world : identity);
         }
         stream.push(...extra);
         stream.push(9, 16, 1, 0);
@@ -117,7 +118,7 @@ function fixture(){
         return new DataView(vertices.buffer, vertices.byteOffset, vertices.byteLength)
             .getUint32(16, true);
     };
-    return { device, viewport, legacy, run };
+    return { device, viewport, legacy, run, identity };
 }
 
 test('D3DEXECUTEDATA\'s vertex count does not bound what the processing makes and the draw'
@@ -151,4 +152,12 @@ test('a D3DVERTEX processed with no material is white, and one lit takes its lig
         D3DLIGHTSTATE.AMBIENT, 0, 0, 0, 0x00, 0x20, 0x00, 0xff];
     assert.equal(f.run([0, 0, -1], states) & 0xffffff, 0x0060ff,
         'Lit quad with light: the light\'s green and blue, and the ambient\'s green');
+    // A singular world turns the normal aside and lights by 1/sqrt(2) of the
+    // light; the world is its handle's matrix, set again after it was bound
+    // (ddraw1 test_lighting).
+    const world = f.device.createMatrix();
+    assert.equal(f.run([0, 0, -1], states, 4, world) & 0xffffff, 0x0060ff);
+    f.device.setMatrix(world, [1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1]);
+    assert.equal(f.run([0, 0, -1], states, 4, null) & 0xffffff, 0x004db4,
+        'Lit quad with singular world matrix');
 });
