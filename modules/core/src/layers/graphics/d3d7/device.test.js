@@ -1411,21 +1411,16 @@ test('recorded: a buffer the runtime clips is clipped behind the eye, and under 
         'every draw, under current rules');
 });
 
-test('a fresh device has a white material, not a black one', ()=>{
-    // This is the version Warcraft III draws its menu through, and lighting now
-    // reads the material. All zeros -- what an unseeded structure holds -- takes
-    // every term to zero for geometry that never calls SetMaterial and carries
-    // no vertex colour, so the whole scene lights to black while every state a
-    // program reads back still says what it expects.
+test('a fresh device\'s material is all zeros (test_material)', ()=>{
     const f = fixture();
     /** @type {{ material?: any }} */
     const out = {};
 
     assert.equal(f.device.GetMaterial(out), D3D_OK);
-    assert.deepEqual(out.material.Diffuse, { r: 1, g: 1, b: 1, a: 1 });
-    assert.deepEqual(out.material.Ambient, { r: 1, g: 1, b: 1, a: 1 });
-    assert.deepEqual(out.material.Specular, { r: 0, g: 0, b: 0, a: 0 });
-    assert.deepEqual(out.material.Emissive, { r: 0, g: 0, b: 0, a: 0 });
+    for (const term of ['Diffuse', 'Ambient', 'Specular', 'Emissive'])
+    {
+        assert.deepEqual(out.material[term], { r: 0, g: 0, b: 0, a: 0 }, term);
+    }
     assert.equal(out.material.Power, 0);
 
     releaseAll(f);
