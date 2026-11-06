@@ -3225,7 +3225,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const desc = describe(surface);
+            // Both sides a power of two (Wine's test_cursor).
+            const powerOfTwo = (/** @type {number} */ side)=>side > 0 && (side & (side - 1)) === 0;
             if (!desc || desc.Format !== D3DFMT.A8R8G8B8
+                || !powerOfTwo(desc.Width) || !powerOfTwo(desc.Height)
                 || x < 0 || y < 0 || x >= desc.Width || y >= desc.Height)
             {
                 return D3DERR_INVALIDCALL;
@@ -3235,12 +3238,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * Shown only once there is a cursor to show: asked before any is set,
+         * it stays hidden (Wine's test_cursor).
+         *
          * @param {boolean} show
          * @returns {boolean} whether it was shown before
          */
         ShowCursor(show){
             const was = cursor.shown;
-            cursor.shown = show;
+            cursor.shown = show && Boolean(cursor.surface);
             return was;
         },
 

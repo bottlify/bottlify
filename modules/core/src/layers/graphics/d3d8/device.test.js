@@ -2278,7 +2278,16 @@ test('the cursor is kept as the program set it, and refused when it could not be
     /** @type {{ surface?: any }} */
     const wrong = {};
     device.CreateImageSurface(32, 32, D3DFMT.X8R8G8B8, wrong);
+    /** @type {{ surface?: any }} */
+    const odd = {};
+    device.CreateImageSurface(32, 24, D3DFMT.A8R8G8B8, odd);
 
+    // Wine's test_cursor: no cursor to show keeps it hidden, and a cursor's
+    // sides are powers of two.
+    assert.equal(device.ShowCursor(true), false);
+    assert.equal(device.ShowCursor(true), false, 'still hidden: nothing to show');
+    assert.equal(device.SetCursorProperties(0, 0, odd.surface), D3DERR_INVALIDCALL);
+    odd.surface.release();
     assert.equal(device.SetCursorProperties(0, 0, null), D3DERR_INVALIDCALL);
     assert.equal(device.SetCursorProperties(0, 0, wrong.surface), D3DERR_INVALIDCALL,
         'a cursor is A8R8G8B8 and nothing else');

@@ -1713,7 +1713,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const out = {};
             surface.GetDesc(out);
             const desc = out.desc;
+            // Both sides a power of two (Wine's test_cursor).
+            const powerOfTwo = (/** @type {number} */ side)=>side > 0 && (side & (side - 1)) === 0;
             if (!desc || desc.Format !== D3DFMT.A8R8G8B8
+                || !powerOfTwo(desc.Width) || !powerOfTwo(desc.Height)
                 || x < 0 || y < 0 || x >= desc.Width || y >= desc.Height)
             {
                 return D3DERR_INVALIDCALL;
@@ -1723,12 +1726,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * Shown only once there is a cursor to show: asked before any is set,
+         * it stays hidden (Wine's test_cursor).
+         *
          * @param {boolean} show
          * @returns {boolean} whether it was shown before
          */
         ShowCursor(show){
             const was = cursor.shown;
-            cursor.shown = show;
+            cursor.shown = show && Boolean(cursor.surface);
             return was;
         },
 
