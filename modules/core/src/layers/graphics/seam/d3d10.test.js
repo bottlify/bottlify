@@ -31,7 +31,8 @@ import {
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
     IDXGIRESOURCE_SLOTS, IDXGISURFACE1_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS,
-    IDXGIADAPTER3_SLOTS, IDXGIFACTORY2_SLOTS, IDXGIFACTORY4_SLOTS, IDXGISWAPCHAIN1_SLOTS,
+    IDXGIADAPTER3_SLOTS, IDXGIFACTORY2_SLOTS, IDXGIFACTORY4_SLOTS, IDXGIFACTORY5_SLOTS,
+    IDXGISWAPCHAIN1_SLOTS,
     IDXGISWAPCHAIN3_SLOTS, createDirect3D10Seam,
 } from './d3d10.js';
 import {
@@ -545,6 +546,15 @@ test('DXGI 1.2 and later: every factory version, a window\'s swap chain from two
     assert.equal(h.box.memory.readU32(descAt + 0x124), 0, 'DXGI_ADAPTER_DESC1\'s flags');
     assert.equal(h.box.call(factory7, slot(IDXGIFACTORY4_SLOTS, 'EnumAdapterByLuid'),
         [7, 0, h.box.placeGuid(IID.IDXGIAdapter), adapterAt]) >>> 0, 0x887a0002, 'NOT_FOUND');
+    assert.equal(h.box.call(factory7, slot(IDXGIFACTORY4_SLOTS, 'EnumAdapterByLuid'),
+        [1, 0, h.box.placeGuid(IID.IDXGIAdapter), 0]), DXGI_ERROR_INVALID_CALL,
+    'nowhere to put it');
+    const tearingAt = h.box.place([0xdead]);
+    assert.equal(h.box.call(factory7, slot(IDXGIFACTORY5_SLOTS, 'CheckFeatureSupport'),
+        [0, tearingAt, 4]), S_OK);
+    assert.equal(h.box.memory.readU32(tearingAt), 1, 'a present without vsync tears');
+    assert.equal(h.box.call(factory7, slot(IDXGIFACTORY5_SLOTS, 'CheckFeatureSupport'),
+        [0, tearingAt, 5]), DXGI_ERROR_INVALID_CALL, 'the size is the BOOL\'s');
     const infoAt = h.box.allocate(32);
     assert.equal(h.box.call(adapter, slot(IDXGIADAPTER3_SLOTS, 'QueryVideoMemoryInfo'),
         [0, 0, infoAt]), S_OK);

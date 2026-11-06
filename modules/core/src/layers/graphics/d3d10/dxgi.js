@@ -403,7 +403,8 @@ export function createFactory(options = {}, secondVersion = false){
          * @returns {{ hr: number, value?: number }}
          */
         CheckFeatureSupport(feature, size){
-            return feature === 0 && size === 4 ? { hr: S_OK, value: 1 } : { hr: E_INVALIDARG };
+            return feature === 0 && size === 4 ? { hr: S_OK, value: 1 }
+                : { hr: DXGI_ERROR_INVALID_CALL };
         },
 
         /**
@@ -1119,8 +1120,10 @@ function createSwapChain(requested, device, factory, services){
 
         /** @param {{ desc?: any }} out */
         GetDesc1(out){
+            // A chain of the first version's description blends no alpha
+            // with the desktop: DXGI_ALPHA_MODE_IGNORE (test_create_swapchain).
             out.desc = { ...copySwapChainDesc(desc), stereo: !!desc.stereo,
-                scaling1: desc.scaling1 ?? 0, alphaMode: desc.alphaMode ?? 0 };
+                scaling1: desc.scaling1 ?? 0, alphaMode: desc.alphaMode ?? 3 };
             return S_OK;
         },
 

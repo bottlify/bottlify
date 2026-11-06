@@ -1411,9 +1411,20 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         RegisterHardwareContentProtectionTeardownStatusEvent: (adapter, [, cookie])=>
             registered(adapter, cookie),
         UnregisterHardwareContentProtectionTeardownStatus: ()=>{},
-        /** @param {any} adapter @param {number[]} args */
-        RegisterVideoMemoryBudgetChangeNotificationEvent: (adapter, [, cookie])=>
-            registered(adapter, cookie),
+        /**
+         * The budget is told at once, as Windows does on registering: the
+         * event is set, and never again, as the budget never moves here.
+         *
+         * @param {any} adapter @param {number[]} args
+         */
+        RegisterVideoMemoryBudgetChangeNotificationEvent: (adapter, [event, cookie])=>{
+            if ((event >>> 0) === 0 || (cookie >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            setEvent?.(event >>> 0);
+            return registered(adapter, cookie);
+        },
         UnregisterVideoMemoryBudgetChangeNotification: ()=>{},
         /** @param {any} adapter @param {number[]} args */
         CheckInterfaceSupport: (adapter, [guid, version])=>{
@@ -1442,7 +1453,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         if ((out >>> 0) === 0)
         {
             adapter?.release();
-            return hr === S_OK ? E_INVALIDARG : hr;
+            return DXGI_ERROR_INVALID_CALL;
         }
         if (hr !== S_OK)
         {
@@ -1514,7 +1525,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         /** @param {any} factory @param {number[]} args */
         CreateSwapChain: (factory, [devicePointer, descAt, out])=>{
             const device = publisher.objectAt(devicePointer);
-            if (!device || (descAt >>> 0) === 0)
+            if (!device || (descAt >>> 0) === 0 || (out >>> 0) === 0)
             {
                 return DXGI_ERROR_INVALID_CALL;
             }
@@ -1607,11 +1618,12 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         /** @param {any} factory @param {number[]} args */
         CheckFeatureSupport: (factory, [feature, dataAt, size])=>{
             const answer = factory.CheckFeatureSupport(feature >>> 0, size >>> 0);
-            if (answer.hr === S_OK && (dataAt >>> 0) !== 0)
+            if (answer.hr !== S_OK || (dataAt >>> 0) === 0)
             {
-                fields.writeU32(dataAt, answer.value ?? 0);
+                return DXGI_ERROR_INVALID_CALL;
             }
-            return (dataAt >>> 0) === 0 ? E_INVALIDARG : answer.hr;
+            fields.writeU32(dataAt, answer.value ?? 0);
+            return S_OK;
         },
         // One adapter: the one of every preference.
         /** @param {any} factory @param {number[]} args */
