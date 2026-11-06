@@ -2636,3 +2636,52 @@ test('a refused GetDC hands back no DC; a second one leaves the handle alone (te
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
+
+test('the emulation\'s caps are its own, and an object made without hardware puts surfaces in'
+    + ' system memory and refuses a depth it has no format of (test_caps)', ()=>{
+    const h = seamed();
+    const caps = 0x6100;
+    const capsOf = (/** @type {number} */ ddraw, /** @type {boolean} */ hel)=>{
+        h.box.bytes.fill(0, caps, caps + DDCAPS.SIZE);
+        h.box.memory.writeU32(caps + DDCAPS.dwSize, DDCAPS.SIZE);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'GetCaps'),
+            hel ? [0, caps] : [caps, 0]), DD_OK);
+        return { surfaces: h.box.memory.readU32(caps + DDCAPS.ddsCaps),
+            old: h.box.memory.readU32(caps + DDCAPS.ddsOldCaps),
+            depths: h.box.memory.readU32(caps + DDCAPS.dwZBufferBitDepths) };
+    };
+    const helCaps = 0x10 | 0x40 | 0x100 | 0x200 | 0x1000 | 0x20000 | 0x400000;
+    for (const emulated of [false, true])
+    {
+        assert.equal(h.ddrawDll.DirectDrawCreate.handler([emulated ? 2 : 0, 0x4100, 0]), DD_OK);
+        const ddraw = h.box.memory.readU32(0x4100);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
+            [HWND, DDSCL_NORMAL]), DD_OK);
+        assert.deepEqual(capsOf(ddraw, true), { surfaces: helCaps, old: helCaps, depths: 0x400 });
+        const hal = capsOf(ddraw, false);
+        assert.equal(hal.surfaces === 0, emulated, 'no hardware has no surfaces in it');
+        const depthBuffer = (/** @type {number} */ bits)=>{
+            h.box.bytes.fill(0, 0x5000, 0x5000 + DDSURFACEDESC.SIZE);
+            h.box.memory.writeU32(0x5000, DDSURFACEDESC.SIZE);
+            h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwFlags, 1 | 2 | 4 | 0x40);
+            h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwWidth, 64);
+            h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwHeight, 64);
+            h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwZBufferBitDepth, bits);
+            h.box.memory.writeU32(0x5000 + DDSURFACEDESC.dwCaps, 0x20000);
+            const hr = h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+                [0x5000, 0x5100, 0]);
+            if (hr !== DD_OK)
+            {
+                return hr >>> 0;
+            }
+            const surface = h.box.memory.readU32(0x5100);
+            const made = h.publisher.objectAt(surface).caps;
+            assert.equal(h.release(surface), 0);
+            return made;
+        };
+        assert.equal(depthBuffer(16), emulated ? 0x800 | 0x20000 : 0x10000000 | 0x4000 | 0x20000);
+        assert.equal(depthBuffer(24), emulated ? 0x88760091 : 0x10000000 | 0x4000 | 0x20000);
+        assert.equal(h.release(ddraw), 0);
+    }
+    h.assertAllReleased();
+});

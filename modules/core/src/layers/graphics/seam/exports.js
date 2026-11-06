@@ -78,6 +78,8 @@ const REGISTER_INPUT = 1;
 const REGISTER_CONSTANT = 2;
 /** E_OUTOFMEMORY, which is what a create that cannot make an object reports. */
 const E_OUTOFMEMORY = 0x8007000e | 0;
+/** DirectDrawCreate's device pointer that asks for the emulation alone. */
+const DDCREATE_EMULATIONONLY = 2;
 
 /** The libraries the Direct3D 10 and 11 seam answers: either version's, and DXGI's. */
 /**
@@ -456,13 +458,16 @@ export function createGraphicsLibraries(
      *
      * @param {1 | 2 | 4 | 7} version
      * @param {number} out
+     * @param {number} [guid]  The device named: DDCREATE_EMULATIONONLY makes
+     *        an object with no hardware; any other is the one display there is.
      */
-    const createDirectDrawInto = (version, out)=>{
+    const createDirectDrawInto = (version, out, guid = 0)=>{
         if ((out >>> 0) === 0)
         {
             return DDERR_INVALIDPARAMS;
         }
-        const object = graphics.create('ddraw', ddraw.rootOptions(version));
+        const object = graphics.create('ddraw',
+            ddraw.rootOptions(version, (guid >>> 0) === DDCREATE_EMULATIONONLY));
         if (!object)
         {
             fields.writeU32(out >>> 0, 0);
@@ -775,9 +780,9 @@ export function createGraphicsLibraries(
             DirectDrawCreate: {
                 argBytes: 12,
                 /** @param {number[]} args */
-                handler: ([, out, outer])=>((outer >>> 0) !== 0
+                handler: ([guid, out, outer])=>((outer >>> 0) !== 0
                     ? CLASS_E_NOAGGREGATION
-                    : createDirectDrawInto(1, out)),
+                    : createDirectDrawInto(1, out, guid)),
             },
 
             /**
@@ -790,7 +795,7 @@ export function createGraphicsLibraries(
             DirectDrawCreateEx: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([, out, riid, outer])=>{
+                handler: ([guid, out, riid, outer])=>{
                     if ((outer >>> 0) !== 0)
                     {
                         return CLASS_E_NOAGGREGATION;
@@ -799,7 +804,7 @@ export function createGraphicsLibraries(
                     {
                         return DDERR_INVALIDPARAMS;
                     }
-                    return createDirectDrawInto(7, out);
+                    return createDirectDrawInto(7, out, guid);
                 },
             },
 

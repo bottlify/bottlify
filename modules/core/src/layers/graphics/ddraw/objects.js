@@ -324,7 +324,7 @@ export function depthFormatForDepth(bitDepth){
  * @property {(value: number) => void} setBuffer
  * @property {(value: number) => void} setCaps
  * @property {(previous: Surface | null) => void} setFlipPrev
- * @property {(next: Surface | null, isImplicit: boolean) => void} setFlipNext
+ * @property {(next: Surface | null, isImplicit: boolean, via?: string) => void} setFlipNext
  * @property {() => void} markLost
  * @property {() => number} isLost
  * @property {() => number} restore
@@ -340,6 +340,7 @@ export function depthFormatForDepth(bitDepth){
  *           `via` the interface called through (`surfaceCountOf`'s key).
  * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
  * @property {string | undefined} attachedVia  What its flip successor was attached through.
+ * @property {boolean} attachedImplicitly  Whether the runtime made the link to its successor.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
  *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
@@ -471,6 +472,9 @@ function sameRect(a, b){
  * @property {(key: string, own: string) => number | undefined} [surfaceRefusal]
  *           What a surface's QueryInterface answers for an interface it does not
  *           have, by the generation it was created as; E_NOINTERFACE without it.
+ * @property {boolean} [emulated]
+ *           Made by DirectDrawCreate(DDCREATE_EMULATIONONLY): no hardware, so
+ *           every surface is in system memory and depth is 16 or 32 bits.
  * @property {number} [screenWidth]
  * @property {number} [screenHeight]
  * @property {(bytes: number) => number} [allocate]
@@ -2111,6 +2115,23 @@ export function createDirectDraw(options = {}){
             return { hr: DDERR_INVALIDPARAMS, surface: null };
         }
 
+        // Without hardware a surface goes where the program did not say:
+        // system memory, and a depth buffer the emulation has no format of
+        // is refused (Wine's test_caps, DDCREATE_EMULATIONONLY).
+        if (options.emulated)
+        {
+            if ((request.caps & DDSCAPS_ZBUFFER) !== 0
+                && (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0
+                && request.zBufferBitDepth !== 16 && request.zBufferBitDepth !== 32)
+            {
+                return { hr: DDERR_INVALIDPIXELFORMAT, surface: null };
+            }
+            if ((request.caps & (DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY
+                | DDSCAPS_PRIMARYSURFACE)) === 0)
+            {
+                request = { ...request, caps: (request.caps | DDSCAPS_SYSTEMMEMORY) >>> 0 };
+            }
+        }
         const caps2 = request.caps2 ?? 0;
         const backBufferCount = request.backBufferCount ?? 0;
         const validity = validateSurfaceCaps({
@@ -2331,6 +2352,11 @@ export function createDirectDraw(options = {}){
          * The bytes its surfaces in video memory take, which the memory a
          * program is told is free goes down by (Wine's test_create_surface_pitch).
          */
+        /** Whether the object was made without hardware (DDCREATE_EMULATIONONLY). */
+        get emulated(){
+            return options.emulated === true;
+        },
+
         get videoBytes(){
             let bytes = 0;
             for (const surface of surfaces)

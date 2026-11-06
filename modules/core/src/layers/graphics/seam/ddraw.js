@@ -79,6 +79,7 @@ import {
     DDPCAPS_PRIMARYSURFACE, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDSCAPS_3DDEVICE, DXT_CODES,
     DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
+    DDSCAPS_PALETTE,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
     DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_LINEARSIZE, DDSD_MIPMAPCOUNT,
@@ -154,6 +155,10 @@ const SURFACE_CAPS = (DDSCAPS_BACKBUFFER | DDSCAPS_COMPLEX | DDSCAPS_FLIP | DDSC
     | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PRIMARYSURFACE | DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE
     | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP
     | DDSCAPS_LOCALVIDMEM) >>> 0;
+
+/** What the emulation (HEL) says it makes, as Windows 8 and later report it. */
+const HEL_SURFACE_CAPS = (DDSCAPS_FLIP | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_PALETTE
+    | DDSCAPS_PRIMARYSURFACE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP) >>> 0;
 
 /** What an enumeration callback answers to go on, and to stop. */
 const DDENUMRET_CANCEL = 0;
@@ -1552,8 +1557,10 @@ export function createDirectDrawSeam(
      * the z-buffer formats Direct3D enumerates.
      *
      * @param {number} pointer
+     * @param {'hal' | 'hel' | 'none'} kind  The hardware's, the emulation's,
+     *        or the hardware's of an object made without any.
      */
-    const writeCaps = pointer=>{
+    const writeCaps = (pointer, kind)=>{
         const at = pointer >>> 0;
         const size = fields.readU32(at + DDCAPS.dwSize);
         if (!DDCAPS_SIZES.includes(size))
@@ -1561,6 +1568,9 @@ export function createDirectDrawSeam(
             return DDERR_INVALIDPARAMS;
         }
         memory.writeMemory(at, new Uint8Array(size));
+        // The emulation's surfaces are those Windows 8 and later name, and an
+        // object made without hardware has none in hardware (test_caps).
+        const surfaceCaps = { hal: SURFACE_CAPS, hel: HEL_SURFACE_CAPS, none: 0 }[kind];
         fields.writeStruct(at, DDCAPS, {
             dwSize: size,
             dwCaps: (DDCAPS_3D | DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_BLTCOLORFILL
@@ -1573,14 +1583,14 @@ export function createDirectDrawSeam(
             // Blt's effects and raster operations, as ddraw/blit.js makes them.
             dwFXCaps: DDFXCAPS_BLTMIRRORLEFTRIGHT | DDFXCAPS_BLTMIRRORUPDOWN,
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
-            dwZBufferBitDepths: DDBD_16 | DDBD_32,
+            dwZBufferBitDepths: kind === 'hal' ? DDBD_16 | DDBD_32 : DDBD_16,
             dwVidMemTotal: videoMemory?.() ?? VIDEO_MEMORY,
             dwVidMemFree: videoMemory?.() ?? VIDEO_MEMORY,
-            ddsOldCaps: SURFACE_CAPS,
+            ddsOldCaps: surfaceCaps,
         });
         if (size >= DDCAPS.SIZE)
         {
-            fields.writeU32(at + DDCAPS.ddsCaps, SURFACE_CAPS);
+            fields.writeU32(at + DDCAPS.ddsCaps, surfaceCaps);
         }
         // dwRops: a bit for each raster operation, by its index (the ROP's third byte).
         for (const rop of [ROP.BLACKNESS, ROP.WHITENESS, ROP.SRCCOPY])
@@ -1813,11 +1823,12 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            for (const pointer of [hal, hel])
+            for (const [pointer, emulation] of /** @type {const} */ ([[hal, false], [hel, true]]))
             {
                 if ((pointer >>> 0) !== 0)
                 {
-                    const hr = writeCaps(pointer);
+                    const hr = writeCaps(pointer,
+                        emulation ? 'hel' : root.emulated ? 'none' : 'hal');
                     if (hr !== DD_OK)
                     {
                         return hr;
@@ -2218,10 +2229,11 @@ export function createDirectDrawSeam(
          * @param {1 | 2 | 4 | 7} version
          * @returns {import('../ddraw/objects.js').DirectDrawOptions}
          */
-        rootOptions(version){
+        rootOptions(version, emulated = false){
             /** @type {import('../ddraw/objects.js').DirectDrawOptions} */
             const options = {
                 version,
+                emulated,
                 surfaceCountOf,
                 surfaceRefusal,
                 surfaceSupports,
