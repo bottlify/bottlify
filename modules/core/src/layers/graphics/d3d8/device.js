@@ -2915,6 +2915,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 count: explicitCount(pool, undefined, chainBytes(format, width, height, 1, chain)),
                 allocate: storageFor(usage),
                 free,
+                // Video memory checks a lock's rectangle (Wine's d3d8
+                // test_surface_blocks); other pools take any.
+                rejectsMalformedRects: true,
             });
             if (renderer)
             {
@@ -2985,6 +2988,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 allocate: storageFor(usage),
                 free,
                 cube: true,
+                rejectsMalformedRects: true,
+                strictFaces: true,
             });
             renderer?.trackTexture(texture,
                 { width: edgeLength, height: edgeLength, format, levels: chain, usage });
@@ -3083,6 +3088,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage: 0,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.SYSTEMMEM, ()=>retireSurface(surface)),
+                // An image surface checks a lock's rectangle and clears a
+                // refused lock's answer (Wine's d3d8 test_lockrect_invalid).
+                checksRectsInEveryPool: true,
+                clearsFailedLock: true,
             });
             out.surface = surface;
             return D3D_OK;

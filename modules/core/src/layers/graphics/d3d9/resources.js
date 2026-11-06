@@ -636,6 +636,13 @@ const BI_BITFIELDS = 3;
  *           the wrong way round, is refused. The later runtime refuses it;
  *           the earlier accepted it and programs relied on that, so which
  *           applies is the device's to say.
+ * @property {boolean} [checksRectsInEveryPool]
+ *           Such a rectangle is refused in every pool, not only video
+ *           memory: Direct3D 8's image surfaces and cube faces.
+ * @property {boolean} [clearsFailedLock]
+ *           A lock refused hands back a null address and a pitch of zero:
+ *           Direct3D 8's image surfaces and cube faces (Wine's d3d8
+ *           test_lockrect_invalid).
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
  * @property {((api: string, detail: string, severity?: 'loss') => void) | null} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
@@ -670,6 +677,7 @@ export function createSurface(options){
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
+    const checksRectsInEveryPool = options.checksRectsInEveryPool === true;
     let locked = false;
     let lockFlags = 0;
     /** @type {LockRectangle | null} */
@@ -702,6 +710,8 @@ export function createSurface(options){
         base: options.base,
         /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
         kind: options.type,
+        /** A refused lock hands back a null address and a zero pitch (`clearsFailedLock`). */
+        clearsFailedLock: options.clearsFailedLock === true,
         reachable: ()=>!options.count.destroyed,
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: options.count,
@@ -738,7 +748,8 @@ export function createSurface(options){
             // Only video memory checks the rectangle: a lock of system,
             // scratch or managed memory takes any, as Windows does
             // (test_surface_blocks, test_lockrect_invalid).
-            if (rect && rejectsMalformedRects && options.pool === D3DPOOL.DEFAULT
+            if (rect && ((rejectsMalformedRects && options.pool === D3DPOOL.DEFAULT)
+                || checksRectsInEveryPool)
                 && !(rect.left >= 0 && rect.top >= 0 && rect.left < rect.right
                     && rect.top < rect.bottom && rect.right <= options.width
                     && rect.bottom <= options.height))
@@ -1158,6 +1169,8 @@ export function levelExtent(size, level){
  *     build whose storage is a fabricated address rather than guest memory.
  * @property {boolean} [cube]
  * @property {boolean} [rejectsMalformedRects]  Passed to every level's surface.
+ * @property {boolean} [strictFaces]  A cube's faces refuse a malformed rectangle in
+ *     every pool and clear a refused lock's answer, as Direct3D 8's do.
  * @property {boolean} [faceForgivesUnlock]  A cube's UnlockRect of a face not
  *     locked answers D3D_OK, as Direct3D 9's does (Wine's
  *     test_lockrect_invalid); its face's own surface still refuses one.
@@ -1275,6 +1288,8 @@ export function createTexture(options){
             // measured rather than reasoned about.
             forgivesDoubleUnlock: !cube,
             rejectsMalformedRects: options.rejectsMalformedRects,
+            checksRectsInEveryPool: cube && options.strictFaces === true,
+            clearsFailedLock: cube && options.strictFaces === true,
             family,
             // A level's rectangle is a region of the top level scaled up; a
             // rectangle that is not one is all of it.

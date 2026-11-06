@@ -42,7 +42,7 @@ import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
-    D3DSURFACE_DESC8, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
+    D3DSURFACE_DESC8, D3DLOCKED_RECT, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
@@ -515,6 +515,37 @@ export function createDirect3D8Seam(
         }
         return hr;
     };
+    /**
+     * A cube face's lock or unlock the host made, told to the face's block as
+     * its surface's own: a lock of the face's surface the guest then tries
+     * finds it held (Wine's d3d8 test_lockrect_invalid).
+     *
+     * @param {any} texture @param {number} face @param {number} level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteFace = (texture, face, level, locked, hr)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        if (hr === D3D_OK && texture.GetCubeMapSurface(face >>> 0, level >>> 0, held) === D3D_OK)
+        {
+            noteLevelLock(held.surface, null, locked, hr);
+            held.surface.release();
+        }
+        return hr;
+    };
+    /**
+     * A refused lock of a level that clears its answer (`clearsFailedLock`)
+     * hands back a null address and a zero pitch.
+     *
+     * @param {any} level @param {number} out @param {any} hr
+     */
+    const clearRefused = (level, out, hr)=>{
+        if (hr !== D3D_OK && typeof hr === 'number' && level?.clearsFailedLock && (out >>> 0) !== 0)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_RECT, { Pitch: 0, pBits: 0 });
+        }
+        return hr;
+    };
     /** @param {string} name */
     const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
         : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
@@ -839,9 +870,9 @@ export function createDirect3D8Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>noteLevelLock(surface, null, true,
-            lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
-                flags >>> 0))),
+        LockRect: (surface, [out, rect, flags])=>clearRefused(surface, out,
+            noteLevelLock(surface, null, true, lockRectInto(fields, out,
+                locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)))),
         /** @param {any} surface */
         UnlockRect: surface=>noteLevelLock(surface, null, false, surface.UnlockRect()),
     }, guestsBut(levelGroup, allocate
@@ -939,11 +970,23 @@ export function createDirect3D8Seam(
             return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0)),
+        LockRect: (texture, [face, level, out, rect, flags])=>{
+            const hr = noteFace(texture, face, level, true, lockRectInto(fields, out,
+                locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                    flags >>> 0)));
+            /** @type {{ surface?: any }} */
+            const held = {};
+            if (hr !== D3D_OK
+                && texture.GetCubeMapSurface(face >>> 0, level >>> 0, held) === D3D_OK)
+            {
+                clearRefused(held.surface, out, hr);
+                held.surface.release();
+            }
+            return hr;
+        },
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
+        UnlockRect: (texture, [face, level])=>noteFace(texture, face, level, false,
+            texture.UnlockCubeRect(face >>> 0, level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
     };

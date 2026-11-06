@@ -2315,6 +2315,33 @@ test('the cursor is kept as the program set it, and refused when it could not be
     assertFullyReleased(device);
 });
 
+test('an image surface and a cube face check a lock rectangle in every pool, a level not', ()=>{
+    // Wine's d3d8 test_lockrect_invalid: they refuse a rectangle past the
+    // surface, a managed texture's level takes it.
+    const device = createDevice();
+    const past = { left: 60, top: 60, right: 136, bottom: 68 };
+    /** @type {{ surface?: any }} */
+    const image = {};
+    assert.equal(device.CreateImageSurface(128, 128, D3DFMT.A8R8G8B8, image), D3D_OK);
+    assert.equal(image.surface.LockRect({}, past, 0), D3DERR_INVALIDCALL);
+    assert.equal(image.surface.clearsFailedLock, true, 'and a refused lock clears its answer');
+    /** @type {{ texture?: any }} */
+    const cube = {};
+    assert.equal(device.CreateCubeTexture(128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+        D3D_OK);
+    assert.equal(cube.texture.LockCubeRect(1, 0, {}, past, 0), D3DERR_INVALIDCALL);
+    /** @type {{ texture?: any }} */
+    const flat = {};
+    assert.equal(device.CreateTexture(128, 128, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, flat),
+        D3D_OK);
+    assert.equal(flat.texture.LockRect(0, {}, past, 0), D3D_OK);
+    assert.equal(flat.texture.UnlockRect(0), D3D_OK);
+    image.surface.release();
+    cube.texture.release();
+    flat.texture.release();
+    assertFullyReleased(device);
+});
+
 test('a lockable back buffer is given storage for the whole mode, not a fixed megabyte', ()=>{
     // A lock hands the program this address and it reads and writes the whole
     // surface through it. The allocation was a fixed megabyte whatever the mode,
