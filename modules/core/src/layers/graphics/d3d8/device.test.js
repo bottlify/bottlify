@@ -437,6 +437,27 @@ test('a world written over the one held reads back new, and a block captured bef
         assertFullyReleased(device);
     });
 
+test('a multiplied transform goes into the device while a block records, not into the block', ()=>{
+    // Wine's test_multiply_transform.
+    const device = createDevice();
+    /** @type {{ matrix?: Float32Array, handle?: number }} */
+    const out = {};
+    const scale = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2];
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.MultiplyTransform(D3DTS.WORLD, scale), D3D_OK);
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    const block = /** @type {number} */ (out.handle);
+    assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+    assert.deepEqual([...(/** @type {Float32Array} */ (out.matrix))], scale);
+    assert.equal(device.SetTransform(D3DTS.WORLD, identity), D3D_OK);
+    assert.equal(device.ApplyStateBlock(block), D3D_OK);
+    assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+    assert.deepEqual([...(/** @type {Float32Array} */ (out.matrix))], identity);
+    assert.equal(device.DeleteStateBlock(block), D3D_OK);
+    assertFullyReleased(device);
+});
+
 // --- the viewport, which is one value with two halves ---
 
 test('a fresh device has the whole back buffer as its viewport', ()=>{

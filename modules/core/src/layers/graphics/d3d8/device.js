@@ -2151,11 +2151,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     product[row * 4 + column] = sum;
                 }
             }
-            if (recording)
-            {
-                recording.transforms.set(type, product);
-                return D3D_OK;
-            }
+            // It goes into the device's own state even while a block
+            // records, and the block does not hold it (Wine's
+            // test_multiply_transform).
             transforms.set(type, product);
             if (type !== D3DTS.WORLD)
             {

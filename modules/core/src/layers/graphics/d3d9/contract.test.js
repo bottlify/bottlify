@@ -531,6 +531,52 @@ test('a multiplied transform is the given one times the current one', ()=>{
     // inside the translation, which it leaves as it was.
     assert.deepEqual([...(out.matrix ?? [])].slice(12), [10, 20, 30, 1]);
     assert.equal(out.matrix?.[0], 2);
+
+    // Wine's test_multiply_transform: while a block records, the product
+    // goes into the device, and the block does not hold it.
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    device.MultiplyTransform(D3DTS.WORLD, [
+        3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1,
+    ]);
+    /** @type {{ block?: any }} */
+    const block = {};
+    assert.equal(device.EndStateBlock(block), D3D_OK);
+    device.GetTransform(D3DTS.WORLD, out);
+    assert.equal(out.matrix?.[0], 6);
+    device.SetTransform(D3DTS.WORLD, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    assert.equal(block.block.Apply(), D3D_OK);
+    device.GetTransform(D3DTS.WORLD, out);
+    assert.equal(out.matrix?.[0], 1);
+    block.block.release();
+    assert.equal(device.release(), 0);
+});
+
+test('a buffer is no render target or depth-stencil, and lives in no scratch pool', ()=>{
+    // Wine's test_resource_access.
+    const { device } = make();
+    /** @type {{ buffer?: any }[]} */
+    const made = [];
+    const out = ()=>{
+        made.push({});
+        return made[made.length - 1];
+    };
+    for (const create of [
+        (/** @type {number} */ usage, /** @type {number} */ pool)=>device.CreateVertexBuffer(16,
+            usage, 0, pool, out()),
+        (/** @type {number} */ usage, /** @type {number} */ pool)=>device.CreateIndexBuffer(16,
+            usage, 101, pool, out()),
+    ])
+    {
+        assert.equal(create(0x200, D3DPOOL.DEFAULT), D3D_OK, 'dynamic');
+        assert.equal(create(0, D3DPOOL.MANAGED), D3D_OK);
+        assert.equal(create(1, D3DPOOL.DEFAULT), D3DERR_INVALIDCALL, 'render target');
+        assert.equal(create(0x202, D3DPOOL.DEFAULT), D3DERR_INVALIDCALL, 'depth-stencil');
+        assert.equal(create(0, D3DPOOL.SCRATCH), D3DERR_INVALIDCALL, 'scratch');
+    }
+    for (const held of made)
+    {
+        held.buffer?.release();
+    }
     assert.equal(device.release(), 0);
 });
 

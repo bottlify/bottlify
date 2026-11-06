@@ -809,6 +809,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {number} pool
      */
     const unmanaged = pool=>extended && pool === D3DPOOL.MANAGED;
+    /**
+     * Whether a buffer can be made with this usage in this pool: none is a
+     * render target or a depth-stencil, and none lives in the scratch pool
+     * (Wine's test_resource_access).
+     *
+     * @param {number} usage @param {number} pool
+     */
+    const bufferTakes = (usage, pool)=>pool !== D3DPOOL.SCRATCH
+        && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) === 0;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
     let inScene = false;
@@ -2968,9 +2977,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const product = multiplyMatrices(matrix, transforms.get(type) ?? IDENTITY);
-            return setState(
-                record=>record.transforms.set(type, product),
-                ()=>transforms.set(type, product));
+            // It goes into the device's own state even while a block
+            // records, and the block does not hold it (Wine's
+            // test_multiply_transform).
+            transforms.set(type, product);
+            return stateChanged(false);
         },
 
         /** @param {Material} value */
@@ -4208,7 +4219,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ buffer?: any }} out
          */
         CreateVertexBuffer(length, usage, vertexFormat, pool, out){
-            if (!(length > 0) || unmanaged(pool))
+            if (!(length > 0) || unmanaged(pool) || !bufferTakes(usage, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4230,7 +4241,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ buffer?: any }} out
          */
         CreateIndexBuffer(length, usage, format, pool, out){
-            if (!(length > 0) || unmanaged(pool))
+            if (!(length > 0) || unmanaged(pool) || !bufferTakes(usage, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
