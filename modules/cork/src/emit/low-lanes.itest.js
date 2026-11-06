@@ -82,7 +82,7 @@ for (const [host, armHost] of /** @type {const} */ ([['an arm64', true], ['an x6
     test(`owed low lanes come out as the instruction model leaves the registers (${host} host)`,
         async()=>{
             const judge = createJudge({ pool: POOL,
-                features: { ...features(), defaultNaNNegative: true, armHost } });
+                features: { ...features(), armHost } });
             const next = random(0x10a5e);
             let judged = 0;
             /** @type {string[]} */

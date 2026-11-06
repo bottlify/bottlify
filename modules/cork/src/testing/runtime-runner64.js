@@ -46,13 +46,19 @@ export function createRuntimeRunner64({ memory, layout, config = {}, defaultNaNN
     /** The state the current run is of, whose `trapped` a trap goes on. @type {any} */
     let current = null;
     const stats = { translated: 0, interpreted: 0, exits: 0, stepped: 0, tiered: 0, traps: 0 };
+    // A NaN an operation makes carries the host's sign unless `exactNaN` asks for
+    // x86's (roadmap/decisions.md): where the code is made for a host whose default
+    // NaN is positive, an arm64 one, the runner is held to the interpreter's NaNs
+    // with the fix-ups that make them, as the sequence judge is.
+    const exact = (defaultNaNNegative ?? probeFeatures().defaultNaNNegative)
+        || 'exactNaN' in config ? {} : { exactNaN: true };
     const runtime = createCorkRuntime({
         memory, layout,
         ...defaultNaNNegative === undefined ? {}
             : { features: { ...probeFeatures(), defaultNaNNegative } },
         config: { feed: 'slice', precise: true, hotThreshold: 1, missThreshold: 1,
             // The harness rewrites one code page for every case: never left to the interpreter.
-            volatileWindowMs: 0, ...config },
+            volatileWindowMs: 0, ...exact, ...config },
         read,
         imports: {
             trap: (/** @type {number} */ value)=>{
