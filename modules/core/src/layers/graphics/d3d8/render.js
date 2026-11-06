@@ -934,6 +934,20 @@ const decodeCompressed = (bytes, format, width, height, into)=>{
 };
 
 /**
+ * The depth range a Direct3D 8 or 9 viewport draws over: its own, but one
+ * whose MaxZ is at or below its MinZ draws as if MaxZ were MinZ + 0.001
+ * (Wine's d3d9 test_viewport: MinZ = MaxZ = 0 draws at 0.001, MinZ 0.5 and
+ * MaxZ 0 at 0.501). WebGPU would refuse a range whose top is under its
+ * bottom, and the frame with it.
+ *
+ * @template {{ minDepth: number, maxDepth: number }} R
+ * @param {R} rect
+ * @returns {R}
+ */
+export const drawnDepthRange = rect=>(rect.maxDepth > rect.minDepth ? rect
+    : { ...rect, maxDepth: rect.minDepth + 0.001 });
+
+/**
  * An ATI1 or ATI2 level in `bgra8unorm` texels: its BC4 blocks decoded, one
  * channel into all four, or two -- x the first block, y the second -- as red y
  * and green x, blue and alpha one, which is how a Direct3D 9 driver samples
@@ -6129,6 +6143,31 @@ export function createRenderer(options){
         depthFormat: model.depthStencil ? surfaceFor(model.depthStencil).format : undefined,
     });
 
+    /** A viewport over all of 0..1 in depth, one a viewport. @type {WeakMap<object, any>} */
+    const wholeDepthOf = new WeakMap();
+    /**
+     * The model a clear's quad is drawn through: the program's, but with its
+     * viewport over all of 0..1 in depth, since a clear writes the depth it
+     * was given and the viewport's range does not scale it.
+     *
+     * @param {RenderModel} model
+     * @returns {RenderModel}
+     */
+    const wholeDepth = model=>{
+        const { rect } = model.viewport;
+        if (rect.minDepth === 0 && rect.maxDepth === 1)
+        {
+            return model;
+        }
+        let viewport = wholeDepthOf.get(model.viewport);
+        if (!viewport)
+        {
+            viewport = { ...model.viewport, rect: { ...rect, minDepth: 0, maxDepth: 1 } };
+            wholeDepthOf.set(model.viewport, viewport);
+        }
+        return { ...model, viewport };
+    };
+
     /**
      * The pass for the model's targets, with the model's viewport applied.
      * Setting the viewport also sets the scissor, so anything that narrows
@@ -6140,7 +6179,7 @@ export function createRenderer(options){
         const frame = ensurePass(model);
         if (frame.viewport !== model.viewport)
         {
-            frame.commands.push({ kind: 'viewport', rect: model.viewport.rect });
+            frame.commands.push({ kind: 'viewport', rect: drawnDepthRange(model.viewport.rect) });
             frame.viewport = model.viewport;
             frame.scissor = '';
         }
@@ -10286,8 +10325,12 @@ export function createRenderer(options){
             }
             // A clear of less than the target is a scissored quad through the
             // ordinary draw path, with the depth test off and the writes
-            // chosen by the flags.
-            const frame = ensureViewport(model);
+            // chosen by the flags. It writes the depth it was given, which
+            // the viewport's depth range does not scale: the quad is drawn
+            // over all of 0..1, and the viewport's own range comes back with
+            // the next draw.
+            const drawn = wholeDepth(model);
+            const frame = ensureViewport(drawn);
             const state = {
                 ...pipelineStateOf(model, {
                     diverge: stateDiverge,
@@ -10327,7 +10370,7 @@ export function createRenderer(options){
                 state,
                 uniforms: uniformBlock({
                     worldViewProjection: IDENTITY,
-                    viewport: model.viewport,
+                    viewport: drawn.viewport,
                     textureFactor: 0,
                     fogColor: 0,
                     alphaRef: 0,
@@ -10361,7 +10404,7 @@ export function createRenderer(options){
                 frame.commands.push({ kind: 'scissor', rect: {
                     x: area.x1, y: area.y1, width: area.x2 - area.x1, height: area.y2 - area.y1,
                 } });
-                record(model, prepared, {
+                record(drawn, prepared, {
                     vertices: scratchVertices.write(new Uint8Array(vertices.buffer)),
                     indices: null,
                     count: 6,

@@ -125,6 +125,15 @@ test('the adapter answers format questions from the table its creates consult', 
     assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.R5G6B5, D3DFMT.X8R8G8B8), D3D_OK);
     assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.D16, D3DFMT.X8R8G8B8),
         D3DERR_NOTAVAILABLE);
+    // Wine's test_format_conversion: a format into itself, whatever it is; a
+    // video one into RGB; nothing between floats, nor into luminance.
+    assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.D16, D3DFMT.D16), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormatConversion(200, 200), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.YUY2, D3DFMT.R5G6B5), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.R32F, D3DFMT.R16F), D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.X8R8G8B8, D3DFMT.L8),
+        D3DERR_NOTAVAILABLE);
+    assert.equal(d3d.CheckDeviceFormatConversion(D3DFMT.L8, D3DFMT.A8), D3DERR_NOTAVAILABLE);
 });
 
 test('a device remembers what it was made with and who made it', ()=>{
@@ -1056,10 +1065,46 @@ test('UpdateTexture copies the levels, and the pools and formats have to match t
     const managed = {};
     device.CreateTexture(4, 4, 1, 0, D3DFMT.R5G6B5, D3DPOOL.MANAGED, managed);
     assert.equal(device.UpdateTexture(managed.texture, destination.texture), D3DERR_INVALIDCALL);
+    // Another format is taken, as Windows takes it (Wine's d3d9
+    // test_updatetexture, cases 12 to 15): of one texel size the bytes go,
+    // of two nothing does.
     /** @type {{ texture?: any }} */
     const other = {};
     device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, other);
-    assert.equal(device.UpdateTexture(other.texture, destination.texture), D3DERR_INVALIDCALL);
+    assert.equal(device.UpdateTexture(other.texture, destination.texture), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const into = {};
+    destination.texture.GetSurfaceLevel(0, into);
+    assert.equal(memory[into.surface.base], 1, 'nothing of another texel size arrived');
+    into.surface.release();
+    /** @type {{ texture?: any }} */
+    const twin = {};
+    device.CreateTexture(4, 4, 1, 0, D3DFMT.X1R5G5B5, D3DPOOL.SYSTEMMEM, twin);
+    /** @type {{ surface?: any }} */
+    const twinTop = {};
+    twin.texture.GetSurfaceLevel(0, twinTop);
+    memory.fill(9, twinTop.surface.base, twinTop.surface.base + 4);
+    twinTop.surface.release();
+    assert.equal(device.UpdateTexture(twin.texture, destination.texture), D3D_OK);
+    destination.texture.GetSurfaceLevel(0, into);
+    assert.equal(memory[into.surface.base], 9, 'one texel size: the bytes arrived');
+    into.surface.release();
+    twin.texture.release();
+    // The source's levels are matched by size: one 8x8 level above the
+    // destination's 4x4 top is skipped.
+    /** @type {{ texture?: any }} */
+    const larger = {};
+    device.CreateTexture(8, 8, 2, 0, D3DFMT.R5G6B5, D3DPOOL.SYSTEMMEM, larger);
+    /** @type {{ surface?: any }} */
+    const second = {};
+    larger.texture.GetSurfaceLevel(1, second);
+    memory.fill(7, second.surface.base, second.surface.base + 4);
+    second.surface.release();
+    assert.equal(device.UpdateTexture(larger.texture, destination.texture), D3D_OK);
+    destination.texture.GetSurfaceLevel(0, into);
+    assert.equal(memory[into.surface.base], 7, 'the 4x4 level went into the 4x4 top');
+    into.surface.release();
+    larger.texture.release();
     managed.texture.release();
     other.texture.release();
     source.texture.release();

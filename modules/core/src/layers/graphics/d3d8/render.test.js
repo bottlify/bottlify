@@ -916,6 +916,77 @@ test('a buffer released for the last time gives its GPU buffer back once no stre
         assert.equal(held(), before, 'unbound, it goes');
     });
 
+test('a viewport whose MaxZ is not above its MinZ draws over a thousandth above MinZ', async()=>{
+    // Wine's d3d9 test_viewport: MinZ = MaxZ = 0 draws at 0.001, MinZ 0.5 and
+    // MaxZ 0 at 0.501; what the program reads back is what it set.
+    for (const [minZ, maxZ, drawn] of [[0, 0, 0.001], [0.5, 0, 0.501], [0.25, 0.75, 0.75]])
+    {
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(20 * 3, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), quad([0, 0, 4, 4], 0).subarray(0, 60));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        const asked = { X: 1, Y: 1, Width: 2, Height: 2, MinZ: minZ, MaxZ: maxZ };
+        assert.equal(device.SetViewport(asked), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const rect = gpu.of('setViewport').pop().rect;
+        assert.equal(rect[4], minZ);
+        assert.ok(Math.abs(rect[5] - drawn) < 1e-6, `${minZ}..${maxZ} drawn up to ${rect[5]}`);
+        /** @type {any} */
+        const read = {};
+        assert.equal(device.GetViewport(read), D3D_OK);
+        assert.equal(read.viewport?.MaxZ ?? read.MaxZ, maxZ);
+    }
+});
+
+test('a clear of less than the target writes its depth over all of 0..1', async()=>{
+    // Wine's d3d9 test_viewport: a clear in a viewport whose MaxZ is its MinZ
+    // writes the depth it was given; the next draw takes the viewport's range.
+    const h = harness();
+    const { device, gpu } = h;
+    assert.equal(device.SetViewport({ X: 1, Y: 1, Width: 2, Height: 2, MinZ: 0, MaxZ: 0 }),
+        D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 0.5, 0), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(20 * 3, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    // The depth range each draw was made under: the clear's quad, then the draw.
+    /** @type {number[][]} */
+    const drawnUnder = [];
+    /** @type {number[]} */
+    let range = [0, 1];
+    for (const call of gpu.calls)
+    {
+        if (call.op === 'setViewport')
+        {
+            range = call.rect.slice(4);
+        }
+        else if (call.op === 'draw')
+        {
+            drawnUnder.push(range);
+        }
+    }
+    assert.equal(drawnUnder.length, 2);
+    assert.deepEqual(drawnUnder[0], [0, 1], 'the clear\'s quad over all of 0..1');
+    assert.ok(Math.abs(drawnUnder[1][1] - 0.001) < 1e-6, 'the draw over the viewport\'s own');
+});
+
 test('recorded: a draw binds its pipeline, its stream and a viewport inside its pass', async()=>{
     const h = harness();
     const { device, gpu } = h;

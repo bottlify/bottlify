@@ -546,6 +546,11 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {number} BehaviorFlags
  */
 
+/** The RGB formats a device converts between (`CheckDeviceFormatConversion`). */
+/** @type {Set<number>} */
+const CONVERTED_RGB = new Set([D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.A1R5G5B5, D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4, D3DFMT.A2R10G10B10]);
+
 /**
  * The object a program gets from Direct3DCreate9. It exists here for one
  * reason: device creation can fail on its parameters, and the caller has to be
@@ -780,15 +785,22 @@ export function createDirect3D9(options = {}){
         },
 
         /**
-         * Whether a present can convert between two formats. Any two colour
-         * formats: the back buffer is always drawn into the same surface and
-         * the presentation makes no distinction.
+         * Whether StretchRect or a present converts one format into another:
+         * any format into itself, whatever it is; an RGB format of eight bits
+         * a channel or fewer, or a video one, into such an RGB format; and
+         * nothing else -- no float, luminance, alpha-only or bump format into
+         * another (Wine's d3d9 test_format_conversion).
          *
          * @param {number} sourceFormat
          * @param {number} targetFormat
          */
         CheckDeviceFormatConversion(sourceFormat, targetFormat){
-            return isColourFormat(sourceFormat) && isColourFormat(targetFormat)
+            if ((sourceFormat >>> 0) === (targetFormat >>> 0))
+            {
+                return D3D_OK;
+            }
+            return (CONVERTED_RGB.has(sourceFormat) || sourceFormat === D3DFMT.YUY2
+                || sourceFormat === D3DFMT.UYVY) && CONVERTED_RGB.has(targetFormat)
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
@@ -4494,18 +4506,57 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             const from = describe(top);
             const to = describe(target);
+            // Two formats are taken, as Windows takes them (Wine's d3d9
+            // test_updatetexture, cases 12 to 15): of one texel size the
+            // bytes are carried, of two nothing is, and both are said.
+            const fromInfo = FORMAT_INFO[from.Format];
+            const toInfo = FORMAT_INFO[to.Format];
+            const sameBytes = from.Format === to.Format || (fromInfo !== undefined
+                && toInfo !== undefined && fromInfo.blockSize === undefined
+                && toInfo.blockSize === undefined && fromInfo.bytesPerPixel === toInfo.bytesPerPixel);
             if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool !== D3DPOOL.DEFAULT
-                || from.Format !== to.Format
+                || (from.Format !== to.Format
+                    && (isCompressed(from.Format) || isCompressed(to.Format)))
                 || (source.cube ?? false) !== (destination.cube ?? false))
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (from.Format !== to.Format)
+            {
+                report('update-format', sameBytes
+                    ? 'UpdateTexture between two formats of one texel size: the bytes were'
+                        + ' carried, not converted'
+                    : 'UpdateTexture between formats of two texel sizes carried nothing: the'
+                        + ' texels are not converted');
+            }
             // A destination that makes its own levels takes the source's top
-            // one and makes the rest from it.
-            const skipped = destination.autoGen
-                ? 0
-                : Math.max(0, source.levels - destination.levels);
+            // one and makes the rest from it. Otherwise the source's levels
+            // larger than the destination's top one are skipped, by size and
+            // not by count (Wine's test_updatetexture, cases 6, 7 and 10), and
+            // levels of one larger side and two shapes carry where they
+            // overlap (case 11).
+            const largest = (/** @type {any} */ surface)=>{
+                const desc = describe(surface);
+                return Math.max(desc.Width, desc.Height);
+            };
+            let skipped = 0;
+            if (!destination.autoGen)
+            {
+                while (skipped < source.levels - 1
+                    && largest(levelSurface(source, skipped)) > largest(target))
+                {
+                    skipped++;
+                }
+                // A source with no level as large as the destination's top
+                // one in its larger side is no match: Windows writes past the
+                // destination there (the case the test leaves out).
+                if (largest(levelSurface(source, skipped)) !== largest(target))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+            }
             const faces = source.cube ? 6 : 1;
+            let overlapped = false;
             /** @type {{ one: any, other: any, level: number, face: number }[]} */
             const pairs = [];
             for (let face = 0; face < faces; face++)
@@ -4520,12 +4571,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     }
                     const desc = describe(one);
                     const into = describe(other);
-                    if (desc.Width !== into.Width || desc.Height !== into.Height)
-                    {
-                        return D3DERR_INVALIDCALL;
-                    }
+                    overlapped ||= desc.Width !== into.Width || desc.Height !== into.Height;
                     pairs.push({ one, other, level: level + skipped, face });
                 }
+            }
+            if (overlapped)
+            {
+                report('update-size', 'UpdateTexture between levels of two sizes: they were'
+                    + ' carried where they overlap');
             }
             // What the source was written in since it was last carried, and
             // nothing more: an update of a source nobody touched moves nothing
@@ -4535,11 +4588,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 (_, face)=>source.takeDirtyRegion?.(face) ?? null);
             /** @type {SurfaceMove[]} */
             const moves = [];
-            const carried = pairs.filter(pair=>regions[pair.face] !== null);
+            const carried = sameBytes ? pairs.filter(pair=>regions[pair.face] !== null) : [];
             for (const { one, other, level, face } of carried)
             {
                 const desc = describe(one);
-                const rect = regionAtLevel(regions[face], level, desc.Width, desc.Height);
+                const into = describe(other);
+                const rect = regionAtLevel(regions[face], level, Math.min(desc.Width, into.Width),
+                    Math.min(desc.Height, into.Height));
                 moves.push(rectMove(one, rect, other, { x: rect.left, y: rect.top }));
             }
             deliverMoves(moves, out);
