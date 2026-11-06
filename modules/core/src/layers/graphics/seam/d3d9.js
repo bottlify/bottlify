@@ -27,7 +27,7 @@
  * an HRESULT -- a count, a boolean, a float -- which the caller reads as that.
  */
 
-import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
+import { IDIRECT3D9_SLOTS, describe as describeAny } from './vtables.js';
 import { fpuSetupCode } from './fpu.js';
 import {
     D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_BOX64, D3DLOCKED_RECT,
@@ -66,10 +66,11 @@ import { vertexCountOf } from '../d3d8/render.js';
 import { createCursorTeller } from './cursor.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { capabilityWords } from '../d3d9/caps.js';
-import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, PALETTE_BYTES } from '../d3d9/device.js';
+import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, EX_SURFACE_USAGE, PALETTE_BYTES }
+    from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
-import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
 import { scanWindows } from '../../win32/common/scan-windows.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
@@ -87,6 +88,15 @@ import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 import { loudRefusals } from './refusals.js';
+
+/**
+ * Every interface here is its object's IUnknown: one inheritance chain, one
+ * pointer (com.js `identity`).
+ *
+ * @param {Parameters<typeof describeAny>} args
+ * @returns {import('./com.js').InterfaceDescriptor}
+ */
+const describe = (...args)=>({ ...describeAny(...args), identity: true });
 
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
@@ -155,6 +165,19 @@ const D3DDISPLAYROTATION_IDENTITY = 1;
 const ADAPTER_LUID = 0x00000001;
 const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
+
+/** The program keeps its windows itself: a full-screen device changes neither (`focus.js`). */
+const D3DCREATE_NOWINDOWCHANGES = 0x00000800;
+
+/**
+ * `then` of an answer that may be a promise, at once when it is not.
+ *
+ * @param {unknown} value @param {(answer: any) => any} then
+ */
+const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<unknown>} */ (value).then(then) : then(value));
+/** What a device of the plain interface answers a shared handle with. */
+const E_NOTIMPL = 0x80004001 | 0;
 /** D3DENUM_NO_WHQL_LEVEL: skip the certification lookup, which took seconds on real Windows. */
 const D3DENUM_NO_WHQL_LEVEL = 0x00000002;
 /** D3DPRESENTFLAG_LOCKABLE_BACKBUFFER. */
@@ -180,6 +203,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     placed. `announce` asks that the window be told its size even if it
  *     did not change.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
+ *        A full-screen device's focus and device windows (`focus.js`).
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
@@ -208,7 +233,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     where its caller reads it, when that is not EAX: XMM0 in a 64-bit process.
  */
 export function createDirect3D9Seam(
-    { publisher, memory, screen, divergence, cursor, resolution, identity,
+    { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, resolution,
+        identity,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
@@ -342,6 +368,18 @@ export function createDirect3D9Seam(
             writePointer(out >>> 0, 0);
         }
         return hr;
+    };
+
+    /**
+     * Whether a surface was made by a device other than this one: no target
+     * of another device is bound (Wine's d3d9
+     * test_render_target_device_mismatch).
+     *
+     * @param {any} device @param {any} surface
+     */
+    const madeElsewhere = (device, surface)=>{
+        const owner = surface ? owners.get(surface) ?? owners.get(surface.container) : null;
+        return owner !== null && owner !== undefined && owner !== device;
     };
 
     /**
@@ -1645,6 +1683,15 @@ export function createDirect3D9Seam(
     const sharedHandleRefused = shared=>(shared >>> 0) !== 0;
 
     /**
+     * A shared handle asked of a device made through the plain interface,
+     * which has no sharing at all: E_NOTIMPL, before anything else is looked
+     * at (Wine's test_shared_handle; Windows 7 answers D3DERR_INVALIDCALL).
+     *
+     * @param {any} device @param {number} shared
+     */
+    const plainShareRefused = (device, shared)=>(shared >>> 0) !== 0 && device?.extended !== true;
+
+    /**
      * What a create's shared-handle pointer asks of an extended device for a
      * resource in the system-memory pool: the handle it holds is the address
      * of memory of the program's own to keep the resource in. Any other use of
@@ -1882,10 +1929,12 @@ export function createDirect3D9Seam(
                 // to take it with it the way a created one does; a window left
                 // at the old size has the program clipping its cursor to a
                 // rectangle the picture no longer fills.
-                takeScreen(device, next, (next.hDeviceWindow >>> 0) || deviceWindow);
+                const taken = takeScreen(device, next, (next.hDeviceWindow >>> 0) || deviceWindow);
+                // A reset puts the state back to its defaults, which the block
+                // has to say before the guest reads or writes it again.
+                shadowOf(device)?.remirror();
+                return andThen(taken, ()=>hr);
             }
-            // A reset puts the state back to its defaults, which the block
-            // has to say before the guest reads or writes it again.
             shadowOf(device)?.remirror();
             return hr;
         },
@@ -1972,6 +2021,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateTexture: (device, [width, height, levels, usage, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             const userMemory = userMemoryOf(device, shared, pool);
             if (userMemory === null || (out >>> 0) === 0)
             {
@@ -2002,6 +2055,10 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         CreateVolumeTexture: (device, args)=>{
             const [width, height, depth, levels, usage, format, pool, out, shared] = args;
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2027,6 +2084,10 @@ export function createDirect3D9Seam(
         },
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2045,6 +2106,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateVertexBuffer: (device, [length, usage, fvf, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 // A buffer is never kept in the program's own memory.
@@ -2066,6 +2131,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateIndexBuffer: (device, [length, usage, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 // A buffer is never kept in the program's own memory.
@@ -2089,6 +2158,10 @@ export function createDirect3D9Seam(
         // one sample per pixel whatever it is asked for (decision A85).
         /** @param {any} device @param {number[]} args */
         CreateRenderTarget: (device, [width, height, format, samples, , lockable, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2108,6 +2181,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateDepthStencilSurface: (device, [width, height, format, samples, , , out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             if (sharedHandleRefused(shared) || (out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2127,6 +2204,10 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateOffscreenPlainSurface: (device, [width, height, format, pool, out, shared])=>{
+            if (plainShareRefused(device, shared))
+            {
+                return E_NOTIMPL;
+            }
             const userMemory = userMemoryOf(device, shared, pool);
             if (userMemory === null || (out >>> 0) === 0)
             {
@@ -2178,7 +2259,12 @@ export function createDirect3D9Seam(
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [index, surface])=>{
-            const hr = device.SetRenderTarget(index >>> 0, publisher.objectAt(surface));
+            const target = publisher.objectAt(surface);
+            if (madeElsewhere(device, target))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetRenderTarget(index >>> 0, target);
             // A new target is a new viewport, which the guest's GetViewport reads.
             shadowOf(device)?.remirror({ viewport: true });
             return hr;
@@ -2202,8 +2288,11 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetDepthStencilSurface: (device, [surface])=>
-            device.SetDepthStencilSurface(publisher.objectAt(surface)),
+        SetDepthStencilSurface: (device, [surface])=>{
+            const target = publisher.objectAt(surface);
+            return madeElsewhere(device, target) ? D3DERR_INVALIDCALL
+                : device.SetDepthStencilSurface(target);
+        },
 
         /** @param {any} device @param {number[]} args */
         GetDepthStencilSurface: (device, [out])=>{
@@ -3020,13 +3109,16 @@ export function createDirect3D9Seam(
      * nothing here shares a resource across devices.
      *
      * @param {string} method
-     * @param {(args: number[]) => { out: number, shared: number,
+     * @param {(args: number[], device: any) => { out: number, shared: number, usage?: number,
      *     call: (device: any, held: { surface?: any }) => number }} read
+     *     `usage` given: a usage the create takes no part of is refused before the
+     *     pointer is touched (Wine's d3d9ex test_create_depth_stencil_surface_ex)
      */
     const exSurfaceCreate = (method, read)=>
         (/** @type {any} */ device, /** @type {number[]} */ args)=>{
-            const { out, shared, call } = read(args);
-            if (sharedHandleRefused(shared) || (out >>> 0) === 0)
+            const { out, shared, usage, call } = read(args, device);
+            if (sharedHandleRefused(shared) || (out >>> 0) === 0
+                || ((usage ?? 0) & ~EX_SURFACE_USAGE) !== 0)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3040,7 +3132,9 @@ export function createDirect3D9Seam(
                         ? E_OUTOFMEMORY
                         : D3DERR_OUTOFVIDEOMEMORY, device);
             }
-            return hr;
+            // A refused one clears the pointer, as the plain creates do
+            // (Wine's d3d9ex test_format_unknown).
+            return clearAndRefuse(out, hr);
         };
 
     /**
@@ -3090,20 +3184,27 @@ export function createDirect3D9Seam(
         CheckDeviceState: (device, [window])=>device.CheckDeviceState(window >>> 0),
         CreateRenderTargetEx: exSurfaceCreate('CreateRenderTargetEx',
             ([width, height, format, samples, , lockable, out, shared, usage])=>({
-                out, shared,
+                out, shared, usage,
                 call: (device, held)=>singleSampled(samples)
                     ?? device.CreateRenderTargetEx(width >>> 0, height >>> 0,
                         format >>> 0, lockable !== 0, usage >>> 0, held),
             })),
+        // A system-memory surface may live in the program's own memory, its
+        // address in the shared handle, as the plain create's may (Wine's
+        // d3d9ex test_user_memory).
         CreateOffscreenPlainSurfaceEx: exSurfaceCreate('CreateOffscreenPlainSurfaceEx',
-            ([width, height, format, pool, out, shared, usage])=>({
-                out, shared,
-                call: (device, held)=>device.CreateOffscreenPlainSurfaceEx(width >>> 0,
-                    height >>> 0, format >>> 0, pool >>> 0, usage >>> 0, held),
-            })),
+            ([width, height, format, pool, out, shared, usage], device)=>{
+                const userMemory = userMemoryOf(device, shared, pool);
+                return {
+                    out, shared: userMemory === null ? shared : 0,
+                    call: (/** @type {any} */ made, /** @type {{ surface?: any }} */ held)=>
+                        made.CreateOffscreenPlainSurfaceEx(width >>> 0, height >>> 0,
+                            format >>> 0, pool >>> 0, usage >>> 0, held, userMemory ?? 0),
+                };
+            }),
         CreateDepthStencilSurfaceEx: exSurfaceCreate('CreateDepthStencilSurfaceEx',
             ([width, height, format, samples, , , out, shared, usage])=>({
-                out, shared,
+                out, shared, usage,
                 call: (device, held)=>singleSampled(samples)
                     ?? device.CreateDepthStencilSurfaceEx(width >>> 0,
                         height >>> 0, format >>> 0, usage >>> 0, held),
@@ -3193,7 +3294,7 @@ export function createDirect3D9Seam(
             backBufferHeight: (raw.BackBufferHeight >>> 0) || taken.height,
             backBufferFormat: raw.BackBufferFormat || D3DFMT.X8R8G8B8,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? raw.MultiSampleType,
             swapEffect: raw.SwapEffect,
             // None named is the window the device was made for, and what
             // GetPresentParameters then answers (test_swapchain_parameters).
@@ -3540,14 +3641,28 @@ export function createDirect3D9Seam(
         // window is kept for a later Reset, whose present parameters need
         // not repeat it.
         deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-        takeScreen(held.device, wanted, deviceWindow);
+        // A loss the focus window's hook makes is the guest's to see at once:
+        // TestCooperativeLevel answers from the block while it says D3D_OK.
+        const made = held.device;
+        const lose = made.injectDeviceLoss?.bind(made);
+        if (lose)
+        {
+            made.injectDeviceLoss = (/** @type {boolean | undefined} */ restorable)=>{
+                lose(restorable);
+                shadowOf(made)?.remirror();
+            };
+        }
+        windowsOf.set(held.device, { focus: focus >>> 0,
+            noWindowChanges: ((behaviourFlags >>> 0) & D3DCREATE_NOWINDOWCHANGES) !== 0,
+            extended: held.device.extended === true });
+        const taken = takeScreen(held.device, wanted, deviceWindow);
         const result = handBack(held.device, deviceInterfacesOf(held.device), id,
             out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
         if (result === D3D_OK)
         {
             lastDevice = held.device;
         }
-        return result;
+        return andThen(taken, ()=>result);
     };
 
     /** The roots Direct3DCreate9Ex made. @type {WeakSet<object>} */
@@ -3677,24 +3792,79 @@ export function createDirect3D9Seam(
      */
     const unshown = new WeakMap();
 
+    /** The devices that set a display mode and have not left it. @type {WeakSet<any>} */
+    const fullScreen = new WeakSet();
+    /** The devices whose last Release is watched for that. @type {WeakSet<any>} */
+    const releaseWatched = new WeakSet();
+
+    /**
+     * A full-screen device leaving its mode, reset to a window or released:
+     * the display goes back to the registry's mode, whatever was set since
+     * (Wine's test_reset and test_mode_change).
+     *
+     * @param {any} device
+     */
+    const leaveFullScreen = device=>{
+        if (fullScreen.delete(device))
+        {
+            const mode = registryMode(screen());
+            resolution?.(mode.width, mode.height);
+        }
+    };
+
     /**
      * What a created or reset device does to the screen: a fullscreen one
-     * takes it now, at its mode, with its window; a windowed one at its first
-     * frame.
+     * takes it now, at its mode, with its window, and gives it back when it
+     * goes (`leaveFullScreen`); a windowed one takes it at its first frame.
      *
      * @param {any} device @param {any} parameters @param {number} window
+     * @returns {unknown} a promise while the windows hear of it
      */
     const takeScreen = (device, parameters, window)=>{
         const width = parameters.backBufferWidth >>> 0;
         const height = parameters.backBufferHeight >>> 0;
+        const how = windowsOf.get(device);
+        const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
+            fullscreen: !parameters.windowed, width, height, created: !how.taken }) : 0;
+        if (how)
+        {
+            how.taken = true;
+        }
         if (parameters.windowed)
         {
+            leaveFullScreen(device);
             unshown.set(device, { width, height, window });
-            return;
+            return taken;
+        }
+        fullScreen.add(device);
+        if (!releaseWatched.has(device))
+        {
+            releaseWatched.add(device);
+            const release = device.release;
+            device.release = ()=>{
+                const left = release();
+                if (left === 0)
+                {
+                    leaveFullScreen(device);
+                    focusWindows?.release(device);
+                }
+                return left;
+            };
         }
         unshown.delete(device);
         resolution?.(width, height, { window, fullscreen: true });
+        return taken;
     };
+
+    /**
+     * The windows a device was created with, for its focus window's hook
+     * (`focus.js`): the focus window, whether the program keeps its windows
+     * itself, and whether the device is never lost.
+     *
+     * @type {WeakMap<any, { focus: number, noWindowChanges: boolean, extended: boolean,
+     *     taken?: boolean }>}
+     */
+    const windowsOf = new WeakMap();
 
     /**
      * A windowed device's first frame: its window is the screen from now on.

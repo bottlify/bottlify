@@ -2427,6 +2427,81 @@ test('a class word is read from the atom or the extra bytes, and the atom is not
 
 // --- display mode ---
 
+test('a mode set tells every top-level window, before ChangeDisplaySettings returns', ()=>{
+    // WM_DISPLAYCHANGE: the depth, and the size in the low and high words
+    // (Wine's d3d9 test_wndproc hears it while the call is made).
+    /** @type {any[]} */
+    const heard = [];
+    const { memory, fns } = setup({ dispatch: (_, message)=>{
+        heard.push(message);
+        return 0;
+    } });
+    const hwnd = makeWindow(memory, fns);
+    putMode(memory, 640, 480);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL);
+    const told = heard.filter(message=>message.message === 0x7e);
+    assert.deepEqual(told.map(message=>[message.hwnd, message.wParam, message.lParam]),
+        [[hwnd, SCREEN.bitsPerPixel, (480 << 16) | 640]]);
+    heard.length = 0;
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL);
+    assert.equal(heard.filter(message=>message.message === 0x7e).length, 0,
+        'a mode already set moves nothing');
+    assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL);
+    assert.equal(heard.filter(message=>message.message === 0x7e).length, 1,
+        'and back to the registry mode, again');
+});
+
+test('a display turned from its own orientation is no mode', ()=>{
+    // Wine's d3d9ex test_get_adapter_displaymode_ex asks for DMDO_180 and
+    // skips on DISP_CHANGE_BADMODE.
+    const { memory, fns, screen } = setup();
+    const DM_DISPLAYORIENTATION = 0x80;
+    putMode(memory, SCREEN.width, SCREEN.height);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields,
+        [DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmDisplayOrientation, [2]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_BADMODE);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmDisplayOrientation, [0]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL,
+        'its own is');
+    assert.equal(screen.width, SCREEN.width);
+});
+
+test('the registry mode is written with CDS_UPDATEREGISTRY, and set only without CDS_NORESET', ()=>{
+    // Wine's d3d9 test_mode_change writes the registry this way and expects
+    // the mode in effect to stay until a null mode puts the registry's back.
+    const { memory, fns, screen } = setup();
+    const CDS_UPDATEREGISTRY = 0x1;
+    const CDS_NORESET = 0x10000000;
+    const ENUM_REGISTRY_SETTINGS = 0xfffffffe;
+    putMode(memory, 640, 480);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER,
+        CDS_UPDATEREGISTRY | CDS_NORESET]), DISP_CHANGE_SUCCESSFUL);
+    assert.equal(screen.width, SCREEN.width, 'the mode in effect stays');
+    memory.putU32s(DEVMODE_BUFFER, new Array(40).fill(0));
+    const REGISTRY = ENUM_REGISTRY_SETTINGS;
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, REGISTRY, DEVMODE_BUFFER]), 1);
+    assert.deepEqual([memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth),
+        memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsHeight)], [640, 480], 'the registry has it');
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, 0xffffffff, DEVMODE_BUFFER]), 1);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), SCREEN.width,
+        'and the current settings do not');
+    assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL);
+    assert.deepEqual([screen.width, screen.height], [640, 480],
+        'a null mode sets the registry mode');
+
+    putMode(memory, 800, 600);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, CDS_UPDATEREGISTRY]),
+        DISP_CHANGE_SUCCESSFUL);
+    assert.deepEqual([screen.width, screen.height], [800, 600],
+        'without CDS_NORESET it is set too');
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, REGISTRY, DEVMODE_BUFFER]), 1);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 800);
+});
+
 /** @param {any} memory @param {number} width @param {number} height */
 function putMode(memory, width, height){
     memory.putU32s(DEVMODE_BUFFER, new Array(40).fill(0));

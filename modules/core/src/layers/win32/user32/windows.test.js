@@ -778,6 +778,23 @@ test('MoveWindow changes both rectangles', ()=>{
     assert.equal(memory.u32(RECT_BUFFER + RECT.right), 120);
 });
 
+test('DefWindowProc carries out the window menu\'s minimise, maximise and restore', ()=>{
+    // Wine's d3d9 test_wndproc sends them to its window and expects the
+    // placement messages ShowWindow makes.
+    const { fns, hwnd } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const WM_SYSCOMMAND = 0x0112;
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf020, 0]), 0);
+    assert.equal(fns.IsIconic.handler([hwnd]), 1, 'SC_MINIMIZE');
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf120, 0]), 0);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0, 'SC_RESTORE');
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf030, 0]), 0);
+    assert.equal(fns.IsZoomed.handler([hwnd]), 1, 'SC_MAXIMIZE');
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf122, 0]), 0,
+        'the low four bits are the system\'s');
+    assert.equal(fns.IsZoomed.handler([hwnd]), 0);
+});
+
 test('CloseWindow minimises rather than closing, and a restore restores', ()=>{
     const SW_RESTORE = 9;
     const { fns, hwnd } = withWindow();

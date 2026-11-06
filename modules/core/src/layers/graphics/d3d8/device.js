@@ -830,7 +830,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         answer: null };
     let nextStateBlock = 1;
 
-    const count = createReferenceCount();
+    // Whoever lets the last reference go -- the program, or a resource or
+    // state block that held the device -- the device's teardown runs
+    // (Wine's test_refcount: the last state block destroys it).
+    const count = createReferenceCount({ onLastRef: ()=>teardown() });
 
     /**
      * The vertices each range of a static index buffer named, while none of its
@@ -1581,6 +1584,18 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     /** @type {(() => void) | undefined} */
     let stopWatchingLoss;
 
+    /** What the device's last reference takes with it. */
+    const teardown = ()=>{
+        stopWatchingLoss?.();
+        showGamma(true);
+        // The targets it kept bound go with it.
+        renderTarget = rebound(renderTarget, null);
+        depthStencil = rebound(depthStencil, null);
+        retireImplicitResources();
+        // The reference CreateDevice took on the object that made it.
+        identity?.direct3D?.release?.();
+    };
+
     /**
      * A present's answer, once its frame is queued: at once, or once the
      * device has finished enough of the frames before it.
@@ -1634,22 +1649,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return stateBlocks;
         },
         addRef: ()=>count.addRef(),
-        release: ()=>{
-            const before = count.value;
-            const left = count.release();
-            if (left === 0 && before > 0)
-            {
-                stopWatchingLoss?.();
-                showGamma(true);
-                // The targets it kept bound go with it.
-                renderTarget = rebound(renderTarget, null);
-                depthStencil = rebound(depthStencil, null);
-                retireImplicitResources();
-                // The reference CreateDevice took on the object that made it.
-                identity?.direct3D?.release?.();
-            }
-            return left;
-        },
+        release: ()=>count.release(),
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){
@@ -2366,10 +2366,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {number} stride
          */
         DrawPrimitiveUP(type, primitiveCount, vertexData, stride){
-            // No primitives is nothing to draw, and still a user-pointer draw.
-            if (primitiveCount === 0 && inScene && vertexData && stride > 0)
+            // No primitives is nothing to draw, answered before anything is
+            // looked at: the vertices may be none and the stream stays bound
+            // (Wine's d3d8 test_draw_primitive, test_render_zero_triangles).
+            if (primitiveCount === 0)
             {
-                unbindStreamZero();
                 return D3D_OK;
             }
             const hr = drawPreconditions(type, primitiveCount);
@@ -2401,6 +2402,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             stride,
         )
         {
+            if (primitiveCount === 0)
+            {
+                return D3D_OK;
+            }
             // The indices count from the first vertex, not from minIndex, which
             // only says where the range they use begins (Wine's d3d8
             // test_drawindexedprimitiveup).
@@ -2646,8 +2651,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /** @param {number} handle */
         ApplyStateBlock(handle){
+            // The handle no block has: nothing to apply (Wine's d3d8
+            // test_ApplyStateBlock).
+            if (handle === 0 && !recording)
+            {
+                return D3D_OK;
+            }
             const block = stateBlocks.get(handle);
-            if (!block)
+            // Not while a block is being recorded (Wine's d3d8
+            // test_begin_end_state_block).
+            if (!block || recording)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2661,7 +2674,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /** @param {number} handle */
         CaptureStateBlock(handle){
             const block = stateBlocks.get(handle);
-            if (!block)
+            // Not while a block is being recorded (Wine's d3d8
+            // test_begin_end_state_block).
+            if (!block || recording)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2679,7 +2694,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ handle?: number }} out
          */
         CreateStateBlock(type, out){
-            if (!/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
+            if (recording || !/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2883,7 +2898,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          */
         SetRenderTarget(target, depth){
             const hr = targetPairResult(
-                target ? describe(target) : null, depth ? describe(depth) : null);
+                target ? describe(target) : null, depth ? describe(depth) : null,
+                describe(target ?? renderTarget));
             if (hr !== D3D_OK)
             {
                 return hr;
@@ -3133,7 +3149,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ surface?: any }} out
          */
         CreateImageSurface(width, height, format, out){
-            if (!blockAligned(format, width, height))
+            // A side of zero is no surface (Wine's d3d8 test_surface_dimensions).
+            if (width === 0 || height === 0 || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3257,7 +3274,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             /** A texture level or a render target: what the GPU draws into or from. */
             const onGpu = (/** @type {any} */ surface, /** @type {any} */ desc)=>
                 Boolean(surface.container) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0;
-            if (!source || !destination)
+            // A source the program holds locked is refused (Wine's
+            // test_mipmap_lock).
+            if (!source || !destination || source.locked === true)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3343,7 +3362,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         /**
          * Every level a system-memory texture and a device-memory one share.
          *
-         * The source is system memory and the destination is not. A smaller
+         * The source is system memory and the destination video memory: a
+         * managed or scratch one is refused (Wine's test_update_texture_pool). A smaller
          * destination starts from the source level of its own size, the
          * source's larger levels skipped, and takes as many levels as it has.
          * Windows also accepts a destination whose size no source level has,
@@ -3365,9 +3385,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (source.volume || destination.volume)
             {
                 const update = source.volume && destination.volume && source !== destination
-                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool !== D3DPOOL.SYSTEMMEM
-                    && source.width >= destination.width && source.height >= destination.height
-                    && source.depth >= destination.depth
+                    && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
+                    // A smaller source is taken too, as a copy of what it has
+                    // (Wine's test_update_volumetexture, case 6).
                     ? volumeUpdate(source, destination, { bySize: true })
                     : null;
                 if (!update)
@@ -3399,7 +3419,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             const from = describe(top);
             const to = describe(into);
-            if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.SYSTEMMEM
+            if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool !== D3DPOOL.DEFAULT
                 || (source.cube ?? false) !== (destination.cube ?? false)
                 || from.Width < to.Width || from.Height < to.Height)
             {

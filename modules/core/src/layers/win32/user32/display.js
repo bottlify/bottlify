@@ -112,3 +112,18 @@ export function displayModes(screen){
         width, height, bitsPerPixel: screen.bitsPerPixel, refresh,
     })));
 }
+
+/**
+ * The mode the registry holds: the one ChangeDisplaySettings with no mode, and
+ * a full-screen Direct3D device going away, put the display back to. It is
+ * the display's own size until a program writes another with
+ * CDS_UPDATEREGISTRY.
+ *
+ * @param {{ width: number, height: number, displayWidth?: number, displayHeight?: number,
+ *           registryWidth?: number, registryHeight?: number }} screen
+ * @returns {{ width: number, height: number }}
+ */
+export const registryMode = screen=>({
+    width: screen.registryWidth ?? screen.displayWidth ?? screen.width,
+    height: screen.registryHeight ?? screen.displayHeight ?? screen.height,
+});

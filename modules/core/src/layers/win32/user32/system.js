@@ -27,7 +27,7 @@ import {
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { cursorFilePicture, dibToBgra, groupImageId } from './cursors.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
-import { displayModes, refreshOf } from './display.js';
+import { displayModes, refreshOf, registryMode } from './display.js';
 import {
     BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT,
     WS_CAPTION, WS_CHILD, WS_THICKFRAME, WS_VISIBLE, frameOf,
@@ -532,6 +532,14 @@ const DISP_CHANGE_SUCCESSFUL = 0;
 const DISP_CHANGE_BADMODE = -2;
 /** ChangeDisplaySettings' flag that asks whether a mode could be set, without setting it. */
 const CDS_TEST = 0x2;
+/** ChangeDisplaySettings' flags: keep the mode in the registry too; and, beside it, only there. */
+const CDS_UPDATEREGISTRY = 0x1;
+const CDS_NORESET = 0x10000000;
+/** What every top-level window hears when the display's mode moves. */
+const WM_DISPLAYCHANGE = 0x007e;
+/** DEVMODE's display orientation field, and the orientation every display here has. */
+const DM_DISPLAYORIENTATION = 0x00000080;
+const DMDO_DEFAULT = 0;
 
 /** The refresh rate reported for the one mode this build offers. */
 
@@ -1921,11 +1929,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * enumeration that never ends is a hang, so the list is finite and the end
      * is reported.
      *
-     * The two named indices answer the same mode: the current settings are
-     * the one mode there is, and so are the registry's. A program asks for
-     * the current settings to learn the desktop's depth before it picks
-     * its own, and one refused that answer settles for the shallowest
-     * depth it knows -- sixteen bits, for every surface it makes after.
+     * The two named indices answer the mode in effect and the registry's,
+     * the one a full-screen program's exit puts back (`registryMode`). A
+     * program asks for the current settings to learn the desktop's depth
+     * before it picks its own, and one refused that answer settles for the
+     * shallowest depth it knows -- sixteen bits, for every surface it makes
+     * after.
      *
      * @param {number} mode @param {number} devMode
      * @param {typeof DEVMODEA | typeof DEVMODEW} layout
@@ -1942,7 +1951,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return 0;
         }
-        const answer = listed ?? { ...screen, refresh: refreshOf(screen) };
+        const answer = listed ?? { ...screen, refresh: refreshOf(screen),
+            ...(index === ENUM_REGISTRY_SETTINGS ? registryMode(screen) : {}) };
         writeU16(host, devMode + layout.dmSize, layout.SIZE);
         writeU16(host, devMode + layout.dmDriverExtra, 0);
         writeU32s(host, devMode + layout.dmFields,
@@ -1970,19 +1980,28 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {typeof DEVMODEA | typeof DEVMODEW} [layout]  Which of the two the caller built.
      */
     const changeDisplaySettings = (devMode, flags, layout = DEVMODEA)=>{
-        const display = /** @type {{ displayWidth?: number, displayHeight?: number }} */ (screen);
+        const display = /** @type {{ registryWidth?: number, registryHeight?: number }} */ (screen);
         if ((devMode >>> 0) === 0)
         {
             // A null mode means "go back to what the registry says": the
-            // display's own size, which is where the launch put the screen.
+            // display's own size, which is where the launch put the screen,
+            // unless a program wrote another there.
             if ((flags & CDS_TEST) === 0)
             {
-                screen.width = display.displayWidth ?? screen.width;
-                screen.height = display.displayHeight ?? screen.height;
+                const mode = registryMode(screen);
+                return setMode(mode.width, mode.height);
             }
             return DISP_CHANGE_SUCCESSFUL;
         }
         const named = readU32(devMode + layout.dmFields);
+        // A display here cannot turn: any orientation but its own is no
+        // mode it has (Wine's d3d9ex test_get_adapter_displaymode_ex skips
+        // on this answer).
+        if ((named & DM_DISPLAYORIENTATION) !== 0
+            && readU32(devMode + layout.dmDisplayOrientation) !== DMDO_DEFAULT)
+        {
+            return DISP_CHANGE_BADMODE;
+        }
         const width = (named & DM_PELSWIDTH) !== 0
             ? readU32(devMode + layout.dmPelsWidth) : screen.width;
         const height = (named & DM_PELSHEIGHT) !== 0
@@ -1999,12 +2018,38 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return DISP_CHANGE_BADMODE;
         }
-        if ((flags & CDS_TEST) === 0)
+        if ((flags & CDS_TEST) !== 0)
         {
-            screen.width = width;
-            screen.height = height;
+            return DISP_CHANGE_SUCCESSFUL;
         }
-        return DISP_CHANGE_SUCCESSFUL;
+        // Kept in the registry, it is the mode the display goes back to; with
+        // CDS_NORESET it is kept there and not set now (Wine's d3d9
+        // test_mode_change writes the registry this way).
+        if ((flags & CDS_UPDATEREGISTRY) !== 0)
+        {
+            display.registryWidth = width;
+            display.registryHeight = height;
+        }
+        return (flags & CDS_NORESET) === 0 ? setMode(width, height) : DISP_CHANGE_SUCCESSFUL;
+    };
+
+    /**
+     * The display set to a size, and every top-level window told when it
+     * moved, before the call returns, as Windows sends it (WM_DISPLAYCHANGE:
+     * the depth, and the size in the low and high words).
+     *
+     * @param {number} width @param {number} height
+     * @returns {number | Promise<number>}
+     */
+    const setMode = (width, height)=>{
+        if (screen.width === width && screen.height === height)
+        {
+            return DISP_CHANGE_SUCCESSFUL;
+        }
+        screen.width = width;
+        screen.height = height;
+        return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
+            ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0), ()=>DISP_CHANGE_SUCCESSFUL);
     };
 
     /**

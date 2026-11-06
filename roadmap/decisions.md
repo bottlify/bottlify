@@ -858,6 +858,17 @@ would stop at a refusal no real machine gave it. The target is drawn and read wi
 sample, and the journal says so once. It stands until targets are drawn multisampled and resolved where a
 program reads or presents them. *2026-11-06.*
 
+**A86. Temporary: a Direct3D 9 device made for software vertex processing has the 256 vertex
+shader constants of a hardware one.** Windows gives a software or mixed device 8192 float
+constants (2048 integer and boolean ones), so a program may set registers past 255 and run
+a shader that reads them (Wine's test_vertex_shader_constant and test_shader_constant_apply
+on such devices). Here the constants live where the guest's command routines and the GPU's
+uniform block keep them, 256 a device: a set past the last is D3DERR_INVALIDCALL and a shader
+naming such a register is refused, both said in the journal. A program that skins on the CPU
+with a large bone palette is the one that meets it. It stands until a software device's
+constant file is 8192 registers wide on both sides and the translated shader indexes it.
+*2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

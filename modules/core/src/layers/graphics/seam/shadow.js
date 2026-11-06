@@ -419,7 +419,12 @@ export const SURFACE = {
     CONTAINER: 4 + 8 * 4,
     /** Its block as a level the guest locks (`LEVEL`), zero for none. */
     LEVEL: 4 + 8 * 4 + 4,
-    SIZE: 4 + 8 * 4 + 8,
+    /**
+     * The block of the device that made it: a command routine binds only a
+     * surface of its own device (Wine's test_render_target_device_mismatch).
+     */
+    OWNER: 4 + 8 * 4 + 8,
+    SIZE: 4 + 8 * 4 + 12,
 };
 
 /**
@@ -2556,11 +2561,33 @@ function commandChecks(shape, at){
             [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x3b, 0x48, SURFACE.OWNER],                         // cmp ecx, [eax+OWNER]
+            { jcc: 0x75, to: 'out', near: true },                // jne out: another device's
             // test dword [eax + DESC + Usage], mask
             [0xf7, 0x80, ...dword(SURFACE.DESC + 8), ...dword(mask)],
             { jcc: 0x74, to: 'out', near: true },                // jz out
             { label: `usable${index}` });
     });
+    if (shape.depthCovers)
+    {
+        // Past the usage checks: both have a block, the depth surface when
+        // there is one.
+        const { target, depth } = shape.depthCovers;
+        for (const side of [SURFACE.DESC + 24, SURFACE.DESC + 28])
+        {
+            parts.push(
+                [0x8b, 0x44, 0x24, at(depth)],                   // mov eax, [esp+depth]
+                [0x85, 0xc0],                                    // test eax, eax
+                { jcc: 0x74, to: 'covered', near: true },        // jz covered: none
+                [0x8b, 0x40, 0x04],                              // mov eax, [eax+4]: its block
+                [0x8b, 0x54, 0x24, at(target)],                  // mov edx, [esp+target]
+                [0x8b, 0x52, 0x04],                              // mov edx, [edx+4]: its block
+                [0x8b, 0x52, side],                              // mov edx, [edx+side]
+                [0x39, 0x50, side],                              // cmp [eax+side], edx
+                { jcc: 0x72, to: 'out', near: true });           // jb out: smaller
+        }
+        parts.push({ label: 'covered' });
+    }
     if (shape.token !== undefined)
     {
         parts.push(
@@ -2676,6 +2703,9 @@ function commandChecks(shape, at){
  *     argument the device takes only as a surface whose usage has a bit of `mask`, read
  *     from the surface's block (`SURFACE`, the word after its interface): a surface
  *     with no block is the host's, and so is a null one unless `nullable`; or several
+ * @property {{ target: number, depth: number }} [depthCovers]  a depth surface
+ *     argument, when there is one, the device takes only as large as the target
+ *     argument in both sides, read from their blocks (`SURFACE`)
  * @property {number} [token]  an argument the device takes only as the token of a
  *     state block it holds (`SHADOW.STATE_BLOCKS`): with `stale`, the block's
  *     apply is one a draw waits for the host after when the block holds what
@@ -5007,6 +5037,7 @@ export function createShadow(deps){
             deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
             describe(block + SURFACE.DESC);
             deps.writeMemory(block + SURFACE.LEVEL, dwordBytes(levelBlocks.get(surface) ?? 0));
+            deps.writeMemory(block + SURFACE.OWNER, dwordBytes(address));
             const container = /** @type {{ container?: object }} */ (surface).container;
             if (container)
             {
@@ -5832,7 +5863,18 @@ function recordCommand(m, shape, mirror, block, a){
         const surface = a[usage.arg];
         const owner = surface === 0 ? 0 : m.u32(surface + 4);
         if (surface === 0 ? !usage.nullable
-            : owner === 0 || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+            : owner === 0 || m.u32(owner + SURFACE.OWNER) !== block
+                || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+        {
+            return undefined;
+        }
+    }
+    if (shape.depthCovers && a[shape.depthCovers.depth] !== 0)
+    {
+        const depth = m.u32(a[shape.depthCovers.depth] + 4);
+        const target = m.u32(a[shape.depthCovers.target] + 4);
+        if ([24, 28].some(side=>m.u32(depth + SURFACE.DESC + side)
+            < m.u32(target + SURFACE.DESC + side)))
         {
             return undefined;
         }

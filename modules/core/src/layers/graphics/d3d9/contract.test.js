@@ -190,6 +190,8 @@ test('setting a format makes a declaration, the same one each time, that reports
     const second = {};
     device.GetVertexDeclaration(second);
     assert.equal(second.declaration, first.declaration, 'one declaration per format');
+    assert.equal(second.declaration.refCount, 2,
+        'the device holds no reference the program counts: two Gets, two references');
     /** @type {{ fvf?: number }} */
     const fvf = {};
     device.GetFVF(fvf);
@@ -339,6 +341,54 @@ test('a device that advertises a version makes shaders up to it and binds them',
     assert.equal(bound.shader, null);
     vs.shader.release();
     ps.shader.release();
+    assert.equal(device.release(), 0);
+});
+
+test('a user-pointer draw lets stream zero and the indices go, refused or not', ()=>{
+    // Wine's d3d9 test_draw_indexed: refused, DrawPrimitiveUP lets stream
+    // zero's buffer go and keeps its stride, DrawIndexedPrimitiveUP the
+    // indices; drawn, stream zero is left empty, stride and offset too. An
+    // indexed draw with no indices answers D3D_OK and draws nothing.
+    const { device } = make();
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    assert.equal(device.CreateIndexBuffer(16, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED, indices),
+        D3D_OK);
+    /** @returns {any[]} */
+    const zero = ()=>{
+        /** @type {{ buffer?: any, offset?: number, stride?: number }} */
+        const out = {};
+        device.GetStreamSource(0, out);
+        return [out.buffer ?? null, out.offset, out.stride];
+    };
+    const index = ()=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        device.GetIndices(out);
+        return out.buffer ?? null;
+    };
+    const bytes = new Uint8Array(12 * 3);
+    device.BeginScene();
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 0, 12), D3D_OK);
+    assert.equal(device.SetIndices(indices.buffer), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 12), D3DERR_INVALIDCALL,
+        'no declaration');
+    assert.deepEqual(zero(), [null, 0, 12]);
+    assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 3, 1, new Uint8Array(6),
+        D3DFMT_INDEX.INDEX16, bytes, 12), D3DERR_INVALIDCALL);
+    assert.equal(index(), null);
+    device.SetFVF(FVF_XYZ);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 3, 0, 1), D3D_OK,
+        'no indices: nothing drawn');
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 4, 12), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 12), D3D_OK);
+    assert.deepEqual(zero(), [null, 0, 0]);
+    device.EndScene();
+    vertices.buffer.release();
+    indices.buffer.release();
     assert.equal(device.release(), 0);
 });
 
@@ -774,14 +824,15 @@ test('event and occlusion queries are offered, the timings are not, and a null p
         assert.equal(refused.query, undefined);
 
         // A device that draws nothing counts nothing: an occlusion query
-        // never ended answers without writing, and once ended, zero.
+        // never issued answers the runtime's fill (Wine's
+        // test_occlusion_query), and once ended, zero.
         /** @type {{ query?: any }} */
         const occlusion = {};
         assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, occlusion), D3D_OK);
         /** @type {{ value?: number }} */
         const pixels = {};
         assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
-        assert.equal(pixels.value, undefined);
+        assert.equal(pixels.value, 0xdddddddd);
         assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
         assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
         assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);
@@ -964,6 +1015,12 @@ test('UpdateSurface moves a rectangle from system memory into the default pool',
         D3DERR_INVALIDCALL, 'the pools are the wrong way round');
     assert.equal(device.UpdateSurface(source.surface, { left: 0, top: 0, right: 4, bottom: 4 },
         level.surface, { x: 1, y: 0 }), D3DERR_INVALIDCALL, 'off the edge');
+    // Wine's test_mipmap_lock: a source the program holds locked is refused.
+    assert.equal(source.surface.LockRect({}, null, 0), D3D_OK);
+    assert.equal(device.UpdateSurface(source.surface, null, level.surface, null),
+        D3DERR_INVALIDCALL, 'locked');
+    assert.equal(source.surface.UnlockRect(), D3D_OK);
+    assert.equal(device.UpdateSurface(source.surface, null, level.surface, null), D3D_OK);
     level.surface.release();
     texture.texture.release();
     source.surface.release();

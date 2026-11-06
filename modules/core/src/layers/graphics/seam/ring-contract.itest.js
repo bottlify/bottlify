@@ -56,6 +56,8 @@ const TEXTURES = 0x1b000;
 const STACK = 0x300000;
 /** The device's interface: its block one word on. */
 const DEVICE = OBJECTS + 0x800;
+/** What a surface named `...Elsewhere` says made it: another device's block. */
+const OTHER_DEVICE = BLOCK + 0x100;
 
 const D3D_OK = 0;
 const D3DFMT_X8R8G8B8 = 22;
@@ -87,7 +89,10 @@ const floats = values=>[...new Uint32Array(new Float32Array(values).buffer)];
  *
  * @typedef {{ label: string,
  *     args: (number | string | ((made: Record<string, any>) => number))[], data?: number[],
- *     caps?: object, setup?: (device: any, made: Record<string, any>) => void }} Case
+ *     caps?: object, setup?: (device: any, made: Record<string, any>) => void,
+ *     host?: boolean }} Case
+ *     `host`: a call the routine must leave to the host, which the device on its
+ *     own would take (a surface another device made, `OTHER_DEVICE`)
  *     an argument a function of what `setup` made: a value known only once it is made
  */
 
@@ -292,7 +297,8 @@ function placeObjects(host, made, textures = false){
             const { Format, Type, Usage, Pool, Width, Height } = held.desc;
             host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
                 Usage, Pool, 0, 0, Width, Height,
-                container ? /** @type {number} */ (containers.get(container)) : 0]).buffer));
+                container ? /** @type {number} */ (containers.get(container)) : 0,
+                0, key.endsWith('Elsewhere') ? OTHER_DEVICE : BLOCK]).buffer));
         }
         host.writePhysical(at + 4, new Uint8Array(u32(block)));
         pointers.set(at, made[key]);
@@ -320,7 +326,7 @@ function gate(api, table){
         const shape = api.COMMANDS[name];
         const routine = commandCode(ROUTINE, TRAP,
             { ...shape, slot: api.commandSlot(name), mirror: api.mirrors[name] });
-        for (const { label, args, data = [], caps, setup } of cases)
+        for (const { label, args, data = [], caps, setup, host: toHost } of cases)
         {
             const device = api.device(caps);
             /** @type {Record<string, any>} */
@@ -339,6 +345,15 @@ function gate(api, table){
             const record = shape.self
                 ? run(routine, values[0], values.slice(1), state, valid)
                 : run(routine, DEVICE, values, state, valid);
+            if (toHost === true)
+            {
+                if (record !== null)
+                {
+                    wrong.push(`${name} (${label}): taken in the guest, `
+                        + 'which is the host\'s to refuse');
+                }
+                continue;
+            }
             if (record === null)
             {
                 continue;
@@ -689,6 +704,12 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                 { label: 'the second target', args: [1, 'target'], setup: offscreen },
                 { label: 'none', args: [0, 0] },
                 { label: 'a depth surface for a target', args: [0, 'depth'], setup: offscreen },
+                // Wine's test_render_target_device_mismatch.
+                { label: 'a target another device made', args: [0, 'targetElsewhere'],
+                    host: true, setup: (device, made)=>{
+                        offscreen(device, made);
+                        made.targetElsewhere = made.target;
+                    } },
                 { label: 'a texture level that is no target', args: [0, 'level'],
                     setup: (device, made)=>{
                         texture(device, made);
@@ -895,6 +916,35 @@ test('Direct3D 8: every call the command ring answers for in the guest is one th
                 { label: 'a target and a depth surface', args: ['target', 'depth'],
                     setup: offscreen },
                 { label: 'a target and none', args: ['target', 0], setup: offscreen },
+                // Wine's d3d8 test_depth_stencil_size.
+                { label: 'a depth surface smaller than the target', args: ['target', 'small'],
+                    setup: (device, made)=>{
+                        offscreen(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateDepthStencilSurface(16, 8, D3DFMT_D24X8, out),
+                            D3D_OK);
+                        made.small = out.surface;
+                    } },
+                { label: 'a depth surface larger than the target', args: ['target', 'large'],
+                    setup: (device, made)=>{
+                        offscreen(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateDepthStencilSurface(32, 32, D3DFMT_D24X8, out),
+                            D3D_OK);
+                        made.large = out.surface;
+                    } },
+                { label: 'a target another device made', args: ['targetElsewhere', 0],
+                    host: true, setup: (device, made)=>{
+                        offscreen(device, made);
+                        made.targetElsewhere = made.target;
+                    } },
+                { label: 'a depth surface another device made', args: ['target', 'depthElsewhere'],
+                    host: true, setup: (device, made)=>{
+                        offscreen(device, made);
+                        made.depthElsewhere = made.depth;
+                    } },
                 { label: 'no target', args: [0, 'depth'], setup: offscreen },
                 { label: 'a depth surface for a target', args: ['depth', 'depth'],
                     setup: offscreen },

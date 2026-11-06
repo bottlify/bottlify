@@ -192,16 +192,26 @@ export function imageSurfaceCreateResult(format, support){
  * wants to change the depth stencil. A null depth stencil *is* an unbind, and
  * that asymmetry is why each side is tested separately.
  *
- * @param {{ Usage: number } | null} renderTarget
- * @param {{ Usage: number } | null} depthStencil
+ * @param {{ Usage: number, Width?: number, Height?: number } | null} renderTarget
+ * @param {{ Usage: number, Width?: number, Height?: number } | null} depthStencil
+ * @param {{ Width?: number, Height?: number } | null} [bound]  The target the depth
+ *        surface goes with: the one given, else the one kept bound.
  * @returns {number}
  */
-export function targetPairResult(renderTarget, depthStencil){
+export function targetPairResult(renderTarget, depthStencil, bound = renderTarget){
     if (renderTarget && (renderTarget.Usage & D3DUSAGE.RENDERTARGET) === 0)
     {
         return D3DERR_INVALIDCALL;
     }
     if (depthStencil && (depthStencil.Usage & D3DUSAGE.DEPTHSTENCIL) === 0)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // A depth surface smaller than the target it is set with, or the one kept
+    // bound, in either side (Wine's d3d8 test_depth_stencil_size).
+    if (depthStencil && bound
+        && ((depthStencil.Width ?? 0) < (bound.Width ?? 0)
+            || (depthStencil.Height ?? 0) < (bound.Height ?? 0)))
     {
         return D3DERR_INVALIDCALL;
     }

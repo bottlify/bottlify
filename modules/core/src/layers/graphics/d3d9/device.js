@@ -87,7 +87,8 @@ import {
     fvfOfElements, validateElements,
 } from './declaration.js';
 import {
-    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
+    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, parseShader, validateShader,
+    versionOf,
 } from './shader.js';
 import {
     D3DSBT, applyRecord, captureRecord, createStateBlock, emptyRecord, fillRecord,
@@ -841,7 +842,7 @@ const MAX_RESIDENCY_QUERY = 65535;
 const MAX_FRAME_LATENCY = 30;
 const DEFAULT_FRAME_LATENCY = 3;
 /** What an Ex create's usage may carry beside the surface's own. */
-const EX_SURFACE_USAGE = D3DUSAGE.RESTRICTED_CONTENT | D3DUSAGE.RESTRICT_SHARED_RESOURCE
+export const EX_SURFACE_USAGE = D3DUSAGE.RESTRICTED_CONTENT | D3DUSAGE.RESTRICT_SHARED_RESOURCE
     | D3DUSAGE.RESTRICT_SHARED_RESOURCE_DRIVER;
 
 /**
@@ -1018,7 +1019,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {import('./stateblock.js').StateBlockRecord | null} */
     let recording = null;
 
-    const count = createReferenceCount();
+    // Whoever lets the last reference go -- the program, or a resource or
+    // state block that held the device -- the device's teardown runs
+    // (Wine's test_refcount: the last state block destroys it).
+    const count = createReferenceCount({ onLastRef: ()=>teardown() });
 
     /**
      * The vertices each range of a static index buffer named, while none of its
@@ -1968,7 +1972,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * (`unbindIndices`); DrawPrimitiveUP drew none and keeps them.
      */
     const unbindStreamZero = ()=>{
-        stream(0).buffer = rebound(stream(0).buffer, null);
+        const zero = stream(0);
+        zero.buffer = rebound(zero.buffer, null);
+        // Its offset and stride go too (Wine's d3d9 test_draw_indexed).
+        zero.offset = 0;
+        zero.stride = 0;
     };
     const unbindIndices = ()=>{
         indices = rebound(indices, null);
@@ -2221,6 +2229,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {(() => void) | undefined} */
     let stopWatchingLoss;
 
+    /** What the device's last reference takes with it. */
+    const teardown = ()=>{
+        stopWatchingLoss?.();
+        showGamma(true);
+        // What it kept bound goes with it.
+        streams.clear();
+        indices = rebound(indices, null);
+        rebound(renderTargets.get(0), null);
+        renderTargets.clear();
+        depthStencil = rebound(depthStencil, null);
+        retireImplicitSurfaces();
+        // The reference CreateDevice took on the object that made it.
+        identity?.direct3D?.release?.();
+    };
+
     /**
      * A present's answer, once its frame is queued: at once, or once the
      * device has finished enough of the frames before it.
@@ -2330,25 +2353,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return count.destroyed;
         },
         addRef: ()=>count.addRef(),
-        release: ()=>{
-            const before = count.value;
-            const left = count.release();
-            if (left === 0 && before > 0)
-            {
-                stopWatchingLoss?.();
-                showGamma(true);
-                // What it kept bound goes with it.
-                streams.clear();
-                indices = rebound(indices, null);
-                rebound(renderTargets.get(0), null);
-                renderTargets.clear();
-                depthStencil = rebound(depthStencil, null);
-                retireImplicitSurfaces();
-                // The reference CreateDevice took on the object that made it.
-                identity?.direct3D?.release?.();
-            }
-            return left;
-        },
+        release: ()=>count.release(),
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){
@@ -2397,9 +2402,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return D3D_OK;
         },
 
-        /** @returns {number} bytes, rounded the way this call always reports them */
+        /**
+         * Bytes, rounded the way this call always reports them. An extended
+         * device's video memory is virtual: what its resources take is not
+         * subtracted (Wine's d3d9ex test_vidmem_accounting).
+         *
+         * @returns {number}
+         */
         GetAvailableTextureMem(){
-            return videoMemory.available();
+            return extended
+                ? (caps.videoMemory ?? AVAILABLE_TEXTURE_MEMORY) & ~0xfffff
+                : videoMemory.available();
         },
 
         /**
@@ -2531,11 +2544,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         /**
          * @param {number} width @param {number} height @param {number} format
          * @param {number} pool @param {number} usage @param {{ surface?: any }} out
+         * @param {number} [userMemory]  The program's own memory to keep it in, 0 for none.
          */
-        CreateOffscreenPlainSurfaceEx(width, height, format, pool, usage, out){
+        CreateOffscreenPlainSurfaceEx(width, height, format, pool, usage, out, userMemory = 0){
             return (usage & ~EX_SURFACE_USAGE) !== 0
                 ? D3DERR_INVALIDCALL
-                : device.CreateOffscreenPlainSurface(width, height, format, pool, out, usage);
+                : device.CreateOffscreenPlainSurface(width, height, format, pool, out, usage,
+                    userMemory);
         },
 
         /**
@@ -2711,7 +2726,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 presentParameters = normalisePresentParameters(next);
             }
-            inScene = false;
+            // An extended device's scene outlives a reset (Wine's d3d9ex
+            // test_scene); a plain one's ends with it.
+            if (!extended)
+            {
+                inScene = false;
+            }
             recording = null;
             deviceState = DEVICE_STATE.OK;
             if (!extended)
@@ -3312,10 +3332,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                // Owned by the device: the count keeps it alive for as long as
-                // the device is, so the same object comes back every time.
+                // Owned by the device, which holds no reference a program
+                // counts: the same object comes back every time, and its count
+                // is the program's alone, as an implicit surface's is (Wine's
+                // test_fvf_decl_management: three Gets, a count of three).
                 declaration = createVertexDeclaration({
-                    elements, fvf, count: createReferenceCount(),
+                    elements, fvf, count: implicitCount(),
                 });
                 fvfDeclarations.set(fvf, declaration);
             }
@@ -3639,9 +3661,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          */
         DrawIndexedPrimitive(type, base, minIndex, numVertices, startIndex, primitiveCount){
             const bias = streamBias();
-            if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null || !indices)
+            if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            // No index buffer is not checked either: the draw answers D3D_OK
+            // and, reading indices from nothing, draws nothing (Wine's d3d9
+            // test_draw_indexed).
+            if (!indices)
+            {
+                report('draw-indices', 'an indexed draw with no index buffer drew nothing');
+                return D3D_OK;
             }
             if (bias === DRAWS_NOTHING)
             {
@@ -3674,6 +3704,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !(stride > 0)
                 || vertexData.byteLength < vertexCountOf(type, primitiveCount) * stride)
             {
+                // Refused, it has let stream zero's buffer go all the same,
+                // keeping its offset and stride (Wine's d3d9 test_draw_indexed).
+                stream(0).buffer = rebound(stream(0).buffer, null);
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
@@ -3703,6 +3736,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !indexData
                 || !(stride > 0) || vertexData.byteLength < reach * stride)
             {
+                // Refused, it has let the index buffer go all the same.
+                unbindIndices();
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
@@ -4354,7 +4389,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         UpdateSurface(source, sourceRect, destination, point, out = {}){
-            if (!source || !destination || source === destination)
+            // A source the program holds locked is refused (Wine's
+            // test_mipmap_lock); its container is not looked at.
+            if (!source || !destination || source === destination || source.locked === true)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4396,13 +4433,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (source.volume || destination.volume)
             {
+                // Volumes of other sizes or formats are taken, as Windows takes
+                // them (Wine's test_update_volumetexture, cases 6 and 7): what
+                // overlaps is carried, bytes only between formats of one texel size.
                 const update = source.volume && destination.volume
                     && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
-                    ? volumeUpdate(source, destination)
+                    ? volumeUpdate(source, destination, { bySize: true })
                     : null;
                 if (!update)
                 {
                     return D3DERR_INVALIDCALL;
+                }
+                if (update.overlapped)
+                {
+                    report('update-size', 'UpdateTexture between volumes with no level of one'
+                        + ' size: they were carried where they overlap');
+                }
+                if (update.converted)
+                {
+                    report('update-format', 'UpdateTexture between volume formats of two texel'
+                        + ' sizes carried nothing: the texels are not converted');
                 }
                 deliverMoves(update.moves, out);
                 for (const volume of update.written)
@@ -4913,11 +4963,25 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         if (hr !== D3D_OK)
         {
             const version = versionOf(tokens[0]);
+            // Read whole and of a version this device runs, it was refused for
+            // a constant register past its version's last.
+            const past = version !== null && version.kind === kind && !parseShader(tokens).error
+                && (version.major < supported.major || (version.major === supported.major
+                    && version.minor <= supported.minor) || (version.major === 2
+                    && version.minor === 1 && supported.major >= 2));
             report(`create:${kind}:${version ? `${version.major}.${version.minor}` : 'bad'}`,
-                version && version.kind === kind
+                past
                     ? `a ${kind} shader of version ${version.major}.${version.minor} was refused:`
-                        + ` this device advertises ${supported.major}.${supported.minor}`
-                    : `a ${kind} shader was refused: its bytecode could not be read`);
+                        + ' it names a constant register past the version\'s last'
+                        + (kind === SHADER_KIND.VERTEX && (softwareVertexProcessing
+                            || mixedVertexProcessing)
+                            ? ', which a software-processing device has on Windows (decision A86)'
+                            : '')
+                    : version && version.kind === kind
+                        ? `a ${kind} shader of version ${version.major}.${version.minor} was`
+                            + ` refused: this device advertises ${supported.major}.`
+                            + `${supported.minor}`
+                        : `a ${kind} shader was refused: its bytecode could not be read`);
             return hr;
         }
         out.shader = createShader({ kind, tokens, count: explicitCount() });
@@ -4937,6 +5001,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const limit = file[which].length / width;
         if (!values || start < 0 || n < 0 || start + n > limit)
         {
+            if (file === vertexConstants && (softwareVertexProcessing || mixedVertexProcessing)
+                && values && start >= 0 && n >= 0)
+            {
+                report('swvp-constants', 'vertex shader constants past the hardware\'s were set'
+                    + ' on a software-processing device, which has 8192 on Windows: refused'
+                    + ' (decision A86)');
+            }
             return D3DERR_INVALIDCALL;
         }
         if (!recording)
@@ -5073,8 +5144,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
              * the caller wait for the count (Wine's d3d9 test_occlusion_query,
              * whose loop polls with it). An event's buffer too small for its
              * BOOL is refused; an occlusion count is written in as many of
-             * its bytes as there is room for, and a query never ended writes
-             * nothing.
+             * its bytes as there is room for, and a query never issued writes
+             * the runtime's fill, 0xdddddddd.
              *
              * @param {{ value?: number } | null} out
              * @param {number} size  Bytes the caller has room for; zero asks nothing.
@@ -5101,6 +5172,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 if (!occlusion)
                 {
                     return answer(1);
+                }
+                // Never issued, the count is the runtime's fill (Wine's
+                // test_occlusion_query: 0xdddddddd, S_OK).
+                if (!ended)
+                {
+                    return answer(0xdddddddd);
                 }
                 if (!counted)
                 {

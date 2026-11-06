@@ -1241,8 +1241,16 @@ test('vertex shader constants are a file of 256 registers a state block records 
         return [...out.values ?? []];
     };
     assert.equal(device.SetVertexShaderConstant(0, vs, 1), D3D_OK);
+    /** @type {{ handle?: number }} */
+    const earlier = {};
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, earlier), D3D_OK);
     assert.equal(device.BeginStateBlock(), D3D_OK);
     assert.equal(device.SetVertexShaderConstant(1, vs, 1), D3D_OK);
+    // No block is applied, captured or made while one is recorded (Wine's
+    // d3d8 test_begin_end_state_block).
+    assert.equal(device.ApplyStateBlock(earlier.handle ?? 0), D3DERR_INVALIDCALL);
+    assert.equal(device.CaptureStateBlock(earlier.handle ?? 0), D3DERR_INVALIDCALL);
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, {}), D3DERR_INVALIDCALL);
     /** @type {{ handle?: number }} */
     const block = {};
     assert.equal(device.EndStateBlock(block), D3D_OK);
@@ -1458,7 +1466,80 @@ test('a handle from one shader kind is not a handle of the other', ()=>{
     assertFullyReleased(device);
 });
 
+test('a user-pointer draw of no primitives is answered before anything is looked at', ()=>{
+    // Wine's d3d8 test_render_zero_triangles and test_draw_primitive: no
+    // vertices, no indices, no scene; and the stream stays bound.
+    const device = createDevice();
+    /** @type {{ buffer?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, made), D3D_OK);
+    assert.equal(device.SetStreamSource(0, made.buffer, 16), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(4, 0, null, 0), D3D_OK);
+    assert.equal(device.DrawIndexedPrimitiveUP(4, 0, 0, 0, null, 101, null, 16), D3D_OK);
+    /** @type {{ buffer?: any, stride?: number }} */
+    const bound = {};
+    assert.equal(device.GetStreamSource(0, bound), D3D_OK);
+    assert.equal(bound.buffer, made.buffer);
+    bound.buffer?.release();
+    // And applying the handle no block has applies nothing.
+    assert.equal(device.ApplyStateBlock(0), D3D_OK);
+    made.buffer.release();
+    assert.equal(device.release(), 0);
+});
+
+test('an image surface of a side of zero is refused', ()=>{
+    // Wine's d3d8 test_surface_dimensions.
+    const device = createDevice();
+    assert.equal(device.CreateImageSurface(0, 1, D3DFMT.A8R8G8B8, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.CreateImageSurface(1, 0, D3DFMT.A8R8G8B8, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.release(), 0);
+});
+
+test('a depth surface smaller than its target is not set with it', ()=>{
+    // Wine's d3d8 test_depth_stencil_size: the target given, or the one kept.
+    const device = createDevice();
+    /** @param {number} side @param {boolean} [depth] */
+    const make = (side, depth = false)=>{
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(depth
+            ? device.CreateDepthStencilSurface(side, side, D3DFMT.D24X8, out)
+            : device.CreateRenderTarget(side, side, D3DFMT.A8R8G8B8, false, out), D3D_OK);
+        return out.surface;
+    };
+    const target = make(64);
+    const small = make(32, true);
+    const large = make(128, true);
+    assert.equal(device.SetRenderTarget(target, small), D3DERR_INVALIDCALL);
+    assert.equal(device.SetRenderTarget(target, large), D3D_OK);
+    assert.equal(device.SetRenderTarget(null, small), D3DERR_INVALIDCALL, 'the kept target');
+    assert.equal(device.SetRenderTarget(null, large), D3D_OK);
+    for (const surface of [target, small, large])
+    {
+        surface.release();
+    }
+});
+
 // --- CopyRects, which D3D9 does not have ---
+
+test('CopyRects refuses a source the program holds locked', ()=>{
+    // Wine's d3d8 test_mipmap_lock.
+    const device = createDevice();
+    /** @type {{ surface?: any }} */
+    const source = {};
+    /** @type {{ surface?: any }} */
+    const destination = {};
+    assert.equal(device.CreateImageSurface(4, 4, D3DFMT.A8R8G8B8, source), D3D_OK);
+    assert.equal(device.CreateImageSurface(4, 4, D3DFMT.A8R8G8B8, destination), D3D_OK);
+    assert.equal(source.surface.LockRect({}, null, 0), D3D_OK);
+    assert.equal(device.CopyRects(source.surface, null, 0, destination.surface, null),
+        D3DERR_INVALIDCALL);
+    assert.equal(source.surface.UnlockRect(), D3D_OK);
+    assert.equal(device.CopyRects(source.surface, null, 0, destination.surface, null), D3D_OK);
+    source.surface.release();
+    destination.surface.release();
+    assert.equal(device.release(), 0);
+});
 
 test('a depth stencil is refused on either side of a CopyRects', ()=>{
     const device = createDevice();
@@ -2646,6 +2727,17 @@ test('UpdateTexture into a smaller texture starts from the source level of its s
     assert.equal(kept.result, D3D_OK);
     assert.equal(kept.moves.length, 8 + 4, 'a volume of the same size keeps its top levels,'
         + ' a slice at a time');
+    assert.equal(update(volume(4, 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+        volume(8, 1, D3DFMT.A8R8G8B8, DEFAULT)).result, D3D_OK,
+    'a smaller volume is carried where it overlaps (Wine\'s test_update_volumetexture)');
+    // Only video memory is updated (Wine's test_update_texture_pool).
+    for (const pool of [D3DPOOL.MANAGED, D3DPOOL.SCRATCH])
+    {
+        assert.equal(update(volume(4, 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+            volume(4, 1, D3DFMT.A8R8G8B8, pool)).result, D3DERR_INVALIDCALL, `pool ${pool}`);
+        assert.equal(update(texture([4, 4], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
+            texture([4, 4], 1, D3DFMT.A8R8G8B8, pool)).result, D3DERR_INVALIDCALL, `pool ${pool}`);
+    }
 
     const small = update(texture([4, 4], 1, D3DFMT.A8R8G8B8, SYSTEMMEM),
         texture([8, 8], 1, D3DFMT.A8R8G8B8, DEFAULT));

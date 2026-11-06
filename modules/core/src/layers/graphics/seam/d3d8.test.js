@@ -615,8 +615,33 @@ test('a call given nothing to act on is refused, and GetInfo reports nothing', (
     assert.equal(h.device(device, 'ProcessVertices', [0, 0, 3, 0, 0]), D3DERR_INVALIDCALL);
 
     // GetInfo succeeded and reported nothing, which is what a program checks
-    // for before reading the structure it passed.
-    assert.equal(h.device(device, 'GetInfo', [1, 0x6100, 16]), S_FALSE);
+    // for before reading the structure it passed; an id below
+    // D3DDEVINFOID_RESOURCEMANAGER names nothing (Wine's d3d8 test_get_info).
+    assert.equal(h.device(device, 'GetInfo', [4, 0x6100, 16]), S_FALSE);
+    assert.equal(h.device(device, 'GetInfo', [9, 0x6100, 16]), S_FALSE);
+    for (const id of [0, 1, 3])
+    {
+        assert.equal(h.device(device, 'GetInfo', [id, 0x6100, 16]), 0x80004005, `id ${id}`);
+    }
+
+    // No format is refused before the pointer is touched, but by
+    // CreateImageSurface (Wine's d3d8 test_format_unknown).
+    const out = 0x6200;
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateTexture', [64, 64, 1, 0, 0, 0, out]],
+        ['CreateCubeTexture', [64, 1, 0, 0, 0, out]],
+        ['CreateVolumeTexture', [64, 64, 1, 1, 0, 0, 0, out]],
+        ['CreateRenderTarget', [64, 64, 0, 0, 0, out]],
+        ['CreateDepthStencilSurface', [64, 64, 0, 0, out]],
+    ]))
+    {
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, `${name} left the pointer`);
+    }
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(h.device(device, 'CreateImageSurface', [64, 64, 0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(out), 0, 'CreateImageSurface cleared it');
 
     assert.equal(h.release(device), 0);
     h.release(root);
@@ -1146,14 +1171,19 @@ test('UpdateTexture carries a system-memory texture into the one that draws', ()
     const device = h.createDevice(root);
     const out = 0xd000;
 
-    /** @param {number} pool */
-    const texture = pool=>{
+    /** @param {number} pool @param {number} [usage] */
+    const texture = (pool, usage = 0)=>{
         assert.equal(h.device(device, 'CreateTexture',
-            [4, 4, 1, 0, D3DFMT.A8R8G8B8, pool, out]), D3D_OK);
+            [4, 4, 1, usage, D3DFMT.A8R8G8B8, pool, out]), D3D_OK);
         return h.box.memory.readU32(out);
     };
     const source = texture(D3DPOOL.SYSTEMMEM);
-    const destination = texture(D3DPOOL.MANAGED);
+    // Dynamic, so the test can lock it and read what arrived.
+    const destination = texture(D3DPOOL.DEFAULT, 0x200);
+    const managed = texture(D3DPOOL.MANAGED);
+    assert.equal(h.device(device, 'UpdateTexture', [source, managed]), D3DERR_INVALIDCALL,
+        'only video memory is updated (Wine\'s test_update_texture_pool)');
+    assert.equal(h.release(managed), 0);
 
     assert.equal(h.texture(source, 'GetLevelCount'), 1);
     const desc = 0xd100;
@@ -1399,6 +1429,9 @@ test('a surface names its container as QueryInterface on it would, and its devic
     // A surface of its own, the back buffer included, is held by the device.
     putGuid(h, iid, [0x7385E5DF, 0x8FE8, 0x41D5, 0x86, 0xB6, 0xD7, 0xB4, 0x85, 0x47, 0xB6,
         0xCF]);
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(h.device(device, 'GetBackBuffer', [1, 0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(out), 0, 'a refused one clears the pointer');
     assert.equal(h.device(device, 'GetBackBuffer', [0, 0, out]), D3D_OK);
     const back = h.box.memory.readU32(out);
     assert.equal(h.surface(back, 'GetContainer', [iid, container]), D3D_OK);
@@ -1744,6 +1777,8 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     // The bits land in the fields they belong to rather than one field over.
     assert.equal(caps.ZCmpCaps, caps.AlphaCmpCaps, 'both comparison sets are the same set');
     assert.equal(caps.SrcBlendCaps, caps.DestBlendCaps);
+    assert.equal(caps.SrcBlendCaps, 0x1fff,
+        'every factor up to BOTHINVSRCALPHA, and not Direct3D 9\'s BLENDFACTOR');
     assert.ok((caps.TextureCaps & 0x00004000) !== 0, 'D3DPTEXTURECAPS_MIPMAP');
     assert.ok((caps.TextureAddressCaps & 0x00000001) !== 0, 'D3DPTADDRESSCAPS_WRAP');
     // Each by the value d3d8caps.h gives it. A driver that will not draw
@@ -2110,6 +2145,24 @@ test('a windowed device takes the screen at its first frame, and one that shows 
         assert.equal(h.resolutions.length, 1, 'once');
     });
 
+test('a fullscreen device gives the display back to the registry mode at its last release', ()=>{
+    // Wine's test_mode_change: whatever mode was set since, and only for a
+    // device that set one.
+    const h = seamed();
+    const root = h.create();
+    const windowed = h.createDevice(root);
+    assert.equal(h.release(windowed), 0);
+    assert.deepEqual(h.resolutions, [], 'a windowed device set no mode, and restores none');
+    const device = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: HWND });
+    assert.notEqual(device, 0);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
+    assert.equal(h.release(device), 0);
+    assert.deepEqual(h.resolutions.at(-1), [800, 600, undefined, undefined]);
+    assert.equal(h.resolutions.length, 2);
+    h.release(root);
+});
+
 test('a fullscreen device names the window it takes with it', ()=>{
     // The real device places its window at the mode's size; the window is
     // named so whoever answers can do the same, and fullscreen is the signal.
@@ -2152,8 +2205,8 @@ test('a reset that changes the mode names the window it presents into', ()=>{
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true],
-        'back to windowed, the screen waits for a frame');
+    assert.deepEqual(h.resolutions.at(-1), [800, 600, undefined, undefined],
+        'back to windowed, the display is the registry mode until a frame');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
         'and the frame names the window');
@@ -2246,6 +2299,20 @@ test('a back buffer asked for as zero by zero is the window, described and store
     h.release(root);
 });
 
+test('a present into a window that is gone is refused', ()=>{
+    // Wine's d3d8 test_destroyed_window.
+    let gone = false;
+    const h = seamed({ windowClientSize: window=>(window === HWND && !gone
+        ? { width: 640, height: 480 } : null) });
+    const root = h.create();
+    const device = h.createDevice(root);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    gone = true;
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a back buffer asked for as zero by zero, with no window to measure, is the display', ()=>{
     const h = seamed({ windowClientSize: ()=>null });
     const root = h.create();
@@ -2290,6 +2357,44 @@ test('the guest routines a device writes come from the code pages, not the heap 
         assert.ok(code.length > 0, 'a guest routine was placed');
         assert.ok(code.every(([, size])=>size > 0 && size <= 0x200));
     });
+
+test('a target made by another device is not bound', ()=>{
+    // Wine's d3d8 test_render_target_device_mismatch.
+    const h = seamed();
+    const root = h.create();
+    const first = h.createDevice(root);
+    const second = h.createDevice(root);
+    const out = 0x3200;
+    assert.equal(h.device(second, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, out]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [target, 0]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(second, 'CreateDepthStencilSurface',
+        [32, 16, D3DFMT.D24S8, 0, out]), D3D_OK);
+    const depth = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'GetRenderTarget', [out]), D3D_OK);
+    const own = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [own, depth]), D3DERR_INVALIDCALL,
+        'nor its depth surface');
+    assert.equal(h.device(second, 'SetRenderTarget', [target, 0]), D3D_OK);
+});
+
+test('a device whose last reference a swap chain held still lets go of its Direct3D object', ()=>{
+    // Wine's d3d8 test_refcount: the swap chain's Release destroys the device.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0xe400;
+    const out = 0xe000;
+    h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
+    h.fields.writeStruct(at, D3DPRESENT_PARAMETERS8,
+        { Windowed: 1, SwapEffect: 1, BackBufferFormat: D3DFMT.A8R8G8B8 });
+    assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+    const chain = h.box.memory.readU32(out);
+    assert.equal(h.release(device), 1, 'the chain holds the device');
+    assert.equal(h.release(chain), 0);
+    assert.equal(h.release(root), 0, 'and the device held the root no longer');
+});
 
 test('an additional swap chain has back buffers of its own, and writes back only its count',
     ()=>{

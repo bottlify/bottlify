@@ -262,8 +262,8 @@ test('the block fits its two pages and its regions follow one another', ()=>{
         [BUFFER.LOCKED, BUFFER.LOCK_FLAGS, BUFFER.DEVICE, BUFFER.QUEUED]);
     assert.equal(LEVEL.BOX + 24, LEVEL.SIZE);
     // A displacement of a byte reaches every word of it.
-    assert.ok(LEVEL.SIZE <= 128 && TEXTURE.DEPTH < 128 && SURFACE.LEVEL < 128);
-    assert.equal(SURFACE.LEVEL + 4, SURFACE.SIZE);
+    assert.ok(LEVEL.SIZE <= 128 && TEXTURE.DEPTH < 128 && SURFACE.OWNER < 128);
+    assert.deepEqual([SURFACE.OWNER, SURFACE.SIZE], [SURFACE.LEVEL + 4, SURFACE.LEVEL + 8]);
     // Enough for the longest chain a texture of this era can have: a 32768
     // texel side is sixteen levels, and no device of the era reports one.
     assert.ok(TEXTURE.LEVEL_SLOTS >= 14);

@@ -39,6 +39,9 @@ import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields, D3DCAPS8 } from './structs.js';
 import { GL_COMMANDS } from '../opengl/commands.js';
 import { commandCode } from './shadow.js';
+import { createShaderValidator } from './shader-validator.js';
+import { createFocusWindows } from './focus.js';
+import { DEVICE_STATE } from '../d3d9/device.js';
 
 const DD_OK = 0;
 /** DDERR_INVALIDPARAMS. */
@@ -181,6 +184,11 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *        Kernel events by handle, which DXGI hands out and sets.
  * @param {{ open: (key: number) => number, resolve: (handle: number) => number | null }}
  *     [deps.sharedHandles]  The NT handles DXGI's shared resources are named by.
+ * @param {(name: string) => { handler: (args: number[]) => unknown } | undefined}
+ *     [deps.user32]  user32's functions by name, which a full-screen Direct3D 8 or 9
+ *     device calls on its windows (`focus.js`)
+ * @param {(name: string, handler: (args: number[]) => unknown) => number} [deps.procedure]
+ *        A window procedure of the host's, as a guest address.
  * @param {string[]} [deps.guestTraps]
  *        With guest code on, the parts of it kept as traps all the same: methods
  *        by name, or the groups `getters`, `ring`, `locks`, `levels` and
@@ -208,7 +216,7 @@ export function createGraphicsLibraries(
         windowClient, gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
         presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
-        guestTraps = [], pointerSize = 4, floatResult, events, sharedHandles,
+        guestTraps = [], pointerSize = 4, floatResult, events, sharedHandles, user32, procedure,
         schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
@@ -350,14 +358,19 @@ export function createGraphicsLibraries(
     // told apart by.
     const guestAllocate = guestCode ? allocate : undefined;
     const guestAllocateCode = guestCode ? allocateCode : undefined;
+    // A full-screen device's windows, Direct3D 8's and 9's alike.
+    const focus = user32 && procedure
+        ? createFocusWindows({ user32, procedure, states: DEVICE_STATE })
+        : null;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, resolution, ringBytes,
-        windowClientSize, now, waitUntil, presented, refresh, phases,
+        windowClientSize, now, waitUntil, presented, refresh, phases, focus,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
+        focus,
         waitUntil, presented, refresh, phases, allocate: guestAllocate,
         allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), ringBytes, pointerSize, floatResult,
@@ -563,15 +576,21 @@ export function createGraphicsLibraries(
             /**
              * HRESULT ValidatePixelShader(const DWORD *code, const D3DCAPS8 *caps,
              *                             BOOL errorReturn, char **errors)
+             *
+             * No code at all is refused with no string: unlike the vertex
+             * shader's, the errors pointer is left as it was (Wine's d3d8
+             * test_validate_ps).
              */
             ValidatePixelShader: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([code, caps, errorReturn, errors])=>validated(
-                    shaderFault(code, caps, 0, {
-                        versions: PIXEL_SHADER_VERSIONS,
-                        capsVersion: D3DCAPS8.PixelShaderVersion,
-                    }), errorReturn, errors),
+                handler: ([code, caps, errorReturn, errors])=>((code >>> 0) === 0
+                    ? E_FAIL
+                    : validated(
+                        shaderFault(code, caps, 0, {
+                            versions: PIXEL_SHADER_VERSIONS,
+                            capsVersion: D3DCAPS8.PixelShaderVersion,
+                        }), errorReturn, errors)),
             },
 
             /**
@@ -601,28 +620,30 @@ export function createGraphicsLibraries(
             /**
              * IDirect3DShaderValidator9 *Direct3DShaderValidatorCreate9(void)
              *
-             * The validator a shader assembler drives a token stream through:
-             * Begin, Instruction and End answer S_OK, judging nothing, but an
-             * instruction of no tokens fails. Windows names no interface
-             * identifier for it, so nothing can query its way to it.
+             * The validator a shader assembler drives a token stream through
+             * (`createShaderValidator`). Windows names no interface identifier
+             * for it, so nothing can query its way to it.
              */
             Direct3DShaderValidatorCreate9: {
                 argBytes: 0,
-                handler: ()=>publishInterface(createComObject(SHADER_VALIDATOR, {
-                    interfaces: [{
-                        id: SHADER_VALIDATOR,
-                        methods: [
-                            { name: 'Begin', argBytes: 16, invoke: ()=>S_OK },
-                            {
-                                name: 'Instruction',
-                                argBytes: 20,
-                                invoke: (/** @type {any} */ _, /** @type {number[]} */ args)=>
-                                    ((args[3] >>> 0) === 0 ? E_FAIL : S_OK),
-                            },
-                            { name: 'End', argBytes: 4, invoke: ()=>S_OK },
-                        ],
-                    }],
-                }), SHADER_VALIDATOR),
+                handler: ()=>{
+                    const validator = createShaderValidator({ memory, callGuest, currentThread,
+                        allocate: processHeapAllocate });
+                    /** @param {'Begin' | 'Instruction' | 'End'} name */
+                    const method = name=>(/** @type {any} */ _, /** @type {number[]} */ args)=>
+                        validator[name](args);
+                    return publishInterface(createComObject(SHADER_VALIDATOR, {
+                        interfaces: [{
+                            id: SHADER_VALIDATOR,
+                            methods: [
+                                { name: 'Begin', argBytes: 16, invoke: method('Begin') },
+                                { name: 'Instruction', argBytes: 20,
+                                    invoke: method('Instruction') },
+                                { name: 'End', argBytes: 4, invoke: method('End') },
+                            ],
+                        }],
+                    }), SHADER_VALIDATOR);
+                },
             },
 
             /**

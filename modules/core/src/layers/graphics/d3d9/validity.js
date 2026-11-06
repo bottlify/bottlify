@@ -325,6 +325,7 @@ const EX_SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
  * @property {number} [hDeviceWindow]
  * @property {number} [flags]
  * @property {number} [presentationInterval]  D3DPRESENT_INTERVAL_*; 0 is DEFAULT.
+ * @property {number} [multiSampleType]  D3DMULTISAMPLE_TYPE.
  */
 
 /**
@@ -336,6 +337,12 @@ export function validatePresentParameters(parameters, extended = false){
     const limit = (extended ? EX_SWAP_EFFECT_MAX_BACK_BUFFERS
         : SWAP_EFFECT_MAX_BACK_BUFFERS)[parameters.swapEffect];
     if (limit === undefined)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // A lockable back buffer is never a multisampled one (Wine's
+    // test_lockable_backbuffer).
+    if (parameters.lockableBackBuffer === true && (parameters.multiSampleType ?? 0) !== 0)
     {
         return D3DERR_INVALIDCALL;
     }

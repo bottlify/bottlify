@@ -1,0 +1,149 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createFocusWindows } from './focus.js';
+
+const FOCUS = 0x10010;
+const DEVICE_WINDOW = 0x10020;
+const PROGRAM_PROC = 0x401000;
+const STUB = 0x7f0000;
+const STATES = { OK: 'ok', LOST: 'lost', NOT_RESET: 'notreset' };
+
+/** user32 as far as the focus window's hook calls it, every call recorded. */
+function harness({ visible = false } = {}){
+    /** @type {[string, number[]][]} */
+    const calls = [];
+    /** @type {Map<number, number>} */
+    const procs = new Map([[FOCUS, PROGRAM_PROC]]);
+    let style = visible ? 0x10000000 : 0;
+    let iconic = false;
+    /** @type {((args: number[]) => unknown) | null} */
+    let hook = null;
+    /** @type {Record<string, (args: number[]) => number>} */
+    const table = {
+        SetWindowLongA: ([hwnd, index, value])=>{
+            const before = procs.get(hwnd) ?? 0;
+            if (index === -4)
+            {
+                procs.set(hwnd, value);
+            }
+            return before;
+        },
+        GetWindowLongA: ([hwnd, index])=>(index === -4 ? procs.get(hwnd) ?? 0 : style),
+        CallWindowProcA: ()=>0,
+        DefWindowProcA: ()=>0,
+        SetForegroundWindow: ()=>1,
+        ChangeDisplaySettingsA: ()=>0,
+        IsIconic: ()=>(iconic ? 1 : 0),
+        ShowWindow: ([, command])=>{
+            iconic = command === 6;
+            return 1;
+        },
+        SetWindowPos: ([, , , , , , flags])=>{
+            if ((flags & 0x40) !== 0)
+            {
+                style |= 0x10000000;
+            }
+            return 1;
+        },
+    };
+    const windows = createFocusWindows({
+        user32: name=>({ handler: (/** @type {number[]} */ args)=>{
+            calls.push([name, args]);
+            return table[name](args);
+        } }),
+        procedure: (_, handler)=>{
+            hook = handler;
+            return STUB;
+        },
+        states: STATES,
+    });
+    const device = {
+        deviceState: STATES.OK,
+        /** @param {boolean} [restorable] */
+        injectDeviceLoss(restorable = false){
+            this.deviceState = restorable ? STATES.NOT_RESET : STATES.LOST;
+        },
+    };
+    /** @param {number} message @param {number} wParam */
+    const send = (message, wParam)=>/** @type {(args: number[]) => unknown} */ (hook)(
+        [FOCUS, message, wParam, 0]);
+    return { windows, device, calls, procs, send, names: ()=>calls.map(([name])=>name) };
+}
+
+const HOW = { focus: FOCUS, window: DEVICE_WINDOW, fullscreen: true, noWindowChanges: false,
+    extended: false, width: 640, height: 480, created: true };
+
+test('a full-screen device hooks its focus window, activates it and shows its window', ()=>{
+    const { windows, device, procs, names, calls } = harness();
+    windows.take(device, HOW);
+    assert.equal(procs.get(FOCUS), STUB, 'the runtime\'s procedure is the window\'s');
+    assert.ok(names().includes('SetForegroundWindow'));
+    const placed = calls.find(([name])=>name === 'SetWindowPos');
+    assert.ok(placed, 'a hidden device window is shown');
+    assert.equal(placed[1][1], 0xffffffff, 'and put above the others (WS_EX_TOPMOST)');
+    windows.release(device);
+    assert.equal(procs.get(FOCUS), PROGRAM_PROC, 'the program\'s procedure back');
+});
+
+test('a visible device window is left where it is, and a windowed device hooks nothing', ()=>{
+    const visible = harness({ visible: true });
+    visible.windows.take(visible.device, HOW);
+    assert.equal(visible.names().includes('SetWindowPos'), false);
+    const windowed = harness();
+    windowed.windows.take(windowed.device, { ...HOW, fullscreen: false });
+    assert.equal(windowed.procs.get(FOCUS), PROGRAM_PROC);
+    assert.deepEqual(windowed.names(), []);
+});
+
+test('losing the activation loses the device; regaining it waits for a Reset', ()=>{
+    const { windows, device, send, names, calls } = harness();
+    windows.take(device, HOW);
+    calls.length = 0;
+    send(0x1c, 0);
+    assert.equal(device.deviceState, STATES.LOST);
+    assert.deepEqual(names(), ['ChangeDisplaySettingsA', 'ShowWindow', 'SetWindowPos',
+        'CallWindowProcA'], 'the registry mode, the window minimised, then the program hears it');
+    calls.length = 0;
+    send(0x1c, 1);
+    assert.equal(device.deviceState, STATES.NOT_RESET);
+    assert.deepEqual(names(), ['IsIconic', 'ShowWindow', 'CallWindowProcA']);
+    device.deviceState = STATES.OK;
+    send(0x7e, 0);
+    assert.equal(device.deviceState, STATES.NOT_RESET, 'a mode set under it');
+});
+
+test('D3DCREATE_NOWINDOWCHANGES leaves the windows, an extended device is never lost', ()=>{
+    const kept = harness();
+    kept.windows.take(kept.device, { ...HOW, noWindowChanges: true });
+    kept.calls.length = 0;
+    kept.send(0x1c, 0);
+    assert.deepEqual(kept.names(), ['ChangeDisplaySettingsA', 'CallWindowProcA']);
+    assert.equal(kept.device.deviceState, STATES.LOST);
+    const ex = harness();
+    ex.windows.take(ex.device, { ...HOW, extended: true });
+    ex.send(0x1c, 0);
+    ex.send(0x7e, 0);
+    assert.equal(ex.device.deviceState, STATES.OK);
+});
+
+test('SC_RESTORE is the default procedure\'s before the program hears it', ()=>{
+    const { windows, device, send, names, calls } = harness();
+    windows.take(device, HOW);
+    calls.length = 0;
+    send(0x112, 0xf120);
+    assert.deepEqual(names(), ['DefWindowProcA', 'CallWindowProcA']);
+});
+
+test('a procedure the program set meanwhile stays at the last release', ()=>{
+    const { windows, device, procs } = harness();
+    windows.take(device, HOW);
+    procs.set(FOCUS, 0x402000);
+    windows.release(device);
+    assert.equal(procs.get(FOCUS), 0x402000);
+});

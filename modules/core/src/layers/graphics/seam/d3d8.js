@@ -29,8 +29,8 @@
  * because both are facts about the ABI rather than about Direct3D.
  */
 
-import { describe, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
-    IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
+import { describe as describeAny, IDIRECT3D8_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS,
+    IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSWAPCHAIN8_SLOTS,
     IDIRECT3DRESOURCE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
     IDIRECT3DVERTEXBUFFER8_SLOTS, IDIRECT3DINDEXBUFFER8_SLOTS, IDIRECT3DVOLUME8_SLOTS,
     IDIRECT3DVOLUMETEXTURE8_SLOTS } from './vtables.js';
@@ -45,8 +45,8 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
-import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
-import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
+import { D3DDEVTYPE, D3DFMT, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -75,6 +75,15 @@ import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { loudRefusals } from './refusals.js';
+
+/**
+ * Every interface here is its object's IUnknown: one inheritance chain, one
+ * pointer (com.js `identity`).
+ *
+ * @param {Parameters<typeof describeAny>} args
+ * @returns {import('./com.js').InterfaceDescriptor}
+ */
+const describe = (...args)=>({ ...describeAny(...args), identity: true });
 
 /** Direct3D 8's stage state types below 32, a bit each: what the block keeps for them. */
 const STAGE_STATE_TYPES_8 = Object.values(D3DTSS)
@@ -185,8 +194,10 @@ const ALL_COMPARE_CAPS = 0x000000ff;
  * Every source and destination blend factor D3D8 names, including the two
  * BOTH* forms. The renderer maps each onto its own; a factor left unclaimed
  * makes a program pick a worse path for an effect we can draw exactly.
+ * D3DPBLENDCAPS_BLENDFACTOR (0x2000) is Direct3D 9's and not claimed here
+ * (Wine's d3d8 test_device_caps).
  */
-const ALL_BLEND_CAPS = 0x00003fff;
+const ALL_BLEND_CAPS = 0x00001fff;
 
 const D3DPSHADECAPS_COLORGOURAUDRGB = 0x00000008;
 const D3DPSHADECAPS_SPECULARGOURAUDRGB = 0x00000200;
@@ -264,6 +275,19 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 /** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
 const S_FALSE = 1;
 
+/** The program keeps its windows itself: a full-screen device changes neither (`focus.js`). */
+const D3DCREATE_NOWINDOWCHANGES = 0x00000800;
+
+/**
+ * `then` of an answer that may be a promise, at once when it is not.
+ *
+ * @param {unknown} value @param {(answer: any) => any} then
+ */
+const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<unknown>} */ (value).then(then) : then(value));
+/** GetInfo's answer for an id below D3DDEVINFOID_RESOURCEMANAGER. */
+const E_FAIL = 0x80004005 | 0;
+
 /**
  * The program's cursor, as the device was given it.
  *
@@ -300,6 +324,8 @@ const S_FALSE = 1;
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {ReturnType<typeof import('./focus.js').createFocusWindows> | null} [deps.focus]
+ *        A full-screen device's focus and device windows (`focus.js`).
  *        The hardware behind the device, as the assembling caller knows it.
  * @param {(window: number) => { width: number, height: number } | null} [deps.windowClientSize]
  *        The client area of a window, which is the size a back buffer asked
@@ -317,7 +343,8 @@ const S_FALSE = 1;
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D8Seam(
-    { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
+    { focus: focusWindows = null, publisher, memory, screen, allocate, allocateCode,
+        divergence, cursor, resolution, identity,
         windowClientSize, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         traps = new Set(), phases, ringBytes },
@@ -1448,6 +1475,13 @@ export function createDirect3D8Seam(
         // Present's rectangles are said; the window is the browser's.
         /** @param {any} device @param {number[]} args */
         Present: (/** @type {any} */ device, /** @type {number[]} */ args = [])=>{
+            // Into a window that is gone, nothing is presented (Wine's d3d8
+            // test_destroyed_window; Direct3D 9 answers D3D_OK there).
+            const window = (args[2] >>> 0) || deviceWindow;
+            if (window !== 0 && windowClientSize && windowClientSize(window) === null)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             presentRects(args[0], args[1]);
             showScreen(device);
             return pacedPresent(device.Present());
@@ -1478,11 +1512,14 @@ export function createDirect3D8Seam(
                 // clipping its cursor to a rectangle the picture no longer
                 // fills.
                 deviceWindow = (next.hDeviceWindow >>> 0) || deviceWindow;
-                takeScreen(device, next, deviceWindow);
+                const taken = takeScreen(device, next, deviceWindow);
                 pacing = pacingOf(next);
+                // The block is brought to what the device now holds, not to
+                // what it held before: a reset is the host changing state on
+                // its own.
+                shadowOf(device)?.remirror();
+                return andThen(taken, ()=>hr);
             }
-            // The block is brought to what the device now holds, not to what
-            // it held before: a reset is the host changing state on its own.
             shadowOf(device)?.remirror();
             return hr;
         },
@@ -1539,6 +1576,13 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateTexture: (device, [width, height, levels, usage, format, pool, out])=>{
+            // No format is refused before the pointer is touched, here and in
+            // the four creates like it; CreateImageSurface clears it first
+            // (Wine's d3d8 test_format_unknown).
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ texture?: any }} */
             const held = {};
             const hr = device.CreateTexture(
@@ -1605,6 +1649,11 @@ export function createDirect3D8Seam(
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
                     out >>> 0, E_OUTOFMEMORY, device);
+            }
+            // A refused one clears the pointer (Wine's d3d8 test_swapchain).
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out >>> 0, 0);
             }
             return hr;
         },
@@ -1697,8 +1746,14 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [target, depth])=>{
-            const hr = device.SetRenderTarget(publisher.objectAt(target),
-                publisher.objectAt(depth));
+            // A surface another device made is refused (Wine's d3d8
+            // test_render_target_device_mismatch).
+            const made = [publisher.objectAt(target), publisher.objectAt(depth)];
+            if (made.some(surface=>surface && ![null, device].includes(ownerOf(surface))))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetRenderTarget(made[0], made[1]);
             // A new target is a new viewport, which the guest's GetViewport reads.
             shadowOf(device)?.remirror({ viewport: true });
             return hr;
@@ -1920,6 +1975,10 @@ export function createDirect3D8Seam(
         // buffer only in that is still a target it can draw into (decision A85).
         /** @param {any} device @param {number[]} args */
         CreateRenderTarget: (device, [width, height, format, samples, lockable, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
@@ -1935,6 +1994,10 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateDepthStencilSurface: (device, [width, height, format, samples, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             singleSampled(samples);
             /** @type {{ surface?: any }} */
             const held = {};
@@ -1950,6 +2013,10 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateCubeTexture: (device, [edgeLength, levels, usage, format, pool, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if ((out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -1969,6 +2036,10 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         CreateVolumeTexture: (device, [width, height, depth, levels, usage, format, pool, out])=>{
+            if ((format >>> 0) === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if ((out >>> 0) === 0)
             {
                 return D3DERR_INVALIDCALL;
@@ -2204,8 +2275,10 @@ export function createDirect3D8Seam(
 
         // The retail answer: the call succeeded and there is nothing to report,
         // which is what a program checks for before reading the structure it
-        // passed. Nothing is written into it.
-        GetInfo: ()=>S_FALSE,
+        // passed; the ids below D3DDEVINFOID_RESOURCEMANAGER name nothing and
+        // fail (Wine's d3d8 test_get_info). Nothing is written into it.
+        /** @param {any} _ @param {number[]} args */
+        GetInfo: (_, [id])=>((id >>> 0) < 4 ? E_FAIL : S_FALSE),
 
         // --- state blocks ---
 
@@ -2617,7 +2690,7 @@ export function createDirect3D8Seam(
             backBufferHeight: asked.height === 0 ? taken.height : asked.height,
             backBufferFormat: raw.BackBufferFormat,
             backBufferCount: raw.BackBufferCount,
-            multiSampleType: singleSampled(raw.MultiSampleType) ?? 0,
+            multiSampleType: singleSampled(raw.MultiSampleType) ?? raw.MultiSampleType,
             swapEffect: raw.SwapEffect,
             hDeviceWindow: raw.hDeviceWindow,
             windowed: raw.Windowed !== 0,
@@ -2925,6 +2998,8 @@ export function createDirect3D8Seam(
             const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
             /** @type {{ device?: any }} */
             const held = {};
+            /** @type {unknown} What the windows hearing of the device waits on. */
+            let taken = 0;
             // The first three arguments are kept rather than dropped: they are
             // what GetCreationParameters has to answer with, and a device that
             // described itself instead would be describing a device the program
@@ -2943,7 +3018,21 @@ export function createDirect3D8Seam(
                 // The window is kept for a later Reset, whose present
                 // parameters need not repeat it.
                 deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-                takeScreen(held.device, wanted, deviceWindow);
+                // A loss the focus window's hook makes is the guest's to see at once:
+                // TestCooperativeLevel answers from the block while it says D3D_OK.
+                const made = held.device;
+                const lose = made.injectDeviceLoss?.bind(made);
+                if (lose)
+                {
+                    made.injectDeviceLoss = (/** @type {boolean | undefined} */ restorable)=>{
+                        lose(restorable);
+                        shadowOf(made)?.remirror();
+                    };
+                }
+                windowsOf.set(held.device, { focus: focus >>> 0,
+                    noWindowChanges: ((behaviourFlags >>> 0) & D3DCREATE_NOWINDOWCHANGES) !== 0,
+                    extended: false });
+                taken = takeScreen(held.device, wanted, deviceWindow);
                 pacing = pacingOf(wanted);
             }
             if (hr !== D3D_OK || !held.device)
@@ -3025,6 +3114,11 @@ export function createDirect3D8Seam(
             }
             const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice8,
                 out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+            if (result === D3D_OK && taken !== 0)
+            {
+                lastDevice = held.device;
+                return andThen(taken, ()=>result);
+            }
             if (result === D3D_OK)
             {
                 // Held so the layer's diagnostics can reach the renderer's
@@ -3069,24 +3163,79 @@ export function createDirect3D8Seam(
      */
     const unshown = new WeakMap();
 
+    /** The devices that set a display mode and have not left it. @type {WeakSet<any>} */
+    const fullScreen = new WeakSet();
+    /** The devices whose last Release is watched for that. @type {WeakSet<any>} */
+    const releaseWatched = new WeakSet();
+
+    /**
+     * A full-screen device leaving its mode, reset to a window or released:
+     * the display goes back to the registry's mode, whatever was set since
+     * (Wine's test_reset and test_mode_change).
+     *
+     * @param {any} device
+     */
+    const leaveFullScreen = device=>{
+        if (fullScreen.delete(device))
+        {
+            const mode = registryMode(screen());
+            resolution?.(mode.width, mode.height);
+        }
+    };
+
     /**
      * What a created or reset device does to the screen: a fullscreen one
-     * takes it now, at its mode, with its window; a windowed one at its first
-     * frame.
+     * takes it now, at its mode, with its window, and gives it back when it
+     * goes (`leaveFullScreen`); a windowed one takes it at its first frame.
      *
      * @param {any} device @param {any} parameters @param {number} window
+     * @returns {unknown} a promise while the windows hear of it
      */
     const takeScreen = (device, parameters, window)=>{
         const width = parameters.backBufferWidth >>> 0;
         const height = parameters.backBufferHeight >>> 0;
+        const how = windowsOf.get(device);
+        const taken = focusWindows && how ? focusWindows.take(device, { ...how, window,
+            fullscreen: !parameters.windowed, width, height, created: !how.taken }) : 0;
+        if (how)
+        {
+            how.taken = true;
+        }
         if (parameters.windowed)
         {
+            leaveFullScreen(device);
             unshown.set(device, { width, height, window });
-            return;
+            return taken;
+        }
+        fullScreen.add(device);
+        if (!releaseWatched.has(device))
+        {
+            releaseWatched.add(device);
+            const release = device.release;
+            device.release = ()=>{
+                const left = release();
+                if (left === 0)
+                {
+                    leaveFullScreen(device);
+                    focusWindows?.release(device);
+                }
+                return left;
+            };
         }
         unshown.delete(device);
         resolution?.(width, height, { window, fullscreen: true });
+        return taken;
     };
+
+    /**
+     * The windows a device was created with, for its focus window's hook
+     * (`focus.js`): the focus window, whether the program keeps its windows
+     * itself, and whether the device is never lost.
+     *
+     * @type {WeakMap<any, { focus: number, noWindowChanges: boolean, extended: boolean,
+     *     taken?: boolean }>}
+     */
+    const windowsOf = new WeakMap();
 
     /**
      * A windowed device's first frame: its window is the screen from now on.

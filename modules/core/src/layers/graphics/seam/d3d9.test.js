@@ -58,6 +58,7 @@ import { createSystemFunctions } from '../../win32/user32/system.js';
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
+const E_NOTIMPL = 0x80004001;
 /** A query whose answer is not ready yet. */
 const S_FALSE = 1;
 const E_NOINTERFACE = 0x80004002;
@@ -465,6 +466,39 @@ test('the raster status follows the display\'s clock, which the caps say can be 
     h.release(root);
 });
 
+test('a target made by another device is not bound', ()=>{
+    // Wine's d3d9 test_render_target_device_mismatch.
+    const h = seamed();
+    const root = h.create();
+    const first = h.createDevice(root).device;
+    const second = h.createDevice(root).device;
+    const out = 0x3200;
+    assert.equal(h.device(second, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [0, target]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(first, 'SetDepthStencilSurface', [target]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(second, 'SetRenderTarget', [0, target]), D3D_OK);
+});
+
+test('a fullscreen device gives the display back to the registry mode at its last release', ()=>{
+    // Wine's test_mode_change: whatever mode was set since, and only for a
+    // device that set one.
+    const h = seamed();
+    const root = h.create();
+    const windowed = h.createDevice(root).device;
+    assert.equal(h.release(windowed), 0);
+    assert.deepEqual(h.resolutions, [], 'a windowed device set no mode, and restores none');
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: HWND });
+    assert.notEqual(device, 0);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
+    assert.equal(h.release(device), 0);
+    assert.deepEqual(h.resolutions.at(-1), [1280, 1024, undefined, undefined]);
+    assert.equal(h.resolutions.length, 2);
+    h.release(root);
+});
+
 test('a fullscreen device names the window it takes with it', ()=>{
     // The real device places its window at the mode's size; the window is
     // named so whoever answers can do the same, and fullscreen is the signal.
@@ -534,8 +568,8 @@ test('a reset that changes the mode names the window it presents into', ()=>{
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true],
-        'back to windowed, the screen waits for a frame');
+    assert.deepEqual(h.resolutions.at(-1), [1280, 1024, undefined, undefined],
+        'back to windowed, the display is the registry mode until a frame');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
         'and the frame names the window');
@@ -687,7 +721,7 @@ test('a texture is made without a shared handle, described and locked at this ve
         const { device } = h.createDevice(root);
         const out = 0x3000;
         assert.equal(h.device(device, 'CreateTexture',
-            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), E_NOTIMPL,
         'a shared handle is the extended interface\'s');
         assert.equal(h.device(device, 'CreateTexture',
             [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
@@ -863,6 +897,13 @@ test('a surface names its container: its texture, its swap chain, or its device'
     // The same pointer, as single inheritance lays it out: D3DX casts a base
     // texture back to the texture by its type and calls GetLevelDesc through it.
     assert.equal(base.pointer, texture, 'the base texture is the texture');
+    putGuid(h, iid, [0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    assert.deepEqual(containerOf(level), { hr: D3D_OK, pointer: texture },
+        'and so is its IUnknown');
+    h.release(texture);
+    assert.equal(h.box.call(texture, 0, [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), texture, 'QueryInterface for IUnknown too');
+    h.release(texture);
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelCount')), 1);
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelDesc'),
         [0, out]), D3D_OK);
@@ -905,7 +946,7 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     const { device } = h.createDevice(root);
     const out = 0x3000;
     assert.equal(h.device(device, 'CreateCubeTexture',
-        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), E_NOTIMPL,
     'a shared handle is the extended interface\'s');
     assert.equal(h.device(device, 'CreateCubeTexture',
         [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
@@ -967,7 +1008,7 @@ test('a volume texture is made, and its levels lock, describe and name it as a b
         const { device } = h.createDevice(root);
         const out = 0x3000;
         assert.equal(h.device(device, 'CreateVolumeTexture',
-            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), D3DERR_INVALIDCALL,
+            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), E_NOTIMPL,
         'a shared handle is the extended interface\'s');
         h.box.memory.writeU32(out, 0xdeadbeef);
         assert.equal(h.device(device, 'CreateVolumeTexture',
@@ -1249,6 +1290,32 @@ test('a shader on a device that runs none is refused with the pointer cleared', 
     h.release(root);
 });
 
+test('a device whose last reference a state block held still lets go of its Direct3D object', ()=>{
+    // Wine's test_refcount: the state block's Release destroys the device.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const block = h.box.memory.readU32(out);
+    assert.equal(h.release(device), 1, 'the block holds the device');
+    assert.equal(h.release(block), 0);
+    assert.equal(h.release(root), 0, 'and the device held the root no longer');
+});
+
+test('a loss the device is told of reaches the guest\'s TestCooperativeLevel at once', ()=>{
+    // The focus window's hook loses the device (`focus.js`); the guest
+    // answers D3D_OK from the block only while the block says so.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const block = h.box.memory.readU32(device + 4);
+    assert.equal(h.box.memory.readU32(block + SHADOW.COOPERATIVE), 0);
+    h.object(device).injectDeviceLoss(false);
+    assert.notEqual(h.box.memory.readU32(block + SHADOW.COOPERATIVE), 0, 'the host\'s to answer');
+});
+
 test('a state block is recorded, handed back, and applied through its own vtable', ()=>{
     const h = seamed();
     const root = h.create();
@@ -1401,7 +1468,7 @@ test('the viewport, scissor and the draws cross with their arguments in this ver
         assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0x4000, 12]), D3D_OK);
         assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0, 12]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'DrawIndexedPrimitive', [4, 0xffffffff, 0, 3, 0, 1]),
-            D3DERR_INVALIDCALL, 'no indices bound');
+            D3D_OK, 'no indices bound draws nothing (test_draw_indexed)');
         assert.equal(h.device(device, 'DrawRectPatch', [1, 0, 0]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'EndScene'), D3D_OK);
 
@@ -1735,13 +1802,38 @@ test('IDirect3D9Ex answers modes as D3DDISPLAYMODEEX, its LUID, and makes Ex dev
     assert.equal(deviceCall('ResetEx', [parameters, mode]), D3DERR_INVALIDCALL,
         'a window takes no mode');
 
-    // The depth stencil Ex create hands back through the pointer, and
-    // leaves it alone when it refuses.
+    // As the plain create does, the Ex one keeps a system-memory surface in
+    // the program's own memory (Wine's d3d9ex test_user_memory).
+    const handle = 0x71e0;
+    h.box.memory.writeU32(handle, 0x8000);
+    assert.equal(deviceCall('CreateOffscreenPlainSurfaceEx', [8, 8, D3DFMT.A8R8G8B8,
+        D3DPOOL.SYSTEMMEM, 0x71c0, handle, 0]), D3D_OK);
+    const own = h.box.memory.readU32(0x71c0);
+    assert.equal(h.box.call(own, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'), [0x71f0, 0, 0]),
+        D3D_OK);
+    assert.equal(h.fields.readU32(0x71f0 + D3DLOCKED_RECT.pBits), 0x8000);
+    assert.equal(h.box.call(own, slot(IDIRECT3DSURFACE9_SLOTS, 'UnlockRect'), []), D3D_OK);
+    assert.equal(h.release(own), 0);
+
+    // The depth stencil Ex create hands back through the pointer, leaves it
+    // alone when it refuses a usage (Wine's d3d9ex
+    // test_create_depth_stencil_surface_ex), and clears it when it refuses
+    // anything else, as the plain creates do (test_format_unknown).
     const surface = 0x71c0;
     h.box.memory.writeU32(surface, 0xdeadbeef);
     assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
         surface, 0, 2]), D3DERR_INVALIDCALL);
     assert.equal(h.box.memory.readU32(surface), 0xdeadbeef);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateRenderTargetEx', [64, 64, 0, 0, 0, 0, surface, 0, 0]],
+        ['CreateDepthStencilSurfaceEx', [64, 64, 0, 0, 0, 1, surface, 0, 0]],
+        ['CreateOffscreenPlainSurfaceEx', [64, 64, 0, 0, surface, 0, 9]],
+    ]))
+    {
+        h.box.memory.writeU32(surface, 0xdeadbeef);
+        assert.equal(deviceCall(name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.box.memory.readU32(surface), 0, `${name} cleared the pointer`);
+    }
     assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
         surface, 0, 0]), D3D_OK);
     h.release(h.box.memory.readU32(surface));
@@ -2159,18 +2251,67 @@ test('a create refused for its shared handle leaves no pointer behind', ()=>{
     // its out-parameter: a pointer from an earlier call there is a call into
     // a freed object.
     const h = seamed();
-    const root = h.create();
-    const { device } = h.createDevice(root);
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const { device } = h.createDevice(h.box.memory.readU32(0x2200));
     const out = 0x3000;
-    for (const [name, args] of /** @type {[string, number[]][]} */ ([
-        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
-        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
-        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+    for (const [name, args, hr] of /** @type {[string, number[], number][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000],
+            D3DERR_INVALIDCALL],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000],
+            D3DERR_INVALIDCALL],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000], D3DERR_NOTAVAILABLE],
     ]))
     {
         h.box.memory.writeU32(out, 0xdeadbeef);
-        assert.equal(h.device(device, name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.device(device, name, args), hr, name);
         assert.equal(h.box.memory.readU32(out), 0, `${name} cleared its out-parameter`);
+    }
+});
+
+test('an Ex device keeps a system-memory surface in the program\'s own memory', ()=>{
+    // Wine's d3d9ex test_user_memory: the shared handle holds its address.
+    const h = seamed();
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const { device } = h.createDevice(h.box.memory.readU32(0x2200));
+    const out = 0x3000;
+    const handle = 0x3100;
+    // Below where the seam allocates (`machine`).
+    const mem = 0x8000;
+    h.box.memory.writeU32(handle, mem);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateOffscreenPlainSurface', [8, 8, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, handle]],
+    ]))
+    {
+        assert.equal(h.device(device, name, args), D3D_OK, name);
+        const surface = h.box.memory.readU32(out);
+        const locked = 0x3200;
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'),
+            [locked, 0, 0]), D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), mem, `${name} pBits`);
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'UnlockRect'), []), D3D_OK);
+        assert.equal(h.release(surface), 0);
+    }
+});
+
+test('a device of the plain interface answers any shared handle with E_NOTIMPL', ()=>{
+    // Wine's test_shared_handle: before anything else is looked at.
+    const h = seamed();
+    const { device } = h.createDevice(h.create());
+    const out = 0x3000;
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateCubeTexture', [8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0x4000]],
+        ['CreateVolumeTexture', [8, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0x4000]],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateRenderTarget', [8, 4, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0x4000]],
+        ['CreateDepthStencilSurface', [8, 4, D3DFMT.D24S8, 0, 0, 0, out, 0x4000]],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateIndexBuffer', [16, 0, 101, D3DPOOL.DEFAULT, out, 0x4000]],
+    ]))
+    {
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, name, args), E_NOTIMPL, name);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, `${name} wrote nothing`);
     }
 });
 

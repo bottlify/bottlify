@@ -1158,6 +1158,12 @@ export function createGraphicsModule(){
                 // A shared resource's NT handle is a kernel object of the process.
                 sharedHandles: win32.sharedHandles?.(),
                 guestTraps: config?.guestTraps,
+                // A full-screen Direct3D 8 or 9 device's windows: user32's own
+                // calls on them, and a window procedure of the device's.
+                user32: (/** @type {string} */ name)=>win32.user32?.(name),
+                procedure: (/** @type {string} */ name,
+                    /** @type {(args: number[]) => unknown} */ handler)=>
+                    bridge.register(`<${name}>`, { argBytes: 16, handler }),
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.
                 processHeapAllocate: (/** @type {number} */ bytes)=>
