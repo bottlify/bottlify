@@ -265,6 +265,14 @@ const play = async profiled=>{
             // the program did with the answers it had. Its diagnostics are
             // kept, for `--uploads`.
             port1.onmessage = (/** @type {MessageEvent} */ event)=>{
+                // A call the played side could not play stops its root: said,
+                // and the run fails, rather than measuring frames it never drew.
+                if (event.data?.type === 'failed')
+                {
+                    console.error(`root ${record.root} stopped at batch ${batches}:`
+                        + ` ${event.data.message}`);
+                    process.exitCode = 1;
+                }
                 if (measuring && event.data?.type === 'diagnostics')
                 {
                     told[told.length === 0 ? 0 : 1] = { diagnostics: event.data.diagnostics,

@@ -2311,7 +2311,16 @@ export function createPlayer({ root, ship, read, borrow }){
             const target = /** @type {any} */ (objectAt(call.t));
             if (call.op === OP.GET)
             {
-                bindAll(target[/** @type {string} */ (call.m)], [], bind);
+                // The recording sends a read only when it numbered what it
+                // read: the same is numbered here whatever it holds, or every
+                // number after it would name another object.
+                const value = target[/** @type {string} */ (call.m)];
+                if (value === null || typeof value !== 'object')
+                {
+                    throw new Error(`remote: ${String(call.m)} read on the played side`
+                        + ' is no object');
+                }
+                bind(value);
                 return undefined;
             }
             if (call.op === OP.SET)

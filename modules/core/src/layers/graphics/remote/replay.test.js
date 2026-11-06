@@ -14,6 +14,7 @@ import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from '
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
+import { createDirect3D8 } from '../d3d8/device.js';
 import { commandSlot } from '../d3d9/commands.js';
 import { createReferenceCount } from '../d3d9/resources.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -1129,6 +1130,31 @@ test('an event query answers on the program\'s side; an occlusion query asks the
     assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.EVENT }, 'GetData', []), false);
     assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.OCCLUSION }, 'GetData', []), true);
     assert.equal(answeredByRenderer({}, 'GetRenderTargetData', []), true);
+});
+
+test('objects are numbered alike when the recording has a diagnostic the played side lacks', ()=>{
+    // The graphics worker's device is made from options that crossed a port,
+    // where a function does not go: the recording's draw check is the engine's
+    // alone. The program reads the caps before it makes its device, as
+    // 3DMark2001 SE does, and every call on the device must reach the played one.
+    for (const factory of [createDirect3D8, createDirect3D9])
+    {
+        const played = playedDirect3D(factory, {});
+        const sender = createSender({
+            post: message=>played.read(message.buffer, call=>{
+                played.play(call);
+            }),
+            later: flush=>flush(),
+        });
+        const d3d = recordedDirect3D(factory, { checkDraws: ()=>0 }, sender);
+        assert.equal(typeof d3d.caps, 'object');
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        assert.equal(out.device.Clear(0, null, D3DCLEAR.TARGET, 0, 1, 0), D3D_OK);
+    }
 });
 
 test('a getter of plain state answers on the program\'s side and sends nothing', ()=>{
