@@ -2427,6 +2427,22 @@ test('a class word is read from the atom or the extra bytes, and the atom is not
 
 // --- display mode ---
 
+test('a display turned from its own orientation is no mode', ()=>{
+    // Wine's d3d9ex test_get_adapter_displaymode_ex asks for DMDO_180 and
+    // skips on DISP_CHANGE_BADMODE.
+    const { memory, fns, screen } = setup();
+    const DM_DISPLAYORIENTATION = 0x80;
+    putMode(memory, SCREEN.width, SCREEN.height);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields,
+        [DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmDisplayOrientation, [2]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_BADMODE);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmDisplayOrientation, [0]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL,
+        'its own is');
+    assert.equal(screen.width, SCREEN.width);
+});
+
 test('the registry mode is written with CDS_UPDATEREGISTRY, and set only without CDS_NORESET', ()=>{
     // Wine's d3d9 test_mode_change writes the registry this way and expects
     // the mode in effect to stay until a null mode puts the registry's back.

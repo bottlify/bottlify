@@ -535,6 +535,9 @@ const CDS_TEST = 0x2;
 /** ChangeDisplaySettings' flags: keep the mode in the registry too; and, beside it, only there. */
 const CDS_UPDATEREGISTRY = 0x1;
 const CDS_NORESET = 0x10000000;
+/** DEVMODE's display orientation field, and the orientation every display here has. */
+const DM_DISPLAYORIENTATION = 0x00000080;
+const DMDO_DEFAULT = 0;
 
 /** The refresh rate reported for the one mode this build offers. */
 
@@ -1988,6 +1991,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return DISP_CHANGE_SUCCESSFUL;
         }
         const named = readU32(devMode + layout.dmFields);
+        // A display here cannot turn: any orientation but its own is no
+        // mode it has (Wine's d3d9ex test_get_adapter_displaymode_ex skips
+        // on this answer).
+        if ((named & DM_DISPLAYORIENTATION) !== 0
+            && readU32(devMode + layout.dmDisplayOrientation) !== DMDO_DEFAULT)
+        {
+            return DISP_CHANGE_BADMODE;
+        }
         const width = (named & DM_PELSWIDTH) !== 0
             ? readU32(devMode + layout.dmPelsWidth) : screen.width;
         const height = (named & DM_PELSHEIGHT) !== 0
