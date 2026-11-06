@@ -1535,3 +1535,17 @@ test('a pixel shader writing a luminance target writes its red into all three co
     assert.ok(code.indexOf('oC0 = vec4f(oC0.rrr, oC0.a);') < code.indexOf('out.oC0 = oC0;'));
     assert.ok(!(translateShader(parsed).wgsl ?? '').includes('oC0.rrr'));
 });
+
+test('a def of NaN or an infinity keeps it, made when the shader runs', ()=>{
+    // Wine's d3d9 fp_special_test: no WGSL literal spells them, and a constant
+    // expression that makes one is refused; they were zero.
+    const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.DEF, 5), dst(REGISTER.CONST, 1), 0x7fc00000, 0x7f800000, 0xff800000, 0,
+        op(OPCODE.MOV, 2), dst(REGISTER.TEMP, 0), src(REGISTER.CONST, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.TEMP, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const code = translateShader(parsed).wgsl ?? '';
+    assert.ok(code.includes('var<private> _nonFinite: vec4u'), code);
+    assert.ok(code.includes('vec4f(bitcast<f32>(_nonFinite.x), bitcast<f32>(_nonFinite.y),'
+        + ' bitcast<f32>(_nonFinite.z), 0.0)'), code);
+});

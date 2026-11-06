@@ -2178,12 +2178,14 @@ export function translateShader(parsed, options = {}){
     // The samplers' level biases follow every other register, four a register.
     const biasRegister = biased ? reach : undefined;
     const declared = biased ? reach + 4 : reach;
+    const nonFinite = [...defined.values()].some(value=>value.includes('_nonFinite'));
     const wgsl = [
         ...moduleHeader({
             vertex, constants: declared, samplers, inputFields, outputFields,
             clipDistances: vertex && options.clip?.distances === true,
         }),
         D3D_MATH,
+        ...(nonFinite ? [NON_FINITE] : []),
         ...fogCurve,
         ...(relativeDefs ? [
             'fn cAt(i: i32) -> vec4f {',
@@ -2555,11 +2557,24 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     };
 }
 
+/**
+ * Where a shader reads the values no WGSL literal spells: NaN, +Inf, -Inf.
+ * Read from a private variable, they are made when the shader runs rather
+ * than refused as a constant expression; a def of one in a shader keeps it
+ * (Wine's d3d9 fp_special_test).
+ */
+const NON_FINITE = 'var<private> _nonFinite: vec4u = vec4u(0x7fc00000u, 0x7f800000u,'
+    + ' 0xff800000u, 0u);';
+
 /** @param {number} value @returns {string} a WGSL float literal */
 function literal(value){
+    if (Number.isNaN(value))
+    {
+        return 'bitcast<f32>(_nonFinite.x)';
+    }
     if (!Number.isFinite(value))
     {
-        return '0.0';
+        return value > 0 ? 'bitcast<f32>(_nonFinite.y)' : 'bitcast<f32>(_nonFinite.z)';
     }
     const text = String(value);
     return text.includes('.') || text.includes('e') ? text : `${text}.0`;
