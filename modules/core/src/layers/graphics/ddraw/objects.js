@@ -91,7 +91,9 @@ import {
     DDSCAPS2_CUBEMAP_ALLFACES,
     DDSCAPS2_CUBEMAP_POSITIVEX,
     DDSCAPS2_TEXTUREMANAGE,
+    DDSCAPS_BACKBUFFER,
     DDSCAPS_FLIP,
+    DDSCAPS_FRONTBUFFER,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
     DDSCAPS_TEXTURE,
@@ -329,8 +331,10 @@ export function depthFormatForDepth(bitDepth){
  * @property {(rect?: Rect | null) => number} unlock
  * @property {() => { hr: number, dc: number | null }} getDC
  * @property {(handle: number) => number} releaseDC
- * @property {(other: Surface) => number} addAttachedSurface
- * @property {(other: Surface | null) => number} deleteAttachedSurface
+ * @property {(other: Surface, via?: string) => number} addAttachedSurface
+ *           `via` the interface called through (`surfaceCountOf`'s key).
+ * @property {(other: Surface | null, via?: string) => number} deleteAttachedSurface
+ * @property {string | undefined} attachedVia  What its flip successor was attached through.
  * @property {(wanted: number, wanted2?: number) => { hr: number, surface: Surface | null }}
  *           getAttachedSurface
  * @property {() => Surface[]} enumAttachedSurfaces
@@ -965,6 +969,73 @@ export function createDirectDraw(options = {}){
     }
 
     /**
+     * The caps a chain the program attached gives each member, beyond its own:
+     * FLIP to every one, FRONTBUFFER to its head unless that is a back buffer
+     * itself, BACKBUFFER to the one behind such a front.
+     *
+     * @type {WeakMap<Surface, number>}
+     */
+    const chainGiven = new WeakMap();
+
+    /**
+     * A chain of attached surfaces given its caps again after an attach or a
+     * detach (Wine's ddraw1 test_surface_attachment).
+     *
+     * @param {Surface} member  Any surface of the chain.
+     */
+    function restyleChain(member){
+        let head = member;
+        while (head.flipPrev && head.flipPrev !== member)
+        {
+            head = head.flipPrev;
+        }
+        /** @type {Surface[]} */
+        const chain = [head];
+        for (let next = head.flipNext; next && next !== head; next = next.flipNext)
+        {
+            chain.push(next);
+        }
+        if (chain.length < 2)
+        {
+            leaveChain(head);
+            return;
+        }
+        const ownCaps = (/** @type {Surface} */ one)=>one.caps & ~(chainGiven.get(one) ?? 0);
+        const front = (ownCaps(head) & DDSCAPS_BACKBUFFER) === 0;
+        for (const [index, one] of chain.entries())
+        {
+            const mine = ownCaps(one);
+            let given = DDSCAPS_FLIP;
+            if (index === 0 && front)
+            {
+                given |= DDSCAPS_FRONTBUFFER;
+            }
+            if (index === 1 && front)
+            {
+                given |= DDSCAPS_BACKBUFFER;
+            }
+            chainGiven.set(one, given & ~mine);
+            one.setCaps(mine | given);
+        }
+    }
+
+    /**
+     * A surface out of every chain: what a chain gave it goes, and a front
+     * buffer is one no longer, whatever it was made as (test_surface_attachment).
+     *
+     * @param {Surface} member
+     */
+    function leaveChain(member){
+        if (member.flipNext !== null || member.flipPrev !== null)
+        {
+            return;
+        }
+        member.setCaps(member.caps & ~((chainGiven.get(member) ?? 0) | DDSCAPS_FLIP
+            | DDSCAPS_FRONTBUFFER));
+        chainGiven.delete(member);
+    }
+
+    /**
      * The surface generation a creation through `version` makes.
      *
      * @param {number | undefined} version @returns {1 | 4 | 7}
@@ -1054,6 +1125,11 @@ export function createDirectDraw(options = {}){
             }
         };
 
+        /** The interfaces the depth buffer and the next flip buffer were attached through. */
+        /** @type {string | undefined} */
+        let depthVia;
+        /** @type {string | undefined} */
+        let flipVia;
         // The counts its interfaces keep, by `surfaceCountOf`'s name: the one
         // it was created through holds the creation's reference and every
         // reference the model takes itself.
@@ -1074,12 +1150,12 @@ export function createDirectDraw(options = {}){
             if (flipNext)
             {
                 flipNext.setFlipPrev(null);
-                flipNext.release();
+                flipNext.release(flipVia);
                 flipNext = null;
             }
             if (depth)
             {
-                depth.release();
+                depth.release(depthVia);
                 depth = null;
             }
             if (mipNext)
@@ -1328,6 +1404,10 @@ export function createDirectDraw(options = {}){
             get flipPrev(){
                 return flipPrev;
             },
+            /** The interface the buffer behind it was attached through. */
+            get attachedVia(){
+                return flipVia;
+            },
             /** @param {Surface | null} next @param {boolean} isImplicit */
             setFlipNext(next, isImplicit){
                 flipNext = next;
@@ -1555,9 +1635,29 @@ export function createDirectDraw(options = {}){
                 return DD_OK;
             },
 
-            /** @param {Surface} other */
-            addAttachedSurface(other){
+            /**
+             * @param {Surface} other
+             * @param {string} [via]  The interface called through.
+             */
+            addAttachedSurface(other, via){
                 if (other === surface)
+                {
+                    return DDERR_CANNOTATTACHSURFACE;
+                }
+                // The seventh generation attaches a depth buffer and nothing
+                // else, and a depth buffer of another size is attached by none
+                // (Wine's test_surface_attachment, every version).
+                const seventh = via !== undefined && countOf(via) === '7';
+                if (seventh && (other.caps & DDSCAPS_ZBUFFER) === 0)
+                {
+                    return DDERR_CANNOTATTACHSURFACE;
+                }
+                if (via !== undefined && (other.caps & DDSCAPS_ZBUFFER) !== 0
+                    && (other.width !== width || other.height !== height))
+                {
+                    return DDERR_CANNOTATTACHSURFACE;
+                }
+                if (depth === other && countOf(depthVia) !== countOf(via))
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
@@ -1572,13 +1672,14 @@ export function createDirectDraw(options = {}){
                         return DDERR_CANNOTATTACHSURFACE;
                     }
                     depth = other;
-                    other.addRef();
+                    depthVia = via;
+                    other.addRef(via);
                     return DD_OK;
                 }
                 // A flip chain is a line, so the surface doing the attaching
                 // must not already have something behind it and the one being
-                // attached must not already be behind something else.
-                if (flipNext !== null || other.flipPrev !== null)
+                // attached must be in no chain at all.
+                if (flipNext !== null || other.flipPrev !== null || other.flipNext !== null)
                 {
                     return DDERR_CANNOTATTACHSURFACE;
                 }
@@ -1587,11 +1688,11 @@ export function createDirectDraw(options = {}){
                     return DDERR_CANNOTATTACHSURFACE;
                 }
                 flipNext = other;
+                flipVia = via;
                 flipImplicit = false;
                 other.setFlipPrev(surface);
-                other.addRef();
-                caps |= DDSCAPS_FLIP;
-                other.setCaps(other.caps | DDSCAPS_FLIP);
+                other.addRef(via);
+                restyleChain(surface);
                 return DD_OK;
             },
 
@@ -1600,26 +1701,36 @@ export function createDirectDraw(options = {}){
              * attached stays, as it does when named one at a time.
              *
              * @param {Surface | null} other
+             * @param {string} [via]  The interface called through.
              */
-            deleteAttachedSurface(other){
+            deleteAttachedSurface(other, via){
                 if (other === null)
                 {
                     if (depth)
                     {
-                        surface.deleteAttachedSurface(depth);
+                        surface.deleteAttachedSurface(depth, depthVia);
                     }
                     // Each detach splices the next one up behind this surface.
                     let next = flipNext;
-                    while (next !== null && surface.deleteAttachedSurface(next) === DD_OK)
+                    while (next !== null && surface.deleteAttachedSurface(next, flipVia) === DD_OK)
                     {
                         next = flipNext;
                     }
                     return DD_OK;
                 }
+                // Attached through one generation, it is not attached for
+                // another (Wine's ddraw7 test_surface_attachment).
+                const asAttached = (/** @type {string | undefined} */ made)=>via === undefined
+                    || made === undefined || countOf(made) === countOf(via);
                 if (depth === other)
                 {
+                    if (!asAttached(depthVia))
+                    {
+                        return DDERR_SURFACENOTATTACHED;
+                    }
                     depth = null;
-                    other.release();
+                    other.release(depthVia);
+                    depthVia = undefined;
                     return DD_OK;
                 }
                 if (mipNext === other)
@@ -1641,17 +1752,23 @@ export function createDirectDraw(options = {}){
                 {
                     return DDERR_CANNOTDETACHSURFACE;
                 }
+                if (!asAttached(flipVia))
+                {
+                    return DDERR_SURFACENOTATTACHED;
+                }
                 // Splicing, not truncating: whatever was behind the detached
                 // surface moves up to take its place, and the reference it held
                 // on that successor transfers here rather than being retaken.
                 const successor = other.flipNext;
+                const released = flipVia;
                 other.setFlipNext(null, false);
                 other.setFlipPrev(null);
                 flipNext = successor;
+                flipVia = other.attachedVia;
                 successor?.setFlipPrev(surface);
-                other.release();
-                shedFlipCap(other);
-                shedFlipCap(surface);
+                other.release(released);
+                leaveChain(other);
+                restyleChain(surface);
                 return DD_OK;
             },
 
@@ -1881,19 +1998,6 @@ export function createDirectDraw(options = {}){
         /** @param {Surface} candidate */
         function inChain(candidate){
             return chainMembers().includes(candidate);
-        }
-
-        /**
-         * A surface with nothing attached in either direction is not part of a
-         * chain any more and stops claiming to be flippable.
-         *
-         * @param {Surface} member
-         */
-        function shedFlipCap(member){
-            if (member.flipNext === null && member.flipPrev === null)
-            {
-                member.setCaps(member.caps & ~DDSCAPS_FLIP);
-            }
         }
 
         surfaces.add(surface);

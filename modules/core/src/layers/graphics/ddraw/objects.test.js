@@ -752,6 +752,66 @@ test('attaching a surface takes a reference and detaching gives it back', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('a chain the program attaches gives its head FRONTBUFFER, the buffer behind BACKBUFFER,'
+    + ' and takes them back when the surfaces leave it (ddraw1 test_surface_attachment)', ()=>{
+    const ddraw = withLevel({ version: 1 });
+    const kind = DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER;
+    /** @param {any} one */
+    const roles = one=>one.caps & kind;
+    const head = makeOffscreen(ddraw, { version: 1 });
+    const back = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER });
+    const front = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_FRONTBUFFER });
+
+    assert.equal(back.addAttachedSurface(front), DD_OK);
+    assert.equal(roles(back), DDSCAPS_FLIP | DDSCAPS_BACKBUFFER, 'a back buffer heads no front');
+    assert.equal(roles(front), DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER);
+    assert.equal(head.addAttachedSurface(back), DDERR_CANNOTATTACHSURFACE,
+        'a surface in a chain is attached to no other');
+    assert.equal(back.deleteAttachedSurface(front), DD_OK);
+    assert.equal(roles(back), DDSCAPS_BACKBUFFER, 'its own BACKBUFFER stays');
+    assert.equal(roles(front), 0, 'out of a chain no surface is a front buffer');
+
+    assert.equal(head.addAttachedSurface(back), DD_OK);
+    assert.equal(back.addAttachedSurface(front), DD_OK);
+    assert.equal(roles(head), DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER);
+    assert.equal(roles(back), DDSCAPS_FLIP | DDSCAPS_BACKBUFFER);
+    assert.equal(roles(front), DDSCAPS_FLIP, 'the third buffer is flippable and nothing else');
+    assert.equal(head.deleteAttachedSurface(back), DD_OK);
+    assert.equal(roles(back), DDSCAPS_BACKBUFFER);
+    assert.equal(roles(front), DDSCAPS_FLIP | DDSCAPS_BACKBUFFER, 'now the one behind the front');
+    assert.equal(head.deleteAttachedSurface(front), DD_OK);
+    assert.equal(roles(front), 0, 'what the chain gave goes with it');
+    assert.equal(roles(head), 0);
+    for (const one of [head, back, front])
+    {
+        assert.equal(one.release(), 0);
+    }
+});
+
+test('the seventh generation attaches only a depth buffer, no generation one of another size, and'
+    + ' an attachment is the generation\'s it was made through (test_surface_attachment)', ()=>{
+    const SEVENTH = 'surface 7';
+    const FIRST = 'surface 1';
+    const seventh = createDirectDraw({ version: 7,
+        surfaceCountOf: key=>(key === SEVENTH ? '7' : key === FIRST ? '1' : key) });
+    seventh.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const a = makeOffscreen(seventh);
+    const b = makeOffscreen(seventh);
+    const z = makeOffscreen(seventh, { caps: DDSCAPS_ZBUFFER });
+    const zSmall = makeOffscreen(seventh, { caps: DDSCAPS_ZBUFFER, width: 32, height: 32 });
+    assert.equal(a.addAttachedSurface(b, SEVENTH), DDERR_CANNOTATTACHSURFACE);
+    assert.equal(a.addAttachedSurface(zSmall, FIRST), DDERR_CANNOTATTACHSURFACE);
+    assert.equal(a.addAttachedSurface(z, SEVENTH), DD_OK);
+    assert.equal(a.addAttachedSurface(z, FIRST), DDERR_CANNOTATTACHSURFACE,
+        'attached through another generation');
+    assert.equal(a.deleteAttachedSurface(z, FIRST), DDERR_SURFACENOTATTACHED);
+    assert.equal(a.deleteAttachedSurface(z, SEVENTH), DD_OK);
+    for (const one of [a, b, z, zSmall])
+    {
+        assert.equal(one.release(), 0);
+    }
+});
+
 test('an attachment refuses the reverse, a mismatched size, and itself', ()=>{
     const ddraw = withLevel();
     const first = makeOffscreen(ddraw);

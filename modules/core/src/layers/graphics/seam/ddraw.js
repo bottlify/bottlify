@@ -999,7 +999,8 @@ export function createDirectDrawSeam(
             /** @param {any} surface @param {number[]} args */
             AddAttachedSurface: (surface, [other])=>{
                 const attached = publisher.objectAt(other);
-                return attached ? surface.addAttachedSurface(attached) : DDERR_INVALIDPARAMS;
+                return attached ? surface.addAttachedSurface(attached, generation.id)
+                    : DDERR_INVALIDPARAMS;
             },
 
             /** @param {any} surface @param {number[]} args */
@@ -1117,7 +1118,8 @@ export function createDirectDrawSeam(
                     return surface.deleteAttachedSurface(null);
                 }
                 const attached = publisher.objectAt(other);
-                return attached ? surface.deleteAttachedSurface(attached) : DDERR_INVALIDPARAMS;
+                return attached ? surface.deleteAttachedSurface(attached, generation.id)
+                    : DDERR_INVALIDPARAMS;
             },
 
             /**
