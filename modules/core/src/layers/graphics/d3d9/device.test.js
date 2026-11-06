@@ -1008,6 +1008,22 @@ test('GetAvailableTextureMem falls as default-pool resources are made and comes 
         assert.equal(managed.buffer.release(), 0);
         assert.equal(device.GetAvailableTextureMem(), start);
         assert.equal(device.release(), 0);
+
+        // An extended device's memory is virtual: nothing it makes is taken
+        // off (Wine's d3d9ex test_vidmem_accounting).
+        const d3d = createDirect3D9({ maxPointSize: MAX_POINT_SIZE });
+        /** @type {{ device?: any }} */
+        const ex = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 64,
+            backBufferHeight: 64, backBufferFormat: D3DFMT.X8R8G8B8 }, ex, 0, {}, true), D3D_OK);
+        const before = ex.device.GetAvailableTextureMem();
+        /** @type {{ texture?: any }} */
+        const target = {};
+        assert.equal(ex.device.CreateTexture(1024, 1024, 1, D3DUSAGE.RENDERTARGET,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, target), D3D_OK);
+        assert.equal(ex.device.GetAvailableTextureMem(), before);
+        assert.equal(target.texture.release(), 0);
+        assert.equal(ex.device.release(), 0);
     });
 
 test('a texture\'s levels lie one after another, a cube\'s faces each from a 16-byte boundary,'

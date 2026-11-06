@@ -2402,9 +2402,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return D3D_OK;
         },
 
-        /** @returns {number} bytes, rounded the way this call always reports them */
+        /**
+         * Bytes, rounded the way this call always reports them. An extended
+         * device's video memory is virtual: what its resources take is not
+         * subtracted (Wine's d3d9ex test_vidmem_accounting).
+         *
+         * @returns {number}
+         */
         GetAvailableTextureMem(){
-            return videoMemory.available();
+            return extended
+                ? (caps.videoMemory ?? AVAILABLE_TEXTURE_MEMORY) & ~0xfffff
+                : videoMemory.available();
         },
 
         /**
