@@ -284,12 +284,14 @@ const surfaceCountOf = (key, own)=>{
 
 /**
  * Whether a surface answers QueryInterface for an interface: a surface of the
- * seventh generation is no Direct3D texture (test_surface_qi).
+ * seventh generation is no Direct3D texture, and no first-generation device is
+ * made of it (test_surface_qi).
  *
  * @param {string} key @param {string} own
  */
 const surfaceSupports = (key, own)=>own !== '7'
-    || (key !== IID_IDirect3DTexture && key !== IID_IDirect3DTexture2);
+    || (key !== IID_IDirect3DTexture && key !== IID_IDirect3DTexture2
+        && !(/** @type {string[]} */ (Object.values(DEVICE_IDS))).includes(key));
 
 /**
  * What a surface's QueryInterface answers for an interface it has not: a

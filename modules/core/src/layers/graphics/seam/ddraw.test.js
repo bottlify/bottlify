@@ -37,6 +37,7 @@ import {
     DDDEVICEIDENTIFIER2, DDSURFACEDESC, DDSURFACEDESC2, MAX_DDDEVICEID_STRING, writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import { createDirectDraw } from '../ddraw/objects.js';
+import { DEVICE_IDS } from '../d3d7/constants.js';
 import {
     DDBLT_COLORFILL, DDCAPS2_PRIMARYGAMMA, DDCAPS_BLT, DDERR_DCALREADYCREATED, DDERR_INVALIDPARAMS,
     DDGDI_GETHOSTIDENTIFIER, DDERR_NOCOOPERATIVELEVELSET, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND,
@@ -2625,6 +2626,11 @@ test('a surface\'s interfaces each keep a count of their own, and an older surfa
         const refused = query(surface, IID_IDirect3DDevice7);
         assert.equal(refused.hr, seventh ? 0x80004002 | 0 : 0x80070057 | 0);
         assert.equal(refused.pointer, 0);
+        if (seventh)
+        {
+            // No first-generation device is made of a seventh-generation surface.
+            assert.equal(query(surface, DEVICE_IDS.RGB).hr, 0x80004002 | 0);
+        }
         assert.equal(query(surface, IID_IDirectDrawColorControl).hr, 0x80004002 | 0,
             'the colour control is E_NOINTERFACE in every generation');
         if (seventh)
