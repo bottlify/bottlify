@@ -945,10 +945,17 @@ function createLegacyDevice(inner, version, legacy){
             multiplyMatrices(projection, clipVolumeMatrix(data)));
     };
 
-    /** The active lights of the viewport in effect, as the Direct3D 7 device's first few. */
+    /**
+     * The active lights of the viewport in effect, as the Direct3D 7 device's
+     * first few. A light of no colour adds nothing to any term of the
+     * equation - this version's lights have no ambient of their own - so it
+     * takes none of the few: a program that adds dozens of black lights
+     * before its own is lit by its own (Wine's ddraw4 test_specular_lighting
+     * adds 64).
+     */
     const syncLights = ()=>{
-        const on = (inEffect()?.lights ?? []).filter((/** @type {any} */ light)=>light.active)
-            .slice(0, MAX_ACTIVE_LIGHTS);
+        const on = (inEffect()?.lights ?? []).filter((/** @type {any} */ light)=>light.active
+            && !isBlack(light.data.color)).slice(0, MAX_ACTIVE_LIGHTS);
         on.forEach((/** @type {any} */ light, /** @type {number} */ index)=>{
             inner.SetLight(index, lightFor(light.data));
             inner.LightEnable(index, true);
@@ -1625,6 +1632,13 @@ function createLegacyDevice(inner, version, legacy){
     };
     return device;
 }
+
+/**
+ * Whether a colour is black in all three channels: a light of it lights nothing.
+ *
+ * @param {{ r: number, g: number, b: number }} colour
+ */
+const isBlack = colour=>colour.r === 0 && colour.g === 0 && colour.b === 0;
 
 /**
  * A light of these versions as the Direct3D 7 device lights with one. The

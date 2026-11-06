@@ -179,6 +179,12 @@ test('the scene is a pair, and a draw outside it is drawn all the same', ()=>{
     assert.equal(device.BeginScene(), D3DERR_SCENE_IN_SCENE);
     assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, FVF_TL, triangle, 3), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK, 'the refused begin did not count');
+    // Indices into no vertices draw nothing and succeed, a null array too.
+    const indices = new Uint8Array(8);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL, new Uint8Array(0), 0,
+        indices, 4), D3D_OK);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL,
+        /** @type {any} */ (null), 0, indices, 4), D3D_OK);
     assert.equal(device.EndScene(), D3DERR_SCENE_NOT_IN_SCENE);
 
     releaseAll(f);

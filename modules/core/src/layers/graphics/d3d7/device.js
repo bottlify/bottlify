@@ -1761,7 +1761,9 @@ export function createDirect3D7(ddraw, services = {}){
             DrawIndexedPrimitive(type, fvf, vertices, vertexCount, indices, indexCount){
                 const primitiveCount = primitiveCountOf(type, indexCount);
                 const hr = drawPreconditions(type, fvf, primitiveCount, indexCount);
-                if (hr !== D3D_OK || indexCount === 0)
+                // Indices into no vertices draw nothing, whatever the arrays
+                // are (test_draw_primitive: a null array of none, indexed).
+                if (hr !== D3D_OK || indexCount === 0 || vertexCount === 0)
                 {
                     return hr;
                 }

@@ -445,6 +445,24 @@ test('a light belongs to one viewport, and only an active one lights a draw', ()
     assert.equal(light.setLight({ ...directional, flags: 0 }, false), D3D_OK);
     assert.equal(light.getLight()?.flags, D3DLIGHT_ACTIVE, 'a D3DLIGHT has no flags: it is on');
 
+    // Black lights take none of Direct3D 7's eight before the one that lights
+    // (Wine's ddraw4 test_specular_lighting adds 64 ahead of its own).
+    assert.equal(viewport.deleteLight(light), D3D_OK);
+    const dark = Array.from({ length: 9 }, ()=>{
+        const one = f.legacy.createLight();
+        assert.equal(one.setLight({ ...directional, flags: D3DLIGHT_ACTIVE,
+            color: { r: 0, g: 0, b: 0, a: 0 } }, true), D3D_OK);
+        assert.equal(viewport.addLight(one), D3D_OK);
+        return one;
+    });
+    assert.equal(viewport.addLight(light), D3D_OK);
+    assert.equal(enabledFor().length, 1, 'only the coloured light');
+    for (const one of dark)
+    {
+        assert.equal(viewport.deleteLight(one), D3D_OK);
+        assert.equal(one.release(), 0);
+    }
+
     const walked = viewport.nextLight(null, D3DNEXT_HEAD);
     assert.equal(walked.found, light);
     assert.equal(light.refCount, 3, 'the walk hands back a reference (Wine\'s d3d.c)');
