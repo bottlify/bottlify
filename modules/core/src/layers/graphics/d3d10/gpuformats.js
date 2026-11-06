@@ -39,6 +39,8 @@ export const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R32G32_SINT]: 'rg32sint',
     [DXGI_FORMAT.R10G10B10A2_UNORM]: 'rgb10a2unorm',
     [DXGI_FORMAT.R10G10B10A2_UINT]: 'rgb10a2uint',
+    // Its bits as they are, without the bias (decisions.md A83, temporary).
+    [DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM]: 'rgb10a2unorm',
     [DXGI_FORMAT.R11G11B10_FLOAT]: 'rg11b10ufloat',
     [DXGI_FORMAT.R8G8B8A8_UNORM]: 'rgba8unorm',
     [DXGI_FORMAT.R8G8B8A8_UNORM_SRGB]: 'rgba8unorm-srgb',

@@ -819,6 +819,18 @@ draws through composition (a launcher, a browser engine inside a game) is told i
 cannot be made and falls back to a window's, or says so; the refusal is said in the journal. It
 stands until DirectComposition's visuals are drawn into the window's surface. *2026-11-06.*
 
+**A83. Temporary: R10G10B10_XR_BIAS_A2_UNORM is kept as R10G10B10A2_UNORM, without its
+bias.** Feature level 11 requires the extended-range format as a swap chain format, and a
+program may make its back buffer in it. Its colour channels are 10-bit values with a bias:
+a stored n means (n - 384) / 510, so 0..1 sits in the middle of the range and values past it
+can be shown on a display that takes them. Here its bits are those of R10G10B10A2_UNORM: a
+value v is stored as v * 1023, not v * 510 + 384, so 0..1 is drawn and shown as it is, values
+outside it are clamped, and the bits a copy or a map reads are not Windows'. Each device says
+so once in the journal when such a texture or buffer is made. It stands until a texture of the
+format reads and writes through the bias (an affine step at sampling and at the output) and the
+presenter decodes it.
+*2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

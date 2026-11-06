@@ -2500,6 +2500,24 @@ test('from level 11 stream output may follow the domain shader: a stage of no sh
     ten.device.release();
 });
 
+test('an update\'s pitch of zero reads every row from the same bytes'
+    + ' (test_copy_subresource_region)', async()=>{
+    const device = createDevice();
+    const texture = createTexture2D(device, { Width: 4, Height: 4 });
+    device.UpdateSubresource(texture, 0, null, new Uint8Array(16).fill(0x45), 0, 0);
+    const staging = createTexture2D(device, { Width: 4, Height: 4,
+        Usage: D3D10_USAGE.STAGING, BindFlags: 0, CPUAccessFlags: D3D10_CPU_ACCESS.READ });
+    device.CopyResource(staging, texture);
+    /** @type {{ data?: Uint8Array }} */
+    const mapped = {};
+    assert.equal(await staging.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.deepEqual([...(mapped.data ?? new Uint8Array(0)).subarray(0, 64)],
+        new Array(64).fill(0x45), 'all four rows the one row given');
+    staging.Unmap(0);
+    staging.release();
+    texture.release();
+});
+
 test('a device asked for with the debug layer is refused as on a Windows without its Graphics'
     + ' Tools (decision A81)', ()=>{
     /** @type {any} */

@@ -15,7 +15,7 @@ import {
     CreateDXGIFactory, CreateDXGIFactory1, CreateDXGIFactory2, createFactory,
     defaultSwapChainDesc, outputModes,
 } from './dxgi.js';
-import { D3D10CreateDevice } from './device.js';
+import { D3D10CreateDevice, D3D11CreateDevice } from './device.js';
 
 /** @param {object} [options] */
 function createDevice(options = {}){
@@ -728,6 +728,33 @@ test('a present that only tests shows, counts and rotates nothing'
     assert.equal(shown.length, 1, 'one frame went to the device');
     swapChain.release();
     assertFullyReleased(device, 'the device');
+});
+
+test('the extended-range format is a swap chain format, kept without its bias'
+    + ' (test_swapchain_formats, decisions.md A83)', ()=>{
+    /** @param {number} level */
+    const made = level=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        /** @type {string[]} */
+        const said = [];
+        /** @param {string} api @param {string} detail */
+        const divergence = (api, detail)=>said.push(detail);
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, { divergence }), S_OK);
+        /** @type {{ swapChain?: any }} */
+        const created = {};
+        const desc = swapChainDesc();
+        desc.bufferDesc.format = DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM;
+        const hr = out.device.factory().CreateSwapChain(out.device, desc, created);
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        created.swapChain?.GetBuffer(0, IID.ID3D11Texture2D, buffer);
+        buffer.buffer?.release();
+        created.swapChain?.release();
+        return { hr, said: said.some(detail=>/XR_BIAS/.test(detail)) };
+    };
+    assert.deepEqual(made(0xb000), { hr: S_OK, said: true });
+    assert.deepEqual(made(0xa000), { hr: S_OK, said: true }, 'optional at level 10, taken');
 });
 
 test('a swap chain is made only in a format it can be shown in (test_create_swapchain,'

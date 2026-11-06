@@ -809,6 +809,19 @@ export function createDevice(options = {}){
     let maximumFrameLatency = DEFAULT_FRAME_LATENCY;
 
     /**
+     * Says a format kept as another with what it changes (decisions.md A83,
+     * temporary).
+     *
+     * @param {number} format
+     */
+    const noteKept = format=>{
+        if (format === DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM)
+        {
+            diverge('R10G10B10_XR_BIAS_A2_UNORM is kept as R10G10B10A2_UNORM: its bias is'
+                + ' not applied when it is drawn, read or shown');
+        }
+    };
+    /**
      * @param {any} desc
      * @param {number} dimension
      * @param {any} initialData
@@ -835,6 +848,7 @@ export function createDevice(options = {}){
         {
             return hr;
         }
+        noteKept(desc.Format);
         if ((desc.SampleDesc?.Count ?? 1) > 1 && (desc.ArraySize ?? 1) > 1)
         {
             diverge('a multisampled texture array is refused: WebGPU multisamples a texture'
@@ -2321,6 +2335,7 @@ export function createDevice(options = {}){
          * @returns {any}
          */
         createSwapChainBuffer(request){
+            noteKept(request.format);
             const desc = Object.freeze({
                 Width: request.width,
                 Height: request.height,

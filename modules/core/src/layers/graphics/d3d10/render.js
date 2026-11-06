@@ -4196,8 +4196,11 @@ export function createRenderer(services){
                 left: 0, top: 0, front: 0,
                 right: geometry.width, bottom: geometry.height, back: geometry.depth,
             });
-            const pitch = rowPitch || region.rowBytes;
-            const slicePitch = depthPitch || pitch * region.rows;
+            // A pitch is the program's to the byte: zero reads every row,
+            // or slice, from the same bytes, as Direct3D does
+            // (test_copy_subresource_region's UpdateSubresource1).
+            const pitch = rowPitch;
+            const slicePitch = depthPitch;
             for (let z = 0; z < region.depth; z++)
             {
                 for (let row = 0; row < region.rows; row++)
