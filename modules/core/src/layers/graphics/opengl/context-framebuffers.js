@@ -36,6 +36,7 @@
 
 import { GL } from './constants.js';
 import { RENDERBUFFER_FORMATS, attachmentImage, levelKey } from './objects.js';
+import { componentTypeOf } from './formats.js';
 
 /**
  * @typedef {import('./objects.js').RenderbufferObject} RenderbufferObject
@@ -82,10 +83,16 @@ export function framebufferStatus(fbo){
         {
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
-        if (point === GL.DEPTH_ATTACHMENT && image.holds === 'depth'
-            && attachment.kind === 'texture')
+        const sized = attachment.kind === 'texture'
+            ? attachment.texture.levels.get(levelKey(attachment.level, attachment.face))?.sized
+            : null;
+        if (sized && (sized.kind === 'int' || sized.kind === 'uint' || sized.compressed
+            || sized.packing === 'rgb9e5'
+            || (attachment.kind === 'texture' && attachment.texture.target === GL.TEXTURE_3D)))
         {
-            // A depth texture this renderer cannot sample after drawing it.
+            // What this renderer cannot draw into: an integer format (its
+            // shaders write floats), a shared exponent (WebGPU renders none),
+            // a slice of a 3D texture.
             return GL.FRAMEBUFFER_UNSUPPORTED;
         }
         sizes.push(image);
@@ -590,6 +597,17 @@ export function installFramebufferCalls(context, kernel){
             }
             const image = attachmentImage(attached);
             const colour = image?.holds === 'colour';
+            // A texture kept as a sized format answers from its format.
+            const sized = attached.kind === 'texture'
+                ? attached.texture.levels.get(levelKey(attached.level, attached.face))?.sized
+                : null;
+            const bits = /** @type {number[]} */ ([GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE]).indexOf(pname);
+            if (sized && bits >= 0)
+            {
+                return [sized.bits[bits]];
+            }
             switch (pname)
             {
                 case GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
@@ -611,15 +629,18 @@ export function installFramebufferCalls(context, kernel){
                 case GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
                     return [colour ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-                    return [image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
-                        : 0];
+                    return [sized ? sized.depth
+                        : image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
+                            : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-                    return [image && (image.holds === 'stencil' || image.holds === 'depthStencil')
-                        ? 8 : 0];
+                    return [sized ? sized.stencil
+                        : image && (image.holds === 'stencil' || image.holds === 'depthStencil')
+                            ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-                    return [GL.UNSIGNED_NORMALIZED];
+                    return [sized ? componentTypeOf(sized, colour ? 'colour' : 'depth')
+                        : GL.UNSIGNED_NORMALIZED];
                 case GL.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-                    return [GL.LINEAR_COLOR];
+                    return [sized?.srgb ? GL.SRGB : GL.LINEAR_COLOR];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

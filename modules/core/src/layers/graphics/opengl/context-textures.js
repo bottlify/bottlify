@@ -29,6 +29,13 @@ import {
     baseFormatOf, compressedBytes, conformTexels, createTextureEnvironment, decodeS3tc,
     imageBytes, unpackImage,
 } from './texture.js';
+import { SIZED_FORMATS, TEX, sizedFormatOf } from './formats.js';
+import {
+    clientBytes, decodeClient, encodeStorage, packFromStorage, transferError, unpackToStorage,
+} from './texture-transfer.js';
+import {
+    blankStorage, copyBox, rgbaOf, sizedLevelAnswer, storageBytes, uncompressedTwin,
+} from './texture-levels.js';
 
 
 /**
@@ -86,12 +93,67 @@ function digestBlocks(bytes){
 const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP];
 /** The targets from the highest precedence down, as a unit's enabled target is chosen. */
 const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
+/**
+ * Every target a unit binds a texture to: the enabled ones, and those only a
+ * program samples -- 3D textures and the arrays of OpenGL 3.0.
+ */
+const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY];
 
 const BINDING_QUERY = Object.freeze({
     [GL.TEXTURE_1D]: GL.TEXTURE_BINDING_1D,
     [GL.TEXTURE_2D]: GL.TEXTURE_BINDING_2D,
     [GL.TEXTURE_CUBE_MAP]: GL.TEXTURE_BINDING_CUBE_MAP,
+    [GL.TEXTURE_3D]: TEX.TEXTURE_BINDING_3D,
+    [TEX.TEXTURE_1D_ARRAY]: TEX.TEXTURE_BINDING_1D_ARRAY,
+    [TEX.TEXTURE_2D_ARRAY]: TEX.TEXTURE_BINDING_2D_ARRAY,
 });
+
+/**
+ * The targets each image call names, proxies included (OpenGL 4.6 section 8.5).
+ *
+ * @type {Record<1 | 2 | 3, ReadonlySet<number>>}
+ */
+const IMAGE_TARGETS = {
+    1: new Set([GL.TEXTURE_1D, GL.PROXY_TEXTURE_1D]),
+    2: new Set([GL.TEXTURE_2D, GL.PROXY_TEXTURE_2D, TEX.TEXTURE_1D_ARRAY,
+        TEX.PROXY_TEXTURE_1D_ARRAY, GL.PROXY_TEXTURE_CUBE_MAP, 0x8515, 0x8516, 0x8517, 0x8518,
+        0x8519, 0x851a]),
+    3: new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D, TEX.TEXTURE_2D_ARRAY,
+        TEX.PROXY_TEXTURE_2D_ARRAY]),
+};
+/** @type {ReadonlySet<number>} */
+const PROXIES = new Set([GL.PROXY_TEXTURE_1D, GL.PROXY_TEXTURE_2D, GL.PROXY_TEXTURE_3D,
+    GL.PROXY_TEXTURE_CUBE_MAP, TEX.PROXY_TEXTURE_1D_ARRAY, TEX.PROXY_TEXTURE_2D_ARRAY]);
+/** The targets whose third dimension is a layer, not a depth. @type {ReadonlySet<number>} */
+const ARRAYS = new Set([TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY]);
+
+/** @type {ReadonlySet<number>} */
+const COMPARE_FUNCS = new Set([0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207]);
+/** @type {ReadonlySet<number>} */
+const DEPTH_TEXTURE_MODES = new Set([GL.LUMINANCE, GL.INTENSITY, GL.ALPHA, GL.RED]);
+
+/**
+ * What a level kept as a sized format reduces to for the fixed pipeline's
+ * texture environment, which knows the formats of OpenGL 1.x: red and
+ * red-green textures combine as RGB (their missing components read zero and
+ * alpha one, OpenGL 3.0 table 3.20), depth and stencil keep their own.
+ *
+ * @param {import('./formats.js').SizedFormat} sized
+ * @returns {number}
+ */
+const environmentBase = sized=>(sized.base === GL.RED || sized.base === TEX.RG
+    ? GL.RGB : sized.base);
+
+/** The RGBA bytes made from a sized level's data, while that data is unchanged. */
+/** @type {WeakMap<object, Uint8Array | null>} */
+const rgbaCache = new WeakMap();
+
+/**
+ * Pixels a list holds already in the level's own layout: replayed, they are
+ * stored as they are rather than read again through the unpack state.
+ *
+ * @typedef {{ stored: Uint8Array }} StoredPixels
+ */
 
 const GEN_COORDS = Object.freeze({
     [GL.TEXTURE_GEN_S]: 0, [GL.TEXTURE_GEN_T]: 1, [GL.TEXTURE_GEN_R]: 2, [GL.TEXTURE_GEN_Q]: 3,
@@ -196,6 +258,24 @@ const S3TC_FORMATS = new Set([
     GL.COMPRESSED_RGBA_S3TC_DXT3_EXT, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
 ]);
 
+/** The sized entry of RGBA8, the layout of a legacy level's RGBA bytes. */
+const RGBA8 = /** @type {import('./formats.js').SizedFormat} */ (SIZED_FORMATS.get(GL.RGBA8));
+
+/**
+ * A client image in any layout the transfer reads, as RGBA bytes: what a
+ * legacy level keeps. Values outside [0, 1] are clamped as the conversion to
+ * an unsigned normalised format clamps them.
+ *
+ * @param {Uint8Array} bytes @param {number} width @param {number} height @param {number} depth
+ * @param {number} format @param {number} type
+ * @param {import('./texture-transfer.js').TransferState} state
+ * @returns {Uint8Array | null}
+ */
+function rgbaFromClient(bytes, width, height, depth, format, type, state){
+    const values = decodeClient(bytes, width, height, depth, format, type, state);
+    return values ? encodeStorage(values, RGBA8) : null;
+}
+
 /**
  * @typedef {Object} TextureUnit
  * @property {Map<number, number>} enabled   target -> 0 or 1
@@ -218,7 +298,7 @@ const S3TC_FORMATS = new Set([
 function createUnit(defaults){
     return {
         enabled: new Map(TARGETS.map(target=>[target, 0])),
-        bindings: new Map(TARGETS.map(target=>[target, 0])),
+        bindings: new Map(BIND_TARGETS.map(target=>[target, 0])),
         defaults,
         env: createTextureEnvironment(),
         genEnabled: [0, 0, 0, 0],
@@ -234,10 +314,11 @@ function createUnit(defaults){
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function installTextureCalls(context, kernel){
-    const { enter, setError, record, setState, diverge } = kernel;
+    const { enter, setError, record, setState, diverge, lose } = kernel;
 
     /** @type {Map<number, import('./objects.js').TextureObject>} */
-    const defaults = new Map(TARGETS.map(target=>[target, createTextureObject(0, target)]));
+    const defaults = new Map(BIND_TARGETS.map(target=>[target,
+        createTextureObject(0, target)]));
     /** @type {TextureUnit[]} */
     const units = Array.from({ length: TEXTURE_UNITS }, ()=>createUnit(defaults));
     let active = 0;
@@ -267,7 +348,7 @@ export function installTextureCalls(context, kernel){
             {
                 return [unit.genEnabled[coordinate]];
             }
-            for (const target of TARGETS)
+            for (const target of BIND_TARGETS)
             {
                 if (/** @type {any} */ (BINDING_QUERY)[target] === query)
                 {
@@ -442,7 +523,8 @@ export function installTextureCalls(context, kernel){
             const texture = textureBound(active, GL.TEXTURE_CUBE_MAP);
             return texture ? { texture, face, cube: true } : null;
         }
-        if (target === GL.TEXTURE_2D || target === GL.TEXTURE_1D)
+        if (target === GL.TEXTURE_2D || target === GL.TEXTURE_1D || target === GL.TEXTURE_3D
+            || ARRAYS.has(target))
         {
             const texture = textureBound(active, target);
             return texture ? { texture, face: 0, cube: false } : null;
@@ -540,26 +622,142 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * The pixel store state of one direction, the 3D parameters included.
+     *
+     * @param {boolean} pack
+     * @returns {import('./texture-transfer.js').TransferState}
+     */
+    function transferState(pack){
+        const value = (/** @type {number} */ query)=>record(query)?.values[0] ?? 0;
+        return pack ? {
+            alignment: value(GL.PACK_ALIGNMENT), rowLength: value(GL.PACK_ROW_LENGTH),
+            skipRows: value(GL.PACK_SKIP_ROWS), skipPixels: value(GL.PACK_SKIP_PIXELS),
+            imageHeight: value(TEX.PACK_IMAGE_HEIGHT), skipImages: value(TEX.PACK_SKIP_IMAGES),
+            swapBytes: value(GL.PACK_SWAP_BYTES) !== 0,
+        } : {
+            alignment: value(GL.UNPACK_ALIGNMENT), rowLength: value(GL.UNPACK_ROW_LENGTH),
+            skipRows: value(GL.UNPACK_SKIP_ROWS), skipPixels: value(GL.UNPACK_SKIP_PIXELS),
+            imageHeight: value(TEX.UNPACK_IMAGE_HEIGHT), skipImages: value(TEX.UNPACK_SKIP_IMAGES),
+            swapBytes: value(GL.UNPACK_SWAP_BYTES) !== 0,
+        };
+    }
+
+    /**
+     * The format a level is kept in: its own when it is sized, RGBA8 for a
+     * legacy format given to a 3D or array target (whose images are kept
+     * the sized way, as bytes with a depth), or null for the legacy path.
+     *
+     * @param {number} internal @param {number} target @param {number} depth
+     * @returns {{ kept: import('./formats.js').SizedFormat, legacyBase: number | null } | null}
+     */
+    function keptFormatOf(internal, target, depth){
+        const sized = sizedFormatOf(internal);
+        if (sized)
+        {
+            return { kept: uncompressedTwin(sized), legacyBase: null };
+        }
+        const base = baseFormatOf(internal);
+        if (base !== null && (depth > 1 || IMAGE_TARGETS[3].has(target)
+            || target === TEX.TEXTURE_1D_ARRAY || target === TEX.PROXY_TEXTURE_1D_ARRAY))
+        {
+            return { kept: /** @type {import('./formats.js').SizedFormat} */ (
+                SIZED_FORMATS.get(GL.RGBA8)), legacyBase: base };
+        }
+        return null;
+    }
+
+    /**
+     * A client image as the bytes of the format a level keeps, or null where
+     * there is none to read.
+     *
+     * @param {number | Uint8Array | StoredPixels | null} pixels
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {number} format @param {number} type
+     * @param {import('./formats.js').SizedFormat} kept
+     * @param {number | null} legacyBase  the legacy format whose components are kept
+     * @returns {Uint8Array | null}
+     */
+    function readStored(pixels, width, height, depth, format, type, kept, legacyBase){
+        if (pixels !== null && typeof pixels === 'object' && 'stored' in pixels)
+        {
+            return pixels.stored;
+        }
+        if (pixels === null || pixels === 0 || width === 0 || height === 0 || depth === 0)
+        {
+            return null;
+        }
+        const unpack = transferState(false);
+        const bytes = guestBytes(pixels, clientBytes(width, height, depth, format, type, unpack));
+        if (!bytes)
+        {
+            return null;
+        }
+        if (legacyBase === null)
+        {
+            return unpackToStorage(bytes, width, height, depth, format, type, unpack, kept);
+        }
+        const texels = rgbaFromClient(bytes, width, height, depth, format, type, unpack);
+        if (texels)
+        {
+            conformTexels(texels, legacyBase);
+        }
+        return texels;
+    }
+
+    /**
+     * The checks every image call of a sized level makes on its client
+     * layout: the formats and types this implementation reads at all, then
+     * the pairings the specification refuses.
+     *
+     * @param {import('./formats.js').SizedFormat} kept
+     * @param {number} format @param {number} type
+     * @returns {boolean}
+     */
+    function checkTransfer(kept, format, type){
+        const error = transferError(kept, format, type);
+        if (error !== 0)
+        {
+            setError(error);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * glTexImage1D, 2D and 3D, for every target.
+     *
      * @param {string} name
      * @param {number} target
      * @param {number} level
      * @param {number} internal  the internal format
      * @param {number} width
      * @param {number} height
+     * @param {number} depth
      * @param {number} border
      * @param {number} format
      * @param {number} type
-     * @param {number | Uint8Array | null} pixels
+     * @param {number | Uint8Array | StoredPixels | null} pixels
      */
-    function texImage(name, target, level, internal, width, height, border, format, type, pixels){
-        const args = [target, level, internal, width, height, border, format, type];
-        const isProxy = target === GL.PROXY_TEXTURE_2D || target === GL.PROXY_TEXTURE_1D;
+    function texImage(name, target, level, internal, width, height, depth, border, format, type,
+        pixels)
+    {
+        const isProxy = PROXIES.has(target);
         if (!isProxy && !imageTarget(target))
         {
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (!checkPixelFormat(format, type))
+        const keeping = keptFormatOf(internal, target, depth);
+        if (keeping)
+        {
+            sizedImage(name, target, level, internal, keeping.kept, keeping.legacyBase, width,
+                height, depth, border, format, type, pixels);
+            return;
+        }
+        const args = [target, level, internal, width, height, border, format, type];
+        const legacyLayout = PIXEL_FORMATS.has(format) && PIXEL_TYPES.has(type);
+        if (legacyLayout ? !checkPixelFormat(format, type)
+            : !checkTransfer(RGBA8, format, type))
         {
             return;
         }
@@ -582,7 +780,10 @@ export function installTextureCalls(context, kernel){
         }
         // The data is read before the list decides anything: a compiled
         // glTexImage2D holds the pixels as they were, not the pointer.
-        const texels = readPixels(pixels, width, height, format, type);
+        const texels = pixels !== null && typeof pixels === 'object' && 'stored' in pixels
+            ? pixels.stored
+            : legacyLayout ? readPixels(pixels, width, height, format, type)
+                : readNewLayout(pixels, width, height, format, type);
         if (texels instanceof Uint8Array && imageDigests.length < 20000)
         {
             if (keptImages.at.has(imageDigests.length))
@@ -599,7 +800,8 @@ export function installTextureCalls(context, kernel){
             diverge(`glTexImage2D with format ${format} and type ${type} was accepted and`
                 + ' uploaded nothing: this implementation does not read that layout');
         }
-        if (!enter(name, [...args, texels === 'refused' ? null : texels]))
+        if (!enter(name, [...args, texels === 'refused' ? null : legacyLayout ? texels
+            : texels && { stored: texels }]))
         {
             return;
         }
@@ -619,30 +821,195 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * A client layout the legacy reader does not know -- RG, a half float,
+     * a packed float -- read into RGBA bytes for a legacy level.
+     *
+     * @param {number | Uint8Array | null} pixels
+     * @param {number} width @param {number} height
+     * @param {number} format @param {number} type
+     * @returns {Uint8Array | null}
+     */
+    function readNewLayout(pixels, width, height, format, type){
+        if (pixels === null || pixels === 0 || width === 0 || height === 0)
+        {
+            return null;
+        }
+        const unpack = transferState(false);
+        const bytes = guestBytes(pixels, clientBytes(width, height, 1, format, type, unpack));
+        return bytes ? rgbaFromClient(bytes, width, height, 1, format, type, unpack) : null;
+    }
+
+    /**
+     * An image of a sized format, or of a legacy one kept the sized way.
+     *
+     * @param {string} name @param {number} target @param {number} level
+     * @param {number} internal  the format asked for
+     * @param {import('./formats.js').SizedFormat} kept  the format kept
+     * @param {number | null} legacyBase
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {number} border @param {number} format @param {number} type
+     * @param {number | Uint8Array | StoredPixels | null} pixels
+     */
+    function sizedImage(name, target, level, internal, kept, legacyBase, width, height, depth,
+        border, format, type, pixels)
+    {
+        if (!checkTransfer(kept, format, type))
+        {
+            return;
+        }
+        const three = IMAGE_TARGETS[3].has(target);
+        const size3d = record(GL.MAX_3D_TEXTURE_SIZE).values[0];
+        const layers = record(TEX.MAX_ARRAY_TEXTURE_LAYERS)?.values[0] ?? 256;
+        const max = record(GL.MAX_TEXTURE_SIZE).values[0];
+        const solid = target === GL.TEXTURE_3D || target === GL.PROXY_TEXTURE_3D;
+        const maxWidth = solid ? size3d : max;
+        const maxHeight = solid ? size3d
+            : target === TEX.TEXTURE_1D_ARRAY || target === TEX.PROXY_TEXTURE_1D_ARRAY
+                ? layers : max;
+        const maxDepth = solid ? size3d : three ? layers : 1;
+        if (level < 0 || border !== 0 || width < 0 || height < 0 || depth < 0
+            || width > maxWidth || height > maxHeight || depth > maxDepth)
+        {
+            // A border is OpenGL 1.x's alone: the sized formats of 3.0 refuse
+            // one, and so does every image kept here as bytes.
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if ((kept.kind === 'depth' || kept.kind === 'stencil') && solid)
+        {
+            // A depth format is for 1D, 2D, cube maps and their arrays.
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (PROXIES.has(target))
+        {
+            return;
+        }
+        const stored = readStored(pixels, width, height, depth, format, type, kept, legacyBase);
+        if (pixels !== null && pixels !== 0 && !stored && width > 0 && height > 0 && depth > 0)
+        {
+            lose(`${name} of ${kept.name} read no pixels: the client image was out of reach`);
+        }
+        if (stored && imageDigests.length < 20000)
+        {
+            imageDigests.push(`${target.toString(16)}:${level}:${width}x${height}x${depth}:`
+                + `${hashOf(stored)}`);
+            imageTimes.push(Math.round(performance.timeOrigin + performance.now()));
+        }
+        if (!enter(name, [target, level, internal, width, height, ...(three ? [depth] : []),
+            border, format, type, stored && { stored }]))
+        {
+            return;
+        }
+        const image = /** @type {NonNullable<ReturnType<typeof imageTarget>>} */ (
+            imageTarget(target));
+        image.texture.levels.set(levelKey(level, image.face), sizedLevel(internal, kept,
+            width, height, depth, stored && kernel.keepTexels ? stored : null, legacyBase));
+        markDirty(image.texture, levelKey(level, image.face), null);
+        kernel.shareGroup().used = true;
+    }
+
+    /**
+     * A level kept as a sized format's bytes. Its `texels` are the RGBA bytes
+     * the processor's rasteriser and the legacy readers take, made from the
+     * data when asked and kept while it is unchanged.
+     *
+     * @param {number} internal @param {import('./formats.js').SizedFormat} kept
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {Uint8Array | null} data
+     * @param {number | null} legacyBase
+     * @param {boolean} [blank]  whether a level given no data holds zeros here
+     * @returns {import('./objects.js').TextureLevel}
+     */
+    function sizedLevel(internal, kept, width, height, depth, data, legacyBase, blank = true){
+        /** @type {import('./objects.js').TextureLevel} */
+        const level = {
+            width, height, depth, internalFormat: internal, border: 0,
+            baseFormat: legacyBase ?? environmentBase(kept),
+            sized: kept,
+            data: data ?? (kernel.keepTexels && blank
+                ? blankStorage(kept, width, height, depth) : null),
+            compressed: null,
+            get texels(){
+                const cached = rgbaCache.get(level);
+                if (cached !== undefined)
+                {
+                    return cached;
+                }
+                const made = level.data ? rgbaOf(level.data, kept, width, height, depth) : null;
+                rgbaCache.set(level, made);
+                return made;
+            },
+            set texels(value){
+                rgbaCache.set(level, value);
+            },
+        };
+        return level;
+    }
+
+    /**
+     * Writes a box of a sized level from bytes in its own layout, and says
+     * the device copy must follow.
+     *
+     * @param {import('./objects.js').TextureObject} texture @param {number} key
+     * @param {import('./objects.js').TextureLevel} level
+     * @param {import('./texture-levels.js').Box} box @param {Uint8Array} stored
+     */
+    function writeSizedBox(texture, key, level, box, stored){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (level.sized);
+        if (kernel.keepTexels)
+        {
+            // A level the device holds alone (let go after its upload) gets
+            // bytes again here: the box is written into them, and only the
+            // box goes up.
+            level.data ??= blankStorage(sized, level.width, level.height, level.depth ?? 1);
+            copyBox(level.data, sized, level.width, level.height, box, stored, 'write');
+            rgbaCache.delete(level);
+        }
+        level.compressed = null;
+        markDirty(texture, key, box.depth === (level.depth ?? 1) && box.z === 0
+            ? { x: box.x, y: box.y, width: box.width, height: box.height } : null);
+    }
+
+    /**
+     * glTexSubImage1D, 2D and 3D. A 1D or 2D call addresses the slice z0 = 0
+     * of depth one.
+     *
      * @param {string} name
      * @param {number} target
      * @param {number} level
      * @param {number} x0
      * @param {number} y0
+     * @param {number} z0
      * @param {number} width
      * @param {number} height
+     * @param {number} depth
      * @param {number} format
      * @param {number} type
-     * @param {number | Uint8Array | null} pixels
+     * @param {number | Uint8Array | StoredPixels | null} pixels
      */
-    function texSubImage(name, target, level, x0, y0, width, height, format, type, pixels){
-        const args = [target, level, x0, y0, width, height, format, type];
+    function texSubImage(name, target, level, x0, y0, z0, width, height, depth, format, type,
+        pixels)
+    {
         const image = imageTarget(target);
         if (!image)
         {
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (!checkPixelFormat(format, type))
+        const existing = image.texture.levels.get(levelKey(level, image.face));
+        if (existing?.sized)
+        {
+            sizedSubImage(name, target, level, image, existing, { x: x0, y: y0, z: z0, width,
+                height, depth }, format, type, pixels);
+            return;
+        }
+        const args = [target, level, x0, y0, width, height, format, type];
+        const legacyLayout = PIXEL_FORMATS.has(format) && PIXEL_TYPES.has(type);
+        if (legacyLayout ? !checkPixelFormat(format, type) : !checkTransfer(RGBA8, format, type))
         {
             return;
         }
-        const existing = image.texture.levels.get(levelKey(level, image.face));
         if (!existing)
         {
             setError(GL.INVALID_OPERATION);
@@ -654,13 +1021,17 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_VALUE);
             return;
         }
-        const texels = readPixels(pixels, width, height, format, type);
+        const texels = pixels !== null && typeof pixels === 'object' && 'stored' in pixels
+            ? pixels.stored
+            : legacyLayout ? readPixels(pixels, width, height, format, type)
+                : readNewLayout(pixels, width, height, format, type);
         if (texels === 'refused')
         {
             diverge(`glTexSubImage2D with format ${format} and type ${type} was accepted and`
                 + ' uploaded nothing: this implementation does not read that layout');
         }
-        if (!enter(name, [...args, texels === 'refused' ? null : texels]))
+        if (!enter(name, [...args, texels === 'refused' ? null : legacyLayout ? texels
+            : texels && { stored: texels }]))
         {
             return;
         }
@@ -675,6 +1046,210 @@ export function installTextureCalls(context, kernel){
             existing.compressed = null;
             markDirty(image.texture, levelKey(level, image.face), { x: x0, y: y0, width, height });
         }
+    }
+
+    /**
+     * A box of a sized level, from a client image.
+     *
+     * @param {string} name @param {number} target @param {number} level
+     * @param {NonNullable<ReturnType<typeof imageTarget>>} image
+     * @param {import('./objects.js').TextureLevel} existing
+     * @param {import('./texture-levels.js').Box} box
+     * @param {number} format @param {number} type
+     * @param {number | Uint8Array | StoredPixels | null} pixels
+     */
+    function sizedSubImage(name, target, level, image, existing, box, format, type, pixels){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (existing.sized);
+        if (!checkTransfer(sized, format, type))
+        {
+            return;
+        }
+        const layersOf = existing.depth ?? 1;
+        if (level < 0 || box.width < 0 || box.height < 0 || box.depth < 0 || box.x < 0
+            || box.y < 0 || box.z < 0 || box.x + box.width > existing.width
+            || box.y + box.height > existing.height || box.z + box.depth > layersOf)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        // A legacy format kept as bytes (a 3D or array level) keeps its own
+        // components, as its 2D levels do.
+        const legacyBase = sized === RGBA8 && !sizedFormatOf(existing.internalFormat)
+            ? existing.baseFormat : null;
+        const stored = readStored(pixels, box.width, box.height, box.depth, format, type, sized,
+            legacyBase);
+        const three = IMAGE_TARGETS[3].has(target);
+        const args = three
+            ? [target, level, box.x, box.y, box.z, box.width, box.height, box.depth, format, type]
+            : target === GL.TEXTURE_1D ? [target, level, box.x, box.width, format, type]
+                : [target, level, box.x, box.y, box.width, box.height, format, type];
+        if (!enter(name, [...args, stored && { stored }]))
+        {
+            return;
+        }
+        if (stored)
+        {
+            writeSizedBox(image.texture, levelKey(level, image.face), existing, box, stored);
+        }
+    }
+
+    /**
+     * A sized level's box as a client image (glGetTexImage), or the error.
+     *
+     * @param {import('./objects.js').TextureLevel} stored
+     * @param {number} format @param {number} type
+     * @returns {Uint8Array | null}
+     */
+    function packSized(stored, format, type){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (stored.sized);
+        const depth = stored.depth ?? 1;
+        if (sized.compressed)
+        {
+            // Decoded, then read back as the eight-bit components it decodes to.
+            if (!checkTransfer(RGBA8, format, type))
+            {
+                return null;
+            }
+            const texels = stored.texels
+                ?? new Uint8Array(stored.width * stored.height * depth * 4);
+            return packFromStorage(texels, stored.width, stored.height, depth, format, type,
+                transferState(true), RGBA8);
+        }
+        if (!checkTransfer(sized, format, type))
+        {
+            return null;
+        }
+        const data = stored.data ?? blankStorage(sized, stored.width, stored.height, depth);
+        return packFromStorage(data, stored.width, stored.height, depth, format, type,
+            transferState(true), sized);
+    }
+
+    /**
+     * A rectangle of the processor's framebuffer written into a sized level's
+     * slice: read as RGBA bytes, then kept as the level's format keeps them.
+     *
+     * @param {import('./objects.js').TextureObject} texture @param {number} key
+     * @param {import('./objects.js').TextureLevel} level
+     * @param {import('./texture-levels.js').Box} box
+     * @param {number} x @param {number} y
+     */
+    function copyIntoSized(texture, key, level, box, x, y){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (level.sized);
+        const texels = framebufferTexels(x, y, box.width, box.height);
+        const values = decodeClient(texels, box.width, box.height, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+            { alignment: 1, rowLength: 0, skipRows: 0, skipPixels: 0, swapBytes: false });
+        if (values)
+        {
+            writeSizedBox(texture, key, level, box, encodeStorage(values, sized));
+        }
+    }
+
+    /**
+     * glCopyTexImage1D and 2D into a sized format: the level made in that
+     * format, and the framebuffer's rectangle copied into it -- on the
+     * device as a draw into the level, on the processor through RGBA bytes.
+     *
+     * @param {any[]} args
+     * @param {NonNullable<ReturnType<typeof imageTarget>>} image
+     * @param {number} level @param {number} internal
+     * @param {import('./formats.js').SizedFormat} kept
+     * @param {number} x @param {number} y @param {number} width @param {number} height
+     * @param {number} border
+     */
+    function copySizedImage(args, image, level, internal, kept, x, y, width, height, border){
+        const max = record(GL.MAX_TEXTURE_SIZE).values[0];
+        if (level < 0 || border !== 0 || width < 0 || height < 0 || width > max
+            || height > max)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (kept.kind === 'int' || kept.kind === 'uint')
+        {
+            // The framebuffer's colour is normalised: an integer level takes
+            // a copy only from an integer one (OpenGL 4.6 section 8.6).
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (!enter('glCopyTexImage2D', [...args, null]))
+        {
+            return;
+        }
+        const key = levelKey(level, image.face);
+        const gpu = kernel.gpuBacked();
+        // On the device the level's pixels are the copy's, made there; its
+        // data here would be uploaded over them.
+        const made = sizedLevel(internal, kept, width, height, 1, null, null, !gpu);
+        image.texture.levels.set(key, made);
+        kernel.shareGroup().used = true;
+        copyRectangle(image.texture, level, image.face, made, { x: 0, y: 0, z: 0, width, height,
+            depth: 1 }, x, y);
+    }
+
+    /**
+     * glCopyTexSubImage2D and 3D into a sized level.
+     *
+     * @param {string} name @param {any[]} args
+     * @param {NonNullable<ReturnType<typeof imageTarget>>} image
+     * @param {number} level @param {import('./objects.js').TextureLevel} existing
+     * @param {import('./texture-levels.js').Box} box
+     * @param {number} x @param {number} y
+     */
+    function copySubImage(name, args, image, level, existing, box, x, y){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (existing.sized);
+        if (box.width < 0 || box.height < 0 || box.x < 0 || box.y < 0 || box.z < 0
+            || box.x + box.width > existing.width || box.y + box.height > existing.height
+            || box.z >= (existing.depth ?? 1))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (sized.kind === 'int' || sized.kind === 'uint')
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (!enter(name, [...args, null]))
+        {
+            return;
+        }
+        copyRectangle(image.texture, level, image.face, existing, box, x, y);
+    }
+
+    /**
+     * The copy itself, once the level is in place.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {number} level @param {number} face
+     * @param {import('./objects.js').TextureLevel} into
+     * @param {import('./texture-levels.js').Box} box
+     * @param {number} x @param {number} y
+     */
+    function copyRectangle(texture, level, face, into, box, x, y){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (into.sized);
+        if (sized.kind === 'depth' || sized.kind === 'stencil')
+        {
+            // The depth buffer is not read back into a texture here: the
+            // device copies colour by drawing it, and a depth copy is a
+            // different draw this renderer does not have.
+            lose('a copy of the framebuffer\'s depth into a depth texture: the level keeps'
+                + ' what it held');
+            return;
+        }
+        if (kernel.gpuBacked())
+        {
+            if (texture.target === GL.TEXTURE_3D)
+            {
+                lose('a copy of the framebuffer into a slice of a 3D texture: the device draws'
+                    + ' into one slice of a 3D texture through no view here');
+                return;
+            }
+            // A layer of an array is addressed where a cube's face is.
+            kernel.copyToTexture?.(texture, level, ARRAYS.has(texture.target) ? box.z : face,
+                box.x, box.y, x, y, box.width, box.height);
+            return;
+        }
+        copyIntoSized(texture, levelKey(level, face), into, box, x, y);
     }
 
     /**
@@ -749,7 +1324,7 @@ export function installTextureCalls(context, kernel){
         {
             return;
         }
-        const texture = TARGETS.some(t=>t === target) ? textureBound(active, target) : null;
+        const texture = BIND_TARGETS.some(t=>t === target) ? textureBound(active, target) : null;
         if (!texture)
         {
             setError(GL.INVALID_ENUM);
@@ -785,6 +1360,14 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_VALUE);
             return;
         }
+        if (parameter === TEX.TEXTURE_COMPARE_MODE && value !== GL.NONE
+                && value !== TEX.COMPARE_REF_TO_TEXTURE
+            || parameter === TEX.TEXTURE_COMPARE_FUNC && !COMPARE_FUNCS.has(value)
+            || parameter === TEX.DEPTH_TEXTURE_MODE && !DEPTH_TEXTURE_MODES.has(value))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
         texture.parameters.set(parameter, value);
         texture.parametersVersion++;
     }
@@ -800,7 +1383,7 @@ export function installTextureCalls(context, kernel){
         {
             return null;
         }
-        const texture = TARGETS.some(t=>t === target) ? textureBound(active, target) : null;
+        const texture = BIND_TARGETS.some(t=>t === target) ? textureBound(active, target) : null;
         if (!texture)
         {
             setError(GL.INVALID_ENUM);
@@ -1044,6 +1627,13 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
+        const sized = sizedFormatOf(internal);
+        if (sized?.compressed)
+        {
+            compressedSized(name, target, level, internal, sized, width, height, 1, border, size,
+                data);
+            return;
+        }
         if (!S3TC_FORMATS.has(internal))
         {
             setError(GL.INVALID_ENUM);
@@ -1098,6 +1688,96 @@ export function installTextureCalls(context, kernel){
         });
         markDirty(image.texture, levelKey(level, image.face), null);
         kernel.shareGroup().used = true;
+    }
+
+    /**
+     * A compressed image of a sized format (RGTC, BPTC, the sRGB S3TC ones),
+     * kept as its blocks.
+     *
+     * @param {string} name @param {number} target @param {number} level
+     * @param {number} internal @param {import('./formats.js').SizedFormat} sized
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {number} border @param {number} size
+     * @param {number | Uint8Array | null} data
+     */
+    function compressedSized(name, target, level, internal, sized, width, height, depth, border,
+        size, data)
+    {
+        if (target === GL.TEXTURE_1D || target === GL.TEXTURE_3D)
+        {
+            // Blocks are four by four texels: OpenGL 4.6 table 8.17 keeps
+            // these formats to 2D images, cube maps and 2D arrays.
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const max = record(GL.MAX_TEXTURE_SIZE).values[0];
+        const layers = record(TEX.MAX_ARRAY_TEXTURE_LAYERS)?.values[0] ?? 256;
+        if (level < 0 || border !== 0 || width < 0 || height < 0 || depth < 0 || width > max
+            || height > max || depth > layers || size !== storageBytes(sized, width, height, depth))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        const bytes = guestBytes(data, size);
+        if (bytes)
+        {
+            digestBlocks(bytes);
+        }
+        const three = IMAGE_TARGETS[3].has(target);
+        if (!enter(name, [target, level, internal, width, height, ...(three ? [depth] : []),
+            border, size, bytes]))
+        {
+            return;
+        }
+        const image = /** @type {NonNullable<ReturnType<typeof imageTarget>>} */ (
+            imageTarget(target));
+        image.texture.levels.set(levelKey(level, image.face), sizedLevel(internal, sized, width,
+            height, depth, bytes && kernel.keepTexels ? bytes.slice() : null, null));
+        markDirty(image.texture, levelKey(level, image.face), null);
+        kernel.shareGroup().used = true;
+    }
+
+    /**
+     * Blocks written into a box of a compressed sized level: whole blocks,
+     * or the level's edge (section 8.7).
+     *
+     * @param {string} name @param {any[]} args
+     * @param {NonNullable<ReturnType<typeof imageTarget>>} image @param {number} level
+     * @param {import('./objects.js').TextureLevel} existing
+     * @param {import('./texture-levels.js').Box} box
+     * @param {number} format @param {number} size @param {number | Uint8Array | null} data
+     */
+    function compressedSizedSub(name, args, image, level, existing, box, format, size, data){
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (existing.sized);
+        if (format !== existing.internalFormat)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const edge = (/** @type {number} */ at, /** @type {number} */ extent,
+            /** @type {number} */ whole)=>at % 4 === 0 && (extent % 4 === 0 || at + extent === whole);
+        if (box.x < 0 || box.y < 0 || box.z < 0 || box.width < 0 || box.height < 0
+            || box.x + box.width > existing.width || box.y + box.height > existing.height
+            || box.z + box.depth > (existing.depth ?? 1))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (!edge(box.x, box.width, existing.width) || !edge(box.y, box.height, existing.height)
+            || size !== storageBytes(sized, box.width, box.height, box.depth))
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const bytes = guestBytes(data, size);
+        if (!enter(name, [...args, bytes]))
+        {
+            return;
+        }
+        if (bytes)
+        {
+            writeSizedBox(image.texture, levelKey(level, image.face), existing, box, bytes);
+        }
     }
 
     Object.assign(context, {
@@ -1270,6 +1950,19 @@ export function installTextureCalls(context, kernel){
             const stored = image.texture.levels.get(levelKey(level, image.face));
             const width = stored?.width ?? 0;
             const height = stored?.height ?? 0;
+            if (parameter === TEX.TEXTURE_DEPTH)
+            {
+                return [stored ? stored.depth ?? 1 : 0];
+            }
+            if (stored?.sized && parameter !== GL.TEXTURE_INTERNAL_FORMAT
+                && parameter !== GL.TEXTURE_COMPRESSED_IMAGE_SIZE)
+            {
+                const answer = sizedLevelAnswer(stored.sized, parameter);
+                if (answer !== undefined)
+                {
+                    return [answer];
+                }
+            }
             const base = stored?.baseFormat ?? GL.RGBA;
             const hasAlpha = base === GL.RGBA || base === GL.LUMINANCE_ALPHA || base === GL.ALPHA
                 || base === GL.INTENSITY;
@@ -1288,6 +1981,31 @@ export function installTextureCalls(context, kernel){
                     return [stored && hasColour ? 8 : 0];
                 case GL.TEXTURE_ALPHA_SIZE:
                     return [stored && hasAlpha ? 8 : 0];
+                case TEX.TEXTURE_LUMINANCE_SIZE:
+                    return [stored && (base === GL.LUMINANCE || base === GL.LUMINANCE_ALPHA)
+                        ? 8 : 0];
+                case TEX.TEXTURE_INTENSITY_SIZE:
+                    return [stored && base === GL.INTENSITY ? 8 : 0];
+                case TEX.TEXTURE_DEPTH_SIZE:
+                case TEX.TEXTURE_STENCIL_SIZE:
+                case TEX.TEXTURE_SHARED_SIZE:
+                    return [0];
+                case TEX.TEXTURE_RED_TYPE:
+                case TEX.TEXTURE_GREEN_TYPE:
+                case TEX.TEXTURE_BLUE_TYPE:
+                    return [stored && hasColour && base !== GL.LUMINANCE
+                        && base !== GL.LUMINANCE_ALPHA && base !== GL.INTENSITY
+                        ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+                case TEX.TEXTURE_ALPHA_TYPE:
+                    return [stored && hasAlpha && base !== GL.INTENSITY
+                        ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+                case TEX.TEXTURE_LUMINANCE_TYPE:
+                    return [stored && (base === GL.LUMINANCE || base === GL.LUMINANCE_ALPHA)
+                        ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+                case TEX.TEXTURE_INTENSITY_TYPE:
+                    return [stored && base === GL.INTENSITY ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+                case TEX.TEXTURE_DEPTH_TYPE:
+                    return [GL.NONE];
                 case GL.TEXTURE_COMPRESSED:
                     return [stored?.compressedFormat ? 1 : 0];
                 case GL.TEXTURE_COMPRESSED_IMAGE_SIZE:
@@ -1315,13 +2033,86 @@ export function installTextureCalls(context, kernel){
          * @param {number | Uint8Array | null} [pixels]
          */
         glTexImage2D(target, level, internal, width, height, border, format, type, pixels){
-            if (target === GL.TEXTURE_1D || target === GL.PROXY_TEXTURE_1D)
+            if (!IMAGE_TARGETS[2].has(target))
             {
+                enter('glTexImage2D', [target]);
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            texImage('glTexImage2D', target, level, internal, width, height, border,
+            texImage('glTexImage2D', target, level, internal, width, height, 1, border,
                 format, type, pixels ?? null);
+        },
+
+        /**
+         * @param {number} target
+         * @param {number} level
+         * @param {number} internal  the internal format
+         * @param {number} width
+         * @param {number} height
+         * @param {number} depth
+         * @param {number} border
+         * @param {number} format
+         * @param {number} type
+         * @param {number | Uint8Array | StoredPixels | null} [pixels]
+         */
+        glTexImage3D(target, level, internal, width, height, depth, border, format, type,
+            pixels)
+        {
+            if (!IMAGE_TARGETS[3].has(target))
+            {
+                enter('glTexImage3D', [target]);
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            texImage('glTexImage3D', target, level, internal, width, height, depth, border,
+                format, type, pixels ?? null);
+        },
+
+        /**
+         * @param {number} target @param {number} level
+         * @param {number} x0 @param {number} y0 @param {number} z0
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} format @param {number} type
+         * @param {number | Uint8Array | StoredPixels | null} [pixels]
+         */
+        glTexSubImage3D(target, level, x0, y0, z0, width, height, depth, format, type, pixels){
+            if (!IMAGE_TARGETS[3].has(target) || PROXIES.has(target))
+            {
+                enter('glTexSubImage3D', [target]);
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            texSubImage('glTexSubImage3D', target, level, x0, y0, z0, width, height, depth,
+                format, type, pixels ?? null);
+        },
+
+        /**
+         * A rectangle of the framebuffer into one slice of a 3D texture or
+         * one layer of an array.
+         *
+         * @param {number} target @param {number} level
+         * @param {number} xoffset @param {number} yoffset @param {number} zoffset
+         * @param {number} x @param {number} y @param {number} width @param {number} height
+         */
+        glCopyTexSubImage3D(target, level, xoffset, yoffset, zoffset, x, y, width, height){
+            const args = [target, level, xoffset, yoffset, zoffset, x, y, width, height];
+            const image = IMAGE_TARGETS[3].has(target) && !PROXIES.has(target)
+                ? imageTarget(target) : null;
+            if (!image)
+            {
+                enter('glCopyTexSubImage3D', args);
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const existing = image.texture.levels.get(levelKey(level, image.face));
+            if (!existing?.sized)
+            {
+                enter('glCopyTexSubImage3D', args);
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            copySubImage('glCopyTexSubImage3D', args, image, level, existing, { x: xoffset,
+                y: yoffset, z: zoffset, width, height, depth: 1 }, x, y);
         },
 
         /**
@@ -1343,7 +2134,7 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            texImage('glTexImage1D', target, level, internalFormat, width, 1, border, format,
+            texImage('glTexImage1D', target, level, internalFormat, width, 1, 1, border, format,
                 type, pixels);
         },
 
@@ -1359,13 +2150,13 @@ export function installTextureCalls(context, kernel){
          * @param {number | Uint8Array | null} [pixels]
          */
         glTexSubImage2D(target, level, x0, y0, width, height, format, type, pixels){
-            if (target === GL.TEXTURE_1D)
+            if (!IMAGE_TARGETS[2].has(target) || PROXIES.has(target))
             {
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            texSubImage('glTexSubImage2D', target, level, x0, y0, width, height, format, type,
-                pixels ?? null);
+            texSubImage('glTexSubImage2D', target, level, x0, y0, 0, width, height, 1, format,
+                type, pixels ?? null);
         },
 
         /**
@@ -1383,7 +2174,7 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            texSubImage('glTexSubImage1D', target, level, xoffset, 0, width, 1, format, type,
+            texSubImage('glTexSubImage1D', target, level, xoffset, 0, 0, width, 1, 1, format, type,
                 pixels);
         },
 
@@ -1399,11 +2190,18 @@ export function installTextureCalls(context, kernel){
          */
         glCopyTexImage2D(target, level, internalFormat, x, y, width, height, border){
             const args = [target, level, internalFormat, x, y, width, height, border];
-            const image = imageTarget(target);
+            const image = IMAGE_TARGETS[3].has(target) ? null : imageTarget(target);
             const baseFormat = baseFormatOf(internalFormat);
             if (!image)
             {
                 setError(GL.INVALID_ENUM);
+                return;
+            }
+            const sized = sizedFormatOf(internalFormat);
+            if (sized)
+            {
+                copySizedImage(args, image, level, internalFormat, uncompressedTwin(sized), x, y,
+                    width, height, border);
                 return;
             }
             if (baseFormat === null || level < 0 || border < 0 || border > 1 || width < 0
@@ -1463,6 +2261,12 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            if (existing.sized)
+            {
+                copySubImage('glCopyTexSubImage2D', args, image, level, existing, { x: xoffset,
+                    y: yoffset, z: 0, width, height, depth: 1 }, x, y);
+                return;
+            }
             if (width < 0 || height < 0 || xoffset < 0 || yoffset < 0
                 || xoffset + width > existing.width || yoffset + height > existing.height)
             {
@@ -1499,24 +2303,42 @@ export function installTextureCalls(context, kernel){
          * @param {number} level
          * @param {number} format
          * @param {number} type
-         * @returns {Uint8Array | null} the level's texels as RGBA bytes; the
-         *          caller packs them into the format asked for
+         * @returns {Uint8Array | { packed: Uint8Array } | null} the level's texels
+         *          as RGBA bytes, which the caller packs into the format asked
+         *          for; or, for a level kept as a sized format, the client
+         *          image itself, packed here from the format's own values
          */
         glGetTexImage(target, level, format, type){
             if (!enter('glGetTexImage', [target, level, format, type]))
             {
                 return null;
             }
-            const image = imageTarget(target);
-            if (!image || !checkPixelFormat(format, type))
+            const image = PROXIES.has(target) ? null : imageTarget(target);
+            if (!image)
             {
-                if (!image)
-                {
-                    setError(GL.INVALID_ENUM);
-                }
+                setError(GL.INVALID_ENUM);
                 return null;
             }
             const stored = image.texture.levels.get(levelKey(level, image.face));
+            if (stored?.sized || (stored && !(PIXEL_FORMATS.has(format) && PIXEL_TYPES.has(type))))
+            {
+                if (!kernel.keepTexels)
+                {
+                    diverge('glGetTexImage was accepted and read zeros: the texels live with'
+                        + ' the context that draws, in the graphics worker, and are not read back');
+                }
+                const packed = stored.sized ? packSized(stored, format, type)
+                    : checkTransfer(RGBA8, format, type)
+                        ? packFromStorage(stored.texels
+                            ?? new Uint8Array(stored.width * stored.height * 4), stored.width,
+                        stored.height, 1, format, type, transferState(true), RGBA8)
+                        : null;
+                return packed ? { packed } : null;
+            }
+            if (!checkPixelFormat(format, type))
+            {
+                return null;
+            }
             if (!stored)
             {
                 setError(GL.INVALID_VALUE);
@@ -1646,12 +2468,19 @@ export function installTextureCalls(context, kernel){
          */
         glCompressedTexSubImage2DARB(target, level, x0, y0, width, height, format, size, data){
             const image = imageTarget(target);
-            if (!image || !S3TC_FORMATS.has(format))
+            if (!image || !S3TC_FORMATS.has(format) && !sizedFormatOf(format)?.compressed)
             {
                 setError(GL.INVALID_ENUM);
                 return;
             }
             const existing = image.texture.levels.get(levelKey(level, image.face));
+            if (existing?.sized?.compressed)
+            {
+                compressedSizedSub('glCompressedTexSubImage2DARB',
+                    [target, level, x0, y0, width, height, format, size], image, level, existing,
+                    { x: x0, y: y0, z: 0, width, height, depth: 1 }, format, size, data ?? null);
+                return;
+            }
             if (!existing || existing.compressedFormat !== format)
             {
                 setError(GL.INVALID_OPERATION);
@@ -1683,17 +2512,32 @@ export function installTextureCalls(context, kernel){
         },
 
         /**
-         * The compressed bytes are not kept, only their decoding, so there is
-         * nothing to hand back: an operation error, and a divergence, because
-         * the real driver would have answered.
+         * A level of a compressed sized format hands back its blocks. An S3TC
+         * level's are not kept here, only their decoding, so there is nothing
+         * to hand back: an operation error, and a divergence, because the
+         * real driver would have answered.
          *
          * @param {number} target
          * @param {number} level
-         * @returns {null}
+         * @returns {Uint8Array | null}
          */
         glGetCompressedTexImageARB(target, level){
             if (!enter('glGetCompressedTexImageARB', [target, level]))
             {
+                return null;
+            }
+            const image = imageTarget(target);
+            const stored = image?.texture.levels.get(levelKey(level, image.face));
+            if (stored?.sized?.compressed)
+            {
+                const sized = stored.sized;
+                return stored.data?.slice() ?? new Uint8Array(storageBytes(sized, stored.width,
+                    stored.height, stored.depth ?? 1));
+            }
+            if (stored && !stored.compressedFormat)
+            {
+                // Not a compressed level at all (OpenGL 4.6 section 8.11).
+                setError(GL.INVALID_OPERATION);
                 return null;
             }
             diverge('glGetCompressedTexImage was refused: compressed levels are kept decoded'
@@ -1713,10 +2557,28 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
         },
 
-        /** @param {number} target */
-        glCompressedTexImage3DARB(target){
-            enter('glCompressedTexImage3DARB', [target]);
-            setError(GL.INVALID_ENUM);
+        /**
+         * A 2D array of a compressed sized format (S3TC's own formats are kept
+         * as decoded 2D images and are not taken here).
+         *
+         * @param {number} target @param {number} level @param {number} internal
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} border @param {number} size
+         * @param {number | Uint8Array | null} [data]
+         */
+        glCompressedTexImage3DARB(target, level, internal, width, height, depth, border, size,
+            data)
+        {
+            const sized = sizedFormatOf(internal);
+            if (target !== TEX.TEXTURE_2D_ARRAY || !sized?.compressed)
+            {
+                enter('glCompressedTexImage3DARB', [target]);
+                setError(target === TEX.TEXTURE_2D_ARRAY || target === GL.TEXTURE_3D
+                    ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
+                return;
+            }
+            compressedSized('glCompressedTexImage3DARB', target, level, internal, sized, width,
+                height, depth, border, size, data ?? null);
         },
 
         /** @param {number} target */
@@ -1725,10 +2587,28 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
         },
 
-        /** @param {number} target */
-        glCompressedTexSubImage3DARB(target){
-            enter('glCompressedTexSubImage3DARB', [target]);
-            setError(GL.INVALID_ENUM);
+        /**
+         * @param {number} target @param {number} level
+         * @param {number} x0 @param {number} y0 @param {number} z0
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} format @param {number} size
+         * @param {number | Uint8Array | null} [data]
+         */
+        glCompressedTexSubImage3DARB(target, level, x0, y0, z0, width, height, depth, format,
+            size, data)
+        {
+            const image = target === TEX.TEXTURE_2D_ARRAY ? imageTarget(target) : null;
+            const existing = image?.texture.levels.get(levelKey(level, image.face));
+            if (!image || !existing?.sized?.compressed)
+            {
+                enter('glCompressedTexSubImage3DARB', [target]);
+                setError(image ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
+                return;
+            }
+            compressedSizedSub('glCompressedTexSubImage3DARB',
+                [target, level, x0, y0, z0, width, height, depth, format, size], image, level,
+                existing, { x: x0, y: y0, z: z0, width, height, depth }, format, size,
+                data ?? null);
         },
     });
 }

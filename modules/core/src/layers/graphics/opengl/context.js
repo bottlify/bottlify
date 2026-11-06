@@ -204,6 +204,8 @@ const PIXEL_STORE_PARAMETERS = new Set([
     GL.UNPACK_ALIGNMENT, GL.UNPACK_ROW_LENGTH, GL.UNPACK_SKIP_ROWS, GL.UNPACK_SKIP_PIXELS,
     GL.UNPACK_SWAP_BYTES, GL.UNPACK_LSB_FIRST, GL.PACK_ALIGNMENT, GL.PACK_ROW_LENGTH,
     GL.PACK_SKIP_ROWS, GL.PACK_SKIP_PIXELS, GL.PACK_SWAP_BYTES, GL.PACK_LSB_FIRST,
+    // The image height and skipped images of 3D transfers (OpenGL 1.2).
+    0x806b, 0x806c, 0x806d, 0x806e,
 ]);
 
 /** How many pushes the attribute stacks take. */

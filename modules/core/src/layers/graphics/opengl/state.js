@@ -393,12 +393,16 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.UNPACK_SKIP_PIXELS, name: 'GL_UNPACK_SKIP_PIXELS', kind: 'int', value: [0] },
     { query: GL.UNPACK_SWAP_BYTES, name: 'GL_UNPACK_SWAP_BYTES', kind: 'bool', value: [0] },
     { query: GL.UNPACK_LSB_FIRST, name: 'GL_UNPACK_LSB_FIRST', kind: 'bool', value: [0] },
+    { query: 0x806e, name: 'GL_UNPACK_IMAGE_HEIGHT', kind: 'int', value: [0] },
+    { query: 0x806d, name: 'GL_UNPACK_SKIP_IMAGES', kind: 'int', value: [0] },
     { query: GL.PACK_ALIGNMENT, name: 'GL_PACK_ALIGNMENT', kind: 'int', value: [4] },
     { query: GL.PACK_ROW_LENGTH, name: 'GL_PACK_ROW_LENGTH', kind: 'int', value: [0] },
     { query: GL.PACK_SKIP_ROWS, name: 'GL_PACK_SKIP_ROWS', kind: 'int', value: [0] },
     { query: GL.PACK_SKIP_PIXELS, name: 'GL_PACK_SKIP_PIXELS', kind: 'int', value: [0] },
     { query: GL.PACK_SWAP_BYTES, name: 'GL_PACK_SWAP_BYTES', kind: 'bool', value: [0] },
     { query: GL.PACK_LSB_FIRST, name: 'GL_PACK_LSB_FIRST', kind: 'bool', value: [0] },
+    { query: 0x806c, name: 'GL_PACK_IMAGE_HEIGHT', kind: 'int', value: [0] },
+    { query: 0x806b, name: 'GL_PACK_SKIP_IMAGES', kind: 'int', value: [0] },
 
     // --- texture and list bookkeeping ---
     { query: GL.TEXTURE_BINDING_1D, name: 'GL_TEXTURE_BINDING_1D', kind: 'int', value: [0] },
@@ -407,6 +411,9 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.TEXTURE_BINDING_CUBE_MAP, name: 'GL_TEXTURE_BINDING_CUBE_MAP', kind: 'int',
         value: [0],
     },
+    { query: GL.TEXTURE_BINDING_3D, name: 'GL_TEXTURE_BINDING_3D', kind: 'int', value: [0] },
+    { query: 0x8c1c, name: 'GL_TEXTURE_BINDING_1D_ARRAY', kind: 'int', value: [0] },
+    { query: 0x8c1d, name: 'GL_TEXTURE_BINDING_2D_ARRAY', kind: 'int', value: [0] },
     { query: GL.ACTIVE_TEXTURE, name: 'GL_ACTIVE_TEXTURE', kind: 'enum', value: [GL.TEXTURE0] },
     {
         query: GL.CLIENT_ACTIVE_TEXTURE, name: 'GL_CLIENT_ACTIVE_TEXTURE', kind: 'enum',
@@ -795,7 +802,9 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.MAX_DRAW_BUFFERS, name: 'GL_MAX_DRAW_BUFFERS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],
     },
-    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [16] },
+    // OpenGL 3.0's minimums, both well inside WebGPU's 3D size and layers.
+    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [256] },
+    { query: 0x88ff, name: 'GL_MAX_ARRAY_TEXTURE_LAYERS', kind: 'int', value: [256] },
 
     // --- OpenGL 2.1: pixel buffer objects ---
     {

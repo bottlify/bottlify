@@ -69,6 +69,11 @@ const MIPMAP_FILTERS = new Set([
  *           the S3TC blocks as the guest gave them, kept alongside the
  *           decoded texels so a device that samples the blocks directly
  *           never has to decode what it can upload as-is
+ * @property {number} [depth]  a 3D level's depth or an array level's layers; one if absent
+ * @property {import('./formats.js').SizedFormat | null} [sized]  the format a level is
+ *           kept as its own bytes in (`formats.js`), or absent for one kept as RGBA
+ * @property {Uint8Array | null} [data]  that format's bytes, slices one after another,
+ *           or null where this context keeps none
  */
 
 /**
@@ -195,6 +200,11 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [GL.TEXTURE_MAX_LOD, 1000],
     [GL.TEXTURE_PRIORITY, 1],
     [GL.GENERATE_MIPMAP, 0],
+    // OpenGL 1.4's depth textures (ARB_shadow, ARB_depth_texture): no
+    // comparison, LEQUAL when there is one, a depth read as luminance.
+    [0x884c, GL.NONE],
+    [0x884d, GL.LEQUAL],
+    [0x884b, GL.LUMINANCE],
 ]);
 
 /**
@@ -496,7 +506,8 @@ export function attachmentImage(attachment){
         return null;
     }
     const base = level.baseFormat;
-    const holds = base === GL.DEPTH_COMPONENT ? 'depth' : 'colour';
+    const holds = base === GL.DEPTH_COMPONENT ? 'depth' : base === GL.DEPTH_STENCIL
+        ? 'depthStencil' : base === GL.STENCIL_INDEX ? 'stencil' : 'colour';
     return { holds, width: level.width, height: level.height,
         internalFormat: level.internalFormat };
 }
