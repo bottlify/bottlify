@@ -60,6 +60,7 @@ const RS = Object.freeze({
     AMBIENT: 139,
     FOGVERTEXMODE: 140,
     COLORVERTEX: 141,
+    LOCALVIEWER: 142,
 });
 
 /** D3DTADDRESS_WRAP, and D3DWRAP_U / _V in D3DRENDERSTATE_WRAP0. */
@@ -973,7 +974,11 @@ function createLegacyDevice(inner, version, legacy){
         if (material)
         {
             const m = material.data;
-            inner.SetMaterial({ Diffuse: m.diffuse, Ambient: m.ambient, Specular: m.specular,
+            // A material of no power has no highlight in these versions, and a
+            // highlight's alpha is none of the material's (Wine's ddraw2 and
+            // ddraw4 test_specular_lighting).
+            inner.SetMaterial({ Diffuse: m.diffuse, Ambient: m.ambient,
+                Specular: m.power > 0 ? { ...m.specular, a: 0 } : black(),
                 Emissive: m.emissive, Power: m.power });
             syncLights();
         }
@@ -1278,6 +1283,12 @@ function createLegacyDevice(inner, version, legacy){
 
         /** @param {number} state @param {number} value */
         setRenderState(state, value){
+            // These versions have no LOCALVIEWER: they light as Direct3D 7 does
+            // with it on, whatever is set (ddraw4 test_specular_lighting).
+            if (state === RS.LOCALVIEWER)
+            {
+                return D3D_OK;
+            }
             if (!ownStates.has(state))
             {
                 return inner.SetRenderState(state, value);
@@ -1675,5 +1686,6 @@ function lightFor(light){
         Attenuation2: light.attenuation2,
         Theta: light.theta,
         Phi: light.phi,
+        Legacy: true,
     };
 }

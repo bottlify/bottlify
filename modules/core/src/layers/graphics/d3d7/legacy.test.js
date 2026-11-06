@@ -480,6 +480,46 @@ test('a light belongs to one viewport, and only an active one lights a draw', ()
     f.done();
 });
 
+test('these versions light as Direct3D 1-6: lights by the range left, no LOCALVIEWER, a'
+    + ' material of no power without a highlight', ()=>{
+    // Wine's ddraw2 and ddraw4 test_specular_lighting.
+    const f = fixture();
+    const viewport = f.viewport();
+    const light = f.legacy.createLight();
+    assert.equal(light.setLight({
+        type: 1, color: { r: 1, g: 1, b: 1, a: 0 }, position: { x: 0, y: 0, z: 0 },
+        direction: { x: 0, y: 0, z: 0 }, range: 100, falloff: 0, attenuation0: 0,
+        attenuation1: 0, attenuation2: 1, theta: 0, phi: 0, flags: D3DLIGHT_ACTIVE,
+    }, true), D3D_OK);
+    assert.equal(viewport.addLight(light), D3D_OK);
+    const material = f.legacy.createMaterial();
+    const white = { r: 1, g: 1, b: 1, a: 0.5 };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    /** @param {number} power @returns {any} the material the Direct3D 7 device was given */
+    const given = power=>{
+        material.setMaterial({ diffuse: black, ambient: black, specular: white, emissive: black,
+            power, texture: 0, rampSize: 0 });
+        assert.equal(f.device.setLightState(D3DLIGHTSTATE.MATERIAL, material.getHandle()), D3D_OK);
+        const mark = f.calls.length;
+        f.device.drawPrimitive(D3DPT.TRIANGLESTRIP, FVF_VERTEX, zeros(4, 32), 4, 0);
+        return f.since('SetMaterial', mark).at(-1)?.[1];
+    };
+    f.device.BeginScene();
+    assert.deepEqual(given(30).Specular, { r: 1, g: 1, b: 1, a: 0 },
+        'the highlight\'s alpha is none of the material\'s');
+    assert.deepEqual(given(0).Specular, black, 'no power, no highlight');
+    assert.equal(f.since('SetLight').at(-1)?.[2].Legacy, true, 'lit as these versions light');
+    const mark = f.calls.length;
+    assert.equal(f.device.setRenderState(142, 0), D3D_OK, 'LOCALVIEWER is taken');
+    assert.equal(f.since('SetRenderState', mark).length, 0, 'and changes nothing');
+    f.device.EndScene();
+    assert.equal(viewport.deleteLight(light), D3D_OK);
+    assert.equal(light.release(), 0);
+    assert.equal(material.release(), 0);
+    viewport.release();
+    f.done();
+});
+
 // --- texturing (Wine's ddraw4.c test_texturemapblend) ---
 
 test('TEXTUREMAPBLEND sets stage zero, until a stage state set to something else ends it', ()=>{

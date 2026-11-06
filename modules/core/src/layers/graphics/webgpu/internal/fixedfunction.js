@@ -465,6 +465,14 @@ const ATTENUATION_FUNCTION = `fn attenuationOf(light: Light, dist: f32) -> f32 {
     {
         return 0.0;
     }
+    // A Direct3D 1-6 light (attenuation.w one) falls off over the share of
+    // its range left: the coefficients weigh one, that share and its square.
+    if (light.attenuation.w > 0.0)
+    {
+        let left = (light.position.w - dist) / light.position.w;
+        return light.attenuation.x + light.attenuation.y * left
+            + light.attenuation.z * left * left;
+    }
     let denominator = light.attenuation.x + light.attenuation.y * dist
         + light.attenuation.z * dist * dist;
     // Every coefficient zero is a light with no falloff term to apply. The

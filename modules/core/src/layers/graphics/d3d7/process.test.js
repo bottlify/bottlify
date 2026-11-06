@@ -202,6 +202,36 @@ test('lighting uses the camera-space normal the inverse transpose carries, at it
     'blended normals are not renormalised');
 });
 
+test('a Direct3D 1-6 point light falls off by the share of its range left', ()=>{
+    // Wine's ddraw2 and ddraw4 test_specular_lighting: a point light at the
+    // eye, range 100, attenuation (0, 0, 1), a vertex at distance one in front.
+    const s = space();
+    const point = {
+        Type: D3DLIGHTTYPE.POINT, Diffuse: { r: 1, g: 1, b: 1, a: 0 },
+        Specular: { r: 0, g: 0, b: 0, a: 0 }, Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Position: { x: 0, y: 0, z: 0 }, Direction: { x: 0, y: 0, z: 0 },
+        Range: 100, Falloff: 0, Attenuation0: 0, Attenuation1: 0, Attenuation2: 1,
+        Theta: 0, Phi: 0,
+    };
+    const dest = s.buffer(FVF.XYZRHW | FVF.DIFFUSE, 1);
+    const src = s.buffer(FVF.XYZ | FVF.NORMAL, 1);
+    s.fill(src, [[0, 0, 2, 0, 0, -1]]);
+    const white = { r: 1, g: 1, b: 1, a: 1 };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    /** @param {any} light @returns {number} the diffuse's blue */
+    const lit = light=>{
+        assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
+            dest, destIndex: 0, count: 1, source: s.source(src), flags: 0,
+            state: device({ lights: [light], material: { Diffuse: white, Ambient: black,
+                Specular: black, Emissive: black, Power: 0 } }) }), D3D_OK);
+        return s.dword(dest.base + 16) & 0xff;
+    };
+    assert.equal(lit(point), Math.round(255 / 4), 'Direct3D 7: one over the distance squared');
+    assert.equal(lit({ ...point, Legacy: true }), Math.round(255 * 0.98 * 0.98),
+        'Direct3D 1-6: the share of the range left, squared');
+    assert.equal(lit({ ...point, Legacy: true, Range: 1.5 }), 0, 'and nothing past the range');
+});
+
 test('with no light, a lit vertex is black in its own alpha, an unlit one keeps its colour', ()=>{
     // Wine's ddraw7 test_lighting: lit and unlit quads with and without normals.
     const s = space();

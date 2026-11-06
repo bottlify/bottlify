@@ -1116,6 +1116,11 @@ test('a point light attenuates by distance and a spot light also by its cone', (
     // Past the range a light contributes nothing at all, which is what the
     // range means; without the test it keeps adding its attenuated remainder.
     assert.match(point, /if \(dist > light\.position\.w\)/);
+    // A Direct3D 1-6 light (attenuation.w) falls off over the share of its
+    // range left, not by one over a polynomial (ddraw2 test_specular_lighting).
+    assert.match(point, /if \(light\.attenuation\.w > 0\.0\)/);
+    assert.match(point, /let left = \(light\.position\.w - dist\) \/ light\.position\.w;/);
+    assert.match(point, /return light\.attenuation\.x \+ light\.attenuation\.y \* left\s+\+ light\.attenuation\.z \* left \* left;/);
 
     const spot = generate(
         baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [D3DLIGHT.SPOT] }) })).code;

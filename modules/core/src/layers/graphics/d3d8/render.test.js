@@ -2710,6 +2710,9 @@ test('a light is packed into the rows the shader declares', ()=>{
     // against a dot product, and the conversion belongs where it happens once.
     assert.equal(block[24], 1, 'cos of half of theta, which is zero');
     assert.equal(block[25], 0.5, 'cos of half of phi, which is sixty degrees');
+    // A Direct3D 1-6 light says so beside them, for its own falloff.
+    packLight(block, 0, { ...light8({ Type: D3DLIGHTTYPE.POINT }), Legacy: true });
+    assert.equal(block[23], 1, 'a Direct3D 1-6 light');
     assert.equal(block[26], 1.5, 'the falloff exponent');
 
     // A direction of no length would normalise to a not-a-number, which would
