@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { D3DERR_INVALIDCALL, D3D_OK, E_FAIL } from './constants.js';
 import { createReferenceCount } from './resources.js';
 import {
     D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, MAX_DECLARATION_LENGTH,
@@ -122,10 +122,10 @@ test('validation refuses what the header puts out of range', ()=>{
     ]), D3DERR_INVALIDCALL, 'a stream past the last');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.UNUSED, 0),
-    ]), D3DERR_INVALIDCALL, 'the unused type outside the sentinel');
+    ]), E_FAIL, 'the unused type outside the sentinel');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, 18, 0),
-    ]), D3DERR_INVALIDCALL, 'a type past the last');
+    ]), E_FAIL, 'a type past the last');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0, { method: 7 }),
     ]), D3DERR_INVALIDCALL, 'a method past the last');
@@ -137,7 +137,7 @@ test('validation refuses what the header puts out of range', ()=>{
         assert.equal(validateElements([
             element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
             element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 12 + offset),
-        ]), D3DERR_INVALIDCALL, `an offset of ${12 + offset} is not dword-aligned`);
+        ]), E_FAIL, `an offset of ${12 + offset} is not dword-aligned`);
     }
     assert.equal(validateElements([
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 0),

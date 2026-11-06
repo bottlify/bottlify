@@ -22,7 +22,7 @@
  * means "unused" is only ever legal in the sentinel.
  */
 
-import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { D3DERR_INVALIDCALL, D3D_OK, E_FAIL } from './constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { D3DDECL_END_STREAM } from './structs.js';
 
@@ -132,12 +132,17 @@ export function validateElements(elements){
     for (const element of elements)
     {
         if (element.Stream >= MAX_STREAMS
-            || element.Type >= D3DDECLTYPE.UNUSED
             || element.Method > D3DDECLMETHOD.LOOKUPPRESAMPLED
-            || element.Usage > D3DDECLUSAGE.SAMPLE
-            || (element.Offset & 3) !== 0)
+            || element.Usage > D3DDECLUSAGE.SAMPLE)
         {
             return D3DERR_INVALIDCALL;
+        }
+        // An element of no type, or not on a dword, is one Windows cannot lay
+        // out: E_FAIL rather than an invalid call (Wine's
+        // test_vertex_declaration_alignment and test_unused_declaration_type).
+        if (element.Type >= D3DDECLTYPE.UNUSED || (element.Offset & 3) !== 0)
+        {
+            return E_FAIL;
         }
         const key = (element.Usage << 8) | element.UsageIndex;
         if (seen.has(key))

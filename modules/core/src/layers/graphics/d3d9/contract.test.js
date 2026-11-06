@@ -217,7 +217,7 @@ test('a declaration the program made reports no format, even when it describes o
     assert.equal(device.CreateVertexDeclaration(null, made), D3DERR_INVALIDCALL);
     assert.equal(device.CreateVertexDeclaration([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 2),
-    ], made), D3DERR_INVALIDCALL, 'a misaligned offset');
+    ], made), 0x80004005, 'a misaligned offset is E_FAIL (test_vertex_declaration_alignment)');
     made.declaration.release();
     assert.equal(device.release(), 0);
 });

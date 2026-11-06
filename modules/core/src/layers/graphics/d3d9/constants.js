@@ -28,6 +28,8 @@ export const D3DERR_NOTFOUND = 0x88760866;
 export const D3DOK_NOAUTOGEN = 0x0876086f;
 /** Direct3D 9Ex's answer for a device whose adapter is gone. */
 export const D3DERR_DEVICEREMOVED = 0x88760870;
+/** E_FAIL: what a vertex declaration Windows cannot lay out is answered. */
+export const E_FAIL = 0x80004005;
 
 /** D3DRENDERSTATETYPE. Sparse by design: the gaps are states D3D8 dropped. */
 export const D3DRS = Object.freeze({
