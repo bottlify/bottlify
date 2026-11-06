@@ -364,6 +364,9 @@ export function varyingLocation(usage, index){
  * @property {{ mask: number, colour: number }} [border]  The axes addressed
  *     D3DTADDRESS_BORDER, whose GPU sampler clamps, and D3DSAMP_BORDERCOLOR as
  *     a D3DCOLOR: a read outside [0, 1] on one of them is that colour.
+ * @property {'2d' | '3d'} [dimension]  The bound texture's, where the sampler
+ *     is declared the other of the two: the texture is declared and read as
+ *     it is, from the coordinate's first two or three components.
  */
 
 /**
@@ -1194,7 +1197,9 @@ export function translateShader(parsed, options = {}){
                 const declaration = /** @type {any} */ (instruction.declaration);
                 if (dest.type === REGISTER.SAMPLER)
                 {
-                    const type = SAMPLER_TYPE[declaration.samplerType];
+                    const crossed = options.sampling?.[dest.index]?.dimension;
+                    const type = crossed ? TEXTURE_TYPE[crossed]
+                        : SAMPLER_TYPE[declaration.samplerType];
                     if (!type)
                     {
                         fail(`sampler type ${declaration.samplerType} is not translated`);

@@ -209,6 +209,7 @@ const variantsKey = variants=>Array.from(variants, variant=>(variant
     // value in (`biasRegister`), and one module serves every value.
     ? `${variant.lodBias ? 'b' : 0}/${variant.mirrorOnce ?? 0}`
         + `/${variant.border ? `${variant.border.mask}:${variant.border.colour}` : ''}`
+        + (variant.dimension ? `/${variant.dimension}` : '')
     : '')).join(',');
 
 
@@ -6920,12 +6921,20 @@ export function createRenderer(options){
         {
             variantStates = model.stageStates(first + index);
             const lodBias = lodBiasOf(variantState(D3DTSS.MIPMAPLODBIAS));
+            const texture = model.textures.get(first + index);
+            const bound = texture ? textureDimensionOf(texture) : null;
+            // A volume under a sampler declared two-dimensional, or the other
+            // way round: read as the texture is, with the coordinate's
+            // components it takes (Wine's d3d9 test_mismatched_sample_types).
+            const crossed = dimension !== null && bound !== null && dimension !== bound
+                && dimension !== 'cube' && bound !== 'cube' ? bound : null;
             const addressing = addressVariantOf(variantState,
-                dimension ?? textureDimensionOf(model.textures.get(first + index)));
-            if (lodBias !== 0 || addressing !== NO_ADDRESS_VARIANT)
+                crossed ?? dimension ?? bound ?? '2d');
+            if (lodBias !== 0 || addressing !== NO_ADDRESS_VARIANT || crossed)
             {
                 variants ??= [];
-                variants[index] = { ...(lodBias === 0 ? {} : { lodBias }), ...addressing };
+                variants[index] = { ...(lodBias === 0 ? {} : { lodBias }), ...addressing,
+                    ...(crossed ? { dimension: crossed } : {}) };
             }
         }
         variantStates = null;

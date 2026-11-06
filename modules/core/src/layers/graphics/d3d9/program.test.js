@@ -1284,6 +1284,58 @@ test('a varying the pixel shader reads and the vertex shader never writes is wri
     assert.equal(h.device.release(), 0);
 });
 
+test('a sampler declared a volume reads a 2D texture bound to it as 2D, and the other way round',
+    async()=>{
+        // Wine's d3d9 test_mismatched_sample_types: the texture is read as it
+        // is, from the coordinate's first two or three components, not a blank.
+        const h = harness();
+        /** @param {number} type  D3DSAMPLER_TEXTURE_TYPE, 2 or 4 @returns {number[]} */
+        const reading = type=>[
+            versionToken(SHADER_KIND.PIXEL, 2, 0),
+            op(OPCODE.DCL, 2), (type << 27) >>> 0, dst(REGISTER.SAMPLER, 0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 0),
+            op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),
+            src(REGISTER.SAMPLER, 0),
+            op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+            END_TOKEN,
+        ];
+        const lastPixelModule = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .filter(made=>made.label.startsWith('ps:')).at(-1).code;
+        /** @type {{ shader?: any }} */
+        const volumeShader = {};
+        assert.equal(h.device.CreatePixelShader(reading(4), volumeShader), D3D_OK);
+        h.device.SetPixelShader(volumeShader.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.match(lastPixelModule(), /var tex0: texture_2d<f32>;/);
+        assert.match(lastPixelModule(), /textureSample\(tex0, samp0, [^;]*\.xy\)/);
+
+        /** @type {{ texture?: any }} */
+        const volume = {};
+        assert.equal(h.device.CreateVolumeTexture(4, 4, 2, 1, 0, D3DFMT.A8R8G8B8,
+            D3DPOOL.MANAGED, volume), D3D_OK);
+        /** @type {{ shader?: any }} */
+        const flatShader = {};
+        assert.equal(h.device.CreatePixelShader(reading(2), flatShader), D3D_OK);
+        h.device.SetPixelShader(flatShader.shader);
+        h.device.SetTexture(0, volume.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.match(lastPixelModule(), /var tex0: texture_3d<f32>;/);
+        assert.match(lastPixelModule(), /textureSample\(tex0, samp0, [^;]*\.xyz\)/);
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        volume.texture.release();
+        volumeShader.shader.release();
+        flatShader.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
 test('a pixel shader over lit fixed-function vertices reads the colours the lights made',
     async()=>{
         // Wine's d3d8 test_specular_shaders: under D3DRS_LIGHTING the fixed
