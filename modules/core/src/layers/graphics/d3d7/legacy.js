@@ -893,8 +893,8 @@ function createLegacyDevice(inner, version, legacy){
     /**
      * Stage zero's alpha under TEXTUREMAPBLEND's MODULATE, set when the blend
      * or the texture changes: the texture's alpha where it has one, the
-     * colour's where it has none or there is no texture. It reads back so
-     * (Wine's ddraw4 test_texturemapblend) and counts as what the blend set.
+     * colour's where it has none; no texture leaves it as it is. It reads back
+     * so (Wine's ddraw4 test_texturemapblend) and counts as what the blend set.
      */
     const fixAlphaOp = ()=>{
         const mode = ownStates.get(RS.TEXTUREMAPBLEND);
@@ -905,9 +905,12 @@ function createLegacyDevice(inner, version, legacy){
         /** @type {{ surface?: any }} */
         const bound = {};
         inner.GetTexture(0, bound);
-        const hasAlpha = bound.surface
-            && (bound.surface.pixelFormat.flags & DDPF_ALPHAPIXELS) !== 0;
-        bound.surface?.release();
+        if (!bound.surface)
+        {
+            return;
+        }
+        const hasAlpha = (bound.surface.pixelFormat.flags & DDPF_ALPHAPIXELS) !== 0;
+        bound.surface.release();
         const op = hasAlpha ? D3DTOP.SELECTARG1 : D3DTOP.SELECTARG2;
         blendSet.set(D3DTSS.ALPHAOP, op);
         inner.SetTextureStageState(0, D3DTSS.ALPHAOP, op);

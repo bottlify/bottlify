@@ -569,7 +569,7 @@ test('TEXTUREMAPBLEND sets stage zero, until a stage state set to something else
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.MODULATE);
     assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'a different mode does');
     f.device.setTexture(0, null);
-    assert.equal(alphaOp(), D3DTOP.SELECTARG2, 'no texture takes the vertex alpha');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'no texture leaves it as it was');
 
     f.device.setTexture(0, null);
     assert.equal(plain.release(), 0);
