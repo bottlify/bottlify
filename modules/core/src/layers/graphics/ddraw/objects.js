@@ -519,7 +519,12 @@ function sameRect(a, b){
  * @property {number} [sizeImage]
  *           What the DC's bitmap reports as `biSizeImage`; the rows' bytes when
  *           absent. A Direct3D 10/11 surface's DC reports 0.
+ * @property {number} [compression] What the section says it is laid out as.
+ * @property {number[]} [bitfields] Its colour masks, with BI_BITFIELDS.
  */
+
+/** BITMAPINFOHEADER.biCompression of a section laid out by colour masks. */
+const BI_BITFIELDS = 3;
 
 /**
  * @param {number} entry a PALETTEENTRY dword: red, green, blue, flags as bytes
@@ -1608,6 +1613,12 @@ export function createDirectDraw(options = {}){
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
+                // GDI draws on RGB and palette pixels only: a luminance, YUV
+                // or compressed surface has no DIB to be (Wine's test_getdc).
+                if ((pixelFormat.flags & (DDPF_RGB | DDPF_PALETTEINDEXED8)) === 0)
+                {
+                    return { hr: DDERR_CANTCREATEDC, dc: null };
+                }
                 const made = createDc({
                     width: width,
                     height: height,
@@ -1620,6 +1631,11 @@ export function createDirectDraw(options = {}){
                     // colours its pixels are shown in once blitted there.
                     palette: bpp === 1 ? (palette ?? primaryPalette())?.pixels ?? null : null,
                     format: pixelFormat.greenMask === 0x07e0 ? '565' : '555',
+                    // The section a surface's DC reports: no image size, and a
+                    // 16-bit one laid out by its masks (test_getdc).
+                    sizeImage: 0,
+                    ...(bpp === 2 ? { compression: BI_BITFIELDS, bitfields: [pixelFormat.redMask,
+                        pixelFormat.greenMask, pixelFormat.blueMask] } : {}),
                 });
                 // No DC is a failure, and leaves the surface free: a DC
                 // handed out as zero is never released, and every Lock after

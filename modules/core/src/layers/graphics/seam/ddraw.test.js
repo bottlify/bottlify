@@ -28,7 +28,7 @@ import {
 import {
     IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface4,
     IID_IDirectDrawSurface7, IID_IDirectDrawSurface2, IID_IDirectDrawColorControl,
-    IID_IDirect3DDevice7, IID_IDirect3DTexture2,
+    IID_IDirect3DDevice7, IID_IDirect3DTexture2, IID_IDirectDrawSurface,
 } from './iids.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
@@ -488,7 +488,7 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
     assert.deepEqual([h.box.memory.readU32(0x5500), h.box.memory.readU32(0x5504)], [0, 0]);
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
         width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
-        format: '555',
+        format: '555', sizeImage: 0,
     } }, 'GDI was told exactly where the pixels are');
 
     h.box.memory.writeU32(out, 0xdeadbeef);
@@ -2538,5 +2538,101 @@ test('a surface\'s interfaces each keep a count of their own, and an older surfa
         assert.equal(h.release(surface), 0, 'the creation\'s count alone held it');
         assert.equal(h.release(ddraw), 0);
     }
+    h.assertAllReleased();
+});
+
+test('Lock takes either descriptor through any generation and keeps the program\'s size; a'
+    + ' system-memory texture takes any size (test_surface_desc_size)', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const desc = 0x5200;
+    const lockAs = (/** @type {number} */ pointer, /** @type {number} */ size)=>{
+        for (let at = 0; at < 2 * DDSURFACEDESC2.SIZE; at += 4)
+        {
+            h.box.memory.writeU32(desc + at, 0);
+        }
+        h.box.memory.writeU32(desc, size);
+        h.box.memory.writeU32(desc + DDSURFACEDESC2.dwTextureStage, 0xdeadbeef);
+        h.box.memory.writeU32(desc + DDSURFACEDESC2.SIZE, 0xefefefef);
+        const hr = h.box.call(pointer, slot(IDIRECTDRAWSURFACE_SLOTS, 'Lock'), [0, desc, 0, 0]);
+        const seen = {
+            hr,
+            size: h.box.memory.readU32(desc),
+            width: h.box.memory.readU32(desc + DDSURFACEDESC2.dwWidth),
+            stage: h.box.memory.readU32(desc + DDSURFACEDESC2.dwTextureStage),
+            past: h.box.memory.readU32(desc + DDSURFACEDESC2.SIZE),
+        };
+        if (hr === DD_OK)
+        {
+            assert.equal(h.box.call(pointer, slot(IDIRECTDRAWSURFACE_SLOTS, 'Unlock'), [0]), DD_OK);
+        }
+        return seen;
+    };
+    for (const caps of [DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY])
+    {
+        const surface = h.createSurface7(ddraw, { caps, width: 8, height: 8 });
+        const riid = h.box.putGuid(0x4000, IID_IDirectDrawSurface);
+        assert.equal(h.box.call(surface, 0, [riid, 0x6200]), DD_OK);
+        const first = h.box.memory.readU32(0x6200);
+        const anySize = caps !== DDSCAPS_OFFSCREENPLAIN;
+        assert.equal(h.box.call(first, slot(IDIRECTDRAWSURFACE_SLOTS, 'Lock'), [0, 0, 0, 0]),
+            DDERR_INVALIDPARAMS, 'no descriptor at all is refused whatever the surface');
+        assert.deepEqual(lockAs(first, DDSURFACEDESC2.SIZE), { hr: DD_OK, size: DDSURFACEDESC2.SIZE,
+            width: 8, stage: 0, past: 0xefefefef });
+        assert.deepEqual(lockAs(first, DDSURFACEDESC.SIZE), { hr: DD_OK, size: DDSURFACEDESC.SIZE,
+            width: 8, stage: 0xdeadbeef, past: 0xefefefef });
+        assert.deepEqual(lockAs(first, 2 * DDSURFACEDESC2.SIZE), anySize
+            ? { hr: DD_OK, size: 2 * DDSURFACEDESC2.SIZE, width: 8, stage: 0, past: 0xefefefef }
+            : { hr: DDERR_INVALIDPARAMS, size: 2 * DDSURFACEDESC2.SIZE, width: 0,
+                stage: 0xdeadbeef, past: 0xefefefef });
+        assert.deepEqual(lockAs(first, 12), anySize
+            ? { hr: DD_OK, size: 12, width: 8, stage: 0xdeadbeef, past: 0xefefefef }
+            : { hr: DDERR_INVALIDPARAMS, size: 12, width: 0, stage: 0xdeadbeef, past: 0xefefefef });
+        assert.equal(h.release(first), 0);
+        assert.equal(h.release(surface), 0);
+    }
+
+    // GetDisplayMode takes either size, clears what it was given, writes nothing
+    // past it and names its own generation's size.
+    for (const size of [DDSURFACEDESC.SIZE, DDSURFACEDESC2.SIZE])
+    {
+        for (let at = 0; at < 2 * DDSURFACEDESC2.SIZE; at += 4)
+        {
+            h.box.memory.writeU32(desc + at, 0xcccccccc);
+        }
+        h.box.memory.writeU32(desc, size);
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetDisplayMode'), [desc]), DD_OK);
+        assert.equal(h.box.memory.readU32(desc), DDSURFACEDESC2.SIZE);
+        assert.equal(h.box.memory.readU32(desc + size - 4) >>> 24, 0, 'cleared to its end');
+        assert.equal(h.box.memory.readU32(desc + DDSURFACEDESC2.dwReserved), 0, 'and between');
+        assert.equal(h.box.memory.readU32(desc + size), 0xcccccccc, 'nothing past it');
+    }
+    h.box.memory.writeU32(desc, 12);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetDisplayMode'), [desc]),
+        DDERR_INVALIDPARAMS);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('a refused GetDC hands back no DC; a second one leaves the handle alone (test_getdc)', ()=>{
+    const h = seamed();
+    const ddraw = h.create7();
+    const luminance = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8,
+        pixelFormat: { size: 0x20, flags: 0x00020001, fourCC: 0, bitCount: 16, redMask: 0xff,
+            greenMask: 0, blueMask: 0, alphaMask: 0xff00 } });
+    h.box.memory.writeU32(0x6200, 0x1234);
+    assert.notEqual(h.surface7(luminance, 'GetDC', [0x6200]), DD_OK);
+    assert.equal(h.box.memory.readU32(0x6200), 0);
+
+    const plain = h.createSurface7(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8 });
+    assert.equal(h.surface7(plain, 'GetDC', [0x6200]), DD_OK);
+    const dc = h.box.memory.readU32(0x6200);
+    h.box.memory.writeU32(0x6204, 0x1234);
+    assert.equal(h.surface7(plain, 'GetDC', [0x6204]), DDERR_DCALREADYCREATED);
+    assert.equal(h.box.memory.readU32(0x6204), 0x1234);
+    assert.equal(h.surface7(plain, 'ReleaseDC', [dc]), DD_OK);
+    assert.equal(h.release(plain), 0);
+    assert.equal(h.release(luminance), 0);
+    assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });

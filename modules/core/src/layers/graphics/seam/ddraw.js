@@ -64,7 +64,7 @@ import {
 } from '../ddraw/structs.js';
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL,
-    DDBLT_KEYDESTOVERRIDE, DDBLT_WAIT,
+    DDBLT_KEYDESTOVERRIDE, DDBLT_WAIT, DDERR_DCALREADYCREATED,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
@@ -179,6 +179,37 @@ const RGNDATAHEADER = Object.freeze({
     SIZE: 0x20,
 });
 const RDH_RECTANGLES = 1;
+
+/**
+ * The descriptor a size names: DDSURFACEDESC or DDSURFACEDESC2, whichever
+ * generation the interface is (Wine's test_surface_desc_size: every
+ * generation's Lock and GetDisplayMode take both).
+ *
+ * @param {number} size
+ * @returns {typeof DDSURFACEDESC | typeof DDSURFACEDESC2 | null}
+ */
+function describedBy(size){
+    return size === DDSURFACEDESC.SIZE ? DDSURFACEDESC
+        : size === DDSURFACEDESC2.SIZE ? DDSURFACEDESC2 : null;
+}
+
+/**
+ * What a Lock writes into. A texture in system memory takes a descriptor of
+ * any size, written as the newer one from its size up and as the older below
+ * (Windows sets the texture stage of a 248-byte one and leaves a 12-byte one's
+ * alone; nothing past the newer layout is touched).
+ *
+ * @param {{ caps: number }} surface
+ * @param {number} size
+ */
+function lockLayoutOf(surface, size){
+    const named = describedBy(size);
+    if (named || (surface.caps & (DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY)) !== DDSCAPS_TEXTURE)
+    {
+        return named;
+    }
+    return size >= DDSURFACEDESC2.SIZE ? DDSURFACEDESC2 : DDSURFACEDESC;
+}
 
 /**
  * Which generation an IDirectDraw version number names, and which surface
@@ -1236,6 +1267,12 @@ export function createDirectDrawSeam(
                 const got = surface.getDC();
                 if (got.hr !== DD_OK)
                 {
+                    // A refusal hands back no DC, except that a second GetDC
+                    // leaves the handle as it was (test_getdc).
+                    if (got.hr !== DDERR_DCALREADYCREATED)
+                    {
+                        fields.writeU32(out >>> 0, 0);
+                    }
                     return got.hr;
                 }
                 return whenCurrent([surface], ()=>{
@@ -1294,7 +1331,13 @@ export function createDirectDrawSeam(
              * @param {any} surface @param {number[]} args
              */
             Lock: (surface, [rect, desc, flags])=>{
-                if ((desc >>> 0) === 0 || fields.readU32(desc >>> 0) !== layout.SIZE)
+                if ((desc >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const given = fields.readU32(desc >>> 0);
+                const lockLayout = lockLayoutOf(surface, given);
+                if (!lockLayout)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
@@ -1308,11 +1351,12 @@ export function createDirectDrawSeam(
                 }
                 if (locked.hr !== DD_OK)
                 {
-                    fields.writeU32((desc >>> 0) + layout.lpSurface, 0);
+                    fields.writeU32((desc >>> 0) + lockLayout.lpSurface, 0);
                     return locked.hr;
                 }
-                writeSurfaceDesc(memory, desc >>> 0, layout,
+                writeSurfaceDesc(memory, desc >>> 0, lockLayout,
                     descriptorOf(surface, locked.surfacePointer));
+                fields.writeU32(desc >>> 0, given);
                 return whenCurrent([surface], ()=>DD_OK);
             },
 
@@ -1785,14 +1829,20 @@ export function createDirectDrawSeam(
 
         /** @param {any} root @param {number[]} args */
         GetDisplayMode: (root, [out])=>{
-            if ((out >>> 0) === 0 || fields.readU32(out >>> 0) !== generation.layout.SIZE)
+            const given = (out >>> 0) === 0 ? 0 : fields.readU32(out >>> 0);
+            const written = describedBy(given);
+            if (!written)
             {
                 return DDERR_INVALIDPARAMS;
+            }
+            for (let at = 0; at < given; at += 4)
+            {
+                fields.writeU32((out >>> 0) + at, 0);
             }
             const mode = root.displayMode;
             const pixelFormat = /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
                 pixelFormatForDepth(mode.bitCount));
-            writeSurfaceDesc(memory, out >>> 0, generation.layout, {
+            writeSurfaceDesc(memory, out >>> 0, written, {
                 flags: DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT | DDSD_REFRESHRATE,
                 width: mode.width,
                 height: mode.height,
@@ -1803,6 +1853,7 @@ export function createDirectDrawSeam(
                 caps2: 0,
                 pixelFormat,
             });
+            fields.writeU32(out >>> 0, generation.layout.SIZE);
             return DD_OK;
         },
 

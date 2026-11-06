@@ -296,6 +296,7 @@ export function writeSurfaceDesc(memory, address, layout, desc){
     if ('dwCaps2' in layout)
     {
         writeU32(memory, address + layout.dwCaps2, desc.caps2);
+        writeU32(memory, address + layout.dwTextureStage, 0);
     }
     writePixelFormat(memory, address + layout.ddpfPixelFormat, desc.pixelFormat);
     for (const [key, offset] of /** @type {const} */ ([

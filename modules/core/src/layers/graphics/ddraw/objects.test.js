@@ -13,11 +13,13 @@ import {
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
     DDERR_CLIPPERISUSINGHWND,
+    DDERR_CANTCREATEDC,
     DDERR_DCALREADYCREATED,
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
     DDPF_FOURCC,
+    DDPF_LUMINANCE,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
     DDERR_NOCOOPERATIVELEVELSET,
@@ -1444,7 +1446,7 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     assert.equal(dc.dc, 0x7701, 'the handle is the one the maker chose');
     assert.deepEqual(made, [{
         width: 10, height: 6, pitch: 40, bitCount: 32, bits: surface.buffer, palette: null,
-        format: '555',
+        format: '555', sizeImage: 0,
     }]);
     assert.equal(surface.dc, 0x7701);
     assert.equal(ddraw.surfaceWithDc(0x7701), surface);
@@ -1777,4 +1779,40 @@ test('a surface made over the program\'s memory takes its pitch, and one made by
         assert.equal(one.surface?.release(), 0);
     }
     assert.equal(ddraw.videoBytes, before);
+});
+
+test('a surface\'s DC reports no image size, a 16-bit one its masks, and a luminance surface has'
+    + ' none (test_getdc)', ()=>{
+    /** @type {any[]} */
+    const made = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        createDc: attributes=>{
+            made.push(attributes);
+            return 0x7700 + made.length;
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const make = (/** @type {any} */ pixelFormat)=>{
+        const result = ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT,
+            caps: DDSCAPS_OFFSCREENPLAIN, caps2: 0, width: 8, height: 8, backBufferCount: 0,
+            pixelFormat });
+        assert.equal(result.hr, DD_OK);
+        return /** @type {NonNullable<typeof result.surface>} */ (result.surface);
+    };
+    const r5g6b5 = make({ size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16,
+        redMask: 0xf800, greenMask: 0x07e0, blueMask: 0x001f, alphaMask: 0 });
+    assert.equal(r5g6b5.getDC().hr, DD_OK);
+    assert.equal(made[0].sizeImage, 0);
+    assert.equal(made[0].compression, 3, 'BI_BITFIELDS');
+    assert.deepEqual(made[0].bitfields, [0xf800, 0x07e0, 0x001f]);
+
+    assert.equal(makeOffscreen(ddraw).getDC().hr, DD_OK);
+    assert.equal(made[1].sizeImage, 0);
+    assert.equal(made[1].compression, undefined, 'a 32-bit one is BI_RGB');
+
+    const a8l8 = make({ size: 0x20, flags: DDPF_LUMINANCE | 1, fourCC: 0, bitCount: 16,
+        redMask: 0xff, greenMask: 0, blueMask: 0, alphaMask: 0xff00 });
+    assert.equal(a8l8.getDC().hr, DDERR_CANTCREATEDC);
+    assert.equal(made.length, 2, 'no DC is made for it');
 });
