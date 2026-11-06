@@ -1764,7 +1764,17 @@ function cubeSample(index, flags, ones, lod = levelOfDetail()){
     if (point == 1u) {
         let texels = max(floor(size / exp2(floor(level))), 1.0);
         let face = direction / major;
-        let snapped = (floor((face * 0.5 + 0.5) * texels) + 0.5) / texels * 2.0 - 1.0;
+        // Each minor axis by the sign the face's own coordinate takes it
+        // with -- +X reads s from -z and t from -y -- so a direction on a
+        // texel edge lands in the texel the face's coordinate floors into.
+        var signs = vec3f(select(-1.0, 1.0, face.z >= 0.0), -1.0, 1.0);
+        if (axes.x >= axes.y && axes.x >= axes.z) {
+            signs = vec3f(1.0, -1.0, select(1.0, -1.0, face.x >= 0.0));
+        } else if (axes.y >= axes.z) {
+            signs = vec3f(1.0, 1.0, select(-1.0, 1.0, face.y >= 0.0));
+        }
+        let texel = min(floor((signs * face * 0.5 + 0.5) * texels), vec3f(texels - 1.0));
+        let snapped = signs * ((texel + 0.5) / texels * 2.0 - 1.0);
         if (axes.x >= axes.y && axes.x >= axes.z) {
             towards = vec3f(face.x, snapped.yz);
         } else if (axes.y >= axes.z) {

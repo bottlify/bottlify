@@ -573,6 +573,15 @@ test('a cube stage samples a direction of three components, a volume stage three
         assert.match(body, /let face = direction \/ major;/);
         assert.match(body, /towards = vec3f\(face\.x, snapped\.yz\);/);
         assert.match(body, /textureSampleLevel\(texture0, sampler0, towards, level\)/);
+        // By the sign each face takes its minor axes with (+X: s from -z,
+        // t from -y), so a direction on a texel's edge lands where the face's
+        // coordinate floors (Wine's d3d9 test_mipmap_autogen, a cube at s 0.5).
+        assert.match(body, /signs = vec3f\(1\.0, -1\.0, select\(1\.0, -1\.0, face\.x >= 0\.0\)\);/);
+        assert.match(body, /signs = vec3f\(1\.0, 1\.0, select\(-1\.0, 1\.0, face\.y >= 0\.0\)\);/);
+        assert.match(body,
+            /var signs = vec3f\(select\(-1\.0, 1\.0, face\.z >= 0\.0\), -1\.0, 1\.0\);/);
+        assert.match(body, /let texel = min\(floor\(\(signs \* face \* 0\.5 \+ 0\.5\) \* texels\),/);
+        assert.match(body, /let snapped = signs \* \(\(texel \+ 0\.5\) \/ texels \* 2\.0 - 1\.0\);/);
 
         // A set of two components widens with a zero third rather than
         // reading past what the vertex carries.
