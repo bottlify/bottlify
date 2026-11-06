@@ -25,6 +25,12 @@
  * A vertex shader's bytecode made a geometry shader to stream out is a stage
  * that passes each primitive on (`passThroughGeometry`).
  *
+ * After the tessellator the first pass is the domain shader instead, over
+ * every index the tessellator wrote (`linkDomainPositions`), and the
+ * geometry shader takes them as a list of its primitives; how many there are
+ * is on the GPU, so the passes are sized by the most the tessellator may
+ * write and an invocation past what it did write makes nothing.
+ *
  * The buffers between the passes are shared by every such draw of a frame,
  * as the tessellator's are (`tessellation.js`).
  */
@@ -34,8 +40,9 @@ import {
     GEOMETRY_SCAN_WGSL, STREAM_ARGS_WORDS, STREAM_OUT_BINDING, geometryIndexWgsl, streamOutWgsl,
 } from './geometry-wgsl.js';
 import {
-    GEOMETRY_BINDING, GEOMETRY_DRAW_BINDING, STAGE, VERTEX_PATCH_BINDING, geometryStage,
-    linkGeometry, linkVertexPatches, passThroughGeometry,
+    DOMAIN_POSITION_BINDING, GEOMETRY_BINDING, GEOMETRY_DRAW_BINDING, STAGE,
+    VERTEX_PATCH_BINDING, geometryStage, linkDomainPositions, linkGeometry, linkVertexPatches,
+    passThroughGeometry,
 } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 import { SYSTEM_VALUE } from './dxbc.js';
@@ -59,6 +66,10 @@ const TOPOLOGY_VERTICES = Object.freeze(/** @type {Record<number, number>} */ ({
     1: 1, 2: 2, 3: 2, 4: 3, 5: 3, 10: 4, 11: 4, 12: 6, 13: 6,
 }));
 const STRIPS = Object.freeze([3, 5, 11, 13]);
+/** The list the tessellator's primitives are, as Direct3D numbers it. */
+const TESSELLATED_TOPOLOGY = Object.freeze(/** @type {Record<string, number>} */ ({
+    'point-list': 1, 'line-list': 2, 'triangle-list': 4,
+}));
 /** A list of primitives of so many vertices, as the draw over them takes it. */
 const LIST_TOPOLOGY = Object.freeze(['', 'point-list', 'line-list', 'triangle-list']);
 
@@ -78,6 +89,17 @@ const GEOMETRY_ENTRIES = [
     entry(GEOMETRY_BINDING.starts, COMPUTE, 'storage'),
     entry(GEOMETRY_BINDING.counts, COMPUTE, 'storage'),
     entry(GEOMETRY_BINDING.params, COMPUTE, 'uniform'),
+];
+/** A geometry shader after the tessellator reads how many indices it wrote too. */
+const LIMITED_GEOMETRY_ENTRIES = [...GEOMETRY_ENTRIES,
+    entry(GEOMETRY_BINDING.limit, COMPUTE, 'read-only-storage')];
+/** Group 1 of the domain shader run over the tessellator's indices. */
+const DOMAIN_POSITION_ENTRIES = [
+    ...['points', 'constants', 'domain', 'indices', 'offsets'].map(name=>entry(
+        DOMAIN_POSITION_BINDING[/** @type {'points'} */ (name)], COMPUTE, 'read-only-storage')),
+    entry(DOMAIN_POSITION_BINDING.params, COMPUTE, 'uniform'),
+    entry(DOMAIN_POSITION_BINDING.out, COMPUTE, 'storage'),
+    entry(DOMAIN_POSITION_BINDING.count, COMPUTE, 'read-only-storage'),
 ];
 const SCAN_ENTRIES = [
     entry(GEOMETRY_SCAN_BINDING.counts, COMPUTE, 'read-only-storage'),
@@ -362,12 +384,14 @@ export function createGeometry(services){
      * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
      *     indexCount?: number, startIndex?: number, baseVertex?: number,
      *     startInstance?: number, indirect?: any, auto?: any }} draw
+     * @param {any} [tessellated]  the tessellator's passes before it (`tessellation.js`'s
+     *     `prepare`), whose indices the geometry shader takes in place of the draw's
      * @returns {{ commands: any[], waits: Promise<any>[], gs: any,
      *     stage: import('./wgsl.js').GeometryStage, drawn: null | { stream: number,
      *     topology: string, group: object[], args: { gpu: any, offset: number },
      *     indexBuffer: { gpu: any, format: string, offset: number } } } | null}
      */
-    const prepare = (pipeline, draw)=>{
+    const prepare = (pipeline, draw, tessellated = null)=>{
         const shader = pipeline.stages.gs.shader;
         const vertexShader = pipeline.stages.vs.shader;
         if (!vertexShader)
@@ -380,7 +404,8 @@ export function createGeometry(services){
                 + ' it draws is on the GPU, and the passes before it are sized by it');
             return null;
         }
-        const topology = pipeline.topology;
+        const topology = tessellated ? TESSELLATED_TOPOLOGY[tessellated.topology] ?? 4
+            : pipeline.topology;
         const vertices = TOPOLOGY_VERTICES[topology] ?? (topology >= 33 ? topology - 32 : 0);
         const { gs, stage } = stageOf(shader, Math.min(3, vertices));
         if (vertices !== stage.inputVertices)
@@ -394,9 +419,11 @@ export function createGeometry(services){
             lose('a triangle strip with adjacency through a geometry shader is not drawn');
             return null;
         }
-        const indexed = draw.indexCount !== undefined;
-        const points = indexed ? draw.indexCount ?? 0 : draw.vertexCount;
-        const instances = draw.instanceCount ?? 1;
+        // The tessellator's instances are among its patches already.
+        const indexed = !tessellated && draw.indexCount !== undefined;
+        const points = tessellated ? tessellated.positions
+            : indexed ? draw.indexCount ?? 0 : draw.vertexCount;
+        const instances = tessellated ? 1 : draw.instanceCount ?? 1;
         const prims = STRIPS.includes(topology) ? Math.max(0, points - vertices + 1)
             : Math.floor(points / vertices);
         const invocations = instances * prims * stage.instances;
@@ -418,15 +445,16 @@ export function createGeometry(services){
             return null;
         }
 
-        // 1. the vertex shader over every position of the draw
+        // 1. the vertex shader over every position of the draw, or the domain
+        // shader over every index the tessellator wrote
         const vs = services.translationOf(vertexShader);
-        const inputLayout = pipeline.inputLayout;
+        const inputLayout = tessellated ? null : pipeline.inputLayout;
         const attributes = vs.inputs.filter((/** @type {any} */ element)=>
             element.systemValue === SYSTEM_VALUE.UNDEFINED
             && element.register < vs.inputRegisters)
             .map((/** @type {any} */ element)=>({ location: element.register,
                 semantic: element.name, index: element.index }));
-        const layout = inputLayout
+        const layout = tessellated ? { buffers: [], slots: [] } : inputLayout
             ? services.vertexLayouts(inputLayout, { attributes }, pipeline.vertexStrides)
             : attributes.length > 0 ? 'no input layout is bound' : { buffers: [], slots: [] };
         if (typeof layout === 'string')
@@ -434,16 +462,25 @@ export function createGeometry(services){
             lose(`a draw through a geometry shader is not drawn: ${layout}`);
             return null;
         }
-        const linkedVertex = linkVertexPatches(vs, gs.inputs, stage.inputRegisters,
-            layout.buffers);
+        const domainShader = tessellated ? pipeline.stages.ds.shader : null;
+        const hullShader = tessellated ? pipeline.stages.hs.shader : null;
+        const linkedVertex = domainShader
+            ? linkDomainPositions(services.translationOf(domainShader), domainShader.container,
+                hullShader.container, tessellated.hull.stage, gs.inputs, stage.inputRegisters)
+            : linkVertexPatches(vs, gs.inputs, stage.inputRegisters, layout.buffers);
         const vertexEntries = [...VERTEX_PATCH_ENTRIES, ...layout.buffers.map((_, k)=>
             entry(VERTEX_PATCH_BINDING.streams + k, COMPUTE, 'read-only-storage'))];
-        const vertexPipeline = computeFor(
-            `gs-vs:${idOf(vertexShader)}|${idOf(shader)}|${stage.inputVertices}|`
-                + `${idOf(inputLayout)}|`
-                + `${layout.buffers.map(buffer=>`${buffer.stepMode}:${buffer.arrayStride}`)}`,
-            linkedVertex.code, 'vertexPatches', [linkedVertex.entries, vertexEntries],
-            `d3d11:vs-geometry#${idOf(vertexShader)}`, linkedVertex.unsupported);
+        const vertexPipeline = domainShader
+            ? computeFor(`gs-ds:${idOf(domainShader)}|${idOf(hullShader)}|${idOf(shader)}|`
+                + `${stage.inputVertices}`, linkedVertex.code, 'domainPositions',
+            [linkedVertex.entries, DOMAIN_POSITION_ENTRIES],
+            `d3d11:ds-geometry#${idOf(domainShader)}`, linkedVertex.unsupported)
+            : computeFor(
+                `gs-vs:${idOf(vertexShader)}|${idOf(shader)}|${stage.inputVertices}|`
+                    + `${idOf(inputLayout)}|`
+                    + `${layout.buffers.map(buffer=>`${buffer.stepMode}:${buffer.arrayStride}`)}`,
+                linkedVertex.code, 'vertexPatches', [linkedVertex.entries, vertexEntries],
+                `d3d11:vs-geometry#${idOf(vertexShader)}`, linkedVertex.unsupported);
         const indexBytes = indexed ? pipeline.indexFormat === DXGI_FORMAT.R16_UINT ? 2 : 4 : 0;
         const vertexParams = new Uint32Array(8 + 4 * Math.max(1, layout.buffers.length));
         vertexParams.set([instances * points, points, indexBytes, pipeline.indexOffset ?? 0,
@@ -513,28 +550,52 @@ export function createGeometry(services){
         const indices = scratchOf('indices', indicesBytes, BufferUsage.INDEX);
 
         const commands = [];
-        commands.push({
-            kind: 'dispatch', what: 'a vertex shader run before a geometry shader was skipped',
-            ids: [], pipeline: vertexPipeline, label: 'd3d11:vs-geometry',
-            groups: [
-                services.bindingsFor(pipeline.stages.vs, linkedVertex.entries),
-                [
-                    { binding: VERTEX_PATCH_BINDING.indices,
-                        resource: asWords(indexed ? pipeline.indexBuffer : null) },
-                    { binding: VERTEX_PATCH_BINDING.out, resource: whole(vsOut, vsBytes) },
-                    { binding: VERTEX_PATCH_BINDING.params,
-                        resource: uniform(SLOT.vertex, vertexParams.byteLength) },
-                    ...layout.slots.map((slot, k)=>({ binding: VERTEX_PATCH_BINDING.streams + k,
-                        resource: asWords(pipeline.vertexBuffers[slot]) })),
+        // The tessellator's first word: the indices it wrote.
+        const limit = tessellated ? { buffer: tessellated.args.gpu, offset: tessellated.args.offset,
+            size: 16 } : null;
+        if (domainShader && limit)
+        {
+            commands.push({
+                kind: 'dispatch', what: 'a domain shader run before a geometry shader was skipped',
+                ids: [], pipeline: vertexPipeline, label: 'd3d11:ds-geometry',
+                groups: [
+                    services.bindingsFor(pipeline.stages.ds, linkedVertex.entries),
+                    [
+                        ...tessellated.group,
+                        { binding: DOMAIN_POSITION_BINDING.out, resource: whole(vsOut, vsBytes) },
+                        { binding: DOMAIN_POSITION_BINDING.count, resource: limit },
+                    ],
                 ],
-            ],
-            grid: [Math.ceil((instances * points) / 64), 1, 1],
-        });
+                grid: [Math.ceil(points / 64), 1, 1],
+            });
+        }
+        else
+        {
+            commands.push({
+                kind: 'dispatch', what: 'a vertex shader run before a geometry shader was skipped',
+                ids: [], pipeline: vertexPipeline, label: 'd3d11:vs-geometry',
+                groups: [
+                    services.bindingsFor(pipeline.stages.vs, linkedVertex.entries),
+                    [
+                        { binding: VERTEX_PATCH_BINDING.indices,
+                            resource: asWords(indexed ? pipeline.indexBuffer : null) },
+                        { binding: VERTEX_PATCH_BINDING.out, resource: whole(vsOut, vsBytes) },
+                        { binding: VERTEX_PATCH_BINDING.params,
+                            resource: uniform(SLOT.vertex, vertexParams.byteLength) },
+                        ...layout.slots.map((slot, k)=>({ binding: VERTEX_PATCH_BINDING.streams + k,
+                            resource: asWords(pipeline.vertexBuffers[slot]) })),
+                    ],
+                ],
+                grid: [Math.ceil((instances * points) / 64), 1, 1],
+            });
+        }
 
         // 2. the geometry shader
-        const linked = linkGeometry(gs, stage);
-        const geometryPipeline = computeFor(`gs:${idOf(shader)}|${stage.inputVertices}`,
-            linked.code, 'geometryMain', [linked.entries, GEOMETRY_ENTRIES],
+        const linked = linkGeometry(gs, stage, limit ? { limited: true } : {});
+        const geometryPipeline = computeFor(
+            `gs:${idOf(shader)}|${stage.inputVertices}${limit ? '|limited' : ''}`,
+            linked.code, 'geometryMain',
+            [linked.entries, limit ? LIMITED_GEOMETRY_ENTRIES : GEOMETRY_ENTRIES],
             `d3d11:gs#${idOf(shader)}`, linked.unsupported);
         commands.push({
             kind: 'dispatch', what: 'a geometry shader was skipped', ids: [],
@@ -551,6 +612,7 @@ export function createGeometry(services){
                     { binding: GEOMETRY_BINDING.counts, resource: whole(counts,
                         invocations * 32) },
                     { binding: GEOMETRY_BINDING.params, resource: uniform(SLOT.geometry, 32) },
+                    ...(limit ? [{ binding: GEOMETRY_BINDING.limit, resource: limit }] : []),
                 ],
             ],
             grid: [Math.ceil(invocations / 64), 1, 1],
@@ -593,7 +655,7 @@ export function createGeometry(services){
 
         // 5. stream output
         /** @type {Promise<any>[]} */
-        const waits = [vertexPipeline, geometryPipeline];
+        const waits = [vertexPipeline, geometryPipeline, ...tessellated?.waits ?? []];
         if (so && so.writes.length > 0)
         {
             const code = streamOutWgsl(stage, so.writes);

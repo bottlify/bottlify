@@ -19,8 +19,8 @@ import {
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import {
-    assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret, solidPixelShader, utof,
-    v,
+    assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, quadDomainShader, ret,
+    solidPixelShader, utof, v,
 } from './shader-fixtures.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 
@@ -2476,6 +2476,28 @@ test('a device asked for video support is refused as one without it: no video de
     const out = { wantDevice: true };
     assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, {}), 0x80070057,
         'an unknown driver with no adapter is a bad argument before anything else');
+});
+
+test('from level 11 stream output may follow the domain shader: a stage of no shader of its own,'
+    + ' as a vertex shader\'s is', ()=>{
+    const entries = [{ Stream: 0, SemanticName: 'SV_POSITION', SemanticIndex: 0,
+        StartComponent: 0, ComponentCount: 4, OutputSlot: 0 }];
+    /** @type {any} */
+    const eleven = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    /** @type {{ shader?: any }} */
+    const made = {};
+    assert.equal(eleven.device.CreateGeometryShaderWithStreamOutput(quadDomainShader(), entries,
+        [16], 0, made), S_OK);
+    assert.equal(made.shader.passThrough, true);
+    made.shader.release();
+    eleven.device.release();
+    /** @type {any} */
+    const ten = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, {}), S_OK);
+    assert.equal(ten.device.CreateGeometryShaderWithStreamOutput(quadDomainShader(), entries,
+        [16], 0, made), 0x80070057, 'level 10 has no domain shader');
+    ten.device.release();
 });
 
 test('a device asked for with the debug layer is refused as on a Windows without its Graphics'

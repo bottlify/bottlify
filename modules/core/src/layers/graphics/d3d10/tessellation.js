@@ -287,7 +287,9 @@ export function createTessellation(services){
      *     indexCount?: number, startIndex?: number, baseVertex?: number,
      *     startInstance?: number, indirect?: any }} draw
      * @returns {{ commands: any[], waits: Promise<any>[], topology: string, hull: any,
-     *     group: object[], args: { gpu: any, offset: number } } | null}
+     *     group: object[], args: { gpu: any, offset: number }, positions: number } | null}
+     *     `positions`: the most indices the tessellator may write for the draw, which
+     *     `args`' first word counts on the GPU
      */
     const prepare = (pipeline, draw)=>{
         const hullShader = pipeline.stages.hs.shader;
@@ -504,6 +506,7 @@ export function createTessellation(services){
                 { binding: DOMAIN_BINDING.params, resource: uniform(SLOT.shared, 16) },
             ],
             args: { gpu: argSlot.gpu, offset: argSlot.at },
+            positions: capacity.indices,
         };
     };
 

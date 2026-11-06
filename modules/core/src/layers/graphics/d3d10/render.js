@@ -4671,15 +4671,22 @@ export function createRenderer(services){
             let geometry = null;
             if (geometryShader)
             {
-                if (pipeline.stages.hs?.shader || pipeline.stages.ds?.shader)
+                // After the tessellator the geometry shader takes what the
+                // domain shader makes of each index it wrote (`geometry.js`).
+                const tessellated = pipeline.stages.hs?.shader || pipeline.stages.ds?.shader
+                    || pipeline.topology >= FIRST_PATCH_LIST
+                    ? tessellationOf().prepare(pipeline, draw) : undefined;
+                if (tessellated === null)
                 {
                     counters.skipped.stage++;
-                    lose('a draw through the tessellator and a geometry shader is skipped: the'
-                        + ' domain shader\'s vertices are not taken on to a geometry shader');
                     return;
                 }
-                geometry = geometryOf().prepare(pipeline, draw);
+                geometry = geometryOf().prepare(pipeline, draw, tessellated);
                 syncTwins(false);
+                if (geometry)
+                {
+                    tessellated?.commands.forEach(record);
+                }
                 geometry?.commands.forEach(record);
                 if (geometryShader.passThrough
                     ? geometryShader.rasterizedStream === SO_NO_RASTERIZED_STREAM

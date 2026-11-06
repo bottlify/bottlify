@@ -930,9 +930,10 @@ export function createDevice(options = {}){
         }
         out.shader = attachCom({
             container,
-            // A geometry shader made of a vertex shader's bytecode to stream
-            // its vertices out: no stage of its own.
-            passThrough: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX,
+            // A geometry shader made of a vertex or domain shader's bytecode
+            // to stream its vertices out: no stage of its own.
+            passThrough: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX
+                || /** @type {any} */ (container.shader).kind === SHADER_KIND.DOMAIN,
             /** @param {{ device?: any }} target */
             GetDevice(target){
                 retainDevice();
@@ -1436,13 +1437,17 @@ export function createDevice(options = {}){
             out)
         {
             out.shader = null;
+            // From level 11 the stage before may be the domain shader: what
+            // the tessellator made is streamed out.
+            const eleven = featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0;
             const container = bytecode ? (parseShaderOfKind(bytecode, SHADER_KIND.GEOMETRY,
-                shaderModel) ?? parseShaderOfKind(bytecode, SHADER_KIND.VERTEX, shaderModel))
+                shaderModel) ?? parseShaderOfKind(bytecode, SHADER_KIND.VERTEX, shaderModel)
+                ?? (eleven ? parseShaderOfKind(bytecode, SHADER_KIND.DOMAIN, shaderModel) : null))
                 : null;
             if (!container || !validStreamOutput({
                 outputs: container.outputs, entries: declaration, strides, rasterizedStream,
-                eleven: featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0,
-                vertex: /** @type {any} */ (container.shader).kind === SHADER_KIND.VERTEX,
+                eleven,
+                vertex: /** @type {any} */ (container.shader).kind !== SHADER_KIND.GEOMETRY,
             }))
             {
                 return E_INVALIDARG;
