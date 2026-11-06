@@ -1859,6 +1859,20 @@ test('a managed texture takes up only the rectangle AddDirtyRect names, and all 
     made.texture.release();
 });
 
+test('a clear under SRGBWRITEENABLE writes its colour encoded, as a draw does', async()=>{
+    // Wine's d3d9 clear_test: 0x7f7f7f7f clears as 0xbbbbbb.
+    const h = harness();
+    const { device } = h;
+    assert.equal(device.SetRenderState(D3DRS.SRGBWRITEENABLE, 1), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0x7f7f7f7f, 1, 0), D3D_OK);
+    await h.present();
+    const pass = h.gpu.of('beginRenderPass')[0].descriptor;
+    const value = pass.colorAttachments[0].clearValue;
+    assert.equal(Math.round(value.r * 255), 0xbb);
+    assert.equal(Math.round(value.b * 255), 0xbb);
+    assert.equal(device.SetRenderState(D3DRS.SRGBWRITEENABLE, 0), D3D_OK);
+});
+
 test('StretchRect scales an offscreen plain surface into a target, from its bytes', async()=>{
     // Wine's d3d9 stretchrect_test: offscreenplain into a render target,
     // scaling, is allowed. The plain surface's pixels are its guest bytes,

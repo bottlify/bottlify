@@ -2073,6 +2073,14 @@ const readsSrgb = (model, stage)=>(model.stageStates(stage)?.get(SRGB_TEXTURE) ?
 const writesSrgb = model=>(model.renderStates.get(D3DRS9.SRGBWRITEENABLE) ?? 0) !== 0;
 
 /**
+ * A linear channel in 0..1 as sRGB encodes it.
+ *
+ * @param {number} linear
+ */
+export const srgbEncode = linear=>(linear <= 0.0031308 ? linear * 12.92
+    : 1.055 * linear ** (1 / 2.4) - 0.055);
+
+/**
  * Whether a draw's colour is encoded to sRGB on its way out: asked for, and
  * the target one Direct3D 9 writes as sRGB, an eight-bit one; a
  * floating-point target takes the value as it is.
@@ -10491,6 +10499,17 @@ export function createRenderer(options){
             if (whole)
             {
                 const value = colorToFloats(color);
+                // Under D3DRS_SRGBWRITEENABLE the clear's colour is encoded as
+                // a draw's is (Wine's d3d9 clear_test: 0x7f clears as 0xbb);
+                // the pass clears the target's plain view, so it is encoded
+                // here. A partial clear's quad is encoded by its pipeline.
+                if ((flags & D3DCLEAR.TARGET) !== 0
+                    && encodesSrgb(model, surfaceFor(model.renderTarget).format))
+                {
+                    value.r = srgbEncode(value.r);
+                    value.g = srgbEncode(value.g);
+                    value.b = srgbEncode(value.b);
+                }
                 // A target without alpha has none to clear: the format says the
                 // channel is undefined, and a zero there would make the
                 // presented frame transparent. One with alpha, whichever format
