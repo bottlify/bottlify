@@ -1460,6 +1460,25 @@ test('a handle from one shader kind is not a handle of the other', ()=>{
 
 // --- CopyRects, which D3D9 does not have ---
 
+test('CopyRects refuses a source the program holds locked', ()=>{
+    // Wine's d3d8 test_mipmap_lock.
+    const device = createDevice();
+    /** @type {{ surface?: any }} */
+    const source = {};
+    /** @type {{ surface?: any }} */
+    const destination = {};
+    assert.equal(device.CreateImageSurface(4, 4, D3DFMT.A8R8G8B8, source), D3D_OK);
+    assert.equal(device.CreateImageSurface(4, 4, D3DFMT.A8R8G8B8, destination), D3D_OK);
+    assert.equal(source.surface.LockRect({}, null, 0), D3D_OK);
+    assert.equal(device.CopyRects(source.surface, null, 0, destination.surface, null),
+        D3DERR_INVALIDCALL);
+    assert.equal(source.surface.UnlockRect(), D3D_OK);
+    assert.equal(device.CopyRects(source.surface, null, 0, destination.surface, null), D3D_OK);
+    source.surface.release();
+    destination.surface.release();
+    assert.equal(device.release(), 0);
+});
+
 test('a depth stencil is refused on either side of a CopyRects', ()=>{
     const device = createDevice();
     /** @type {{ surface?: any }} */

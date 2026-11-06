@@ -3257,7 +3257,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             /** A texture level or a render target: what the GPU draws into or from. */
             const onGpu = (/** @type {any} */ surface, /** @type {any} */ desc)=>
                 Boolean(surface.container) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0;
-            if (!source || !destination)
+            // A source the program holds locked is refused (Wine's
+            // test_mipmap_lock).
+            if (!source || !destination || source.locked === true)
             {
                 return D3DERR_INVALIDCALL;
             }

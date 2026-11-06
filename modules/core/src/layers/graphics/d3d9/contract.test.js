@@ -1014,6 +1014,12 @@ test('UpdateSurface moves a rectangle from system memory into the default pool',
         D3DERR_INVALIDCALL, 'the pools are the wrong way round');
     assert.equal(device.UpdateSurface(source.surface, { left: 0, top: 0, right: 4, bottom: 4 },
         level.surface, { x: 1, y: 0 }), D3DERR_INVALIDCALL, 'off the edge');
+    // Wine's test_mipmap_lock: a source the program holds locked is refused.
+    assert.equal(source.surface.LockRect({}, null, 0), D3D_OK);
+    assert.equal(device.UpdateSurface(source.surface, null, level.surface, null),
+        D3DERR_INVALIDCALL, 'locked');
+    assert.equal(source.surface.UnlockRect(), D3D_OK);
+    assert.equal(device.UpdateSurface(source.surface, null, level.surface, null), D3D_OK);
     level.surface.release();
     texture.texture.release();
     source.surface.release();

@@ -4374,7 +4374,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         UpdateSurface(source, sourceRect, destination, point, out = {}){
-            if (!source || !destination || source === destination)
+            // A source the program holds locked is refused (Wine's
+            // test_mipmap_lock); its container is not looked at.
+            if (!source || !destination || source === destination || source.locked === true)
             {
                 return D3DERR_INVALIDCALL;
             }

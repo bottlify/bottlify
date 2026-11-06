@@ -580,6 +580,7 @@ const D3DTEXF_LINEAR = 2;
  * @property {() => number} UnlockRect
  * @property {(out: { desc?: SurfaceDesc }) => number} GetDesc
  * @property {number} lockFlags   The flags of the lock in force, if one is.
+ * @property {boolean} locked      Whether the program holds a lock on it.
  * @property {any} [container]    The texture a level belongs to; absent for a surface of its own.
  * @property {(rect: LockRectangle | null) => void} noteWritten
  * @property {(gdi: SurfaceGdi, out: { dc?: number }) => number | Promise<number>} GetDC
@@ -712,6 +713,10 @@ export function createSurface(options){
         kind: options.type,
         /** A refused lock hands back a null address and a zero pitch (`clearsFailedLock`). */
         clearsFailedLock: options.clearsFailedLock === true,
+        /** Whether the program holds a lock on it: a copy from it is refused then. */
+        get locked(){
+            return locked;
+        },
         reachable: ()=>!options.count.destroyed,
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: options.count,
