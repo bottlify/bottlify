@@ -589,7 +589,8 @@ const D3DTEXF_LINEAR = 2;
 /**
  * @typedef {Object} SurfaceGdi  How a device context over guest pixels is made and unmade.
  * @property {(attributes: { width: number, height: number, pitch: number, bitCount: number,
- *   bits: number, palette: null, format: '565' | '555' }) => number} createSurfaceDc
+ *   bits: number, palette: null, format: '565' | '555', sizeImage?: number,
+ *   compression?: number, bitfields?: number[] }) => number} createSurfaceDc
  * @property {(handle: number) => void} deleteSurfaceDc
  *
  * @typedef {Object} SurfaceFamily
@@ -604,15 +605,19 @@ const D3DTEXF_LINEAR = 2;
  * the bit count GDI is told, and for sixteen bits which layout. R8G8B8 is on
  * that list too, and no surface here is made in it.
  *
- * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555' }>>}
+ * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555',
+ *     bitfields?: number[] }>>}
  */
 const DC_FORMATS = Object.freeze({
     [D3DFMT.A8R8G8B8]: { bitCount: 32, format: '555' },
     [D3DFMT.X8R8G8B8]: { bitCount: 32, format: '555' },
-    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565' },
-    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555' },
-    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555' },
+    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565', bitfields: [0xf800, 0x07e0, 0x001f] },
+    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555', bitfields: [0x7c00, 0x03e0, 0x001f] },
+    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555', bitfields: [0x7c00, 0x03e0, 0x001f] },
 });
+
+/** BI_BITFIELDS: what GetObject says a 16-bit surface's section is laid out as. */
+const BI_BITFIELDS = 3;
 
 /**
  * @typedef {Object} SurfaceOptions
@@ -849,6 +854,11 @@ export function createSurface(options){
                 width: options.width, height: options.height, pitch,
                 bitCount: layout.bitCount, bits: options.base, palette: null,
                 format: layout.format,
+                // The section GetObject describes says no image size, and a
+                // 16-bit one its masks (Wine's test_getdc).
+                sizeImage: 0,
+                ...(layout.bitfields ? { compression: BI_BITFIELDS, bitfields: layout.bitfields }
+                    : {}),
             });
             if (handle === 0)
             {

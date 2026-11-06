@@ -378,6 +378,11 @@ test('GetDC answers for the formats GDI draws into, and refuses the rest untouch
             {
                 assert.equal(shown.format, layout);
             }
+            // The section says no image size, and a 16-bit one its masks.
+            assert.deepEqual([shown.sizeImage, shown.compression, shown.bitfields],
+                bitCount === 16
+                    ? [0, 3, layout === '565' ? [0xf800, 0x07e0, 0x001f] : [0x7c00, 0x03e0, 0x001f]]
+                    : [0, undefined, undefined]);
             assert.equal(surface.ReleaseDC(out.dc, gdi), D3D_OK);
             assert.equal(gdi.deleted[gdi.deleted.length - 1], out.dc);
         }

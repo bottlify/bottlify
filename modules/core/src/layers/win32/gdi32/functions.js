@@ -5732,12 +5732,16 @@ export function createGdiFunctions(host){
          *
          * @param {{ width: number, height: number, pitch: number,
          *           bitCount: number, bits: number, palette?: number[] | null,
-         *           format?: string, sizeImage?: number }} attributes  `sizeImage`: what
-         *     GetObject says the image's size is, where it is not its rows'
+         *           format?: string, sizeImage?: number, compression?: number,
+         *           bitfields?: number[] }} attributes  `sizeImage`: what GetObject says
+         *     the image's size is, where it is not its rows'; `compression` and
+         *     `bitfields`: what it says the section is laid out as (a 16-bit
+         *     Direct3D 9 surface is BI_BITFIELDS with its masks)
          * @returns {number} A device context handle, or zero.
          */
         createSurfaceDc(attributes){
-            const { width, height, pitch, bitCount, bits, palette, format, sizeImage } = attributes;
+            const { width, height, pitch, bitCount, bits, palette, format, sizeImage, compression,
+                bitfields } = attributes;
             // An indexed surface without its palette has no colours at all, and
             // a drawing routine given one would have to invent them. The three
             // depths are what a surface of this era actually is.
@@ -5763,6 +5767,8 @@ export function createGdiFunctions(host){
                 palette,
                 format,
                 ...(sizeImage === undefined ? {} : { sizeImage }),
+                ...(compression === undefined ? {} : { compression }),
+                ...(bitfields === undefined ? {} : { bitfields }),
             });
             select(dc, dc.defaultBitmap);
             return dc.hdc;
