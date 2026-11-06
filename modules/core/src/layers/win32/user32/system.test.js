@@ -2427,6 +2427,31 @@ test('a class word is read from the atom or the extra bytes, and the atom is not
 
 // --- display mode ---
 
+test('a mode set tells every top-level window, before ChangeDisplaySettings returns', ()=>{
+    // WM_DISPLAYCHANGE: the depth, and the size in the low and high words
+    // (Wine's d3d9 test_wndproc hears it while the call is made).
+    /** @type {any[]} */
+    const heard = [];
+    const { memory, fns } = setup({ dispatch: (_, message)=>{
+        heard.push(message);
+        return 0;
+    } });
+    const hwnd = makeWindow(memory, fns);
+    putMode(memory, 640, 480);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL);
+    const told = heard.filter(message=>message.message === 0x7e);
+    assert.deepEqual(told.map(message=>[message.hwnd, message.wParam, message.lParam]),
+        [[hwnd, SCREEN.bitsPerPixel, (480 << 16) | 640]]);
+    heard.length = 0;
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL);
+    assert.equal(heard.filter(message=>message.message === 0x7e).length, 0,
+        'a mode already set moves nothing');
+    assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL);
+    assert.equal(heard.filter(message=>message.message === 0x7e).length, 1,
+        'and back to the registry mode, again');
+});
+
 test('a display turned from its own orientation is no mode', ()=>{
     // Wine's d3d9ex test_get_adapter_displaymode_ex asks for DMDO_180 and
     // skips on DISP_CHANGE_BADMODE.

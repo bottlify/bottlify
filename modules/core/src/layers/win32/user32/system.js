@@ -535,6 +535,8 @@ const CDS_TEST = 0x2;
 /** ChangeDisplaySettings' flags: keep the mode in the registry too; and, beside it, only there. */
 const CDS_UPDATEREGISTRY = 0x1;
 const CDS_NORESET = 0x10000000;
+/** What every top-level window hears when the display's mode moves. */
+const WM_DISPLAYCHANGE = 0x007e;
 /** DEVMODE's display orientation field, and the orientation every display here has. */
 const DM_DISPLAYORIENTATION = 0x00000080;
 const DMDO_DEFAULT = 0;
@@ -1986,7 +1988,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             // unless a program wrote another there.
             if ((flags & CDS_TEST) === 0)
             {
-                ({ width: screen.width, height: screen.height } = registryMode(screen));
+                const mode = registryMode(screen);
+                return setMode(mode.width, mode.height);
             }
             return DISP_CHANGE_SUCCESSFUL;
         }
@@ -2027,12 +2030,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             display.registryWidth = width;
             display.registryHeight = height;
         }
-        if ((flags & CDS_NORESET) === 0)
+        return (flags & CDS_NORESET) === 0 ? setMode(width, height) : DISP_CHANGE_SUCCESSFUL;
+    };
+
+    /**
+     * The display set to a size, and every top-level window told when it
+     * moved, before the call returns, as Windows sends it (WM_DISPLAYCHANGE:
+     * the depth, and the size in the low and high words).
+     *
+     * @param {number} width @param {number} height
+     * @returns {number | Promise<number>}
+     */
+    const setMode = (width, height)=>{
+        if (screen.width === width && screen.height === height)
         {
-            screen.width = width;
-            screen.height = height;
+            return DISP_CHANGE_SUCCESSFUL;
         }
-        return DISP_CHANGE_SUCCESSFUL;
+        screen.width = width;
+        screen.height = height;
+        return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
+            ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0), ()=>DISP_CHANGE_SUCCESSFUL);
     };
 
     /**
