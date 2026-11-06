@@ -2653,3 +2653,27 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   version and power plan not recorded.
 - **Decision.** Kept for memory and collection (the product's memory goal); not counted as a
   frame-rate gain.
+
+### 2026-11-06: a block formed into a caller's region and held at its own start gets a region of its own (cork, frame rate)
+
+- **Idea.** A callee formed into its caller's region (`leafCalls`) carries the caller's windows. Entered
+  from another caller with a closed window, its entry leaves HELD at its own start, nothing run, and the
+  runtime steps one instruction in the interpreter and enters again - on 3DMark03 about 450 000 forced
+  steps and 900 000 HELD exits a run at one address. Since 4307bd214 such an entry is dropped and the
+  block gets a region of its own (`heldEntries` in the diagnostics).
+- **Workload.** 3DMark03 (`--route`), `--worker --graphics-worker --coi --graphics-config
+  '{"compressedTextures":true}' --store local --prefetch`, 420 s, every run cold (profile removed
+  before each). Arms alternate on one build (4307bd214 plus a `heldEntries: false` switch, not kept):
+  A = on, B = off (`dbg/bench/ab.sh`, tag s03ab). Bundle hash not recorded.
+- **Values.** Forced steps a run: A 81, 70, 153, 134, 64; B 660 886, 373 302, 614 090, 368 161,
+  644 072. Average fps / 1% low (whole run): A 102.2/1.8, 105.0/1.9, 85.8/1.5, 87.9/1.5, 108.7/1.9
+  (median 102.2); B 111.6/2.0, 94.4/1.6, 108.3/1.9, 84.1/1.5, 109.0/1.9 (median 108.3). Drops in
+  scene 4 (the first test): A 462, 476, 549, 550, 384 (median 476); B 345, 468, 447, 568, 459
+  (median 459); scene 5: A median 292 (268-352), B 262 (217-505); scene 6: A 204 (160-268), B 206
+  (185-238). Scene 4 1% low: A 7-10 (median 8), B 6-10 (median 8). The arms overlap everywhere; the
+  spread between runs of one arm (84-112 fps) is wider than any difference.
+- **Why.** Forced steps were one interpreted instruction each: 0.4-0.66 million of them are well under
+  a second of a 420 s run, spread over it. Drops in these scenes are translation and host turns.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, the VM's hardware WebGPU adapter; Chrome
+  version and power plan not recorded.
+- **Decision.** Kept (it removes a loop and its interpreter work); not counted as a frame-rate gain.
