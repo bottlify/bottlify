@@ -1282,6 +1282,20 @@ test('a shader on a device that runs none is refused with the pointer cleared', 
     h.release(root);
 });
 
+test('a device whose last reference a state block held still lets go of its Direct3D object', ()=>{
+    // Wine's test_refcount: the state block's Release destroys the device.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const block = h.box.memory.readU32(out);
+    assert.equal(h.release(device), 1, 'the block holds the device');
+    assert.equal(h.release(block), 0);
+    assert.equal(h.release(root), 0, 'and the device held the root no longer');
+});
+
 test('a state block is recorded, handed back, and applied through its own vtable', ()=>{
     const h = seamed();
     const root = h.create();

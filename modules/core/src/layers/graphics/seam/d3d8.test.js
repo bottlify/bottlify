@@ -1399,6 +1399,9 @@ test('a surface names its container as QueryInterface on it would, and its devic
     // A surface of its own, the back buffer included, is held by the device.
     putGuid(h, iid, [0x7385E5DF, 0x8FE8, 0x41D5, 0x86, 0xB6, 0xD7, 0xB4, 0x85, 0x47, 0xB6,
         0xCF]);
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(h.device(device, 'GetBackBuffer', [1, 0, out]), D3DERR_INVALIDCALL);
+    assert.equal(h.box.memory.readU32(out), 0, 'a refused one clears the pointer');
     assert.equal(h.device(device, 'GetBackBuffer', [0, 0, out]), D3D_OK);
     const back = h.box.memory.readU32(out);
     assert.equal(h.surface(back, 'GetContainer', [iid, container]), D3D_OK);
@@ -2308,6 +2311,23 @@ test('the guest routines a device writes come from the code pages, not the heap 
         assert.ok(code.length > 0, 'a guest routine was placed');
         assert.ok(code.every(([, size])=>size > 0 && size <= 0x200));
     });
+
+test('a device whose last reference a swap chain held still lets go of its Direct3D object', ()=>{
+    // Wine's d3d8 test_refcount: the swap chain's Release destroys the device.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0xe400;
+    const out = 0xe000;
+    h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
+    h.fields.writeStruct(at, D3DPRESENT_PARAMETERS8,
+        { Windowed: 1, SwapEffect: 1, BackBufferFormat: D3DFMT.A8R8G8B8 });
+    assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+    const chain = h.box.memory.readU32(out);
+    assert.equal(h.release(device), 1, 'the chain holds the device');
+    assert.equal(h.release(chain), 0);
+    assert.equal(h.release(root), 0, 'and the device held the root no longer');
+});
 
 test('an additional swap chain has back buffers of its own, and writes back only its count',
     ()=>{

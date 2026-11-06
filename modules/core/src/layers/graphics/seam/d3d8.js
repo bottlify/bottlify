@@ -1606,6 +1606,11 @@ export function createDirect3D8Seam(
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
+            // A refused one clears the pointer (Wine's d3d8 test_swapchain).
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out >>> 0, 0);
+            }
             return hr;
         },
 

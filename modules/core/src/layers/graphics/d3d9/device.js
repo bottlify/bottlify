@@ -1019,7 +1019,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {import('./stateblock.js').StateBlockRecord | null} */
     let recording = null;
 
-    const count = createReferenceCount();
+    // Whoever lets the last reference go -- the program, or a resource or
+    // state block that held the device -- the device's teardown runs
+    // (Wine's test_refcount: the last state block destroys it).
+    const count = createReferenceCount({ onLastRef: ()=>teardown() });
 
     /**
      * The vertices each range of a static index buffer named, while none of its
@@ -2226,6 +2229,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {(() => void) | undefined} */
     let stopWatchingLoss;
 
+    /** What the device's last reference takes with it. */
+    const teardown = ()=>{
+        stopWatchingLoss?.();
+        showGamma(true);
+        // What it kept bound goes with it.
+        streams.clear();
+        indices = rebound(indices, null);
+        rebound(renderTargets.get(0), null);
+        renderTargets.clear();
+        depthStencil = rebound(depthStencil, null);
+        retireImplicitSurfaces();
+        // The reference CreateDevice took on the object that made it.
+        identity?.direct3D?.release?.();
+    };
+
     /**
      * A present's answer, once its frame is queued: at once, or once the
      * device has finished enough of the frames before it.
@@ -2335,25 +2353,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return count.destroyed;
         },
         addRef: ()=>count.addRef(),
-        release: ()=>{
-            const before = count.value;
-            const left = count.release();
-            if (left === 0 && before > 0)
-            {
-                stopWatchingLoss?.();
-                showGamma(true);
-                // What it kept bound goes with it.
-                streams.clear();
-                indices = rebound(indices, null);
-                rebound(renderTargets.get(0), null);
-                renderTargets.clear();
-                depthStencil = rebound(depthStencil, null);
-                retireImplicitSurfaces();
-                // The reference CreateDevice took on the object that made it.
-                identity?.direct3D?.release?.();
-            }
-            return left;
-        },
+        release: ()=>count.release(),
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){
