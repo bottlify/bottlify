@@ -962,6 +962,33 @@ shader written against one uses them. Here 1.40 compiles as compatibility; from 
 front end accepted them in 1.10 before 1.30 and later were added, and a program that relies on
 it compiled here then. Nothing else of 1.20 is taken into 1.10. *2026-11-06.*
 
+**A98. A context drawing into a bitmap of another depth writes nothing past the bitmap's bits.**
+A context made on a memory DC draws on the processor into the bitmap selected there, as Windows'
+generic renderer does. Given a bitmap whose depth is not the pixel format's, Windows writes the
+format's rows over it and past its end; here the rows are converted to the bitmap's depth and
+nothing beyond its bits is written. *2026-11-06.*
+
+**A99. A DC from D3DKMTCreateDCFromMemory is read from the context's own buffer.** Windows reads
+the memory the DC was made over live, so a GL context on it sees bytes written there afterwards
+(Wine's test_d3dkmt_rendering expects 0xa5a5a5 and marks it todo); here what the context drew
+is read back from its buffer. *2026-11-06.*
+
+**A100. Framebuffer objects are shared between contexts wglShareLists joins.** GL 3.0 core keeps
+framebuffer objects per context; GL_EXT_framebuffer_object, which predates it, shares them with
+the other objects, and Windows drivers share both kinds. Here every framebuffer object is in the
+share group. A core-profile context may need the specification's rule; revisit when they exist.
+*2026-11-06.*
+
+**A101. wglChoosePixelFormatARB's best format comes first in the format list's own order.** The
+extension leaves "best" to the implementation; the formats are listed accelerated before
+generic, and among equals the smaller depth first, and that order is the answer's.
+*2026-11-06.*
+
+**A102. An attribute wglChoosePixelFormatARB does not know matches every format.** The
+specification says the call fails with ERROR_INVALID_DATA; programs pass attributes of extensions
+they found in another driver's string, and refusing them leaves such a program without a format.
+The attribute is reported once as a divergence. *2026-11-06.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

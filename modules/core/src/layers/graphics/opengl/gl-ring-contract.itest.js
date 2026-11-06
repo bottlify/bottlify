@@ -1192,8 +1192,10 @@ Object.assign(CASES, {
     ],
     glBindFramebufferEXT: [
         { label: 'a name made on the bind', args: [GL.FRAMEBUFFER, 5], error: GL.NO_ERROR },
-        { label: 'a target of the ARB names', args: [GL.READ_FRAMEBUFFER, 5],
-            error: GL.INVALID_ENUM },
+        // GL_EXT_framebuffer_blit makes the read and draw targets the EXT bind's too.
+        { label: 'the read target of the blit extension', args: [GL.READ_FRAMEBUFFER, 5],
+            error: GL.NO_ERROR },
+        { label: 'a target there is not', args: [BAD, 5], error: GL.INVALID_ENUM },
     ],
     glUniform1f: uniformCases(0, floats([0.5]), 4),
     glUniform2f: uniformCases(1, floats([0.5, -2]), 5),
