@@ -565,6 +565,7 @@ function depthFill(memory, dest, rect, value, clipList){
  * @param {{ fillColor?: number, fillDepth?: number, srcColorKey?: ColorKey,
  *            destColorKey?: ColorKey, rop?: number, ddfx?: number }} [request.fx]
  * @param {Rect[]} [request.clipList]
+ * @param {boolean} [request.fxGiven]  Whether the program passed a DDBLTFX at all.
  * @returns {number} HRESULT
  */
 export function blt(request){
@@ -575,6 +576,16 @@ export function blt(request){
     }
     const flags = request.flags >>> 0;
     const fx = request.fx ?? {};
+    // The arguments before the rectangles: a fill or raster operation reads
+    // its DDBLTFX, a fill takes no source, and a colour fill is no raster
+    // operation (Wine's test_color_fill).
+    const fills = flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL);
+    if (((fills !== 0 || (flags & DDBLT_ROP) !== 0) && request.fxGiven === false)
+        || (fills !== 0 && request.src)
+        || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0))
+    {
+        return DDERR_INVALIDPARAMS;
+    }
     const asked = wholeOf(request.destRect, dest);
     // A rectangle past the surface is refused, unless a clipper is there to
     // cut it: then the part on the surface is drawn, and the source's part
@@ -628,9 +639,11 @@ export function blt(request){
         const rop = (fx.rop ?? ROP.SRCCOPY) >>> 0;
         if (rop === ROP.BLACKNESS || rop === ROP.WHITENESS)
         {
-            if (dest.depth)
+            // A source it does not read is still a source, and its rectangle
+            // is checked; a depth buffer is filled like any other surface.
+            if (request.src && !rectFits(wholeOf(request.srcRect, request.src), request.src))
             {
-                return DDERR_INVALIDPARAMS;
+                return DDERR_INVALIDRECT;
             }
             transfer({ ...common, fill: rop === ROP.BLACKNESS ? 0 : 0xffffffff });
             return DD_OK;
@@ -647,12 +660,7 @@ export function blt(request){
         return DDERR_UNSUPPORTED;
     }
 
-    if ((flags & DDBLT_DEPTHFILL) !== 0)
-    {
-        return dest.depth
-            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList)
-            : DDERR_INVALIDPARAMS;
-    }
+    // Asked for both, the colour fill is the one made.
     if ((flags & DDBLT_COLORFILL) !== 0)
     {
         if (dest.depth)
@@ -661,6 +669,12 @@ export function blt(request){
         }
         transfer({ ...common, fill: (fx.fillColor ?? 0) >>> 0 });
         return DD_OK;
+    }
+    if ((flags & DDBLT_DEPTHFILL) !== 0)
+    {
+        return dest.depth
+            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList)
+            : DDERR_INVALIDPARAMS;
     }
 
     const src = request.src ?? null;

@@ -1079,11 +1079,12 @@ export function createDirectDrawSeam(
                             (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey),
                     },
                     clipList: clipListOf(surface),
+                    fxGiven: (fx >>> 0) !== 0,
                 };
                 // A plain colour fill of a surface drawn on the GPU is filled
                 // there, no read-back first: a clipped or keyed one reads the
                 // pixels it keeps.
-                if (!from && (flags & ~FILL_ONLY_FLAGS) === DDBLT_COLORFILL
+                if (!from && (flags & ~FILL_ONLY_FLAGS) === DDBLT_COLORFILL && request.fxGiven
                     && !request.clipList && !request.fx.destColorKey && !surface.depth
                     && rectFitsSurface(rect, surface) && surface.colorFilled?.(rect, fill))
                 {

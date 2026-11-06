@@ -454,3 +454,41 @@ test('a rectangle past the surface is cut by a clipper, the source with it; with
         assert.equal(blt({ memory, dest, src, flags: 0, clipList,
             destRect: { left: 8, top: 0, right: 12, bottom: 2 } }), 0, 'wholly off: nothing');
     });
+
+test('a fill or raster operation is checked before its rectangles: it needs its DDBLTFX, a fill'
+    + ' takes no source, a colour fill no raster operation (test_color_fill)', ()=>{
+    const memory = ram();
+    const dest = surface(BASE, 4, 4, 4);
+    const src = surface(BASE + 0x100, 4, 4, 4);
+    const DEPTHFILL = 0x02000000;
+    const inverted = { left: 3, top: 3, right: 1, bottom: 1 };
+    const outside = { left: 0, top: 0, right: 5, bottom: 5 };
+    const fx = { fillColor: 0x11223344, rop: ROP.WHITENESS };
+    for (const flags of [DDBLT_COLORFILL, DDBLT_ROP, DEPTHFILL])
+    {
+        assert.equal(blt({ memory, dest, flags, fx, fxGiven: false }), DDERR_INVALIDPARAMS);
+    }
+    assert.equal(blt({ memory, dest, src, destRect: inverted, flags: DDBLT_COLORFILL, fx }),
+        DDERR_INVALIDPARAMS, 'a source, before the inverted rectangle');
+    assert.equal(blt({ memory, dest, src, srcRect: inverted, flags: DDBLT_COLORFILL, fx }),
+        DDERR_INVALIDPARAMS);
+    assert.equal(blt({ memory, dest, destRect: outside, flags: DDBLT_COLORFILL | DDBLT_ROP, fx }),
+        DDERR_INVALIDPARAMS);
+    assert.equal(blt({ memory, dest, srcRect: inverted, flags: DDBLT_COLORFILL, fx }), 0,
+        'a source rectangle with no source is not read');
+    // A raster operation that reads no source still checks the one it is given.
+    for (const srcRect of [inverted, outside])
+    {
+        assert.equal(blt({ memory, dest, src, srcRect, flags: DDBLT_ROP, fx }), DDERR_INVALIDRECT);
+    }
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx }), 0);
+    // Both fills on a colour surface: the colour fill is made.
+    assert.equal(blt({ memory, dest, flags: DDBLT_COLORFILL | DEPTHFILL, fx }), 0);
+    assert.equal(readPixel(memory, dest, 2, 2), 0x11223344);
+    // A depth buffer takes a raster fill, and refuses a colour fill whatever else is asked.
+    const depth = { ...surface(BASE + 0x200, 2, 2, 2), depth: true };
+    assert.equal(blt({ memory, dest: depth, flags: DDBLT_ROP, fx: { rop: ROP.WHITENESS } }), 0);
+    assert.deepEqual(grid(memory, depth), [[0xffff, 0xffff], [0xffff, 0xffff]]);
+    assert.equal(blt({ memory, dest: depth, flags: DDBLT_COLORFILL | DEPTHFILL, fx }),
+        DDERR_INVALIDPARAMS);
+});
