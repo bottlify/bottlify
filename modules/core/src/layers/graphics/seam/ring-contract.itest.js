@@ -916,6 +916,25 @@ test('Direct3D 8: every call the command ring answers for in the guest is one th
                 { label: 'a target and a depth surface', args: ['target', 'depth'],
                     setup: offscreen },
                 { label: 'a target and none', args: ['target', 0], setup: offscreen },
+                // Wine's d3d8 test_depth_stencil_size.
+                { label: 'a depth surface smaller than the target', args: ['target', 'small'],
+                    setup: (device, made)=>{
+                        offscreen(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateDepthStencilSurface(16, 8, D3DFMT_D24X8, out),
+                            D3D_OK);
+                        made.small = out.surface;
+                    } },
+                { label: 'a depth surface larger than the target', args: ['target', 'large'],
+                    setup: (device, made)=>{
+                        offscreen(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateDepthStencilSurface(32, 32, D3DFMT_D24X8, out),
+                            D3D_OK);
+                        made.large = out.surface;
+                    } },
                 { label: 'a target another device made', args: ['targetElsewhere', 0],
                     host: true, setup: (device, made)=>{
                         offscreen(device, made);

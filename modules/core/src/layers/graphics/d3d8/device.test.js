@@ -1466,6 +1466,39 @@ test('a handle from one shader kind is not a handle of the other', ()=>{
     assertFullyReleased(device);
 });
 
+test('an image surface of a side of zero is refused', ()=>{
+    // Wine's d3d8 test_surface_dimensions.
+    const device = createDevice();
+    assert.equal(device.CreateImageSurface(0, 1, D3DFMT.A8R8G8B8, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.CreateImageSurface(1, 0, D3DFMT.A8R8G8B8, {}), D3DERR_INVALIDCALL);
+    assert.equal(device.release(), 0);
+});
+
+test('a depth surface smaller than its target is not set with it', ()=>{
+    // Wine's d3d8 test_depth_stencil_size: the target given, or the one kept.
+    const device = createDevice();
+    /** @param {number} side @param {boolean} [depth] */
+    const make = (side, depth = false)=>{
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(depth
+            ? device.CreateDepthStencilSurface(side, side, D3DFMT.D24X8, out)
+            : device.CreateRenderTarget(side, side, D3DFMT.A8R8G8B8, false, out), D3D_OK);
+        return out.surface;
+    };
+    const target = make(64);
+    const small = make(32, true);
+    const large = make(128, true);
+    assert.equal(device.SetRenderTarget(target, small), D3DERR_INVALIDCALL);
+    assert.equal(device.SetRenderTarget(target, large), D3D_OK);
+    assert.equal(device.SetRenderTarget(null, small), D3DERR_INVALIDCALL, 'the kept target');
+    assert.equal(device.SetRenderTarget(null, large), D3D_OK);
+    for (const surface of [target, small, large])
+    {
+        surface.release();
+    }
+});
+
 // --- CopyRects, which D3D9 does not have ---
 
 test('CopyRects refuses a source the program holds locked', ()=>{

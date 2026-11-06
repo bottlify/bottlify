@@ -2887,7 +2887,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          */
         SetRenderTarget(target, depth){
             const hr = targetPairResult(
-                target ? describe(target) : null, depth ? describe(depth) : null);
+                target ? describe(target) : null, depth ? describe(depth) : null,
+                describe(target ?? renderTarget));
             if (hr !== D3D_OK)
             {
                 return hr;
@@ -3137,7 +3138,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ surface?: any }} out
          */
         CreateImageSurface(width, height, format, out){
-            if (!blockAligned(format, width, height))
+            // A side of zero is no surface (Wine's d3d8 test_surface_dimensions).
+            if (width === 0 || height === 0 || !blockAligned(format, width, height))
             {
                 return D3DERR_INVALIDCALL;
             }

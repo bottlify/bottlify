@@ -108,6 +108,7 @@ const first = (kind, length)=>{
  * @property {{ arg: number, mask: number, nullable?: boolean }
  *     | readonly { arg: number, mask: number, nullable?: boolean }[]} [surfaceUsage]
  * @property {{ buffer: number, start: number, count: number }} [vertexRange]
+ * @property {{ target: number, depth: number }} [depthCovers]
  * @property {number} [token]
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
@@ -495,10 +496,12 @@ export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...TEXTURE_S
     // Both targets: a surface made to be one, and a depth surface or none. The
     // block's viewport becomes the target's whole and Clear's checks learn the
     // depth surface (`renderTargetMirror`, `depthStencilMirror`); keeping the
-    // bound target, a null one, is the host's.
+    // bound target, a null one, is the host's, and so is a depth surface
+    // smaller than the target (Wine's d3d8 test_depth_stencil_size).
     SetRenderTarget: { args: 2, objects: [0, 1],
         surfaceUsage: [{ arg: 0, mask: D3DUSAGE.RENDERTARGET },
             { arg: 1, mask: D3DUSAGE.DEPTHSTENCIL, nullable: true }],
+        depthCovers: { target: 0, depth: 1 },
         make: (d, c)=>d.SetRenderTarget(c.object(), c.object()) },
     // A format is always taken; a shader's handle only while the shader lives.
     SetVertexShader: { args: 1, validated: { arg: 0, when: D3DFVF_RESERVED0 },

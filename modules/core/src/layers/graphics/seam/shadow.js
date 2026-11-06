@@ -2568,6 +2568,26 @@ function commandChecks(shape, at){
             { jcc: 0x74, to: 'out', near: true },                // jz out
             { label: `usable${index}` });
     });
+    if (shape.depthCovers)
+    {
+        // Past the usage checks: both have a block, the depth surface when
+        // there is one.
+        const { target, depth } = shape.depthCovers;
+        for (const side of [SURFACE.DESC + 24, SURFACE.DESC + 28])
+        {
+            parts.push(
+                [0x8b, 0x44, 0x24, at(depth)],                   // mov eax, [esp+depth]
+                [0x85, 0xc0],                                    // test eax, eax
+                { jcc: 0x74, to: 'covered', near: true },        // jz covered: none
+                [0x8b, 0x40, 0x04],                              // mov eax, [eax+4]: its block
+                [0x8b, 0x54, 0x24, at(target)],                  // mov edx, [esp+target]
+                [0x8b, 0x52, 0x04],                              // mov edx, [edx+4]: its block
+                [0x8b, 0x52, side],                              // mov edx, [edx+side]
+                [0x39, 0x50, side],                              // cmp [eax+side], edx
+                { jcc: 0x72, to: 'out', near: true });           // jb out: smaller
+        }
+        parts.push({ label: 'covered' });
+    }
     if (shape.token !== undefined)
     {
         parts.push(
@@ -2683,6 +2703,9 @@ function commandChecks(shape, at){
  *     argument the device takes only as a surface whose usage has a bit of `mask`, read
  *     from the surface's block (`SURFACE`, the word after its interface): a surface
  *     with no block is the host's, and so is a null one unless `nullable`; or several
+ * @property {{ target: number, depth: number }} [depthCovers]  a depth surface
+ *     argument, when there is one, the device takes only as large as the target
+ *     argument in both sides, read from their blocks (`SURFACE`)
  * @property {number} [token]  an argument the device takes only as the token of a
  *     state block it holds (`SHADOW.STATE_BLOCKS`): with `stale`, the block's
  *     apply is one a draw waits for the host after when the block holds what
@@ -5842,6 +5865,16 @@ function recordCommand(m, shape, mirror, block, a){
         if (surface === 0 ? !usage.nullable
             : owner === 0 || m.u32(owner + SURFACE.OWNER) !== block
                 || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+        {
+            return undefined;
+        }
+    }
+    if (shape.depthCovers && a[shape.depthCovers.depth] !== 0)
+    {
+        const depth = m.u32(a[shape.depthCovers.depth] + 4);
+        const target = m.u32(a[shape.depthCovers.target] + 4);
+        if ([24, 28].some(side=>m.u32(depth + SURFACE.DESC + side)
+            < m.u32(target + SURFACE.DESC + side)))
         {
             return undefined;
         }
