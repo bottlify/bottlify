@@ -1878,4 +1878,14 @@ test('blocks in the program\'s memory are named by their whole size, never a pit
     assert.equal(request(PITCH, 32).hr, DDERR_INVALIDPARAMS, 'blocks have no pitch');
     assert.equal(request(PITCH | LINEARSIZE, 32).hr, DDERR_INVALIDPARAMS);
     assert.equal(request(0, 32).hr, DDERR_INVALIDPARAMS, 'a size has to be named');
+    // Through IDirectDraw4 a pitch names them, whatever it says.
+    const older = (/** @type {number} */ flags, /** @type {number} */ size)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | 0x800 | flags,
+        caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE,
+        width: 8, height: 8, pixelFormat: dxt1, pitch: size, surfacePointer: 0x7000 },
+    { version: 4 }).hr;
+    assert.equal(older(PITCH, 0), DD_OK);
+    assert.equal(older(PITCH | LINEARSIZE, 32), DD_OK);
+    assert.equal(older(LINEARSIZE, 31), DDERR_INVALIDPARAMS);
+    assert.equal(older(0, 32), DDERR_INVALIDPARAMS);
 });

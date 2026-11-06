@@ -2245,13 +2245,16 @@ export function createDirectDraw(options = {}){
             {
                 return { hr: DDERR_INVALIDPARAMS, surface: null };
             }
-            // Blocks are named by their whole size, never a pitch: dwLinearSize
-            // shares lPitch's place, and holds every block row (Wine's
-            // test_block_formats_creation).
+            // Blocks are named by their whole size: dwLinearSize shares
+            // lPitch's place, and holds every block row. IDirectDraw7 refuses
+            // a pitch for them; IDirectDraw4 takes one, whatever its value
+            // (Wine's test_block_formats_creation, ddraw4 and ddraw7).
             if (blockRow !== null)
             {
-                if ((request.flags & (DDSD_PITCH | DDSD_LINEARSIZE)) !== DDSD_LINEARSIZE
-                    || (given >>> 0) < blockRow * Math.ceil(height / 4))
+                const pitched = (request.flags & DDSD_PITCH) !== 0;
+                const sized = (request.flags & DDSD_LINEARSIZE) !== 0
+                    && (given >>> 0) >= blockRow * Math.ceil(height / 4);
+                if (version === 7 ? pitched || !sized : !pitched && !sized)
                 {
                     return { hr: DDERR_INVALIDPARAMS, surface: null };
                 }
