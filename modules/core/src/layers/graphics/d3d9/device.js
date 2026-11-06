@@ -87,7 +87,8 @@ import {
     fvfOfElements, validateElements,
 } from './declaration.js';
 import {
-    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
+    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, parseShader, validateShader,
+    versionOf,
 } from './shader.js';
 import {
     D3DSBT, applyRecord, captureRecord, createStateBlock, emptyRecord, fillRecord,
@@ -4930,11 +4931,25 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         if (hr !== D3D_OK)
         {
             const version = versionOf(tokens[0]);
+            // Read whole and of a version this device runs, it was refused for
+            // a constant register past its version's last.
+            const past = version !== null && version.kind === kind && !parseShader(tokens).error
+                && (version.major < supported.major || (version.major === supported.major
+                    && version.minor <= supported.minor) || (version.major === 2
+                    && version.minor === 1 && supported.major >= 2));
             report(`create:${kind}:${version ? `${version.major}.${version.minor}` : 'bad'}`,
-                version && version.kind === kind
+                past
                     ? `a ${kind} shader of version ${version.major}.${version.minor} was refused:`
-                        + ` this device advertises ${supported.major}.${supported.minor}`
-                    : `a ${kind} shader was refused: its bytecode could not be read`);
+                        + ' it names a constant register past the version\'s last'
+                        + (kind === SHADER_KIND.VERTEX && (softwareVertexProcessing
+                            || mixedVertexProcessing)
+                            ? ', which a software-processing device has on Windows (decision A86)'
+                            : '')
+                    : version && version.kind === kind
+                        ? `a ${kind} shader of version ${version.major}.${version.minor} was`
+                            + ` refused: this device advertises ${supported.major}.`
+                            + `${supported.minor}`
+                        : `a ${kind} shader was refused: its bytecode could not be read`);
             return hr;
         }
         out.shader = createShader({ kind, tokens, count: explicitCount() });
@@ -4954,6 +4969,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const limit = file[which].length / width;
         if (!values || start < 0 || n < 0 || start + n > limit)
         {
+            if (file === vertexConstants && (softwareVertexProcessing || mixedVertexProcessing)
+                && values && start >= 0 && n >= 0)
+            {
+                report('swvp-constants', 'vertex shader constants past the hardware\'s were set'
+                    + ' on a software-processing device, which has 8192 on Windows: refused'
+                    + ' (decision A86)');
+            }
             return D3DERR_INVALIDCALL;
         }
         if (!recording)
