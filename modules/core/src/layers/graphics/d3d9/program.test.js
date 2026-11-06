@@ -2111,13 +2111,12 @@ test('a shader draw into a texture bound to its own sampler samples a copy taken
 });
 
 test('table fog through a vertex shader without oFog runs over z or w as the projection says,'
-    + ' or over z by later rules', async()=>{
+    + ' by either rules', async()=>{
     // A program of the shader-model-2 generation sets an eye-unit range for
     // its shader draws (Far Cry's R300 path: LINEAR 30..350, no oFog) and
     // leaves a perspective projection set for its fixed ones: its drivers
-    // took the curve over w then, as the fixed function does. Later drivers
-    // and Wine's fog rules take it over z whatever the projection
-    // (fog_with_shader_test), which is `driverRules: 'current'`.
+    // took the curve over w then, as the fixed function does, and Windows
+    // still does (Wine's d3d9 test_fog, the shader rows without ortho).
     /**
      * @param {'legacy' | 'current' | undefined} driverRules
      * @param {number[]} projection
@@ -2148,7 +2147,8 @@ test('table fog through a vertex shader without oFog runs over z or w as the pro
     assert.deepEqual(await rangeOf(undefined, perspective), [30, 350, 1, 0], 'over w, density 1');
     assert.deepEqual(await rangeOf('legacy', perspective), [30, 350, 1, 0]);
     assert.deepEqual(await rangeOf('legacy', affine), [30, 350, 1, 1], 'over z');
-    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 1]);
+    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 0]);
+    assert.deepEqual(await rangeOf('current', affine), [30, 350, 1, 1]);
 });
 
 test('table fog through a shader that writes oFog runs over it, or over the depth by later rules',

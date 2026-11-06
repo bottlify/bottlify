@@ -37,6 +37,12 @@ const POSITION = Object.freeze({
     XYZB5: 0x00e,
 });
 
+/**
+ * Direct3D 9's position of four floats (D3DFVF_XYZW), which the field above
+ * cannot hold: XYZ with a bit of its own.
+ */
+const XYZW_BIT = 0x4000;
+
 export const FVF = Object.freeze({
     RESERVED0: 0x001,
     ...POSITION,
@@ -106,7 +112,10 @@ export function decodeFvf(fvf){
     };
 
     const preTransformed = position === POSITION.XYZRHW;
-    add('position', preTransformed ? 'float32x4' : 'float32x3', preTransformed ? 16 : 12);
+    // An untransformed w is stepped over: the fixed function takes it as one,
+    // which the matrices then scale (Wine's d3d9 test_ffp_w, test_fog).
+    const fourth = preTransformed || (position === POSITION.XYZ && (fvf & XYZW_BIT) !== 0);
+    add('position', preTransformed ? 'float32x4' : 'float32x3', fourth ? 16 : 12);
 
     // Blend weights sit immediately after the position and share its field:
     // XYZB1 through XYZB5 carry one to five floats.

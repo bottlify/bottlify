@@ -400,11 +400,15 @@ projection, w under a perspective one, by the projection set on the device. Far 
 writes no oFog and sets LINEAR 30 to 350 in eye units for its shader draws, the range its NV2x
 path computes into oFog itself; over z, which never leaves 0..1, its world was drawn without
 fog and its far forest dark (reports 2026-10-12, Chrome on macOS). A program written for later
-drivers, which take the curve over z whatever the shader wrote and whatever the projection
-(Wine's `fog_with_shader_test`, measured on a GeForce 7600GS), runs with the graphics setting
+drivers, which take the curve over the depth whatever the shader wrote (Wine's
+`fog_with_shader_test`, measured on a GeForce 7600GS; `test_fog`), runs with the graphics setting
 `driverRules: 'current'` (docs/core/configuration.md); `'legacy'` is the default, since the
-programs that leave fog to this stage at all are of the earlier generations. *2026-10-10,
-the case without oFog 2026-10-12.*
+programs that leave fog to this stage at all are of the earlier generations. Either way the depth
+is z or w as the projection says, the projection set on the device even under a shader (Wine's
+d3d9 `test_fog`), and the z is the vertex's own, not the depth with the device's bias in it:
+Windows answers either the vertex's output z or the pixel's z with D3DRS_DEPTHBIAS in depth
+units, and WebGPU's bias is in steps of a format the program did not choose. *2026-10-10,
+the case without oFog 2026-10-12, the depth's z and w 2026-11-06.*
 
 **A44. Under a vertex shader, a 1.0 to 1.3 pixel shader's projective read divides by w.**
 D3DTTFF_PROJECTED on a stage a `ps_1_1` to `ps_1_3` reads divides that stage's coordinates

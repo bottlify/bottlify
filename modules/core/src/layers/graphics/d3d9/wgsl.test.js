@@ -1152,7 +1152,12 @@ test('a vertex shader carries fog to the pixel stage: its oFog, or all fog witho
         `out.oFog = vec4f(out.oFog.x, c[${tableWrites.fogRegister}].rgb);`);
     assertLine(tableWrites.wgsl, `out.o${FOG_RANGE_LOCATION} = vec4f(c[${
         /** @type {number} */ (tableWrites.fogRegister) + 1}].xyz, 2.0);`);
-    assertLine(table.wgsl, `out.oFog = vec4f(0.0, c[${table.fogRegister}].rgb);`);
+    // Without one it carries its z times w for the depth, which the pixel
+    // stage takes back by the position's 1/w.
+    assertLine(table.wgsl,
+        `out.oFog = vec4f(out.oPos.z * out.oPos.w, c[${table.fogRegister}].rgb);`);
+    assert.equal(table.fogOver, undefined);
+    assert.equal(tableWrites.fogOver, true);
     // Later drivers take it over the depth all the same.
     const later = translateShader(shader([
         op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 1, 0x1), src(REGISTER.CONST, 0),
@@ -1323,8 +1328,9 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assert.ok(!specular.wgsl.includes('fogFactorOf'));
 
-    // Table fog is the pixel's: the stage carries the colour, and the curve's
-    // range with the affine flag beside it, flat, for the pixel shader.
+    // Table fog is the pixel's: the stage carries its z times w for the
+    // depth, the colour, and the curve's range with the affine flag beside
+    // it, flat, for the pixel shader.
     const table = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
     ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
@@ -1333,7 +1339,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(table.wgsl, `@location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
         + ` o${FOG_RANGE_LOCATION}: vec4f,`);
     assertLine(table.wgsl, `out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
-    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(0.0,`
+    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(out.oPos.z * out.oPos.w,`
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
 });
 
@@ -1394,7 +1400,7 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     assertLine(table.wgsl, 'return clamp(exp(-fogRange.z * dist), 0.0, 1.0);');
     assertLine(table.wgsl, 'fogRange = in.fogRange;');
     assertLine(table.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(fogFactorOf('
-        + 'select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0), in.fog.x,'
+        + 'select(select(d3dRcp(in.vPos.w), in.fog.x * in.vPos.w, fogRange.w != 0.0), in.fog.x,'
         + ' fogRange.w > 1.5)), 0.0, 1.0)), oC0.a);');
 });
 

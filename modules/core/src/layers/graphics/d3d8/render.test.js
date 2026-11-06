@@ -4287,8 +4287,10 @@ test('recorded: the fog interpolation scene fogs as Windows does in every mode',
             if (state.fogSource === FOG_SOURCE.TABLE)
             {
                 assert.ok(code.includes('fogFactorOf(select(1.0 / input.position.w,'
-                    + ' input.position.z, uniforms.fogFactors.w != 0.0))'));
-                // The pixel's z is the interpolated z; its w is one here.
+                    + ' input.fogAmount * input.position.w, uniforms.fogFactors.w != 0.0))'));
+                assert.ok(code.includes('out.fogAmount = out.position.z * out.position.w;'));
+                // The vertex's z times w, back by 1/w: the interpolated z;
+                // its w is one here.
                 return fogFactor(state.fogMode, fog[3] !== 0 ? t : 1, range);
             }
             if (state.fogSource === FOG_SOURCE.VERTEX)

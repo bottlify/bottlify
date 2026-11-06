@@ -7367,16 +7367,22 @@ export function createRenderer(options){
                 stage.texCoordIndex & COORD_SET_MASK)))]
             : [];
         const planes = clipStateOf(clippingOf(model, { clipDistances }));
+        // Table fog over the depth needs the shader's z beside its oFog: the
+        // translation carries both as it does for a pixel shader.
+        const table = fogOf(model, fogApplied).source === FOG_SOURCE.TABLE;
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
         const vertex = translationOf(/** @type {object} */ (program.vertexShader),
             `vs:${shapes}${flat ? '|flat' : ''}${points
                 ? `|p${points.sprite ? 's' : ''}w${spriteSets.join(',')}` : ''}`
-                + (planes ? `|k${planes.count}${planes.distances ? 'd' : 'v'}` : ''),
+                + (planes ? `|k${planes.count}${planes.distances ? 'd' : 'v'}` : '')
+                + (table ? `|f${FOG_SOURCE.TABLE}${tableFogOverDepth ? '|zfog' : ''}` : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                 { inputs: layout.shapes, flatColours: flat,
                     ...(points ? { points, alsoWrite: spriteSets } : {}),
-                    ...(planes ? { clip: planes } : {}) }));
+                    ...(planes ? { clip: planes } : {}),
+                    ...(table ? { fogSource: FOG_SOURCE.TABLE } : {}),
+                    ...(table && tableFogOverDepth ? { tableFogOverDepth } : {}) }));
         if (vertex.error)
         {
             skip('program');
@@ -7406,7 +7412,8 @@ export function createRenderer(options){
             vertexShader: program.vertexId,
             pixelShader: -1,
         };
-        const pixel = fixedFragmentStage(state, vertex.outputs, { tableFogOverDepth });
+        const pixel = fixedFragmentStage(state, vertex.outputs,
+            { tableOverFog: vertex.fogOver === true });
         counters.prepared.built++;
         reportWrap(model);
         return {
@@ -7586,12 +7593,11 @@ export function createRenderer(options){
             // What the fixed vertex stage reads for the same: the colour,
             // then the curve's range, as `hybridVertexBlocks` writes them.
             // A curve the shader's oFog does not run (decisions.md A43) runs
-            // over the depth: by the drivers of the shader-model-1 and -2
-            // generations, z or w as the fixed projection says, as the fixed
-            // function's -- a program of theirs sets a range in eye units
-            // for its shader draws and leaves the projection set for its
-            // fixed ones --, and by later ones and Wine's fog rules (its
-            // fog_with_shader_test) over z, whatever the projection.
+            // over the depth, z or w as the fixed projection says, as the
+            // fixed function's: a program sets a range in eye units for its
+            // shader draws and leaves the projection set for its fixed ones,
+            // and Windows takes w through a shader under a perspective
+            // projection (Wine's d3d9 test_fog).
             const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
             const fogColour = colorToFloats(rs('FOGCOLOR'));
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
@@ -7600,7 +7606,7 @@ export function createRenderer(options){
                 dwordToFloat(rs('FOGSTART')),
                 dwordToFloat(rs('FOGEND')),
                 dwordToFloat(rs('FOGDENSITY')),
-                tableFogOverDepth || isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
+                isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
             ], (vertex.fogRegister + 1) * 4);
         }
         // The user planes, as set: a vertex shader's are in clip space.

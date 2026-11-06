@@ -288,6 +288,9 @@ export function varyingLocation(usage, index){
  * @property {number} [viewportRegister]
  * @property {number} [fogRegister]  A vertex shader carrying fog: the fog colour's
  *           register, with the table curve's range in the one after it.
+ * @property {boolean} [fogOver]  A vertex shader under table fog whose oFog
+ *           the curve runs over (decisions.md A43); without it the amount
+ *           carried is the shader's z times its w, for the depth.
  *     A vertex shader's: the float register past the ones it reads, where the
  *     viewport's scale is carried for the half-pixel move of its position.
  * @property {number} [alphaRegister]  A pixel shader under the alpha test:
@@ -1808,6 +1811,7 @@ export function translateShader(parsed, options = {}){
     let viewportRegister;
     /** @type {number | undefined} */
     let fogRegister;
+    let fogOver = false;
     /** @type {number | undefined} */
     let pointRegister;
     /** A pixel shader under the alpha test: the reference's register. @type {number | undefined} */
@@ -1930,16 +1934,21 @@ export function translateShader(parsed, options = {}){
             {
                 emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
             }
-            const amount = wrote ? 'out.oFog.x' : '0.0';
+            // Table fog over the depth carries the shader's z times its w
+            // in the amount's place (`tableFog` in the fixed function).
+            const table = carried === FOG_SOURCE.TABLE;
+            fogOver = table && wrote && options.tableFogOverDepth !== true;
+            const amount = table && !fogOver ? 'out.oPos.z * out.oPos.w'
+                : wrote ? 'out.oFog.x' : '0.0';
             body.push(`    out.oFog = vec4f(${amount}, c[${fogRegister}].rgb);`);
-            if (carried === FOG_SOURCE.TABLE)
+            if (table)
             {
                 outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
                     + ` o${FOG_RANGE_LOCATION}: vec4f,`);
                 outputs.push(FOG_RANGE_LOCATION);
                 // A w of 2 tells the pixel stage the curve runs over the
                 // shader's oFog rather than the depth (decisions.md A43).
-                const overFog = wrote && options.tableFogOverDepth !== true;
+                const overFog = fogOver;
                 body.push(`    out.o${FOG_RANGE_LOCATION} = ${overFog
                     ? `vec4f(c[${fogRegister + 1}].xyz, 2.0)` : `c[${fogRegister + 1}]`};`);
             }
@@ -2008,7 +2017,8 @@ export function translateShader(parsed, options = {}){
             // the curve reads its range from a module variable, since a
             // function cannot see the entry point's input.
             const amount = table
-                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0),'
+                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.fog.x * in.vPos.w,'
+                    + ' fogRange.w != 0.0),'
                     + ' in.fog.x, fogRange.w > 1.5))'
                 : 'in.fog.x';
             const fogLines = [
@@ -2164,6 +2174,7 @@ export function translateShader(parsed, options = {}){
         wgsl, entry, inputs, outputs, reads, samplers, constants: declared,
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
         ...(fogRegister === undefined ? {} : { fogRegister }),
+        ...(fogOver ? { fogOver } : {}),
         ...(pointRegister === undefined ? {} : { pointRegister }),
         ...(alphaRegister === undefined ? {} : { alphaRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
@@ -2389,7 +2400,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         const wv = HYBRID_CONSTANTS.WORLD_VIEW;
         const camera = `(mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
             + ` * vec4f(${vertex}, 1.0))`;
-        const amount = fogSource === FOG_SOURCE.TABLE ? '0.0'
+        const amount = fogSource === FOG_SOURCE.TABLE ? 'out.oPos.z * out.oPos.w'
             : vertexFog
                 ? `fogFactorOf(${options.rangeFog ? `length(${camera}.xyz)` : `abs(${camera}.z)`})`
                 : specularAlpha;

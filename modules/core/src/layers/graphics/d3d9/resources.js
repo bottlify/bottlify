@@ -744,7 +744,7 @@ export function createSurface(options){
             // rectangle that cuts one is refused there, and taken in every
             // other pool (test_surface_blocks).
             const block = FORMAT_INFO[options.format]?.blockSize ?? 1;
-            if (rect && block > 1
+            if (rect && block > 1 && options.pool === D3DPOOL.DEFAULT
                 && options.format !== D3DFMT.ATI1 && options.format !== D3DFMT.ATI2
                 && ((rect.left | rect.top) % block !== 0
                     || (rect.right % block !== 0 && rect.right !== options.width)

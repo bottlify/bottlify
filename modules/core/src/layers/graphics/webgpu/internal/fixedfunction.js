@@ -862,12 +862,14 @@ export function generateFixedFunction(state, layout){
         }
     }
 
-    // Table fog is the pixel's own and needs no varying. Vertex fog on a
-    // pre-transformed vertex is the program's, in its specular alpha.
+    // Vertex fog on a pre-transformed vertex is the program's, in its
+    // specular alpha. Table fog is the pixel's own, over the vertex's depth
+    // the same varying carries (`tableFog`).
     const fogSource = fogSourceOf(state);
     const vertexFog = fogSource === FOG_SOURCE.VERTEX && !layout.preTransformed;
     const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
-    if (carriedFog)
+    const fogVarying = carriedFog || fogSource === FOG_SOURCE.TABLE;
+    if (fogVarying)
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
     }
@@ -877,8 +879,8 @@ export function generateFixedFunction(state, layout){
     const clip = layout.preTransformed ? null : clipStateOf(state);
     const clipped = clip ? clipOutputs(clip,
         plane=>`dot(uniforms.clipPlane[${plane}], vec4f(vertex.position, 1.0))`,
-        location + (carriedFog ? 1 : 0)) : null;
-    const discarded = clip ? clipInputs(clip, 'input', location + (carriedFog ? 1 : 0)) : null;
+        location + (fogVarying ? 1 : 0)) : null;
+    const discarded = clip ? clipInputs(clip, 'input', location + (fogVarying ? 1 : 0)) : null;
 
     const inputs = layout.attributes
         .map(attribute=>`    @location(${attribute.shaderLocation}) `
@@ -921,11 +923,17 @@ export function generateFixedFunction(state, layout){
     // fade a two-dimensional overlay by how deep the scene behind it happens
     // to be.
     const cameraPoint = '(uniforms.worldView * vec4f(vertex.position, 1.0))';
-    const fogAmount = !carriedFog ? []
+    // The z before it is held inside the range below: Direct3D fogs by the
+    // vertex's own.
+    const carriedAmount = !carriedFog ? []
         : vertexFog
             ? [`    out.fogAmount = fogFactorOf(${state.rangeFog
                 ? `length(${cameraPoint}.xyz)` : `abs(${cameraPoint}.z)`});`]
             : [`    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`];
+    const fogAmount = fogSource === FOG_SOURCE.TABLE
+        ? [`    out.fogAmount = ${layout.preTransformed ? 'vertex.position.z' : 'out.position.z'}`
+            + ' * out.position.w;']
+        : carriedAmount;
 
     const lightCount = lighting === null ? 0 : lighting.lights.length;
     // A pre-transformed vertex is not clipped by its depth, and with no depth
@@ -1089,17 +1097,26 @@ function transformedGeneration(index, coordinate){
 }
 
 /**
- * Table fog's factor for the pixel, from the fragment position builtin: the
- * curve over its depth, which is its z when the projection is affine and its
- * w otherwise -- the reciprocal of the interpolated 1/w the builtin carries,
- * which for a pre-transformed vertex is its RHW. The choice is a uniform
+ * Table fog's factor for the pixel: the curve over its depth, which is its w
+ * under a perspective projection -- the reciprocal of the interpolated 1/w
+ * the position builtin carries, which for a pre-transformed vertex is its
+ * RHW -- and its z under an affine one. The choice is a uniform
  * (`fogFactors.w`), so a projection change compiles nothing.
  *
+ * The z is the vertex's own, carried as z times w and taken back by the
+ * builtin's 1/w, which interpolates it across the screen as the depth is,
+ * and not the builtin's z: the device's depth bias is in that, in the steps
+ * of whatever depth format the device chose, where Direct3D 9's DEPTHBIAS
+ * is in depth units -- a fog that moved with a format nobody asked for.
+ * Windows answers either z with the bias in depth units or the vertex's
+ * output z without it (Wine's d3d9 test_fog); this is the second.
+ *
  * @param {string} position  the fragment's `@builtin(position)`
+ * @param {string} depth  the varying carrying the vertex's z times its w
  * @returns {string}
  */
-function tableFog(position){
-    return `fogFactorOf(select(1.0 / ${position}.w, ${position}.z,`
+export function tableFog(position, depth){
+    return `fogFactorOf(select(1.0 / ${position}.w, ${depth} * ${position}.w,`
         + ' uniforms.fogFactors.w != 0.0))';
 }
 
@@ -1115,11 +1132,12 @@ function tableFog(position){
  * @param {string} [position]  The fragment's position builtin, for table fog.
  * @param {string} [specular]  What a stage reads the specular colour as.
  * @param {boolean} [sprite]  Every carried set is the point sprite's `input.sprite`.
- * @param {string} [table]  Table fog's factor, the depth's by default.
+ * @param {string} [table]  Table fog's factor, the depth's by default, carried
+ *     in `input.fogAmount`.
  */
 function fragmentBody(state, specularEnable, generated = state.stages.map(
     stage=>generates(stage.texCoordIndex)), position = 'input.position',
-specular = 'input.specular', sprite = false, table = tableFog(position))
+specular = 'input.specular', sprite = false, table = tableFog(position, 'input.fogAmount'))
 {
     const wide = wideSets(state);
     /**
@@ -1256,8 +1274,9 @@ specular = 'input.specular', sprite = false, table = tableFog(position))
  *
  * @param {import('./pipeline.js').PipelineState} state
  * @param {readonly number[]} written  The vertex stage's varying locations.
- * @param {{ tableFogOverDepth?: boolean }} [options]  Table fog over the
- *     depth even where the shader wrote oFog, as later drivers take it.
+ * @param {{ tableOverFog?: boolean }} [options]  Table fog over the shader's
+ *     oFog (`fogOver` of its translation, decisions.md A43); otherwise over
+ *     the depth, which the shader carries as z times w in the same varying.
  * @returns {{ wgsl: string, entry: string, samplers: { index: number, type: string }[],
  *     inputs: never[], outputs: never[], reads: number[], constants: number,
  *     error: string | null }}
@@ -1302,12 +1321,12 @@ export function fixedFragmentStage(state, written, options = {}){
     // fogged whole (Wine's d3d8 fog_special_test).
     const fogSource = fogSourceOf(state);
     const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
-    // Table fog runs its curve over the shader's oFog when it wrote one, and
-    // over the depth otherwise: the fixed projection says nothing of the
-    // shader's w (decisions.md, table fog through a vertex shader).
-    const tableOverFog = fogSource === FOG_SOURCE.TABLE && has(10)
-        && options.tableFogOverDepth !== true;
-    if ((carriedFog || tableOverFog) && has(10))
+    // Table fog runs its curve over the shader's oFog when it wrote one
+    // (decisions.md A43), and over the depth otherwise, z or w as the fixed
+    // projection says: the shader carries its z times w where the oFog goes.
+    const table = fogSource === FOG_SOURCE.TABLE;
+    const tableOverFog = table && has(10) && options.tableOverFog === true;
+    if ((carriedFog || table) && has(10))
     {
         fields.push('    @location(10) fog: vec4f,');
     }
@@ -1342,7 +1361,10 @@ fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
 ${fragmentBody(state, state.specularEnable === true, [], 'in.position', undefined, false,
-        tableOverFog ? 'fogFactorOf(in.fog.x)' : 'fogFactorOf(in.position.z)')}${
+        tableOverFog ? 'fogFactorOf(in.fog.x)'
+            : table && has(10) ? tableFog('in.position', 'in.fog.x')
+                : 'fogFactorOf(select(1.0 / in.position.w, in.position.z,'
+                    + ' uniforms.fogFactors.w != 0.0))')}${
     discarded.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
 }

@@ -909,14 +909,19 @@ test('table fog is the pixel\'s: the curve over its z or its w, in the fragment 
     // Wine's d3d9 test_fog_interpolation draws a quad whose z runs from 0 to 1
     // under table EXP fog and finds the middle at the curve's value there,
     // not at the mean of the two ends; test_fog has the depth be z under an
-    // affine projection and w otherwise, which the block's fog row says.
+    // affine projection and w otherwise, which the block's fog row says. The
+    // z is the vertex's, carried times its w and taken back by the
+    // position's 1/w: the position's own z has the device's depth bias in
+    // it, in the steps of a format Direct3D 9's DEPTHBIAS does not count in.
     const code = generate(baseState({
         fogMode: D3DFOG.EXP, fogSource: FOG_SOURCE.TABLE,
     })).code;
     const fragment = code.slice(code.indexOf('@fragment'));
     assert.ok(fragment.includes('clamp(fogFactorOf(select(1.0 / input.position.w,'
-        + ' input.position.z, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'), fragment);
-    assert.doesNotMatch(code, /fogAmount/, 'no factor travels from the vertex');
+        + ' input.fogAmount * input.position.w, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'),
+    fragment);
+    assert.ok(code.includes('out.fogAmount = out.position.z * out.position.w;'));
+    assert.doesNotMatch(fragment, /position\.z/);
     assert.match(code, /exp\(-uniforms\.fogFactors\.z \* dist\)/);
 
     // A pre-transformed vertex is fogged by the same pixel depth -- its z, or
@@ -926,6 +931,8 @@ test('table fog is the pixel\'s: the curve over its z or its w, in the fragment 
         fogMode: D3DFOG.LINEAR, fogSource: FOG_SOURCE.TABLE,
     })).code;
     assert.ok(screen.includes('fogFactorOf(select(1.0 / input.position.w,'));
+    assert.ok(screen.includes('out.fogAmount = vertex.position.z * out.position.w;'),
+        'its z before it is held inside the range');
     assert.doesNotMatch(screen, /specular\.a/);
 });
 
@@ -956,18 +963,18 @@ test('a vertex shader over the fixed pixel stage is fogged by what it wrote, or 
         .includes('input.fogAmount = in.fog.x;'));
     assert.ok(fixedFragmentStage(state({}), [0, 1]).wgsl
         .includes('input.fogAmount = in.v1.a;'));
-    // Table fog runs its curve over the shader's oFog when it wrote one, over
-    // the depth when it did not (decisions.md).
-    const table = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10]).wgsl;
+    // Table fog runs its curve over the shader's oFog when its translation
+    // says so (decisions.md A43), and otherwise over the depth the shader
+    // carried in the same varying, z or w as the projection says (Wine's
+    // d3d9 test_fog).
+    const table = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10],
+        { tableOverFog: true }).wgsl;
     assert.ok(table.includes('@location(10) fog: vec4f,'));
     assert.ok(table.includes('clamp(fogFactorOf(in.fog.x), 0.0, 1.0)'));
     assert.doesNotMatch(table, /fogAmount/);
-    const depth = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1]).wgsl;
-    assert.ok(depth.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
-    assert.doesNotMatch(depth, /in\.fog\b/);
-    const later = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10],
-        { tableFogOverDepth: true }).wgsl;
-    assert.ok(later.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
+    const depth = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10]).wgsl;
+    assert.ok(depth.includes('clamp(fogFactorOf(select(1.0 / in.position.w,'
+        + ' in.fog.x * in.position.w, uniforms.fogFactors.w != 0.0)), 0.0, 1.0)'), depth);
 });
 
 test('a pre-transformed vertex takes its fog factor from the specular alpha', ()=>{
