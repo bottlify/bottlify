@@ -1595,6 +1595,11 @@ test('a device is made on no indexed surface, and its target moves to one in sys
     assert.equal(d3d.createDevice(DEVICE_IDS.HAL, system).hr >>> 0, 0x887602eb,
         'D3DERR_SURFACENOTINVIDMEM');
     assert.equal(d3d.createDevice(DEVICE_IDS.RGB, system).hr >>> 0, 0x80004005, 'E_FAIL');
+    assert.equal(d3d.createDevice(DEVICE_IDS.RGB, video).hr >>> 0, 0x88760091,
+        'in video memory the software rasteriser refuses the format too');
+    const olderVideo = d3d.createDevice(DEVICE_IDS.RGB, video, { legacy: true });
+    assert.equal(olderVideo.hr, D3D_OK, 'where an older interface\'s makes it');
+    olderVideo.device.release();
     const older = d3d.createDevice(DEVICE_IDS.RGB, system, { legacy: true });
     assert.equal(older.hr, D3D_OK, 'an older interface\'s rasteriser makes it');
     older.device.release();

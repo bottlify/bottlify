@@ -306,10 +306,10 @@ function bufferLockFlags(lockFlags){
 /**
  * Why a device cannot be created on a surface, or D3D_OK. Past the caps and
  * the palette DirectDraw asks of any target, an indexed one is drawn by no
- * device here: in video memory its format is refused, in system memory a
- * hardware device wants video memory first, and the software rasteriser of
- * IDirect3D7 fails it while an older interface's makes it (Wine's
- * test_rt_caps, each version).
+ * device here: an older interface's software rasteriser makes one wherever it
+ * is; otherwise in video memory its format is refused, and in system memory
+ * a hardware device wants video memory first while IDirect3D7's software
+ * rasteriser fails it (Wine's test_rt_caps, each version).
  *
  * @param {any} surface
  * @param {boolean} hardware
@@ -326,12 +326,15 @@ export function deviceTargetRefusal(surface, hardware, legacy){
     {
         return hr;
     }
-    if (!hardware)
+    if (!hardware && legacy)
     {
-        return legacy ? D3D_OK : E_FAIL;
+        return D3D_OK;
     }
-    return (surface.caps & DDSCAPS_SYSTEMMEMORY) !== 0
-        ? D3DERR_SURFACENOTINVIDMEM : DDERR_INVALIDPIXELFORMAT;
+    if ((surface.caps & DDSCAPS_SYSTEMMEMORY) === 0)
+    {
+        return DDERR_INVALIDPIXELFORMAT;
+    }
+    return hardware ? D3DERR_SURFACENOTINVIDMEM : E_FAIL;
 }
 
 /**
