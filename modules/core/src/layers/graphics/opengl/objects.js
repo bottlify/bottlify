@@ -206,6 +206,8 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [0x884c, GL.NONE],
     [0x884d, GL.LEQUAL],
     [0x884b, GL.LUMINANCE],
+    // OpenGL 4.6's anisotropy (EXT/ARB_texture_filter_anisotropic): none.
+    [GL.TEXTURE_MAX_ANISOTROPY, 1],
 ]);
 
 /**

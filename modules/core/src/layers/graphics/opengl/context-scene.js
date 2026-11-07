@@ -383,6 +383,7 @@ export function createSceneBuilder(kernel){
                 ? {
                     factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],
                     units: record(GL.POLYGON_OFFSET_UNITS).values[0],
+                    clamp: record(GL.POLYGON_OFFSET_CLAMP).values[0],
                 }
                 : null,
             colourSum: on(GL.COLOR_SUM)

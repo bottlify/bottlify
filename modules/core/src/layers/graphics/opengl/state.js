@@ -322,6 +322,8 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0],
     },
     { query: GL.POLYGON_OFFSET_UNITS, name: 'GL_POLYGON_OFFSET_UNITS', kind: 'float', value: [0] },
+    // OpenGL 4.6's (GL_ARB_polygon_offset_clamp): zero clamps nothing.
+    { query: GL.POLYGON_OFFSET_CLAMP, name: 'GL_POLYGON_OFFSET_CLAMP', kind: 'float', value: [0] },
     { query: GL.RENDER_MODE, name: 'GL_RENDER_MODE', kind: 'enum', value: [GL.RENDER] },
     {
         query: GL.PERSPECTIVE_CORRECTION_HINT, name: 'GL_PERSPECTIVE_CORRECTION_HINT',
@@ -552,6 +554,10 @@ export const DEFAULT_STATE = Object.freeze([
 
     // --- implementation limits ---
     { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [2048] },
+    {
+        query: GL.MAX_TEXTURE_MAX_ANISOTROPY, name: 'GL_MAX_TEXTURE_MAX_ANISOTROPY',
+        kind: 'float', value: [16],
+    },
     {
         query: GL.MAX_CUBE_MAP_TEXTURE_SIZE, name: 'GL_MAX_CUBE_MAP_TEXTURE_SIZE', kind: 'int',
         value: [2048],

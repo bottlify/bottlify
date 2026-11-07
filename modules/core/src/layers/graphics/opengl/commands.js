@@ -285,6 +285,7 @@ const TABLE = {
     glDepthRange: same('dd', 'glDepthRange'),
     glPolygonMode: same('uu', 'glPolygonMode'),
     glPolygonOffset: same('ff', 'glPolygonOffset'),
+    glPolygonOffsetClamp: same('fff', 'glPolygonOffsetClamp'),
     glShadeModel: same('u', 'glShadeModel'),
     glScissor: same('iiii', 'glScissor'),
     glViewport: same('iiii', 'glViewport'),

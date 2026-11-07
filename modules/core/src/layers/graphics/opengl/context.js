@@ -1095,6 +1095,21 @@ export function createGlContext(options = {}){
             }
         },
 
+        /**
+         * glPolygonOffsetClamp (4.6): the offset, no greater in magnitude
+         * than `clamp` when that is not zero.
+         *
+         * @param {number} factor @param {number} units @param {number} clamp
+         */
+        glPolygonOffsetClamp(factor, units, clamp){
+            if (enter('glPolygonOffsetClamp', [factor, units, clamp]))
+            {
+                setState(GL.POLYGON_OFFSET_FACTOR, [factor]);
+                setState(GL.POLYGON_OFFSET_UNITS, [units]);
+                setState(GL.POLYGON_OFFSET_CLAMP, [clamp]);
+            }
+        },
+
         /** @param {number} width */
         glLineWidth(width){
             setPositive('glLineWidth', GL.LINE_WIDTH, width);

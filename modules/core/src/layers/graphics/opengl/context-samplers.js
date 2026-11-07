@@ -43,6 +43,7 @@ const DEFAULTS = Object.freeze(/** @type {[number, number][]} */ ([
     [GL.TEXTURE_MAX_LOD, 1000],
     [TEX.TEXTURE_COMPARE_MODE, GL.NONE],
     [TEX.TEXTURE_COMPARE_FUNC, GL.LEQUAL],
+    [GL.TEXTURE_MAX_ANISOTROPY, 1],
 ]));
 
 /** @typedef {import('./objects.js').SamplerObject} SamplerObject */
@@ -187,9 +188,11 @@ export function installSamplerCalls(context, kernel){
                 sampler.parametersVersion++;
                 return;
             }
-            if (!sampler.parameters.has(parameter) || samplingRefusal(parameter, values[0]))
+            const refusal = sampler.parameters.has(parameter)
+                ? samplingRefusal(parameter, values[0]) : GL.INVALID_ENUM;
+            if (refusal)
             {
-                setError(GL.INVALID_ENUM);
+                setError(refusal);
                 return;
             }
             sampler.parameters.set(parameter, values[0]);

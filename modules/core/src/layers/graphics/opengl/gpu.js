@@ -979,10 +979,19 @@ export function createGpuRenderer(services){
             diverge('a texture WebGPU does not filter (a 32-bit float without'
                 + ' float32-filterable, a depth) was asked a linear filter and is read nearest');
         }
+        // Anisotropy (4.6) is WebGPU's with every filter linear: a linear
+        // pair takes the levels linearly too, which is a filter that
+        // accounts for anisotropy, as the specification leaves it; a nearest
+        // one is sampled as asked, which it allows ("should").
+        const anisotropy = Math.min(16,
+            Math.floor(parameters.get(GL.TEXTURE_MAX_ANISOTROPY) ?? 1));
+        const anisotropic = filtered && anisotropy > 1 && mag.filter === 'linear'
+            && min.filter === 'linear';
         const descriptor = {
             magFilter: filtered ? mag.filter : 'nearest',
             minFilter: filtered ? min.filter : 'nearest',
-            mipmapFilter: filtered ? min.mip ?? 'nearest' : 'nearest',
+            mipmapFilter: anisotropic ? 'linear' : filtered ? min.mip ?? 'nearest' : 'nearest',
+            ...anisotropic ? { maxAnisotropy: anisotropy } : {},
             // A filter without a mipmap reads the base level only.
             lodMaxClamp: min.mip === null ? 0 : 32,
             addressModeU: wrap(GL.TEXTURE_WRAP_S),

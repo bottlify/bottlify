@@ -85,7 +85,7 @@ import {
  * @property {number} viewportHeight  the render target's rows; fragment.position reads it
  * @property {number} colourMask     bits: red 1, green 2, blue 4, alpha 8
  * @property {boolean} [depthClamp]  depth clamped to the range rather than clipped (GL_DEPTH_CLAMP)
- * @property {{ factor: number, units: number } | null} polygonOffset
+ * @property {{ factor: number, units: number, clamp: number } | null} polygonOffset
  * @property {import('./pipeline.js').SceneProgram | null} vertexProgram
  *           the enabled, loaded vertex program; null draws the fixed stage
  * @property {import('./pipeline.js').SceneProgram | null} fragmentProgram
@@ -482,7 +482,10 @@ export function drawKey(state){
         state.frontIsCcw ? 'ccw' : 'cw',
         state.depthClamp ? 'z' : '',
         state.colourMask,
-        state.polygonOffset ? `${state.polygonOffset.factor},${state.polygonOffset.units}` : '-',
+        state.polygonOffset
+            ? [state.polygonOffset.factor, state.polygonOffset.units, state.polygonOffset.clamp]
+                .join(',')
+            : '-',
         state.vertexProgram
             ? `vp${state.vertexProgram.name}.${state.vertexProgram.version}`
             : '-',
@@ -634,7 +637,8 @@ export function sameKeyInputs(a, b){
     }
     const pa = a.polygonOffset;
     const pb = b.polygonOffset;
-    if (pa !== pb && (!pa || !pb || pa.factor !== pb.factor || pa.units !== pb.units))
+    if (pa !== pb && (!pa || !pb || pa.factor !== pb.factor || pa.units !== pb.units
+        || pa.clamp !== pb.clamp))
     {
         return false;
     }
@@ -1509,7 +1513,9 @@ export function drawDescriptor(state){
             // which is what WebGPU's constant bias counts in too.
             depthBias: state.polygonOffset ? Math.round(state.polygonOffset.units) : 0,
             depthBiasSlopeScale: state.polygonOffset ? state.polygonOffset.factor : 0,
-            depthBiasClamp: 0,
+            // GL's clamp (4.6) bounds the sum as WebGPU's does, the same way
+            // for either sign, in depth units.
+            depthBiasClamp: state.polygonOffset?.clamp ?? 0,
         },
         multisample: { count: 1 },
     };

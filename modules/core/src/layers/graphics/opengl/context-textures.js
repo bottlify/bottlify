@@ -193,7 +193,8 @@ export function samplingRefusal(parameter, value){
         || parameter === TEX.TEXTURE_COMPARE_MODE && value !== GL.NONE
             && value !== TEX.COMPARE_REF_TO_TEXTURE
         || parameter === TEX.TEXTURE_COMPARE_FUNC && !COMPARE_FUNCS.has(value)
-        ? GL.INVALID_ENUM : 0;
+        ? GL.INVALID_ENUM
+        : parameter === GL.TEXTURE_MAX_ANISOTROPY && !(value >= 1) ? GL.INVALID_VALUE : 0;
 }
 
 /** @type {Set<number>} */
@@ -1366,9 +1367,10 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (samplingRefusal(parameter, value))
+        const refusal = samplingRefusal(parameter, value);
+        if (refusal)
         {
-            setError(GL.INVALID_ENUM);
+            setError(refusal);
             return;
         }
         if ((parameter === GL.TEXTURE_BASE_LEVEL || parameter === GL.TEXTURE_MAX_LEVEL)

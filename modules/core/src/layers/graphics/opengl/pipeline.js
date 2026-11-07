@@ -160,7 +160,7 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  *           record, present exactly when `stencil` is -- and equal to it whenever
  *           two-sided stencil testing (`GL_STENCIL_TEST_TWO_SIDE_EXT`) is off, per the
  *           extension's "front for all fragments" rule for a disabled test
- * @property {{ factor: number, units: number } | null} polygonOffset   when filled
+ * @property {{ factor: number, units: number, clamp: number } | null} polygonOffset   when filled
  *           polygons are offset
  * @property {boolean} colourSum
  * @property {{ mode: number, frontIsCcw: boolean } | null} cull

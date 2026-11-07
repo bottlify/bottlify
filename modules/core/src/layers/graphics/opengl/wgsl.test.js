@@ -98,7 +98,7 @@ test('every field the descriptor or the shader reads changes the key', ()=>{
         { cull: 'back' },
         { frontIsCcw: false },
         { colourMask: 0x8 },
-        { polygonOffset: { factor: 0, units: -600 } },
+        { polygonOffset: { factor: 0, units: -600, clamp: 0 } },
     ];
     const keys = new Set([base]);
     for (const variant of variants)
@@ -157,8 +157,9 @@ test('two states are the same to sameKeyInputs exactly when their keys are equal
         { cull: 'back' },
         { frontIsCcw: false },
         { colourMask: 0x8 },
-        { polygonOffset: { factor: 0, units: -600 } },
-        { polygonOffset: { factor: 1, units: -600 } },
+        { polygonOffset: { factor: 0, units: -600, clamp: 0 } },
+        { polygonOffset: { factor: 1, units: -600, clamp: 0 } },
+        { polygonOffset: { factor: 1, units: -600, clamp: -0.25 } },
         { viewportHeight: 480 },
         { vertexProgram: vertex },
         { vertexProgram: { ...vertex, version: 2 } },
@@ -298,7 +299,7 @@ test('the descriptor maps GL state onto WebGPU\'s, with the stencil on both face
         cull: 'front',
         frontIsCcw: false,
         colourMask: 0x8,
-        polygonOffset: { factor: 0, units: -600 },
+        polygonOffset: { factor: 0, units: -600, clamp: 0 },
     }));
     assert.deepEqual(descriptor.target.blend.color,
         { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' });
@@ -370,7 +371,7 @@ test('a stencil-shadowed light\'s three passes get the descriptor their state na
             readMask: 0xff, writeMask: 0xff },
         cull: 'front',
         colourMask: 0x0,
-        polygonOffset: { factor: 0, units: 1 },
+        polygonOffset: { factor: 0, units: 1, clamp: 0 },
     });
     const counted = drawDescriptor(volume).depthStencil;
     assert.equal(counted.depthCompare, 'less-equal');
@@ -385,6 +386,9 @@ test('a stencil-shadowed light\'s three passes get the descriptor their state na
     assert.equal(counted.stencilWriteMask, 0xff);
     assert.equal(counted.depthBias, 1);
     assert.equal(counted.depthBiasSlopeScale, 0);
+    assert.equal(counted.depthBiasClamp, 0);
+    assert.equal(drawDescriptor({ ...volume, polygonOffset: { factor: 2, units: 1, clamp: 0.5 } })
+        .depthStencil.depthBiasClamp, 0.5, 'the clamp (4.6) is WebGPU\'s');
     const otherFace = drawDescriptor({ ...volume, cull: 'back',
         stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.DECR,
             readMask: 0xff, writeMask: 0xff } });

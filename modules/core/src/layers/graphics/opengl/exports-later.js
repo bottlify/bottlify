@@ -367,6 +367,9 @@ export function laterEntryPoints(h){
             context.glGetBufferParameterivARB(target >>> 0, pname >>> 0))),
         glPrimitiveRestartIndex: ([index])=>answer(current()?.glPrimitiveRestartIndex(
             index >>> 0)),
+        ...Object.fromEntries(['glPolygonOffsetClamp', 'glPolygonOffsetClampEXT'].map(name=>[name,
+            (/** @type {number[]} */ [factor, units, clamp])=>answer(current()
+                ?.glPolygonOffsetClamp(asFloat(factor), asFloat(units), asFloat(clamp)))])),
 
         // --- sampler objects (3.3) ---
 

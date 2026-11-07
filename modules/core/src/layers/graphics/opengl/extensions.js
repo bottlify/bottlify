@@ -184,6 +184,8 @@ export const GL_EXTENSIONS = Object.freeze({
     GL_EXT_bgra: [],
     GL_EXT_packed_pixels: [],
     GL_EXT_texture_edge_clamp: [],
+    GL_EXT_texture_filter_anisotropic: [],
+    GL_ARB_texture_filter_anisotropic: [],
     GL_SGIS_texture_edge_clamp: [],
     GL_ARB_texture_mirrored_repeat: [],
     GL_EXT_rescale_normal: [],
@@ -382,7 +384,7 @@ export const PENDING_VERSION_FUNCTIONS = Object.freeze((()=>{
  */
 export const UNANNOUNCED_FUNCTIONS = Object.freeze([
     'glGetFramebufferParameterivEXT', 'glNamedFramebufferParameteriEXT',
-    'glGetNamedFramebufferParameterivEXT',
+    'glGetNamedFramebufferParameterivEXT', 'glPolygonOffsetClampEXT',
 ]);
 
 /** The functions each version past 1.1 adds: obtainable, never in the extension string. */

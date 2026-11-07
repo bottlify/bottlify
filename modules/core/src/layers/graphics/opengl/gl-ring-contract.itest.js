@@ -677,6 +677,10 @@ const CASES = {
         { label: 'one and two', args: floats([1, 2]), error: GL.NO_ERROR },
         { label: 'negative', args: floats([-1, -0]) },
     ],
+    glPolygonOffsetClamp: [
+        { label: 'clamped above', args: floats([1, 2, 0.5]), error: GL.NO_ERROR },
+        { label: 'clamped below', args: floats([-1, -2, -0.25]) },
+    ],
     glShadeModel: [
         { label: 'FLAT', args: [GL.FLAT], error: GL.NO_ERROR },
         { label: 'a model there is not', args: [BAD], error: GL.INVALID_ENUM },
