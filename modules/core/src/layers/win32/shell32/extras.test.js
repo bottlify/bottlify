@@ -155,6 +155,9 @@ test('SHGetFolderPathAndSubDir puts the subdirectory under the folder, verified 
         'verified, and not there');
     assert.equal(await call([0, 0x801c, 0, 0, m.put('wine'), out]), 0);
     assert.deepEqual(made, ['C:\\AppData\\wine'], 'made');
+    // A folder that could not be made is the call's failure, not a path to nowhere.
+    table.SHCreateDirectoryExW.handler = ()=>5;
+    assert.equal(await call([0, 0x801c, 0, 0, m.put('locked'), out]), 0x80070005 | 0);
 });
 
 test('SHGetNewLinkInfo names a shortcut next to its siblings, for a target that is there', ()=>{

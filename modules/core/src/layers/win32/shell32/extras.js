@@ -25,6 +25,8 @@ const E_NOINTERFACE = 0x80004002 | 0;
 const MAX_PATH = 260;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_FILENAME_EXCED_RANGE = 206;
+const ERROR_ALREADY_EXISTS = 183;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
 const CSIDL_FLAG_DONT_VERIFY = 0x4000;
 const CSIDL_FLAG_CREATE = 0x8000;
 const KF_FLAG_CREATE = 0x8000;
@@ -253,10 +255,15 @@ export function createShellExtras(host, parts){
             }
             if ((csidl & CSIDL_FLAG_CREATE) !== 0 && !exists(full))
             {
-                await scratch(utf16z(full).length, async at=>{
+                const made = await scratch(utf16z(full).length, async at=>{
                     host.writeMemory(at, utf16z(full));
-                    await parts.table.SHCreateDirectoryExW.handler([0, at, 0]);
-                }, undefined);
+                    return /** @type {number} */ (
+                        await parts.table.SHCreateDirectoryExW.handler([0, at, 0])) >>> 0;
+                }, ERROR_NOT_ENOUGH_MEMORY);
+                if (made !== 0 && made !== ERROR_ALREADY_EXISTS)
+                {
+                    return fromWin32(made);
+                }
             }
             else if ((csidl & CSIDL_FLAG_DONT_VERIFY) === 0 && !exists(full))
             {
