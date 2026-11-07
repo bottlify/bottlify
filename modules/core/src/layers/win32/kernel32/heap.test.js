@@ -1662,3 +1662,14 @@ test('QueryWorkingSetEx: a committed page is resident with its protection, an im
         assert.equal(fns.DiscardVirtualMemory.handler([0x10000, 0x1000]), 0);
         assert.equal(fns.DiscardVirtualMemory.handler([0x30000, 0x1000]), 87);
     });
+
+test('a range kept from the program is no block of its, and the mark of what was handed out'
+    + ' stays below it', ()=>{
+    const allocator = createHeapAllocator({ base: 0x100000, size: 0x400000 });
+    assert.equal(allocator.allocateAt(0x300000, 0x100000,
+        { owner: 'engine', reserving: true, held: true }), true);
+    assert.equal(allocator.handedTo(), 0x100000, 'nothing of the program\'s is written there');
+    const first = allocator.allocate(0x1000);
+    assert.equal(allocator.handedTo(), first + 0x1000);
+    assert.equal(allocator.allocateAt(0x300000, 0x1000), false, 'and it is never handed out');
+});

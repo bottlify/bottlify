@@ -1438,6 +1438,15 @@ export { jumpBytes, relocatablePrefix };
 const HEAP_FLOOR = 0x0c000000;
 
 /**
+ * Where the engine's range is cut out of the heap when neither the libraries'
+ * space nor the heap's start below 0x10000000 holds it: past the bases a
+ * library is most often linked for, 0x10000000 and the few megabytes above it,
+ * which a library that cannot move takes out of the heap (`claim`). Recorded
+ * in roadmap/decisions.md (A233).
+ */
+export const ENGINE_CUT_AT = 0x14000000;
+
+/**
  * Where a large-address-aware 32-bit process's space ends on a 64-bit Windows:
  * the last 64 KiB below 4 GiB are never the program's.
  */
@@ -1454,13 +1463,17 @@ const LARGE_ADDRESS_TOP = 0xfffe0000;
  * left the libraries below it -- one that does not fit takes heap space, as it
  * does already when the space is full; otherwise at the heap's start, the heap
  * past it (`inHeap`), where it ends short of 0x10000000, the base a library is
- * most often linked for. None for a 64-bit process, a RAM that is not a power of
- * two, or an image of the program's own lying where the range would.
+ * most often linked for; otherwise cut out of the heap past the bases libraries
+ * are linked for (`ENGINE_CUT_AT`, `cut`): four executors or more fit neither
+ * place, and without a range every process committed its whole RAM at its start
+ * (2.1 GiB a process on an eight-core machine). None for a 64-bit process, a RAM
+ * that is not a power of two, or an image of the program's own lying where the
+ * range would.
  *
  * @param {{ long: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
  *     heapStart: number, executors: number,
  *     image: { imageBase: number, sizeOfImage: number } }} what
- * @returns {{ at: number, span: number, inHeap: boolean } | undefined}
+ * @returns {{ at: number, span: number, inHeap: boolean, cut?: true } | undefined}
  */
 export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, heapStart,
     executors, image })
@@ -1482,7 +1495,12 @@ export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, he
     {
         return { at: heapStart, span, inHeap: true };
     }
-    return undefined;
+    if (heapStart >= ENGINE_CUT_AT)
+    {
+        return clear(heapStart) ? { at: heapStart, span, inHeap: true } : undefined;
+    }
+    return clear(ENGINE_CUT_AT) ? { at: ENGINE_CUT_AT, span, inHeap: false, cut: true }
+        : undefined;
 }
 
 /**
@@ -4037,7 +4055,8 @@ async function buildApp(options){
     const engineArea = areaFor(memorySize);
     const HEAP_BASE = HEAP_START + (engineArea?.inHeap ? engineArea.span : 0);
     /** Where the libraries' space ends: at the engine's range where that lies at its top. */
-    const LIBRARIES_END = engineArea && !engineArea.inHeap ? engineArea.at : STACK_POOL_START;
+    const LIBRARIES_END = engineArea && !engineArea.inHeap && !engineArea.cut ? engineArea.at
+        : STACK_POOL_START;
     /** The program's image lies in the heap's span, which gives that part up (`spaceAbove`). */
     const imageInHeap = mainImage.imageBase >= HEAP_BASE;
     // Where a thread that is not the first gets its stack. Above the space
@@ -5695,16 +5714,41 @@ async function buildApp(options){
         name: 'stack', base: initialStack - stackSize, size: stackSize,
         kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE,
     });
-    memory.register({
-        name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
-        kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
-    });
+    // The engine's range where it is cut out of the heap (`engineAreaFor`'s
+    // `cut`): never handed out, and the heap's region two, on either side of it,
+    // as a span a library claims leaves it.
+    const cutArea = engineArea?.cut && engineArea.at > HEAP_BASE
+        && engineArea.at + engineArea.span < HEAP_BASE + HEAP_SIZE ? engineArea : null;
+    if (engineArea?.cut && !cutArea)
+    {
+        throw new Error(`app: the engine's range at 0x${engineArea.at.toString(16)} lies`
+            + ` outside the heap's span 0x${HEAP_BASE.toString(16)}+0x${HEAP_SIZE.toString(16)}`);
+    }
+    /** @type {{ name: string, base: number, end: number }[]} */
+    const heapParts = cutArea
+        ? [{ name: 'heap', base: HEAP_BASE, end: cutArea.at },
+            { name: `heap@${(cutArea.at + cutArea.span).toString(16)}`,
+                base: cutArea.at + cutArea.span, end: HEAP_BASE + HEAP_SIZE }]
+        : [{ name: 'heap', base: HEAP_BASE, end: HEAP_BASE + HEAP_SIZE }];
+    for (const { name, base, end } of heapParts)
+    {
+        memory.register({
+            name, base, size: end - base,
+            kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
+        });
+    }
+    if (cutArea)
+    {
+        win32.heap().allocateAt(cutArea.at, cutArea.span,
+            { owner: 'engine', reserving: true, held: true });
+    }
     // A heap past 2 GiB (`LARGE_ADDRESS_TOP`) runs over the system's shared
     // page, where it lies once the RAM held reaches past it: the heap never
     // hands it out, nor the 64 KiB after it, as Windows maps neither.
     if (HEAP_BASE < SHARED_USER_DATA && HEAP_BASE + HEAP_SIZE > SHARED_USER_DATA + 0x20000)
     {
-        win32.heap().allocateAt(SHARED_USER_DATA, 0x20000, { owner: 'kuser', reserving: true });
+        win32.heap().allocateAt(SHARED_USER_DATA, 0x20000,
+            { owner: 'kuser', reserving: true, held: true });
     }
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
@@ -7354,6 +7398,16 @@ async function buildApp(options){
     // In a memory that grows (`engineArea`) the page is where the engine
     // wraps 0x7FFE0000 into the RAM it holds now, and moves up with it.
     const growing = cpu.growing?.() === true;
+    if (growing)
+    {
+        // The page is kept 128 KiB short of the RAM held, so the RAM held from
+        // the start reaches that far past the thread stacks and a program image
+        // in the heap's span: what is handed out from neither goes through the
+        // heap, which keeps clear of the page itself (`SHARED_PAGE_GUARD`).
+        const placed = Math.max(STACK_POOL_BASE + STACK_POOL_SIZE,
+            imageInHeap ? mainImage.imageBase + mainImage.sizeOfImage : 0);
+        memory.reach?.(placed + (0x80000000 - SHARED_USER_DATA));
+    }
     let sharedAt = growing ? cpu.wrappedAddress(SHARED_USER_DATA) : sharedPageAt(memorySize);
     const wrapped = cpu.wrappedAddress?.(SHARED_USER_DATA) ?? null;
     if (wrapped !== null && wrapped !== sharedAt)

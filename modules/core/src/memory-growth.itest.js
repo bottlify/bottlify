@@ -152,3 +152,72 @@ test('a memory grown whole keeps the shared page past the heap\'s end, where it 
         assert.equal(made.length, 1);
         assert.equal(made[0].buffer.byteLength >= ram, true, 'grown to the whole RAM');
     });
+
+for (const cores of [1, 8])
+{
+    test(`nothing the program commits holds the shared page, which moves up past it as the`
+    + ` memory grows (${cores} executor${cores > 1 ? 's' : ''})`, { timeout: 300_000 }, async t=>{
+        const ram = 2 ** 31;
+        watchMemories(t, ram);
+        const span = 640 * MIB;
+        const piece = 0x10000;
+        // A gigabyte reserved, which reaches over every place the page is kept at
+        // as the memory grows (0x0FFE0000, 0x1FFE0000, 0x3FFE0000), committed 64 KiB
+        // at a time, each piece's first and last dword its own address; then every
+        // mark read back and NtMajorVersion read at 0x7FFE0000: the page's clocks
+        // over a piece would have written its first dword, a piece over the page
+        // its version. 9 where a mark is not the piece's, 7 where a commit fails.
+        const executable = buildExe({ imports, codeSize: 0x100, code: ({ iat })=>assemble([
+            0x6a, PAGE_READWRITE, 0x68, ...u32(0x2000), 0x68, ...u32(1024 * MIB), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('VirtualAlloc')), //              reserve 1 GiB anywhere
+            0x85, 0xc0, { jump: 'jz', to: 'fail' },
+            0x89, 0xc7, //                                           mov edi, eax
+            0x31, 0xf6, //                                           xor esi, esi
+            { label: 'commit' },
+            0x8d, 0x1c, 0x37, //                                     lea ebx, [edi + esi]
+            0x6a, PAGE_READWRITE, 0x68, ...u32(0x1000), 0x68, ...u32(piece), 0x53,
+            0xff, 0x15, ...u32(iat('VirtualAlloc')), //              commit the piece at ebx
+            0x85, 0xc0, { jump: 'jz', to: 'fail' },
+            0x89, 0x1b, //                                           mov [ebx], ebx
+            0x89, 0x9b, ...u32(piece - 4), //                        mov [ebx + piece - 4], ebx
+            0x81, 0xc6, ...u32(piece), //                            add esi, piece
+            0x81, 0xfe, ...u32(span), //                             cmp esi, span
+            { jump: 'jb', to: 'commit' },
+            0x31, 0xf6, //                                           xor esi, esi
+            { label: 'check' },
+            0x8d, 0x1c, 0x37, //                                     lea ebx, [edi + esi]
+            0x39, 0x1b, { jump: 'jnz', to: 'moved' }, //             cmp [ebx], ebx
+            0x39, 0x9b, ...u32(piece - 4), { jump: 'jnz', to: 'moved' },
+            0x81, 0xc6, ...u32(piece), 0x81, 0xfe, ...u32(span), { jump: 'jb', to: 'check' },
+            0xa1, ...u32(0x7ffe026c), //                             mov eax, [NtMajorVersion]
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            { label: 'moved' }, 0x6a, 9, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ...failing(iat),
+        ]) });
+        const app = await createApp({ executable, imagePath: 'C:\\App\\span.exe', memorySize: ram,
+            cpu: { cores } });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 240_000 }), 5,
+            'every piece kept its marks, and the page its version: Windows XP is NT 5');
+    });
+}
+
+test('a process run on eight executors starts with a memory of what it holds, not its whole RAM:'
+    + ' the engine\'s range cut out of the heap', { timeout: 120_000 }, async t=>{
+    const ram = 2 ** 31;
+    const made = watchMemories(t, ram);
+    const executable = buildExe({ imports, codeSize: 0x80, code: ({ iat })=>assemble([
+        ...commit(iat, 0, 32 * MIB),
+        0xc6, 0x80, ...u32(32 * MIB - 1), 1, //                  mov byte [eax + 32 MiB - 1], 1
+        0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ...failing(iat),
+    ]) });
+    const app = await createApp({ executable, imagePath: 'C:\\App\\eight.exe', memorySize: ram,
+        cpu: { cores: 8 } });
+    t.after(()=>app.dispose());
+    assert.equal(await app.run({ timeoutMs: 60_000 }), 0, 'committed and written');
+    assert.equal(made.length, 1);
+    // 512 MiB, the power of two past the engine's range, and the engine's slack.
+    assert.ok(made[0].buffer.byteLength < ram / 2,
+        `under half the RAM: ${made[0].buffer.byteLength}`);
+});

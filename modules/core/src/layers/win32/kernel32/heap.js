@@ -672,9 +672,12 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
          * @param {Object} [options]
          * @param {any} [options.owner]
          * @param {boolean} [options.reserving]  as `allocate`'s
+         * @param {boolean} [options.held]  kept from the program rather than handed
+         *     to it -- the engine's own range, the system's shared page: `handedTo`
+         *     stays where it is, as nothing of the program's is written there
          * @returns {boolean} false when any of the range is taken or outside the arena
          */
-        allocateAt(address, bytes, { owner = null, reserving = false } = {}){
+        allocateAt(address, bytes, { owner = null, reserving = false, held = false } = {}){
             const capacity = Math.max(least, roundUp(bytes, least));
             const start = address >>> 0;
             const end = start + capacity;
@@ -706,7 +709,10 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
                 insert(end, spanEnd - end);
             }
             const fresh = start >= handedTo;
-            handedTo = Math.max(handedTo, end);
+            if (!held)
+            {
+                handedTo = Math.max(handedTo, end);
+            }
             placed({ address: start, size: bytes, capacity, owner, fresh });
             liveBlocks++;
             return true;

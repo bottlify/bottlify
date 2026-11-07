@@ -22,7 +22,7 @@ import {
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
     heapSizeFor,
-    spaceAbove, engineAreaFor,
+    spaceAbove, engineAreaFor, ENGINE_CUT_AT,
     placeMainStack,
     stackReserveOf,
     resourceLookup,
@@ -2129,7 +2129,8 @@ test('a divergence is said once, a loss the first time and every 256th with its 
     assert.deepEqual([...report.divergences], ['Direct3D: a state accepted and not drawn']);
 });
 
-test('the engine keeps a range under the stacks, short of 0x10000000, or none', ()=>{
+test('the engine keeps a range under the stacks, short of 0x10000000, cut out of the heap'
+    + ' past the bases libraries are linked for, or none', ()=>{
     const MIB = 0x100000;
     const space = { moduleBase: 0x02000000, stackPoolStart: 0x08000000, heapStart: 0x0c000000 };
     const image = { imageBase: 0x400000, sizeOfImage: MIB };
@@ -2139,8 +2140,15 @@ test('the engine keeps a range under the stacks, short of 0x10000000, or none', 
     assert.deepEqual(area(1), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false },
         'twenty MiB an executor and eight shared, at the top of the libraries\' space');
     assert.deepEqual(area(3), { at: 0x08000000 - 68 * MIB, span: 68 * MIB, inHeap: false });
-    assert.equal(area(4), undefined,
-        'too large for the libraries\' space, and at the heap\'s start it would reach 0x10000000');
+    assert.deepEqual(area(4), { at: ENGINE_CUT_AT, span: 88 * MIB, inHeap: false, cut: true },
+        'too large for the libraries\' space, and at the heap\'s start it would reach'
+        + ' 0x10000000: cut out of the heap past it');
+    assert.deepEqual(area(16), { at: ENGINE_CUT_AT, span: 328 * MIB, inHeap: false, cut: true });
+    assert.deepEqual(area(8, { heapStart: 0x20000000 }),
+        { at: 0x20000000, span: 168 * MIB, inHeap: true },
+        'a heap that starts past it already: its start');
+    assert.equal(area(8, { image: { imageBase: 0x15000000, sizeOfImage: MIB } }), undefined,
+        'the program\'s image where the cut would be');
     assert.deepEqual(area(1, { moduleBase: 0x06000000, stackPoolStart: 0x07800000 }),
         { at: 0x0c000000, span: 28 * MIB, inHeap: true },
         'too little of the libraries\' space left: the heap\'s start');
@@ -2148,6 +2156,7 @@ test('the engine keeps a range under the stacks, short of 0x10000000, or none', 
     assert.equal(area(1, { memorySize: 3 * 2 ** 30 }), undefined, 'a RAM not a power of two');
     assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x10000 } }),
         { at: 0x0c000000, span: 28 * MIB, inHeap: true }, 'the program\'s image at the top');
-    assert.equal(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x06000000 } }),
-        undefined, 'the program\'s image over both');
+    assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x06000000 } }),
+        { at: ENGINE_CUT_AT, span: 28 * MIB, inHeap: false, cut: true },
+        'the program\'s image over both: cut out of the heap');
 });

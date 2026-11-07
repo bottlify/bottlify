@@ -166,7 +166,7 @@ const OWN = Symbol('guest heap');
  * @typedef {Object} Backend
  * @property {(bytes: number, options?: { alignment?: number, owner?: any }) => number} allocate
  * @property {(address: number, bytes: number,
- *     options?: { owner?: any, reserving?: boolean }) => boolean} allocateAt
+ *     options?: { owner?: any, reserving?: boolean, held?: boolean }) => boolean} allocateAt
  * @property {(address: number) => boolean} free
  * @property {(address: number) => BlockInfo | null} block
  * @property {(address: number) => BlockInfo | null} blockContaining

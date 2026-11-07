@@ -1970,3 +1970,13 @@ of one vertex at another's diffuse ones: the lightmaps landed off their atlas ti
 vertex's own last bytes are its last coordinate set, which is where the mesh holds its lightmap
 coordinates, and what a set the mesh lacks repeats. An element wider than the stride is refused
 still. *2026-11-01.*
+
+**A233. The engine's range is cut out of a 32-bit process's heap at 0x14000000 when nowhere lower
+holds it.** A memory that grows keeps the engine's tables and the other executors' pages in the
+guest's own space, about 20 MiB an executor and 8 more: at the top of the libraries' space under
+the thread stacks, or at the heap's start where it ends short of 0x10000000. Four executors or more
+fit neither, and without a range every process committed its whole RAM at its start (2.1 GiB a
+process on eight). Past 0x10000000 and the few megabytes above it, the bases a library is most
+often linked for, the heap gives the range up as it gives a library that cannot move its span, and
+the memory starts at 512 MiB on eight executors. A library linked to load inside the range cannot
+be loaded; one that can move is moved. *2026-11-07.*
