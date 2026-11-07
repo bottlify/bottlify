@@ -234,6 +234,8 @@ export const GL_EXTENSIONS = Object.freeze({
         'glInvalidateBufferSubData', 'glInvalidateBufferData', 'glInvalidateFramebuffer',
         'glInvalidateSubFramebuffer'],
     GL_ARB_texture_barrier: ['glTextureBarrier'],
+    GL_ARB_get_program_binary: ['glGetProgramBinary', 'glProgramBinary',
+        'glProgramParameteri'],
     GL_ARB_internalformat_query: ['glGetInternalformativ'],
     GL_ARB_clear_buffer_object: ['glClearBufferData', 'glClearBufferSubData'],
     GL_ARB_viewport_array: ['glViewportArrayv', 'glViewportIndexedf', 'glViewportIndexedfv',

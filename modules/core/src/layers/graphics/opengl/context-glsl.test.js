@@ -337,3 +337,26 @@ test('GL_ARB_shader_objects reads the same objects by handle (Wine\'s test_share
     gl.deleteObjectARB(77);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
 });
+
+test('program parameters are kept, and no program binary format is known (4.1)', ()=>{
+    const gl = /** @type {any} */ (createGlContext({}));
+    gl.attach({ width: 4, height: 4, doubleBuffered: true });
+    const made = gl.glCreateProgram();
+    assert.deepEqual(gl.glGetIntegerv(GL.NUM_PROGRAM_BINARY_FORMATS), [0]);
+    gl.glProgramParameteri(made, GL.PROGRAM_BINARY_RETRIEVABLE_HINT, GL.TRUE);
+    gl.glProgramParameteri(made, GL.PROGRAM_SEPARABLE, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.PROGRAM_BINARY_RETRIEVABLE_HINT), [1]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.PROGRAM_SEPARABLE), [1]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.PROGRAM_BINARY_LENGTH), [0]);
+    gl.glProgramParameteri(made, GL.PROGRAM_SEPARABLE, 2);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
+    gl.glProgramParameteri(made, GL.LINK_STATUS, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glGetProgramBinary(made);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
+    gl.glProgramBinary(made, 0x1234);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glProgramBinary(made + 50, 0x1234);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'no such program');
+});

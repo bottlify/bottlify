@@ -320,6 +320,13 @@ export function laterEntryPoints(h){
         glValidateProgram: ([program])=>answer(current()?.glValidateProgram(program >>> 0)),
         glDeleteProgram: ([program])=>answer(current()?.glDeleteProgram(program >>> 0)),
         glIsProgram: ([name])=>current()?.glIsProgram(name >>> 0) ?? GL.FALSE,
+        glProgramParameteri: ([program, pname, value])=>answer(current()?.glProgramParameteri(
+            program >>> 0, pname >>> 0, value | 0)),
+        // Refused for every program, so nothing is written back.
+        glGetProgramBinary: ([program])=>answer(current()?.glGetProgramBinary(program >>> 0)),
+        // The binary is never read: no format is known.
+        glProgramBinary: ([program, format])=>answer(current()?.glProgramBinary(program >>> 0,
+            format >>> 0)),
         glGetProgramiv: ([program, pname, out])=>call(context=>writeQuery(out,
             context.glGetProgramiv(program >>> 0, pname >>> 0), 'word')),
         glGetProgramInfoLog: ([program, size, length, out])=>call(context=>answerString(

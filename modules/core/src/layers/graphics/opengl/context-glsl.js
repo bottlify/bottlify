@@ -113,6 +113,8 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  *     glTransformFeedbackVaryings', for the next link
  * @property {Executable | null} executable
  * @property {number} users  the contexts it is current in
+ * @property {boolean} [retrievable]  PROGRAM_BINARY_RETRIEVABLE_HINT (4.1)
+ * @property {boolean} [separable]  PROGRAM_SEPARABLE (4.1)
  */
 
 /** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment'>} */
@@ -937,9 +939,80 @@ export function installShaderCalls(context, kernel){
                         : GEOMETRY_PRIMITIVES[pname === GL.GEOMETRY_INPUT_TYPE ? layout.input
                             : layout.output]];
                 }
+                // OpenGL 4.1's program binaries, of which no format is known.
+                case GL.PROGRAM_BINARY_LENGTH:
+                    return [0];
+                case GL.PROGRAM_BINARY_RETRIEVABLE_HINT:
+                    return [program.retrievable ? 1 : 0];
+                case GL.PROGRAM_SEPARABLE:
+                    return [program.separable ? 1 : 0];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
+            }
+        },
+
+        /**
+         * glProgramParameteri (4.1): the hint that a binary will be asked
+         * for, and whether the program may be bound to a pipeline stage.
+         *
+         * @param {number} programName @param {number} pname @param {number} value
+         */
+        glProgramParameteri(programName, pname, value){
+            if (!enter('glProgramParameteri', [programName, pname, value]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            if (pname !== GL.PROGRAM_BINARY_RETRIEVABLE_HINT && pname !== GL.PROGRAM_SEPARABLE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (value !== GL.TRUE && value !== GL.FALSE)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            program[pname === GL.PROGRAM_SEPARABLE ? 'separable' : 'retrievable'] =
+                value === GL.TRUE;
+        },
+
+        /**
+         * glGetProgramBinary (4.1): no binary format is known
+         * (GL_NUM_PROGRAM_BINARY_FORMATS is zero), so none is written.
+         *
+         * @param {number} programName
+         */
+        glGetProgramBinary(programName){
+            if (!enter('glGetProgramBinary', [programName]))
+            {
+                return;
+            }
+            if (objectOf(programName, 'program'))
+            {
+                setError(GL.INVALID_OPERATION);
+            }
+        },
+
+        /**
+         * glProgramBinary (4.1): every format is one this renderer does
+         * not know, and the program is left as it was.
+         *
+         * @param {number} programName @param {number} format
+         */
+        glProgramBinary(programName, format){
+            if (!enter('glProgramBinary', [programName, format]))
+            {
+                return;
+            }
+            if (objectOf(programName, 'program'))
+            {
+                setError(GL.INVALID_ENUM);
             }
         },
 
@@ -1566,4 +1639,5 @@ export const SHADER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetUniformLocation', 'glGetActiveUniform', 'getUniform', 'bindFragData', 'fragData',
     'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
     'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
+    'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary',
 ]);
