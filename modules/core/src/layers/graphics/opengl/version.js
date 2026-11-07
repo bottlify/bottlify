@@ -25,7 +25,7 @@
 import { GL } from './constants.js';
 
 /** The highest version every entry point of which is implemented. */
-export const IMPLEMENTED_VERSION = Object.freeze({ major: 4, minor: 5 });
+export const IMPLEMENTED_VERSION = Object.freeze({ major: 4, minor: 6 });
 
 /** The versions OpenGL has: a minor version past its major's last is no version. */
 const LAST_MINOR = Object.freeze(/** @type {Record<number, number>} */ ({ 1: 5, 2: 1, 3: 3, 4: 6 }));

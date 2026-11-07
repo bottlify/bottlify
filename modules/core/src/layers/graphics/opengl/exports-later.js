@@ -76,6 +76,19 @@ export function laterEntryPoints(h){
         ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
 
     /**
+     * glSpecializeShader and its ARB spelling (4.6 section 7.2.1): the entry
+     * point's name, and the constants' SpecIds and values, two arrays of
+     * GLuint.
+     *
+     * @param {number[]} args
+     */
+    const specializeShader = ([shader, entry, count, indices, values])=>call(context=>{
+        const n = Math.max(0, count >>> 0);
+        context.glSpecializeShader(shader >>> 0, (entry >>> 0) !== 0 ? h.readName(entry >>> 0) : '',
+            readTyped('ui', indices, n), readTyped('ui', values, n));
+    });
+
+    /**
      * glBlendFunci, glBlendFuncSeparatei, glBlendEquationi and
      * glBlendEquationSeparatei (4.0).
      *
@@ -553,10 +566,14 @@ export function laterEntryPoints(h){
             asFloat(far))),
         glClearDepthf: ([depth])=>answer(current()?.glClearDepth(asFloat(depth))),
         glReleaseShaderCompiler: ()=>answer(current()?.glReleaseShaderCompiler()),
-        // The binary is never read: no format is known.
-        glShaderBinary: ([count, shaders, format, , length])=>call(context=>
+        // The binary is read only in a format that has one: SPIR-V's.
+        glShaderBinary: ([count, shaders, format, binary, length])=>call(context=>
             context.glShaderBinary(readTyped('ui', shaders, Math.max(0, count | 0)),
-                format >>> 0, length | 0)),
+                format >>> 0, length | 0,
+                (format >>> 0) === GL.SHADER_BINARY_FORMAT_SPIR_V && (length | 0) > 0
+                    && (binary >>> 0) !== 0 ? h.readMemory(binary >>> 0, length | 0) : null)),
+        glSpecializeShader: args=>specializeShader(args),
+        glSpecializeShaderARB: args=>specializeShader(args),
         glGetShaderPrecisionFormat: ([shaderType, precisionType, range, precision])=>
             call(context=>{
                 const format = context.glGetShaderPrecisionFormat(shaderType >>> 0,

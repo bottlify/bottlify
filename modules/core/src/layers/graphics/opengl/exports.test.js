@@ -1199,8 +1199,8 @@ test('wglCreateContextAttribsARB refuses what WGL_ARB_create_context refuses and
         assert.equal(create(0x900d, 0xdeadbeef, 0), 0);
         put(0x2000, [0x2099, 1, 0]);
         assert.equal(create(0x900d, 0, 0x2000), 0);
-        put(0x2000, [0x2091, 4, 0x2092, 6, 0]);
-        assert.equal(create(0x900d, 0, 0x2000), 0, 'a version past this implementation\'s');
+        put(0x2000, [0x2091, 4, 0x2092, 7, 0]);
+        assert.equal(create(0x900d, 0, 0x2000), 0, 'no OpenGL 4.7, past this implementation\'s');
         assert.deepEqual(errors, [6, 4317, 87, 0x2095]);
 
         // An earlier version: this implementation's, and the share list taken.
@@ -1215,7 +1215,7 @@ test('wglCreateContextAttribsARB refuses what WGL_ARB_create_context refuses and
             context.glEndList();
             return context.version;
         });
-        assert.deepEqual(shared, { major: 4, minor: 5,
+        assert.deepEqual(shared, { major: 4, minor: 6,
             profile: GL.CONTEXT_COMPATIBILITY_PROFILE_BIT, flags: GL.CONTEXT_FLAG_DEBUG_BIT });
         assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
         assert.equal(opengl.withContext((/** @type {any} */ context)=>context.glIsList(1)),

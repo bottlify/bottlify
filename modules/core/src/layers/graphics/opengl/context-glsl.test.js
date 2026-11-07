@@ -294,8 +294,8 @@ test('a display list records glUseProgram and the uniforms, and not the object c
 
 test('the version, the shading language and the limits are what is implemented', ()=>{
     const gl = fixture();
-    assert.equal(gl.glGetString(GL.VERSION), '4.5');
-    assert.equal(gl.glGetString(GL.SHADING_LANGUAGE_VERSION), '4.50');
+    assert.equal(gl.glGetString(GL.VERSION), '4.6');
+    assert.equal(gl.glGetString(GL.SHADING_LANGUAGE_VERSION), '4.60');
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VERTEX_ATTRIBS_ARB), [16]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_DRAW_BUFFERS), [4]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VARYING_FLOATS), [32]);

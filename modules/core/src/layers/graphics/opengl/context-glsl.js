@@ -113,6 +113,9 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {ShaderUnit | null} unit
  * @property {boolean} deleted
  * @property {number} attachments  how many programs hold it
+ * @property {import('./spirv-module.js').SpirvModule | null} [spirv]  the SPIR-V module
+ *     glShaderBinary associated (SPIR_V_BINARY, `context-spirv.js`)
+ * @property {boolean} [specialized]  glSpecializeShader done since
  */
 
 /** @typedef {import('./glsl-link.js').Executable} Executable */
@@ -741,6 +744,12 @@ export function installShaderCalls(context, kernel){
          * @param {number} name @returns {ProgramObject | null}
          */
         programObject: name=>objectOf(name, 'program'),
+        /**
+         * A shader object by its name, checked as programObject is.
+         *
+         * @param {number} name @returns {ShaderObject | null}
+         */
+        shaderObject: name=>objectOf(name, 'shader'),
     });
 
     /**
@@ -802,6 +811,8 @@ export function installShaderCalls(context, kernel){
             if (shader)
             {
                 shader.sources = [...sources];
+                // A source breaks a SPIR-V module's association (GL_ARB_gl_spirv).
+                shader.spirv = null;
             }
         },
 
@@ -814,6 +825,12 @@ export function installShaderCalls(context, kernel){
             const shader = objectOf(name, 'shader');
             if (!shader)
             {
+                return;
+            }
+            if (shader.spirv)
+            {
+                // A SPIR-V shader is specialized, never compiled (4.6 section 7.1).
+                setError(GL.INVALID_OPERATION);
                 return;
             }
             const stage = /** @type {ShaderStage} */ (SHADER_TYPES.get(shader.type));
@@ -865,6 +882,8 @@ export function installShaderCalls(context, kernel){
                     return [shader.deleted ? 1 : 0];
                 case GL.COMPILE_STATUS:
                     return [shader.compiled ? 1 : 0];
+                case GL.SPIR_V_BINARY:
+                    return [shader.spirv ? 1 : 0];
                 case GL.INFO_LOG_LENGTH:
                     return [shader.log.length > 0 ? shader.log.length + 1 : 0];
                 case GL.SHADER_SOURCE_LENGTH: {
@@ -1000,6 +1019,14 @@ export function installShaderCalls(context, kernel){
                 return;
             }
             program.validated = false;
+            if (new Set(program.shaders.map(shader=>!!shader.spirv)).size > 1)
+            {
+                // GL_ARB_gl_spirv: SPIR-V shaders and source ones are not linked together.
+                program.linked = false;
+                program.log = 'ERROR: SPIR-V shaders and shaders from source are attached'
+                    + ' together\n';
+                return;
+            }
             const notCompiled = program.shaders.filter(shader=>!shader.compiled);
             if (notCompiled.length > 0)
             {

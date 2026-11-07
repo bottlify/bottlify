@@ -977,12 +977,18 @@ export const DEFAULT_STATE = Object.freeze([
         kind: 'enum', value: [GL.UNDEFINED_VERTEX],
     },
     {
+        // SPIR-V's (4.6 section 7.2, `context-spirv.js`).
         query: GL.NUM_SHADER_BINARY_FORMATS, name: 'GL_NUM_SHADER_BINARY_FORMATS', kind: 'int',
-        value: [0],
+        value: [1],
     },
     {
         query: GL.SHADER_BINARY_FORMATS, name: 'GL_SHADER_BINARY_FORMATS', kind: 'enum',
-        value: [],
+        value: [GL.SHADER_BINARY_FORMAT_SPIR_V],
+    },
+    {
+        // No SPIR-V extension is taken.
+        query: GL.NUM_SPIR_V_EXTENSIONS, name: 'GL_NUM_SPIR_V_EXTENSIONS', kind: 'int',
+        value: [0],
     },
     {
         query: GL.IMPLEMENTATION_COLOR_READ_FORMAT, name: 'GL_IMPLEMENTATION_COLOR_READ_FORMAT',

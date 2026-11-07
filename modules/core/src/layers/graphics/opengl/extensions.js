@@ -438,14 +438,15 @@ export const PENDING_VERSION_FUNCTIONS = Object.freeze((()=>{
 /**
  * Functions of extensions this implementation does not report, implemented
  * because a later version's or another extension's do the same work: the
- * EXT_direct_state_access forms of GL_ARB_framebuffer_no_attachments.
+ * EXT_direct_state_access forms of GL_ARB_framebuffer_no_attachments, and
+ * GL_ARB_gl_spirv's glSpecializeShaderARB, 4.6's glSpecializeShader (A231).
  * Sized from the registry and obtainable as the pending versions' are.
  *
  * @type {readonly string[]}
  */
 export const UNANNOUNCED_FUNCTIONS = Object.freeze([
     'glGetFramebufferParameterivEXT', 'glNamedFramebufferParameteriEXT',
-    'glGetNamedFramebufferParameterivEXT', 'glPolygonOffsetClampEXT',
+    'glGetNamedFramebufferParameterivEXT', 'glPolygonOffsetClampEXT', 'glSpecializeShaderARB',
 ]);
 
 /** The functions each version past 1.1 adds: obtainable, never in the extension string. */
