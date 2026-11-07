@@ -20,6 +20,7 @@
  */
 
 import { GL } from './constants.js';
+import { TIMEOUT_IGNORED } from './context-sync.js';
 
 /**
  * What `exports.js` lends: the current context, and its readers and writers
@@ -54,6 +55,53 @@ const asFloat = word=>{
  */
 export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
+
+    /** How many values a sampler parameter's vector form reads. @param {number} pname */
+    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+
+    /**
+     * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
+     * as the context names it.
+     *
+     * @param {number} low @param {number} high
+     */
+    const timeoutOf = (low, high)=>((low >>> 0) === 0xffffffff && (high >>> 0) === 0xffffffff
+        ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
+
+    /**
+     * glVertexAttribI1i to glVertexAttribI4usv: each form's components, the
+     * missing ones (0, 0, 1) as the 4i form fills them.
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const integerAttributes = ()=>{
+        /** @type {Record<string, (args: number[]) => number>} */
+        const forms = {};
+        /** @param {number} index @param {'int' | 'uint'} kind @param {number[]} given */
+        const set = (index, kind, given)=>{
+            const [x = 0, y = 0, z = 0, w = 1] = given;
+            return answer(current()?.vertexAttribI(index >>> 0, kind, x, y, z, w));
+        };
+        for (const count of [1, 2, 3, 4])
+        {
+            forms[`glVertexAttribI${count}i`] = ([index, ...rest])=>
+                set(index, 'int', rest.slice(0, count).map(v=>v | 0));
+            forms[`glVertexAttribI${count}ui`] = ([index, ...rest])=>
+                set(index, 'uint', rest.slice(0, count).map(v=>v >>> 0));
+            forms[`glVertexAttribI${count}iv`] = ([index, v])=>
+                set(index, 'int', readTyped('i', v, count));
+            forms[`glVertexAttribI${count}uiv`] = ([index, v])=>
+                set(index, 'uint', readTyped('ui', v, count));
+        }
+        for (const [suffix, type, kind] of /** @type {[string, string, 'int' | 'uint'][]} */ ([
+            ['bv', 'b', 'int'], ['sv', 's', 'int'], ['ubv', 'ub', 'uint'], ['usv', 'us', 'uint'],
+        ]))
+        {
+            forms[`glVertexAttribI4${suffix}`] = ([index, v])=>
+                set(index, kind, readTyped(type, v, 4));
+        }
+        return forms;
+    };
 
     /**
      * 64-bit answers, as GLint64s: what glGetInteger64v writes.
@@ -242,6 +290,66 @@ export function laterEntryPoints(h){
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- sampler objects (3.3) ---
+
+        glGenSamplers: generator((context, count)=>context.glGenSamplers(count)),
+        glDeleteSamplers: deleter((context, names)=>context.glDeleteSamplers(names)),
+        glIsSampler: ([name])=>current()?.glIsSampler(name >>> 0) ?? GL.FALSE,
+        glBindSampler: ([unit, name])=>answer(current()?.glBindSampler(unit >>> 0, name >>> 0)),
+        glSamplerParameteri: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [value | 0])),
+        glSamplerParameterf: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [asFloat(value)])),
+        glSamplerParameteriv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname))
+                .map(v=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? v / 0x7fffffff : v)))),
+        glSamplerParameterfv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('f', values, samplerCount(pname)))),
+        glSamplerParameterIiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname)))),
+        glSamplerParameterIuiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('ui', values, samplerCount(pname)))),
+        glGetSamplerParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0)?.map((/** @type {number} */ v)=>
+                ((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+                    ? Math.round(Math.max(-1, Math.min(1, v)) * 0x7fffffff) : Math.round(v)))
+                ?? null, 'word')),
+        glGetSamplerParameterfv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'float')),
+        glGetSamplerParameterIiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+        glGetSamplerParameterIuiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+
+        // --- sync objects (3.2) ---
+
+        glFenceSync: ([condition, flags])=>current()?.glFenceSync(condition >>> 0, flags >>> 0)
+            ?? 0,
+        glIsSync: ([sync])=>current()?.glIsSync(sync >>> 0) ?? GL.FALSE,
+        glDeleteSync: ([sync])=>answer(current()?.glDeleteSync(sync >>> 0)),
+        glWaitSync: ([sync, flags, low, high])=>answer(current()?.glWaitSync(sync >>> 0,
+            flags >>> 0, timeoutOf(low, high))),
+        glGetSynciv: ([sync, pname, size, length, out])=>call(context=>{
+            const values = (context.glGetSynciv(sync >>> 0, pname >>> 0) ?? [])
+                .slice(0, Math.max(0, size | 0));
+            if ((length >>> 0) !== 0)
+            {
+                writeU32s(length, [values.length]);
+            }
+            writeQuery(out, values, 'word');
+        }),
+
+        // --- integer vertex attributes (3.0) ---
+
+        ...integerAttributes(),
+        glVertexAttribIPointer: ([index, size, type, stride, pointer])=>answer(current()
+            ?.glVertexAttribIPointer(index >>> 0, size | 0, type >>> 0, stride | 0,
+                pointer >>> 0)),
+        glGetVertexAttribIiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'int'), 'word')),
+        glGetVertexAttribIuiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'uint'), 'word')),
 
         // --- indexed state, 64-bit queries and one buffer's clears (3.0, 3.2) ---
 
@@ -468,10 +576,11 @@ export function laterEntryPoints(h){
         glEndQuery: ([target])=>answer(current()?.glEndQuery(target >>> 0)),
         glGetQueryiv: ([target, pname, out])=>call(context=>writeQuery(out,
             context.glGetQueryiv(target >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectuiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
+        glQueryCounter: ([name, target])=>answer(current()?.glQueryCounter(name >>> 0,
+            target >>> 0)),
+        glBeginConditionalRender: ([name, mode])=>answer(current()
+            ?.glBeginConditionalRender(name >>> 0, mode >>> 0)),
+        glEndConditionalRender: ()=>answer(current()?.glEndConditionalRender()),
 
         // --- 3D textures and texture arrays ---
 

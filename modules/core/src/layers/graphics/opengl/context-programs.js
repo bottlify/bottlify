@@ -63,13 +63,20 @@ const ATTRIB_TYPES = new Set([
  * @property {number} pointer
  * @property {number} buffer  the ARRAY_BUFFER bound when the pointer was set
  * @property {number} divisor  zero for an element a vertex, n for one every n instances
+ * @property {number} [integer]  1 when glVertexAttribIPointer set it: read as integers
  */
 
 /** @returns {GenericAttribArray} */
 const createAttribArray = ()=>({
     enabled: 0, size: 4, type: GL.FLOAT, normalised: 0, stride: 0, pointer: 0, buffer: 0,
-    divisor: 0,
+    divisor: 0, integer: 0,
 });
+
+/** The types glVertexAttribIPointer takes: the integers (OpenGL 3.0 section 2.8). */
+/** @type {Set<number>} */
+const INTEGER_ATTRIB_TYPES = new Set([
+    GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT,
+]);
 
 /**
  * @param {any} context
@@ -685,6 +692,71 @@ export function installProgramCalls(context, kernel){
             array.stride = stride;
             array.pointer = pointer;
             array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+            array.integer = 0;
+        },
+
+        /**
+         * glVertexAttribIPointer (OpenGL 3.0): an array of integers a shader's
+         * integer input reads as they are.
+         *
+         * @param {number} index @param {number} size @param {number} type
+         * @param {number} stride @param {number} pointer
+         */
+        glVertexAttribIPointer(index, size, type, stride, pointer){
+            if (!enter('glVertexAttribIPointer', [index, size, type, stride, pointer]))
+            {
+                return;
+            }
+            if (!(index >= 0) || index >= GENERIC_ATTRIBS || size < 1 || size > 4 || stride < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (!INTEGER_ATTRIB_TYPES.has(type))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
+            array.size = size;
+            array.type = type;
+            array.normalised = 0;
+            array.stride = stride;
+            array.pointer = pointer;
+            array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+            array.integer = 1;
+        },
+
+        /**
+         * glVertexAttribI4i and glVertexAttribI4ui, and every shorter and
+         * vector form, which `exports-later.js` widens to four with (0, 0, 1):
+         * a current value an integer input reads as it was given.
+         *
+         * @param {number} index @param {'int' | 'uint'} kind
+         * @param {number} x @param {number} y @param {number} z @param {number} w
+         */
+        vertexAttribI(index, kind, x, y, z, w){
+            if (checkAttrib('vertexAttribI', [index, kind, x, y, z, w], index))
+            {
+                attribValues[index] = kind === 'uint' ? [x >>> 0, y >>> 0, z >>> 0, w >>> 0]
+                    : [x | 0, y | 0, z | 0, w | 0];
+            }
+        },
+
+        /**
+         * glGetVertexAttribIiv and glGetVertexAttribIuiv: what the float form
+         * answers, the current value as the integers it holds.
+         *
+         * @param {number} index @param {number} pname @param {'int' | 'uint'} kind
+         * @returns {number[] | null}
+         */
+        getVertexAttribI(index, pname, kind){
+            const values = context.glGetVertexAttribfvARB(index, pname);
+            return values && pname === GL.CURRENT_VERTEX_ATTRIB_ARB
+                ? values.map((/** @type {number} */ v)=>(kind === 'uint' ? v >>> 0 : v | 0))
+                : values;
         },
 
         /**
@@ -755,6 +827,8 @@ export function installProgramCalls(context, kernel){
                     return [array.normalised ?? 0];
                 case GL.VERTEX_ATTRIB_ARRAY_DIVISOR:
                     return [array.divisor ?? 0];
+                case GL.VERTEX_ATTRIB_ARRAY_INTEGER:
+                    return [array.integer ?? 0];
                 case GL.CURRENT_VERTEX_ATTRIB_ARB:
                     return [...attribValues[index]];
                 default:

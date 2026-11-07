@@ -2364,3 +2364,70 @@ test('blending and colour masks set apart per draw buffer reach each target\'s p
     assert.ok(swapped, 'a pipeline blending the second target alone');
     assert.deepEqual([swapped[0].writeMask, swapped[1].writeMask], [0xf, 0x1]);
 });
+
+test('a unit\'s sampler object samples its texture in place of the texture\'s own state', async()=>{
+    /** @type {any[]} */
+    const made = [];
+    const r = rig({ createSampler: (/** @type {any} */ descriptor)=>{
+        made.push(descriptor);
+        return { kind: 'sampler', descriptor };
+    } });
+    const { context } = r;
+    r.bytes.set([255, 0, 0, 255], 0x3000);
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x3000);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
+    context.glEnable(GL.TEXTURE_2D);
+    const [sampler] = context.glGenSamplers(1);
+    context.samplerParameter(sampler, GL.TEXTURE_MIN_FILTER, [GL.LINEAR]);
+    context.samplerParameter(sampler, GL.TEXTURE_WRAP_T, [GL.CLAMP_TO_EDGE]);
+    const draw = async()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glTexCoord2f(0, 0);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(0, 8);
+        context.glEnd();
+        await r.swap();
+    };
+    // The sampler the frame's last draw bound, not the last one made: a
+    // descriptor already made is reused.
+    const last = ()=>{
+        /** @param {any} group */
+        const samplerIn = group=>r.gpu.calls.find((/** @type {any} */ c)=>
+            c.op === 'createBindGroup' && c.createBindGroup === group)?.descriptor.entries
+            .map((/** @type {any} */ e)=>e.resource).find((/** @type {any} */ x)=>
+                x?.kind === 'sampler' && /gl-sampler/.test(x.descriptor.label ?? ''));
+        const sets = r.gpu.of('setBindGroup');
+        for (let k = sets.length - 1; k >= 0; k--)
+        {
+            const found = samplerIn(sets[k].group);
+            if (found)
+            {
+                return found.descriptor;
+            }
+        }
+        return null;
+    };
+    await draw();
+    assert.deepEqual([last().minFilter, last().addressModeV], ['nearest', 'repeat'],
+        'the texture\'s own');
+    context.glBindSampler(0, sampler);
+    await draw();
+    assert.deepEqual([last().minFilter, last().magFilter, last().addressModeV],
+        ['linear', 'linear', 'clamp-to-edge'], 'the sampler\'s, every parameter of it');
+    context.glBindSampler(0, 0);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.MIRRORED_REPEAT);
+    await draw();
+    assert.equal(last().addressModeV, 'mirror-repeat', 'the texture\'s again');
+    // The unit the texture is on is the sampler's: unit 1 alone enabled.
+    context.glDisable(GL.TEXTURE_2D);
+    context.glActiveTextureARB(GL.TEXTURE0 + 1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindSampler(1, sampler);
+    await draw();
+    assert.equal(last().addressModeV, 'clamp-to-edge', 'unit 1\'s sampler');
+});

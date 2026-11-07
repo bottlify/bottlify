@@ -145,6 +145,9 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {readonly number[]} [blendColor]  GL_BLEND_COLOR
  * @property {PerBuffer} [perBuffer]  each draw buffer's blending and colour mask, when
  *           they differ (glEnablei, glColorMaski)
+ * @property {(import('./objects.js').SamplerObject | null)[] | null} [samplers]
+ *           each texture unit's sampler object, whose sampling state stands in for the
+ *           textures' own; null when no unit has one
  * @property {{ fbo: import('./objects.js').FramebufferObject, width: number,
  *     height: number } | null} [target]  the framebuffer object drawn into, or the window
  * @property {import('./objects.js').FramebufferObject | null}

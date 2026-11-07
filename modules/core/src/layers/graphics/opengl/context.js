@@ -44,6 +44,9 @@ import {
     DEFAULT_VERSION, shadingLanguageVersion, versionState, versionString,
 } from './version.js';
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
+import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
+import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
+import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -54,7 +57,7 @@ import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
 import { SHADER_CALLS_NOT_COMPILED, installShaderCalls } from './context-glsl.js';
 import { FRAMEBUFFER_CALLS_NOT_COMPILED, installFramebufferCalls } from './context-framebuffers.js';
-import { BLEND_FACTORS, CORE_CALLS_NOT_COMPILED, installCoreCalls } from './context-core.js';
+import { BLEND_FACTORS, installCoreCalls } from './context-core.js';
 import { VERTEX_ARRAY_CALLS_NOT_COMPILED, installVertexArrayCalls } from './context-vao.js';
 import {
     UNIFORM_BUFFER_CALLS_NOT_COMPILED, installUniformBufferCalls,
@@ -83,7 +86,8 @@ const ALLOWED_IN_BEGIN = new Set([
     'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glColor3ub',
     'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
     'glIndexi', 'glMultiTexCoord4fARB', 'glSecondaryColor3fEXT', 'glFogCoordfEXT',
-    'glVertexAttrib4fARB', 'glMaterialfv', 'glMaterialf', 'glCallList', 'glCallLists', 'glEnd',
+    'glVertexAttrib4fARB', 'vertexAttribI', 'glMaterialfv', 'glMaterialf', 'glCallList',
+    'glCallLists', 'glEnd',
 ]);
 
 /** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
@@ -116,9 +120,11 @@ const NOT_COMPILABLE = new Set([
     'glGetProgramEnvParameterfvARB', 'glGetProgramLocalParameterfvARB',
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
-    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
+    'glVertexAttribIPointer', 'getVertexAttribI',
+    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
-    ...INDEXED_CALLS_NOT_COMPILED,
+    ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
+    ...QUERY_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -463,6 +469,17 @@ export function createGlContext(options = {}){
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
                     width, height, kernel.side.readFramebuffer?.() ?? null)
             : null,
+        fence: gpu?.fence
+            ? ()=>(attached ? gpu.fence(context) : null)
+            : null,
+        queries: gpu?.beginQuery
+            ? {
+                begin: query=>gpu.beginQuery(context, query),
+                end: query=>gpu.endQuery(context, query),
+                flush: ()=>gpu.flushContext(context),
+                condition: (query, inverted)=>gpu.condition(context, query, inverted),
+            }
+            : null,
         readBack: gpu?.readPixels
             ? rect=>(attached
                 ? gpu.readPixels(context, rect, kernel.side.readFramebuffer?.() ?? null)
@@ -686,6 +703,12 @@ export function createGlContext(options = {}){
             if (depth)
             {
                 return readState({ kind: 'int', values: [stacks[depth].saved.length + 1] }, as);
+            }
+            // State an installer answers itself (`kernel.side.queries`).
+            const answered = kernel.side.queries?.get(query);
+            if (answered)
+            {
+                return readState(answered(), as);
             }
             const entry = state.get(query);
             if (!entry)
@@ -1735,6 +1758,9 @@ export function createGlContext(options = {}){
     // Last: a new vertex array object starts from the arrays as the others left them.
     installVertexArrayCalls(context, kernel);
     installIndexedCalls(context, kernel);
+    installSyncCalls(context, kernel);
+    installSamplerCalls(context, kernel);
+    installQueryCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 

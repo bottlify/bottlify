@@ -325,6 +325,8 @@ export function createSceneBuilder(kernel){
                 ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
             blendColor: record(GL.BLEND_COLOR).values,
             perBuffer,
+            // Each unit's sampler object (3.3), when a unit has one.
+            samplers: side.boundSamplers?.() ?? null,
             // The framebuffer object drawn into, or null for the window.
             target: side.drawTarget?.() ?? null,
             readFramebuffer: side.readFramebuffer?.() ?? null,
