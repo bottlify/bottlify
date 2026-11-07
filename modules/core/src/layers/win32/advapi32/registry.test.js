@@ -630,3 +630,37 @@ test('the processor key names the processor the engine gives', ()=>{
     named.fromJSON(createHive({ processorName: 'Other' }).toJSON());
     assert.equal(nameOf(named), 'Bottlify Cork x86 v1.2.3');
 });
+
+test('an installation\'s registry replaces a machine default, never what a program wrote', ()=>{
+    const ENVIRONMENT = 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment';
+    /** @param {ReturnType<typeof createHive>} hive */
+    const pathOf = hive=>{
+        const found = hive.getValue(machine(hive, ENVIRONMENT), 'Path');
+        return found && String.fromCharCode(...found.data).replace(/\0+$/, '');
+    };
+    // The installation: a setup added its folder to the system Path.
+    const installing = createHive();
+    installing.setValue(machine(installing, ENVIRONMENT), 'PATH', REG_SZ,
+        latin1(`C:\\Vendor\\Common;${pathOf(installing)}\0`));
+    const installed = installing.toJSON();
+
+    const fresh = createHive();
+    assert.equal(pathOf(fresh), 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem');
+    fresh.fillFromJSON(installed);
+    assert.equal(pathOf(fresh),
+        'C:\\Vendor\\Common;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem',
+        'the default gives way to what the installation wrote');
+
+    // A session that wrote its own Path keeps it over the installation's.
+    const session = createHive();
+    session.setValue(machine(session, ENVIRONMENT), 'Path', REG_SZ, latin1('C:\\Mine\0'));
+    const kept = createHive();
+    kept.fromJSON(session.toJSON());
+    kept.fillFromJSON(installed);
+    assert.equal(pathOf(kept), 'C:\\Mine');
+    // One that never touched it saves the default as one, and still gets the installation's.
+    const untouched = createHive();
+    untouched.fromJSON(createHive().toJSON());
+    untouched.fillFromJSON(installed);
+    assert.equal(pathOf(untouched)?.split(';')[0], 'C:\\Vendor\\Common');
+});

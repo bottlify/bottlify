@@ -58,11 +58,17 @@ const ROOT_NAMES = new Map([
 const MACHINE_CLASSES = 'SOFTWARE\\Classes';
 const USER_CLASSES = 'Software\\Classes';
 
+/** The machine's environment variables, which a session's programs start with. */
+export const MACHINE_ENVIRONMENT =
+    'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment';
+
 /**
  * @typedef {Object} RegistryValue
  * @property {string} name   As the writer spelled it; lookups ignore its case.
  * @property {number} type
  * @property {Uint8Array} data
+ * @property {boolean} [furnished]  Put there as the machine's default, and
+ *     not written since: what an installation's registry replaces.
  */
 
 /**
@@ -175,6 +181,7 @@ function keyToJSON(key){
             name: value.name,
             type: value.type,
             data: [...value.data],
+            ...value.furnished ? { furnished: true } : {},
         })),
         keys: [...key.keys.values()].map(keyToJSON),
     };
@@ -191,6 +198,7 @@ function keyFromJSON(stored){
             name,
             type: value?.type >>> 0,
             data: Uint8Array.from(value?.data ?? []),
+            ...value?.furnished === true ? { furnished: true } : {},
         });
     }
     for (const child of stored?.keys ?? [])
@@ -585,6 +593,12 @@ const machineKeys = (windows, directx, processors)=>{
             },
             owned: VERSION_VALUES },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+        // The system Path a fresh install sets, which an installer adds its
+        // own folder to (Windows Installer's Environment table, `[~];...`).
+        { root: HKEY_LOCAL_MACHINE, path: MACHINE_ENVIRONMENT, values: {
+            Path: [`${folders.Windows}\\system32`, folders.Windows,
+                `${folders.Windows}\\System32\\Wbem`].join(';'),
+        } },
         // The services every Windows XP machine has installed, as its setup
         // registers them: the service control manager lists them, a program
         // asks for one by name -- the spooler, to learn whether it may print --
@@ -675,14 +689,18 @@ function walk(node, parts){
 
 /**
  * Copies into a node what a saved tree has and the node does not, leaving
- * what the node already holds as it is.
+ * what the node already holds as it is - but for a machine default nothing
+ * has written since, which the saved tree's value replaces.
  *
  * @param {RegistryNode} into @param {RegistryNode} from
  */
 function mergeMissing(into, from, over = false){
     for (const [name, value] of from.values)
     {
-        if (over || !into.values.has(name))
+        // A machine default nothing has written since is the installation's
+        // to replace: an installer that adds its folder to the system Path.
+        if (over || !into.values.has(name)
+            || (into.values.get(name)?.furnished && !value.furnished))
         {
             into.values.set(name, value);
         }
@@ -820,11 +838,12 @@ export function createHive(
             {
                 if (volatile || !node.values.has(fold(name)) || entry.owned?.includes(name))
                 {
-                    node.values.set(fold(name), typeof value === 'number'
-                        ? { name, type: REG_DWORD, data: dword(value) }
-                        : value instanceof Uint8Array
-                            ? { name, type: REG_BINARY, data: value }
-                            : { name, type: REG_SZ, data: sz(value) });
+                    node.values.set(fold(name), { furnished: true,
+                        ...typeof value === 'number'
+                            ? { name, type: REG_DWORD, data: dword(value) }
+                            : value instanceof Uint8Array
+                                ? { name, type: REG_BINARY, data: value }
+                                : { name, type: REG_SZ, data: sz(value) } });
                 }
             }
         }
@@ -1328,8 +1347,11 @@ export function createHive(
                 }
             }
             // An installation's HARDWARE is the machine it was installed on:
-            // this one's processors are the ones there are.
-            furnish(furnishings.filter(entry=>entry.path.startsWith('HARDWARE\\')));
+            // this one's processors are the ones there are; and what describes
+            // the machine (`owned`) is this one's, whatever the installation's
+            // registry said of the Windows it ran on.
+            furnish(furnishings.filter(entry=>entry.path.startsWith('HARDWARE\\')
+                || entry.owned));
         },
     };
     return hive;

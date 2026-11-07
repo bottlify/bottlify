@@ -6835,9 +6835,10 @@ async function buildApp(options){
         isKnownDll,
         redirect: (/** @type {string} */ name)=>activation?.redirect(name) ?? null,
         // Where else Windows looks for a program's imports: its current
-        // directory and, for a child, the PATH its parent handed it.
+        // directory and the PATH it starts with - its parent's, or for a
+        // session's first program the one the registry builds.
         currentDirectory: filesystem.currentDirectory(),
-        path: pathDirectories(Object.entries(options.environment ?? {})
+        path: pathDirectories(Object.entries(options.environment ?? win32.environment?.() ?? {})
             .find(([variable])=>variable.toUpperCase() === 'PATH')?.[1]),
         byName, byBase,
         // Straight after the system modules, which is the first address nothing

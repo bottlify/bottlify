@@ -35,12 +35,41 @@ const IID_ID3D10BLOB = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
 /** D3D10_SDK_VERSION, which D3DX10CheckVersion holds a program's to. */
 const D3D10_SDK_VERSION = 29;
 
+/**
+ * ID3D10Device's methods used here, by vtable slot (d3d10.h; the device's
+ * table is `graphics/d3d10/slots.js`): the creates the loaders call, and the
+ * setters D3DX10UnsetAllDeviceObjects calls.
+ */
+const DEVICE = Object.freeze({ CreateTexture2D: 73, CreateTexture3D: 74,
+    CreateShaderResourceView: 75,
+    VSSetConstantBuffers: 3, PSSetShaderResources: 4, PSSetShader: 5, PSSetSamplers: 6,
+    VSSetShader: 7, PSSetConstantBuffers: 10, IASetInputLayout: 11, IASetVertexBuffers: 12,
+    IASetIndexBuffer: 13, GSSetConstantBuffers: 16, GSSetShader: 17, VSSetShaderResources: 19,
+    VSSetSamplers: 20, GSSetShaderResources: 22, GSSetSamplers: 23, OMSetRenderTargets: 24,
+    OMSetBlendState: 25, OMSetDepthStencilState: 26, SOSetTargets: 27, RSSetState: 29,
+});
+
+/** Each shader stage's constant buffers, resources, samplers and shader. */
+const STAGE_SLOTS = [
+    [DEVICE.VSSetConstantBuffers, DEVICE.VSSetShaderResources, DEVICE.VSSetSamplers,
+        DEVICE.VSSetShader],
+    [DEVICE.PSSetConstantBuffers, DEVICE.PSSetShaderResources, DEVICE.PSSetSamplers,
+        DEVICE.PSSetShader],
+    [DEVICE.GSSetConstantBuffers, DEVICE.GSSetShaderResources, DEVICE.GSSetSamplers,
+        DEVICE.GSSetShader],
+];
+
+/** D3D10's slot counts: the common shader's, the input assembler's, stream output's, the OM's. */
+const CONSTANT_BUFFER_SLOTS = 14;
+const RESOURCE_SLOTS = 128;
+const SAMPLER_SLOTS = 16;
+const VERTEX_BUFFER_SLOTS = 16;
+const STREAM_OUTPUT_SLOTS = 4;
+const RENDER_TARGET_SLOTS = 8;
+
 export const D3DX10_DEFAULT = 0xffffffff;
 export const D3DX10_FROM_FILE = 0xfffffffd;
 
-/** ID3D10Device's slots used here, after IUnknown's three. */
-const DEVICE = Object.freeze({ CreateTexture2D: 73, CreateTexture3D: 74,
-    CreateShaderResourceView: 75 });
 const UNKNOWN_RELEASE = 2;
 
 /** The DXGI formats a file's texels are made into, and what a row of blocks or texels takes. */
@@ -103,6 +132,8 @@ const pitchOf = (format, width, height)=>{
  *     [callGuest]
  * @property {() => any} [currentThread]
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
+ * @property {() => Promise<number>} [compiler]
+ *     Where this process's D3DCompile is (d3dcompiler_43's), or 0 for none.
  */
 
 /**
@@ -476,12 +507,26 @@ export function createD3dx10Functions(host, version){
      *     UINT Flags1, UINT Flags2, ID3DX10ThreadPump*, ID3D10Blob **ppShader,
      *     ID3D10Blob **ppErrorMsgs, HRESULT *pHResult)
      *
-     * There is no HLSL compiler for shader model 4 here: the program is told the
-     * compile failed, with the reason in its error blob, as a compile error is.
+     * D3DCompile's work, as the library hands it to d3dcompiler_43: the source,
+     * its name, defines, include handler, entry point, profile and flags, the
+     * code and the messages. Asked of the D3DCompile this process finds, so the
+     * compiler is whichever the process has. With none to ask, the program is
+     * told the compile failed, with the reason in its error blob. A thread pump
+     * is not used: the compile is done by the time the call returns, its answer
+     * in pHResult as well.
      */
-    const compile = (/** @type {number[]} */ args)=>{
-        const [, , , , , entryAt, profileAt, , , , shaderOut, errorsOut, hrAt] =
-            args.map(a=>a >>> 0);
+    const compile = async(/** @type {number[]} */ args)=>{
+        const thread = host.currentThread?.();
+        const [data, size, file, defines, include, entryAt, profileAt, flags1, flags2, ,
+            shaderOut, errorsOut, hrAt] = args.map(a=>a >>> 0);
+        const compiler = host.callGuest ? await host.compiler?.() ?? 0 : 0;
+        if (compiler !== 0 && host.callGuest)
+        {
+            const hr = await host.callGuest({ entry: compiler,
+                args: [data, size, file, defines, include, entryAt, profileAt, flags1, flags2,
+                    shaderOut, errorsOut], ...(thread === undefined ? {} : { thread }) });
+            return answer(hrAt, hr | 0);
+        }
         const entry = entryAt === 0 ? '' : string(entryAt, false, 256);
         const profile = profileAt === 0 ? '' : string(profileAt, false, 32);
         const reason = 'error X0000: this build has no HLSL compiler for'
@@ -576,6 +621,79 @@ export function createD3dx10Functions(host, version){
             },
         },
         D3DX10CompileFromMemory: { argBytes: 52, handler: compile },
+        /**
+         * HRESULT D3DX10UnsetAllDeviceObjects(ID3D10Device *pDevice)
+         *
+         * Every object bound to the device unbound, through the device's own
+         * methods (ID3D10Device's slots): each stage's constant buffers,
+         * resources, samplers and shader, the input assembler's buffers and
+         * layout, the stream-output targets, the render targets and the
+         * output and rasterizer states.
+         */
+        D3DX10UnsetAllDeviceObjects: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([device])=>{
+                if ((device >>> 0) === 0 || !host.callGuest || !host.heap)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.currentThread?.();
+                const nulls = host.heap.allocate(RESOURCE_SLOTS * 4);
+                if (nulls === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                host.writeMemory(nulls, new Uint8Array(RESOURCE_SLOTS * 4));
+                /** @param {number} slot @param {number[]} rest */
+                const call = (slot, ...rest)=>method(thread, device, slot, rest);
+                try
+                {
+                    for (const [buffers, views, samplers, shader] of STAGE_SLOTS)
+                    {
+                        await call(buffers, 0, CONSTANT_BUFFER_SLOTS, nulls);
+                        await call(views, 0, RESOURCE_SLOTS, nulls);
+                        await call(samplers, 0, SAMPLER_SLOTS, nulls);
+                        await call(shader, 0);
+                    }
+                    await call(DEVICE.IASetVertexBuffers, 0, VERTEX_BUFFER_SLOTS, nulls, nulls,
+                        nulls);
+                    await call(DEVICE.IASetIndexBuffer, 0, 0, 0);
+                    await call(DEVICE.IASetInputLayout, 0);
+                    await call(DEVICE.SOSetTargets, STREAM_OUTPUT_SLOTS, nulls, nulls);
+                    await call(DEVICE.OMSetRenderTargets, RENDER_TARGET_SLOTS, nulls, 0);
+                    // A blend factor of zeros, the mask every sample.
+                    await call(DEVICE.OMSetBlendState, 0, nulls, 0xffffffff);
+                    await call(DEVICE.OMSetDepthStencilState, 0, 0);
+                    await call(DEVICE.RSSetState, 0);
+                    return S_OK;
+                }
+                finally
+                {
+                    host.heap.free(nulls);
+                }
+            },
+        },
+        /**
+         * HRESULT D3DX10FilterTexture(ID3D10Resource *pTexture, UINT SrcLevel, UINT MipFilter)
+         *
+         * The levels below SrcLevel remade from it. The texture's levels are as
+         * the loader made them - a loaded file comes with its chain - so they
+         * are left as they are, and said.
+         */
+        D3DX10FilterTexture: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([texture])=>{
+                if ((texture >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.divergence?.('D3DX10FilterTexture',
+                    'the texture\'s levels are kept as loaded, not filtered again');
+                return S_OK;
+            },
+        },
         /**
          * HRESULT D3DX10SaveTextureToFileA(ID3D10Resource*, D3DX10_IMAGE_FILE_FORMAT, LPCSTR):
          * refused; the texture's bytes are the GPU's and no read-back is made for it.

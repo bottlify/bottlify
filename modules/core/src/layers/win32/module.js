@@ -26,7 +26,7 @@ import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, decodeAnsi, encodeAnsi } from './kernel32/locale.js';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
-    machineArchitecture,
+    machineArchitecture, sessionEnvironment,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { serveCall } from './kernel32/cross-process.js';
@@ -75,7 +75,8 @@ import {
 import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
-    DIRECTX_RELEASES, createHive, shellFolderDirectories, shellFolders,
+    DIRECTX_RELEASES, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, REG_EXPAND_SZ,
+    REG_SZ, createHive, shellFolderDirectories, shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -448,10 +449,33 @@ export function createWin32Module(){
                 processors.adopt(thread);
                 config?.threadBlock?.(thread);
             };
-            /** The variables the process starts with: its parent's, or the machine's. */
+            /**
+             * The string values of an environment key in the registry: the
+             * machine's or the user's, as a session's block is built from them.
+             *
+             * @param {number} root @param {string} path
+             * @returns {import('./kernel32/environment.js').EnvironmentValue[]}
+             */
+            const environmentValues = (root, path)=>{
+                const key = hive.open(/** @type {any} */ (hive.root(root)), path);
+                /** @type {{ name: string, type: number, data: Uint8Array }[]} */
+                const values = key ? hive.values(key) : [];
+                return values.filter(value=>value.type === REG_SZ || value.type === REG_EXPAND_SZ)
+                    .map(value=>({ name: value.name,
+                        value: decodeAnsi(value.data).replace(/\0+$/, ''),
+                        expand: value.type === REG_EXPAND_SZ }));
+            };
+            /**
+             * The variables the process starts with: its parent's, or a
+             * session's first program's - the machine's, with what the
+             * registry's environment keys hold over them.
+             */
             const ownWidth = { long: pointerSize === 8, wow64: machine64 && pointerSize === 4 };
             const startingEnvironment = ()=>(config?.environment === undefined
-                ? defaultEnvironment(windows, folders, processors.count(), ownWidth)
+                ? sessionEnvironment(
+                    defaultEnvironment(windows, folders, processors.count(), ownWidth),
+                    environmentValues(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT),
+                    environmentValues(HKEY_CURRENT_USER, 'Environment'))
                 : machine64 ? machineArchitecture(config.environment, ownWidth)
                     : config.environment);
 
@@ -3792,7 +3816,33 @@ export function createWin32Module(){
                         },
                     };
                     const d3dx9 = createD3dxFunctions(d3dxHost);
-                    return { ...d3dxLibraries(d3dx9), ...d3dx10Libraries(d3dx9, d3dxHost) };
+                    /** @type {Promise<number> | null} */
+                    let d3dCompile = null;
+                    /**
+                     * D3DX 10's compiles go to D3DCompile, as the library's own
+                     * go to d3dcompiler_43: found the way a program finds it,
+                     * once, on the thread that first asks.
+                     */
+                    const compiler = ()=>(d3dCompile ??= (async()=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        const name = heap.allocate(32);
+                        const routine = heap.allocate(16);
+                        writeMemory(name, encodeAnsi('d3dcompiler_43.dll\0'));
+                        writeMemory(routine, encodeAnsi('D3DCompile\0'));
+                        try
+                        {
+                            const module = (await kernel32.LoadLibraryA.handler([name])) >>> 0;
+                            return module === 0 ? 0
+                                : (await kernel32.GetProcAddress.handler([module, routine])) >>> 0;
+                        }
+                        finally
+                        {
+                            heap.free(name);
+                            heap.free(routine);
+                        }
+                    })());
+                    return { ...d3dxLibraries(d3dx9),
+                        ...d3dx10Libraries(d3dx9, { ...d3dxHost, compiler }) };
                 })(),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
