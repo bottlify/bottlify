@@ -2115,3 +2115,29 @@ test('an exception a handler raises on purpose goes to the guest the same way', 
     m.dispatcher.dispatch(1);
     assert.deepEqual(raised.map(what=>[what.code, what.status]), [['GUEST_EXCEPTION', 0xc0000008]]);
 });
+
+test('a frame chain through a region nothing may read ends there, rather than faulting', ()=>{
+    // An EBP a program uses as a plain register, pointing into the engine's
+    // range of a growing memory: a sampled crossing's chain stopped the run.
+    const regions = [
+        { name: 'stack', base: 0x200000, size: 0x100000, access: 'rw' },
+        { name: 'engine', base: 0x3c00000, size: 0x3de0000, access: 'none' },
+    ];
+    const words = new Map([[0x2ff000, 0x4000000], [0x2ff004, 0x401234]]);
+    const dispatcher = createDispatcher({ cpu: {}, parking: null, memory: {
+        find: (/** @type {number} */ at)=>regions.find(one=>at >= one.base
+            && at < one.base + one.size),
+        readU32: (/** @type {number} */ at)=>{
+            if (at >= 0x3c00000 && at < 0x79e0000)
+            {
+                throw new Error(`Region "engine" (none) does not permit read at ${at}`);
+            }
+            return words.get(at) ?? 0;
+        },
+    } });
+    dispatcher.frameChain(0x2ff000);
+    assert.equal(dispatcher.chainFirst, 0x401234, 'the first frame read');
+    assert.equal(dispatcher.chainSecond, 0, 'the second, in the engine\'s range, ends the chain');
+    dispatcher.frameChain(0x4000000);
+    assert.equal(dispatcher.chainFirst, 0, 'an EBP inside it names no caller');
+});
