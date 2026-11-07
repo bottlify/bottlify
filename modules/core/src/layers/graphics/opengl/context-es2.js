@@ -7,8 +7,9 @@
 /**
  * OpenGL ES 2.0's calls on the desktop (OpenGL 4.1, GL_ARB_ES2_compatibility).
  *
- * - **Shaders are compiled from source only**: no binary format is known,
- *   so glShaderBinary refuses every one, and the compiler is never released.
+ * - **No binary format is known but SPIR-V's** (`context-spirv.js`, which
+ *   hands any other here), so glShaderBinary refuses every other one, and the
+ *   compiler is never released.
  * - **Every precision is the desktop's**: a float of any qualifier holds
  *   IEEE single precision (range 2^127 either way, 23 bits of mantissa), an
  *   integer 32 bits, as section 7.13 of 4.1 has a desktop answer.
@@ -59,7 +60,7 @@ export function installEs2Calls(context, kernel){
             {
                 return;
             }
-            // No format is known (GL_NUM_SHADER_BINARY_FORMATS is zero).
+            // No format but SPIR-V's is known, and that one never reaches here.
             setError(length < 0 ? GL.INVALID_VALUE : GL.INVALID_ENUM);
         },
 

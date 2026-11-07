@@ -46,6 +46,7 @@ import {
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
 import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
 import { ES2_CALLS_NOT_COMPILED, installEs2Calls } from './context-es2.js';
+import { SPIRV_CALLS_NOT_COMPILED, installSpirvCalls } from './context-spirv.js';
 import { installViewportCalls } from './context-viewports.js';
 import { LATER_CALLS_NOT_COMPILED, installLaterCalls } from './context-later.js';
 import { COMPUTE_CALLS_NOT_COMPILED, installComputeCalls } from './context-compute.js';
@@ -149,7 +150,8 @@ const NOT_COMPILABLE = new Set([
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...ATTRIB_BINDING_CALLS_NOT_COMPILED,
     ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
-    ...ES2_CALLS_NOT_COMPILED, ...LATER_CALLS_NOT_COMPILED, ...DEBUG_CALLS_NOT_COMPILED,
+    ...ES2_CALLS_NOT_COMPILED, ...SPIRV_CALLS_NOT_COMPILED, ...LATER_CALLS_NOT_COMPILED,
+    ...DEBUG_CALLS_NOT_COMPILED,
     ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED,
     ...DSA_CALLS_NOT_COMPILED, ...COMPUTE_CALLS_NOT_COMPILED, ...INTERFACE_CALLS_NOT_COMPILED,
     ...LEGACY_CALLS_NOT_COMPILED,
@@ -856,12 +858,14 @@ export function createGlContext(options = {}){
             {
                 return null;
             }
-            if (name !== GL.EXTENSIONS)
+            if (name !== GL.EXTENSIONS && name !== GL.SPIR_V_EXTENSIONS)
             {
                 setError(GL.INVALID_ENUM);
                 return null;
             }
-            if (index < 0 || index >= extensions.length)
+            // No SPIR-V extension is taken, so no index names one.
+            const listed = name === GL.EXTENSIONS ? extensions.length : 0;
+            if (index < 0 || index >= listed)
             {
                 setError(GL.INVALID_VALUE);
                 return null;
@@ -1948,6 +1952,7 @@ export function createGlContext(options = {}){
     }
     installSyncCalls(context, kernel);
     installEs2Calls(context, kernel);
+    installSpirvCalls(context, kernel);
     installSamplerCalls(context, kernel);
     installQueryCalls(context, kernel);
     installTransformFeedbackCalls(context, kernel);

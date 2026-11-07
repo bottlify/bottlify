@@ -39,10 +39,11 @@ test('every precision is the desktop\'s, and asked of a stage only', ()=>{
     assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'not a precision');
 });
 
-test('no shader binary format is known, and the compiler stays', ()=>{
+test('no shader binary format but SPIR-V\'s is known, and the compiler stays', ()=>{
     const gl = context();
-    assert.deepEqual(gl.glGetIntegerv(GL.NUM_SHADER_BINARY_FORMATS), [0]);
-    assert.deepEqual(gl.glGetIntegerv(GL.SHADER_BINARY_FORMATS), []);
+    assert.deepEqual(gl.glGetIntegerv(GL.NUM_SHADER_BINARY_FORMATS), [1]);
+    assert.deepEqual(gl.glGetIntegerv(GL.SHADER_BINARY_FORMATS), [GL.SHADER_BINARY_FORMAT_SPIR_V],
+        'context-spirv.test.js has its calls');
     const shader = gl.glCreateShader(GL.VERTEX_SHADER);
     gl.glShaderBinary([shader], 0x1234, 16);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);

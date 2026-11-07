@@ -189,6 +189,14 @@ event, an error. Neither stops the program.
   renderbuffers draw with one sample; `glBlitFramebuffer` copies colour only; occlusion queries
   answer the viewport's area; 3D textures are accepted and kept nowhere, and a GLSL program that
   samples one does not link.
+- OpenGL SPIR-V shaders (`glShaderBinary` with `GL_SHADER_BINARY_FORMAT_SPIR_V`,
+  `glSpecializeShader`) are written back as GLSL and compiled as a source shader is, so they take
+  what GLSL takes here and no more. Refused at specialization, with the reason in the shader's log:
+  64-bit integers, 16- and 8-bit types, any SPIR-V extension (`GL_NUM_SPIR_V_EXTENSIONS` is zero),
+  a read of an image without a format, a minimum level of detail, and outputs captured by the
+  shader's own `Xfb` decorations. `GL_ARB_gl_spirv` is not in the extension string;
+  `glSpecializeShaderARB` is obtainable. Name queries answer the names the GLSL was written with
+  (`_a0` for the attribute at location 0, `_U1` for the uniform block at binding 1, and so on).
 - Direct3D 11 tessellation runs as compute passes before the draw: the vertex shader over the
   control points, the hull shader a patch an invocation, the fixed-function tessellator (Microsoft's
   reference, bit for bit), and the domain shader as the vertex stage of an indirect draw. An

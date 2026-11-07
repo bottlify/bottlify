@@ -1318,6 +1318,27 @@ every member of a uniform block is an active uniform here, and **an input or out
 stages with no `layout(location)` answers GL_LOCATION -1:** locations between stages are matched
 by name here and assigned to none. *2026-11-07.*
 
+**A230. A SPIR-V program's resources answer the names its GLSL was written with,** not the
+module's OpName strings and not the empty string: the attribute at location 0 is `_a0`, the
+uniform at location 4 `_l4`, the sampler at binding 2 `_t2`, the uniform block at binding 1 `_U1`
+and its members `m0`, `m1`, the storage block at binding 0 `_B0`, a fragment output `_f0i0`
+(location, index). GL_ARB_gl_spirv leaves name reflection to the implementation; these names
+are what the GLSL front end links by, and two stages naming one resource alike is what makes a
+binding or a location one resource across them. Between stages a variable is the member `v` of
+a block named by its location and component, so A221 leaves it out of the program's lists.
+*2026-11-07.*
+
+**A231. Temporary: GL_ARB_gl_spirv is not reported,** while a SPIR-V shader is written back as
+GLSL and takes what the GLSL path takes and no more: a program that finds it may prefer its
+SPIR-V path, and one that does not keeps its GLSL one, which is drawn right.
+`glSpecializeShaderARB` is obtainable, as 4.6's `glSpecializeShader` is (A111), and
+GL_SHADER_BINARY_FORMATS lists SPIR-V's format. *2026-11-07.*
+
+**A232. A specialization that fails leaves its shader unspecialized:** glSpecializeShader may be
+called on it again, with other constants or another entry point. The extension forbids
+specializing a shader specialized already and says nothing of one whose specialization failed.
+*2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
