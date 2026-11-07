@@ -283,7 +283,7 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     // prototype's: one literal holding both fell into V8's dictionary mode.
     assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'f80Values', 'f80Words',
         'faultEip', 'halted', 'layout', 'memory', 'ports', 'rdtsc', 'reg', 'retired', 'trapped',
-        'view', 'x87Exact', 'x87In', 'x87Shadow', 'xmmIn', 'xmmWords']);
+        'view', 'wasmMemory', 'x87Exact', 'x87In', 'x87Shadow', 'xmmIn', 'xmmWords']);
     for (const accessor of ['f80', 'f80bits', 'xmm', 'top', 'empty', 'status', 'control',
         'mxcsr', 'fsBase'])
     {

@@ -1203,11 +1203,15 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             return null;
         }
-        if (cachedBytes === null || cachedBytes.buffer.byteLength === 0)
+        // A shared memory that grew keeps its old buffer whole, only shorter
+        // than the memory now is: taken again once a range reaches past it.
+        if (cachedBytes === null || cachedBytes.buffer.byteLength === 0
+            || cachedBytes.length < layout.ramBase + end)
         {
             cachedBytes = new Uint8Array(memory.buffer);
         }
-        return cachedBytes.subarray(layout.ramBase + address, layout.ramBase + end);
+        return cachedBytes.length < layout.ramBase + end ? null
+            : cachedBytes.subarray(layout.ramBase + address, layout.ramBase + end);
     };
     const counterWord = ()=>view().getUint32(layout.counter, true);
     const fold = ()=>{

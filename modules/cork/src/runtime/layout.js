@@ -218,6 +218,21 @@ export const blockSlot = address=>Math.imul(address, 0x9e3779b1) >>> 12;
 export const LOW_STATE = 4096;
 
 /**
+ * Where in the first executor's state page a growing layout keeps the mask a
+ * read left untested is wrapped by (`ramFloor`, `wrapIntoRam`): past the state
+ * block, the block marks and the interrupt word, short of the wasm
+ * interpreter's statics. One word, the process's: every executor reads it.
+ */
+export const WRAP_WORD = 3072;
+
+/**
+ * What a growing memory holds past the RAM the wrap reaches: a read wrapped to
+ * the RAM's last byte reads up to sixteen bytes on, and a field folded off a
+ * wrapped sum (`wrappedFirst`) up to 64 KiB further.
+ */
+export const WRAP_SLACK = 2 * PAGE;
+
+/**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.
  *
  * Guest RAM lies at `ramBase`: a page in, past the state page, unless the
@@ -230,18 +245,36 @@ export const LOW_STATE = 4096;
  * limit one subtraction makes rather than a constant built in two.
  *
  * @param {{ ramSize: number, hashSlots?: number, processors?: number,
- *     ramBase?: number, bits?: 32 | 64 }} options
+ *     ramBase?: number, bits?: 32 | 64, tablesAt?: number, ramFloor?: number }} options
  *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
  *     `processors`: the process's executors, which `cpuid` says the machine has --
  *     a field only past one, so one processor's layout, and its translations, are
  *     what they were;
  *     `ramBase`: `PAGE` (the default) or 0;
- *     `bits`: 64 for long mode's state block (`longLayout`), one executor's
+ *     `bits`: 64 for long mode's state block (`longLayout`), one executor's;
+ *     `tablesAt`: where the tables lie, a multiple of `PAGE`, when not past RAM -- inside
+ *     the guest's space, in a range the host keeps from it, so the memory need not reach
+ *     past RAM's end to hold them;
+ *     `ramFloor`: a growing memory's (RAM at 0, a power of two up to `ramSize`, a power
+ *     of two too): the RAM it always holds, and the mask an untested read is wrapped by
+ *     then read from the process's word at `wrap` (`WRAP_WORD`), which the host sets to
+ *     the RAM the memory holds now, less one, as it grows
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
-    ramBase = PAGE, bits = 32 })
+    ramBase = PAGE, bits = 32, tablesAt, ramFloor })
 {
+    if (tablesAt !== undefined && (tablesAt % PAGE !== 0 || tablesAt < 0))
+    {
+        throw new Error(`cork: tables at ${tablesAt}, not a page boundary`);
+    }
+    if (ramFloor !== undefined && (bits !== 32 || ramBase !== 0
+        || (ramSize & ramSize - 1) !== 0 || (ramFloor & ramFloor - 1) !== 0
+        || ramFloor > ramSize || ramFloor < 2 * PAGE))
+    {
+        throw new Error(`cork: a growing layout's RAM is at 0 and a power of two from its`
+            + ` floor (${ramFloor}) to its ceiling (${ramSize})`);
+    }
     if (!(hashSlots >= 1 << 10 && hashSlots <= 1 << 26 && (hashSlots & (hashSlots - 1)) === 0))
     {
         throw new Error(`cork: ${hashSlots} entry hash slots is not a power of two`
@@ -292,7 +325,8 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         origin: state + 488,
         // Past the state block, so a thread switch does not carry it.
         nanFirst: state + 1024,
-        tables: ramBase + ramSize,
+        tables: tablesAt ?? ramBase + ramSize,
+        ...ramFloor === undefined ? {} : { ramFloor, wrap: state + WRAP_WORD },
         // The entry hash's slot is the top bits of eip times the golden ratio,
         // as many as the hash has slots for.
         hashShift: 32 - Math.log2(hashSlots),
@@ -534,5 +568,7 @@ export function layoutId(fields){
  * @param {number} bytes  the tables' and what lies past them
  */
 export function pagesFor(layout, bytes){
-    return Math.ceil((layout.tables + bytes) / PAGE);
+    // A growing memory starts holding its floor's RAM and the slack past it.
+    const floor = layout.ramFloor === undefined ? 0 : layout.ramFloor + WRAP_SLACK;
+    return Math.ceil(Math.max(layout.tables + bytes, floor) / PAGE);
 }

@@ -87,11 +87,23 @@ export function wrappedAddress(address, ramSize){
  * access's page flags loaded and tested, an exit for the fault): a load was 46
  * bytes of wasm. The long-mode emitter wraps its reads the same way.
  *
+ * A growing layout (`ramFloor`) wraps by the mask in its `wrap` word, the RAM
+ * the memory holds now less one: one load more than the constant `and`, and
+ * every executor finds the memory's growth at its next read.
+ *
  * @param {import('./region.js').RegionEmitter['b']} b
- * @param {number} ramSize
+ * @param {{ ramSize: number, wrap?: number }} layout
  * @param {number} [addr]  the local, the 32-bit emitter's `Local.addr` unless given
  */
-export function wrapIntoRam(b, ramSize, addr = Local.addr){
+export function wrapIntoRam(b, layout, addr = Local.addr){
+    const { ramSize } = layout;
+    if (layout.wrap !== undefined)
+    {
+        b.localGet(addr);
+        wrapMask(b, layout);
+        b.op(I32.and).localSet(addr);
+        return;
+    }
     if ((ramSize & ramSize - 1) === 0)
     {
         b.localGet(addr).i32const(ramSize - 1).op(I32.and).localSet(addr);
@@ -103,6 +115,25 @@ export function wrapIntoRam(b, ramSize, addr = Local.addr){
     b.localGet(addr).i32const(ramSize | 0).op(I32.ltU);
     b.select().localSet(addr);
 }
+
+/**
+ * The growing layout's wrap mask (`wrapIntoRam`) on the stack: its word, an
+ * absolute address every executor's code reads alike.
+ *
+ * @param {import('./region.js').RegionEmitter['b']} b
+ * @param {{ wrap?: number }} layout
+ */
+export function wrapMask(b, layout){
+    b.i32const(0).load('i32', { offset: /** @type {number} */ (layout.wrap) });
+}
+
+/**
+ * The RAM a static reach may count on being inside the memory: a growing
+ * layout's floor, the whole RAM otherwise.
+ *
+ * @param {{ ramSize: number, ramFloor?: number }} layout
+ */
+export const ramAlways = layout=>layout.ramFloor ?? layout.ramSize;
 
 /**
  * Whether the current instruction's access goes untested, its address wrapped
@@ -188,7 +219,7 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
         {
             windowTest(e, size, counted);
         }
-        wrapIntoRam(b, e.layout.ramSize);
+        wrapIntoRam(b, e.layout);
         return;
     }
     const table = pageFlagsAt(e.layout);
@@ -2108,14 +2139,24 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             }
             b.i32const(from | 0).op(I32.add).localSet(Local.addr);
             if (!stream.store && stream.tested !== true && readsWrapped(e.context)
-                && width <= e.layout.ramSize)
+                && width <= ramAlways(e.layout))
             {
                 // A stream that only reads, where reads go untested: its reach
                 // inside RAM is all the unchecked copy needs, a read there being
                 // the one its address wrapped into RAM makes -- one compare, where
-                // the pages' flags were three loads.
-                b.localGet(Local.addr).i32const(e.layout.ramSize - width + 1 | 0).op(I32.geU)
-                    .op(I32.or);
+                // the pages' flags were three loads. A growing layout's RAM is
+                // what its wrap word says now: the mask less the width, plus two.
+                b.localGet(Local.addr);
+                if (e.layout.wrap !== undefined)
+                {
+                    wrapMask(b, e.layout);
+                    b.i32const(width - 2).op(I32.sub);
+                }
+                else
+                {
+                    b.i32const(e.layout.ramSize - width + 1 | 0);
+                }
+                b.op(I32.geU).op(I32.or);
                 continue;
             }
         }

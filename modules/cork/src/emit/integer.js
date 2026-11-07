@@ -33,7 +33,7 @@ import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
-    wrapsRead,
+    wrapsRead, wrapMask, ramAlways,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -1993,7 +1993,16 @@ function wrappedFirst(e, operand, store){
     const { b } = e;
     const local = e.foldedSumLocal();
     emitAddress(e, { ...operand, disp: low }, true);
-    b.i32const(ramSize - 1).op(I32.and).localTee(local);
+    if (e.layout.wrap !== undefined)
+    {
+        // A growing layout's mask, the RAM it holds now (`wrapIntoRam`).
+        wrapMask(b, e.layout);
+    }
+    else
+    {
+        b.i32const(ramSize - 1);
+    }
+    b.op(I32.and).localTee(local);
     if (disp !== low)
     {
         b.i32const(disp - low).op(I32.add);
@@ -2135,7 +2144,7 @@ function boundedRead(e, operand, store){
     }
     const reach = disp + (base >= 0 ? bounds[base] : 0)
         + (index >= 0 ? bounds[index] * (operand.scale ?? 1) : 0) + Math.max(operand.size, 1);
-    if (reach > e.layout.ramSize)
+    if (reach > ramAlways(e.layout))
     {
         return false;
     }
