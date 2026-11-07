@@ -15,7 +15,8 @@ import {
     CLIP_PLANES, LIGHTS, UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey,
     generateClear,
     sameKeyInputs,
-    generateCopy, generateDraw, generateShow, lightingStateOf, showDescriptor, writeLighting,
+    generateCopy, generateDraw, generateShow, lightingStateOf, showDescriptor, stippled,
+    writeLighting,
 } from './wgsl.js';
 
 /**
@@ -99,6 +100,7 @@ test('every field the descriptor or the shader reads changes the key', ()=>{
         { frontIsCcw: false },
         { colourMask: 0x8 },
         { polygonOffset: { factor: 0, units: -600, clamp: 0 } },
+        { stipple: '5'.repeat(256) },
     ];
     const keys = new Set([base]);
     for (const variant of variants)
@@ -166,6 +168,8 @@ test('two states are the same to sameKeyInputs exactly when their keys are equal
         { fragmentProgram: fragment },
         { fragmentProgram: fragment, viewportHeight: 480 },
         { fragmentProgram: { ...fragment, name: 5 } },
+        { stipple: '5'.repeat(256) },
+        { stipple: 'a'.repeat(256) },
     ];
     const states = variants.flatMap(variant=>[state(variant), structuredClone(state(variant))]);
     for (const a of states)
@@ -651,4 +655,19 @@ test('user clip planes: distances the device clips by, or ones the fragment disc
     assert.match(byFragment, /any\(input\.clipLow < vec4f\(0\.0\)\)/);
     assert.notEqual(drawKey(state({ clip: { count: 5, distances: false } })), drawKey(state()));
     assert.equal(sameKeyInputs(state({ clip: { count: 2, distances: true } }), state()), false);
+});
+
+test('the polygon stipple cuts every kind of fragment stage before it runs', ()=>{
+    const pattern = '0000ffff'.repeat(32);
+    const glsl = stippled('@fragment\nfn fragmentMain(input: VertexOut, @builtin(front_facing)'
+        + ' facing: bool) -> FragmentOut {\n    var out: FragmentOut;\n', pattern);
+    assert.match(glsl, /-> FragmentOut \{\n {4}let glStippleX[^]*discard;[^]*var out/,
+        'a GLSL stage: the test first');
+    assert.match(glsl, /array<u32, 32>\(0x0000ffffu(, 0x0000ffffu){31}\)/);
+
+    const target = { format: 'bgra8unorm', mask: 0xf };
+    const { code } = generateDraw(state({ stipple: pattern, targets: [target, target] }));
+    assert.match(code, /fn fragmentColour\(input: VertexOut\) -> vec4f \{\n {4}let glStippleX/,
+        'several draw buffers: the colour every one is written is the cut one');
+    assert.doesNotMatch(generateDraw(state()).code, /glStipple/);
 });

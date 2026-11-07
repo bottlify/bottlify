@@ -959,6 +959,20 @@ export function installArrayCalls(context, kernel){
     };
 
     /**
+     * Bytes GL itself writes into a store (a getter packing into the bound
+     * pixel pack buffer), noted as the program's writes are.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {Uint8Array} bytes
+     */
+    function storeIntoBuffer(buffer, offset, bytes){
+        buffer.data.set(bytes, offset);
+        noteWritten(buffer, offset, bytes.length);
+        mirrorToMap(buffer, offset, bytes.length);
+    }
+    kernel.side.storeIntoBuffer = storeIntoBuffer;
+
+    /**
      * Whether a map of `bits` is refused for the store's flags (4.4): what
      * it reads, writes, keeps or keeps coherent must be the store's to give.
      *

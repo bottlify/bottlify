@@ -76,6 +76,9 @@ import {
     UNIFORM_BUFFER_CALLS_NOT_COMPILED, installUniformBufferCalls,
 } from './context-uniform-buffers.js';
 import { createSceneBuilder } from './context-scene.js';
+import {
+    LEGACY_CALLS_IN_BEGIN, LEGACY_CALLS_NOT_COMPILED, installLegacyCalls,
+} from './context-legacy.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
 
@@ -100,7 +103,7 @@ const ALLOWED_IN_BEGIN = new Set([
     'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
     'glIndexi', 'glMultiTexCoord4fARB', 'glSecondaryColor3fEXT', 'glFogCoordfEXT',
     'glVertexAttrib4fARB', 'vertexAttribI', 'glMaterialfv', 'glMaterialf', 'glCallList',
-    'glCallLists', 'glEnd',
+    'glCallLists', 'glEnd', ...LEGACY_CALLS_IN_BEGIN,
 ]);
 
 /** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
@@ -146,7 +149,7 @@ const NOT_COMPILABLE = new Set([
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
     ...ES2_CALLS_NOT_COMPILED, ...LATER_CALLS_NOT_COMPILED, ...DEBUG_CALLS_NOT_COMPILED,
     ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED,
-    ...DSA_CALLS_NOT_COMPILED,
+    ...DSA_CALLS_NOT_COMPILED, ...LEGACY_CALLS_NOT_COMPILED,
 ]);
 
 /**
@@ -1897,6 +1900,7 @@ export function createGlContext(options = {}){
     installLightingCalls(context, kernel);
     installArrayCalls(context, kernel);
     installPixelCalls(context, kernel);
+    installLegacyCalls(context, kernel);
     installProgramCalls(context, kernel);
     // Before the vertex array objects: a new one's state holds the bindings too.
     installAttribBindingCalls(context, kernel);

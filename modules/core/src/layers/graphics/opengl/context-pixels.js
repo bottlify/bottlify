@@ -132,6 +132,24 @@ export function installPixelCalls(context, kernel){
     });
 
     /**
+     * An unpacked image through the pixel transfer, a copy when it changes
+     * anything (`context-legacy.js`).
+     *
+     * @param {Uint8Array} texels
+     * @returns {Uint8Array}
+     */
+    const transferred = texels=>{
+        const transfer = kernel.side.pixelTransfer?.();
+        if (!transfer)
+        {
+            return texels;
+        }
+        const copy = texels.slice();
+        transfer(copy);
+        return copy;
+    };
+
+    /**
      * Draws a block of RGBA texels at the raster position, through the
      * fragment operations, zoomed as GL_ZOOM_X and GL_ZOOM_Y say.
      *
@@ -362,9 +380,12 @@ export function installPixelCalls(context, kernel){
                 const reading = kernel.readBack?.({ x, y, width, height }) ?? null;
                 if (reading)
                 {
-                    return reading.then(texels=>packImage(
-                        texels ?? new Uint8Array(width * height * 4), width, height, format,
-                        type, pack));
+                    const transfer = kernel.side.pixelTransfer?.() ?? null;
+                    return reading.then(texels=>{
+                        const read = texels ?? new Uint8Array(width * height * 4);
+                        transfer?.(read);
+                        return packImage(read, width, height, format, type, pack);
+                    });
                 }
                 kernel.diverge('glReadPixels was accepted and read black: the read buffer'
                     + ' lives on the device and is not one it reads back');
@@ -383,6 +404,7 @@ export function installPixelCalls(context, kernel){
                     texels.set(readPixel(frame, fx, fy), (row * width + column) * 4);
                 }
             }
+            kernel.side.pixelTransfer?.()?.(texels);
             return packImage(texels, width, height, format, type, packState());
         },
 
@@ -411,7 +433,8 @@ export function installPixelCalls(context, kernel){
             }
             if (texels)
             {
-                drawTexels(texels, width, height);
+                // A list keeps the unpacked image; the transfer is the state at the draw.
+                drawTexels(transferred(texels), width, height);
             }
         },
 

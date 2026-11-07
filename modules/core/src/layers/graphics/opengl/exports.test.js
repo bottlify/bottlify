@@ -236,13 +236,13 @@ test('an unimplemented export cleans its stack, answers zero, and is counted', (
     const { table, opengl } = library();
     startDrawing(table);
 
-    // The evaluators are the one part of GL 1.1 nothing here implements.
-    assert.equal(table.glMap1f.argBytes, 24);
-    assert.equal(table.glMap1f.handler([0, floatBits(0), floatBits(1), 3, 4, 0]), 0);
-    table.glMap1f.handler([0, floatBits(0), floatBits(1), 3, 4, 0]);
-    table.glEvalCoord1f.handler([floatBits(0.5)]);
+    // Selection is a part of GL 1.1 nothing here implements.
+    assert.equal(table.glPushName.argBytes, 4);
+    assert.equal(table.glPushName.handler([7]), 0);
+    table.glPushName.handler([7]);
+    table.glLoadName.handler([8]);
 
-    assert.deepEqual(opengl.diagnostics().unimplemented, { glMap1f: 2, glEvalCoord1f: 1 },
+    assert.deepEqual(opengl.diagnostics().unimplemented, { glPushName: 2, glLoadName: 1 },
         'which entry points a program reached for is what a run that drew nothing has to say');
 });
 

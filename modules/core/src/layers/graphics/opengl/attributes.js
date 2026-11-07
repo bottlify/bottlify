@@ -22,6 +22,7 @@
 import { GL } from './constants.js';
 import { DEFAULT_CLIENT_ENABLES, DEFAULT_ENABLES, DEFAULT_STATE } from './state.js';
 import { TESSELLATION_QUERIES } from './context-tessellation.js';
+import { EVAL_QUERIES, PIXEL_MAP_SIZE_QUERIES, PIXEL_MODE_QUERIES } from './legacy-state.js';
 
 /** @type {[number, readonly number[]][]} */
 const SERVER_GROUPS = [
@@ -51,7 +52,7 @@ const SERVER_GROUPS = [
         GL.POLYGON_OFFSET_CLAMP, GL.POLYGON_OFFSET_POINT, GL.POLYGON_OFFSET_LINE,
         GL.POLYGON_OFFSET_FILL,
     ]],
-    [GL.PIXEL_MODE_BIT, [GL.ZOOM_X, GL.ZOOM_Y, GL.READ_BUFFER]],
+    [GL.PIXEL_MODE_BIT, [GL.ZOOM_X, GL.ZOOM_Y, GL.READ_BUFFER, ...PIXEL_MODE_QUERIES]],
     [GL.LIGHTING_BIT, [
         GL.COLOR_MATERIAL_FACE, GL.COLOR_MATERIAL_PARAMETER, GL.COLOR_MATERIAL, GL.LIGHTING,
         GL.LIGHT0, GL.LIGHT1, GL.LIGHT2, GL.LIGHT3, GL.LIGHT4, GL.LIGHT5, GL.LIGHT6, GL.LIGHT7,
@@ -96,7 +97,7 @@ const SERVER_GROUPS = [
         GL.POLYGON_SMOOTH_HINT, GL.FOG_HINT, GL.GENERATE_MIPMAP_HINT,
         GL.TEXTURE_COMPRESSION_HINT, GL.FRAGMENT_SHADER_DERIVATIVE_HINT,
     ]],
-    [GL.EVAL_BIT, [GL.AUTO_NORMAL]],
+    [GL.EVAL_BIT, [GL.AUTO_NORMAL, ...EVAL_QUERIES]],
     [GL.LIST_BIT, [GL.LIST_BASE]],
     [GL.TEXTURE_BIT, [
         GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP, GL.TEXTURE_BINDING_1D,
@@ -142,6 +143,8 @@ const CLIENT_GROUPS = [
  */
 export const NOT_SAVED = new Set([
     ...TESSELLATION_QUERIES,
+    // The pixel maps are in no group, and their sizes with them.
+    ...PIXEL_MAP_SIZE_QUERIES,
     // Vertex array state outside the vertex array objects, in no group (4.6
     // compatibility table 23.8); the two enables are the enable group's.
     GL.PRIMITIVE_RESTART_INDEX,

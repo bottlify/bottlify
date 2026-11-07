@@ -48,6 +48,7 @@ import {
     UNANNOUNCED_FUNCTIONS, WGL_EXTENSIONS, registryArguments,
 } from './extensions.js';
 import { laterEntryPoints } from './exports-later.js';
+import { legacyEntryPoints } from './exports-legacy.js';
 import { SYNC } from './context-sync.js';
 import {
     choosePixelFormat, choosePixelFormatsARB, decodePixelFormat, encodePixelFormat,
@@ -2244,6 +2245,7 @@ export function createOpengl(services){
         },
         pointerSize: services.pointerSize ?? 4,
     }));
+    Object.assign(implemented, legacyEntryPoints({ current, answer, readTyped }));
     const debug = debugEntryPoints({
         current, call, answer, readTyped, writeU32s,
         writeMemory: services.writeMemory,
