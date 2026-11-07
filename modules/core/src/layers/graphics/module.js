@@ -811,6 +811,13 @@ export function createGraphicsModule(){
                     // there (`wgl-bitmap.js`).
                     /** @param {number} hdc */
                     bitmapSurface: hdc=>win32.gdi().bitmapSurface?.(hdc) ?? null,
+                    // A pbuffer's DC is GDI's, so GetPixelFormat and every other
+                    // call naming it finds one (WGL_ARB_pbuffer).
+                    /** @param {number} width @param {number} height */
+                    createPbufferDc: (width, height)=>win32.gdi().createPbufferDc?.(width, height)
+                        ?? 0,
+                    /** @param {number} hdc */
+                    deleteDc: hdc=>win32.gdi().deleteSurfaceDc?.(hdc),
                     // WGL's refusals are read with GetLastError.
                     /** @param {number} code */
                     setLastError: code=>win32.setLastError?.(code),

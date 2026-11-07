@@ -2361,6 +2361,31 @@ test('a context made current with a read DC reads that window\'s buffers, and dr
         assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, readBack);
     });
 
+test('a context left draws what it recorded, and another reads that drawable as it is',
+    async()=>{
+        const r = rig();
+        const pbuffer = { width: 16, height: 8, doubleBuffered: false, key: 'pbuffer:1' };
+        /** @type {any} */
+        const drawer = createGlContext({ gpu: r.renderer });
+        drawer.attach(pbuffer);
+        const colour = textureLabelled(r, /gl-colour/);
+        colour.bytes.fill(0x30);
+        drawer.glClear(GL.COLOR_BUFFER_BIT);
+        const passes = ()=>r.gpu.of('beginRenderPass').filter((/** @type {any} */ call)=>
+            call.descriptor.colorAttachments[0]?.view.texture === colour).length;
+        await r.renderer.settled();
+        assert.equal(passes(), 0, 'recorded, not drawn yet');
+        drawer.flushDevice();
+        await r.renderer.settled();
+        assert.equal(passes(), 1, 'drawn once it is left');
+        drawer.flushDevice();
+        await r.renderer.settled();
+        assert.equal(passes(), 1, 'and nothing twice');
+        assert.deepEqual([...(await r.context.readDrawable(pbuffer) ?? [])].slice(0, 4),
+            [0x30, 0x30, 0x30, 0x30], 'the other drawable\'s colour, the whole of it');
+        assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, colour);
+    });
+
 test('a single-buffered window keeps its one buffer across a swap', async()=>{
     const r = rig();
     r.context.attach({ width: 4, height: 4, doubleBuffered: false, key: 'single' });

@@ -1250,3 +1250,109 @@ test('wglMakeContextCurrentARB reads from its second DC, which must carry the co
         assert.equal(table.wglMakeContextCurrentARB.handler([draw, draw, 0]), 1);
         assert.equal(table.wglGetCurrentReadDCARB.handler([]), 0);
     });
+
+/** @param {{ errors: number[] }} [log] */
+function pbufferLibrary(log = { errors: [] }){
+    const box = machine();
+    const opengl = createOpengl({
+        readMemory: box.readMemory,
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+        describeDrawable: (/** @type {number} */ hdc)=>(hdc === 0x900d
+            ? { key: 'window:1', width: 200, height: 200, window: 1 } : null),
+        setLastError: (/** @type {number} */ code)=>log.errors.push(code),
+    });
+    const table = /** @type {Table} */ (opengl.table);
+    /** @param {number[]} words @returns {number} where they were put */
+    const list = words=>{
+        const at = box.scratch.allocate(words.length * 4);
+        box.writeMemory(at, new Uint8Array(Uint32Array.from(words).buffer));
+        return at;
+    };
+    const out = box.scratch.allocate(4);
+    /** @param {number} pbuffer @param {number} attribute */
+    const query = (pbuffer, attribute)=>(table.wglQueryPbufferARB.handler(
+        [pbuffer, attribute, out]) === 1 ? new DataView(box.bytes.buffer).getUint32(out, true)
+        : null);
+    assert.equal(table.wglSetPixelFormat.handler([0x900d, 1, 0]), 1);
+    return { opengl, table, list, query, errors: log.errors };
+}
+
+test('WGL_ARB_pbuffer: a pbuffer, its one DC, its attributes, and the refusals', ()=>{
+    const { table, list, query, errors } = pbufferLibrary();
+    const none = list([0]);
+    const create = (/** @type {number[]} */ args)=>table.wglCreatePbufferARB.handler(args);
+    assert.equal(create([0x900d, 0, 100, 100, none]), 0);
+    assert.equal(create([0x900d, 1, 0, 100, none]), 0);
+    assert.equal(create([0x900d, 1, 100, -1, none]), 0);
+    assert.equal(create([0x900d, 1, 65535, 65535, none]), 0);
+    // The generic renderer's formats draw no pbuffer.
+    const generic = PIXEL_FORMATS.findIndex(format=>(format.dwFlags & PFD.GENERIC_FORMAT) !== 0);
+    assert.equal(create([0x900d, generic + 1, 16, 16, none]), 0);
+    assert.deepEqual(errors, [2000, 13, 13, 1450, 2000],
+        'ERROR_INVALID_PIXEL_FORMAT, _INVALID_DATA twice, _NO_SYSTEM_RESOURCES, the format');
+    errors.length = 0;
+
+    const largest = create([0x900d, 1, 65535, 65535, list([WGL.PBUFFER_LARGEST_ARB, 1, 0])]);
+    assert.notEqual(largest, 0, 'the largest there is, when the program takes it');
+    assert.equal(query(largest, WGL.PBUFFER_WIDTH_ARB), 8192);
+    assert.equal(table.wglDestroyPbufferARB.handler([largest]), 1);
+
+    const pbuffer = create([0x900d, 1, 16, 8, list([WGL.TEXTURE_FORMAT_ARB,
+        WGL.TEXTURE_RGB_ARB, WGL.TEXTURE_TARGET_ARB, WGL.TEXTURE_2D_ARB, 0])]);
+    const dc = table.wglGetPbufferDCARB.handler([pbuffer]);
+    assert.notEqual(dc, 0);
+    assert.equal(table.wglGetPbufferDCARB.handler([pbuffer]), dc, 'the same DC every time');
+    assert.equal(table.wglGetPixelFormat.handler([dc]), 1, 'the pbuffer\'s format');
+    assert.equal(table.wglReleasePbufferDCARB.handler([pbuffer, 0x900d]), 0);
+    assert.deepEqual(errors, [1425], 'ERROR_DC_NOT_FOUND for a DC not its');
+    assert.equal(table.wglReleasePbufferDCARB.handler([pbuffer, dc]), 1);
+    assert.equal(table.wglReleasePbufferDCARB.handler([pbuffer, dc]), 1, 'and again');
+    assert.deepEqual([WGL.PBUFFER_WIDTH_ARB, WGL.PBUFFER_HEIGHT_ARB, WGL.PBUFFER_LOST_ARB,
+        WGL.TEXTURE_FORMAT_ARB, WGL.TEXTURE_TARGET_ARB, WGL.MIPMAP_TEXTURE_ARB,
+        WGL.MIPMAP_LEVEL_ARB, WGL.CUBE_MAP_FACE_ARB].map(name=>query(pbuffer, name)),
+    [16, 8, 0, WGL.TEXTURE_RGB_ARB, WGL.TEXTURE_2D_ARB, 0, 0,
+        WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB]);
+    errors.length = 0;
+    assert.equal(query(pbuffer, 0xdeadbeef), null);
+    assert.equal(query(0, WGL.PBUFFER_WIDTH_ARB), null);
+    assert.equal(table.wglSetPbufferAttribARB.handler([pbuffer, list([WGL.MIPMAP_LEVEL_ARB, 1,
+        0])]), 0, 'a level it does not have');
+    assert.equal(table.wglSetPbufferAttribARB.handler([pbuffer, list([WGL.CUBE_MAP_FACE_ARB,
+        WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB, 0])]), 1, 'what it has, taken');
+    assert.deepEqual(errors, [13, 6, 13]);
+    assert.equal(table.wglDestroyPbufferARB.handler([pbuffer]), 1);
+    assert.equal(table.wglDestroyPbufferARB.handler([pbuffer]), 0, 'gone');
+    assert.equal(table.wglGetPixelFormat.handler([dc]), 0, 'and its DC with it');
+});
+
+test('WGL_ARB_render_texture: the pbuffer is the image of the texture bound until let go of',
+    async()=>{
+        const { opengl, table, list } = pbufferLibrary();
+        const pbuffer = table.wglCreatePbufferARB.handler([0x900d, 1, 16, 8, list([
+            WGL.TEXTURE_FORMAT_ARB, WGL.TEXTURE_RGBA_ARB, WGL.TEXTURE_TARGET_ARB,
+            WGL.TEXTURE_2D_ARB, 0])]);
+        table.wglGetPbufferDCARB.handler([pbuffer]);
+        const context = table.wglCreateContext.handler([0x900d]);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, context]), 1);
+        /** @returns {number[]} the bound 2D texture's level 0, width and height */
+        const level = ()=>/** @type {number[]} */ (opengl.withContext((/** @type {any} */ gl)=>[
+            gl.glGetTexLevelParameteriv(GL.TEXTURE_2D, 0, GL.TEXTURE_WIDTH)[0],
+            gl.glGetTexLevelParameteriv(GL.TEXTURE_2D, 0, GL.TEXTURE_HEIGHT)[0]]));
+        const bind = (/** @type {number} */ buffer)=>table.wglBindTexImageARB.handler(
+            [pbuffer, buffer]);
+        const release = (/** @type {number} */ buffer)=>table.wglReleaseTexImageARB.handler(
+            [pbuffer, buffer]);
+        assert.equal(await bind(GL.BACK), 0, 'GL\'s names are not WGL\'s');
+        assert.equal(release(WGL.BACK_LEFT_ARB), 0, 'a single-buffered pbuffer has no back');
+        assert.equal(release(WGL.FRONT_LEFT_ARB), 1, 'nothing bound to let go of');
+        assert.equal(await bind(WGL.FRONT_LEFT_ARB), 1);
+        assert.deepEqual(level(), [16, 8]);
+        assert.equal(await bind(WGL.FRONT_LEFT_ARB), 0, 'bound already');
+        assert.equal(release(WGL.FRONT_LEFT_ARB), 1);
+        assert.deepEqual(level(), [0, 0], 'let go of, the image is none');
+        assert.equal(await bind(WGL.FRONT_RIGHT_ARB), 1);
+        assert.deepEqual(level(), [0, 0], 'no stereo: the right buffer is none');
+        assert.equal(release(WGL.FRONT_RIGHT_ARB), 1);
+    });

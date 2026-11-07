@@ -711,6 +711,32 @@ export function createGlContext(options = {}){
             return extensions[index];
         },
 
+        /**
+         * Another drawable's colour as RGBA, its bottom row first, read on the
+         * device: a pbuffer bound as a texture (WGL_ARB_render_texture). Null
+         * on the processor or for a context with no drawable.
+         *
+         * @param {{ width: number, height: number, key?: string }} drawable
+         * @returns {Promise<Uint8Array | null> | null}
+         */
+        readDrawable(drawable){
+            return gpu?.readPixels && attached
+                ? gpu.readPixels(context, { x: 0, y: 0, width: drawable.width,
+                    height: drawable.height }, null, drawable)
+                : null;
+        },
+
+        /**
+         * What was recorded for the device is drawn now: the context is
+         * current no longer, or is going (`gpu.js` flush).
+         */
+        flushDevice(){
+            if (attached)
+            {
+                gpu?.flush?.(context);
+            }
+        },
+
         /** The version, profile and flags the context was made for. */
         get version(){
             return version;

@@ -4788,6 +4788,8 @@ export function createWin32Module(){
                     createSurfaceDc: attributes=>gdi.createSurfaceDc(attributes),
                     /** @param {number} handle */
                     deleteSurfaceDc: handle=>gdi.deleteSurfaceDc(handle),
+                    /** @param {number} width @param {number} height */
+                    createPbufferDc: (width, height)=>gdi.createPbufferDc(width, height),
                     /** @param {number} hdc */
                     describeDrawable: hdc=>gdi.describeDrawable(hdc),
                     /** @param {number} hdc */

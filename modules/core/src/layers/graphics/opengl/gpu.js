@@ -3906,17 +3906,21 @@ export function createGpuRenderer(services){
          * @param {{ x: number, y: number, width: number, height: number }} rect
          *     in window coordinates, y up
          * @param {any} readFbo  the read framebuffer object, or null for the window's
+         * @param {{ width: number, height: number, key?: string }} [drawable]  another
+         *     drawable's colour to read in place of the context's: a pbuffer bound
+         *     as a texture (WGL_ARB_render_texture)
          * @returns {Promise<Uint8Array | null> | null} the rectangle as RGBA, its bottom
          *     row first, zero where it lies outside the buffer
          */
-        readPixels(context, rect, readFbo){
+        readPixels(context, rect, readFbo, drawable){
             const surfaces = drawables.get(context);
             if (!surfaces)
             {
                 return null;
             }
             const recording = recordingOf(context);
-            const source = sourceOf(readers.get(context) ?? surfaces, readFbo, recording);
+            const source = drawable ? sourceOf(surfacesFor(drawable), null, recording)
+                : sourceOf(readers.get(context) ?? surfaces, readFbo, recording);
             if (!source)
             {
                 return null;
@@ -3977,6 +3981,33 @@ export function createGpuRenderer(services){
                 }
                 return out;
             });
+        },
+
+        /**
+         * What the context recorded since its last swap or read is drawn now,
+         * shown nowhere: a context made current no longer, or deleted, has
+         * its commands carried out, as wglMakeCurrent flushes the one it
+         * leaves, and another context reading its drawable finds them there.
+         *
+         * @param {object} context
+         */
+        flush(context){
+            const surfaces = drawables.get(context);
+            const recording = recordings.get(context);
+            if (!surfaces || !recording)
+            {
+                return;
+            }
+            recordings.delete(context);
+            const drawn = { ...surfaces };
+            chain = chain
+                .then(async()=>{
+                    await replay(recording, drawn, null, undefined);
+                })
+                .catch(error=>{
+                    unflushed.delete(recording.id);
+                    lose(error instanceof Error ? error.message : String(error));
+                });
         },
 
         /** Every replay queued so far has run. */

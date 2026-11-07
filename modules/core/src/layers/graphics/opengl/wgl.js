@@ -51,11 +51,13 @@
  * seam is one function, and the whole of WGL runs headless in a test.
  */
 
-import { PFD, WIN32_ERROR } from './constants.js';
+import { MAX_PBUFFER_SIZE, PFD, WGL, WIN32_ERROR } from './constants.js';
 import { CORE_FUNCTIONS, createGlContext } from './context.js';
 import { HIDDEN_GL_EXTENSIONS } from './extensions.js';
 import { chooseContextVersion } from './version.js';
-import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './pixelformat.js';
+import {
+    PIXEL_FORMATS, choosePixelFormat, drawsToPbuffer, writePixelFormatDescriptor,
+} from './pixelformat.js';
 import { createBitmapDrawables } from './wgl-bitmap.js';
 
 /**
@@ -71,12 +73,38 @@ import { createBitmapDrawables } from './wgl-bitmap.js';
  * @property {boolean} [memory]  A memory DC: its pixels are the selected bitmap's.
  */
 
+/** The first pbuffer handle: past every context handle and DC there is. */
+const PBUFFER_BASE = 0x7e000000;
+/** The first DC numbered here for a pbuffer when no GDI makes one. */
+const OWN_DC_BASE = 0x7f000002;
+/** WGL_ARB_render_texture's texture formats and targets, none among them. */
+const TEXTURE_FORMATS = new Set(/** @type {number[]} */ ([WGL.NO_TEXTURE_ARB, WGL.TEXTURE_RGB_ARB,
+    WGL.TEXTURE_RGBA_ARB]));
+const TEXTURE_TARGETS = new Set(/** @type {number[]} */ ([WGL.NO_TEXTURE_ARB, WGL.TEXTURE_1D_ARB,
+    WGL.TEXTURE_2D_ARB, WGL.TEXTURE_CUBE_MAP_ARB]));
+
+/**
+ * @typedef {Object} Pbuffer
+ * @property {number} format  its one-based pixel format
+ * @property {number} width @property {number} height
+ * @property {number} textureFormat  WGL_TEXTURE_RGB_ARB, _RGBA_ARB or WGL_NO_TEXTURE_ARB
+ * @property {number} textureTarget  WGL_TEXTURE_1D_ARB, _2D_ARB, _CUBE_MAP_ARB or none
+ * @property {number} mipmap  1 when it was asked to have its mipmaps
+ * @property {number} level @property {number} face
+ * @property {number} dc  its DC once one was asked for, zero before
+ * @property {number} bound  the buffer bound as a texture (WGL_FRONT_LEFT_ARB...), zero for none
+ */
+
 /**
  * @typedef {Object} WglGdi
  * @property {(hdc: number) => DrawableInfo | null} describeDrawable
  *           Null for a handle that is not a device context at all.
  * @property {(hdc: number) => import('./wgl-bitmap.js').BitmapSurface | null} [bitmapSurface]
  *           The bitmap a memory DC has selected, and its pixels.
+ * @property {(width: number, height: number) => number} [createPbufferDc]
+ *           A DC of a pbuffer of this size, which `describeDrawable` then names;
+ *           absent, the pbuffers' DCs are numbered and described here
+ * @property {(hdc: number) => void} [deleteDc]  a pbuffer's DC, gone with it
  */
 
 /**
@@ -138,6 +166,20 @@ export function createWgl(options){
 
     /** @type {Map<string, number>} drawable key -> the one-based format index */
     const formats = new Map();
+
+    /**
+     * WGL_ARB_pbuffer's pbuffers, by handle (`PBUFFER_BASE` on, a number no
+     * other WGL object has), each with its DC once one was asked for.
+     *
+     * @type {Map<number, Pbuffer>}
+     */
+    const pbuffers = new Map();
+    let nextPbuffer = PBUFFER_BASE;
+    /** The pbuffers' DCs numbered here, with no GDI behind this. @type {Map<number, DrawableInfo>} */
+    const ownDcs = new Map();
+    let nextOwnDc = OWN_DC_BASE;
+    /** @param {number} hdc @returns {DrawableInfo | null} */
+    const describe = hdc=>ownDcs.get(hdc >>> 0) ?? gdi.describeDrawable(hdc);
     /** @type {Map<string, number>} drawable key -> how many times it was presented */
     const swaps = new Map();
 
@@ -194,7 +236,7 @@ export function createWgl(options){
 
         /** @param {number} hdc @returns {number} how many times it was presented */
         swapCount(hdc){
-            const drawable = gdi.describeDrawable(hdc);
+            const drawable = describe(hdc);
             return drawable ? (swaps.get(drawable.key) ?? 0) : 0;
         },
 
@@ -206,7 +248,7 @@ export function createWgl(options){
          * @returns {number} the one-based index, or zero
          */
         ChoosePixelFormat(hdc, request){
-            if (!gdi.describeDrawable(hdc))
+            if (!describe(hdc))
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);
                 return 0;
@@ -226,7 +268,7 @@ export function createWgl(options){
          * @returns {number}
          */
         DescribePixelFormat(hdc, index, bytes, address){
-            if (!gdi.describeDrawable(hdc))
+            if (!describe(hdc))
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);
                 return 0;
@@ -250,7 +292,7 @@ export function createWgl(options){
          * @returns {boolean}
          */
         SetPixelFormat(hdc, index){
-            const drawable = gdi.describeDrawable(hdc);
+            const drawable = describe(hdc);
             if (!drawable)
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);
@@ -283,7 +325,7 @@ export function createWgl(options){
          *          format one even when the handle is what was wrong.
          */
         GetPixelFormat(hdc){
-            const drawable = gdi.describeDrawable(hdc);
+            const drawable = describe(hdc);
             const index = drawable ? formats.get(drawable.key) : undefined;
             if (index === undefined)
             {
@@ -302,7 +344,7 @@ export function createWgl(options){
          * @returns {any | null}
          */
         wglCreateContext(hdc, version){
-            const drawable = gdi.describeDrawable(hdc);
+            const drawable = describe(hdc);
             if (!drawable)
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);
@@ -359,7 +401,7 @@ export function createWgl(options){
          * @returns {any | null}
          */
         wglCreateContextAttribsARB(hdc, share, attributes){
-            if (!gdi.describeDrawable(hdc))
+            if (!describe(hdc))
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);
                 return null;
@@ -403,6 +445,7 @@ export function createWgl(options){
                 current.delete(holder);
             }
             live.delete(context);
+            context.flushDevice?.();
             context.destroy();
             return true;
         },
@@ -419,12 +462,13 @@ export function createWgl(options){
          */
         wglMakeCurrent(hdc, context, readHdc = hdc){
             const thread = options.currentThread();
-            const drawable = gdi.describeDrawable(hdc);
-            const readDrawable = readHdc === hdc ? drawable : gdi.describeDrawable(readHdc);
+            const drawable = describe(hdc);
+            const readDrawable = readHdc === hdc ? drawable : describe(readHdc);
             if (!context)
             {
                 if (drawable)
                 {
+                    current.get(thread)?.context.flushDevice?.();
                     current.delete(thread);
                     return true;
                 }
@@ -432,6 +476,7 @@ export function createWgl(options){
                 // works when there was something to release.
                 if (current.has(thread))
                 {
+                    current.get(thread)?.context.flushDevice?.();
                     current.delete(thread);
                     return true;
                 }
@@ -472,6 +517,13 @@ export function createWgl(options){
                     : { width: readDrawable.width, height: readDrawable.height,
                         key: readDrawable.key },
             });
+            // The context left is flushed, as wglMakeCurrent does before it
+            // switches.
+            const left = current.get(thread)?.context;
+            if (left && left !== context)
+            {
+                left.flushDevice?.();
+            }
             current.set(thread, { context, hdc, readHdc });
             if (record.size)
             {
@@ -525,6 +577,229 @@ export function createWgl(options){
         wglGetCurrentReadDCARB(){
             return current.get(options.currentThread())?.readHdc ?? 0;
         },
+
+        // --- WGL_ARB_pbuffer ---
+
+        /**
+         * A pbuffer of `format` and this size: an off-screen drawable OpenGL
+         * draws on the device. `attributes` are WGL_PBUFFER_LARGEST_ARB and
+         * WGL_ARB_render_texture's texture format, target and mipmap flag.
+         *
+         * @param {number} hdc @param {number} format @param {number} width
+         * @param {number} height @param {readonly number[]} attributes  name and value pairs
+         * @returns {number} its handle, or zero
+         */
+        wglCreatePbufferARB(hdc, format, width, height, attributes){
+            if (!describe(hdc))
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return 0;
+            }
+            const described = PIXEL_FORMATS[format - 1];
+            if (!described || !drawsToPbuffer(described))
+            {
+                fail(WIN32_ERROR.INVALID_PIXEL_FORMAT);
+                return 0;
+            }
+            if (width <= 0 || height <= 0)
+            {
+                fail(WIN32_ERROR.INVALID_DATA);
+                return 0;
+            }
+            let largest = false;
+            let textureFormat = /** @type {number} */ (WGL.NO_TEXTURE_ARB);
+            let textureTarget = /** @type {number} */ (WGL.NO_TEXTURE_ARB);
+            let mipmap = 0;
+            for (let at = 0; at + 1 < attributes.length; at += 2)
+            {
+                const value = attributes[at + 1];
+                switch (attributes[at])
+                {
+                    case WGL.PBUFFER_LARGEST_ARB: largest = value !== 0; break;
+                    case WGL.TEXTURE_FORMAT_ARB: textureFormat = value; break;
+                    case WGL.TEXTURE_TARGET_ARB: textureTarget = value; break;
+                    case WGL.MIPMAP_TEXTURE_ARB: mipmap = value !== 0 ? 1 : 0; break;
+                    default:
+                        fail(WIN32_ERROR.INVALID_DATA);
+                        return 0;
+                }
+            }
+            if (!TEXTURE_FORMATS.has(textureFormat) || !TEXTURE_TARGETS.has(textureTarget))
+            {
+                fail(WIN32_ERROR.INVALID_DATA);
+                return 0;
+            }
+            // Past the largest, only for a program that said it takes the largest.
+            if ((width > MAX_PBUFFER_SIZE || height > MAX_PBUFFER_SIZE) && !largest)
+            {
+                fail(WIN32_ERROR.NO_SYSTEM_RESOURCES);
+                return 0;
+            }
+            const handle = nextPbuffer++;
+            pbuffers.set(handle, { format, width: Math.min(width, MAX_PBUFFER_SIZE),
+                height: Math.min(height, MAX_PBUFFER_SIZE), textureFormat, textureTarget,
+                mipmap, level: 0, face: WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB, dc: 0,
+                bound: 0 });
+            return handle;
+        },
+
+        /**
+         * The pbuffer's DC: the same one every time, until the pbuffer goes.
+         *
+         * @param {number} handle @returns {number}
+         */
+        wglGetPbufferDCARB(handle){
+            const pbuffer = pbuffers.get(handle);
+            if (!pbuffer)
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return 0;
+            }
+            if (pbuffer.dc === 0)
+            {
+                const { width, height } = pbuffer;
+                if (gdi.createPbufferDc)
+                {
+                    pbuffer.dc = gdi.createPbufferDc(width, height);
+                }
+                else
+                {
+                    pbuffer.dc = nextOwnDc;
+                    nextOwnDc += 4;
+                    ownDcs.set(pbuffer.dc, { key: `pbuffer:${pbuffer.dc}`, window: 0, width,
+                        height, memory: false });
+                }
+                const drawable = describe(pbuffer.dc);
+                if (drawable)
+                {
+                    formats.set(drawable.key, pbuffer.format);
+                }
+            }
+            return pbuffer.dc;
+        },
+
+        /**
+         * Done with the DC: one that is not the pbuffer's is ERROR_DC_NOT_FOUND.
+         * The DC stays the pbuffer's and is handed out again, as the drivers
+         * Wine's test measured keep it.
+         *
+         * @param {number} handle @param {number} hdc @returns {boolean}
+         */
+        wglReleasePbufferDCARB(handle, hdc){
+            const pbuffer = pbuffers.get(handle);
+            if (!pbuffer)
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return false;
+            }
+            if (pbuffer.dc === 0 || pbuffer.dc !== (hdc >>> 0))
+            {
+                fail(WIN32_ERROR.DC_NOT_FOUND);
+                return false;
+            }
+            return true;
+        },
+
+        /** @param {number} handle @returns {boolean} */
+        wglDestroyPbufferARB(handle){
+            const pbuffer = pbuffers.get(handle);
+            if (!pbuffer)
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return false;
+            }
+            if (pbuffer.dc !== 0)
+            {
+                const drawable = describe(pbuffer.dc);
+                if (drawable)
+                {
+                    formats.delete(drawable.key);
+                }
+                if (!ownDcs.delete(pbuffer.dc))
+                {
+                    gdi.deleteDc?.(pbuffer.dc);
+                }
+            }
+            pbuffers.delete(handle);
+            return true;
+        },
+
+        /**
+         * @param {number} handle @param {number} attribute
+         * @returns {number | null} the value, or null with the error set
+         */
+        wglQueryPbufferARB(handle, attribute){
+            const pbuffer = pbuffers.get(handle);
+            if (!pbuffer)
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return null;
+            }
+            switch (attribute)
+            {
+                case WGL.PBUFFER_WIDTH_ARB: return pbuffer.width;
+                case WGL.PBUFFER_HEIGHT_ARB: return pbuffer.height;
+                // A device here never loses one.
+                case WGL.PBUFFER_LOST_ARB: return 0;
+                case WGL.TEXTURE_FORMAT_ARB: return pbuffer.textureFormat;
+                case WGL.TEXTURE_TARGET_ARB: return pbuffer.textureTarget;
+                case WGL.MIPMAP_TEXTURE_ARB: return pbuffer.mipmap;
+                case WGL.MIPMAP_LEVEL_ARB: return pbuffer.level;
+                case WGL.CUBE_MAP_FACE_ARB: return pbuffer.face;
+                default:
+                    fail(WIN32_ERROR.INVALID_DATA);
+                    return null;
+            }
+        },
+
+        /**
+         * WGL_ARB_render_texture's level and face to draw: taken only where they
+         * change nothing, as the drivers Wine's test measured answer; any
+         * other attribute is none to set.
+         *
+         * @param {number} handle @param {readonly number[]} attributes  name and value pairs
+         * @returns {boolean}
+         */
+        wglSetPbufferAttribARB(handle, attributes){
+            const pbuffer = pbuffers.get(handle);
+            if (!pbuffer)
+            {
+                fail(WIN32_ERROR.INVALID_HANDLE);
+                return false;
+            }
+            for (let at = 0; at + 1 < attributes.length; at += 2)
+            {
+                const name = attributes[at];
+                const value = attributes[at + 1];
+                const same = (name === WGL.MIPMAP_LEVEL_ARB && value === pbuffer.level)
+                    || (name === WGL.CUBE_MAP_FACE_ARB && value === pbuffer.face);
+                if (!same)
+                {
+                    fail(WIN32_ERROR.INVALID_DATA);
+                    return false;
+                }
+            }
+            return true;
+        },
+
+        /**
+         * A pbuffer by its handle, for WGL_ARB_render_texture's binds, which
+         * the current context carries out; null for none.
+         *
+         * @param {number} handle @returns {Pbuffer | null}
+         */
+        pbufferOf: handle=>pbuffers.get(handle) ?? null,
+
+        /**
+         * The drawable a pbuffer's DC names, for a bind to read: null before
+         * the pbuffer has one.
+         *
+         * @param {Pbuffer} pbuffer @returns {DrawableInfo | null}
+         */
+        pbufferDrawable: pbuffer=>(pbuffer.dc === 0 ? null : describe(pbuffer.dc)),
+
+        /** @param {number} error */
+        fail: error=>fail(error),
 
         /**
          * @param {any} source
@@ -593,7 +868,7 @@ export function createWgl(options){
 
         /** @param {number} hdc @returns {boolean} */
         SwapBuffers(hdc){
-            const drawable = gdi.describeDrawable(hdc);
+            const drawable = describe(hdc);
             if (!drawable)
             {
                 fail(WIN32_ERROR.INVALID_HANDLE);

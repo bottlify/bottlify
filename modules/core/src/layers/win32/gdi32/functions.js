@@ -794,6 +794,12 @@ export function createGdiFunctions(host){
             background: false,
             /** The bitmap a surface's DC brought with it, and takes away again. */
             defaultBitmap: 0,
+            /**
+             * An OpenGL pbuffer's size, for its DC: OpenGL's drawable, not GDI's.
+             *
+             * @type {{ width: number, height: number } | null}
+             */
+            pbuffer: null,
             pen: stockObject(BLACK_PEN),
             brush: stockObject(WHITE_BRUSH),
             font: stockObject(SYSTEM_FONT),
@@ -5780,6 +5786,20 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * The DC of an OpenGL pbuffer (WGL_ARB_pbuffer): a drawable of its own
+         * size that no window shows and OpenGL draws on the device. GDI sees
+         * a memory DC with nothing selected, which draws nowhere.
+         *
+         * @param {number} width @param {number} height
+         * @returns {number} the DC
+         */
+        createPbufferDc(width, height){
+            const dc = createContext(0, 'memory');
+            dc.pbuffer = { width, height };
+            return dc.hdc;
+        },
+
+        /**
          * What a device context draws on, for the pixel-format negotiation
          * that OPENGL32 keeps. A window's contexts all name the window, so a
          * format set on one DC is found by the next DC of the same window --
@@ -5796,6 +5816,11 @@ export function createGdiFunctions(host){
             if (!dc)
             {
                 return null;
+            }
+            if (dc.pbuffer)
+            {
+                return { key: `pbuffer:${dc.hdc}`, window: 0, width: dc.pbuffer.width,
+                    height: dc.pbuffer.height, memory: false };
             }
             // A DC a program took once and keeps (CS_OWNDC, as SDL's) is over
             // the window as it is now: OpenGL sizes its default framebuffer by

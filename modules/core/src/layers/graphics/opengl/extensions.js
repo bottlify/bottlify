@@ -254,6 +254,10 @@ export const WGL_EXTENSIONS = Object.freeze({
     WGL_EXT_swap_control: ['wglSwapIntervalEXT', 'wglGetSwapIntervalEXT'],
     WGL_ARB_create_context: ['wglCreateContextAttribsARB'],
     WGL_ARB_make_current_read: ['wglMakeContextCurrentARB', 'wglGetCurrentReadDCARB'],
+    WGL_ARB_pbuffer: ['wglCreatePbufferARB', 'wglGetPbufferDCARB', 'wglReleasePbufferDCARB',
+        'wglDestroyPbufferARB', 'wglQueryPbufferARB'],
+    WGL_ARB_render_texture: ['wglBindTexImageARB', 'wglReleaseTexImageARB',
+        'wglSetPbufferAttribARB'],
     WGL_ARB_create_context_profile: [],
 });
 
@@ -423,6 +427,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
     0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT',
         'wglGetCurrentReadDCARB'],
     1: [
+        'wglGetPbufferDCARB', 'wglDestroyPbufferARB',
         'glActiveStencilFaceEXT',
         'glActiveTextureARB', 'glClientActiveTextureARB', 'glIsBufferARB', 'glUnmapBufferARB',
         'glSecondaryColor3bvEXT', 'glSecondaryColor3dvEXT', 'glSecondaryColor3fvEXT',
@@ -432,6 +437,8 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glIsProgramARB', 'glEnableVertexAttribArrayARB', 'glDisableVertexAttribArrayARB',
     ],
     2: [
+        'wglReleasePbufferDCARB', 'wglBindTexImageARB', 'wglReleaseTexImageARB',
+        'wglSetPbufferAttribARB',
         'glMultiTexCoord1fARB', 'glMultiTexCoord1iARB', 'glMultiTexCoord1sARB',
         'glMultiTexCoord1dvARB', 'glMultiTexCoord1fvARB', 'glMultiTexCoord1ivARB',
         'glMultiTexCoord1svARB', 'glMultiTexCoord2dvARB', 'glMultiTexCoord2fvARB',
@@ -452,7 +459,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
     ],
     3: [
-        'wglCreateContextAttribsARB', 'wglMakeContextCurrentARB',
+        'wglCreateContextAttribsARB', 'wglMakeContextCurrentARB', 'wglQueryPbufferARB',
         'glMultiTexCoord1dARB', 'glMultiTexCoord2fARB', 'glMultiTexCoord2iARB',
         'glMultiTexCoord2sARB', 'glGetCompressedTexImageARB', 'glGetBufferParameterivARB',
         'glGetBufferPointervARB', 'glSecondaryColor3bEXT', 'glSecondaryColor3fEXT',
@@ -474,6 +481,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glProgramStringARB', 'glVertexAttrib3sARB', 'glVertexAttrib3fARB',
     ],
     5: [
+        'wglCreatePbufferARB',
         'glMultiTexCoord2dARB', 'glMultiTexCoord4fARB', 'glMultiTexCoord4iARB',
         'glMultiTexCoord4sARB',
         'glVertexAttrib2dARB', 'glVertexAttrib4sARB', 'glVertexAttrib4fARB',
