@@ -17,7 +17,7 @@ import { createGlContext } from './context.js';
 /** @param {{ profile: number, flags?: number }} kind @returns {any} */
 function context({ profile, flags = 0 }){
     const gl = createGlContext({ version: { major: 3, minor: 2, profile, flags },
-        extensions: ['GL_ARB_one'] });
+        extensions: ['GL_ARB_one', 'GL_ARB_compatibility'] });
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     return gl;
 }
@@ -57,7 +57,7 @@ test('a compatibility profile keeps everything, and a debug context starts debug
     gl.glMatrixMode(GL.MODELVIEW);
     gl.glDrawArrays(GL.QUADS, 0, 0);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
-    assert.equal(gl.glGetString(GL.EXTENSIONS), 'GL_ARB_one');
+    assert.equal(gl.glGetString(GL.EXTENSIONS), 'GL_ARB_one GL_ARB_compatibility');
     assert.equal(gl.glIsEnabled(GL.DEBUG_OUTPUT), GL.TRUE);
     assert.equal(context({ profile: COMPATIBILITY }).glIsEnabled(GL.DEBUG_OUTPUT), GL.FALSE);
 
@@ -67,4 +67,29 @@ test('a compatibility profile keeps everything, and a debug context starts debug
     /** @type {any} */ (forward).glBegin(GL.TRIANGLES);
     assert.equal(forward.glGetError(), GL.INVALID_OPERATION,
         'a forward-compatible 3.0 has none of what 3.0 deprecated');
+});
+
+test('a core profile makes no object of a name never generated; a 3.1 or later compatibility'
+    + ' context reports GL_ARB_compatibility', ()=>{
+    const gl = context({ profile: CORE });
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, 7);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a buffer');
+    assert.equal(gl.glIsBufferARB(7), GL.FALSE, 'and none made');
+    gl.glBindTexture(GL.TEXTURE_2D, 7);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a texture');
+    gl.glBeginQuery(0x88bf, 7);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a query');
+    const [buffer] = gl.glGenBuffersARB(1);
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, buffer);
+    assert.equal(gl.glGetError(), GL.NO_ERROR, 'a name generated');
+    assert.equal(gl.glGetStringi(GL.EXTENSIONS, 1), null, 'a core profile has no compatibility');
+    const legacy = createGlContext({ version: { major: 2, minor: 1, profile: 0, flags: 0 },
+        extensions: ['GL_ARB_compatibility'] });
+    assert.equal(legacy.glGetString(GL.EXTENSIONS), '', 'nor has 2.1 the name');
+
+    const compatibility = context({ profile: COMPATIBILITY });
+    compatibility.glBindBufferARB(GL.ARRAY_BUFFER, 7);
+    assert.equal(compatibility.glGetError(), GL.NO_ERROR, 'the compatibility profile makes it');
+    assert.match(compatibility.glGetString(GL.EXTENSIONS), /GL_ARB_compatibility/);
+    assert.deepEqual(compatibility.glGetIntegerv(GL.NUM_EXTENSIONS), [2]);
 });

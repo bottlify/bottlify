@@ -63,7 +63,7 @@ export function createBitmapDrawables(gdi){
      * bitmap its buffer last met, and the buffer as it was then.
      *
      * @type {WeakMap<any, { hdc: number, word: number, depth: number, bitmap: number,
-     *     synced: Uint8Array }>}
+     *     synced: Uint8Array, seen: Uint8Array }>}
      */
     const bound = new WeakMap();
 
@@ -181,7 +181,7 @@ export function createBitmapDrawables(gdi){
                 return;
             }
             const created = { hdc, word: made.colorBits === 16 ? 2 : 4, depth: made.depth,
-                bitmap: 0, synced: new Uint8Array(0) };
+                bitmap: 0, synced: new Uint8Array(0), seen: new Uint8Array(0) };
             const selected = gdi.bitmapSurface(hdc);
             const frame = context.framebuffer;
             if (selected && frame?.bytes?.length > 0)
@@ -190,6 +190,7 @@ export function createBitmapDrawables(gdi){
             }
             created.bitmap = selected?.bitmap ?? 0;
             created.synced = frame?.bytes ? frame.bytes.slice() : new Uint8Array(0);
+            created.seen = selected ? selected.surface.bytes.slice() : new Uint8Array(0);
             bound.set(context, created);
         },
 
@@ -216,8 +217,11 @@ export function createBitmapDrawables(gdi){
             {
                 store(frame, selected.surface, record);
             }
-            else if (selected.bitmap !== record.bitmap)
+            else if (selected.bitmap !== record.bitmap
+                || !same(selected.surface.bytes, record.seen))
             {
+                // Another bitmap selected, or the program wrote the pixels
+                // itself: the bitmap is the colour buffer, read in.
                 load(frame, selected.surface, record);
             }
             else
@@ -226,6 +230,7 @@ export function createBitmapDrawables(gdi){
             }
             record.bitmap = selected.bitmap;
             record.synced = frame.bytes.slice();
+            record.seen = selected.surface.bytes.slice();
         },
 
         /** @param {any} context @returns {boolean} whether it is on a memory DC */

@@ -459,7 +459,9 @@ export function installQueryCalls(context, kernel){
             }
             const held = queries.get(name);
             const busy = [...active.values()].some(query=>query.name === name);
-            if (name === 0 || active.has(target) || busy || (held && held.target !== target
+            // A core profile makes no query of a name glGenQueries did not give.
+            if (name === 0 || active.has(target) || busy || (kernel.core && !queries.has(name))
+                || (held && held.target !== target
                 && !(OCCLUSION.has(held.target) && OCCLUSION.has(target))))
             {
                 setError(GL.INVALID_OPERATION);

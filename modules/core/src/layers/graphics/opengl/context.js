@@ -323,6 +323,17 @@ export function createGlContext(options = {}){
     // has none of what 3.0 deprecated either.
     const core = (version.profile & GL.CONTEXT_CORE_PROFILE_BIT) !== 0
         || (version.flags & GL.CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) !== 0;
+    // GL_ARB_compatibility is what a 3.1 or later context keeps of the
+    // deprecated features (3.1 section 1.3.1): a core profile has none of
+    // them, and an earlier version has them without the name.
+    if (core || version.major < 3 || (version.major === 3 && version.minor < 1))
+    {
+        const at = extensions.indexOf('GL_ARB_compatibility');
+        if (at >= 0)
+        {
+            extensions.splice(at, 1);
+        }
+    }
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
     for (const { query, ...entry } of versionState(version, extensions.length))
     {

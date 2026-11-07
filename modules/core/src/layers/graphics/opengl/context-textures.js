@@ -3577,6 +3577,13 @@ export function installTextureCalls(context, kernel){
             }
             if (!existing)
             {
+                if (kernel.core && !group.textures.reserved.has(name))
+                {
+                    // A core profile makes no object of a name glGenTextures
+                    // did not give (3.1 appendix E.2.2).
+                    setError(GL.INVALID_OPERATION);
+                    return;
+                }
                 group.textures.define(name, createTextureObject(name, target));
                 group.used = true;
             }

@@ -247,6 +247,7 @@ export const GL_EXTENSIONS = Object.freeze({
         'glInvalidateSubFramebuffer'],
     GL_ARB_texture_barrier: ['glTextureBarrier'],
     GL_ARB_query_buffer_object: [],
+    GL_ARB_compatibility: [],
     GL_KHR_robustness: ['glGetGraphicsResetStatus', 'glReadnPixels', 'glGetnUniformfv',
         'glGetnUniformiv', 'glGetnUniformuiv'],
     GL_KHR_debug: ['glDebugMessageControl', 'glDebugMessageInsert', 'glDebugMessageCallback',

@@ -1940,6 +1940,13 @@ export function installArrayCalls(context, kernel){
             const group = kernel.shareGroup();
             if (name !== 0 && !group.buffers.objects.has(name))
             {
+                if (kernel.core && !group.buffers.reserved.has(name))
+                {
+                    // A core profile makes no object of a name glGenBuffers
+                    // did not give (3.1 appendix E.2.2).
+                    setError(GL.INVALID_OPERATION);
+                    return;
+                }
                 group.buffers.define(name, createBufferObject(name));
                 group.used = true;
             }
