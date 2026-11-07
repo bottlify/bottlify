@@ -56,6 +56,41 @@ export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
 
     /**
+     * glVertexAttribI1i to glVertexAttribI4usv: each form's components, the
+     * missing ones (0, 0, 1) as the 4i form fills them.
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const integerAttributes = ()=>{
+        /** @type {Record<string, (args: number[]) => number>} */
+        const forms = {};
+        /** @param {number} index @param {'int' | 'uint'} kind @param {number[]} given */
+        const set = (index, kind, given)=>{
+            const [x = 0, y = 0, z = 0, w = 1] = given;
+            return answer(current()?.vertexAttribI(index >>> 0, kind, x, y, z, w));
+        };
+        for (const count of [1, 2, 3, 4])
+        {
+            forms[`glVertexAttribI${count}i`] = ([index, ...rest])=>
+                set(index, 'int', rest.slice(0, count).map(v=>v | 0));
+            forms[`glVertexAttribI${count}ui`] = ([index, ...rest])=>
+                set(index, 'uint', rest.slice(0, count).map(v=>v >>> 0));
+            forms[`glVertexAttribI${count}iv`] = ([index, v])=>
+                set(index, 'int', readTyped('i', v, count));
+            forms[`glVertexAttribI${count}uiv`] = ([index, v])=>
+                set(index, 'uint', readTyped('ui', v, count));
+        }
+        for (const [suffix, type, kind] of /** @type {[string, string, 'int' | 'uint'][]} */ ([
+            ['bv', 'b', 'int'], ['sv', 's', 'int'], ['ubv', 'ub', 'uint'], ['usv', 'us', 'uint'],
+        ]))
+        {
+            forms[`glVertexAttribI4${suffix}`] = ([index, v])=>
+                set(index, kind, readTyped(type, v, 4));
+        }
+        return forms;
+    };
+
+    /**
      * 64-bit answers, as GLint64s: what glGetInteger64v writes.
      *
      * @param {number} address @param {number[] | null} values
@@ -242,6 +277,17 @@ export function laterEntryPoints(h){
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- integer vertex attributes (3.0) ---
+
+        ...integerAttributes(),
+        glVertexAttribIPointer: ([index, size, type, stride, pointer])=>answer(current()
+            ?.glVertexAttribIPointer(index >>> 0, size | 0, type >>> 0, stride | 0,
+                pointer >>> 0)),
+        glGetVertexAttribIiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'int'), 'word')),
+        glGetVertexAttribIuiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'uint'), 'word')),
 
         // --- indexed state, 64-bit queries and one buffer's clears (3.0, 3.2) ---
 

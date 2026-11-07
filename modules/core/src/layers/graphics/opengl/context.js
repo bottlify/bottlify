@@ -83,7 +83,8 @@ const ALLOWED_IN_BEGIN = new Set([
     'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glColor3ub',
     'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
     'glIndexi', 'glMultiTexCoord4fARB', 'glSecondaryColor3fEXT', 'glFogCoordfEXT',
-    'glVertexAttrib4fARB', 'glMaterialfv', 'glMaterialf', 'glCallList', 'glCallLists', 'glEnd',
+    'glVertexAttrib4fARB', 'vertexAttribI', 'glMaterialfv', 'glMaterialf', 'glCallList',
+    'glCallLists', 'glEnd',
 ]);
 
 /** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
@@ -116,6 +117,7 @@ const NOT_COMPILABLE = new Set([
     'glGetProgramEnvParameterfvARB', 'glGetProgramLocalParameterfvARB',
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
+    'glVertexAttribIPointer', 'getVertexAttribI',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED,

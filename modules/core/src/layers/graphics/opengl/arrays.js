@@ -38,6 +38,8 @@ import { GL } from './constants.js';
  *                                  read; absent reads as no
  * @property {number} [divisor]  glVertexAttribDivisor's: zero or absent for an
  *                               element a vertex, n for one every n instances
+ * @property {number} [integer]  set by glVertexAttribIPointer: read as the
+ *                               integers it holds, never converted to floats
  */
 
 /** @type {Map<number, number>} */

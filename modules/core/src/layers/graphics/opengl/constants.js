@@ -547,6 +547,8 @@ export const GL = Object.freeze({
     UNSIGNED_SHORT_1_5_5_5_REV: 0x8366,
     UNSIGNED_INT_8_8_8_8_REV: 0x8367,
     UNSIGNED_INT_2_10_10_10_REV: 0x8368,
+    INT_2_10_10_10_REV: 0x8d9f,
+    VERTEX_ATTRIB_ARRAY_INTEGER: 0x88fd,
 
     // --- GL_ARB_multitexture ---
     TEXTURE0: 0x84c0,
