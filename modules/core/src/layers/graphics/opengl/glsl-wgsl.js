@@ -102,13 +102,100 @@ export function registersOf(type){
 }
 
 /**
- * The registers a vertex the vertex pass writes for the geometry shader
- * takes: gl_Position, gl_PointSize, then each input the geometry shader reads.
+ * The components of each register a value takes, in order (`registersOf`).
+ *
+ * @param {GlslType} type @returns {number[]}
+ */
+function leafSizes(type){
+    switch (type.kind)
+    {
+        case 'array':
+            return Array.from({ length: type.length }, ()=>leafSizes(type.element)).flat();
+        case 'matrix':
+            return new Array(type.cols).fill(type.rows);
+        case 'struct':
+            return type.fields.flatMap(field=>leafSizes(field.type));
+        default:
+            return [componentsOf(type) || 1];
+    }
+}
+
+/**
+ * What transform feedback captures that takes registers of its own after a
+ * pass's others: every captured value but gl_Position (register 0), and in
+ * the vertex pass gl_PointSize (register 1).
+ *
+ * @param {LinkedProgram} program @param {boolean} vertexPass
+ * @returns {{ path: string, type: GlslType }[]}
+ */
+export function feedbackLeaves(program, vertexPass){
+    return (program.feedback?.varyings ?? []).filter(v=>v.type && v.path !== null
+        && v.path !== 'gl_Position' && !(vertexPass && v.path === 'gl_PointSize'))
+        .map(v=>({ path: /** @type {string} */ (v.path), type: /** @type {GlslType} */ (v.type) }));
+}
+
+/**
+ * Where stream output finds each captured word: the register and component
+ * of a vertex the pass wrote, by the buffer and word it goes to
+ * (`../d3d10/geometry-wgsl.js` streamOutWgsl's writes).
+ *
+ * @param {LinkedProgram} program
+ * @param {number} first  the first register the captured values take
+ * @param {boolean} vertexPass  the vertex pass's registers, not the geometry pass's
+ * @returns {import('../d3d10/geometry-wgsl.js').StreamOutWrite[]}
+ */
+export function feedbackWrites(program, first, vertexPass){
+    /** @type {Map<number, import('../d3d10/geometry-wgsl.js').StreamOutWrite>} */
+    const bySlot = new Map();
+    let register = first;
+    for (const varying of program.feedback?.varyings ?? [])
+    {
+        if (!varying.type)
+        {
+            continue;
+        }
+        let write = bySlot.get(varying.buffer);
+        if (!write)
+        {
+            write = { slot: varying.buffer, stream: 0, words: [] };
+            bySlot.set(varying.buffer, write);
+        }
+        let word = varying.word;
+        if (varying.path === 'gl_Position')
+        {
+            for (let c = 0; c < 4; c++)
+            {
+                write.words.push({ register: 0, component: c, word: word++ });
+            }
+            continue;
+        }
+        if (vertexPass && varying.path === 'gl_PointSize')
+        {
+            write.words.push({ register: 1, component: 0, word });
+            continue;
+        }
+        for (const size of leafSizes(varying.type))
+        {
+            for (let c = 0; c < size; c++)
+            {
+                write.words.push({ register, component: c, word: word++ });
+            }
+            register++;
+        }
+    }
+    return [...bySlot.values()];
+}
+
+/**
+ * The registers a vertex the vertex pass writes takes: gl_Position,
+ * gl_PointSize, then each input the geometry shader reads, or without one
+ * what transform feedback captures.
  *
  * @param {LinkedProgram} program @returns {number}
  */
-export const geometryInputRegisters = program=>2 + program.geometryInputs.reduce((n, input)=>
-    n + registersOf(input.type), 0);
+export const geometryInputRegisters = program=>2 + (program.geometry
+    ? program.geometryInputs.reduce((n, input)=>n + registersOf(input.type), 0)
+    : feedbackLeaves(program, true).reduce((n, leaf)=>n + registersOf(leaf.type), 0));
 
 /**
  * A value of a type the stages pass as the four words of a register, and
@@ -144,10 +231,10 @@ export function fromRegister(code, type){
  * the fragment stage takes, the position first.
  *
  * @param {Interface} fields  the geometry stage's (`emitStage`)
+ * @param {number} registers  a vertex's, captured values included
  * @returns {string}
  */
-export function geometryDrawStage(fields){
-    const registers = 1 + fields.length;
+export function geometryDrawStage(fields, registers){
     return `@group(${GLSL_GEOMETRY_DRAW_GROUP}) @binding(0) var<storage, read> gsVertices:`
         + ` array<vec4u>;
 
@@ -835,7 +922,9 @@ export function emitStage(program, which, options, given, partner){
     }
     // What the entry point reads whether or not main wrote it.
     const read = vertex ? [['gl_Position', 'vec4f']]
-        : geometry ? [['gl_Position', 'vec4f'], ['gl_PrimitiveID', 'i32']]
+        : geometry ? [['gl_Position', 'vec4f'], ['gl_PrimitiveID', 'i32'],
+            ...program.feedback?.varyings.some(v=>v.path === 'gl_PointSize')
+                ? [['gl_PointSize', 'f32']] : []]
             : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
                 program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
     for (const [name, type] of read)
@@ -2572,9 +2661,11 @@ ${[...copiesIn, ...body, ...fallback].join('\n')}
             `    vsOut[base + 1u] = vec4u(bitcast<u32>(${linked.uses.has('gl_PointSize')
                 ? `${p}gl_PointSize` : '1.0f'}), 0u, 0u, 0u);`];
         let at = 2;
-        for (const input of program.geometryInputs)
+        const kept = program.geometry ? program.geometryInputs.map(input=>({
+            path: input.vertexPath, type: input.type })) : feedbackLeaves(program, true);
+        for (const value of kept)
         {
-            for (const leaf of leavesOf(`${p}${input.vertexPath}`, input.type))
+            for (const leaf of leavesOf(`${p}${value.path}`, value.type))
             {
                 stores.push(`    vsOut[base + ${at++}u] = ${toRegister(leaf.code, leaf.type)};`);
             }
@@ -2613,7 +2704,10 @@ ${[...fetch, ...prologue, ...initial, `    ${p}main();`,
         const vertices = layout.inputVertices;
         const most = Math.max(1, layout.maxVertices);
         const inputs = geometryInputRegisters(program);
-        const outputs = 1 + fields.length;
+        // What transform feedback captures, after what the fragment stage reads.
+        const captured = feedbackLeaves(program, false).flatMap(leaf=>leavesOf(`${p}${leaf.path}`,
+            leaf.type));
+        const outputs = 1 + fields.length + captured.length;
         const b = GLSL_GEOMETRY_PASS_BINDING;
         declarations.push([
             'struct GsParams { invocations: u32, prims: u32, pad0: u32, pad1: u32, }',
@@ -2632,6 +2726,8 @@ ${[...fetch, ...prologue, ...initial, `    ${p}main();`,
             `    gsVertices[at * ${outputs}u] = bitcast<vec4u>(${p}gl_Position);`,
             ...fields.map((f, k)=>`    gsVertices[at * ${outputs}u + ${k + 1}u] = `
                 + `${toRegister(f.source, f.type)};`),
+            ...captured.map((leaf, k)=>`    gsVertices[at * ${outputs}u + `
+                + `${k + 1 + fields.length}u] = ${toRegister(leaf.code, leaf.type)};`),
             '    gsStarts[at] = select(0u, 1u, gsStrip == 0u);',
             '    gsEmitted += 1u;',
             '    gsStrip += 1u;',

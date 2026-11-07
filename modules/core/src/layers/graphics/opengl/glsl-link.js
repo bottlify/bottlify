@@ -161,12 +161,41 @@ import { canonicalAttribName } from './arb-program.js';
  */
 
 /**
+ * A value transform feedback captures (OpenGL 3.0 section 2.15, 4.0's
+ * gl_SkipComponents and gl_NextBuffer): an output of the stage before the
+ * rasterizer, an element of one, or a gap.
+ *
+ * @typedef {Object} FeedbackVarying
+ * @property {string} name  as glGetTransformFeedbackVarying answers it
+ * @property {GlslType | null} type  null for a gap (gl_SkipComponents, gl_NextBuffer)
+ * @property {number} size  an array's elements, 1 for anything else; a gap's components
+ * @property {string | null} path  what the stage writes it through, past its
+ *     prefix (`g_x`, `g_b.m_x`, `g_a[2]`, `gl_Position`); null for a gap
+ * @property {number} buffer  the buffer it is written to
+ * @property {number} word  its first word within a vertex there
+ */
+
+/**
+ * @typedef {Object} Feedback
+ * @property {'interleaved' | 'separate'} mode
+ * @property {FeedbackVarying[]} varyings  in the order they were named
+ * @property {number[]} strides  each buffer's words a vertex
+ */
+
+/** Transform feedback's limits (OpenGL 3.0's minimums; 4.0's buffers). */
+export const FEEDBACK_LIMITS = Object.freeze({
+    interleavedComponents: 64, separateAttribs: 4, separateComponents: 4, buffers: 4,
+});
+
+/**
  * @typedef {Object} LinkedProgram
  * @property {LinkedStage | null} vertex
  * @property {LinkedStage | null} geometry
  * @property {GeometryInput[]} geometryInputs  what the geometry stage reads of
  *     the vertex stage's, by name
  * @property {GeometryLayout | null} geometryLayout
+ * @property {Feedback | null} feedback  what transform feedback captures, where
+ *     glTransformFeedbackVaryings named anything
  * @property {LinkedStage | null} fragment
  * @property {{ name: string, type: GlslType, location: number }[]} attributes  active
  * @property {string[]} builtinAttributes  the conventional ones the vertex stage reads
@@ -227,6 +256,7 @@ const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_s
 
 /**
  * @param {{ vertex: ShaderUnit[], geometry?: ShaderUnit[], fragment: ShaderUnit[],
+ *     feedback?: { names: readonly string[], mode: 'interleaved' | 'separate' },
  *     attribBindings: Map<string, number>,
  *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
  * @returns {{ ok: true, log: string, program: LinkedProgram }
@@ -486,6 +516,10 @@ export function linkProgram(given){
         }
     }
 
+    // --- what transform feedback captures ---
+    const feedback = given.feedback && given.feedback.names.length > 0 && before
+        ? feedbackOf(before, given.feedback, error) : null;
+
     // --- attributes ---
     /** @type {{ name: string, type: GlslType, location: number }[]} */
     const attributes = [];
@@ -725,7 +759,7 @@ export function linkProgram(given){
         ok: true,
         log: '',
         program: {
-            vertex: vs, geometry: gs, geometryInputs, geometryLayout, fragment: fs,
+            vertex: vs, geometry: gs, geometryInputs, geometryLayout, feedback, fragment: fs,
             attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
             blocks, blockUniforms,
@@ -971,6 +1005,115 @@ function interfaceOf(stage, direction, error, arrayed = false){
             centroid: !!own?.centroid });
     }
     return entries;
+}
+
+/**
+ * What transform feedback captures, each name an output of the stage before
+ * the rasterizer (a block member as `Block.member`), an element of an array
+ * one (`a[2]`), gl_Position or gl_PointSize, or a gap: gl_SkipComponents1 to
+ * 4 leave words unwritten, gl_NextBuffer moves to the next buffer (OpenGL
+ * 3.0 section 2.15, 4.0 section 2.14). A name no output has, or one named
+ * twice, is a link error, as are more components than a buffer takes.
+ *
+ * @param {LinkedStage} stage
+ * @param {{ names: readonly string[], mode: 'interleaved' | 'separate' }} given
+ * @param {(message: string) => void} error
+ * @returns {Feedback}
+ */
+function feedbackOf(stage, given, error){
+    const outputs = new Map(interfaceOf(stage, 'out', ()=>{}).map(entry=>[entry.name, entry]));
+    /** @type {Record<string, GlslType>} */
+    const builtins = {};
+    for (const name of ['gl_Position', 'gl_PointSize'])
+    {
+        const symbol = stage.builtins.get(name);
+        if (symbol)
+        {
+            builtins[name] = symbol.type;
+        }
+    }
+    const separate = given.mode === 'separate';
+    /** @type {FeedbackVarying[]} */
+    const varyings = [];
+    /** @type {number[]} */
+    const strides = [0];
+    let buffer = 0;
+    /** @type {Set<string>} */
+    const named = new Set();
+    for (const name of given.names)
+    {
+        const skip = /^gl_SkipComponents([1-4])$/.exec(name);
+        if (skip || name === 'gl_NextBuffer')
+        {
+            if (separate)
+            {
+                error(`transform feedback varying '${name}' is named for separate buffers`);
+                continue;
+            }
+            if (skip)
+            {
+                varyings.push({ name, type: null, size: Number(skip[1]), path: null, buffer,
+                    word: strides[buffer] });
+                strides[buffer] += Number(skip[1]);
+            }
+            else
+            {
+                varyings.push({ name, type: null, size: 0, path: null, buffer, word: 0 });
+                buffer++;
+                strides[buffer] = 0;
+            }
+            continue;
+        }
+        if (named.has(name))
+        {
+            error(`transform feedback varying '${name}' is named twice`);
+            continue;
+        }
+        named.add(name);
+        const parts = /^(.*?)(?:\[(\d+)\])?$/.exec(name) ?? [name, name, undefined];
+        const base = parts[1];
+        const element = parts[2] === undefined ? null : Number(parts[2]);
+        const output = outputs.get(base);
+        let type = output?.type ?? builtins[base];
+        let path = output ? output.path : builtins[base] ? base : null;
+        if (!type || path === null)
+        {
+            error(`transform feedback varying '${name}' is not an output of the ${stage.stage}`
+                + ' shader');
+            continue;
+        }
+        if (element !== null)
+        {
+            if (type.kind !== 'array' || element >= type.length)
+            {
+                error(`transform feedback varying '${name}' is past its array`);
+                continue;
+            }
+            type = type.element;
+            path = `${path}[${element}]`;
+        }
+        if (separate)
+        {
+            buffer = varyings.length;
+            strides[buffer] = 0;
+        }
+        const words = wordsOf(type.kind === 'array' ? type.element : type)
+            * (type.kind === 'array' ? type.length : 1);
+        varyings.push({ name, type, size: type.kind === 'array' ? type.length : 1, path,
+            buffer, word: strides[buffer] });
+        strides[buffer] += words;
+    }
+    const most = separate ? FEEDBACK_LIMITS.separateComponents
+        : FEEDBACK_LIMITS.interleavedComponents;
+    if (strides.length > (separate ? FEEDBACK_LIMITS.separateAttribs : FEEDBACK_LIMITS.buffers))
+    {
+        error('transform feedback writes more buffers than there are');
+    }
+    if (strides.some(words=>words > most))
+    {
+        error(`transform feedback writes more than ${most} components to a buffer`);
+    }
+    return { mode: given.mode, varyings, strides };
 }
 
 /**
