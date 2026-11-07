@@ -41,6 +41,7 @@ import { lightVertex, normalise } from './lighting.js';
 import { transform } from './matrix.js';
 import { rasterLine, rasterPoint, rasterTriangle, toByte, writeFragment } from './raster.js';
 import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
+import { swizzleTexel } from './objects.js';
 
 /**
  * @typedef {Object} PipelineVertex
@@ -77,6 +78,7 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {boolean} cube
  * @property {number} baseFormat
  * @property {import('./texture.js').SamplerParameters} parameters
+ * @property {string} [swizzle]  the texture's swizzle (`objects.js` swizzleCode), empty for none
  * @property {import('./texture.js').TextureEnvironment} env
  * @property {ArrayLike<number>} matrix
  * @property {TextureGeneration | null} generation
@@ -675,6 +677,10 @@ function shade(scene, fragment){
         {
             texel = sample2D(
                 unit.images[0], unit.parameters, attributes[at] / q, attributes[at + 1] / q);
+        }
+        if (unit.swizzle)
+        {
+            texel = swizzleTexel(texel, unit.swizzle, 255);
         }
         colour = applyTextureEnvironment(
             unit.env, unit.baseFormat, colour, texel.map(value=>value / 255), primary);

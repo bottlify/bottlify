@@ -49,6 +49,7 @@ import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import {
     FACE_STRIDE, attachmentImage, createTextureObject, isTextureComplete, levelKey,
+    swizzleCode,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
@@ -1907,6 +1908,7 @@ export function createGpuRenderer(services){
                 intensity: format === GL.INTENSITY,
                 rgbOnly: format === GL.RGB,
                 generation: unit.generation ? unit.generation.modes : [null, null, null, null],
+                swizzle: unit.swizzle ?? '',
             };
         });
         const operations = scene.operations;
@@ -1936,6 +1938,7 @@ export function createGpuRenderer(services){
                         mask: scene.perBuffer.masks[0], blend: scene.perBuffer.blend[0] }]
                     : undefined,
             glsl: glsl ? { id: glsl.id, program: glsl.linked } : null,
+            samplerSwizzles: glsl ? samplerSwizzlesOf(scene, glsl) : '',
             twoSide: glsl ? scene.twoSide : false,
             units,
             colourSum: scene.colourSum,
@@ -1969,6 +1972,29 @@ export function createGpuRenderer(services){
                 : lightingStateOf(scene.lighting),
             clip: vertexShader ? null : clipStateOf(scene),
         };
+    };
+
+    /**
+     * The swizzles (3.3) of the textures a GLSL program's samplers read, for
+     * the draw's key: `index:code` apart by commas, empty when every one
+     * reads its components as they are.
+     *
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @returns {string}
+     */
+    const samplerSwizzlesOf = (scene, executable)=>{
+        let list = '';
+        const count = executable.linked.samplers?.length ?? 0;
+        for (let index = 0; index < count; index++)
+        {
+            const code = swizzleCode(textureForSampler(scene, executable,
+                { sampler: index, cube: false }).parameters);
+            if (code)
+            {
+                list += `${list ? ',' : ''}${index}:${code}`;
+            }
+        }
+        return list;
     };
 
     /** Whether the device clips by the distances a vertex stage writes. */
@@ -2743,6 +2769,12 @@ export function createGpuRenderer(services){
             let texture = entry.sampler !== undefined && executable
                 ? textureForSampler(scene, executable, entry)
                 : textureForBinding(scene, entry, plan.fragmentBlock);
+            if (entry.sampler === undefined && (scene.programs.fragment || scene.programs.vertex)
+                && swizzleCode(texture.parameters))
+            {
+                diverge('an assembly program sampled a swizzled texture, and read its'
+                    + ' components unswizzled');
+            }
             // Sampled while it is drawn into: GL leaves it undefined, and
             // WebGPU refuses the pass.
             if (target.attached.has(texture))

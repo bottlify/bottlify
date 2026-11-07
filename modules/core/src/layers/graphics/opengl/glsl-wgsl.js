@@ -267,6 +267,19 @@ export function blockDeclaration(program, index){
         + ` array<vec4u, ${size / 16}>;`;
 }
 
+/**
+ * A vector's components remapped by a swizzle code (`objects.js`
+ * swizzleCode): each a component of `value`, which is a name read as many
+ * times as the code says, or a constant.
+ *
+ * @param {string} value @param {string} code @param {string} scalar
+ * @returns {string}
+ */
+export function swizzledTexel(value, code, scalar){
+    return `vec4<${scalar}>(${[...code].map(letter=>(letter === '0' ? `${scalar}(0)`
+        : letter === '1' ? `${scalar}(1)` : `${value}.${letter}`)).join(', ')})`;
+}
+
 /** A sampler's texture binding; its sampler is the next one. @param {number} index */
 export const samplerBinding = index=>1 + index * 2;
 
@@ -363,6 +376,8 @@ export function textureLayoutOf(type){
  *     vertex stage run as a compute pass, which reads them as words
  * @property {boolean} [compute]  the vertex stage runs as a compute pass, for the
  *     geometry shader after it (`vertexCompute`)
+ * @property {Map<number, string>} [swizzles]  the swizzle (3.3) of the texture each
+ *     sampler reads, where it is not the identity (`objects.js` swizzleCode)
  */
 
 /**
@@ -2103,6 +2118,27 @@ export function emitStage(program, which, options, given, partner){
      * @param {any} node @param {Emit} out @returns {string}
      */
     function textureCall(node, out){
+        const value = lookup(node, out);
+        const [tex] = samplerPair(node.args[0]).split(', ');
+        const type = /** @type {import('./glsl-types.js').SamplerType} */ (node.args[0].type);
+        const code = options.swizzles?.get(Number(/^glt(\d+)$/.exec(tex)?.[1] ?? -1));
+        // A swizzle (3.3) remaps what a lookup returns, a comparison's and a
+        // size's aside, which are not a texel's components.
+        if (!code || type.shadow || node.name.startsWith('textureSize')
+            || node.type.kind !== 'vector' || node.type.size !== 4)
+        {
+            return value;
+        }
+        const scalar = SCALARS[type.sampled ?? 'float'];
+        return swizzledTexel(temp(out, value, `vec4<${scalar}>`), code, scalar);
+    }
+
+    /**
+     * The lookup itself, before any swizzle.
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function lookup(node, out){
         const name = node.name;
         const type = /** @type {import('./glsl-types.js').SamplerType} */ (node.args[0].type);
         const [tex, smp] = samplerPair(node.args[0]).split(', ');

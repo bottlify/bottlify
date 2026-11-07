@@ -207,6 +207,13 @@ const WRAPS = new Set([
     GL.CLAMP, GL.REPEAT, GL.CLAMP_TO_EDGE, GL.CLAMP_TO_BORDER, GL.MIRRORED_REPEAT,
 ]);
 
+/** The swizzle parameters (3.3), red to alpha, and what each may take. */
+/** @type {readonly number[]} */
+const SWIZZLE_PARAMETERS = [GL.TEXTURE_SWIZZLE_R, GL.TEXTURE_SWIZZLE_G, GL.TEXTURE_SWIZZLE_B,
+    GL.TEXTURE_SWIZZLE_A];
+/** @type {ReadonlySet<number>} */
+const SWIZZLE_SOURCES = new Set([GL.RED, GL.GREEN, GL.BLUE, GL.ALPHA, GL.ZERO, GL.ONE]);
+
 /**
  * Whether a value is one a sampling parameter takes: the filters, the wraps
  * and the comparison, which a texture and a sampler object (3.3) share.
@@ -224,6 +231,7 @@ export function samplingRefusal(parameter, value){
         || parameter === TEX.TEXTURE_COMPARE_MODE && value !== GL.NONE
             && value !== TEX.COMPARE_REF_TO_TEXTURE
         || parameter === TEX.TEXTURE_COMPARE_FUNC && !COMPARE_FUNCS.has(value)
+        || SWIZZLE_PARAMETERS.includes(parameter) && !SWIZZLE_SOURCES.has(value)
         ? GL.INVALID_ENUM
         : parameter === GL.TEXTURE_MAX_ANISOTROPY && !(value >= 1) ? GL.INVALID_VALUE : 0;
 }
@@ -1488,6 +1496,19 @@ export function installTextureCalls(context, kernel){
             texture.borderColour = [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k])));
             return;
         }
+        if (parameter === GL.TEXTURE_SWIZZLE_RGBA)
+        {
+            // Four at once: a scalar form gives one, and is refused.
+            if (values.length < 4
+                || values.slice(0, 4).some(v=>!SWIZZLE_SOURCES.has(v)))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            SWIZZLE_PARAMETERS.forEach((query, k)=>texture.parameters.set(query, values[k]));
+            texture.parametersVersion++;
+            return;
+        }
         if (!texture.parameters.has(parameter))
         {
             setError(GL.INVALID_ENUM);
@@ -1542,6 +1563,11 @@ export function installTextureCalls(context, kernel){
         if (parameter === TEXTURE_IMMUTABLE_FORMAT)
         {
             return [immutableLevels.has(texture) ? GL.TRUE : GL.FALSE];
+        }
+        if (parameter === GL.TEXTURE_SWIZZLE_RGBA)
+        {
+            return SWIZZLE_PARAMETERS.map(query=>/** @type {number} */ (
+                texture.parameters.get(query)));
         }
         if (parameter === TEXTURE_IMMUTABLE_LEVELS)
         {

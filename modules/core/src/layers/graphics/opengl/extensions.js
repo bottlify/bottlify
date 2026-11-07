@@ -185,6 +185,8 @@ export const GL_EXTENSIONS = Object.freeze({
     GL_EXT_packed_pixels: [],
     GL_EXT_texture_edge_clamp: [],
     GL_EXT_texture_filter_anisotropic: [],
+    GL_ARB_texture_swizzle: [],
+    GL_EXT_texture_swizzle: [],
     GL_ARB_texture_filter_anisotropic: [],
     GL_SGIS_texture_edge_clamp: [],
     GL_ARB_texture_mirrored_repeat: [],

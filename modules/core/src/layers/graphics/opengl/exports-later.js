@@ -62,7 +62,8 @@ export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
 
     /** How many values a sampler parameter's vector form reads. @param {number} pname */
-    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        || (pname >>> 0) === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1);
 
     /**
      * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
@@ -963,7 +964,8 @@ function storageAndNamedEntryPoints(h){
     });
 
     /** How many values a texture parameter's vector form reads. @param {number} pname */
-    const parameterCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+    const parameterCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        || (pname >>> 0) === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1);
     /** A signed integer as the normalised float an integer form's colour is (2.3.2). */
     const fromInt = (/** @type {number} */ value)=>(2 * value + 1) / 4294967295;
 

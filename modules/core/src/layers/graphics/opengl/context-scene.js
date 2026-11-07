@@ -18,7 +18,7 @@
 import { GL } from './constants.js';
 import { TEX } from './formats.js';
 import { colourMaterialTargets, lightVertex, normalMatrix, normalise } from './lighting.js';
-import { levelKey } from './objects.js';
+import { levelKey, swizzleCode } from './objects.js';
 import { compare, drawPrimitive } from './pipeline.js';
 
 /**
@@ -235,6 +235,7 @@ export function createSceneBuilder(kernel){
                     wrapS: texture.parameters.get(GL.TEXTURE_WRAP_S),
                     wrapT: texture.parameters.get(GL.TEXTURE_WRAP_T),
                 },
+                swizzle: swizzleCode(texture.parameters),
                 env: unit.env,
                 matrix: unit.stack.current,
                 generation: generated

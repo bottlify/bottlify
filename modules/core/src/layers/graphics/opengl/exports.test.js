@@ -1392,3 +1392,17 @@ test('the indexed viewport calls take floats and doubles, and answer them', ()=>
     assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(out + at, true)), [5, 6, 7, 8]);
     assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
 });
+
+test('glTexParameteriv takes a whole swizzle, four words', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glBindTexture.handler([GL.TEXTURE_2D, 1]);
+    [GL.ALPHA, GL.ZERO, GL.ONE, GL.RED].forEach((v, i)=>view.setInt32(0x3000 + i * 4, v, true));
+    table.glTexParameteriv.handler([GL.TEXTURE_2D, GL.TEXTURE_SWIZZLE_RGBA, 0x3000]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    const out = 0x4000;
+    table.glGetTexParameteriv.handler([GL.TEXTURE_2D, GL.TEXTURE_SWIZZLE_RGBA, out]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(out + at, true)),
+        [GL.ALPHA, GL.ZERO, GL.ONE, GL.RED]);
+});

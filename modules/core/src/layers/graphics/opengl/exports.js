@@ -1398,7 +1398,8 @@ export function createOpengl(services){
         new Set([GL.FOG_COLOR]),
         (context, [parameter], values)=>context.glFogfv(parameter, values));
     parameterFamily('glTexParameter', 2,
-        parameter=>(parameter === GL.TEXTURE_BORDER_COLOR ? 4 : 1),
+        parameter=>(parameter === GL.TEXTURE_BORDER_COLOR
+            || parameter === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1),
         new Set([GL.TEXTURE_BORDER_COLOR]),
         (context, [target, parameter], values)=>
             context.glTexParameterfv(target, parameter, values));

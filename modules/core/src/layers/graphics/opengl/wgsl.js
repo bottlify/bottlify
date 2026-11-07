@@ -38,7 +38,7 @@ import {
 import {
     blockDeclaration, emitStage, feedbackLeaves, geometryDrawStage, geometryInputRegisters,
     interfaceStruct, registersOf,
-    samplerTypeOf, samplerVarTypeOf, textureTypeOf,
+    samplerTypeOf, samplerVarTypeOf, swizzledTexel, textureTypeOf,
 } from './glsl-wgsl.js';
 
 /**
@@ -53,6 +53,7 @@ import {
  * @property {boolean} intensity    GL_INTENSITY, which is both at once
  * @property {boolean} rgbOnly      GL_RGB, where DECAL is a plain replace
  * @property {(number | null)[]} generation   per coordinate: the texgen mode, or null
+ * @property {string} [swizzle]  the texture's swizzle (`objects.js` swizzleCode), empty for none
  */
 
 /**
@@ -108,6 +109,8 @@ import {
  * @property {{ id: number, program: import('./glsl-link.js').LinkedProgram } | null} [glsl]
  *           the GLSL program in use: its link, by a number unique to it
  * @property {boolean} [twoSide]  GL_VERTEX_PROGRAM_TWO_SIDE, for a GLSL program
+ * @property {string} [samplerSwizzles]  the swizzles (3.3) of the textures a GLSL
+ *           program's samplers read, `index:code` apart by commas; empty for none
  */
 
 /**
@@ -449,7 +452,7 @@ export function drawKey(state){
         }
         units += `${unit.index}${unit.cube ? 'c' : ''}:${unit.mode}:${combined}:`
             + `${unit.hasColour ? 1 : 0}${unit.hasAlpha ? 1 : 0}${unit.intensity ? 1 : 0}`
-            + `${unit.rgbOnly ? 1 : 0}:${generation}`;
+            + `${unit.rgbOnly ? 1 : 0}:${generation}:${unit.swizzle ?? ''}`;
     }
     /** @param {DrawState['stencil']} face */
     const stencilFace = face=>(face
@@ -497,7 +500,8 @@ export function drawKey(state){
                 + `${state.viewportHeight ?? 0}`
             : '-',
         targetsKey(state.targets),
-        state.glsl ? `g${state.glsl.id}${state.twoSide ? 't' : ''}` : '-',
+        state.glsl ? `g${state.glsl.id}${state.twoSide ? 't' : ''}${state.samplerSwizzles
+            ? `s${state.samplerSwizzles}` : ''}` : '-',
     ].join('|');
 }
 
@@ -572,6 +576,7 @@ export function sameKeyInputs(a, b){
         || a.alphaFunc !== b.alphaFunc || !a.flat !== !b.flat || a.cull !== b.cull
         || !a.frontIsCcw !== !b.frontIsCcw || a.colourMask !== b.colourMask
         || !a.depthClamp !== !b.depthClamp
+        || (a.samplerSwizzles ?? '') !== (b.samplerSwizzles ?? '')
         || !sameItems(a.strides, b.strides) || (a.steps ?? '') !== (b.steps ?? '')
         || a.attributes.length !== b.attributes.length || a.units.length !== b.units.length)
     {
@@ -594,6 +599,7 @@ export function sameKeyInputs(a, b){
         if (x.index !== y.index || !x.cube !== !y.cube || x.mode !== y.mode
             || !x.hasColour !== !y.hasColour || !x.hasAlpha !== !y.hasAlpha
             || !x.intensity !== !y.intensity || !x.rgbOnly !== !y.rgbOnly
+            || (x.swizzle ?? '') !== (y.swizzle ?? '')
             || !sameItems(x.generation, y.generation))
         {
             return false;
@@ -1136,11 +1142,19 @@ function fixedFragment(state){
     for (const unit of state.units)
     {
         const tc = `input.tc${unit.index}`;
+        // A swizzled texture (3.3) is read under another name, the unit's
+        // value its components remapped.
+        const read = unit.swizzle ? `t${unit.index}Read` : `t${unit.index}`;
         fragmentBody.push(unit.cube
-            ? `    let t${unit.index} = textureSample(t${unit.index}Texture,`
+            ? `    let ${read} = textureSample(t${unit.index}Texture,`
                 + ` t${unit.index}Sampler, ${tc}.xyz);`
-            : `    let t${unit.index} = textureSample(t${unit.index}Texture,`
+            : `    let ${read} = textureSample(t${unit.index}Texture,`
                 + ` t${unit.index}Sampler, ${tc}.xy / ${tc}.w);`);
+        if (unit.swizzle)
+        {
+            fragmentBody.push(`    let t${unit.index} = `
+                + `${swizzledTexel(read, unit.swizzle, 'f32')};`);
+        }
         fragmentBody.push(environment(unit));
     }
     if (state.colourSum)
@@ -1218,6 +1232,19 @@ ${Array.from({ length: targets }, (_, k)=>`    out.c${k} = colour;`).join('\n')}
 }
 
 /**
+ * The swizzles a draw's `samplerSwizzles` names, by sampler.
+ *
+ * @param {string | undefined} list
+ * @returns {Map<number, string> | undefined}
+ */
+function swizzlesOf(list){
+    return list ? new Map(list.split(',').map(entry=>{
+        const [index, code] = entry.split(':');
+        return [Number(index), code];
+    })) : undefined;
+}
+
+/**
  * A draw under a GLSL program: its stages, and the fixed pipeline's for a
  * stage it has no shader for (OpenGL 2.0, section 2.15), the two meeting in
  * the fixed varying struct when one of them is fixed.
@@ -1233,6 +1260,7 @@ function generateGlslDraw(state){
     /** @type {import('./glsl-wgsl.js').StageOptions} */
     const options = {
         attributes: state.attributes, flat: state.flat, twoSide: !!state.twoSide,
+        swizzles: swizzlesOf(state.samplerSwizzles),
         alphaFunc: state.alphaFunc, targets, compare: compareExpression,
         targetScalars: (state.targets?.map(t=>t.format) ?? [state.targetFormat])
             .map(format=>(/sint$/.test(format) ? 'i32' : /uint$/.test(format) ? 'u32' : 'f32')),
