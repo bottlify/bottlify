@@ -1259,12 +1259,15 @@ GL makes of them without transform feedback (stream 0 alone is rasterised); a pr
 captures while its geometry shader emits to another stream does not link, and the primitive
 queries of those streams count nothing. *2026-11-07.*
 
-**A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
-many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an
-indirect dispatch sized there. *2026-11-07.*
+**A190. A geometry shader after tessellation runs over the most the tessellator may make:** the
+evaluation shader as a compute pass over every index the tessellator's room holds and the
+geometry shader's passes over as many primitives, both reading how many indices it wrote from
+its arguments on the GPU, an invocation past them making nothing (Direct3D 11's way, whose
+passes these are). The work is sized by the room, not by what was made. *2026-11-07.*
 
-**A191. Temporary: transform feedback of tessellated output is refused, as a loss,** for the same
-reason: the count of what is captured is the GPU's. *2026-11-07.*
+**A191. Temporary: transform feedback of tessellated output without a geometry shader is refused,
+as a loss:** the evaluation shader is the draw's vertex stage there, and no pass keeps what it
+makes. Through a geometry shader it is captured (A190). *2026-11-07.*
 
 **A192. Default tessellation levels are kept as glPatchParameterfv gives them;** clamping and
 rounding by the spacing happen in the tessellator when a draw reads them, so a query answers what

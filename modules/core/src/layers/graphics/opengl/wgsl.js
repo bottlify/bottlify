@@ -41,7 +41,9 @@ import {
     interfaceStruct, registersOf,
     samplerTypeOf, samplerVarTypeOf, swizzledTexel, textureTypeOf,
 } from './glsl-wgsl.js';
-import { controlEntry, evaluationEntry, tessRegisters } from './glsl-wgsl-tess.js';
+import {
+    controlEntry, evaluationComputeEntry, evaluationEntry, tessRegisters,
+} from './glsl-wgsl-tess.js';
 
 /**
  * @typedef {Object} UnitState
@@ -1365,26 +1367,11 @@ ${stage.code}
                 throw new Error('tessellation is drawn without a vertex or a fragment shader,'
                     + ' which this implementation does not do');
             }
-            if (program.geometry)
-            {
-                throw new Error('a geometry shader after tessellation shaders is drawn, which'
-                    + ' this implementation does not do');
-            }
             const vertex = emitStage(program, 'vertex', { ...options, compute: true }, null,
                 'glsl');
             const control = program.tessControl ? emitStage(program, 'tessControl',
                 { ...options, entry: controlEntry }, null, 'glsl') : null;
-            const evaluation = emitStage(program, 'tessEvaluation',
-                { ...options, entry: evaluationEntry }, null, 'glsl');
-            const fragment = emitStage(program, 'fragment', options, evaluation.fields, 'glsl');
-            parts.push(interfaceStruct(evaluation.fields), evaluation.code, fragment.code);
-            stages.vertex = evaluation.plan;
-            stages.fragment = fragment.plan;
-            stages.samplers = [...new Set([...evaluation.usedSamplers,
-                ...fragment.usedSamplers])];
-            stages.blocks = [...new Set([...evaluation.usedBlocks, ...fragment.usedBlocks])];
-            parts.unshift(...samplerDeclarations(program, stages.samplers));
-            stages.tessellation = {
+            const tessellation = {
                 vertex: { code: module(vertex, state.attributes.length > 0
                     ? fixedVertexIn(state) : ''), plan: vertex.plan,
                 samplers: vertex.usedSamplers, blocks: vertex.usedBlocks },
@@ -1394,6 +1381,54 @@ ${stage.code}
                 layout: /** @type {import('./glsl-link-tess.js').TessLayout} */ (
                     program.tessLayout),
             };
+            if (program.geometry)
+            {
+                // 4.0's whole pipeline: the evaluation shader as a compute pass
+                // over the tessellator's indices, keeping what the geometry
+                // shader reads, then the geometry shader's passes over as many
+                // primitives as the tessellator made.
+                const evaluation = emitStage(program, 'tessEvaluation',
+                    { ...options, entry: evaluationComputeEntry }, null, 'glsl');
+                const geometry = emitStage(program, 'geometry', { ...options, limited: true },
+                    null, 'glsl');
+                const fragment = emitStage(program, 'fragment', options, geometry.fields,
+                    'glsl');
+                const outputs = geometryOutputRegisters(program, geometry.fields);
+                parts.push(interfaceStruct(geometry.fields), geometryDrawStage(geometry.fields,
+                    outputs), fragment.code);
+                stages.fragment = fragment.plan;
+                stages.samplers = fragment.usedSamplers;
+                stages.blocks = fragment.usedBlocks;
+                parts.unshift(...samplerDeclarations(program, stages.samplers));
+                stages.tessellation = tessellation;
+                stages.geometry = {
+                    vertex: { code: module(evaluation, ''), plan: evaluation.plan,
+                        samplers: evaluation.usedSamplers, blocks: evaluation.usedBlocks },
+                    geometry: { code: module(geometry, ''), plan: geometry.plan,
+                        samplers: geometry.usedSamplers, blocks: geometry.usedBlocks },
+                    inputs: geometryInputRegisters(program),
+                    outputs,
+                    fields: geometry.fields.length,
+                    layout: /** @type {import('./glsl-link.js').GeometryLayout} */ (
+                        program.geometryLayout),
+                };
+            }
+            else
+            {
+                const evaluation = emitStage(program, 'tessEvaluation',
+                    { ...options, entry: evaluationEntry }, null, 'glsl');
+                const fragment = emitStage(program, 'fragment', options, evaluation.fields,
+                    'glsl');
+                parts.push(interfaceStruct(evaluation.fields), evaluation.code, fragment.code);
+                stages.vertex = evaluation.plan;
+                stages.fragment = fragment.plan;
+                stages.samplers = [...new Set([...evaluation.usedSamplers,
+                    ...fragment.usedSamplers])];
+                stages.blocks = [...new Set([...evaluation.usedBlocks,
+                    ...fragment.usedBlocks])];
+                parts.unshift(...samplerDeclarations(program, stages.samplers));
+                stages.tessellation = tessellation;
+            }
         }
         else if (program.geometry)
         {

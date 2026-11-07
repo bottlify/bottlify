@@ -255,8 +255,9 @@ export function createGlTessellation(services){
      * @returns {{ passes: { pipeline: Promise<any>, label: string, groups: object[][],
      *     grid: number[] }[],
      *     drawn: { group: object[], args: { gpu: any, offset: number },
- *         asked: { points: number, indices: number } } } | null}
- *     `asked`: the room the draw was given, which its read-back is weighed against
+ *         asked: { points: number, indices: number }, indices: number } } | null}
+ *     `asked`: the room the draw was given, which its read-back is weighed against;
+ *     `indices`: the most indices the tessellator may write for it
      */
     const prepare = draw=>{
         const { passes } = draw;
@@ -397,6 +398,7 @@ export function createGlTessellation(services){
                 ],
                 args: argSlot,
                 asked: { points: room.points, indices: room.indices },
+                indices: capacity.indices,
             },
         };
     };

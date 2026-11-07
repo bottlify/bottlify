@@ -191,3 +191,84 @@ test('fewer positions than a patch draw nothing, and say nothing', async()=>{
     assert.equal(r.gpu.of('drawIndirect').length, 0);
     assert.deepEqual(r.divergences, []);
 });
+
+const GS_AFTER = `#version 400
+layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;
+in vec3 colour[]; out vec3 gColour;
+void main() {
+    for (int i = 0; i < 3; i++) {
+        gColour = colour[i] * 0.5; gl_Position = gl_in[i].gl_Position; EmitVertex();
+    }
+}`;
+const GS_FS = `#version 150
+in vec3 gColour; out vec4 c; void main() { c = vec4(gColour, 1.0); }`;
+
+test('a geometry shader after the tessellator reads what the evaluation shader made of every'
+    + ' index, as many primitives as were written', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const made = program(gl, [[GL.VERTEX_SHADER, VS], [TESS.TESS_CONTROL_SHADER, TCS],
+        [TESS.TESS_EVALUATION_SHADER, TES], [GL.GEOMETRY_SHADER, GS_AFTER],
+        [GL.FRAGMENT_SHADER, GS_FS]]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [1], gl.glGetProgramInfoLog(made));
+    gl.glUseProgram(made);
+    gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glPatchParameteri(TESS.PATCH_VERTICES, 4);
+    gl.glDrawArrays(TESS.PATCHES, 0, 8);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    assert.deepEqual(r.divergences, []);
+    assert.deepEqual(labels(r), ['gl:vs-geometry', 'gl:tcs', 'gl:tessellator',
+        'gl:tessellator-scan', 'gl:tessellator', 'gl:tes-geometry', 'gl:gs', 'gl:geometry-scan',
+        'gl:geometry-list']);
+    assert.equal(r.gpu.of('drawIndexedIndirect').length, 1, 'what the geometry shader made');
+    assert.equal(r.gpu.of('drawIndirect').length, 0, 'not the evaluation shader\'s draw');
+    const modules = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>
+        m.descriptor.code).join('\n');
+    assert.match(modules, /fn evaluationCompute\(@builtin\(global_invocation_id\) teId: vec3u\)/);
+    assert.match(modules, /if \(teVertex >= teLimit\[0\]\) \{ return; \}/);
+    assert.match(modules, /if \(\(primitive \+ 1u\) \* 3u > gsLimit\[0\]\) \{/);
+    // The vertex pass keeps what the control shader reads, not what the
+    // geometry shader reads of the evaluation shader.
+    const vertexPass = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>
+        m.descriptor.code).find((/** @type {string} */ code)=>/fn vertexCompute/.test(code));
+    assert.match(vertexPass, /vsOut\[base \+ 2u\] = [^;]*vg_vColour/);
+    assert.doesNotMatch(vertexPass, /vg_colour\b/);
+    // The tessellator's arguments, their first word its indices: bound to both passes.
+    const dispatches = r.gpu.of('dispatchWorkgroups');
+    const tessellator = dispatches.find((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label === 'gl:tessellator-scan');
+    const argsOf = (/** @type {any} */ call, /** @type {number} */ group,
+        /** @type {number} */ binding)=>call.groups?.[group]?.entries.find(
+        (/** @type {any} */ e)=>e.binding === binding)?.resource;
+    const written = argsOf(tessellator, 0, 3);
+    const evaluation = dispatches.find((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label === 'gl:tes-geometry');
+    const gs = dispatches.find((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label === 'gl:gs');
+    assert.equal(argsOf(evaluation, 1, 7)?.buffer, written?.buffer);
+    assert.equal(argsOf(evaluation, 1, 7)?.offset, written?.offset);
+    assert.equal(argsOf(gs, 1, 5)?.buffer, written?.buffer);
+});
+
+test('a geometry shader whose input is not what the tessellator makes is an invalid operation'
+    + ' at the draw', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const lines = GS_AFTER.replace('layout(triangles) in;', 'layout(lines) in;')
+        .replace('i < 3', 'i < 2');
+    const made = program(gl, [[GL.VERTEX_SHADER, VS], [TESS.TESS_CONTROL_SHADER, TCS],
+        [TESS.TESS_EVALUATION_SHADER, TES], [GL.GEOMETRY_SHADER, lines],
+        [GL.FRAGMENT_SHADER, GS_FS]]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [1], gl.glGetProgramInfoLog(made));
+    gl.glUseProgram(made);
+    gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glPatchParameteri(TESS.PATCH_VERTICES, 4);
+    gl.glDrawArrays(TESS.PATCHES, 0, 4);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'lines from triangles');
+    await r.swap();
+    assert.equal(r.gpu.of('dispatchWorkgroups').length, 0);
+});

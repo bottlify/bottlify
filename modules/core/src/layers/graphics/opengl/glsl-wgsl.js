@@ -84,6 +84,9 @@ export const GLSL_VERTEX_PASS_BINDING = Object.freeze({ indices: 0, out: 1, para
  */
 export const GLSL_GEOMETRY_PASS_BINDING = Object.freeze({
     inputs: 0, vertices: 1, starts: 2, counts: 3, params: 4,
+    // After tessellation: the tessellator's arguments, whose first word is
+    // how many indices it wrote.
+    limit: 5,
 });
 
 /** The group a draw of what a geometry shader made reads its vertices from, at binding 0. */
@@ -206,6 +209,18 @@ export const geometryInputRegisters = program=>2 + (program.geometry
     : program.tessEvaluation ? tessellationInputs(program)
         .reduce((n, input)=>n + registersOf(input.type), 0)
         : feedbackLeaves(program, true).reduce((n, leaf)=>n + registersOf(leaf.type), 0));
+
+/**
+ * The registers the vertex pass writes a position: what the tessellation
+ * shaders read where there are some, ahead of a geometry shader after them,
+ * else what the geometry shader reads (`geometryInputRegisters`).
+ *
+ * @param {LinkedProgram} program
+ * @returns {number}
+ */
+export const vertexPassRegisters = program=>(program.tessEvaluation
+    ? 2 + tessellationInputs(program).reduce((n, input)=>n + registersOf(input.type), 0)
+    : geometryInputRegisters(program));
 
 /**
  * What the vertex pass keeps of a control point after gl_Position and
@@ -416,6 +431,8 @@ export function textureLayoutOf(type){
  *     vertex stage run as a compute pass, which reads them as words
  * @property {boolean} [compute]  the vertex stage runs as a compute pass, for the
  *     geometry shader after it (`vertexCompute`)
+ * @property {boolean} [limited]  the geometry shader reads what the tessellator
+ *     made, as many primitives as the first word of `gsLimit` has indices for
  * @property {Map<string, Map<string, string>>} [subroutines]  by stage, the function
  *     (its key) each subroutine uniform names (4.0), where the program chose one
  * @property {Map<number, string>} [swizzles]  the swizzle (3.3) of the texture each
@@ -3610,15 +3627,16 @@ ${[...copiesIn, ...body, ...fallback].join('\n')}
             `        vertex.${attribute.name} = ${n === 4 ? four : n === 1 ? `${four}.x`
                 : `${four}.${XYZW.slice(0, n)}`};`, '    }');
         }
-        const registers = geometryInputRegisters(program);
+        const registers = vertexPassRegisters(program);
         /** @type {string[]} */
         const stores = [`    vsOut[base] = bitcast<vec4u>(${p}gl_Position);`,
             `    vsOut[base + 1u] = vec4u(bitcast<u32>(${linked.uses.has('gl_PointSize')
                 ? `${p}gl_PointSize` : '1.0f'}), 0u, 0u, 0u);`];
         let at = 2;
-        const kept = program.geometry ? program.geometryInputs.map(input=>({
-            path: input.vertexPath, type: input.type }))
-            : program.tessEvaluation ? tessellationInputs(program) : feedbackLeaves(program, true);
+        const kept = program.tessEvaluation ? tessellationInputs(program)
+            : program.geometry ? program.geometryInputs.map(input=>({
+                path: input.vertexPath, type: input.type }))
+                : feedbackLeaves(program, true);
         for (const value of kept)
         {
             for (const leaf of leavesOf(`${p}${value.path}`, value.type))
@@ -3716,12 +3734,25 @@ ${[...fetch, ...prologue, ...initial, `    ${p}main();`,
                 }
             }
         }
+        // After tessellation the passes are sized by the most the tessellator
+        // may make: an invocation past what it made makes nothing.
+        const limit = options.limited ? [
+            `    if ((primitive + 1u) * ${vertices}u > gsLimit[0]) {`,
+            '        gsCounts[id.x * 2u] = vec4u(0u);',
+            '        gsCounts[id.x * 2u + 1u] = vec4u(0u);',
+            '        return;',
+            '    }'] : [];
+        if (options.limited)
+        {
+            declarations.push(`@group(1) @binding(${b.limit}) var<storage, read> gsLimit:`
+                + ' array<u32>;');
+        }
         return `@compute @workgroup_size(64)
 fn geometryMain(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= gsParams.invocations) { return; }
     gsInvocation = id.x;
     let primitive = id.x / ${runs}u;
-${[...linked.uses.has('gl_PrimitiveIDIn')
+${[...limit, ...linked.uses.has('gl_PrimitiveIDIn')
         ? [`    ${p}gl_PrimitiveIDIn = i32(primitive % max(1u, gsParams.prims));`] : [],
     ...linked.uses.has('gl_InvocationID')
         ? [`    ${p}gl_InvocationID = i32(id.x % ${runs}u);`] : [],

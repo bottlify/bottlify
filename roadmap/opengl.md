@@ -25,6 +25,6 @@ Status 2026-11-07: OpenGL 4.6 in code, compatibility and core profiles.
 The `Temporary` entries of [`decisions.md`](decisions.md) from A105 on that name OpenGL: limits
 below 4.6's minimums (A181: 4 draw buffers, 32 varying components, WebGPU's compute limits),
 doubles (A178), arrays of subroutine uniforms (A179), cull distances (A180), geometry streams
-past 0 (A182), a geometry shader after tessellation and transform feedback of tessellated
-output (A190, A191), draws of captures through further passes (A195, A196), pixel transfer
-past 8-bit colour (A200), texture views in another format (A211 to A213).
+past 0 (A182), transform feedback of tessellated output without a geometry shader (A191),
+draws of captures through further passes (A195, A196), pixel transfer past 8-bit colour
+(A200), texture views in another format (A211 to A213).

@@ -26,7 +26,9 @@
  * reads by name; a patch its outer and inner levels, then its patch values.
  */
 
-import { fromRegister, geometryInputRegisters, registersOf, toRegister } from './glsl-wgsl.js';
+import {
+    fromRegister, geometryInputRegisters, registersOf, toRegister, vertexPassRegisters,
+} from './glsl-wgsl.js';
 import { DOMAIN_BINDING } from '../d3d10/wgsl.js';
 import { tessellatorKind } from './glsl-link-tess.js';
 import { CLIP_REMAP } from './arb-wgsl.js';
@@ -82,7 +84,7 @@ const registersOfAll = values=>values.reduce((n, value)=>n + registersOf(value.t
 export function tessRegisters(program){
     const evaluation = registersOfAll(program.evaluationInputs ?? []);
     return {
-        inputs: geometryInputRegisters(program),
+        inputs: vertexPassRegisters(program),
         pointRegisters: 2 + evaluation,
         patchRegisters: 2 + registersOfAll(program.patchInputs ?? []),
     };
@@ -217,18 +219,17 @@ ${[...uses(ctx, 'gl_PatchVerticesIn') ? [`    ${p}gl_PatchVerticesIn = i32(tcPar
 }
 
 /**
- * The evaluation shader as the draw's vertex stage: `teParams` the patches,
- * the patches an instance, the tessellator's room in points and indices,
- * then the control points a patch has.
+ * What the evaluation shader's two forms share: the tessellator's buffers in
+ * `group`, and the statements that find an index's patch and domain point,
+ * load its control points and patch values and run the shader for `teVertex`.
  *
- * @param {TessEntryContext} ctx
- * @returns {string}
+ * @param {TessEntryContext} ctx @param {number} group
+ * @returns {string[]} the statements, up to and with main's call
  */
-export function evaluationEntry(ctx){
+function evaluationRun(ctx, group){
     const { program, p } = ctx;
     const layout = /** @type {import('./glsl-link-tess.js').TessLayout} */ (program.tessLayout);
     const registers = tessRegisters(program);
-    const group = 2;
     const b = DOMAIN_BINDING;
     ctx.declarations.push([
         `@group(${group}) @binding(${b.points}) var<storage, read> tePoints: array<vec4u>;`,
@@ -262,33 +263,91 @@ export function evaluationEntry(ctx){
                 leaf.type)};`);
         }
     }
+    return [
+        '    // The last patch whose indices start at or before this one: a patch',
+        '    // that made none starts where the next one does.',
+        '    var teLow = 0u;',
+        '    var teHigh = max(teParams[0].x, 1u) - 1u;',
+        '    loop {',
+        '        if (teLow >= teHigh) { break; }',
+        '        let teMid = (teLow + teHigh + 1u) / 2u;',
+        '        if (teOffsets[teMid].y <= teVertex) { teLow = teMid; }',
+        '        else { teHigh = teMid - 1u; }',
+        '    }',
+        '    let tePatch = teLow;',
+        '    let teAt = teUv[teOffsets[tePatch].x + teIndices[teVertex]];',
+        '    let tePerPatch = teParams[1].x;',
+        '    let teCount = min(tePerPatch, 32u);',
+        '    for (var teJ = 0u; teJ < teCount; teJ++) {',
+        `        let teFrom = (tePatch * tePerPatch + teJ) * ${registers.pointRegisters}u;`,
+        ...loadPoint(ctx, inputs, 'tePoints', 'teJ', 'teFrom'),
+        '    }',
+        ...uses(ctx, 'gl_TessCoord') ? [`    ${p}gl_TessCoord = vec3f(teAt.x, teAt.y, ${third});`]
+            : [],
+        ...uses(ctx, 'gl_PatchVerticesIn') ? [`    ${p}gl_PatchVerticesIn = i32(tePerPatch);`]
+            : [],
+        ...uses(ctx, 'gl_PrimitiveID')
+            ? [`    ${p}gl_PrimitiveID = i32(tePatch % max(1u, teParams[0].y));`] : [],
+        ...patch, ...ctx.initial, `    ${p}main();`,
+    ];
+}
+
+/**
+ * The evaluation shader as the draw's vertex stage: `teParams` the patches,
+ * the patches an instance, the tessellator's room in points and indices,
+ * then the control points a patch has.
+ *
+ * @param {TessEntryContext} ctx
+ * @returns {string}
+ */
+export function evaluationEntry(ctx){
+    const { p } = ctx;
+    const run = evaluationRun(ctx, 2);
     return `@vertex
 fn vertexMain(@builtin(vertex_index) teVertex: u32) -> VertexOut {
-    // The last patch whose indices start at or before this one: a patch
-    // that made none starts where the next one does.
-    var teLow = 0u;
-    var teHigh = max(teParams[0].x, 1u) - 1u;
-    loop {
-        if (teLow >= teHigh) { break; }
-        let teMid = (teLow + teHigh + 1u) / 2u;
-        if (teOffsets[teMid].y <= teVertex) { teLow = teMid; } else { teHigh = teMid - 1u; }
+${[...run, '    var out: VertexOut;', `    let clip = ${p}gl_Position;`,
+        `    out.position = ${CLIP_REMAP};`, ...ctx.out, '    return out;'].join('\n')}
+}`;
+}
+
+/** Group 1 of the evaluation shader run as compute before a geometry shader. */
+export const EVALUATION_COMPUTE_BINDING = Object.freeze({ ...DOMAIN_BINDING, out: 6, count: 7 });
+
+/**
+ * The evaluation shader as a compute pass before a geometry shader (4.0's
+ * pipeline; Direct3D 11's `linkDomainPositions`): an invocation an index the
+ * tessellator wrote, none past the first word of its arguments (`teLimit`),
+ * what the geometry shader reads written at the index's place in `teOut`, a
+ * register a leaf, as the vertex pass writes it (`geometryInputRegisters`).
+ *
+ * @param {TessEntryContext} ctx
+ * @returns {string}
+ */
+export function evaluationComputeEntry(ctx){
+    const { program, linked, p } = ctx;
+    const b = EVALUATION_COMPUTE_BINDING;
+    const run = evaluationRun(ctx, 1);
+    ctx.declarations.push([
+        `@group(1) @binding(${b.out}) var<storage, read_write> teOut: array<vec4u>;`,
+        `@group(1) @binding(${b.count}) var<storage, read> teLimit: array<u32>;`,
+    ].join('\n'));
+    const registers = geometryInputRegisters(program);
+    /** @type {string[]} */
+    const stores = [`    teOut[teBase] = bitcast<vec4u>(${p}gl_Position);`,
+        `    teOut[teBase + 1u] = vec4u(bitcast<u32>(${linked.uses.has('gl_PointSize')
+            ? `${p}gl_PointSize` : '1.0f'}), 0u, 0u, 0u);`];
+    let at = 2;
+    for (const input of program.geometryInputs ?? [])
+    {
+        for (const leaf of ctx.leavesOf(`${p}${input.vertexPath}`, input.type))
+        {
+            stores.push(`    teOut[teBase + ${at++}u] = ${toRegister(leaf.code, leaf.type)};`);
+        }
     }
-    let tePatch = teLow;
-    let teAt = teUv[teOffsets[tePatch].x + teIndices[teVertex]];
-    let tePerPatch = teParams[1].x;
-    let teCount = min(tePerPatch, 32u);
-    for (var teJ = 0u; teJ < teCount; teJ++) {
-        let teFrom = (tePatch * tePerPatch + teJ) * ${registers.pointRegisters}u;
-${loadPoint(ctx, inputs, 'tePoints', 'teJ', 'teFrom').join('\n')}
-    }
-${[...uses(ctx, 'gl_TessCoord') ? [`    ${p}gl_TessCoord = vec3f(teAt.x, teAt.y, ${third});`]
-        : [],
-    ...uses(ctx, 'gl_PatchVerticesIn') ? [`    ${p}gl_PatchVerticesIn = i32(tePerPatch);`] : [],
-    ...uses(ctx, 'gl_PrimitiveID')
-        ? [`    ${p}gl_PrimitiveID = i32(tePatch % max(1u, teParams[0].y));`] : [],
-    ...patch, ...ctx.initial, `    ${p}main();`, '    var out: VertexOut;',
-    `    let clip = ${p}gl_Position;`,
-    `    out.position = ${CLIP_REMAP};`,
-    ...ctx.out, '    return out;'].join('\n')}
+    return `@compute @workgroup_size(64)
+fn evaluationCompute(@builtin(global_invocation_id) teId: vec3u) {
+    let teVertex = teId.x;
+    if (teVertex >= teLimit[0]) { return; }
+${[...run, `    let teBase = teVertex * ${registers}u;`, ...stores].join('\n')}
 }`;
 }

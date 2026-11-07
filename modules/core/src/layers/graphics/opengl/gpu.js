@@ -3168,13 +3168,20 @@ export function createGpuRenderer(services){
         let geometry = null;
         /** @type {any} */
         let kept = null;
-        if (passes && executable)
-        {
-            const vertexGroup = computeGroup(passes.vertex, GLSL_VERTEX_BINDING, idBias);
-            const geometryGroup = computeGroup(passes.geometry, GLSL_GEOMETRY_BINDING);
+        /**
+         * A geometry shader's passes, after the tessellator's where it reads
+         * what they made.
+         *
+         * @param {any} [tessellatedBy]  the tessellator's draw (`gpu-tessellation.js`)
+         * @returns {boolean} whether the draw goes on
+         */
+        const geometryPassesOf = (tessellatedBy = null)=>{
+            const stages = /** @type {import('./wgsl.js').GeometryPasses} */ (passes);
+            const vertexGroup = computeGroup(stages.vertex, GLSL_VERTEX_BINDING, idBias);
+            const geometryGroup = computeGroup(stages.geometry, GLSL_GEOMETRY_BINDING);
             const prepared = geometryPasses.prepare({
                 key: `${key}|${vertexGroup.signature}|${geometryGroup.signature}`,
-                passes, vertexGroup, geometryGroup,
+                passes: stages, vertexGroup, geometryGroup,
                 slots: slots.map((slot, k)=>({ gpu: slot.gpu, offset: slot.offset,
                     stride: layout.slots[k]?.stride ?? 0,
                     instance: (layout.slots[k]?.divisor ?? 0) > 0 })),
@@ -3182,22 +3189,27 @@ export function createGpuRenderer(services){
                     bytes: indices.format === 'uint16' ? 2 : 4 } : null,
                 first, baseVertex, positions: count, instances,
                 lastProvokes: !!scene.lastProvokes && (scene.flat
-                    || executable.linked.varyings.some(v=>v.interpolation === 'flat')
-                    || !!executable.linked.fragment?.uses.has('gl_PrimitiveID')),
-            });
+                    || !!executable?.linked.varyings.some(v=>v.interpolation === 'flat')
+                    || !!executable?.linked.fragment?.uses.has('gl_PrimitiveID')),
+            }, tessellatedBy);
             if (!prepared)
             {
-                return;
+                return false;
             }
             dispatchAll(recording, prepared.passes);
             geometry = prepared.drawn;
             kept = prepared.kept;
+            return true;
+        };
+        if (passes && executable && !tessellation && !geometryPassesOf())
+        {
+            return;
         }
         /** @type {any} */
         let tessellated = null;
         if (tessellation && executable)
         {
-            if (scene.feedback)
+            if (scene.feedback && !passes)
             {
                 lose('transform feedback captured nothing of a draw through tessellation'
                     + ' shaders: this implementation does not capture what they make');
@@ -3223,7 +3235,19 @@ export function createGpuRenderer(services){
                 return;
             }
             dispatchAll(recording, prepared.passes);
-            tessellated = prepared.drawn;
+            if (passes)
+            {
+                // A geometry shader after the tessellator (4.0): its passes
+                // read what the evaluation shader makes of every index.
+                if (!geometryPassesOf(prepared.drawn))
+                {
+                    return;
+                }
+            }
+            else
+            {
+                tessellated = prepared.drawn;
+            }
         }
         // Transform feedback: what the last pass kept, written into the
         // buffers bound (stream output); without a geometry shader the vertex
@@ -4171,7 +4195,13 @@ export function createGpuRenderer(services){
             // The passes before a draw are laid out for the count it draws.
             return false;
         }
-        if (geometryLayout && !drawsGeometryInput(request.mode, geometryLayout.input))
+        const glsl = drawn.programs.glsl?.linked ?? null;
+        // Patches are read in order, a patch's control points after another's.
+        const tessLayout = glsl?.tessEvaluation ? glsl.tessLayout ?? null : null;
+        // After the tessellator a geometry shader takes its primitives, which
+        // the context checked (`context-arrays.js`).
+        if (geometryLayout && !tessLayout
+            && !drawsGeometryInput(request.mode, geometryLayout.input))
         {
             diverge(`a draw of mode ${hex(request.mode)} through a geometry shader that takes`
                 + ` ${geometryLayout.input} drew nothing`);
@@ -4179,9 +4209,6 @@ export function createGpuRenderer(services){
         }
         // A flat value is the provoking vertex's: GL's last, WebGPU's first,
         // so where a flat value is drawn each primitive is turned round.
-        const glsl = drawn.programs.glsl?.linked ?? null;
-        // Patches are read in order, a patch's control points after another's.
-        const tessLayout = glsl?.tessEvaluation ? glsl.tessLayout ?? null : null;
         const provoking = !geometryLayout && !tessLayout && drawn.lastProvokes && (drawn.flat
             || !!glsl?.varyings.some(varying=>varying.interpolation === 'flat'))
             ? lastProvoking(request.mode, request.count) : null;
@@ -4282,8 +4309,8 @@ export function createGpuRenderer(services){
         }
         record(context, drawn, layout, slots,
             indices, indices ? indices.count : request.count, first, baseVertex,
-            tessLayout ? tessellatedTopology(tessLayout)
-                : geometryLayout ? GEOMETRY_TOPOLOGIES[geometryLayout.outputVertices]
+            geometryLayout ? GEOMETRY_TOPOLOGIES[geometryLayout.outputVertices]
+                : tessLayout ? tessellatedTopology(tessLayout)
                     : topologyOf(request.mode), instances, from, counted);
         return true;
     };

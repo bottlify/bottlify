@@ -34,6 +34,7 @@ import {
     GEOMETRY_SCAN_WGSL, STREAM_ARGS_WORDS, STREAM_OUT_BINDING, geometryIndexWgsl, streamOutWgsl,
 } from '../d3d10/geometry-wgsl.js';
 import { GLSL_GEOMETRY_PASS_BINDING, GLSL_VERTEX_PASS_BINDING } from './glsl-wgsl.js';
+import { EVALUATION_COMPUTE_BINDING } from './glsl-wgsl-tess.js';
 
 /** The most bytes one buffer between the passes may take: the least a device binds. */
 const MOST_BYTES = 1 << 27;
@@ -87,6 +88,17 @@ const GEOMETRY_PASS_ENTRIES = Object.freeze([
     entry(GLSL_GEOMETRY_PASS_BINDING.starts, 'storage'),
     entry(GLSL_GEOMETRY_PASS_BINDING.counts, 'storage'),
     entry(GLSL_GEOMETRY_PASS_BINDING.params, 'uniform'),
+]);
+/** A geometry shader after the tessellator reads how many indices it wrote too. */
+const LIMITED_GEOMETRY_ENTRIES = Object.freeze([...GEOMETRY_PASS_ENTRIES,
+    entry(GLSL_GEOMETRY_PASS_BINDING.limit, 'read-only-storage')]);
+/** Group 1 of the evaluation shader run over the tessellator's indices. */
+const EVALUATION_ENTRIES = Object.freeze([
+    ...['points', 'constants', 'domain', 'indices', 'offsets'].map(name=>entry(
+        EVALUATION_COMPUTE_BINDING[/** @type {'points'} */ (name)], 'read-only-storage')),
+    entry(EVALUATION_COMPUTE_BINDING.params, 'uniform'),
+    entry(EVALUATION_COMPUTE_BINDING.out, 'storage'),
+    entry(EVALUATION_COMPUTE_BINDING.count, 'read-only-storage'),
 ]);
 const SCAN_ENTRIES = Object.freeze([
     entry(GEOMETRY_SCAN_BINDING.counts, 'read-only-storage'),
@@ -270,9 +282,14 @@ export function createGlGeometry(services){
 
     /**
      * The passes before a draw through a geometry shader, and what its draw
-     * binds and reads, or null where it makes nothing.
+     * binds and reads, or null where it makes nothing. After the tessellator
+     * (`tessellated`, its passes recorded already) the first pass is the
+     * evaluation shader over every index it may write, and the passes are
+     * sized by that most: an invocation past what it did write makes nothing.
      *
      * @param {GeometryDraw} draw
+     * @param {{ group: object[], args: { gpu: any, offset: number }, indices: number }
+     *     | null} [tessellated]  what the tessellator's passes made (`gpu-tessellation.js`)
      * @returns {{ passes: { pipeline: Promise<any>, label: string, groups: object[][],
      *     grid: number[] }[],
      *     drawn: { group: object[], args: { gpu: any, offset: number },
@@ -280,19 +297,20 @@ export function createGlGeometry(services){
      *     kept: { vertices: object, registers: number, indices: object, args: object,
      *         room: number, vpp: number } } | null}
      */
-    const prepare = draw=>{
+    const prepare = (draw, tessellated = null)=>{
         const { passes } = draw;
         const layout = passes.layout;
         const vertices = layout.inputVertices;
         const vpp = layout.outputVertices;
         const most = Math.max(1, layout.maxVertices);
-        const prims = Math.floor(draw.positions / vertices);
-        const invocations = draw.instances * prims * Math.max(1, layout.invocations ?? 1);
+        const instances = tessellated ? 1 : draw.instances;
+        const prims = Math.floor((tessellated ? tessellated.indices : draw.positions) / vertices);
+        const invocations = instances * prims * Math.max(1, layout.invocations ?? 1);
         if (invocations === 0)
         {
             return null;
         }
-        const positions = draw.instances * prims * vertices;
+        const positions = instances * prims * vertices;
         const vsBytes = positions * passes.inputs * REGISTER;
 
         const placesBytes = invocations * most * passes.outputs * REGISTER;
@@ -314,15 +332,28 @@ export function createGlGeometry(services){
         const indices = scratchOf('indices', indicesBytes, BufferUsage.INDEX);
         const args = scratchOf('args', 4 * STREAM_ARGS_WORDS * 4, BufferUsage.INDIRECT);
 
-        // 1. the vertex shader over every position
+        // The tessellator's first word: the indices it wrote.
+        const limit = tessellated ? { buffer: tessellated.args.gpu,
+            offset: tessellated.args.offset, size: 16 } : null;
+        // 1. the vertex shader over every position, or the evaluation shader
+        // over every index the tessellator may write
         /** @type {{ pipeline: Promise<any>, label: string, groups: object[][], grid: number[] }[]} */
-        const recorded = [vertexPass(draw, passes.vertex.code, positions, prims * vertices,
+        const recorded = [tessellated && limit ? {
+            pipeline: computeFor(`te|${draw.key}`, passes.vertex.code, 'evaluationCompute',
+                [draw.vertexGroup.layout, EVALUATION_ENTRIES], 'gl:tes-geometry'),
+            label: 'gl:tes-geometry',
+            groups: [draw.vertexGroup.entries, [...tessellated.group,
+                { binding: EVALUATION_COMPUTE_BINDING.out, resource: whole(vsOut, vsBytes) },
+                { binding: EVALUATION_COMPUTE_BINDING.count, resource: limit }]],
+            grid: [Math.ceil(positions / 64), 1, 1],
+        } : vertexPass(draw, passes.vertex.code, positions, prims * vertices,
             whole(vsOut, vsBytes))];
 
         // 2. the geometry shader
         recorded.push({
             pipeline: computeFor(`gs|${draw.key}`, passes.geometry.code, 'geometryMain',
-                [draw.geometryGroup.layout, GEOMETRY_PASS_ENTRIES], 'gl:gs'),
+                [draw.geometryGroup.layout, limit ? LIMITED_GEOMETRY_ENTRIES
+                    : GEOMETRY_PASS_ENTRIES], 'gl:gs'),
             label: 'gl:gs',
             groups: [draw.geometryGroup.entries, [
                 { binding: GLSL_GEOMETRY_PASS_BINDING.inputs, resource: whole(vsOut, vsBytes) },
@@ -334,6 +365,7 @@ export function createGlGeometry(services){
                     resource: whole(counts, invocations * 32) },
                 { binding: GLSL_GEOMETRY_PASS_BINDING.params,
                     resource: uniform(new Uint32Array([invocations, prims, 0, 0])) },
+                ...limit ? [{ binding: GLSL_GEOMETRY_PASS_BINDING.limit, resource: limit }] : [],
             ]],
             grid: [Math.ceil(invocations / 64), 1, 1],
         });
