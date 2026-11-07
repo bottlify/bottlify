@@ -4151,14 +4151,11 @@ export function createGpuRenderer(services){
     const flush = (context, surfaces, read)=>{
         const recording = recordingOf(context);
         recordings.delete(context);
-        // As the surfaces are now: a swap exchanged before this replay runs
-        // must not move it onto the other buffer.
-        const drawn = { ...surfaces };
         /** @type {{ width: number, height: number, data: Uint8Array } | null} */
         let shot = null;
         chain = chain
             .then(async()=>{
-                shot = await replay(recording, drawn, null, undefined, read);
+                shot = await replay(recording, surfaces, null, undefined, read);
             })
             .catch(error=>{
                 unflushed.delete(recording.id);
