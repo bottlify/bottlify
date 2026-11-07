@@ -62,7 +62,8 @@ export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
 
     /** How many values a sampler parameter's vector form reads. @param {number} pname */
-    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        || (pname >>> 0) === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1);
 
     /**
      * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
@@ -1028,7 +1029,8 @@ function storageAndNamedEntryPoints(h){
     });
 
     /** How many values a texture parameter's vector form reads. @param {number} pname */
-    const parameterCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+    const parameterCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        || (pname >>> 0) === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1);
     /** A signed integer as the normalised float an integer form's colour is (2.3.2). */
     const fromInt = (/** @type {number} */ value)=>(2 * value + 1) / 4294967295;
 
@@ -1065,6 +1067,28 @@ function storageAndNamedEntryPoints(h){
 
         glTexStorage1D: a=>answer(current()?.glTexStorage1D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
             a[3] | 0)),
+        // --- the texture kinds of 3.1 to 3.3: buffer and multisample textures ---
+
+        ...Object.fromEntries(['glTexBuffer', 'glTexBufferARB', 'glTexBufferEXT'].map(name=>[
+            name, (/** @type {number[]} */ [target, internal, buffer])=>answer(
+                current()?.glTexBuffer(target >>> 0, internal >>> 0, buffer >>> 0))])),
+        glTexImage2DMultisample: ([target, samples, internal, width, height, fixed])=>answer(
+            current()?.glTexImageMultisample(target >>> 0, samples | 0, internal >>> 0,
+                width | 0, height | 0, 1, fixed & 0xff)),
+        glTexImage3DMultisample: a=>answer(current()?.glTexImageMultisample(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glTexStorage2DMultisample: ([target, samples, internal, width, height, fixed])=>answer(
+            current()?.glTexStorageMultisample(target >>> 0, samples | 0, internal >>> 0,
+                width | 0, height | 0, 1, fixed & 0xff)),
+        glTexStorage3DMultisample: a=>answer(current()?.glTexStorageMultisample(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glSampleMaski: ([index, mask])=>answer(current()?.glSampleMaski(index >>> 0, mask >>> 0)),
+        glGetMultisamplefv: ([pname, index, out])=>call(context=>writeQuery(out,
+            context.glGetMultisamplefv(pname >>> 0, index >>> 0), 'float')),
+        glTexBufferRange: ([target, internal, buffer, offset, size])=>answer(
+            current()?.glTexBufferRange(target >>> 0, internal >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+
         glTexStorage2D: a=>answer(current()?.glTexStorage2D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
             a[3] | 0, a[4] | 0)),
         glTexStorage3D: a=>answer(current()?.glTexStorage3D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,

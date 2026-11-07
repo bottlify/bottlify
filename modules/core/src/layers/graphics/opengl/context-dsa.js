@@ -49,16 +49,17 @@ const CUBE_FACES = [0x8515, 0x8516, 0x8517, 0x8518, 0x8519, 0x851a];
  * @type {ReadonlySet<number>}
  */
 const CREATE_TARGETS = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D,
-    GL.TEXTURE_CUBE_MAP, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY]);
+    GL.TEXTURE_CUBE_MAP, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_RECTANGLE,
+    GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE_ARRAY]);
 /** @type {ReadonlyMap<number, string>} */
-const ABSENT_TARGETS = new Map([[0x84f5, 'rectangle'], [0x8c2a, 'buffer'],
-    [0x9009, 'cube map array'], [0x9100, 'multisample'], [0x9102, 'multisample array']]);
+const ABSENT_TARGETS = new Map([[0x9009, 'cube map array']]);
 
 /** The texture targets each dimension's calls take (sections 8.6 and 8.19). */
 /** @type {Record<1 | 2 | 3, ReadonlySet<number>>} */
 const DIMENSION_TARGETS = {
     1: new Set([GL.TEXTURE_1D]),
-    2: new Set([GL.TEXTURE_2D, TEX.TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP]),
+    2: new Set([GL.TEXTURE_2D, TEX.TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP,
+        GL.TEXTURE_RECTANGLE]),
     3: new Set([GL.TEXTURE_3D, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_CUBE_MAP]),
 };
 

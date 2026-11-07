@@ -49,6 +49,7 @@ import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import {
     FACE_STRIDE, attachmentImage, createTextureObject, isTextureComplete, levelKey,
+    swizzleCode,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
@@ -106,7 +107,7 @@ const COMPARE_FUNCTIONS = /** @type {Record<number, string>} */ ({
 const BOUND_TARGETS = Object.freeze({
     '1D': 'oneD', '2D': 'twoD', Cube: 'cube', '3D': 'threeD', '1DArray': 'oneDArray',
     '2DArray': 'twoDArray', CubeArray: 'cubeArray', '2DRect': 'rectangle',
-    '2DMS': 'twoDMultisample', '2DMSArray': 'twoDMultisampleArray',
+    '2DMS': 'twoDMultisample', '2DMSArray': 'twoDMultisampleArray', Buffer: 'buffer',
 });
 
 /**
@@ -636,7 +637,8 @@ export function createGpuRenderer(services){
      *     uniform block, a texture pair per unit the fragment stage samples,
      *     and a uniform block per program stage.
      * @property {string} key
-     * @property {{ binding: number, cube: boolean, unit: number, sampler?: number,
+     * @property {{ binding: number, cube: boolean, rectangle?: boolean, unit: number,
+ *     sampler?: number,
      *     layout?: { viewDimension: string, sampleType: string, multisampled: boolean },
      *     unfilterable?: boolean }[]} textures
      *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value, and
@@ -681,7 +683,7 @@ export function createGpuRenderer(services){
                 + `${geometry ? '|gs' : ''}`;
             return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry };
         }
-        /** @type {{ binding: number, cube: boolean, unit: number }[]} */
+        /** @type {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }[]} */
         const textures = [];
         if (programs?.fragment)
         {
@@ -691,7 +693,7 @@ export function createGpuRenderer(services){
             {
                 textures.push({
                     binding: 1 + texture.unit * 2, cube: texture.target === 'CUBE',
-                    unit: texture.unit,
+                    rectangle: texture.target === 'RECT', unit: texture.unit,
                 });
             }
         }
@@ -1309,7 +1311,8 @@ export function createGpuRenderer(services){
         const cube = target === GL.TEXTURE_CUBE_MAP;
         const solid = target === GL.TEXTURE_3D;
         const oneArray = target === TEX.TEXTURE_1D_ARRAY;
-        const twoArray = target === TEX.TEXTURE_2D_ARRAY;
+        const twoArray = target === TEX.TEXTURE_2D_ARRAY
+            || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY;
         const baseDepth = base.depth ?? 1;
         const layers = cube ? 6 : twoArray ? baseDepth : oneArray ? base.height : 1;
         const height = oneArray ? 1 : base.height;
@@ -1907,6 +1910,8 @@ export function createGpuRenderer(services){
                 intensity: format === GL.INTENSITY,
                 rgbOnly: format === GL.RGB,
                 generation: unit.generation ? unit.generation.modes : [null, null, null, null],
+                swizzle: unit.swizzle ?? '',
+                rectangle: !!unit.rectangle,
             };
         });
         const operations = scene.operations;
@@ -1936,6 +1941,7 @@ export function createGpuRenderer(services){
                         mask: scene.perBuffer.masks[0], blend: scene.perBuffer.blend[0] }]
                     : undefined,
             glsl: glsl ? { id: glsl.id, program: glsl.linked } : null,
+            samplerSwizzles: glsl ? samplerSwizzlesOf(scene, glsl) : '',
             twoSide: glsl ? scene.twoSide : false,
             units,
             colourSum: scene.colourSum,
@@ -1969,6 +1975,29 @@ export function createGpuRenderer(services){
                 : lightingStateOf(scene.lighting),
             clip: vertexShader ? null : clipStateOf(scene),
         };
+    };
+
+    /**
+     * The swizzles (3.3) of the textures a GLSL program's samplers read, for
+     * the draw's key: `index:code` apart by commas, empty when every one
+     * reads its components as they are.
+     *
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @returns {string}
+     */
+    const samplerSwizzlesOf = (scene, executable)=>{
+        let list = '';
+        const count = executable.linked.samplers?.length ?? 0;
+        for (let index = 0; index < count; index++)
+        {
+            const code = swizzleCode(textureForSampler(scene, executable,
+                { sampler: index, cube: false }).parameters);
+            if (code)
+            {
+                list += `${list ? ',' : ''}${index}:${code}`;
+            }
+        }
+        return list;
     };
 
     /** Whether the device clips by the distances a vertex stage writes. */
@@ -2743,6 +2772,12 @@ export function createGpuRenderer(services){
             let texture = entry.sampler !== undefined && executable
                 ? textureForSampler(scene, executable, entry)
                 : textureForBinding(scene, entry, plan.fragmentBlock);
+            if (entry.sampler === undefined && (scene.programs.fragment || scene.programs.vertex)
+                && swizzleCode(texture.parameters))
+            {
+                diverge('an assembly program sampled a swizzled texture, and read its'
+                    + ' components unswizzled');
+            }
             // Sampled while it is drawn into: GL leaves it undefined, and
             // WebGPU refuses the pass.
             if (target.attached.has(texture))
@@ -3129,7 +3164,7 @@ export function createGpuRenderer(services){
      * enabled at that position.
      *
      * @param {import('./pipeline.js').Scene} scene
-     * @param {{ binding: number, cube: boolean, unit: number }} entry
+     * @param {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }} entry
      * @param {boolean} programFragment
      * @returns {import('./objects.js').TextureObject}
      */
@@ -3137,7 +3172,8 @@ export function createGpuRenderer(services){
         if (programFragment)
         {
             const bound = scene.boundTextures[entry.unit];
-            const texture = entry.cube ? bound?.cube : bound?.twoD;
+            const texture = entry.cube ? bound?.cube : entry.rectangle ? bound?.rectangle
+                : bound?.twoD;
             return texture ?? incompleteTexture(entry.cube);
         }
         const position = (entry.binding - 1) / 2;

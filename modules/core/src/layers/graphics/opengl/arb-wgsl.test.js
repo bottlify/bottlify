@@ -253,8 +253,8 @@ END
         'TEX samples the coordinate as it is');
     assert.match(code, /textureSample\(t2Texture, t2Sampler, s\d+_0\.xyz \/ s\d+_0\.w\)/,
         'TXP divides a cube coordinate by w');
-    assert.match(code, /textureSampleBias\(t0Texture, t0Sampler, s\d+_0\.xy, s\d+_0\.w\)/,
-        'TXB biases with the source w');
+    assert.match(code, /textureSampleBias\(t0Texture, t0Sampler, \(s\d+_0\.xy\) \/ vec2f\(textureDimensions\(t0Texture\)\), s\d+_0\.w\)/,
+        'TXB biases with the source w, a rectangle\'s coordinates counted in texels');
     assert.match(code, /textureSample\(t3Texture, t3Sampler, vec2f\(select\(0\.0, s\d+_0\.x \/ s\d+_0\.w, s\d+_0\.w != 0\.0\), 0\.5\)\)/,
         'a 1D target samples a 2D texture\'s only row, a zero q at the origin');
     assert.deepEqual(needs.textures.map(t=>t.unit), [1, 2, 0, 3]);

@@ -41,6 +41,7 @@ import { lightVertex, normalise } from './lighting.js';
 import { transform } from './matrix.js';
 import { rasterLine, rasterPoint, rasterTriangle, toByte, writeFragment } from './raster.js';
 import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
+import { swizzleTexel } from './objects.js';
 
 /**
  * @typedef {Object} PipelineVertex
@@ -77,6 +78,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {boolean} cube
  * @property {number} baseFormat
  * @property {import('./texture.js').SamplerParameters} parameters
+ * @property {boolean} [rectangle]  read at texel coordinates (3.1)
+ * @property {string} [swizzle]  the texture's swizzle (`objects.js` swizzleCode), empty for none
  * @property {import('./texture.js').TextureEnvironment} env
  * @property {ArrayLike<number>} matrix
  * @property {TextureGeneration | null} generation
@@ -182,7 +185,12 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  *           matrix of each unit, whether or not it is enabled
  * @property {readonly { twoD: import('./objects.js').TextureObject | null,
  *             cube: import('./objects.js').TextureObject | null,
- *             oneD?: import('./objects.js').TextureObject | null }[]} boundTextures
+ *             oneD?: import('./objects.js').TextureObject | null,
+ *             rectangle?: import('./objects.js').TextureObject | null,
+ *             buffer?: import('./objects.js').TextureObject | null,
+ *             twoDMultisample?: import('./objects.js').TextureObject | null,
+ *             twoDMultisampleArray?: import('./objects.js').TextureObject | null }[]}
+ *           boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
  * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
@@ -673,8 +681,15 @@ function shade(scene, fragment){
         }
         else
         {
-            texel = sample2D(
-                unit.images[0], unit.parameters, attributes[at] / q, attributes[at + 1] / q);
+            const image = unit.images[0];
+            // A rectangle's coordinates count texels (3.1 section 3.8.8).
+            const [w, h] = unit.rectangle ? [image.width, image.height] : [1, 1];
+            texel = sample2D(image, unit.parameters, attributes[at] / q / w,
+                attributes[at + 1] / q / h);
+        }
+        if (unit.swizzle)
+        {
+            texel = swizzleTexel(texel, unit.swizzle, 255);
         }
         colour = applyTextureEnvironment(
             unit.env, unit.baseFormat, colour, texel.map(value=>value / 255), primary);

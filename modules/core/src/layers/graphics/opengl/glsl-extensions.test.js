@@ -163,13 +163,13 @@ test('an extension the front end does not have is a warning to enable and an err
 
 test('every extension the context reports for the language is one the front end has', ()=>{
     for (const name of ['GL_ARB_uniform_buffer_object', 'GL_ARB_explicit_attrib_location',
-        'GL_ARB_draw_instanced', 'GL_ARB_shading_language_packing'])
+        'GL_ARB_draw_instanced', 'GL_ARB_shading_language_packing', 'GL_ARB_texture_rectangle'])
     {
         assert.ok(name in GL_EXTENSIONS, `${name} reported`);
         assert.ok(name in GLSL_EXTENSIONS, `${name} in the front end`);
     }
     // Half of these is here: they are enabled, never reported.
-    for (const name of ['GL_EXT_gpu_shader4', 'GL_ARB_gpu_shader5', 'GL_ARB_texture_rectangle'])
+    for (const name of ['GL_EXT_gpu_shader4', 'GL_ARB_gpu_shader5'])
     {
         assert.equal(name in GL_EXTENSIONS, false, `${name} reported`);
     }

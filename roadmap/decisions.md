@@ -1164,6 +1164,24 @@ gather path every other per-instance array takes. *2026-11-07.*
 attribute reads** (the point's offset and the relative offset), not the last
 glVertexAttribPointer's argument. *2026-11-07.*
 
+**A150. Temporary: a multisample texture is kept with one sample a texel,** as every framebuffer
+here is drawn single-sampled (A85 for Direct3D): a fetch of any sample reads that texel, sample
+positions answer the pixel's centre, and a sample mask without its first bit is said and still
+draws. *2026-11-07.*
+
+**A151. Temporary: a buffer texture is a 2D texture 8192 texels a row,** rebuilt from the
+buffer's bytes when they change: textureSize is exact up to 8192 texels and counts whole rows
+past them, and what transform feedback wrote on the device is not seen (A129). *2026-11-07.*
+
+**A152. Temporary: an assembly program reads a swizzled texture unswizzled,** and says so each
+time. *2026-11-07.*
+
+**A153. GL_MAX_RECTANGLE_TEXTURE_SIZE is GL_MAX_TEXTURE_SIZE (2048), and
+GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT is 4:** nothing here needs a coarser boundary. *2026-11-07.*
+
+**A154. glTexBuffer and glTexBufferRange run when they are reached, a list open or not,** as the
+buffer object calls do. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

@@ -47,6 +47,7 @@ import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
+import { BUFFER_ROW } from './objects.js';
 
 /**
  * @typedef {import('./glsl-types.js').GlslType} GlslType
@@ -267,6 +268,19 @@ export function blockDeclaration(program, index){
         + ` array<vec4u, ${size / 16}>;`;
 }
 
+/**
+ * A vector's components remapped by a swizzle code (`objects.js`
+ * swizzleCode): each a component of `value`, which is a name read as many
+ * times as the code says, or a constant.
+ *
+ * @param {string} value @param {string} code @param {string} scalar
+ * @returns {string}
+ */
+export function swizzledTexel(value, code, scalar){
+    return `vec4<${scalar}>(${[...code].map(letter=>(letter === '0' ? `${scalar}(0)`
+        : letter === '1' ? `${scalar}(1)` : `${value}.${letter}`)).join(', ')})`;
+}
+
 /** A sampler's texture binding; its sampler is the next one. @param {number} index */
 export const samplerBinding = index=>1 + index * 2;
 
@@ -286,18 +300,16 @@ export function textureTypeOf(type){
             : 'texture_depth_cube' : type.array ? 'texture_depth_2d_array' : 'texture_depth_2d';
     }
     const scalar = SCALARS[type.sampled ?? 'float'];
-    if (type.ms)
-    {
-        return `texture_multisampled_2d<${scalar}>`;
-    }
+    // A multisample texture is kept with one sample a texel (3.2): a plain
+    // one, its every sample that texel.
     switch (type.dim)
     {
         case '3D':
             return `texture_3d<${scalar}>`;
         case 'Cube':
             return type.array ? `texture_cube_array<${scalar}>` : `texture_cube<${scalar}>`;
+        // A buffer texture's texels (3.1) are a 2D texture's, `BUFFER_ROW` a row.
         case 'Buffer':
-            throw new Error('a buffer texture is sampled, and this implementation has none');
         default:
             return type.array ? `texture_2d_array<${scalar}>` : `texture_2d<${scalar}>`;
     }
@@ -324,7 +336,7 @@ export function textureLayoutOf(type){
         : type.sampled === 'int' ? 'sint' : 'uint';
     const viewDimension = type.dim === '3D' ? '3d' : type.dim === 'Cube'
         ? type.array ? 'cube-array' : 'cube' : type.array ? '2d-array' : '2d';
-    return { viewDimension, sampleType, multisampled: !!type.ms };
+    return { viewDimension, sampleType, multisampled: false };
 }
 
 /**
@@ -363,6 +375,8 @@ export function textureLayoutOf(type){
  *     vertex stage run as a compute pass, which reads them as words
  * @property {boolean} [compute]  the vertex stage runs as a compute pass, for the
  *     geometry shader after it (`vertexCompute`)
+ * @property {Map<number, string>} [swizzles]  the swizzle (3.3) of the texture each
+ *     sampler reads, where it is not the identity (`objects.js` swizzleCode)
  */
 
 /**
@@ -2103,6 +2117,27 @@ export function emitStage(program, which, options, given, partner){
      * @param {any} node @param {Emit} out @returns {string}
      */
     function textureCall(node, out){
+        const value = lookup(node, out);
+        const [tex] = samplerPair(node.args[0]).split(', ');
+        const type = /** @type {import('./glsl-types.js').SamplerType} */ (node.args[0].type);
+        const code = options.swizzles?.get(Number(/^glt(\d+)$/.exec(tex)?.[1] ?? -1));
+        // A swizzle (3.3) remaps what a lookup returns, a comparison's and a
+        // size's aside, which are not a texel's components.
+        if (!code || type.shadow || node.name.startsWith('textureSize')
+            || node.type.kind !== 'vector' || node.type.size !== 4)
+        {
+            return value;
+        }
+        const scalar = SCALARS[type.sampled ?? 'float'];
+        return swizzledTexel(temp(out, value, `vec4<${scalar}>`), code, scalar);
+    }
+
+    /**
+     * The lookup itself, before any swizzle.
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function lookup(node, out){
         const name = node.name;
         const type = /** @type {import('./glsl-types.js').SamplerType} */ (node.args[0].type);
         const [tex, smp] = samplerPair(node.args[0]).split(', ');
@@ -2112,12 +2147,24 @@ export function emitStage(program, which, options, given, partner){
         const c = oneD ? 1 : dim === '3D' || dim === 'Cube' ? 3 : 2;
         if (dim === 'Buffer')
         {
-            throw new Error('a buffer texture is sampled, and this implementation has none');
+            // Texel n of a buffer texture is at (n mod BUFFER_ROW, n / BUFFER_ROW);
+            // its size is its rows', whole past the first (`context-textures.js`).
+            if (name === 'textureSize')
+            {
+                const d = temp(out, `textureDimensions(${tex})`, 'vec2u');
+                return `i32(${d}.x * ${d}.y)`;
+            }
+            if (name !== 'texelFetch')
+            {
+                throw new Error(`glsl: the built-in '${name}' takes no buffer texture`);
+            }
+            const at = temp(out, expr(rest[0], out), 'i32');
+            return `textureLoad(${tex}, vec2i(${at} % ${BUFFER_ROW}, ${at} / ${BUFFER_ROW}), 0)`;
         }
         if (name === 'textureSize')
         {
             const lod = rest[0] ? `, u32(${expr(rest[0], out)})` : '';
-            const d = temp(out, `textureDimensions(${tex}${type.ms ? '' : lod})`,
+            const d = temp(out, `textureDimensions(${tex}${lod})`,
                 dim === '3D' ? 'vec3u' : 'vec2u');
             const layers = `i32(textureNumLayers(${tex}))`;
             if (oneD)
@@ -2148,7 +2195,12 @@ export function emitStage(program, which, options, given, partner){
             const coords = oneD ? `vec2i(${moved(part(0))}, 0)`
                 : moved(pSize === c ? P : `${P}.${XYZW.slice(0, c)}`);
             const layer = type.array ? `, ${part(c)}` : '';
-            const level = dim === '2DRect' ? ', 0' : `, ${expr(rest[1], out)}`;
+            if (type.ms)
+            {
+                // The sample asked of a texel kept as one sample.
+                discardValue(expr(rest[1], out), out);
+            }
+            const level = dim === '2DRect' || type.ms ? ', 0' : `, ${expr(rest[1], out)}`;
             return `textureLoad(${tex}, ${coords}${layer}${level})`;
         }
         const proj = name.includes('Proj');

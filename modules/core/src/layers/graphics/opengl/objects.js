@@ -98,6 +98,12 @@ const MIPMAP_FILTERS = new Set([
  *           current one without re-deriving it
  * @property {number[]} borderColour
  * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
+ * @property {{ buffer: number, internal: number, offset: number, size: number | null,
+ *     version: number }} [store]  a buffer texture's (3.1): the buffer object its texels
+ *           are, in which format, over which range (null: to its end), and the
+ *           buffer's version the level was last made from
+ * @property {{ samples: number, fixed: boolean }} [multisample]  a multisample texture's
+ *           (3.2): the samples asked and whether their locations are fixed
  * @property {Map<number, DirtyRect | null>} dirty   the level keys written
  *           since a copy kept elsewhere last read them, each with the
  *           rectangle written or `null` for the whole level
@@ -212,7 +218,75 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [0x884b, GL.LUMINANCE],
     // OpenGL 4.6's anisotropy (EXT/ARB_texture_filter_anisotropic): none.
     [GL.TEXTURE_MAX_ANISOTROPY, 1],
+    // OpenGL 3.3's swizzle (GL_ARB_texture_swizzle): each component its own.
+    [GL.TEXTURE_SWIZZLE_R, GL.RED],
+    [GL.TEXTURE_SWIZZLE_G, GL.GREEN],
+    [GL.TEXTURE_SWIZZLE_B, GL.BLUE],
+    [GL.TEXTURE_SWIZZLE_A, GL.ALPHA],
 ]);
+
+/**
+ * What a rectangle texture (3.1) starts with: one level, so a filter without
+ * mipmaps, and coordinates clamped to its edges (3.1 section 3.8.8).
+ *
+ * @type {ReadonlyArray<readonly [number, number]>}
+ */
+const RECTANGLE_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name, value])=>
+    /** @type {const} */ ([name, name === GL.TEXTURE_MIN_FILTER ? GL.LINEAR
+        : name === GL.TEXTURE_WRAP_S || name === GL.TEXTURE_WRAP_T || name === GL.TEXTURE_WRAP_R
+            ? GL.CLAMP_TO_EDGE : value])));
+
+/**
+ * What a buffer texture (3.1) or a multisample one (3.2) holds of sampling
+ * state: none a program can set; its one level is read texel by texel,
+ * which these filters keep complete.
+ *
+ * @type {ReadonlyArray<readonly [number, number]>}
+ */
+const BUFFER_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name, value])=>
+    /** @type {const} */ ([name, name === GL.TEXTURE_MIN_FILTER || name === GL.TEXTURE_MAG_FILTER
+        ? GL.NEAREST : value])));
+
+/**
+ * How wide a buffer texture's level is (3.1): its texels lie in rows of this
+ * many, WebGPU's least 2D extent, the last row short of it.
+ */
+export const BUFFER_ROW = 8192;
+
+/** The swizzle parameters, red to alpha. */
+const SWIZZLES = [GL.TEXTURE_SWIZZLE_R, GL.TEXTURE_SWIZZLE_G, GL.TEXTURE_SWIZZLE_B,
+    GL.TEXTURE_SWIZZLE_A];
+
+/** What a swizzle source is called in a code: a component or a constant. */
+/** @type {ReadonlyMap<number, string>} */
+const SWIZZLE_LETTERS = new Map([[GL.RED, 'r'], [GL.GREEN, 'g'], [GL.BLUE, 'b'],
+    [GL.ALPHA, 'a'], [GL.ZERO, '0'], [GL.ONE, '1']]);
+
+/**
+ * A texture's swizzle (3.3) as four letters, red's source to alpha's: `r`,
+ * `g`, `b`, `a`, `0` or `1`; empty for the identity, which every reader
+ * skips.
+ *
+ * @param {Map<number, number>} parameters
+ * @returns {string}
+ */
+export function swizzleCode(parameters){
+    const code = SWIZZLES.map(name=>SWIZZLE_LETTERS.get(parameters.get(name) ?? GL.RED) ?? 'r')
+        .join('');
+    return code === 'rgba' ? '' : code;
+}
+
+/**
+ * A texel swizzled by a code: each component its source's, a constant zero
+ * or `one` (1 for a normalised read, 255 for one of bytes).
+ *
+ * @param {readonly number[]} texel @param {string} code @param {number} one
+ * @returns {number[]}
+ */
+export function swizzleTexel(texel, code, one){
+    return [...code].map(letter=>(letter === '0' ? 0 : letter === '1' ? one
+        : texel['rgba'.indexOf(letter)]));
+}
 
 /**
  * @param {number} name
@@ -223,7 +297,10 @@ export function createTextureObject(name, target){
     return {
         name,
         target,
-        parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
+        parameters: new Map(target === GL.TEXTURE_RECTANGLE ? RECTANGLE_PARAMETERS
+            : target === GL.TEXTURE_BUFFER || target === GL.TEXTURE_2D_MULTISAMPLE
+                || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY ? BUFFER_PARAMETERS
+                : DEFAULT_TEXTURE_PARAMETERS),
         parametersVersion: 0,
         borderColour: [0, 0, 0, 0],
         levels: new Map(),
