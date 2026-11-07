@@ -176,10 +176,11 @@ function statedDigest(content){
  *
  * @param {Uint8Array} bytes
  * @param {TrustOptions} options
+ * @param {import('./subject.js').Subject | null} [subject]  the file as a subject,
+ *     read beforehand where reading it waits (an installer database's)
  * @returns {number}
  */
-export function verifyAuthenticode(bytes, options){
-    const subject = readSubject(bytes);
+export function verifyAuthenticode(bytes, options, subject = readSubject(bytes)){
     if (!subject)
     {
         return TRUST.TRUST_E_SUBJECT_FORM_UNKNOWN;

@@ -19,6 +19,7 @@ import { DerError } from '../crypto/der.js';
 import { parseCertificate } from '../crypto/x509.js';
 import { TRUST, verifyAuthenticode } from './authenticode.js';
 import { defaultTrustedRoots } from './roots.js';
+import { msiSubject, readSubject } from './subject.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -236,19 +237,31 @@ export function createWintrustFunctions(host){
             return answer(ERROR_INVALID_PARAMETER);
         }
         const flags = readU32(data + WTD.PROVIDER_FLAGS);
-        /** @param {Uint8Array | null} bytes */
-        const judge = bytes=>{
+        /** @param {Uint8Array | null} bytes @param {import('./subject.js').Subject | null} subject */
+        const verdict = (bytes, subject)=>{
             const code = bytes ? verifyAuthenticode(bytes, {
                 roots: roots(),
                 now: host.now(),
                 hashOnly: (flags & WTD_HASH_ONLY_FLAG) !== 0,
                 lifetime: (flags & WTD_LIFETIME_SIGNING_FLAG) !== 0,
-            }) : CRYPT_E_FILE_ERROR;
+            }, subject) : CRYPT_E_FILE_ERROR;
             if (state === WTD_STATEACTION_VERIFY)
             {
                 writeU32(data + WTD.STATE_DATA, host.handles.open('wintrust-state', { code }));
             }
             return answer(code);
+        };
+        /**
+         * A cabinet or a PE image judged at once; an installer database once
+         * its streams are read.
+         *
+         * @param {Uint8Array | null} bytes
+         */
+        const judge = bytes=>{
+            const subject = bytes ? readSubject(bytes) : null;
+            return bytes && !subject && bytes[0] === 0xd0 && bytes[1] === 0xcf
+                ? msiSubject(bytes).then(database=>verdict(bytes, database))
+                : verdict(bytes, subject);
         };
         const bytes = readWhole(host.fullPath(host.readWideString(pathPointer, WHOLE_NAME * 2)));
         return bytes instanceof Promise ? bytes.then(judge) : judge(bytes);

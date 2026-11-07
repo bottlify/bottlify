@@ -72,6 +72,61 @@ test('a signature over other bytes finds no signer, unless only finding is asked
     assert.equal(errors.at(-1), CRYPT_E_NO_TRUSTED_SIGNER);
 });
 
+test('a signer\'s countersignature and its signing time are read as a setup engine reads them',
+    ()=>{
+        // A countersigner over the signer's encrypted digest, stamped 1 June 2010.
+        const stamped = Date.UTC(2010, 5, 1, 12, 30, 0);
+        const counter = makeSignerInfo({ issuer: 'CA', serial: 7, key: signerKey,
+            covered: Uint8Array.of(1), attributes: [[OIDS.signingTime, der.utc(stamped)]] });
+        const signer = makeSignerInfo({ issuer: 'CA', serial: 7, key: signerKey,
+            covered: contentsOf(content), attributes: [[OIDS.contentType, der.oid('1.2.3')]],
+            unauthenticated: [[OIDS.counterSignature, counter.encoded]] });
+        const { call, put, u32, bytes, view, message } = opened(makeSignedData({
+            contentType: OIDS.data, content, certificates: [ca, signerCert],
+            signers: [signer.encoded] }));
+        const cstring = (/** @type {number} */ at)=>{
+            let text = '';
+            for (let i = at; bytes[i] !== 0; i++)
+            {
+                text += String.fromCharCode(bytes[i]);
+            }
+            return text;
+        };
+        /** CMSG_SIGNER_INFO's attributes at `at`, by OID, each its first value's blob. @param {number} at */
+        const attributes = at=>new Map(Array.from({ length: u32(at) }, (_, i)=>{
+            const attribute = u32(at + 4) + i * 12;
+            const value = u32(attribute + 8);
+            return [cstring(u32(attribute)), { size: u32(value), at: u32(value + 4) }];
+        }));
+        const size = put(new Uint8Array(4));
+        assert.equal(call('CryptMsgGetParam', message, 6, 0, 0, size), 1, 'CMSG_SIGNER_INFO_PARAM');
+        const info = put(new Uint8Array(u32(size)));
+        assert.equal(call('CryptMsgGetParam', message, 6, 0, info, size), 1);
+        assert.equal(u32(info), 1, 'dwVersion');
+        assert.equal(u32(info + 12), 1, 'the serial, one byte');
+        assert.equal(bytes[u32(info + 16)], 7);
+        assert.equal(cstring(u32(info + 20)), OIDS.sha1, 'the hash algorithm');
+        assert.equal(u32(info + 52), 2, 'the content type and the message digest');
+        const countersigned = attributes(info + 60).get(OIDS.counterSignature);
+        assert.ok(countersigned, 'the countersignature among the unauthenticated');
+
+        // PKCS7_SIGNER_INFO (500), as the countersignature's value is decoded.
+        view.setUint32(size, 0, true);
+        assert.equal(call('CryptDecodeObject', 0x10001, 500, countersigned.at, countersigned.size,
+            0, 0, size), 1);
+        const decoded = put(new Uint8Array(u32(size)));
+        assert.equal(call('CryptDecodeObject', 0x10001, 500, countersigned.at, countersigned.size,
+            0, decoded, size), 1);
+        const time = attributes(decoded + 52).get(OIDS.signingTime);
+        assert.ok(time, 'the signing time among its authenticated attributes');
+        const filetime = put(new Uint8Array(8));
+        view.setUint32(size, 8, true);
+        assert.equal(call('CryptDecodeObject', 0x10001, put(OIDS.signingTime), time.at,
+            time.size, 0, filetime, size), 1);
+        assert.equal(view.getBigUint64(filetime, true),
+            (BigInt(stamped) + 11644473600000n) * 10000n, 'a FILETIME of the stamp');
+    });
+
 test('CryptHashPublicKeyInfo hashes the key\'s SubjectPublicKeyInfo', ()=>{
     const { call, put, u32, bytes, view } = setup();
     const leaf = call('CertCreateCertificateContext', 1, put(LEAF), LEAF.length);

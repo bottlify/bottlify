@@ -21,10 +21,12 @@
  */
 
 import { createDigestFor } from '../crypto/signature.js';
+import { bytesSource, CompoundError, openCompound } from '../msi/compound.js';
+import { parseGuid } from '../ole32/guid.js';
 
 /**
  * @typedef {Object} Subject
- * @property {'cab' | 'pe'} form
+ * @property {'cab' | 'pe' | 'msi'} form
  * @property {Uint8Array | null} signature  The PKCS #7 SignedData, or null for none.
  * @property {(digestOid: string) => Uint8Array | null} digest
  *   The file's digest as the signature covers it; null for an algorithm not known.
@@ -163,4 +165,111 @@ function peSubject(bytes){
  */
 export function readSubject(bytes){
     return cabinetSubject(bytes) ?? peSubject(bytes);
+}
+
+/** The streams of an installer database the signature is kept in, out of its digest. */
+const MSI_SIGNATURE = '\u0005DigitalSignature';
+const MSI_SIGNATURE_EX = '\u0005MsiDigitalSignatureEx';
+
+/**
+ * An installer database (any compound file) as a signature's subject, as
+ * Windows' MSI SIP answers it: the signature is the \x05DigitalSignature
+ * stream, and the digest covers every other stream's contents and every
+ * storage's class, a storage's children taken in the order of their names'
+ * UTF-16LE bytes - a shorter name first where one starts the other - and its
+ * class after them. That order was measured: Microsoft's own signed
+ * databases (Visual C++ 2010's, PhysX's) digest to their stated value in it,
+ * not in the directory's. A database signed with \x05MsiDigitalSignatureEx,
+ * which prehashes the streams' metadata, is not one this reads: its digest is
+ * null, as for an algorithm not known.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {Promise<Subject | null>} null for bytes that are no compound file
+ */
+export async function msiSubject(bytes){
+    if (bytes.length < 8 || bytes[0] !== 0xd0 || bytes[1] !== 0xcf || bytes[2] !== 0x11
+        || bytes[3] !== 0xe0)
+    {
+        return null;
+    }
+    let compound;
+    try
+    {
+        compound = await openCompound(bytesSource(bytes));
+    }
+    catch (e){
+        if (e instanceof CompoundError)
+        {
+            return null;
+        }
+        throw e;
+    }
+    /** @param {string} name */
+    const nameBytes = name=>{
+        const out = new Uint8Array(name.length * 2);
+        for (let i = 0; i < name.length; i++)
+        {
+            out[i * 2] = name.charCodeAt(i) & 0xff;
+            out[i * 2 + 1] = name.charCodeAt(i) >> 8;
+        }
+        return out;
+    };
+    /** @param {Uint8Array} a @param {Uint8Array} b */
+    const byBytes = (a, b)=>{
+        for (let i = 0; i < Math.min(a.length, b.length); i++)
+        {
+            if (a[i] !== b[i])
+            {
+                return a[i] - b[i];
+            }
+        }
+        return a.length - b.length;
+    };
+    /** The pieces the digest covers, in order. @type {Uint8Array[]} */
+    const covered = [];
+    let signature = null;
+    let extended = false;
+    /** @param {import('../msi/compound.js').CompoundNode} storage @param {boolean} root */
+    const walk = async(storage, root)=>{
+        const children = [...storage.children.values()]
+            .map(node=>({ node, key: nameBytes(node.name) }))
+            .sort((one, two)=>byBytes(one.key, two.key));
+        for (const { node } of children)
+        {
+            if (root && node.name === MSI_SIGNATURE)
+            {
+                signature = await compound.readAll(node);
+                continue;
+            }
+            if (root && node.name === MSI_SIGNATURE_EX)
+            {
+                extended = true;
+                continue;
+            }
+            if (node.kind === 'stream')
+            {
+                covered.push(await compound.readAll(node));
+            }
+            else
+            {
+                await walk(node, false);
+            }
+        }
+        covered.push(/** @type {Uint8Array} */ (parseGuid(storage.clsid
+            ?? '{00000000-0000-0000-0000-000000000000}')));
+    };
+    await walk(compound.root, true);
+    return {
+        form: 'msi',
+        signature,
+        digest: digestOid=>{
+            const digest = extended ? null : createDigestFor(digestOid);
+            if (!digest)
+            {
+                return null;
+            }
+            covered.forEach(piece=>digest.update(piece));
+            return digest.digest();
+        },
+    };
 }
