@@ -1322,10 +1322,10 @@ original. *2026-11-07.*
 **A213. Temporary: GL_ARB_texture_view is not reported** while A211 and A212 stand;
 glTextureView is 4.3's, handed out with the version and answering. *2026-11-07.*
 
-**A214. Temporary: a whole array attached to a framebuffer is drawn into its first layer,** said,
-as a cube map attached whole is; a layer of an array (a cube map array's layer-face among them)
-attached by glFramebufferTextureLayer is drawn into as a 2D image. A 3D texture's slice is not
-attached: GL_INVALID_OPERATION, as no draw here reaches one. *2026-11-07.*
+**A214. A layer of an array (a cube map array's layer-face among them) attached by
+glFramebufferTextureLayer is drawn into as a 2D image;** a whole array or cube map is layered
+(A130). A 3D texture's slice is not attached: GL_INVALID_OPERATION, as no draw here reaches one.
+*2026-11-07.*
 
 **A215. Temporary: an image kept in a sized format's own bytes and a copy the device makes skip
 the pixel transfer** (A200), and say so once while the transfer changes anything: the transfer
