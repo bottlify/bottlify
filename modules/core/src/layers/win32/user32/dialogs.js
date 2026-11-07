@@ -1085,16 +1085,21 @@ export function createDialogFunctions(options){
                     await host.send(owner, WM_ENTERIDLE, MSGF_DIALOGBOX, hwnd, thread);
                     continue;
                 }
-                if (host.unattended && presses < UNATTENDED_PRESSES)
+                const children = host.children(record);
+                const pushButtons = children.filter(child=>child.className === 'Button'
+                    && (child.style & BS_TYPEMASK) <= BS_DEFPUSHBUTTON);
+                // A dialog that offers no way on but Cancel - a "please
+                // wait" or a progress dialog - is waiting on its own work,
+                // which ends it, and not on a person: a person watching
+                // would let it be.
+                const waitsOnItself = pushButtons.every(child=>(child.id & 0xffff) === IDCANCEL);
+                if (host.unattended && presses < UNATTENDED_PRESSES && !waitsOnItself)
                 {
                     presses++;
                     const id = await defaultButton(hwnd, thread);
-                    const children = host.children(record);
-                    const buttons = children.filter(child=>child.className === 'Button'
-                        && (child.style & BS_TYPEMASK) <= BS_DEFPUSHBUTTON)
-                        .map(child=>({ id: child.id & 0xffff,
-                            label: String(child.title).replace('&', ''),
-                            default: child.id === id }));
+                    const buttons = pushButtons.map(child=>({ id: child.id & 0xffff,
+                        label: String(child.title).replace('&', ''),
+                        default: child.id === id }));
                     const chosen = await (host.answer?.({
                         kind: 'dialog',
                         title: record.title,

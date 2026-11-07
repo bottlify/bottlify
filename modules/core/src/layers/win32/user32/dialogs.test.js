@@ -437,6 +437,40 @@ test('unattended, the button the answerer chooses is the press the procedure rec
     assert.equal(asked[0].kind, 'dialog');
 });
 
+test('unattended, a dialog whose only button is Cancel is left to the work that ends it',
+    async()=>{
+        // A self-extractor's "Please wait" with a Cancel button: the work on
+        // another thread ends it; pressing its one button would cancel the
+        // install.
+        /** @type {number[]} */
+        const commands = [];
+        /** @type {any} */
+        let table = null;
+        let dialog = 0;
+        const { memory, fns } = setup({
+            unattended: true,
+            dispatch: (wndProc, message)=>{
+                dialog = message.hwnd;
+                if (message.message === 0x0111)
+                {
+                    commands.push(message.wParam & 0xffff);
+                    table.EndDialog.handler([message.hwnd, message.wParam & 0xffff]);
+                }
+                return 0;
+            },
+        });
+        table = fns;
+        putTemplate(memory, [{ id: 2, x: 4, y: 8, cx: 20, cy: 6, title: 'Cancel', style: 1 }]);
+        const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+        for (let round = 0; round < 20; round++)
+        {
+            await new Promise(resolve=>setImmediate(resolve));
+        }
+        fns.EndDialog.handler([dialog, 1]);
+        assert.equal(await answer, 1, 'ended by its work');
+        assert.deepEqual(commands, [], 'nothing pressed');
+    });
+
 test('attended, a modal dialog is left waiting for a person', async()=>{
     /** @type {number[]} */
     const heard = [];

@@ -58,3 +58,20 @@ test('the active database holds the session\'s properties as _Property, as they 
         assert.equal(session.db.table('_Property'), null,
             'the package\'s own database is unchanged');
     });
+
+test('ALLUSERS 2 becomes 1 for the administrator, nothing for a per-user install on Windows 7',
+    ()=>{
+        // The VC++ 2005 runtime's merge module refuses to install unless
+        // ALLUSERS reads 1; its package asks for 2, which the installer turns
+        // into what it decided.
+        /** @param {string} commandLine @param {any} [windows] */
+        const allUsers = (commandLine, windows)=>createSession({ db: createEmptyDatabase(),
+            packagePath: 'C:\\a.msi', machine: { ...MACHINE, ...windows ? { windows } : {} },
+            commandLine }).getProperty('ALLUSERS');
+        assert.equal(allUsers('ALLUSERS=2'), '1');
+        assert.equal(allUsers('ALLUSERS=2 MSIINSTALLPERUSER=1', windowsVersion('win7')), '');
+        assert.equal(allUsers('ALLUSERS=2 MSIINSTALLPERUSER=1', windowsVersion('winxp')), '1',
+            'before Windows Installer 5 there is no per-user choice');
+        assert.equal(allUsers('ALLUSERS=1'), '1');
+        assert.equal(allUsers(''), '', 'unset stays unset');
+    });

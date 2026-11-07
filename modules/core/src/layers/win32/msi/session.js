@@ -336,6 +336,24 @@ export function createSession(options){
     {
         properties.set(name, value);
     }
+    // ALLUSERS 2 asks for whatever the user may have: the installer decides
+    // and the property says what it decided - 1, per machine, for the
+    // administrator this user is, or nothing when Windows Installer 5 is
+    // asked for a per-user install with MSIINSTALLPERUSER. A merge module's
+    // check that ALLUSERS is 1 (the VC++ 2005 runtime's) reads the decision.
+    if (properties.get('ALLUSERS') === '2')
+    {
+        const perUser = properties.get('MSIINSTALLPERUSER') === '1'
+            && Number(properties.get('VersionNT')) >= 601;
+        if (perUser)
+        {
+            properties.delete('ALLUSERS');
+        }
+        else
+        {
+            properties.set('ALLUSERS', '1');
+        }
+    }
 
     /** @param {string} name */
     const getProperty = name=>properties.get(name) ?? '';
