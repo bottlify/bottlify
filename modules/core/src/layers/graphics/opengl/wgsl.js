@@ -36,8 +36,9 @@ import {
     CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
 } from './arb-wgsl.js';
 import {
-    blockDeclaration, emitStage, interfaceStruct, samplerTypeOf, samplerVarTypeOf,
-    textureTypeOf,
+    blockDeclaration, emitStage, feedbackLeaves, geometryDrawStage, geometryInputRegisters,
+    interfaceStruct, registersOf,
+    samplerTypeOf, samplerVarTypeOf, textureTypeOf,
 } from './glsl-wgsl.js';
 
 /**
@@ -1244,10 +1245,70 @@ function generateGlslDraw(state){
     const stages = { vertex: null, fragment: null, samplers: [], blocks: [] };
     /** @type {string[]} */
     const parts = [];
+    /**
+     * A compute pass's module: the fixed block, the stage's own
+     * samplers and uniform blocks, and the stage.
+     *
+     * @param {ReturnType<typeof emitStage>} stage @param {string} more
+     */
+    const module = (stage, more)=>`diagnostic(off, derivative_uniformity);
+${UNIFORM_STRUCT}
+${more}
+${[...stage.usedBlocks].sort((a, b)=>a - b).map(index=>blockDeclaration(program, index))
+        .join('\n')}
+${samplerDeclarations(program, stage.usedSamplers).join('\n')}
+${stage.code}
+`;
+    /**
+     * The vertex stage as a compute pass that keeps what transform feedback
+     * captures, for a program with no geometry shader.
+     */
+    const capture = ()=>{
+        if (!program.feedback || !program.vertex)
+        {
+            return;
+        }
+        const vertex = emitStage(program, 'vertex', { ...options, compute: true }, null, 'glsl');
+        stages.capture = { vertex: { code: module(vertex, state.attributes.length > 0
+            ? fixedVertexIn(state) : ''), plan: vertex.plan, samplers: vertex.usedSamplers,
+        blocks: vertex.usedBlocks }, inputs: geometryInputRegisters(program) };
+    };
     try
     {
-        if (program.vertex && program.fragment)
+        if (program.geometry)
         {
+            if (!program.vertex || !program.fragment)
+            {
+                throw new Error('a geometry shader is drawn without a vertex or a fragment'
+                    + ' shader, which this implementation does not do');
+            }
+            const vertex = emitStage(program, 'vertex', { ...options, compute: true }, null,
+                'glsl');
+            const geometry = emitStage(program, 'geometry', options, null, 'glsl');
+            const fragment = emitStage(program, 'fragment', options, geometry.fields, 'glsl');
+            const outputs = geometryOutputRegisters(program, geometry.fields);
+            parts.push(interfaceStruct(geometry.fields), geometryDrawStage(geometry.fields,
+                outputs), fragment.code);
+            stages.fragment = fragment.plan;
+            stages.samplers = fragment.usedSamplers;
+            stages.blocks = fragment.usedBlocks;
+            parts.unshift(...samplerDeclarations(program, stages.samplers));
+            stages.geometry = {
+                vertex: { code: module(vertex, state.attributes.length > 0
+                    ? fixedVertexIn(state) : ''), plan: vertex.plan,
+                samplers: vertex.usedSamplers, blocks: vertex.usedBlocks },
+                geometry: { code: module(geometry, ''), plan: geometry.plan,
+                    samplers: geometry.usedSamplers, blocks: geometry.usedBlocks },
+                inputs: geometryInputRegisters(program),
+                outputs,
+                fields: geometry.fields.length,
+                layout: /** @type {import('./glsl-link.js').GeometryLayout} */ (
+                    program.geometryLayout),
+            };
+        }
+        else if (program.vertex && program.fragment)
+        {
+            capture();
             const vertex = emitStage(program, 'vertex', options, null, 'glsl');
             const fragment = emitStage(program, 'fragment', options, vertex.fields, 'glsl');
             parts.push(interfaceStruct(vertex.fields), vertex.code, fragment.code);
@@ -1259,6 +1320,7 @@ function generateGlslDraw(state){
         }
         else if (program.vertex)
         {
+            capture();
             const fixedVaryings = { texcoords: state.units.map(unit=>unit.index),
                 fogCoord: false };
             const vertex = emitStage(program, 'vertex', options, null, 'fixed');
@@ -1304,11 +1366,45 @@ ${parts.join('\n\n')}
 }
 
 /**
+ * A vertex's registers the geometry pass writes: gl_Position, the fields,
+ * then what transform feedback captures.
+ *
+ * @param {import('./glsl-link.js').LinkedProgram} program @param {unknown[]} fields
+ */
+const geometryOutputRegisters = (program, fields)=>1 + fields.length
+    + feedbackLeaves(program, false).reduce((n, leaf)=>n + registersOf(leaf.type), 0);
+
+/**
  * @typedef {Object} GlslStages
  * @property {import('./glsl-wgsl.js').BlockPlan | null} vertex
  * @property {import('./glsl-wgsl.js').BlockPlan | null} fragment
  * @property {number[]} samplers  the program's samplers the stages sample, by index
  * @property {number[]} blocks  the program's uniform blocks the stages read, by index
+ * @property {GeometryPasses} [geometry]  the passes before the draw, for a program
+ *     with a geometry shader: the draw's vertex stage then reads what they made
+ * @property {{ vertex: ComputeStage, inputs: number }} [capture]  the vertex stage as a
+ *     pass keeping what transform feedback captures, for a program without one
+ */
+
+/**
+ * The compute passes a program with a geometry shader runs before its draw.
+ *
+ * @typedef {Object} GeometryPasses
+ * @property {ComputeStage} vertex  its vertex shader over every position of the draw
+ * @property {ComputeStage} geometry  its geometry shader over every primitive
+ * @property {number} inputs  the registers the vertex pass writes a position
+ * @property {number} outputs  the registers the geometry pass writes a vertex it emits
+ * @property {number} fields  of them, what the fragment stage reads (after gl_Position);
+ *     what transform feedback captures follows
+ * @property {import('./glsl-link.js').GeometryLayout} layout
+ */
+
+/**
+ * @typedef {Object} ComputeStage
+ * @property {string} code
+ * @property {import('./glsl-wgsl.js').BlockPlan | null} plan  its uniform block, if it has one
+ * @property {number[]} samplers
+ * @property {number[]} blocks
  */
 
 /**

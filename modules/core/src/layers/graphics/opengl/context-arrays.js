@@ -24,6 +24,7 @@ import {
 import { createBufferObject } from './objects.js';
 import { TEXTURE_UNITS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
+import { drawsGeometryInput, expandMode } from './gpu-layout.js';
 
 /** The conventional arrays after the position, in the order a draw reads them. */
 const CONVENTIONAL = /** @type {const} */ (['color', 'secondary', 'normal', 'fogCoord']);
@@ -52,11 +53,22 @@ function genericNamed(generic, name){
 /** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([
     GL.POINTS, GL.LINES, GL.LINE_LOOP, GL.LINE_STRIP, GL.TRIANGLES, GL.TRIANGLE_STRIP,
-    GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON,
+    GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON, GL.LINES_ADJACENCY,
+    GL.LINE_STRIP_ADJACENCY, GL.TRIANGLES_ADJACENCY, GL.TRIANGLE_STRIP_ADJACENCY,
 ]);
 
 /** GL_MIN_MAP_BUFFER_ALIGNMENT: a map starts on a boundary of it, past the range's offset. */
 const MAP_ALIGNMENT = 64;
+
+/**
+ * What an adjacency mode draws without a geometry shader: its own
+ * primitives, the adjacent vertices passed over.
+ *
+ * @type {Map<number, number>}
+ */
+const WITHOUT_ADJACENCY = new Map([[GL.LINES_ADJACENCY, GL.LINES],
+    [GL.LINE_STRIP_ADJACENCY, GL.LINES], [GL.TRIANGLES_ADJACENCY, GL.TRIANGLES],
+    [GL.TRIANGLE_STRIP_ADJACENCY, GL.TRIANGLES]]);
 
 /**
  * The targets a buffer object binds to, and the query each binding answers:
@@ -75,6 +87,7 @@ const BINDING_QUERIES = new Map([
     [GL.UNIFORM_BUFFER, GL.UNIFORM_BUFFER_BINDING],
     [GL.DRAW_INDIRECT_BUFFER, GL.DRAW_INDIRECT_BUFFER_BINDING],
     [GL.PARAMETER_BUFFER, GL.PARAMETER_BUFFER_BINDING],
+    [GL.TRANSFORM_FEEDBACK_BUFFER, GL.TRANSFORM_FEEDBACK_BUFFER_BINDING],
 ]);
 
 /**
@@ -659,6 +672,19 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
+        if (geometryLayout())
+        {
+            lose(`${name} ran a geometry shader where the draw could not reach the device,`
+                + ' and drew nothing');
+            return;
+        }
+        const plain = WITHOUT_ADJACENCY.get(mode);
+        if (plain !== undefined)
+        {
+            const order = /** @type {Uint32Array} */ (expandMode(mode, indices.length));
+            indices = Array.from(order, k=>indices[k]);
+            mode = plain;
+        }
         if (record(GL.VERTEX_ARRAY).values[0] === 0)
         {
             return;
@@ -956,6 +982,38 @@ export function installArrayCalls(context, kernel){
     });
 
     /**
+     * What transform feedback wrote is on the device, and a read here is of
+     * the program's own bytes: said, as what it reads is not what was captured.
+     *
+     * @param {string} name @param {import('./objects.js').BufferObject} buffer
+     */
+    function readsCaptured(name, buffer){
+        if (buffer.captured)
+        {
+            lose(`${name} read a buffer transform feedback wrote on the device: it read what`
+                + ' the program last stored there, not what was captured');
+        }
+    }
+
+    /** The geometry shader of the program in use, if it has one. */
+    function geometryLayout(){
+        return kernel.side.glslExecutable?.()?.linked.geometryLayout ?? null;
+    }
+
+    /**
+     * Whether the program in use draws a mode: one with a geometry shader
+     * only the modes of its input primitive (OpenGL 3.2 section 2.12.1),
+     * and while transform feedback captures only the modes of its primitive.
+     *
+     * @param {number} mode
+     */
+    function takesMode(mode){
+        const layout = geometryLayout();
+        return (!layout || drawsGeometryInput(mode, layout.input))
+            && (kernel.side.feedbackTakes?.(mode, layout) ?? true);
+    }
+
+    /**
      * A draw by a range of the arrays, as many times as there are instances.
      *
      * @param {string} name @param {number} mode @param {number} first @param {number} count
@@ -972,7 +1030,7 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (kernel.inPrimitive())
+        if (kernel.inPrimitive() || !takesMode(mode))
         {
             setError(GL.INVALID_OPERATION);
             return;
@@ -1005,7 +1063,7 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (kernel.inPrimitive())
+        if (kernel.inPrimitive() || !takesMode(mode))
         {
             setError(GL.INVALID_OPERATION);
             return;
@@ -1783,6 +1841,7 @@ export function installArrayCalls(context, kernel){
             }
             buffer.data = new Uint8Array(size);
             buffer.size = size;
+            buffer.captured = false;
             buffer.usage = usage;
             buffer.written = size > 0 ? { start: 0, end: size } : null;
             buffer.version++;
@@ -1866,6 +1925,7 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return null;
             }
+            readsCaptured('glGetBufferSubDataARB', buffer);
             return buffer.data.slice(offset, offset + size);
         },
 
@@ -1889,6 +1949,7 @@ export function installArrayCalls(context, kernel){
             {
                 return 0;
             }
+            readsCaptured('glMapBufferARB', buffer);
             if (buffer.mapped !== 0)
             {
                 setError(GL.INVALID_OPERATION);
@@ -1918,6 +1979,7 @@ export function installArrayCalls(context, kernel){
             {
                 return 0;
             }
+            readsCaptured('glMapBufferRange', buffer);
             if (offset < 0 || length < 0 || offset + length > buffer.size
                 || (access & ~MAP_BITS) !== 0)
             {

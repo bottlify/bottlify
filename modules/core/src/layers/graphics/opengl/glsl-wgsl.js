@@ -42,7 +42,8 @@
  * `?:` whose right side would then run unconditionally become `if`s.
  */
 
-import { FLOAT, baseOf, componentsOf, glslName, vectorOf } from './glsl-types.js';
+import { FLOAT, INT, baseOf, componentsOf, glslName, vectorOf } from './glsl-types.js';
+import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
@@ -59,6 +60,196 @@ import { membersLayout, typeLayout } from './glsl-layout.js';
 export const GLSL_VERTEX_BINDING = 17;
 export const GLSL_FRAGMENT_BINDING = 18;
 export const GLSL_FRAGMENT_GROUP = 1;
+export const GLSL_GEOMETRY_BINDING = 19;
+
+/**
+ * Group 1 of the vertex shader run as a compute pass before a geometry
+ * shader: the draw's indices, what it writes a position of the draw, its
+ * parameters, and the draw's arrays from `slots` on, a binding each.
+ */
+export const GLSL_VERTEX_PASS_BINDING = Object.freeze({ indices: 0, out: 1, params: 2, slots: 3 });
+
+/**
+ * Group 1 of the geometry shader's pass: what the vertex pass wrote, the
+ * vertices it emits and where its strips start, and each invocation's counts
+ * (`../d3d10/geometry-wgsl.js` reads these as Direct3D's shader writes them).
+ */
+export const GLSL_GEOMETRY_PASS_BINDING = Object.freeze({
+    inputs: 0, vertices: 1, starts: 2, counts: 3, params: 4,
+});
+
+/** The group a draw of what a geometry shader made reads its vertices from, at binding 0. */
+export const GLSL_GEOMETRY_DRAW_GROUP = 2;
+
+/**
+ * The registers a value takes between the passes, one a leaf: a scalar or a
+ * vector, a matrix's column, an array's element, a struct's member.
+ *
+ * @param {GlslType} type @returns {number}
+ */
+export function registersOf(type){
+    switch (type.kind)
+    {
+        case 'array':
+            return type.length * registersOf(type.element);
+        case 'matrix':
+            return type.cols;
+        case 'struct':
+            return type.fields.reduce((n, field)=>n + registersOf(field.type), 0);
+        default:
+            return 1;
+    }
+}
+
+/**
+ * The components of each register a value takes, in order (`registersOf`).
+ *
+ * @param {GlslType} type @returns {number[]}
+ */
+function leafSizes(type){
+    switch (type.kind)
+    {
+        case 'array':
+            return Array.from({ length: type.length }, ()=>leafSizes(type.element)).flat();
+        case 'matrix':
+            return new Array(type.cols).fill(type.rows);
+        case 'struct':
+            return type.fields.flatMap(field=>leafSizes(field.type));
+        default:
+            return [componentsOf(type) || 1];
+    }
+}
+
+/**
+ * What transform feedback captures that takes registers of its own after a
+ * pass's others: every captured value but gl_Position (register 0), and in
+ * the vertex pass gl_PointSize (register 1).
+ *
+ * @param {LinkedProgram} program @param {boolean} vertexPass
+ * @returns {{ path: string, type: GlslType }[]}
+ */
+export function feedbackLeaves(program, vertexPass){
+    return (program.feedback?.varyings ?? []).filter(v=>v.type && v.path !== null
+        && v.path !== 'gl_Position' && !(vertexPass && v.path === 'gl_PointSize'))
+        .map(v=>({ path: /** @type {string} */ (v.path), type: /** @type {GlslType} */ (v.type) }));
+}
+
+/**
+ * Where stream output finds each captured word: the register and component
+ * of a vertex the pass wrote, by the buffer and word it goes to
+ * (`../d3d10/geometry-wgsl.js` streamOutWgsl's writes).
+ *
+ * @param {LinkedProgram} program
+ * @param {number} first  the first register the captured values take
+ * @param {boolean} vertexPass  the vertex pass's registers, not the geometry pass's
+ * @returns {import('../d3d10/geometry-wgsl.js').StreamOutWrite[]}
+ */
+export function feedbackWrites(program, first, vertexPass){
+    /** @type {Map<number, import('../d3d10/geometry-wgsl.js').StreamOutWrite>} */
+    const bySlot = new Map();
+    let register = first;
+    for (const varying of program.feedback?.varyings ?? [])
+    {
+        if (!varying.type)
+        {
+            continue;
+        }
+        let write = bySlot.get(varying.buffer);
+        if (!write)
+        {
+            write = { slot: varying.buffer, stream: 0, words: [] };
+            bySlot.set(varying.buffer, write);
+        }
+        let word = varying.word;
+        if (varying.path === 'gl_Position')
+        {
+            for (let c = 0; c < 4; c++)
+            {
+                write.words.push({ register: 0, component: c, word: word++ });
+            }
+            continue;
+        }
+        if (vertexPass && varying.path === 'gl_PointSize')
+        {
+            write.words.push({ register: 1, component: 0, word });
+            continue;
+        }
+        for (const size of leafSizes(varying.type))
+        {
+            for (let c = 0; c < size; c++)
+            {
+                write.words.push({ register, component: c, word: word++ });
+            }
+            register++;
+        }
+    }
+    return [...bySlot.values()];
+}
+
+/**
+ * The registers a vertex the vertex pass writes takes: gl_Position,
+ * gl_PointSize, then each input the geometry shader reads, or without one
+ * what transform feedback captures.
+ *
+ * @param {LinkedProgram} program @returns {number}
+ */
+export const geometryInputRegisters = program=>2 + (program.geometry
+    ? program.geometryInputs.reduce((n, input)=>n + registersOf(input.type), 0)
+    : feedbackLeaves(program, true).reduce((n, leaf)=>n + registersOf(leaf.type), 0));
+
+/**
+ * A value of a type the stages pass as the four words of a register, and
+ * the value back.
+ *
+ * @param {string} code @param {string} type  `f32`, `vec3i` and the like
+ */
+export function toRegister(code, type){
+    const vector = /^vec([234])[fiu]$/.exec(type);
+    if (!vector)
+    {
+        return `vec4u(bitcast<u32>(${code}), 0u, 0u, 0u)`;
+    }
+    const n = Number(vector[1]);
+    const bits = `bitcast<vec${n}u>(${code})`;
+    return n === 4 ? bits : `vec4u(${bits}${', 0u'.repeat(4 - n)})`;
+}
+
+/** @param {string} code a register @param {string} type */
+export function fromRegister(code, type){
+    const vector = /^vec([234])[fiu]$/.exec(type);
+    if (!vector)
+    {
+        return `bitcast<${type}>(${code}.x)`;
+    }
+    const n = Number(vector[1]);
+    return `bitcast<${type}>(${code}${n === 4 ? '' : `.${XYZW.slice(0, n)}`})`;
+}
+
+/**
+ * The vertex stage of a draw of what a geometry shader made: each vertex
+ * the index list names read out of its registers (`gsVertices`) into what
+ * the fragment stage takes, the position first.
+ *
+ * @param {Interface} fields  the geometry stage's (`emitStage`)
+ * @param {number} registers  a vertex's, captured values included
+ * @returns {string}
+ */
+export function geometryDrawStage(fields, registers){
+    return `@group(${GLSL_GEOMETRY_DRAW_GROUP}) @binding(0) var<storage, read> gsVertices:`
+        + ` array<vec4u>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) gsVertex: u32) -> VertexOut {
+    let base = gsVertex * ${registers}u;
+    var out: VertexOut;
+    let clip = bitcast<vec4f>(gsVertices[base]);
+    out.position = vec4f(clip.x, clip.y * uniforms.misc.z, (clip.z * uniforms.misc.y + clip.w)`
+        + ` * 0.5, clip.w);
+${fields.map((f, k)=>`    out.${f.field} = `
+        + `${fromRegister(`gsVertices[base + ${k + 1}u]`, f.type)};`).join('\n')}
+    return out;
+}`;
+}
 
 /** Where a program's uniform blocks are bound: group 0, from this binding on. */
 export const GLSL_BLOCK_BINDING = 32;
@@ -168,6 +359,10 @@ export function textureLayoutOf(type){
  *     `wgsl.js`'s comparison, for the alpha test
  * @property {FixedVaryings} [fixed]  what the fixed fragment stage reads, when it is
  *     the vertex shader's partner
+ * @property {readonly { stride?: number }[]} [slots]  the draw's arrays, for a
+ *     vertex stage run as a compute pass, which reads them as words
+ * @property {boolean} [compute]  the vertex stage runs as a compute pass, for the
+ *     geometry shader after it (`vertexCompute`)
  */
 
 /**
@@ -373,7 +568,7 @@ const SIMPLE = /^([A-Za-z_][A-Za-z0-9_.]*|[0-9][0-9.e+]*[fi]?)$/;
 
 /**
  * @param {LinkedProgram} program
- * @param {'vertex' | 'fragment'} which
+ * @param {'vertex' | 'geometry' | 'fragment'} which
  * @param {StageOptions} options
  * @param {Interface | null} given  the interface the other stage chose, for
  *     the fragment stage; null for the vertex stage, which chooses it
@@ -383,7 +578,9 @@ const SIMPLE = /^([A-Za-z_][A-Za-z0-9_.]*|[0-9][0-9.e+]*[fi]?)$/;
 export function emitStage(program, which, options, given, partner){
     const linked = /** @type {LinkedStage} */ (program[which]);
     const vertex = which === 'vertex';
-    const p = vertex ? 'v' : 'f';
+    const geometry = which === 'geometry';
+    const fragment = which === 'fragment';
+    const p = vertex ? 'v' : geometry ? 'y' : 'f';
     const names = namer(p);
     /** @param {StructType} s */
     const structName = s=>names.value(s);
@@ -401,7 +598,7 @@ export function emitStage(program, which, options, given, partner){
         {
             return symbol.builtin?.role === 'const' ? undefined : symbol.type;
         }
-        return BUILTIN_VARIABLE_TYPES[which][name];
+        return BUILTIN_VARIABLE_TYPES[which === 'fragment' ? 'fragment' : 'vertex'][name];
     };
 
     /** @type {string[]} */
@@ -720,12 +917,16 @@ export function emitStage(program, which, options, given, partner){
         {
             continue;
         }
+        declareStructs(type);
         privates.push(`var<private> ${p}${name}: ${typeOf(type)};`);
     }
     // What the entry point reads whether or not main wrote it.
     const read = vertex ? [['gl_Position', 'vec4f']]
-        : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
-            program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
+        : geometry ? [['gl_Position', 'vec4f'], ['gl_PrimitiveID', 'i32'],
+            ...program.feedback?.varyings.some(v=>v.path === 'gl_PointSize')
+                ? [['gl_PointSize', 'f32']] : []]
+            : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
+                program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
     for (const [name, type] of read)
     {
         if (!linked.uses.has(name))
@@ -1999,7 +2200,7 @@ export function emitStage(program, which, options, given, partner){
             // base level: a level, gradients or a bias asked of a comparison
             // read the base level or the implicit one.
             const compareHead = `${tex}, ${smp}, ${coords}${layer}, ${reference}`;
-            const compared = !vertex && level === null && !gradients
+            const compared = fragment && level === null && !gradients
                 ? `textureSampleCompare(${compareHead}${offsetCode})`
                 : `textureSampleCompareLevel(${compareHead}${offsetCode})`;
             // 1.10's shadow lookups answer a luminance: (r, r, r, 1).
@@ -2017,7 +2218,7 @@ export function emitStage(program, which, options, given, partner){
         {
             sample = `textureSampleLevel(${head}, ${level}${offsetCode})`;
         }
-        else if (vertex)
+        else if (!fragment)
         {
             sample = `textureSampleLevel(${head}, 0.0f${offsetCode})`;
         }
@@ -2271,6 +2472,13 @@ export function emitStage(program, which, options, given, partner){
                 }
                 return;
             case 'call':
+                // A geometry shader's vertex, stored with every output it has
+                // now, and the end of its strip.
+                if (!node.user && (node.name === 'EmitVertex' || node.name === 'EndPrimitive'))
+                {
+                    out.pre.push(node.name === 'EmitVertex' ? `${p}emit();` : `${p}cut();`);
+                    return;
+                }
                 if (node.user)
                 {
                     const code = expr(node, out);
@@ -2347,12 +2555,226 @@ ${[...copiesIn, ...body, ...fallback].join('\n')}
         initial.push(...out.pre.map(line=>`    ${line}`), `    ${p}g_${symbol.name} = ${value};`);
     }
 
+    // --- the passes before a geometry shader's draw ---
+
+    /**
+     * A value's leaves as the registers between the passes take them
+     * (`registersOf`), in order.
+     *
+     * @param {string} source @param {GlslType} type
+     * @returns {{ code: string, type: string }[]}
+     */
+    function leavesOf(source, type){
+        switch (type.kind)
+        {
+            case 'array':
+                return Array.from({ length: type.length }, (_, k)=>
+                    leavesOf(`${source}[${k}]`, type.element)).flat();
+            case 'matrix':
+                return Array.from({ length: type.cols }, (_, c)=>
+                    leavesOf(`${source}[${c}]`, vectorOf('float', type.rows))).flat();
+            case 'struct':
+                return type.fields.flatMap(field=>leavesOf(`${source}.m_${field.name}`,
+                    field.type));
+            default:
+                return [{ code: source, type: typeOf(type) }];
+        }
+    }
+
+    /**
+     * The vertex stage as a compute pass, one invocation a position of the
+     * draw and instance: the position's vertex found as the draw finds it
+     * (its index, or the first vertex counted on), each array's element read
+     * out of the array's words (an element past the end of its buffer reads
+     * zero), the shader run, and what the geometry shader reads of it stored
+     * a register a leaf (`geometryInputRegisters`): gl_Position, gl_PointSize,
+     * then the inputs by name.
+     *
+     * `vsParams`: the positions, the positions an instance, the index size
+     * in bytes (0 for none), the index buffer's byte offset, the first index
+     * or vertex, the base vertex; then, an array each, its byte offset, its
+     * stride and whether it steps by instance.
+     *
+     * @returns {string}
+     */
+    function vertexComputeEntry(){
+        const slots = Math.max(1, ...options.attributes.map(a=>a.slot + 1));
+        const b = GLSL_VERTEX_PASS_BINDING;
+        declarations.push([
+            'struct VsParams { count: u32, perInstance: u32, indexBytes: u32, indexOffset: u32,',
+            '    first: u32, baseVertex: i32, pad0: u32, pad1: u32,',
+            `    slots: array<vec4u, ${slots}>, }`,
+            `@group(1) @binding(${b.indices}) var<storage, read> vsIndices: array<u32>;`,
+            `@group(1) @binding(${b.out}) var<storage, read_write> vsOut: array<vec4u>;`,
+            `@group(1) @binding(${b.params}) var<uniform> vsParams: VsParams;`,
+            ...Array.from({ length: slots }, (_, k)=>`@group(1) @binding(${b.slots + k})`
+                + ` var<storage, read> vsSlot${k}: array<u32>;`),
+            ...Array.from({ length: slots }, (_, k)=>[
+                `fn vsWord${k}(at: u32) -> u32 {`,
+                '    let w = at >> 2u;',
+                `    let n = arrayLength(&vsSlot${k});`,
+                '    if (w >= n) { return 0u; }',
+                '    let s = (at & 3u) * 8u;',
+                `    let lo = vsSlot${k}[w];`,
+                '    if (s == 0u) { return lo; }',
+                `    let hi = select(0u, vsSlot${k}[min(w + 1u, n - 1u)], w + 1u < n);`,
+                '    return (lo >> s) | (hi << (32u - s));',
+                '}'].join('\n')),
+            'fn vsIndex(i: u32) -> u32 {',
+            '    let at = vsParams.indexOffset + i * vsParams.indexBytes;',
+            '    if ((at >> 2u) >= arrayLength(&vsIndices)) { return 0u; }',
+            '    let word = vsIndices[at >> 2u];',
+            '    if (vsParams.indexBytes == 2u) { return extractBits(word, (at & 2u) * 8u, 16u); }',
+            '    return word;',
+            '}'].join('\n'));
+        /** @type {string[]} */
+        const fetch = options.attributes.length > 0 ? ['    var vertex: VertexIn;'] : [];
+        const used = new Set(options.attributes.map(a=>a.slot));
+        for (const k of used)
+        {
+            fetch.push(`    let vsAt${k} = vsParams.slots[${k}].x + select(vertexIndex,`
+                + ` instanceIndex, vsParams.slots[${k}].z != 0u) * vsParams.slots[${k}].y;`);
+        }
+        for (const attribute of options.attributes)
+        {
+            const decoder = vertexFetch(attribute.format);
+            if (!decoder)
+            {
+                throw new Error(`an array of format ${attribute.format} is read before a`
+                    + ' geometry shader, which this implementation does not do');
+            }
+            const at = `vsAt${attribute.slot} + ${attribute.offset}u`;
+            const words = Array.from({ length: Math.ceil(decoder.bytes / 4) },
+                (_, index)=>`vsWord${attribute.slot}(${at} + ${index * 4}u)`);
+            const register = decoder.register(words);
+            const four = attribute.scalar === 'f32' ? `bitcast<vec4f>(${register})`
+                : attribute.scalar === 'i32' ? `bitcast<vec4i>(${register})` : register;
+            const n = attribute.components;
+            fetch.push(`    if (${at} + ${decoder.bytes}u <= arrayLength(&vsSlot${attribute.slot})`
+                + ' * 4u) {',
+            `        vertex.${attribute.name} = ${n === 4 ? four : n === 1 ? `${four}.x`
+                : `${four}.${XYZW.slice(0, n)}`};`, '    }');
+        }
+        const registers = geometryInputRegisters(program);
+        /** @type {string[]} */
+        const stores = [`    vsOut[base] = bitcast<vec4u>(${p}gl_Position);`,
+            `    vsOut[base + 1u] = vec4u(bitcast<u32>(${linked.uses.has('gl_PointSize')
+                ? `${p}gl_PointSize` : '1.0f'}), 0u, 0u, 0u);`];
+        let at = 2;
+        const kept = program.geometry ? program.geometryInputs.map(input=>({
+            path: input.vertexPath, type: input.type })) : feedbackLeaves(program, true);
+        for (const value of kept)
+        {
+            for (const leaf of leavesOf(`${p}${value.path}`, value.type))
+            {
+                stores.push(`    vsOut[base + ${at++}u] = ${toRegister(leaf.code, leaf.type)};`);
+            }
+        }
+        return `@compute @workgroup_size(64)
+fn vertexCompute(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= vsParams.count) { return; }
+    let instanceIndex = id.x / max(1u, vsParams.perInstance);
+    let point = id.x % max(1u, vsParams.perInstance);
+    var vertexIndex = vsParams.first + point;
+    if (vsParams.indexBytes != 0u) {
+        vertexIndex = bitcast<u32>(bitcast<i32>(vsIndex(vsParams.first + point))`
+            + ` + vsParams.baseVertex);
+    }
+${[...fetch, ...prologue, ...initial, `    ${p}main();`,
+        `    let base = id.x * ${registers}u;`, ...stores].join('\n')}
+}`;
+    }
+
+    /**
+     * The geometry shader as a compute pass, one invocation a primitive and
+     * instance of the draw (Direct3D's `linkGeometry`, for GLSL): its
+     * vertices read out of what the vertex pass wrote, the shader run, each
+     * vertex it emits stored with every output it has then (`gl_Position`,
+     * then the fields the fragment stage reads) at its invocation's next
+     * place, with whether it starts a strip; each invocation's primitives and
+     * vertices counted where the sums read them (stream 0's).
+     *
+     * `gsParams`: the invocations, the primitives an instance.
+     *
+     * @returns {string}
+     */
+    function geometryEntry(){
+        const layout = /** @type {import('./glsl-link.js').GeometryLayout} */ (
+            program.geometryLayout);
+        const vertices = layout.inputVertices;
+        const most = Math.max(1, layout.maxVertices);
+        const inputs = geometryInputRegisters(program);
+        // What transform feedback captures, after what the fragment stage reads.
+        const captured = feedbackLeaves(program, false).flatMap(leaf=>leavesOf(`${p}${leaf.path}`,
+            leaf.type));
+        const outputs = 1 + fields.length + captured.length;
+        const b = GLSL_GEOMETRY_PASS_BINDING;
+        declarations.push([
+            'struct GsParams { invocations: u32, prims: u32, pad0: u32, pad1: u32, }',
+            `@group(1) @binding(${b.inputs}) var<storage, read> gsIn: array<vec4u>;`,
+            `@group(1) @binding(${b.vertices}) var<storage, read_write> gsVertices: array<vec4u>;`,
+            `@group(1) @binding(${b.starts}) var<storage, read_write> gsStarts: array<u32>;`,
+            `@group(1) @binding(${b.counts}) var<storage, read_write> gsCounts: array<vec4u>;`,
+            `@group(1) @binding(${b.params}) var<uniform> gsParams: GsParams;`,
+            'var<private> gsInvocation: u32;',
+            'var<private> gsEmitted: u32;',
+            'var<private> gsMade: u32;',
+            'var<private> gsStrip: u32;',
+            `fn ${p}emit() {`,
+            `    if (gsEmitted >= ${most}u) { return; }`,
+            `    let at = gsInvocation * ${most}u + gsEmitted;`,
+            `    gsVertices[at * ${outputs}u] = bitcast<vec4u>(${p}gl_Position);`,
+            ...fields.map((f, k)=>`    gsVertices[at * ${outputs}u + ${k + 1}u] = `
+                + `${toRegister(f.source, f.type)};`),
+            ...captured.map((leaf, k)=>`    gsVertices[at * ${outputs}u + `
+                + `${k + 1 + fields.length}u] = ${toRegister(leaf.code, leaf.type)};`),
+            '    gsStarts[at] = select(0u, 1u, gsStrip == 0u);',
+            '    gsEmitted += 1u;',
+            '    gsStrip += 1u;',
+            `    if (gsStrip >= ${layout.outputVertices}u) { gsMade += 1u; }`,
+            '}',
+            `fn ${p}cut() {`,
+            '    gsStrip = 0u;',
+            '}'].join('\n'));
+        /** @type {string[]} */
+        const loads = [];
+        for (let j = 0; j < vertices; j++)
+        {
+            loads.push(`    let in${j} = (id.x * ${vertices}u + ${j}u) * ${inputs}u;`);
+            if (linked.uses.has('gl_in'))
+            {
+                loads.push(`    ${p}gl_in[${j}].m_gl_Position = bitcast<vec4f>(gsIn[in${j}]);`,
+                    `    ${p}gl_in[${j}].m_gl_PointSize = bitcast<f32>(gsIn[in${j} + 1u].x);`);
+            }
+            let at = 2;
+            for (const input of program.geometryInputs)
+            {
+                const path = `${p}${input.geometryPath.replace('[]', `[${j}]`)}`;
+                for (const leaf of leavesOf(path, input.type))
+                {
+                    loads.push(`    ${leaf.code} = ${fromRegister(`gsIn[in${j} + ${at++}u]`,
+                        leaf.type)};`);
+                }
+            }
+        }
+        return `@compute @workgroup_size(64)
+fn geometryMain(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= gsParams.invocations) { return; }
+    gsInvocation = id.x;
+${[...linked.uses.has('gl_PrimitiveIDIn')
+        ? [`    ${p}gl_PrimitiveIDIn = i32(id.x % max(1u, gsParams.prims));`] : [],
+    ...loads, ...initial, `    ${p}main();`,
+    '    gsCounts[id.x * 2u] = vec4u(gsMade, 0u, 0u, 0u);',
+    '    gsCounts[id.x * 2u + 1u] = vec4u(gsEmitted, 0u, 0u, 0u);'].join('\n')}
+}`;
+    }
+
     // --- the interface and the entry point ---
 
     /** @type {Interface} */
     const fields = [];
     let entry;
-    if (vertex)
+    if (vertex || geometry)
     {
         if (partner === 'glsl')
         {
@@ -2424,12 +2846,19 @@ ${[...copiesIn, ...body, ...fallback].join('\n')}
                     false);
             }
         }
+        // A geometry shader passes its primitive's number on by a field of
+        // its own, flat: WGSL has no fragment input for it.
+        if (geometry && program.fragment?.uses.has('gl_PrimitiveID'))
+        {
+            fields.push({ field: `i${fields.length}`, type: 'i32', flat: true,
+                source: `${p}gl_PrimitiveID`, interpolate: '@interpolate(flat) ' });
+        }
         const out = partner === 'glsl'
             ? fields.map(f=>`    out.${f.field} = ${f.source};`)
             : fixedOutputs(linked, p, /** @type {FixedVaryings} */ (options.fixed));
         /** @type {string[]} */
         const inputs = options.attributes.length > 0 ? ['vertex: VertexIn'] : [];
-        if (linked.uses.has('gl_VertexID'))
+        if (vertex && linked.uses.has('gl_VertexID'))
         {
             // WebGPU's index counts from where the draw put its arrays; GL's
             // from the program's own first vertex (`plan.idBias`).
@@ -2439,13 +2868,13 @@ ${[...copiesIn, ...body, ...fallback].join('\n')}
             slot++;
             prologue.push(`    ${p}gl_VertexID = i32(vertexIndex) + ${p}u.id_bias.x;`);
         }
-        if (linked.uses.has('gl_InstanceID'))
+        if (vertex && linked.uses.has('gl_InstanceID'))
         {
             // The draw starts every instanced draw at instance zero.
             inputs.push('@builtin(instance_index) instanceIndex: u32');
             prologue.push(`    ${p}gl_InstanceID = i32(instanceIndex);`);
         }
-        entry = `@vertex
+        entry = geometry ? geometryEntry() : options.compute ? vertexComputeEntry() : `@vertex
 fn vertexMain(${inputs.join(', ')}) -> VertexOut {
 ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
         `    let clip = ${p}gl_Position;`,
@@ -2523,6 +2952,10 @@ ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
             if (linked.uses.has('gl_FogFragCoord'))
             {
                 take(`${p}gl_FogFragCoord`, FLOAT);
+            }
+            if (program.geometry && linked.uses.has('gl_PrimitiveID'))
+            {
+                take(`${p}gl_PrimitiveID`, INT);
             }
         }
         else
@@ -2633,9 +3066,10 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
         merged.push(copies[k], copies[k + 1], copies[k + 2]);
     }
     plan.copies = Int32Array.from(merged);
-    const blockName = vertex ? 'VertexBlock' : 'FragmentBlock';
-    const group = vertex ? 0 : GLSL_FRAGMENT_GROUP;
-    const binding = vertex ? GLSL_VERTEX_BINDING : GLSL_FRAGMENT_BINDING;
+    const blockName = vertex ? 'VertexBlock' : geometry ? 'GeometryBlock' : 'FragmentBlock';
+    const group = fragment ? GLSL_FRAGMENT_GROUP : 0;
+    const binding = vertex ? GLSL_VERTEX_BINDING : geometry ? GLSL_GEOMETRY_BINDING
+        : GLSL_FRAGMENT_BINDING;
     const blockCode = blockMembers.length > 0
         ? `struct ${blockName} {\n${blockMembers.join('\n')}\n};
 @group(${group}) @binding(${binding}) var<uniform> ${p}u: ${blockName};`

@@ -55,9 +55,11 @@ import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
 import {
-    CANONICAL_LAYOUT, clientReads, expandIndices, instanceElements, isList, lockedFor,
-    packVertices, planLayout, scanIndices, topologyOf, vertexRange,
+    CANONICAL_LAYOUT, clientReads, drawsGeometryInput, expandIndices, geometryOrder,
+    instanceElements, isList, lastProvoking, lockedFor, packVertices, planLayout, scanIndices,
+    topologyOf, vertexRange,
 } from './gpu-layout.js';
+import { createGlGeometry } from './gpu-geometry.js';
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
     VERTEX_PROGRAM_BINDING,
@@ -69,7 +71,10 @@ import {
     showDescriptor, showKey, writeLighting,
 } from './wgsl.js';
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
-import { GLSL_BLOCK_BINDING, samplerTypeOf, textureLayoutOf } from './glsl-wgsl.js';
+import {
+    GLSL_BLOCK_BINDING, GLSL_GEOMETRY_BINDING, GLSL_GEOMETRY_DRAW_GROUP, GLSL_VERTEX_BINDING,
+    feedbackWrites, samplerTypeOf, textureLayoutOf,
+} from './glsl-wgsl.js';
 
 /**
  * A framebuffer object is drawn upside down -- its first row GL's bottom
@@ -126,6 +131,13 @@ const ZERO_MATRIX = new Float64Array(16);
 /** GPUShaderStage bits. */
 const VERTEX_STAGE = 1;
 const FRAGMENT_STAGE = 2;
+const COMPUTE_STAGE = 4;
+/** GL_PRIMITIVES_GENERATED, a query target counted here (`context-queries.js` the rest). */
+const PRIMITIVES_GENERATED = 0x8c87;
+
+/** The list a geometry shader's primitives are drawn as, by their vertices. */
+const GEOMETRY_TOPOLOGIES = /** @type {('point-list' | 'line-list' | 'triangle-list')[]} */ ([
+    'point-list', 'point-list', 'line-list', 'triangle-list']);
 
 /**
  * GL filter → the sampler's filters.
@@ -499,6 +511,14 @@ export function createGpuRenderer(services){
      */
     const activeQueries = new WeakMap();
     /**
+     * The queries counting each context's primitives (PRIMITIVES_GENERATED,
+     * TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN), while they count.
+     *
+     * @type {WeakMap<object, { generated: OcclusionCount | null,
+     *     written: OcclusionCount | null }>}
+     */
+    const feedbackCounts = new WeakMap();
+    /**
      * The query each context's rendering is conditional on
      * (glBeginConditionalRender), and whether the condition is inverted.
      *
@@ -616,6 +636,7 @@ export function createGpuRenderer(services){
      * @property {boolean} fragmentBlock
      * @property {boolean} [glsl]  the textures are visible to the vertex stage too
      * @property {number[]} [blocks]  a GLSL program's uniform blocks the stages read
+     * @property {boolean} [geometry]  the draw reads what a geometry shader made (group 2)
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -643,10 +664,12 @@ export function createGpuRenderer(services){
             const vertexBlock = glsl.vertex !== null;
             const fragmentBlock = glsl.fragment !== null;
             const blocks = glsl.blocks ?? [];
+            const geometry = !!glsl.geometry;
             const key = `g${textures.map(t=>`${t.binding}${t.layout.viewDimension}`
                 + `${t.layout.sampleType}${t.layout.multisampled ? 'm' : ''}`).join(',')}|`
-                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`;
-            return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks };
+                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`
+                + `${geometry ? '|gs' : ''}`;
+            return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry };
         }
         /** @type {{ binding: number, cube: boolean, unit: number }[]} */
         const textures = [];
@@ -785,6 +808,20 @@ export function createGpuRenderer(services){
                 }],
             }));
         }
+        else if (plan.geometry)
+        {
+            groups.push(backend.createBindGroupLayout({ label: `gl:${plan.key}#none`,
+                entries: [] }));
+        }
+        if (plan.geometry)
+        {
+            // What a geometry shader made, which the draw's vertex stage reads.
+            groups.push(backend.createBindGroupLayout({
+                label: `gl:${plan.key}#geometry`,
+                entries: [{ binding: 0, visibility: VERTEX_STAGE,
+                    buffer: { type: 'read-only-storage' } }],
+            }));
+        }
         const made = {
             groups,
             pipeline: backend.createPipelineLayout(
@@ -890,8 +927,9 @@ export function createGpuRenderer(services){
      * go in under NOOVERWRITE until the ring wraps, and the wrap is a DISCARD.
      *
      * @param {string} label @param {number} usage @param {number} size
+     * @param {number} [align]  what each write's offset is a multiple of
      */
-    const ring = (label, usage, size)=>{
+    const ring = (label, usage, size, align = 4)=>{
         // Each draw reads only what it wrote, so a wrap keeps nothing.
         let buffer = backend.createDynamicBuffer({ size, usage, label, keep: false });
         let cursor = 0;
@@ -900,7 +938,7 @@ export function createGpuRenderer(services){
             /** @param {ArrayBufferView} view @returns {{ gpu: any, offset: number }} */
             write(view){
                 const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-                const aligned = alignUp(bytes.byteLength);
+                const aligned = Math.ceil(bytes.byteLength / align) * align;
                 if (aligned > buffer.size)
                 {
                     backend.releaseDynamicBuffer?.(buffer);
@@ -925,10 +963,23 @@ export function createGpuRenderer(services){
             },
         };
     };
+    // Storage too: what a pass before a geometry shader reads a draw's
+    // arrays and indices out of.
     const scratchVertices = ring('gl-scratch-vertices',
-        BufferUsage.VERTEX | BufferUsage.COPY_DST, 1 << 20);
+        BufferUsage.VERTEX | BufferUsage.STORAGE | BufferUsage.COPY_DST, 1 << 20);
     const scratchIndices = ring('gl-scratch-indices',
-        BufferUsage.INDEX | BufferUsage.COPY_DST, 1 << 18);
+        BufferUsage.INDEX | BufferUsage.STORAGE | BufferUsage.COPY_DST, 1 << 18);
+    // The uniforms of the passes a geometry shader's draw runs, at the
+    // offsets a uniform binding may start at.
+    // Storage too: the list and the arguments stream output reads after a
+    // vertex pass of its own.
+    const scratchUniforms = ring('gl-scratch-uniforms',
+        BufferUsage.UNIFORM | BufferUsage.STORAGE | BufferUsage.COPY_DST, 1 << 16, 256);
+    const geometryPasses = createGlGeometry({
+        backend,
+        uniform: view=>scratchUniforms.write(view),
+        lose: detail=>lose(detail),
+    });
 
     /** The sampler the shown copy is read through: one texel to one pixel. */
     let showSampler = /** @type {any} */ (null);
@@ -1673,8 +1724,10 @@ export function createGpuRenderer(services){
             record = {
                 gpu: backend.createDynamicBuffer({
                     size: capacity,
+                    // Storage too: what a pass before a geometry shader reads
+                    // an array out of.
                     usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
-                        | BufferUsage.COPY_DST,
+                        | BufferUsage.STORAGE | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
                 }),
                 size: buffer.size,
@@ -2516,6 +2569,21 @@ export function createGpuRenderer(services){
         && a.b === b.b && a.a === b.a);
 
     /**
+     * Compute passes recorded in their turn among the draws.
+     *
+     * @param {Recording} recording
+     * @param {{ pipeline: Promise<any>, label: string, groups: object[][], grid: number[] }[]} work
+     */
+    const dispatchAll = (recording, work)=>{
+        for (const pass of work)
+        {
+            recording.commands.push({ kind: 'dispatch',
+                pipeline: pipelineSlot(recording, pass.pipeline), label: pass.label,
+                groups: pass.groups, grid: pass.grid });
+        }
+    };
+
+    /**
      * Joins the draw just pushed into the one before it in the same
      * recording, when the join is provably picture-identical: the same
      * pipeline, bindings and uniform blocks -- the state-version cache above
@@ -2536,6 +2604,7 @@ export function createGpuRenderer(services){
      * @param {Recording} recording
      */
     const joinLastDraw = recording=>{
+
         const commands = recording.commands;
         if (commands.length < 2)
         {
@@ -2659,7 +2728,8 @@ export function createGpuRenderer(services){
             plans.set(key, plan);
         }
         const executable = scene.programs.glsl;
-        const sampled = plan.textures.map(entry=>{
+        /** @param {BindPlan['textures'][number]} entry */
+        const sampledTexture = entry=>{
             let texture = entry.sampler !== undefined && executable
                 ? textureForSampler(scene, executable, entry)
                 : textureForBinding(scene, entry, plan.fragmentBlock);
@@ -2698,8 +2768,9 @@ export function createGpuRenderer(services){
                 diverge('a draw sampled a depth texture with its comparison on: the depth is'
                     + ' read as a value, not compared');
             }
-            return { entry, texture };
-        });
+            return texture;
+        };
+        const sampled = plan.textures.map(entry=>({ entry, texture: sampledTexture(entry) }));
         // The id strings are read only by the skip filter and the dump; a
         // frame that asks for neither never needs to build one, per draw.
         const ids = skipTextures.size > 0 || dumpDraws
@@ -2744,9 +2815,13 @@ export function createGpuRenderer(services){
         const pipelineKey = kinds.includes('u') ? `${key}~${kinds}` : key;
         // The descriptor only when the key has no pipeline yet: it is a dozen
         // objects a draw, for a state that repeats all frame.
+        const passes = generated.glsl?.geometry ?? null;
+        // A geometry shader's draw reads its vertices out of what the passes
+        // before it made, not out of arrays.
         const pipeline = pipelines.get(pipelineKey)
-            ?? pipelineFor(pipelineKey, generated, drawDescriptor(state),
-                pipelineKey === key ? plan : planOfKinds(plan, kinds));
+            ?? pipelineFor(pipelineKey, generated, passes
+                ? { ...drawDescriptor(state), vertexBuffers: [] } : drawDescriptor(state),
+            pipelineKey === key ? plan : planOfKinds(plan, kinds));
         // One draw, one MVP: shared with any program stage that reads the
         // same state matrix, instead of each reader multiplying it out again
         // -- and, when the view and the object are both what the previous
@@ -2766,6 +2841,168 @@ export function createGpuRenderer(services){
                 : null;
         const blocks = plan.blocks && plan.blocks.length > 0 && executable
             ? uniformBlocksFor(scene, executable, plan.blocks, recording) : NO_BLOCKS;
+        /**
+         * Group 0 of a compute pass: the fixed block, the stage's own,
+         * its textures and its uniform blocks, all at offsets of their
+         * own (a compute pass binds no dynamic offset).
+         *
+         * @param {import('./wgsl.js').ComputeStage} stage @param {number} binding
+         * @param {number} [bias]
+         */
+        const computeGroup = (stage, binding, bias = 0)=>{
+            // Called only for a draw under a GLSL program.
+            const running = /** @type {NonNullable<typeof executable>} */ (executable);
+            /** @param {ArrayBufferView} view */
+            const uniform = view=>{
+                const written = scratchUniforms.write(view);
+                return { buffer: written.gpu, offset: written.offset,
+                    size: Math.ceil(view.byteLength / 16) * 16 };
+            };
+            /** @type {object[]} */
+            const groupLayout = [{ binding: 0, visibility: COMPUTE_STAGE,
+                buffer: { type: 'uniform' } }];
+            const entries = [{ binding: 0, resource: uniform(uniforms) }];
+            let signature = '';
+            if (stage.plan)
+            {
+                groupLayout.push({ binding, visibility: COMPUTE_STAGE,
+                    buffer: { type: 'uniform' } });
+                entries.push({ binding, resource: uniform(glslUniforms(stage.plan, running,
+                    scene, mvp, bias)) });
+            }
+            for (const index of stage.samplers)
+            {
+                const textureLayout = textureLayoutOf(samplerTypeOf(
+                    running.linked.samplers[index]));
+                const entry = { binding: 1 + index * 2, unit: -1, sampler: index,
+                    cube: textureLayout.viewDimension === 'cube', layout: textureLayout };
+                const texture = sampledTexture(entry);
+                const copy = textureFor(texture, recording);
+                const kind = copy.kind ?? 'f';
+                const compared = textureLayout.sampleType === 'depth';
+                const loaded = textureLayout.sampleType === 'sint'
+                    || textureLayout.sampleType === 'uint';
+                const unfilterable = kind === 'u' && !compared && !loaded;
+                signature += kind;
+                groupLayout.push({ binding: entry.binding, visibility: COMPUTE_STAGE, texture: {
+                    viewDimension: textureLayout.viewDimension,
+                    sampleType: textureLayout.sampleType !== 'float' ? textureLayout.sampleType
+                        : unfilterable ? 'unfilterable-float' : 'float',
+                    multisampled: textureLayout.multisampled } },
+                { binding: entry.binding + 1, visibility: COMPUTE_STAGE, sampler: {
+                    type: compared ? 'comparison' : unfilterable ? 'non-filtering'
+                        : 'filtering' } });
+                entries.push({ binding: entry.binding, resource: copy.sampleView
+                    ?? copy.gpu.view },
+                { binding: entry.binding + 1, resource: samplerFor(texture,
+                    kind === 'f' || compared || loaded, compared) });
+            }
+            for (const index of stage.blocks)
+            {
+                groupLayout.push({ binding: GLSL_BLOCK_BINDING + index,
+                    visibility: COMPUTE_STAGE, buffer: { type: 'uniform' } });
+                entries.push(...uniformBlocksFor(scene, running, [index], recording));
+            }
+            return { layout: groupLayout, entries, signature };
+        };
+        /** @type {any} */
+        let geometry = null;
+        /** @type {any} */
+        let kept = null;
+        if (passes && executable)
+        {
+            const vertexGroup = computeGroup(passes.vertex, GLSL_VERTEX_BINDING, idBias);
+            const geometryGroup = computeGroup(passes.geometry, GLSL_GEOMETRY_BINDING);
+            if (executable.linked.geometry?.uses.has('gl_Layer'))
+            {
+                diverge('a geometry shader wrote gl_Layer, and every primitive was drawn into'
+                    + ' layer 0');
+            }
+            const prepared = geometryPasses.prepare({
+                key: `${key}|${vertexGroup.signature}|${geometryGroup.signature}`,
+                passes, vertexGroup, geometryGroup,
+                slots: slots.map((slot, k)=>({ gpu: slot.gpu, offset: slot.offset,
+                    stride: layout.slots[k]?.stride ?? 0,
+                    instance: (layout.slots[k]?.divisor ?? 0) > 0 })),
+                indices: indices ? { gpu: indices.gpu, offset: indices.offset,
+                    bytes: indices.format === 'uint16' ? 2 : 4 } : null,
+                first, baseVertex, positions: count, instances,
+                lastProvokes: !!scene.lastProvokes && (scene.flat
+                    || executable.linked.varyings.some(v=>v.interpolation === 'flat')
+                    || !!executable.linked.fragment?.uses.has('gl_PrimitiveID')),
+            });
+            if (!prepared)
+            {
+                return;
+            }
+            dispatchAll(recording, prepared.passes);
+            geometry = prepared.drawn;
+            kept = prepared.kept;
+        }
+        // Transform feedback: what the last pass kept, written into the
+        // buffers bound (stream output); without a geometry shader the vertex
+        // shader runs as a pass of its own to keep it.
+        const session = scene.feedback ?? null;
+        const feedback = session && executable ? executable.linked.feedback : null;
+        const capture = generated.glsl?.capture ?? null;
+        const vpp = topology === 'point-list' ? 1 : topology === 'line-list' ? 2 : 3;
+        if (feedback && !passes && capture && executable)
+        {
+            const vertexGroup = computeGroup(capture.vertex, GLSL_VERTEX_BINDING, idBias);
+            const made = geometryPasses.vertexCapture({
+                key: `${key}|capture|${vertexGroup.signature}`, passes: /** @type {any} */ (null),
+                vertexGroup, geometryGroup: vertexGroup,
+                slots: slots.map((slot, k)=>({ gpu: slot.gpu, offset: slot.offset,
+                    stride: layout.slots[k]?.stride ?? 0,
+                    instance: (layout.slots[k]?.divisor ?? 0) > 0 })),
+                indices: indices ? { gpu: indices.gpu, offset: indices.offset,
+                    bytes: indices.format === 'uint16' ? 2 : 4 } : null,
+                first, baseVertex, positions: count, instances,
+            }, capture.vertex.code, capture.inputs, vpp);
+            if (made)
+            {
+                dispatchAll(recording, made.passes);
+                kept = made.kept;
+            }
+        }
+        const counting = feedbackCounts.get(context) ?? null;
+        if (counting?.generated && !passes)
+        {
+            counting.generated.samples += Math.floor(count / vpp) * instances;
+        }
+        const tallied = !!kept && (!!counting?.written || (!!counting?.generated && !!passes));
+        if (tallied)
+        {
+            recording.commands.push({ kind: 'clearCounts' });
+        }
+        if (feedback && session && kept && executable)
+        {
+            const writes = feedbackWrites(executable.linked, passes ? 1 + passes.fields : 2,
+                !passes);
+            const targets = session.buffers.map((bound, slot)=>{
+                if (!bound)
+                {
+                    return null;
+                }
+                const backing = bufferFor(bound.buffer);
+                backing.gpu.markRead();
+                return { object: bound.buffer, gpu: backing.gpu.gpu,
+                    end: bound.offset + bound.size, stride: feedback.strides[slot] * 4 };
+            });
+            dispatchAll(recording, geometryPasses.streamOut(`${executable.id}`, kept, writes,
+                targets));
+        }
+        if (tallied && counting)
+        {
+            recording.commands.push({ kind: 'tally', written: feedback ? counting.written : null,
+                generated: passes ? counting.generated : null,
+                args: passes ? kept.args : null });
+        }
+        if (scene.discard)
+        {
+            // GL_RASTERIZER_DISCARD: the passes ran, and nothing is drawn.
+            return;
+        }
         stats.draws++;
         recording.counts.draws++;
         const rects = rectangles(scene, target);
@@ -2845,12 +3082,13 @@ export function createGpuRenderer(services){
             vertexUniforms,
             fragmentUniforms,
             blocks,
-            slots,
-            indices,
+            slots: geometry ? [] : slots,
+            indices: geometry ? null : indices,
             count,
             first,
             baseVertex,
             instances,
+            geometry,
             bindings,
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
@@ -3389,9 +3627,28 @@ export function createGpuRenderer(services){
         {
             return false;
         }
-        const list = isList(request.mode);
-        const expanded = list ? null : /** @type {Uint32Array} */ (expandIndices(request.mode,
-            scanned ? scanned.indices : null, request.count));
+        const drawn = scene();
+        // A geometry shader reads each primitive's vertices whole, adjacent
+        // ones included, in the order it takes them.
+        const geometryLayout = drawn.programs.glsl?.linked.geometryLayout ?? null;
+        if (geometryLayout && !drawsGeometryInput(request.mode, geometryLayout.input))
+        {
+            diverge(`a draw of mode ${hex(request.mode)} through a geometry shader that takes`
+                + ` ${geometryLayout.input} drew nothing`);
+            return true;
+        }
+        // A flat value is the provoking vertex's: GL's last, WebGPU's first,
+        // so where a flat value is drawn each primitive is turned round.
+        const glsl = drawn.programs.glsl?.linked ?? null;
+        const provoking = !geometryLayout && drawn.lastProvokes && (drawn.flat
+            || !!glsl?.varyings.some(varying=>varying.interpolation === 'flat'))
+            ? lastProvoking(request.mode, request.count) : null;
+        const order = geometryLayout ? geometryOrder(request.mode, request.count) : provoking;
+        const list = geometryLayout ? order === null : provoking ? false : isList(request.mode);
+        const expanded = list ? null : geometryLayout || provoking
+            ? reordered(/** @type {Uint32Array} */ (order), scanned ? scanned.indices : null)
+            : /** @type {Uint32Array} */ (expandIndices(request.mode,
+                scanned ? scanned.indices : null, request.count));
         if (expanded?.length === 0)
         {
             // Too few vertices for one of its primitives: nothing is drawn.
@@ -3456,13 +3713,34 @@ export function createGpuRenderer(services){
             };
         }
         packedSample = null;
-        record(context, scene(), layout, slots,
+        record(context, drawn, layout, slots,
             indices, indices ? indices.count : request.count,
             indices ? 0 : request.first - from,
             (expanded && !scanned ? request.first : 0) - from
                 + (scanned ? request.baseVertex ?? 0 : 0),
-            topologyOf(request.mode), instances, from);
+            geometryLayout ? GEOMETRY_TOPOLOGIES[geometryLayout.outputVertices]
+                : topologyOf(request.mode), instances, from);
         return true;
+    };
+
+    /**
+     * An order applied to a draw's indices, or the order itself for a draw
+     * without them.
+     *
+     * @param {Uint32Array} order @param {Uint16Array | Uint32Array | null} indices
+     * @returns {Uint32Array}
+     */
+    const reordered = (order, indices)=>{
+        if (!indices)
+        {
+            return order;
+        }
+        const out = new Uint32Array(order.length);
+        for (let i = 0; i < order.length; i++)
+        {
+            out[i] = indices[order[i]];
+        }
+        return out;
     };
 
     /**
@@ -3866,6 +4144,13 @@ export function createGpuRenderer(services){
         const slots = [];
         /** @type {(() => Promise<number[]>) | null} */
         let counted = null;
+        /**
+         * The primitives each counted draw wrote and made, read back once
+         * the frame is submitted.
+         *
+         * @type {{ command: any, readBack: () => Promise<Uint8Array[]> }[]}
+         */
+        const tallies = [];
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -3956,6 +4241,21 @@ export function createGpuRenderer(services){
                     pass = null;
                     continue;
                 }
+                if (command.kind === 'clearCounts')
+                {
+                    frame.copyBuffer(geometryPasses.zeros(), 0, geometryPasses.counters(), 0, 8);
+                    pass = null;
+                    continue;
+                }
+                if (command.kind === 'tally')
+                {
+                    tallies.push({ command, readBack: frame.copyOut([
+                        { buffer: geometryPasses.counters(), offset: 0, size: 4 },
+                        ...command.args ? [{ buffer: command.args.buffer,
+                            offset: command.args.offset + 20, size: 4 }] : []]) });
+                    pass = null;
+                    continue;
+                }
                 if (command.kind === 'carry')
                 {
                     frame.copyTexture(
@@ -3974,6 +4274,16 @@ export function createGpuRenderer(services){
                     continue;
                 }
                 const pipeline = outcome.value;
+                if (command.kind === 'dispatch')
+                {
+                    frame.dispatch({ pipeline: pipeline.gpu, label: command.label,
+                        groups: command.groups.map((/** @type {any[]} */ entries,
+                            /** @type {number} */ index)=>({ layout: pipeline.layouts[index],
+                            entries })),
+                        grid: command.grid });
+                    pass = null;
+                    continue;
+                }
                 // Rendered on a condition the query it names did not meet.
                 const condition = command.conditioned;
                 if (condition && condition.query.available
@@ -4065,7 +4375,21 @@ export function createGpuRenderer(services){
                     pass.setVertexBuffer(index, slot.gpu, slot.offset);
                 });
                 const slot = command.occluded ? pass.beginOcclusionQuery() : null;
-                if (command.indices)
+                if (command.geometry)
+                {
+                    if (!command.fragmentUniforms)
+                    {
+                        pass.setBindings(FRAGMENT_PROGRAM_GROUP,
+                            pipeline.groups[FRAGMENT_PROGRAM_GROUP], []);
+                    }
+                    pass.setBindings(GLSL_GEOMETRY_DRAW_GROUP,
+                        pipeline.groups[GLSL_GEOMETRY_DRAW_GROUP], command.geometry.group);
+                    pass.setIndexBuffer(command.geometry.indexBuffer.gpu,
+                        command.geometry.indexBuffer.format, command.geometry.indexBuffer.offset);
+                    pass.drawIndirect(command.geometry.args.gpu, command.geometry.args.offset,
+                        true);
+                }
+                else if (command.indices)
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                         command.indices.offset);
@@ -4135,6 +4459,21 @@ export function createGpuRenderer(services){
                 + ` census=[${probe.command.bindings
                     .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
                     .join(' ')}]`;
+        }
+        for (const { command, readBack } of tallies)
+        {
+            const results = await readBack().catch(()=>null);
+            /** @param {Uint8Array | undefined} bytes */
+            const word = bytes=>(bytes ? new DataView(bytes.buffer, bytes.byteOffset, 4)
+                .getUint32(0, true) : 0);
+            if (command.written)
+            {
+                command.written.samples += word(results?.[0]);
+            }
+            if (command.generated)
+            {
+                command.generated.samples += word(results?.[1]);
+            }
         }
         await countQueries(recording, slots, counted);
         return copied ? copied() : null;
@@ -4390,6 +4729,46 @@ export function createGpuRenderer(services){
                 }
                 return out;
             });
+        },
+
+        /**
+         * What glBeginTransformFeedback does: each buffer of the capture
+         * written from the start of its range again.
+         *
+         * @param {object} context
+         * @param {NonNullable<import('./pipeline.js').Scene['feedback']>} session
+         */
+        beginFeedback(context, session){
+            const recording = recordingOf(context);
+            const set = geometryPasses.begin(session.buffers.map(bound=>(bound
+                ? { object: bound.buffer, offset: bound.offset } : null)));
+            if (set)
+            {
+                dispatchAll(recording, [set]);
+            }
+        },
+
+        /**
+         * Counts the context's primitives into `query` (a target's of
+         * PRIMITIVES_GENERATED and TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN), or
+         * stops counting them (null).
+         *
+         * @param {object} context @param {number} target @param {OcclusionCount | null} query
+         */
+        countFeedback(context, target, query){
+            const counts = feedbackCounts.get(context) ?? { generated: null, written: null };
+            counts[target === PRIMITIVES_GENERATED ? 'generated' : 'written'] = query;
+            feedbackCounts.set(context, counts);
+        },
+
+        /**
+         * A query that counts primitives ended: finished once what was
+         * recorded up to here has been replayed and counted.
+         *
+         * @param {object} context @param {OcclusionCount} query
+         */
+        endCount(context, query){
+            (recordingOf(context).ending ??= []).push(query);
         },
 
         /**

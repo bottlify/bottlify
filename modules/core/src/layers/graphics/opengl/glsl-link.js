@@ -47,7 +47,7 @@ import { canonicalAttribName } from './arb-program.js';
  * One stage of a linked program, merged from its shader objects.
  *
  * @typedef {Object} LinkedStage
- * @property {'vertex' | 'fragment'} stage
+ * @property {'vertex' | 'geometry' | 'fragment'} stage
  * @property {UserFunction} main
  * @property {UserFunction[]} functions  the definitions main reaches, callees first
  * @property {VariableSymbol[]} globals  every global the stage's shaders declare
@@ -66,8 +66,9 @@ import { canonicalAttribName } from './arb-program.js';
  * @typedef {Object} Varying
  * @property {string} name     `x`, or `Block.x` for a block member
  * @property {GlslType} type
- * @property {string} vertexPath  the WGSL the vertex stage writes it through,
- *     past the stage's prefix: `g_x`, or `g_instance.m_x`
+ * @property {string} vertexPath  the WGSL the stage before the fragment stage
+ *     (the geometry shader where there is one, else the vertex shader) writes
+ *     it through, past the stage's prefix: `g_x`, or `g_instance.m_x`
  * @property {string} fragmentPath  what the fragment stage reads it into
  * @property {'smooth' | 'flat' | 'noperspective'} interpolation
  * @property {boolean} centroid
@@ -97,7 +98,7 @@ import { canonicalAttribName } from './arb-program.js';
  * @property {number} size  UNIFORM_BLOCK_DATA_SIZE, in bytes
  * @property {'std140' | 'std430'} packing
  * @property {import('./glsl-layout.js').MemberLayout[]} members
- * @property {{ vertex: boolean, fragment: boolean }} stages
+ * @property {{ vertex: boolean, geometry: boolean, fragment: boolean }} stages
  * @property {number} binding  the binding point a link leaves it at: the
  *     shader's `layout(binding)` (4.20), else 0
  */
@@ -134,8 +135,67 @@ import { canonicalAttribName } from './arb-program.js';
  */
 
 /**
+ * A value the vertex stage passes the geometry stage, which reads it a
+ * vertex of its primitive at a time (section 4.3.4 of 1.50: an input of a
+ * geometry shader is an array, a block's instance an array of blocks).
+ *
+ * @typedef {Object} GeometryInput
+ * @property {string} name
+ * @property {GlslType} type  a vertex's: the input's element type
+ * @property {string} vertexPath  what the vertex stage writes it through
+ * @property {string} geometryPath  what the geometry stage reads it into, `[]`
+ *     standing for the vertex: `g_x[]`, or `g_instance[].m_x`
+ */
+
+/**
+ * What a geometry shader's layout declarations say (section 4.3.8.1 and
+ * 4.3.8.2 of 1.50), merged over its shader objects.
+ *
+ * @typedef {Object} GeometryLayout
+ * @property {'points' | 'lines' | 'lines_adjacency' | 'triangles'
+ *     | 'triangles_adjacency'} input
+ * @property {number} inputVertices  1, 2, 4, 3 or 6
+ * @property {'points' | 'line_strip' | 'triangle_strip'} output
+ * @property {number} outputVertices  a primitive's: 1, 2 or 3
+ * @property {number} maxVertices  what one invocation emits at the most
+ */
+
+/**
+ * A value transform feedback captures (OpenGL 3.0 section 2.15, 4.0's
+ * gl_SkipComponents and gl_NextBuffer): an output of the stage before the
+ * rasterizer, an element of one, or a gap.
+ *
+ * @typedef {Object} FeedbackVarying
+ * @property {string} name  as glGetTransformFeedbackVarying answers it
+ * @property {GlslType | null} type  null for a gap (gl_SkipComponents, gl_NextBuffer)
+ * @property {number} size  an array's elements, 1 for anything else; a gap's components
+ * @property {string | null} path  what the stage writes it through, past its
+ *     prefix (`g_x`, `g_b.m_x`, `g_a[2]`, `gl_Position`); null for a gap
+ * @property {number} buffer  the buffer it is written to
+ * @property {number} word  its first word within a vertex there
+ */
+
+/**
+ * @typedef {Object} Feedback
+ * @property {'interleaved' | 'separate'} mode
+ * @property {FeedbackVarying[]} varyings  in the order they were named
+ * @property {number[]} strides  each buffer's words a vertex
+ */
+
+/** Transform feedback's limits (OpenGL 3.0's minimums; 4.0's buffers). */
+export const FEEDBACK_LIMITS = Object.freeze({
+    interleavedComponents: 64, separateAttribs: 4, separateComponents: 4, buffers: 4,
+});
+
+/**
  * @typedef {Object} LinkedProgram
  * @property {LinkedStage | null} vertex
+ * @property {LinkedStage | null} geometry
+ * @property {GeometryInput[]} geometryInputs  what the geometry stage reads of
+ *     the vertex stage's, by name
+ * @property {GeometryLayout | null} geometryLayout
+ * @property {Feedback | null} feedback  what transform feedback captures, where
+ *     glTransformFeedbackVaryings named anything
  * @property {LinkedStage | null} fragment
  * @property {{ name: string, type: GlslType, location: number }[]} attributes  active
  * @property {string[]} builtinAttributes  the conventional ones the vertex stage reads
@@ -188,8 +248,15 @@ function leavesOf(name, type, path){
     return [{ base: name, path, type, size: 1, array: false }];
 }
 
+/** The input primitives of a geometry shader, with their vertices. */
+const GEOMETRY_INPUTS = new Map([['points', 1], ['lines', 2], ['lines_adjacency', 4],
+    ['triangles', 3], ['triangles_adjacency', 6]]);
+/** The output primitives, with a primitive's vertices. */
+const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_strip', 3]]);
+
 /**
- * @param {{ vertex: ShaderUnit[], fragment: ShaderUnit[],
+ * @param {{ vertex: ShaderUnit[], geometry?: ShaderUnit[], fragment: ShaderUnit[],
+ *     feedback?: { names: readonly string[], mode: 'interleaved' | 'separate' },
  *     attribBindings: Map<string, number>,
  *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
  * @returns {{ ok: true, log: string, program: LinkedProgram }
@@ -197,6 +264,7 @@ function leavesOf(name, type, path){
  */
 export function linkProgram(given){
     const { vertex, fragment, attribBindings } = given;
+    const geometry = given.geometry ?? [];
     const fragDataBindings = given.fragDataBindings ?? new Map();
     /** @type {string[]} */
     const errors = [];
@@ -205,13 +273,13 @@ export function linkProgram(given){
         errors.push(`ERROR: ${message}`);
     };
 
-    if (vertex.length === 0 && fragment.length === 0)
+    if (vertex.length === 0 && fragment.length === 0 && geometry.length === 0)
     {
         return { ok: false, log: 'ERROR: no shaders are attached\n' };
     }
 
     /**
-     * @param {'vertex' | 'fragment'} stage @param {ShaderUnit[]} units
+     * @param {'vertex' | 'geometry' | 'fragment'} stage @param {ShaderUnit[]} units
      * @returns {LinkedStage | null}
      */
     const mergeStage = (stage, units)=>{
@@ -350,7 +418,15 @@ export function linkProgram(given){
     };
 
     const vs = mergeStage('vertex', vertex);
+    const gs = mergeStage('geometry', geometry);
     const fs = mergeStage('fragment', fragment);
+    const geometryLayout = gs ? geometryLayoutOf(geometry, error) : null;
+    if (gs && !vs)
+    {
+        // OpenGL 3.2 section 2.12: a geometry shader takes what a vertex
+        // shader made.
+        error('a geometry shader is attached with no vertex shader');
+    }
     if (errors.length > 0)
     {
         return { ok: false, log: `${errors.join('\n')}\n` };
@@ -361,13 +437,45 @@ export function linkProgram(given){
         ? stage.globals.filter(symbol=>symbol.storage === storage && stage.uses.has(symbol.name))
         : []);
 
-    // --- varyings: the vertex stage's outputs the fragment stage reads ---
-    /** @type {Varying[]} */
-    const varyings = [];
-    if (vs && fs)
+    // --- what the geometry stage reads of the vertex stage's outputs ---
+    /** @type {GeometryInput[]} */
+    const geometryInputs = [];
+    if (vs && gs)
     {
         const outputs = new Map(interfaceOf(vs, 'out', error).map(entry=>[entry.name, entry]));
-        const late = Math.min(vs.version, fs.version) >= 430;
+        for (const input of interfaceOf(gs, 'in', error, true))
+        {
+            if (!input.used)
+            {
+                continue;
+            }
+            const from = outputs.get(input.name);
+            if (!from)
+            {
+                error(`geometry shader input '${input.name}' is not declared in the vertex`
+                    + ' shader');
+                continue;
+            }
+            if (glslName(from.type) !== glslName(input.type))
+            {
+                error(`input '${input.name}' has type ${glslName(from.type)} in the vertex`
+                    + ` shader and ${glslName(input.type)}[] in the geometry shader`);
+                continue;
+            }
+            geometryInputs.push({ name: input.name, type: input.type, vertexPath: from.path,
+                geometryPath: input.path });
+        }
+    }
+
+    // --- varyings: the last stage's outputs the fragment stage reads ---
+    /** @type {Varying[]} */
+    const varyings = [];
+    // What the fragment stage reads is the geometry stage's where there is one.
+    const before = gs ?? vs;
+    if (before && fs)
+    {
+        const outputs = new Map(interfaceOf(before, 'out', error).map(entry=>[entry.name, entry]));
+        const late = Math.min(before.version, fs.version) >= 430;
         for (const input of interfaceOf(fs, 'in', error))
         {
             if (!input.used)
@@ -378,14 +486,14 @@ export function linkProgram(given){
             const from = outputs.get(input.name);
             if (!from)
             {
-                error(`fragment shader ${word} '${input.name}' is not declared in the vertex`
-                    + ' shader');
+                error(`fragment shader ${word} '${input.name}' is not declared in the`
+                    + ` ${before.stage} shader`);
                 continue;
             }
             if (glslName(from.type) !== glslName(input.type))
             {
-                error(`${word} '${input.name}' has type ${glslName(from.type)} in the vertex`
-                    + ` shader and ${glslName(input.type)} in the fragment shader`);
+                error(`${word} '${input.name}' has type ${glslName(from.type)} in the`
+                    + ` ${before.stage} shader and ${glslName(input.type)} in the fragment shader`);
                 continue;
             }
             // Before 4.30 both stages say the same interpolation (section
@@ -393,7 +501,7 @@ export function linkProgram(given){
             if (!late && (from.interpolation ?? 'smooth') !== (input.interpolation ?? 'smooth'))
             {
                 error(`${word} '${input.name}' is interpolated`
-                    + ` ${from.interpolation ?? 'smooth'} in the vertex shader and`
+                    + ` ${from.interpolation ?? 'smooth'} in the ${before.stage} shader and`
                     + ` ${input.interpolation ?? 'smooth'} in the fragment shader`);
                 continue;
             }
@@ -407,6 +515,10 @@ export function linkProgram(given){
             });
         }
     }
+
+    // --- what transform feedback captures ---
+    const feedback = given.feedback && given.feedback.names.length > 0 && before
+        ? feedbackOf(before, given.feedback, error) : null;
 
     // --- attributes ---
     /** @type {{ name: string, type: GlslType, location: number }[]} */
@@ -519,7 +631,7 @@ export function linkProgram(given){
     // --- uniforms ---
     /** @type {Map<string, VariableSymbol>} */
     const uniformRoots = new Map();
-    for (const stage of [vs, fs])
+    for (const stage of [vs, gs, fs])
     {
         for (const symbol of usedOf(stage, 'uniform'))
         {
@@ -582,10 +694,6 @@ export function linkProgram(given){
         error(`too many samplers: ${samplers.length}, at most`
             + ` ${GLSL_LIMITS.combinedTextureImageUnits}`);
     }
-    if (samplers.some(s=>s.dim === '3D'))
-    {
-        error('a 3D sampler is used, and this implementation has no 3D textures');
-    }
     const defaults = new ArrayBuffer(Math.max(4, storeWords * 4));
     {
         const floats = new Float32Array(defaults);
@@ -637,7 +745,7 @@ export function linkProgram(given){
     }
 
     // --- uniform blocks ---
-    const { blocks, blockUniforms } = uniformBlocksOf(vs, fs, error);
+    const { blocks, blockUniforms } = uniformBlocksOf(vs, gs, fs, error);
 
     if (errors.length > 0)
     {
@@ -647,7 +755,8 @@ export function linkProgram(given){
         ok: true,
         log: '',
         program: {
-            vertex: vs, fragment: fs, attributes, builtinAttributes, uniforms, locations,
+            vertex: vs, geometry: gs, geometryInputs, geometryLayout, feedback, fragment: fs,
+            attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
             blocks, blockUniforms,
         },
@@ -728,23 +837,24 @@ function fragmentOutputsOf(fs, bindings, error){
 
 /**
  * The uniform blocks the stages read (OpenGL 3.1 section 2.11.4), the
- * vertex stage's first, each by its index; a block both stages declare is
- * one block and is declared alike in both. A shared or packed block is laid
- * out as a std140 one: where it lies is the implementation's to say, and
- * the program asks.
+ * vertex stage's first, each by its index; a block several stages declare
+ * is one block and is declared alike in each. A shared or packed block is
+ * laid out as a std140 one: where it lies is the implementation's to say,
+ * and the program asks.
  *
- * @param {LinkedStage | null} vs @param {LinkedStage | null} fs
+ * @param {LinkedStage | null} vs @param {LinkedStage | null} gs
+ * @param {LinkedStage | null} fs
  * @param {(message: string) => void} error
  * @returns {{ blocks: UniformBlock[], blockUniforms: BlockUniform[] }}
  */
-function uniformBlocksOf(vs, fs, error){
+function uniformBlocksOf(vs, gs, fs, error){
     /** @type {UniformBlock[]} */
     const blocks = [];
     /** @type {BlockUniform[]} */
     const blockUniforms = [];
     /** @type {Map<string, { info: import('./glsl-check.js').InterfaceBlock, first: number }>} */
     const byName = new Map();
-    for (const stage of [vs, fs])
+    for (const stage of [vs, gs, fs])
     {
         if (!stage)
         {
@@ -782,15 +892,14 @@ function uniformBlocksOf(vs, fs, error){
             {
                 if (shapeOf(known.info) !== shapeOf(info))
                 {
-                    error(`uniform block '${info.name}' is declared differently in the vertex`
-                        + ' and fragment shaders');
+                    error(`uniform block '${info.name}' is declared differently in two`
+                        + ' shaders');
                     continue;
                 }
                 const count = known.info.arrays[0] ?? 1;
                 for (let k = 0; k < count; k++)
                 {
-                    blocks[known.first + k].stages[stage.stage === 'vertex' ? 'vertex'
-                        : 'fragment'] = true;
+                    blocks[known.first + k].stages[stage.stage] = true;
                 }
                 continue;
             }
@@ -814,7 +923,8 @@ function uniformBlocksOf(vs, fs, error){
                     name: info.arrays.length > 0 ? `${info.name}[${k}]` : info.name,
                     blockName: info.name, element: k, instance: info.instance,
                     size: laid.size, packing, members: laid.members,
-                    stages: { vertex: stage === vs, fragment: stage === fs },
+                    stages: { vertex: stage === vs, geometry: stage === gs,
+                        fragment: stage === fs },
                     binding: typeof info.layout.binding === 'number' ? binding + k : 0,
                 });
             }
@@ -848,10 +958,12 @@ function shapeOf(info){
  *
  * @param {LinkedStage} stage @param {'in' | 'out'} direction
  * @param {(message: string) => void} error
+ * @param {boolean} [arrayed]  a geometry shader's inputs: each an array a
+ *     vertex, matched by its element (a path's `[]` the vertex)
  * @returns {{ name: string, type: GlslType, path: string, used: boolean, legacy: boolean,
  *     interpolation: 'smooth' | 'flat' | 'noperspective' | null, centroid: boolean }[]}
  */
-function interfaceOf(stage, direction, error){
+function interfaceOf(stage, direction, error, arrayed = false){
     /** @type {ReturnType<typeof interfaceOf>} */
     const entries = [];
     for (const symbol of stage.globals)
@@ -863,30 +975,204 @@ function interfaceOf(stage, direction, error){
         const used = stage.uses.has(symbol.name);
         const own = symbol.qualifiers;
         const block = symbol.block;
+        const vertexed = arrayed && symbol.type.kind === 'array';
+        const each = vertexed ? '[]' : '';
         if (block && block.instance === symbol.name)
         {
-            if (symbol.type.kind === 'array')
+            if (symbol.type.kind === 'array' && !arrayed)
             {
                 error(`${stage.stage} shader: an array of blocks '${block.name}' is passed`
-                    + ' between the vertex and fragment stages, which this implementation does'
-                    + ' not do');
+                    + ' between stages, which this implementation does not do');
                 continue;
             }
             for (const member of block.members)
             {
                 entries.push({ name: `${block.name}.${member.name}`, type: member.type,
-                    path: `g_${symbol.name}.m_${member.name}`, used, legacy: false,
+                    path: `g_${symbol.name}${each}.m_${member.name}`, used, legacy: false,
                     interpolation: member.qualifiers.interpolation ?? own?.interpolation ?? null,
                     centroid: member.qualifiers.centroid || !!own?.centroid });
             }
             continue;
         }
         entries.push({ name: block ? `${block.name}.${symbol.name}` : symbol.name,
-            type: symbol.type, path: `g_${symbol.name}`, used,
+            type: vertexed ? /** @type {any} */ (symbol.type).element : symbol.type,
+            path: `g_${symbol.name}${each}`, used,
             legacy: symbol.storage === 'varying', interpolation: own?.interpolation ?? null,
             centroid: !!own?.centroid });
     }
     return entries;
+}
+
+/**
+ * What transform feedback captures, each name an output of the stage before
+ * the rasterizer (a block member as `Block.member`), an element of an array
+ * one (`a[2]`), gl_Position or gl_PointSize, or a gap: gl_SkipComponents1 to
+ * 4 leave words unwritten, gl_NextBuffer moves to the next buffer (OpenGL
+ * 3.0 section 2.15, 4.0 section 2.14). A name no output has, or one named
+ * twice, is a link error, as are more components than a buffer takes.
+ *
+ * @param {LinkedStage} stage
+ * @param {{ names: readonly string[], mode: 'interleaved' | 'separate' }} given
+ * @param {(message: string) => void} error
+ * @returns {Feedback}
+ */
+function feedbackOf(stage, given, error){
+    const outputs = new Map(interfaceOf(stage, 'out', ()=>{}).map(entry=>[entry.name, entry]));
+    /** @type {Record<string, GlslType>} */
+    const builtins = {};
+    for (const name of ['gl_Position', 'gl_PointSize'])
+    {
+        const symbol = stage.builtins.get(name);
+        if (symbol)
+        {
+            builtins[name] = symbol.type;
+        }
+    }
+    const separate = given.mode === 'separate';
+    /** @type {FeedbackVarying[]} */
+    const varyings = [];
+    /** @type {number[]} */
+    const strides = [0];
+    let buffer = 0;
+    /** @type {Set<string>} */
+    const named = new Set();
+    for (const name of given.names)
+    {
+        const skip = /^gl_SkipComponents([1-4])$/.exec(name);
+        if (skip || name === 'gl_NextBuffer')
+        {
+            if (separate)
+            {
+                error(`transform feedback varying '${name}' is named for separate buffers`);
+                continue;
+            }
+            if (skip)
+            {
+                varyings.push({ name, type: null, size: Number(skip[1]), path: null, buffer,
+                    word: strides[buffer] });
+                strides[buffer] += Number(skip[1]);
+            }
+            else
+            {
+                varyings.push({ name, type: null, size: 0, path: null, buffer, word: 0 });
+                buffer++;
+                strides[buffer] = 0;
+            }
+            continue;
+        }
+        if (named.has(name))
+        {
+            error(`transform feedback varying '${name}' is named twice`);
+            continue;
+        }
+        named.add(name);
+        const parts = /^(.*?)(?:\[(\d+)\])?$/.exec(name) ?? [name, name, undefined];
+        const base = parts[1];
+        const element = parts[2] === undefined ? null : Number(parts[2]);
+        const output = outputs.get(base);
+        let type = output?.type ?? builtins[base];
+        let path = output ? output.path : builtins[base] ? base : null;
+        if (!type || path === null)
+        {
+            error(`transform feedback varying '${name}' is not an output of the ${stage.stage}`
+                + ' shader');
+            continue;
+        }
+        if (element !== null)
+        {
+            if (type.kind !== 'array' || element >= type.length)
+            {
+                error(`transform feedback varying '${name}' is past its array`);
+                continue;
+            }
+            type = type.element;
+            path = `${path}[${element}]`;
+        }
+        if (separate)
+        {
+            buffer = varyings.length;
+            strides[buffer] = 0;
+        }
+        const words = wordsOf(type.kind === 'array' ? type.element : type)
+            * (type.kind === 'array' ? type.length : 1);
+        varyings.push({ name, type, size: type.kind === 'array' ? type.length : 1, path,
+            buffer, word: strides[buffer] });
+        strides[buffer] += words;
+    }
+    const most = separate ? FEEDBACK_LIMITS.separateComponents
+        : FEEDBACK_LIMITS.interleavedComponents;
+    if (strides.length > (separate ? FEEDBACK_LIMITS.separateAttribs : FEEDBACK_LIMITS.buffers))
+    {
+        error('transform feedback writes more buffers than there are');
+    }
+    if (strides.some(words=>words > most))
+    {
+        error(`transform feedback writes more than ${most} components to a buffer`);
+    }
+    return { mode: given.mode, varyings, strides };
+}
+
+/**
+ * A geometry shader's primitives and its most vertices: each said by at
+ * least one of its shader objects, and the same by every one that says it
+ * (section 4.3.8 of 1.50, and OpenGL 3.2's link errors).
+ *
+ * @param {ShaderUnit[]} units @param {(message: string) => void} error
+ * @returns {GeometryLayout | null}
+ */
+function geometryLayoutOf(units, error){
+    /**
+     * @param {'input' | 'output'} side @param {(name: string) => boolean} named
+     * @returns {string | number | null}
+     */
+    const said = (side, named)=>{
+        /** @type {string | number | null} */
+        let value = null;
+        for (const unit of units)
+        {
+            const layout = /** @type {Record<string, any>} */ (unit.layouts[side]);
+            for (const [name, given] of Object.entries(layout))
+            {
+                if (!named(name))
+                {
+                    continue;
+                }
+                const mine = typeof given === 'number' ? given : name;
+                if (value !== null && value !== mine)
+                {
+                    error(`geometry shader: two shaders declare different ${side} layouts`);
+                }
+                value = mine;
+            }
+        }
+        return value;
+    };
+    const input = said('input', name=>GEOMETRY_INPUTS.has(name));
+    const output = said('output', name=>GEOMETRY_OUTPUTS.has(name));
+    const most = said('output', name=>name === 'max_vertices');
+    if (input === null)
+    {
+        error('geometry shader: no input primitive is declared');
+    }
+    if (output === null)
+    {
+        error('geometry shader: no output primitive is declared');
+    }
+    if (most === null)
+    {
+        error('geometry shader: max_vertices is not declared');
+    }
+    if (input === null || output === null || most === null)
+    {
+        return null;
+    }
+    return {
+        input: /** @type {GeometryLayout['input']} */ (input),
+        inputVertices: /** @type {number} */ (GEOMETRY_INPUTS.get(String(input))),
+        output: /** @type {GeometryLayout['output']} */ (output),
+        outputVertices: /** @type {number} */ (GEOMETRY_OUTPUTS.get(String(output))),
+        maxVertices: Number(most),
+    };
 }
 
 /** @param {import('./glsl-types.js').StructType} struct @returns {string} */

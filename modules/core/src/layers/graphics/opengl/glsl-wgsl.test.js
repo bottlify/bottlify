@@ -303,9 +303,10 @@ test('literals are WGSL\'s typed ones', ()=>{
     assert.equal(intLiteral(-2147483648), '(-2147483647i - 1i)');
 });
 
-test('a program that samples a 3D texture does not link, and says why', ()=>{
-    const result = link(null, 'uniform sampler3D volume;\n'
-        + 'void main() { gl_FragColor = texture3D(volume, vec3(0.5)); }');
-    assert.equal(result.ok, false);
-    assert.match(result.log, /no 3D textures/);
+test('a program that samples a 3D texture links, and reads a texture_3d', ()=>{
+    const program = linked(link(null, 'uniform sampler3D volume;\n'
+        + 'void main() { gl_FragColor = texture3D(volume, vec3(0.5)); }'));
+    const { fragment } = emit(program);
+    assert.match(fragment.samplers.join('\n'), /texture_3d<f32>/);
+    assert.match(fragment.code, /textureSample\(glt0, gls0, t0\)/);
 });

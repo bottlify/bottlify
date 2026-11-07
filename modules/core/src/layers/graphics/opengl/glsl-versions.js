@@ -69,6 +69,47 @@ const FEATURES = Object.freeze({
 
 /** @typedef {keyof typeof FEATURES} Feature */
 
+/**
+ * @typedef {Object} ExtensionGift
+ * @property {Feature[]} [features]
+ * @property {string[]} [keywords]  words it makes keywords, types among them
+ * @property {string[]} [functions]  later versions' built-in functions it
+ *     brings, every overload of each (`glsl-library.js`); its own functions
+ *     and variables are the library's too
+ */
+
+/**
+ * What each extension a shader may enable (section 3.3) brings to a version
+ * before the one that made it core: only what this implementation has of it,
+ * so that an extension half here still compiles the half a shader uses.
+ * Which of them the context reports is `extensions.js`'s to say.
+ *
+ * @type {Readonly<Record<string, ExtensionGift>>}
+ */
+export const GLSL_EXTENSIONS = Object.freeze({
+    GL_ARB_uniform_buffer_object: { features: ['uniformBlocks', 'layout'], keywords: ['layout'] },
+    GL_ARB_explicit_attrib_location: { features: ['explicitLocation', 'layout'],
+        keywords: ['layout'] },
+    // gl_InstanceIDARB (glsl-library.js).
+    GL_ARB_draw_instanced: {},
+    // Of its integer language: the bit operators, gl_VertexID and
+    // gl_InstanceID; not its `unsigned int`, its integer samplers or its
+    // texelFetch2D() family.
+    GL_EXT_gpu_shader4: { features: ['bitwise'] },
+    // Its samplers and texture2DRect() family (glsl-library.js).
+    GL_ARB_texture_rectangle: { keywords: ['sampler2DRect', 'sampler2DRectShadow'] },
+    GL_ARB_shading_language_packing: { functions: ['packSnorm2x16', 'unpackSnorm2x16',
+        'packUnorm2x16', 'unpackUnorm2x16', 'packHalf2x16', 'unpackHalf2x16', 'packUnorm4x8',
+        'unpackUnorm4x8', 'packSnorm4x8', 'unpackSnorm4x8'] },
+    // Of its functions those WGSL has, and int converting to uint; not its
+    // gathers, its sampler arrays indexed at run time, bitfieldExtract and
+    // the extended arithmetic.
+    GL_ARB_gpu_shader5: { features: ['implicitUint'],
+        functions: ['bitfieldReverse', 'bitCount', 'findLSB', 'findMSB', 'fma',
+            'packUnorm2x16', 'unpackUnorm2x16', 'packUnorm4x8', 'unpackUnorm4x8',
+            'packSnorm4x8', 'unpackSnorm4x8'] },
+});
+
 /** The keywords every version has (section 3.6). */
 const BASE_KEYWORDS = ['attribute', 'const', 'uniform', 'varying', 'centroid', 'break',
     'continue', 'do', 'for', 'while', 'if', 'else', 'in', 'out', 'inout', 'true', 'false',
@@ -124,6 +165,8 @@ const RESERVED_UNTIL = [
  * @property {ReadonlySet<string>} reserved  words no shader may use
  * @property {(feature: Feature) => boolean} has
  * @property {ReadonlySet<string>} extensions  the extensions #extension enabled
+ * @property {ReadonlySet<string>} functions  the later built-in functions those
+ *     extensions brought
  */
 
 /** @type {Map<string, Language>} */
@@ -136,7 +179,9 @@ const MADE = new Map();
  * @returns {Language}
  */
 export function languageOf(version, profile = null, extensions = []){
-    const enabled = new Set(extensions);
+    const enabled = new Set([...extensions].filter(name=>name in GLSL_EXTENSIONS));
+    const gifts = [...enabled].map(name=>GLSL_EXTENSIONS[name]);
+    const features = new Set(gifts.flatMap(gift=>gift.features ?? []));
     const key = `${version}:${profile}:${[...enabled].sort().join(',')}`;
     const known = MADE.get(key);
     if (known)
@@ -145,7 +190,8 @@ export function languageOf(version, profile = null, extensions = []){
     }
     const keywords = new Set([...BASE_KEYWORDS,
         ...LATER_KEYWORDS.filter(([, since])=>since <= version).map(([word])=>word),
-        ...typeNames().filter(name=>(typeSince(name) ?? Infinity) <= version)]);
+        ...typeNames().filter(name=>(typeSince(name) ?? Infinity) <= version),
+        ...gifts.flatMap(gift=>gift.keywords ?? [])]);
     const reserved = new Set(version < 130 ? RESERVED_1X : [...RESERVED,
         ...RESERVED_UNTIL.filter(([, until])=>version < until).map(([word])=>word)]);
     for (const word of keywords)
@@ -158,7 +204,9 @@ export function languageOf(version, profile = null, extensions = []){
         profile: version >= 150 ? profile ?? 'core' : null,
         compatibility: version < 150 || profile === 'compatibility',
         keywords, reserved, extensions: enabled,
-        has: (/** @type {Feature} */ feature)=>FEATURES[feature] <= version,
+        functions: new Set(gifts.flatMap(gift=>gift.functions ?? [])),
+        has: (/** @type {Feature} */ feature)=>FEATURES[feature] <= version
+            || features.has(feature),
     });
     MADE.set(key, language);
     return language;

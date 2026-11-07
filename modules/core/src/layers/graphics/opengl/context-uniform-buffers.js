@@ -31,7 +31,7 @@
 
 import { GL } from './constants.js';
 import { createBufferObject } from './objects.js';
-import { BLOCK_LIMITS } from './glsl-link.js';
+import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
 
 /** UNIFORM_BUFFER_OFFSET_ALIGNMENT: WebGPU's alignment of a uniform binding's offset. */
 export const UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256;
@@ -53,6 +53,11 @@ const TARGETS = new Map([
     [GL.UNIFORM_BUFFER, { points: BLOCK_LIMITS.bindings, alignment: UNIFORM_BUFFER_OFFSET_ALIGNMENT,
         general: GL.UNIFORM_BUFFER_BINDING, binding: GL.UNIFORM_BUFFER_BINDING,
         start: GL.UNIFORM_BUFFER_START, size: GL.UNIFORM_BUFFER_SIZE }],
+    // A range's offset and size are words (OpenGL 3.0 section 2.15).
+    [GL.TRANSFORM_FEEDBACK_BUFFER, { points: FEEDBACK_LIMITS.buffers, alignment: 4,
+        general: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING,
+        binding: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING, start: GL.TRANSFORM_FEEDBACK_BUFFER_START,
+        size: GL.TRANSFORM_FEEDBACK_BUFFER_SIZE }],
 ]);
 
 /**
@@ -110,6 +115,17 @@ export function installUniformBufferCalls(context, kernel){
             setError(GL.INVALID_VALUE);
             return;
         }
+        // What transform feedback writes stays bound while it does.
+        if (target === GL.TRANSFORM_FEEDBACK_BUFFER && kernel.side.feedbackActive?.())
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (target === GL.TRANSFORM_FEEDBACK_BUFFER && size !== null && size % 4 !== 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
         if (name !== 0 && size !== null && (size <= 0 || offset < 0
             || offset % row.alignment !== 0))
         {
@@ -143,7 +159,20 @@ export function installUniformBufferCalls(context, kernel){
         indexed.set(row.size, query(point=>point?.size ?? 0));
     }
 
+    /**
+     * @param {number} target
+     * @returns {({ buffer: import('./objects.js').BufferObject, offset: number,
+     *     size: number } | null)[]}
+     */
+    const ranges = target=>(tables.get(target) ?? []).map((unused, index)=>{
+        const point = live(target, index);
+        return point ? { buffer: point.buffer, offset: point.offset,
+            size: point.size === 0 ? point.buffer.size - point.offset : point.size } : null;
+    });
+
     Object.assign(kernel.side, {
+        /** What each transform feedback point holds: what a capture writes into. */
+        feedbackBuffers: ()=>ranges(GL.TRANSFORM_FEEDBACK_BUFFER),
         /**
          * What each uniform buffer point holds for a draw: the buffer, and
          * the range a block reads from (a whole buffer from 0).

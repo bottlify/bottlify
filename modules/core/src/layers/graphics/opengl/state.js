@@ -36,7 +36,37 @@ import { GL } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
-import { BLOCK_LIMITS } from './glsl-link.js';
+import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
+import { GLSL_CONSTANTS } from './glsl-library.js';
+
+/**
+ * OpenGL 3.2's limits of geometry shaders and of what the stages pass, the
+ * values the language's gl_Max* constants have.
+ *
+ * @type {[number, string, number][]}
+ */
+export const GEOMETRY_LIMITS = [
+    [GL.MAX_GEOMETRY_TEXTURE_IMAGE_UNITS, 'GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS',
+        GLSL_LIMITS.textureImageUnits],
+    [GL.MAX_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_GEOMETRY_UNIFORM_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryUniformComponents],
+    [GL.MAX_GEOMETRY_OUTPUT_VERTICES, 'GL_MAX_GEOMETRY_OUTPUT_VERTICES',
+        GLSL_CONSTANTS.gl_MaxGeometryOutputVertices],
+    [GL.MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS, 'GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryTotalOutputComponents],
+    [GL.MAX_GEOMETRY_INPUT_COMPONENTS, 'GL_MAX_GEOMETRY_INPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryInputComponents],
+    [GL.MAX_GEOMETRY_OUTPUT_COMPONENTS, 'GL_MAX_GEOMETRY_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryOutputComponents],
+    [GL.MAX_VERTEX_OUTPUT_COMPONENTS, 'GL_MAX_VERTEX_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxVertexOutputComponents],
+    [GL.MAX_FRAGMENT_INPUT_COMPONENTS, 'GL_MAX_FRAGMENT_INPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxFragmentInputComponents],
+    [GL.MAX_GEOMETRY_UNIFORM_BLOCKS, 'GL_MAX_GEOMETRY_UNIFORM_BLOCKS', BLOCK_LIMITS.perStage],
+    [GL.MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+];
 
 /**
  * How many texture units a context has: the larger of the coordinate sets
@@ -93,6 +123,7 @@ export const DEFAULT_ENABLES = Object.freeze([
     },
     // OpenGL 3.1 and 4.3: an index that ends one primitive and starts the next.
     { query: GL.PRIMITIVE_RESTART, name: 'GL_PRIMITIVE_RESTART', kind: 'bool', value: [0] },
+    { query: GL.RASTERIZER_DISCARD, name: 'GL_RASTERIZER_DISCARD', kind: 'bool', value: [0] },
     {
         query: GL.PRIMITIVE_RESTART_FIXED_INDEX, name: 'GL_PRIMITIVE_RESTART_FIXED_INDEX',
         kind: 'bool', value: [0],
@@ -309,6 +340,15 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.CULL_FACE_MODE, name: 'GL_CULL_FACE_MODE', kind: 'enum', value: [GL.BACK] },
     { query: GL.FRONT_FACE, name: 'GL_FRONT_FACE', kind: 'enum', value: [GL.CCW] },
     { query: GL.SHADE_MODEL, name: 'GL_SHADE_MODEL', kind: 'enum', value: [GL.SMOOTH] },
+    // OpenGL 3.2: which vertex of a primitive a flat value is taken from.
+    {
+        query: GL.PROVOKING_VERTEX, name: 'GL_PROVOKING_VERTEX', kind: 'enum',
+        value: [GL.LAST_VERTEX_CONVENTION],
+    },
+    {
+        query: GL.QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION,
+        name: 'GL_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION', kind: 'int', value: [0],
+    },
     { query: GL.POLYGON_MODE, name: 'GL_POLYGON_MODE', kind: 'enum', value: [GL.FILL, GL.FILL] },
     { query: GL.POINT_SIZE, name: 'GL_POINT_SIZE', kind: 'float', value: [1] },
     { query: GL.LINE_WIDTH, name: 'GL_LINE_WIDTH', kind: 'float', value: [1] },
@@ -911,6 +951,47 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.UNIFORM_BUFFER_OFFSET_ALIGNMENT, name: 'GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT',
         kind: 'int', value: [256],
     },
+    // Transform feedback (OpenGL 3.0, 4.0): the general binding, the object
+    // bound and whether it captures, and the limits (`FEEDBACK_LIMITS`).
+    {
+        query: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING, name: 'GL_TRANSFORM_FEEDBACK_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_BINDING, name: 'GL_TRANSFORM_FEEDBACK_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_ACTIVE, name: 'GL_TRANSFORM_FEEDBACK_ACTIVE', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_PAUSED, name: 'GL_TRANSFORM_FEEDBACK_PAUSED', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS', kind: 'int',
+        value: [FEEDBACK_LIMITS.interleavedComponents],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS', kind: 'int',
+        value: [FEEDBACK_LIMITS.separateAttribs],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS', kind: 'int',
+        value: [FEEDBACK_LIMITS.separateComponents],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_BUFFERS, name: 'GL_MAX_TRANSFORM_FEEDBACK_BUFFERS',
+        kind: 'int', value: [FEEDBACK_LIMITS.buffers],
+    },
+    // OpenGL 3.2's geometry shaders: their limits are the language's
+    // (`GLSL_CONSTANTS`), which a shader's gl_Max* constants read too.
+    ...GEOMETRY_LIMITS.map(([query, name, value])=>({ query, name,
+        kind: /** @type {'int'} */ ('int'), value: [value] })),
     {
         query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],

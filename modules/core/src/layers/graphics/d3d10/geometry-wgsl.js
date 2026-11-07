@@ -97,15 +97,20 @@ export const GEOMETRY_INDEX_BINDING = Object.freeze({
  * that keeps its winding (an odd triangle's first two swapped), at the place
  * the sums gave it; a primitive past the room is not listed.
  *
- * @param {{ streams: number, maxOut: number, outputVertices: number }} stage
+ * `last`: each primitive turned round so that its last vertex comes first,
+ * which is the one a flat value is taken from on the device (OpenGL's
+ * provoking vertex, where Direct3D's is the first); the winding is kept.
+ *
+ * @param {{ streams: number, maxOut: number, outputVertices: number, last?: boolean }} stage
  * @returns {string}
  */
-export function geometryIndexWgsl({ streams, maxOut, outputVertices }){
-    const list = {
+export function geometryIndexWgsl({ streams, maxOut, outputVertices, last = false }){
+    const made = {
         1: ['at'],
         2: ['at - 1u', 'at'],
         3: ['select(at - 2u, at - 1u, odd)', 'select(at - 1u, at - 2u, odd)', 'at'],
     }[outputVertices] ?? ['at'];
+    const list = last ? [made[made.length - 1], ...made.slice(0, -1)] : made;
     return /* wgsl */ `
 @group(0) @binding(0) var<storage, read> starts: array<u32>;
 @group(0) @binding(1) var<storage, read> counts: array<vec4u>;

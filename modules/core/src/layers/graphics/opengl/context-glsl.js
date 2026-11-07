@@ -34,8 +34,9 @@
 
 import { GL } from './constants.js';
 import { compileFront } from './glsl-front.js';
+import { GLSL_EXTENSIONS } from './glsl-versions.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
-import { BLOCK_LIMITS, linkProgram } from './glsl-link.js';
+import { BLOCK_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
 
@@ -62,6 +63,7 @@ export const CONTEXT_CONSTANTS = Object.freeze({
     gl_MaxVertexTextureImageUnits: GLSL_LIMITS.vertexTextureImageUnits,
     gl_MaxCombinedTextureImageUnits: GLSL_LIMITS.combinedTextureImageUnits,
     gl_MaxTextureImageUnits: GLSL_LIMITS.textureImageUnits,
+    gl_MaxGeometryTextureImageUnits: GLSL_LIMITS.textureImageUnits,
     gl_MaxDrawBuffers: GLSL_LIMITS.drawBuffers,
     gl_MaxTextureUnits: GLSL_LIMITS.textureUnits,
     gl_MaxTextureCoords: GLSL_LIMITS.textureCoords,
@@ -107,12 +109,22 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {Map<string, number>} bindings  glBindAttribLocation's, for the next link
  * @property {Map<string, { location: number, index: number }>} fragData
  *     glBindFragDataLocation's, for the next link
+ * @property {{ names: string[], mode: 'interleaved' | 'separate' } | null} feedback
+ *     glTransformFeedbackVaryings', for the next link
  * @property {Executable | null} executable
  * @property {number} users  the contexts it is current in
  */
 
-/** The shader types. @type {Map<number, 'vertex' | 'fragment'>} */
-const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.FRAGMENT_SHADER, 'fragment']]);
+/** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment'>} */
+const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.GEOMETRY_SHADER, 'geometry'],
+    [GL.FRAGMENT_SHADER, 'fragment']]);
+
+/** What GEOMETRY_INPUT_TYPE and GEOMETRY_OUTPUT_TYPE answer, by the layout's word. */
+const GEOMETRY_PRIMITIVES = Object.freeze(/** @type {Record<string, number>} */ ({
+    points: GL.POINTS, lines: GL.LINES, lines_adjacency: GL.LINES_ADJACENCY,
+    triangles: GL.TRIANGLES, triangles_adjacency: GL.TRIANGLES_ADJACENCY,
+    line_strip: GL.LINE_STRIP, triangle_strip: GL.TRIANGLE_STRIP,
+}));
 
 let executables = 0;
 
@@ -123,9 +135,11 @@ let executables = 0;
  */
 const COMPILED = new Map();
 const COMPILED_KEPT = 256;
+/** The extensions a shader's #extension may enable: what the front end has of each. */
+const SHADER_EXTENSIONS = Object.keys(GLSL_EXTENSIONS);
 
 /**
- * @param {readonly string[]} sources @param {'vertex' | 'fragment'} stage
+ * @param {readonly string[]} sources @param {'vertex' | 'geometry' | 'fragment'} stage
  * @returns {{ ok: boolean, log: string, unit: ShaderUnit | null }}
  */
 export function compileShader(sources, stage){
@@ -138,7 +152,7 @@ export function compileShader(sources, stage){
         return known;
     }
     const result = compileFront(sources, stage, { versions: EMITTED_VERSIONS,
-        constants: CONTEXT_CONSTANTS });
+        constants: CONTEXT_CONSTANTS, extensions: SHADER_EXTENSIONS });
     COMPILED.set(key, result);
     if (COMPILED.size > COMPILED_KEPT)
     {
@@ -546,7 +560,8 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const stage = /** @type {'vertex' | 'fragment'} */ (SHADER_TYPES.get(shader.type));
+            const stage = /** @type {'vertex' | 'geometry' | 'fragment'} */ (
+                SHADER_TYPES.get(shader.type));
             const result = compileShader(shader.sources ?? [], stage);
             shader.compiled = result.ok;
             shader.log = result.log;
@@ -638,7 +653,7 @@ export function installShaderCalls(context, kernel){
             /** @type {ProgramObject} */
             const program = { kind: 'program', name, shaders: [], deleted: false, linked: false,
                 validated: false, log: '', bindings: new Map(), fragData: new Map(),
-                executable: null, users: 0 };
+                feedback: null, executable: null, users: 0 };
             namespace().define(name, program);
             kernel.shareGroup().used = true;
             return name;
@@ -723,6 +738,12 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
+            if (kernel.side.feedbackActive?.() && program === currentProgram)
+            {
+                // Transform feedback is capturing what it runs (section 2.15).
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             program.validated = false;
             const notCompiled = program.shaders.filter(shader=>!shader.compiled);
             if (notCompiled.length > 0)
@@ -737,7 +758,9 @@ export function installShaderCalls(context, kernel){
                 .map(shader=>/** @type {ShaderUnit} */ (shader.unit));
             const result = linkProgram({
                 vertex: units(GL.VERTEX_SHADER),
+                geometry: units(GL.GEOMETRY_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
+                feedback: program.feedback ?? undefined,
                 attribBindings: program.bindings,
                 fragDataBindings: program.fragData,
             });
@@ -763,6 +786,11 @@ export function installShaderCalls(context, kernel){
         glUseProgram(programName){
             if (!enter('glUseProgram', [programName]))
             {
+                return;
+            }
+            if (kernel.side.feedbackActive?.())
+            {
+                setError(GL.INVALID_OPERATION);
                 return;
             }
             if (programName === 0)
@@ -886,6 +914,29 @@ export function installShaderCalls(context, kernel){
                 case GL.ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
                     return [linked ? Math.max(0, ...linked.blocks
                         .map(b=>b.name.length + 1)) : 0];
+                case GL.TRANSFORM_FEEDBACK_BUFFER_MODE:
+                    return [linked?.feedback?.mode === 'separate' ? GL.SEPARATE_ATTRIBS
+                        : GL.INTERLEAVED_ATTRIBS];
+                case GL.TRANSFORM_FEEDBACK_VARYINGS:
+                    return [linked?.feedback?.varyings.length ?? 0];
+                case GL.TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH:
+                    return [Math.max(0, ...(linked?.feedback?.varyings ?? [])
+                        .map(v=>v.name.length + 1))];
+                // A program linked with a geometry shader answers these, any
+                // other INVALID_OPERATION (OpenGL 3.2 section 6.1.16).
+                case GL.GEOMETRY_VERTICES_OUT:
+                case GL.GEOMETRY_INPUT_TYPE:
+                case GL.GEOMETRY_OUTPUT_TYPE: {
+                    const layout = program.linked ? linked?.geometryLayout : null;
+                    if (!layout)
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    return [pname === GL.GEOMETRY_VERTICES_OUT ? layout.maxVertices
+                        : GEOMETRY_PRIMITIVES[pname === GL.GEOMETRY_INPUT_TYPE ? layout.input
+                            : layout.output]];
+                }
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
@@ -1041,6 +1092,60 @@ export function installShaderCalls(context, kernel){
                 return null;
             }
             return { name: entry.name, size: 1, type: glTypeOf(entry.type) };
+        },
+
+        /**
+         * glTransformFeedbackVaryings: what the next link captures.
+         *
+         * @param {number} programName @param {readonly string[]} names @param {number} mode
+         */
+        glTransformFeedbackVaryings(programName, names, mode){
+            if (!enter('glTransformFeedbackVaryings', [programName, names, mode]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            if (mode !== GL.INTERLEAVED_ATTRIBS && mode !== GL.SEPARATE_ATTRIBS)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (mode === GL.SEPARATE_ATTRIBS && names.length > FEEDBACK_LIMITS.separateAttribs)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            program.feedback = { names: [...names],
+                mode: mode === GL.SEPARATE_ATTRIBS ? 'separate' : 'interleaved' };
+        },
+
+        /**
+         * @param {number} programName @param {number} index
+         * @returns {{ name: string, size: number, type: number } | null}
+         */
+        glGetTransformFeedbackVarying(programName, index){
+            if (!enter('glGetTransformFeedbackVarying', [programName, index]))
+            {
+                return null;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return null;
+            }
+            const varying = program.executable?.linked.feedback?.varyings[index];
+            if (!varying)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const type = varying.type?.kind === 'array' ? varying.type.element : varying.type;
+            // A gap answers GL_NONE and the components it skips (4.0).
+            return { name: varying.name, size: varying.size, type: type ? glTypeOf(type) : 0 };
         },
 
         // --- uniforms ---
@@ -1233,7 +1338,7 @@ export function installShaderCalls(context, kernel){
                 case GL.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
                     return [own.stages.fragment ? 1 : 0];
                 case GL.UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
-                    return [0];
+                    return [own.stages.geometry ? 1 : 0];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

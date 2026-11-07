@@ -214,6 +214,8 @@ export const BUILTIN_STRUCTS = Object.freeze({
  *     input, its output (which the stage may read back), or a constant
  * @property {number[]} [value]  a constant's
  * @property {boolean} [patch]  a tessellation stage's per-patch variable
+ * @property {string} [alias]  the built-in this is another name of: an
+ *     extension's name for what a later version named otherwise
  */
 
 const MAT2 = matrixOf(2, 2);

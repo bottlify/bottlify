@@ -18,7 +18,7 @@
  * shader.
  */
 
-import { basicTypeAt } from './glsl-types.js';
+import { basicType } from './glsl-types.js';
 import { languageOf } from './glsl-versions.js';
 
 /**
@@ -113,7 +113,6 @@ export function parse(tokens, language = languageOf(110)){
     let i = 0;
     /** @type {Set<string>} */
     const structNames = new Set();
-    const version = language.version;
     const { keywords, reserved } = language;
 
     const peek = (offset = 0)=>tokens[Math.min(i + offset, tokens.length - 1)];
@@ -146,7 +145,7 @@ export function parse(tokens, language = languageOf(110)){
     /** @param {Token} token */
     const isKeyword = token=>token.kind === 'ident' && keywords.has(token.text);
     /** @param {string} name */
-    const typeOf = name=>basicTypeAt(name, version) ?? null;
+    const typeOf = name=>(keywords.has(name) ? basicType(name) ?? null : null);
     /** @returns {Token} */
     const identifier = ()=>{
         const token = peek();

@@ -66,6 +66,12 @@
  *             | null) | null} [fence]
  *           What a fence waits on: the commands recorded so far replayed
  *           (`gpu.js` fence); null where nothing is drawn later than it is called
+ * @property {{ begin: (session: any) => void,
+ *     count: (target: number, query: any) => void, ended: (query: any) => void } | null}
+ *     [feedback]
+ *           Transform feedback captured on the device (`context-transform-feedback.js`,
+ *           `gpu.js`): a capture begun, and the queries counting its primitives;
+ *           null where nothing draws later
  * @property {{ begin: (query: any) => void, end: (query: any) => void, flush: () => void,
  *     condition: (query: any, inverted: boolean) => void } | null} [queries]
  *           Occlusion counted on the device and rendering conditional on it

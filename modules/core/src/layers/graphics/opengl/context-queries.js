@@ -36,6 +36,8 @@ export const QUERY = Object.freeze({
     ANY_SAMPLES_PASSED: 0x8c2f,
     ANY_SAMPLES_PASSED_CONSERVATIVE: 0x8d6a,
     TIME_ELAPSED: 0x88bf,
+    PRIMITIVES_GENERATED: 0x8c87,
+    TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN: 0x8c88,
     TIMESTAMP: 0x8e28,
     QUERY_COUNTER_BITS: 0x8864,
     CURRENT_QUERY: 0x8865,
@@ -66,7 +68,18 @@ const COUNTER_BITS = new Map([
     [QUERY.ANY_SAMPLES_PASSED, 1],
     [QUERY.ANY_SAMPLES_PASSED_CONSERVATIVE, 1],
     [QUERY.TIME_ELAPSED, 64],
+    [QUERY.PRIMITIVES_GENERATED, 64],
+    [QUERY.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, 64],
 ]);
+
+/**
+ * The targets that count primitives (OpenGL 3.0 section 2.15): what the
+ * vertex or geometry shader made, and what transform feedback wrote.
+ *
+ * @type {Set<number>}
+ */
+const PRIMITIVE_COUNTS = new Set([QUERY.PRIMITIVES_GENERATED,
+    QUERY.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN]);
 
 /** The occlusion targets, which count samples and condition rendering. */
 /** @type {Set<number>} */
@@ -123,7 +136,8 @@ export function installQueryCalls(context, kernel){
                 {
                     return;
                 }
-                query.result = target === QUERY.SAMPLES_PASSED ? query.samples
+                query.result = target === QUERY.SAMPLES_PASSED || PRIMITIVE_COUNTS.has(target)
+                    ? query.samples
                     : OCCLUSION.has(target) ? (query.samples > 0 ? 1 : 0) : query.result;
                 query.available = true;
                 settle();
@@ -213,6 +227,18 @@ export function installQueryCalls(context, kernel){
             const query = begin(name, target);
             queries.set(name, query);
             active.set(target, query);
+            if (PRIMITIVE_COUNTS.has(target))
+            {
+                if (kernel.feedback)
+                {
+                    kernel.feedback.count(target, query);
+                }
+                else
+                {
+                    diverge('a query counting primitives on the processor counts none: it'
+                        + ' answers 0');
+                }
+            }
             if (OCCLUSION.has(target))
             {
                 if (kernel.queries)
@@ -245,7 +271,19 @@ export function installQueryCalls(context, kernel){
                 return;
             }
             active.delete(target);
-            if (target === QUERY.TIME_ELAPSED)
+            if (PRIMITIVE_COUNTS.has(target))
+            {
+                if (kernel.feedback)
+                {
+                    kernel.feedback.count(target, null);
+                    kernel.feedback.ended(query);
+                }
+                else
+                {
+                    query.finish();
+                }
+            }
+            else if (target === QUERY.TIME_ELAPSED)
             {
                 query.result = now() - query.started;
                 query.finish();

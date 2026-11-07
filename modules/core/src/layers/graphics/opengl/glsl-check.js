@@ -44,7 +44,7 @@ import {
 } from './glsl-types.js';
 import { BUILTIN_FUNCTIONS, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import {
-    GLSL_CONSTANTS, builtinVariablesFor, modernOverloads, perVertexOf,
+    GLSL_CONSTANTS, builtinVariablesFor, extensionOverloads, modernOverloads, perVertexOf,
 } from './glsl-library.js';
 import { blockLayout } from './glsl-layout.js';
 import { hasStage, languageOf } from './glsl-versions.js';
@@ -211,7 +211,7 @@ function conversionRank(from, to, language){
     {
         return from === 'float' ? 1 : from === 'int' || from === 'uint' ? 3 : null;
     }
-    if (to === 'uint' && from === 'int' && v >= 400)
+    if (to === 'uint' && from === 'int' && language?.has('implicitUint'))
     {
         return 4;
     }
@@ -427,7 +427,8 @@ export function checkShader(ast, options){
 
     /** @param {string} name @returns {VariableSymbol | null} */
     const builtinSymbol = name=>{
-        const existing = unit.builtins.get(name);
+        const named = builtinTable[name]?.alias ?? name;
+        const existing = unit.builtins.get(named);
         if (existing)
         {
             return existing;
@@ -437,6 +438,7 @@ export function checkShader(ast, options){
         {
             return null;
         }
+
         let constant = builtin.role === 'const' ? builtin.value ?? null : null;
         if (name === 'gl_WorkGroupSize')
         {
@@ -446,10 +448,10 @@ export function checkShader(ast, options){
         }
         /** @type {VariableSymbol} */
         const symbol = {
-            kind: 'variable', name, type: builtinType(name, builtin), storage: 'builtin',
+            kind: 'variable', name: named, type: builtinType(name, builtin), storage: 'builtin',
             id: nextId++, global: true, at: /** @type {any} */ (null), builtin, constant,
         };
-        unit.builtins.set(name, symbol);
+        unit.builtins.set(named, symbol);
         return symbol;
     };
 
@@ -1450,7 +1452,8 @@ export function checkShader(ast, options){
             candidates = modern
                 ? modernOverloads(node.name, language).map(o=>({ params: o.params,
                     directions: o.directions, target: o }))
-                : (BUILTIN_FUNCTIONS.get(node.name) ?? []).map(b=>({ params: b.params,
+                : [...BUILTIN_FUNCTIONS.get(node.name) ?? [],
+                    ...extensionOverloads(node.name, language)].map(b=>({ params: b.params,
                     directions: b.params.map(()=>'in'), target: b }));
         }
         if (candidates.length === 0)
@@ -1815,7 +1818,13 @@ export function checkShader(ast, options){
             {
                 fail(at, `'${name}' : layout qualifier not allowed here`);
             }
-            if (since > version)
+            // An extension brings its qualifiers to an earlier version:
+            // GL_ARB_uniform_buffer_object a block's packing and matrix
+            // order, GL_ARB_explicit_attrib_location the locations of 3.30.
+            const brought = (since === 140 && (PACKINGS.has(name) || MATRIX_ORDERS.has(name))
+                && language.has('uniformBlocks'))
+                || (since === 330 && name === 'location' && language.has('explicitLocation'));
+            if (since > version && !brought)
             {
                 fail(at, `'${name}' : layout qualifier needs version ${since}`);
             }
@@ -2979,7 +2988,8 @@ export function checkShader(ast, options){
             fail(decl.at, `'${decl.name}' : identifiers starting with "gl_" are reserved`);
         }
         const builtin = modern ? modernOverloads(decl.name, language).length > 0
-            : BUILTIN_FUNCTIONS.has(decl.name);
+            : BUILTIN_FUNCTIONS.has(decl.name)
+                || extensionOverloads(decl.name, language).length > 0;
         if (version >= 120 && version < 400 && builtin)
         {
             fail(decl.at, `'${decl.name}' : a built-in function cannot be redefined or`

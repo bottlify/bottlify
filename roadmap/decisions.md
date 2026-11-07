@@ -1100,6 +1100,27 @@ GL_TEXTURE_CUBE_MAP_SEAMLESS asks: WebGPU's cube sampling knows no other way. A 
 leaves the switch off, as its default is, gets the seamless filtering every driver of a 3.2
 card gives anyway. *2026-11-07.*
 
+**A128. Temporary: transform feedback's buffer binding points belong to the context,** not to each
+transform feedback object as OpenGL 4.0 has it: binding another object keeps the buffers bound.
+A program that keeps one object a stream and switches between them mid-frame captures into the
+buffers it bound last. *2026-11-07.*
+
+**A129. Temporary: what transform feedback writes stays on the device.** A buffer it captured
+into draws as captured, and a read of it on the processor (glGetBufferSubData, a map) answers
+the bytes the program last gave it, said as a loss each time. *2026-11-07.*
+
+**A130. Temporary: a geometry shader's gl_Layer draws into the first layer,** and says so: layered
+attachments are not routed yet. *2026-11-07.*
+
+**A131. The last vertex provokes by turning the primitive round,** not by a pass of its own: a
+draw with a flat value under GL_LAST_VERTEX_CONVENTION lists each primitive from its last
+vertex, its winding kept, and a quad splits on the diagonal to its fourth vertex, which provokes
+it under either convention as table 13.2 has it. A polygon keeps its first. *2026-11-07.*
+
+**A132. GL_RASTERIZER_DISCARD is saved with the enable group,** as every capability glEnable
+takes is in this renderer's attribute tables; the 4.6 compatibility table names it in no group.
+*2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

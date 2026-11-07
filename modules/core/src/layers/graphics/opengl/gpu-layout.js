@@ -353,7 +353,8 @@ export function topologyOf(mode){
     {
         return 'point-list';
     }
-    if (mode === GL.LINES || mode === GL.LINE_STRIP || mode === GL.LINE_LOOP)
+    if (mode === GL.LINES || mode === GL.LINE_STRIP || mode === GL.LINE_LOOP
+        || mode === GL.LINES_ADJACENCY || mode === GL.LINE_STRIP_ADJACENCY)
     {
         return 'line-list';
     }
@@ -455,10 +456,189 @@ function buildOrder(mode, count){
                 out.push(count - 1, 0);
             }
             break;
+        // Without a geometry shader the adjacent vertices are passed over
+        // (OpenGL 3.2 section 2.6.1).
+        case GL.LINES_ADJACENCY:
+            for (let i = 0; i + 3 < count; i += 4)
+            {
+                out.push(i + 1, i + 2);
+            }
+            break;
+        case GL.LINE_STRIP_ADJACENCY:
+            for (let i = 1; i + 2 < count; i++)
+            {
+                out.push(i, i + 1);
+            }
+            break;
+        case GL.TRIANGLES_ADJACENCY:
+            for (let i = 0; i + 5 < count; i += 6)
+            {
+                out.push(i, i + 2, i + 4);
+            }
+            break;
+        case GL.TRIANGLE_STRIP_ADJACENCY: {
+            const strip = stripWithAdjacency(count);
+            for (let k = 0; k < strip.length; k += 6)
+            {
+                out.push(strip[k], strip[k + 2], strip[k + 4]);
+            }
+            break;
+        }
         default:
             break;
     }
     return Uint32Array.from(out);
+}
+
+/**
+ * A triangle strip with adjacency as the six vertices of each of its
+ * triangles in the order a geometry shader reads them: the triangle's first
+ * vertex, the one adjacent to its first edge, its second, the one adjacent
+ * to its second edge, its third, the one adjacent to its third
+ * (GL_ARB_geometry_shader4, table 2.X1, numbered here from 0). n triangles
+ * take 2(n + 2) vertices, and an odd one past them is passed over.
+ *
+ * @param {number} count @returns {number[]}
+ */
+export function stripWithAdjacency(count){
+    const n = Math.max(0, Math.floor((count - 4) / 2));
+    /** @type {number[]} */
+    const out = [];
+    for (let i = 0; i < n; i++)
+    {
+        const odd = (i & 1) === 1;
+        const [first, second] = i > 0 && odd ? [2 * i + 2, 2 * i] : [2 * i, 2 * i + 2];
+        const third = 2 * i + 4;
+        /** @type {[number, number, number]} */
+        let adjacent;
+        if (n === 1)
+        {
+            adjacent = [1, 5, 3];
+        }
+        else if (i === 0)
+        {
+            adjacent = [1, 6, 3];
+        }
+        else if (i === n - 1)
+        {
+            adjacent = odd ? [2 * i - 2, 2 * i + 3, 2 * i + 5] : [2 * i - 2, 2 * i + 5, 2 * i + 3];
+        }
+        else
+        {
+            adjacent = odd ? [2 * i - 2, 2 * i + 3, 2 * i + 6] : [2 * i - 2, 2 * i + 6, 2 * i + 3];
+        }
+        out.push(first, adjacent[0], second, adjacent[1], third, adjacent[2]);
+    }
+    return out;
+}
+
+/**
+ * A draw's vertices in an order that puts each primitive's provoking vertex
+ * first, which is the one WebGPU takes a flat value from, where GL takes the
+ * last (OpenGL 3.2 section 2.18, table 2.12, GL_LAST_VERTEX_CONVENTION): each
+ * primitive of the mode's list turned round by one, which keeps a
+ * triangle's winding. A quad's is its fourth vertex, which its two
+ * triangles take only when the diagonal runs to it; a polygon's is its
+ * first, where it is already. Null for a mode with nothing to turn.
+ *
+ * @param {number} mode @param {number} count
+ * @returns {Uint32Array | null}
+ */
+export function lastProvoking(mode, count){
+    if (mode === GL.POINTS || mode === GL.POLYGON)
+    {
+        return null;
+    }
+    /** @type {number[]} */
+    let order = [];
+    let size = topologyOf(mode) === 'line-list' ? 2 : 3;
+    if (mode === GL.QUADS)
+    {
+        for (let i = 0; i + 3 < count; i += 4)
+        {
+            order.push(i, i + 1, i + 3, i + 1, i + 2, i + 3);
+        }
+    }
+    else if (mode === GL.QUAD_STRIP)
+    {
+        for (let i = 0; i + 3 < count; i += 2)
+        {
+            order.push(i, i + 1, i + 3, i + 2, i, i + 3);
+        }
+    }
+    else if (isList(mode))
+    {
+        order = Array.from({ length: count - count % size }, (_, k)=>k);
+    }
+    else
+    {
+        order = [...expandMode(mode, count) ?? []];
+    }
+    size = Math.max(1, size);
+    const out = new Uint32Array(order.length - order.length % size);
+    for (let k = 0; k < out.length; k += size)
+    {
+        out[k] = order[k + size - 1];
+        for (let j = 1; j < size; j++)
+        {
+            out[k + j] = order[k + j - 1];
+        }
+    }
+    return out;
+}
+
+/** The vertices a geometry shader reads a primitive, by the primitive it takes. */
+export const GEOMETRY_INPUT_VERTICES = Object.freeze(/** @type {Record<string, number>} */ ({
+    points: 1, lines: 2, lines_adjacency: 4, triangles: 3, triangles_adjacency: 6,
+}));
+
+/**
+ * The modes a geometry shader's input primitive draws (OpenGL 3.2 section
+ * 2.12.1): any other is GL_INVALID_OPERATION.
+ */
+const GEOMETRY_MODES = Object.freeze(/** @type {Record<string, number[]>} */ ({
+    points: [GL.POINTS],
+    lines: [GL.LINES, GL.LINE_STRIP, GL.LINE_LOOP],
+    lines_adjacency: [GL.LINES_ADJACENCY, GL.LINE_STRIP_ADJACENCY],
+    triangles: [GL.TRIANGLES, GL.TRIANGLE_STRIP, GL.TRIANGLE_FAN],
+    triangles_adjacency: [GL.TRIANGLES_ADJACENCY, GL.TRIANGLE_STRIP_ADJACENCY],
+}));
+
+/** @param {number} mode @param {string} input  a geometry shader's input primitive */
+export const drawsGeometryInput = (mode, input)=>GEOMETRY_MODES[input]?.includes(mode) ?? false;
+
+/**
+ * The positions of a draw a geometry shader reads, a primitive's vertices
+ * after another's in the order it reads them: a strip's or a fan's
+ * primitives as the lists they make (`buildOrder`'s, a strip's triangles
+ * keeping its winding), an adjacency strip's by its table; null for a list,
+ * read in order.
+ *
+ * @param {number} mode @param {number} count
+ * @returns {Uint32Array | null}
+ */
+export function geometryOrder(mode, count){
+    switch (mode)
+    {
+        case GL.POINTS:
+        case GL.LINES:
+        case GL.TRIANGLES:
+        case GL.LINES_ADJACENCY:
+        case GL.TRIANGLES_ADJACENCY:
+            return null;
+        case GL.LINE_STRIP_ADJACENCY: {
+            const out = [];
+            for (let i = 0; i + 3 < count; i++)
+            {
+                out.push(i, i + 1, i + 2, i + 3);
+            }
+            return Uint32Array.from(out);
+        }
+        case GL.TRIANGLE_STRIP_ADJACENCY:
+            return Uint32Array.from(stripWithAdjacency(count));
+        default:
+            return expandMode(mode, count);
+    }
 }
 
 /**

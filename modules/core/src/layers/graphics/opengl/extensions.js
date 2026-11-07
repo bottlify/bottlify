@@ -233,6 +233,17 @@ export const GL_EXTENSIONS = Object.freeze({
         'glBindVertexArray', 'glDeleteVertexArrays', 'glGenVertexArrays', 'glIsVertexArray',
     ],
     GL_ARB_shading_language_100: [],
+    // What a shader's #extension enables before the version that has it
+    // (glsl-versions.js), reported where all of it is here.
+    GL_ARB_uniform_buffer_object: [
+        'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
+        'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
+        'glUniformBlockBinding', 'glBindBufferRange', 'glBindBufferBase', 'glGetIntegeri_v',
+    ],
+    GL_ARB_explicit_attrib_location: [],
+    GL_ARB_draw_instanced: ['glDrawArraysInstancedARB', 'glDrawElementsInstancedARB'],
+    GL_ARB_shading_language_packing: [],
+    GL_ARB_provoking_vertex: ['glProvokingVertex'],
     GL_ARB_fragment_program: [
         'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
         'glProgramStringARB',
