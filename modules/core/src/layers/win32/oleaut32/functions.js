@@ -30,6 +30,7 @@ import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { readGuid, writeGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
+import { createPictureObjects } from './picture.js';
 import { createStdDispatchObjects } from './stddispatch.js';
 import { createRecordInfoObjects } from './recordinfo.js';
 import { TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD } from './typelib.js';
@@ -234,7 +235,7 @@ const VARCMP_NULL = 3;
  *     the pattern: the lengths are the program's, and a clear of a megabyte
  *     through writeMemory costs an allocation and two extra passes.
  * @property {AutomationHeap} heap  Where a BSTR's block comes from.
- * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ * @property {((api: string, detail: string, kind?: 'loss') => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes. Said once per distinct difference by whoever receives it.
  * @property {AutomationFiles} [files]  Where LoadTypeLib reads from. Without
@@ -248,6 +249,9 @@ const VARCMP_NULL = 3;
  * @property {() => unknown} [callerThread]  The thread whose call this is.
  * @property {Map<unknown, number>} [errorSlots]  Each thread's error information,
  *           shared with whoever else sets or takes it for a thread.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [gdi32]
+ *           GDI's export of that name, which a picture draws and is made with.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  * @property {() => number} [systemTimeMs]  The guest's wall clock, milliseconds
  *           since 1970: the year a date written without one is in. Without it
  *           such a date is refused, and said so.
@@ -1403,6 +1407,21 @@ export function createAutomationFunctions(host){
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
         allocateBstr: text=>allocateBstr(encode(text)),
         adapt: (state, interfaces)=>createAdapter(state, interfaces),
+    }) : null;
+
+    // The standard picture (`picture.js`), over GDI and user32.
+    const pictures = host.vtables && host.call ? createPictureObjects({
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        allocate: bytes=>host.heap.allocate(bytes),
+        free: address=>host.heap.free(address),
+        gdi32: (name, args)=>host.gdi32?.(name)?.handler(args) ?? 0,
+        user32: (name, args)=>host.user32?.(name)?.handler(args) ?? 0,
+        publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
+        adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+        call: /** @type {NonNullable<AutomationHost['call']>} */ (host.call),
+        callerThread: ()=>host.callerThread?.(),
+        divergence: (api, detail, kind)=>host.divergence?.(api, detail, kind),
     }) : null;
 
     /**
@@ -5142,6 +5161,57 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT OleCreatePictureIndirect(LPPICTDESC lpPictDesc, REFIID riid,
+         *   BOOL fOwn, LPVOID *lplpvObj)
+         *
+         * A picture over a bitmap, an icon or a metafile the program has, or
+         * an uninitialised one for NULL (`picture.js`).
+         */
+        OleCreatePictureIndirect: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([desc, riid, own, out])=>{
+                if (!pictures)
+                {
+                    report('OLE Automation', 'OleCreatePictureIndirect: no COM to publish with',
+                        'loss');
+                    return E_NOTIMPL;
+                }
+                if ((riid >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                return pictures.create(desc >>> 0, readGuid(host, riid >>> 0), (own >>> 0) !== 0,
+                    out >>> 0);
+            },
+        },
+
+        /**
+         * HRESULT OleLoadPicture(LPSTREAM lpstream, LONG lSize, BOOL fRunmode,
+         *   REFIID riid, LPVOID *lplpvObj)
+         *
+         * The picture an image in a stream makes, read through the stream's
+         * own Read from where it stands: lSize bytes, or all it has for 0.
+         */
+        OleLoadPicture: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([stream, size, , riid, out])=>{
+                if (!pictures)
+                {
+                    report('OLE Automation', 'OleLoadPicture: no COM to publish with', 'loss');
+                    return E_NOTIMPL;
+                }
+                if ((riid >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                return pictures.load(stream >>> 0, size | 0, readGuid(host, riid >>> 0),
+                    out >>> 0);
+            },
+        },
+
+        /**
          * HRESULT OleCreateFontIndirect(LPFONTDESC lpFontDesc, REFIID riid,
          *   LPVOID *lplpvObj)
          *
@@ -5944,6 +6014,8 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     411: 'SafeArrayCreateVector',
     412: 'SafeArrayCopyData',
     417: 'OleCreatePropertyFrame',
+    418: 'OleLoadPicture',
+    419: 'OleCreatePictureIndirect',
     420: 'OleCreateFontIndirect',
     425: 'VarUI4FromI8',
     426: 'VarUI4FromUI8',

@@ -4625,6 +4625,9 @@ export function createWin32Module(){
                     /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
+                    // A picture is drawn and made with GDI and user32's calls.
+                    gdi32: name=>libraries['GDI32.dll']?.[name],
+                    user32: name=>libraries['USER32.dll']?.[name],
                 }),
             };
 
