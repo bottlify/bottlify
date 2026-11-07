@@ -22,14 +22,15 @@ import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
-/** @param {string[]} [features] */
-function rig(features = []){
+/** @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks */
+function rig(features = [], compressedTextures = false){
     const gpu = createFakeDevice({ features });
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const said = [];
     const renderer = createGpuRenderer({
         backend,
+        compressedTextures,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         divergence: detail=>said.push(detail),
     });
@@ -362,7 +363,7 @@ test('glCopyImageSubData between two images of one format is the device\'s copy'
     assert.deepEqual(r.said, []);
 });
 
-test('glCopyImageSubData across two formats is made here, and its box goes up', async()=>{
+test('glCopyImageSubData across two formats of one texel size goes through a buffer', async()=>{
     const r = rig();
     const { context } = r;
     const [from, into] = context.glGenTextures(2);
@@ -375,16 +376,52 @@ test('glCopyImageSubData across two formats is made here, and its box goes up', 
     context.glEnable(GL.TEXTURE_2D);
     r.draw();
     await r.swap();
+    const surface = surfaceOf(r, into).texture;
+    /** The uploads into the destination. */
+    const uploads = ()=>r.gpu.of('writeTexture').filter((/** @type {any} */ write)=>
+        write.destination.texture === surface).length;
+    const before = uploads();
     context.glCopyImageSubData(from, GL.TEXTURE_2D, 0, 0, 0, 0, into, GL.TEXTURE_2D, 0, 1, 0, 0,
         1, 1, 1);
     assert.equal(context.glGetError(), GL.NO_ERROR);
     r.draw();
     await r.swap();
     assert.equal(r.gpu.of('copyTextureToTexture').length, 0, 'rgba8uint is not r32float');
-    const held = surfaceOf(r, into).texture.bytes;
-    assert.deepEqual(Array.from(new Float32Array(held.buffer, held.byteOffset, 2)), [0, 1],
-        'the float those bytes spell, in the box');
+    const [down] = r.gpu.of('copyTextureToBuffer');
+    const [up] = r.gpu.of('copyBufferToTexture').filter((/** @type {any} */ copy)=>
+        copy.destination.texture === surface);
+    assert.equal(down?.source.texture, surfaceOf(r, from).texture);
+    assert.deepEqual(up?.destination.origin, { x: 1, y: 0, z: 0 });
+    assert.equal(uploads(), before, 'nothing made here went up');
 });
+
+for (const features of [[], ['texture-compression-bc']])
+{
+    test(`blocks copied into texels are made here, the box to go up (${features})`, async()=>{
+        const r = rig(features, features.length > 0);
+        const { context } = r;
+        const [from, into] = context.glGenTextures(2);
+        const blocks = Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
+        context.glBindTexture(GL.TEXTURE_2D, from);
+        context.glTexStorage2D(GL.TEXTURE_2D, 1, TEX.COMPRESSED_RED_RGTC1, 4, 4);
+        context.glCompressedTexSubImage2DARB(GL.TEXTURE_2D, 0, 0, 0, 4, 4,
+            TEX.COMPRESSED_RED_RGTC1, 8, blocks);
+        context.glBindTexture(GL.TEXTURE_2D, into);
+        context.glTexStorage2D(GL.TEXTURE_2D, 1, TEX.RG32UI, 1, 1);
+        context.glCopyImageSubData(from, GL.TEXTURE_2D, 0, 0, 0, 0, into, GL.TEXTURE_2D, 0, 0, 0,
+            0, 4, 4, 1);
+        assert.equal(context.glGetError(), GL.NO_ERROR);
+        await r.swap();
+        assert.equal(r.gpu.of('copyTextureToTexture').length + r.gpu.of('copyTextureToBuffer')
+            .length, 0, 'a block is no texel to a device copy, decoded or not');
+        assert.deepEqual([...context.side.textureBoundAt(0, GL.TEXTURE_2D).dirty],
+            [[0, { x: 0, y: 0, width: 1, height: 1 }]], 'the box is to go up');
+        assert.deepEqual(Array.from(context.glGetTextureSubImage(into, 0, { x: 0, y: 0, z: 0,
+            width: 1, height: 1, depth: 1 }, TEX.RG_INTEGER, GL.UNSIGNED_INT, 8)),
+        Array.from(blocks), 'one block, one texel');
+        assert.deepEqual(r.said, []);
+    });
+}
 
 test('a colour renderbuffer is a copy\'s source on the device', async()=>{
     const r = rig();
@@ -436,4 +473,24 @@ test('a level the device copied into is not uploaded over from this side', async
     await r.swap();
     assert.equal(r.gpu.of('copyTextureToTexture').length, 1);
     assert.equal(uploads(), before, 'what the device drew in the source is the copy\'s');
+});
+
+test('a level kept in other bits than its own is copied here, to another format', async()=>{
+    const r = rig();
+    const { context } = r;
+    const [from, into] = context.glGenTextures(2);
+    context.glBindTexture(GL.TEXTURE_2D, from);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, TEX.R16, 1, 1, 0, GL.RED, GL.UNSIGNED_SHORT,
+        Uint8Array.from([0x00, 0x3c]));
+    context.glBindTexture(GL.TEXTURE_2D, into);
+    context.glTexStorage2D(GL.TEXTURE_2D, 1, TEX.R16F, 1, 1);
+    context.glCopyImageSubData(from, GL.TEXTURE_2D, 0, 0, 0, 0, into, GL.TEXTURE_2D, 0, 0, 0, 0,
+        1, 1, 1);
+    await r.swap();
+    assert.equal(surfaceOf(r, from).descriptor.format, 'r16float', 'R16 kept as half floats');
+    assert.equal(r.gpu.of('copyTextureToTexture').length + r.gpu.of('copyTextureToBuffer')
+        .length, 0, 'the half float of R16 is not its bits');
+    assert.deepEqual(Array.from(context.glGetTextureSubImage(into, 0, { x: 0, y: 0, z: 0,
+        width: 1, height: 1, depth: 1 }, GL.RED, TEX.HALF_FLOAT, 2)), [0x00, 0x3c],
+    'the bits, here: the half float one');
 });

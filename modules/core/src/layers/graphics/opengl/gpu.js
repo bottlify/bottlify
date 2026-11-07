@@ -3263,7 +3263,7 @@ export function createGpuRenderer(services){
      *
      * @param {import('./kernel.js').CopiedImage} image @param {Recording} recording
      * @returns {{ texture: any, format: string, internal: number, converted: boolean,
-     *     oneArray: boolean } | null}
+     *     oneArray: boolean, bytes: number, blocks: boolean } | null}
      */
     const copiedSide = (image, recording)=>{
         if (image.renderbuffer)
@@ -3276,7 +3276,9 @@ export function createGpuRenderer(services){
                 return null;
             }
             return { texture: renderbufferSurface(rb, false).texture, format: TEXTURE_FORMAT,
-                internal: rb.internalFormat, converted: false, oneArray: false };
+                internal: rb.internalFormat,
+                converted: rb.internalFormat !== GL.RGBA8 && rb.internalFormat !== GL.RGBA,
+                oneArray: false, bytes: 4, blocks: false };
         }
         const texture = /** @type {import('./objects.js').TextureObject} */ (image.texture);
         const level = texture.levels.get(levelKey(image.level));
@@ -3286,18 +3288,26 @@ export function createGpuRenderer(services){
         {
             return null;
         }
+        const blocks = /^(bc|astc|etc)/.test(held.format);
         return { texture: held.gpu.texture, format: held.format,
             internal: level.internalFormat,
-            // A legacy level lives as eight-bit RGBA whatever its format.
-            converted: held.storage ? held.storage.conversion !== null : true,
-            oneArray: texture.target === TEX.TEXTURE_1D_ARRAY };
+            // A legacy level lives as eight-bit RGBA whatever its format, or
+            // as the blocks it was given.
+            converted: held.storage ? held.storage.conversion !== null
+                : !blocks && level.internalFormat !== GL.RGBA8,
+            oneArray: texture.target === TEX.TEXTURE_1D_ARRAY,
+            // A block's bytes, which the format table does not give.
+            bytes: blocks ? (/^bc[14]-/.test(held.format) ? 8 : 16) : held.storage?.bytes ?? 4,
+            blocks };
     };
 
     /**
      * glCopyImageSubData on the device: the box copied between the two
-     * surfaces where both hold their images as the same texels -- one
-     * format, neither converted on its way up (a 16-bit normalised level
-     * kept as half floats holds other bits than its own). Anything else is
+     * surfaces where both hold their images as their own bits -- neither
+     * converted on its way up (a 16-bit normalised level kept as half floats
+     * holds other bits than its own) -- texel for texel or block for block:
+     * surface to surface in one format, through a buffer across two.
+     * Anything else (blocks into texels, a 1D array's layers into rows) is
      * the processor's copy, uploaded.
      *
      * @param {object} context
@@ -3313,8 +3323,13 @@ export function createGpuRenderer(services){
         const recording = recordingOf(context);
         const source = copiedSide(from, recording);
         const target = source && copiedSide(into, recording);
-        if (!source || !target || source.format !== target.format
-            || ((source.converted || target.converted) && source.internal !== target.internal))
+        if (!source || !target || source.oneArray !== target.oneArray)
+        {
+            return false;
+        }
+        const same = source.format === target.format;
+        if (((source.converted || target.converted) && source.internal !== target.internal)
+            || source.bytes !== target.bytes || source.blocks !== target.blocks)
         {
             return false;
         }
@@ -3327,7 +3342,8 @@ export function createGpuRenderer(services){
             /** @type {boolean} */ oneArray)=>(oneArray ? { x: image.x, y: 0, z: image.y }
             : { x: image.x, y: image.y, z: image.z });
         recording.commands.push({
-            kind: 'image',
+            kind: same ? 'image' : 'reinterpret',
+            bytes: source.bytes,
             from: { texture: source.texture, mipLevel: from.level,
                 origin: corner(from, source.oneArray) },
             to: { texture: target.texture, mipLevel: into.level,
@@ -4064,6 +4080,13 @@ export function createGpuRenderer(services){
                 if (command.kind === 'image')
                 {
                     frame.copyTexture(command.from, command.to, command.size);
+                    pass = null;
+                    continue;
+                }
+                if (command.kind === 'reinterpret')
+                {
+                    frame.copyThroughBuffer(command.from, command.to, command.size,
+                        command.bytes);
                     pass = null;
                     continue;
                 }
