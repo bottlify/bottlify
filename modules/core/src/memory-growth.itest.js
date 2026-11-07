@@ -8,8 +8,9 @@
  * A process's memory holds what the program has been given, and grows as it is
  * given more (`engineAreaFor`, the cpu layer's `growTo`): a program that commits
  * half a gigabyte has a memory of that order, not the whole RAM it may reach.
- * A memory of 4 GiB gives a program linked /LARGEADDRESSAWARE addresses past
- * 2 GiB, as a 64-bit Windows does, and any other program none.
+ * A memory of 4 GiB is a 64-bit Windows's: it gives a program linked
+ * /LARGEADDRESSAWARE addresses past 2 GiB under WOW64, and any other program none;
+ * on a machine named 32-bit, none at all.
  */
 
 import { test } from 'node:test';
@@ -105,7 +106,7 @@ const highCommit = largeAddressAware=>buildExe({ imports, largeAddressAware, cod
         ...failing(iat),
     ]) });
 
-test('a memory of 4 GiB gives a large-address-aware program addresses past 2 GiB, and only it',
+test('a memory of 4 GiB is a 64-bit Windows: a large-address-aware program past 2 GiB, only it',
     { timeout: 120_000 }, async t=>{
         const ram = 2 ** 32;
         watchMemories(t, ram);
@@ -121,4 +122,33 @@ test('a memory of 4 GiB gives a large-address-aware program addresses past 2 GiB
         t.after(()=>plain.dispose());
         assert.equal(await plain.run({ timeoutMs: 60_000 }), 7,
             'a program not linked for it is refused the address');
+        await plain.dispose();
+
+        const narrow = await createApp({ executable: highCommit(true),
+            imagePath: 'C:\\App\\aware.exe', memorySize: ram, machine: 'x86' });
+        t.after(()=>narrow.dispose());
+        assert.equal(await narrow.run({ timeoutMs: 60_000 }), 7,
+            'a 32-bit Windows gives none, whatever the program is linked for');
+    });
+
+test('a memory grown whole keeps the shared page past the heap\'s end, where it is its own',
+    { timeout: 120_000 }, async t=>{
+        const ram = 2 ** 28;
+        const made = watchMemories(t, ram);
+        // 32 MiB committed, the last byte written: the memory grows to the whole
+        // 256 MiB, and the shared page to 0x0FFE0000, past the heap's span.
+        const executable = buildExe({ imports, codeSize: 0x80, code: ({ iat })=>assemble([
+            ...commit(iat, 0, 32 * MIB),
+            0xc6, 0x80, ...u32(32 * MIB - 1), 1, //              mov byte [eax + 32 MiB - 1], 1
+            0xa1, ...u32(0x7ffe026c), //                         mov eax, [NtMajorVersion]
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')), //    push eax; ExitProcess
+            ...failing(iat),
+        ]) });
+        const app = await createApp({ executable, imagePath: 'C:\\App\\whole.exe',
+            memorySize: ram });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 5,
+            'committed, and the shared page read where it moved: Windows XP is NT 5');
+        assert.equal(made.length, 1);
+        assert.equal(made[0].buffer.byteLength >= ram, true, 'grown to the whole RAM');
     });

@@ -27,23 +27,29 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
  * One part of the corpus: the cases whose index is `part` modulo `of`.
  *
  * @param {number} part @param {number} of
- * @param {{ executor?: number, shared?: boolean }} [where]  the executor of a shared memory
- *     the machine is: its state and tables past the first's, as for every executor of a
- *     process but the first; shared: the code translated for the process's shared layout,
- *     run with this executor's bases
+ * @param {{ executor?: number, shared?: boolean, growing?: boolean }} [where]  the
+ *     executor of a shared memory the machine is: its state and tables past the first's, as
+ *     for every executor of a process but the first; shared: the code translated for the
+ *     process's shared layout, run with this executor's bases; growing: a memory that grows
+ *     (`ownLayout`'s `ramFloor`), its tables inside the RAM past the cases' pages, holding
+ *     the RAM up to them
  */
-export function testTranslatedCorpus(part, of, { executor = 0, shared = false } = {}){
+export function testTranslatedCorpus(part, of,
+    { executor = 0, shared = false, growing = false } = {})
+{
     test(`translated code leaves what the processor left, on every case it translates in full`
         + ` (part ${part + 1} of ${of}${executor > 0 ? `, executor ${executor}` : ''}`
-        + `${shared ? ', the shared layout' : ''})`,
+        + `${shared ? ', the shared layout' : ''}${growing ? ', a growing memory' : ''})`,
     ()=>{
         const cases = loadX86Corpus()
             .filter((one, index)=>index % of === part && ONLY.test(one.name));
         const started = Date.now();
         const result = judgeAll(cases, 'translated', one=>{
             // Judged against the hardware, so exact where the fast default is not.
-            const m = createTestMachine({ ramSize: 2 << 20, precise: true, executor, shared,
-                processors: shared ? Math.max(2, executor + 1) : 1 });
+            const m = createTestMachine({ ramSize: growing ? 64 << 20 : 2 << 20, precise: true,
+                executor, shared, processors: shared ? Math.max(2, executor + 1) : 1,
+                ...growing ? { hashSlots: 1 << 12, growing: { tablesAt: 2 << 20, floor: 8 << 20 } }
+                    : {} });
             const view = new DataView(m.memory.buffer);
             placeCase(view, m.layout, one);
             const exit = m.runProgram(CORPUS_LAYOUT.CODE_AT, { budget: 100_000 });

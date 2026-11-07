@@ -752,7 +752,9 @@ class Dispatcher {
     /**
      * The return addresses of the two frames an EBP chain names from `ebp`,
      * into `chainFirst` and `chainSecond`, zero where the chain ends sooner; a
-     * frame outside mapped memory ends it. Numbers rather than text: a sampled
+     * frame outside mapped memory, or in a region nothing may read (the
+     * engine's range of a growing memory, which an EBP a program uses as a
+     * plain register may point into), ends it. Numbers rather than text: a sampled
      * crossing runs this tens of thousands of times a second, and text made
      * at each was megabytes of garbage a second for a statistic.
      *
@@ -765,7 +767,7 @@ class Dispatcher {
         for (let depth = 0; depth < 2 && frame !== 0; depth++)
         {
             const region = this.memory.find?.(frame);
-            if (!region || frame + 8 > region.base + region.size)
+            if (!region || region.access === 'none' || frame + 8 > region.base + region.size)
             {
                 break;
             }

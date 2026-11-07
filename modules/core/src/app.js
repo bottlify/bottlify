@@ -38,7 +38,7 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { installedHeaders } from './layers/loader/internal/synth.js';
 import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
-import { KUSER, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
+import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
@@ -4054,10 +4054,11 @@ async function buildApp(options){
     // pool with room for only one thread.
     const threadStackSize = Math.min(stackReserveOf(mainImage.stackReserve),
         Math.floor(STACK_POOL_WHOLE / 16));
-    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB, as a
-    // 64-bit Windows gives them, where the RAM reaches them; any other stays
-    // below, where it may keep a pointer's sign.
+    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB on a
+    // 64-bit Windows, where the RAM reaches them; any other stays below, where it
+    // may keep a pointer's sign, and so does every program on a 32-bit one.
     const HEAP_SIZE = memorySize > 2 ** 31 && mainImage.largeAddressAware
+        && (long || options.machine === 'amd64')
         && options.heapSize === undefined
         ? LARGE_ADDRESS_TOP - HEAP_BASE : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
@@ -7361,8 +7362,13 @@ async function buildApp(options){
             + ` the shared page is kept at 0x${sharedAt.toString(16)}`);
     }
     const version = windowsVersion(options.windows);
+    // Inside the heap's span the page is no region of its own; at the top of a
+    // memory grown whole, past the heap's end, it is one, as in a fixed memory.
+    /** @param {number} at */
+    const ownsPlace = at=>!growing || memory.find(at) === undefined;
+    let sharedOwn = ownsPlace(sharedAt);
     let sharedData = createSharedUserData({ memory, version, at: sharedAt,
-        ownRegion: !growing });
+        ownRegion: sharedOwn });
     const refresh = ()=>sharedData?.refresh(kernel.clock.virtualTime(),
         kernel.clock.wallClock());
     if (sharedData)
@@ -7383,10 +7389,18 @@ async function buildApp(options){
                 return;
             }
             // Its old place becomes the heap's: left as zeros, as arena never
-            // handed out is.
-            memory.writeBytes(sharedAt, new Uint8Array(KUSER.SIZE));
+            // handed out is. A region of its own is given back instead.
+            if (sharedOwn)
+            {
+                memory.unregister(KUSER_REGION);
+            }
+            else
+            {
+                memory.writeBytes(sharedAt, new Uint8Array(KUSER.SIZE));
+            }
             sharedAt = at;
-            sharedData = createSharedUserData({ memory, version, at, ownRegion: false });
+            sharedOwn = ownsPlace(at);
+            sharedData = createSharedUserData({ memory, version, at, ownRegion: sharedOwn });
             refresh();
         });
     }
@@ -10082,12 +10096,18 @@ export async function createApp(options){
 
     /**
      * The machine every process of the run is on (`AppOptions.machine`): as
-     * the caller says, else as wide as the run's first program. An image that
-     * cannot be read here is left for its own build to refuse.
+     * the caller says, else as wide as the run's first program. A memory past
+     * 2 GiB is a 64-bit Windows's: only there does a 32-bit program get addresses
+     * past 2 GiB, under WOW64. An image that cannot be read here is left for its
+     * own build to refuse.
      *
      * @type {'x86' | 'amd64'}
      */
     const runMachine = options.machine ?? (()=>{
+        if ((options.memorySize ?? 0) > 2 ** 31)
+        {
+            return 'amd64';
+        }
         try
         {
             return options.executable && programImage(options.executable).bits === 64

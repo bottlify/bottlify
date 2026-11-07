@@ -5,51 +5,42 @@
  */
 
 /**
- * An executor's state page holds words that different parts of the
- * translator place by their own constants: the state block, a diagnostic
- * build's block mark, the NaN hunt's record, the interrupt word, the return
- * addresses of calls waiting as wasm calls, a growing layout's wrap word, and
- * past the page the wasm interpreter's statics. Two of them in one place is a
- * word each writes over the other's: the wrap word lay inside the return
- * stack, and the 125th call waiting stored its return address as the mask
- * every untested read was wrapped by.
+ * What lies in an executor's state page, each at its own offset: the state
+ * block, the NaN record, the interrupt word, the call stack with its deepest
+ * return address, the wrap word, and the wasm interpreter's statics past the
+ * page. A growing memory's wrap word inside the call stack had the 124th
+ * nested translated call overwrite the mask every untested read is wrapped
+ * by, and the reads that followed read anywhere.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { STATE_BLOCK_SIZE, WRAP_WORD, ownLayout } from './layout.js';
-import { BLOCK_MARK_AT, CallStack } from '../emit/region.js';
+import { CallStack } from '../emit/region.js';
 import { NanRecord } from '../emit/x87.js';
 import { WASM_INTERPRETER_STATICS_AT } from '../interp-wasm.js';
 
-const MIB = 1 << 20;
-
-test('the words of a growing layout\'s state page lie apart, inside the page', ()=>{
-    const layout = ownLayout({ ramSize: 64 * MIB, ramBase: 0, tablesAt: 4 * MIB,
-        ramFloor: 8 * MIB, processors: 2 });
-    const from = layout.regs;
-    assert.equal(/** @type {number} */ (layout.wrap) - from, WRAP_WORD);
-    // What, where from the page's start, and its bytes.
-    const words = /** @type {[string, number, number][]} */ ([
+test('the state page\'s occupants lie apart, the wrap word past the deepest call', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 30, ramBase: 0, tablesAt: 1 << 26,
+        ramFloor: 1 << 27, processors: 2 });
+    const state = layout.regs;
+    assert.equal(/** @type {number} */ (layout.wrap) - state, WRAP_WORD);
+    /** @type {[string, number, number][]} */
+    const occupants = [
         ['state block', 0, STATE_BLOCK_SIZE],
-        ['block mark', BLOCK_MARK_AT, 4],
-        ['NaN record', /** @type {number} */ (layout.nanFirst) - from, NanRecord.SIZE],
-        ['interrupt word', /** @type {number} */ (layout.interrupt) - from, 4],
-        ['call depth', CallStack.DEPTH, 4],
-        ['call budget', CallStack.BUDGET, 4],
-        ['return addresses', CallStack.STACK, 4 * CallStack.LIMIT],
-        ['wrap word', /** @type {number} */ (layout.wrap) - from, 4],
-    ]).sort((a, b)=>a[1] - b[1]);
-    for (let i = 0; i < words.length; i++)
+        ['NaN record', /** @type {number} */ (layout.nanFirst) - state, NanRecord.SIZE],
+        ['interrupt word', /** @type {number} */ (layout.interrupt) - state, 4],
+        ['call stack', CallStack.DEPTH, CallStack.STACK + CallStack.LIMIT * 4 - CallStack.DEPTH],
+        ['wrap word', WRAP_WORD, 4],
+    ];
+    occupants.sort((a, b)=>a[1] - b[1]);
+    for (let i = 1; i < occupants.length; i++)
     {
-        const [what, at, bytes] = words[i];
-        assert.ok(at >= 0 && at + bytes <= WASM_INTERPRETER_STATICS_AT,
-            `the ${what} (${at}, ${bytes} bytes) lies in the page, short of the interpreter's`);
-        if (i > 0)
-        {
-            const [before, beforeAt, beforeBytes] = words[i - 1];
-            assert.ok(beforeAt + beforeBytes <= at,
-                `the ${before} (${beforeAt}, ${beforeBytes} bytes) reaches the ${what} (${at})`);
-        }
+        const [before, at, size] = occupants[i - 1];
+        assert.ok(at + size <= occupants[i][1],
+            `${before} (${at}+${size}) runs into ${occupants[i][0]} at ${occupants[i][1]}`);
     }
+    const [last, at, size] = occupants[occupants.length - 1];
+    assert.ok(at + size <= WASM_INTERPRETER_STATICS_AT,
+        `${last} runs into the wasm interpreter's statics`);
 });

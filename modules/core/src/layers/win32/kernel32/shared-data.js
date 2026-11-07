@@ -26,6 +26,9 @@ import { PROCESSOR_FEATURES } from './processor.js';
 
 export const SHARED_USER_DATA = 0x7ffe0000;
 
+/** The name of the page's own region, where it has one (`ownRegion`). */
+export const KUSER_REGION = 'kuser-shared-data';
+
 /**
  * Where in RAM the page is kept: at its own address in a RAM that reaches it;
  * in a smaller one 128 KiB short of RAM's end, which is where the translator
@@ -97,7 +100,7 @@ export function createSharedUserData(options){
         ownRegion = true } = options;
     /** @param {string} access */
     const region = access=>ownRegion && memory.register({
-        name: 'kuser-shared-data',
+        name: KUSER_REGION,
         base: place,
         size: KUSER.SIZE,
         kind: memory.RegionKind.THUNK_DATA,
@@ -136,13 +139,13 @@ export function createSharedUserData(options){
         // A machine given less memory than reaches the address has no page.
         if (ownRegion)
         {
-            memory.unregister('kuser-shared-data');
+            memory.unregister(KUSER_REGION);
         }
         return null;
     }
     if (words && ownRegion)
     {
-        memory.unregister('kuser-shared-data');
+        memory.unregister(KUSER_REGION);
         region(memory.Access.READ);
     }
 
