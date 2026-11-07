@@ -418,6 +418,16 @@ function readsStencilReference(face){
 }
 
 /**
+ * One image of a copy between images (glCopyImageSubData): a texture's level
+ * or a renderbuffer, and the corner of the box in it -- for a cube map, z is
+ * the face; for a 1D array, y is the layer.
+ *
+ * @typedef {{ texture?: import('./objects.js').TextureObject,
+ *     renderbuffer?: import('./objects.js').RenderbufferObject, level: number,
+ *     x: number, y: number, z: number }} CopiedImage
+ */
+
+/**
  * @param {GpuServices} services
  */
 export function createGpuRenderer(services){
@@ -3261,7 +3271,7 @@ export function createGpuRenderer(services){
      * device does not hold it as plain texels (a depth or stencil image,
      * whose formats a device copy refuses; a level past the copy's chain).
      *
-     * @param {import('./kernel.js').CopiedImage} image @param {Recording} recording
+     * @param {CopiedImage} image @param {Recording} recording
      * @returns {{ texture: any, format: string, internal: number, converted: boolean,
      *     oneArray: boolean, bytes: number, blocks: boolean } | null}
      */
@@ -3311,7 +3321,7 @@ export function createGpuRenderer(services){
      * the processor's copy, uploaded.
      *
      * @param {object} context
-     * @param {import('./kernel.js').CopiedImage} from @param {import('./kernel.js').CopiedImage} into
+     * @param {CopiedImage} from @param {CopiedImage} into
      * @param {{ width: number, height: number, depth: number }} size
      * @returns {boolean} whether the device copies it
      */
@@ -3338,7 +3348,7 @@ export function createGpuRenderer(services){
         const block = /^(bc|astc|etc)/.test(source.format) ? 4 : 1;
         const round = (/** @type {number} */ extent)=>Math.ceil(extent / block) * block;
         // A 1D array's layer is its y.
-        const corner = (/** @type {import('./kernel.js').CopiedImage} */ image,
+        const corner = (/** @type {CopiedImage} */ image,
             /** @type {boolean} */ oneArray)=>(oneArray ? { x: image.x, y: 0, z: image.y }
             : { x: image.x, y: image.y, z: image.z });
         recording.commands.push({

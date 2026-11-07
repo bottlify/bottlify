@@ -47,10 +47,11 @@ import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-index
 import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
 import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
 import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
+import { DSA_CALLS_NOT_COMPILED, installDirectStateCalls } from './context-dsa.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
-import { installTextureCalls } from './context-textures.js';
+import { TEXTURE_CALLS_NOT_COMPILED, installTextureCalls } from './context-textures.js';
 import { installLightingCalls } from './context-lighting.js';
 import { installArrayCalls } from './context-arrays.js';
 import { installPixelCalls } from './context-pixels.js';
@@ -124,7 +125,7 @@ const NOT_COMPILABLE = new Set([
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
-    ...QUERY_CALLS_NOT_COMPILED,
+    ...QUERY_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED, ...DSA_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -1793,6 +1794,8 @@ export function createGlContext(options = {}){
     installSyncCalls(context, kernel);
     installSamplerCalls(context, kernel);
     installQueryCalls(context, kernel);
+    // After every other: its calls drive their work.
+    installDirectStateCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 
