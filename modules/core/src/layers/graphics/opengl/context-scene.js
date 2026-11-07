@@ -20,6 +20,7 @@ import { TEX } from './formats.js';
 import { colourMaterialTargets, lightVertex, normalMatrix, normalise } from './lighting.js';
 import { levelKey, swizzleCode } from './objects.js';
 import { compare, drawPrimitive } from './pipeline.js';
+import { TESS } from './context-tessellation.js';
 
 /**
  * The blend factor for one channel, as the specification's table gives it.
@@ -437,6 +438,11 @@ export function createSceneBuilder(kernel){
             boundTextures,
             uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
             feedback: glsl ? side.feedbackSession?.() ?? null : null,
+            patch: glsl?.linked.tessEvaluation ? {
+                vertices: record(TESS.PATCH_VERTICES).values[0],
+                outer: record(TESS.PATCH_DEFAULT_OUTER_LEVEL).values,
+                inner: record(TESS.PATCH_DEFAULT_INNER_LEVEL).values,
+            } : null,
             discard: on(GL.RASTERIZER_DISCARD),
 
             /**

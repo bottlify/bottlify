@@ -202,6 +202,9 @@ import { swizzleTexel } from './objects.js';
  *           what transform feedback captures a draw into, while it does
  *           (`context-transform-feedback.js` FeedbackSession)
  * @property {boolean} [discard]  GL_RASTERIZER_DISCARD: the draw rasterizes nothing
+ * @property {{ vertices: number, outer: readonly number[], inner: readonly number[] }
+ *     | null} [patch]  GL_PATCH_VERTICES and the default levels, for a program with
+ *           tessellation shaders (`context-tessellation.js`)
  */
 
 /**

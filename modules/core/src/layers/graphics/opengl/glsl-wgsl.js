@@ -196,7 +196,20 @@ export function feedbackWrites(program, first, vertexPass){
  */
 export const geometryInputRegisters = program=>2 + (program.geometry
     ? program.geometryInputs.reduce((n, input)=>n + registersOf(input.type), 0)
-    : feedbackLeaves(program, true).reduce((n, leaf)=>n + registersOf(leaf.type), 0));
+    : program.tessEvaluation ? tessellationInputs(program)
+        .reduce((n, input)=>n + registersOf(input.type), 0)
+        : feedbackLeaves(program, true).reduce((n, leaf)=>n + registersOf(leaf.type), 0));
+
+/**
+ * What the vertex pass keeps of a control point after gl_Position and
+ * gl_PointSize: what the control shader reads, or without one what the
+ * evaluation shader reads (`glsl-link-tess.js`).
+ *
+ * @param {LinkedProgram} program
+ * @returns {{ path: string, type: GlslType }[]}
+ */
+export const tessellationInputs = program=>((program.tessControl ? program.controlInputs
+    : program.evaluationInputs) ?? []).map(input=>({ path: input.fromPath, type: input.type }));
 
 /**
  * A value of a type the stages pass as the four words of a register, and
@@ -377,6 +390,21 @@ export function textureLayoutOf(type){
  *     geometry shader after it (`vertexCompute`)
  * @property {Map<number, string>} [swizzles]  the swizzle (3.3) of the texture each
  *     sampler reads, where it is not the identity (`objects.js` swizzleCode)
+ * @property {(context: TessEntryContext) => string} [entry]
+ *     a tessellation stage's entry point (`glsl-wgsl-tess.js`)
+ */
+
+/**
+ * What a tessellation stage's entry point is made of: `emitStage`'s, for the stage.
+ *
+ * @typedef {Object} TessEntryContext
+ * @property {LinkedProgram} program
+ * @property {LinkedStage} linked
+ * @property {string} p  the stage's prefix
+ * @property {(source: string, type: GlslType) => { code: string, type: string }[]} leavesOf
+ * @property {string[]} initial  the globals' initializers
+ * @property {string[]} declarations
+ * @property {string[]} out  the draw's outputs written from the stage's (`VertexOut`)
  */
 
 /**
@@ -582,7 +610,7 @@ const SIMPLE = /^([A-Za-z_][A-Za-z0-9_.]*|[0-9][0-9.e+]*[fi]?)$/;
 
 /**
  * @param {LinkedProgram} program
- * @param {'vertex' | 'geometry' | 'fragment'} which
+ * @param {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'} which
  * @param {StageOptions} options
  * @param {Interface | null} given  the interface the other stage chose, for
  *     the fragment stage; null for the vertex stage, which chooses it
@@ -594,7 +622,16 @@ export function emitStage(program, which, options, given, partner){
     const vertex = which === 'vertex';
     const geometry = which === 'geometry';
     const fragment = which === 'fragment';
-    const p = vertex ? 'v' : geometry ? 'y' : 'f';
+    const tessControl = which === 'tessControl';
+    const tessEvaluation = which === 'tessEvaluation';
+    const p = vertex ? 'v' : geometry ? 'y' : tessControl ? 'c' : tessEvaluation ? 'e' : 'f';
+    /**
+     * A control shader's outputs are its workgroup's: one invocation reads
+     * what another wrote after barrier() (`glsl-wgsl-tess.js`).
+     *
+     * @param {boolean} shared
+     */
+    const space = shared=>(shared ? 'workgroup' : 'private');
     const names = namer(p);
     /** @param {StructType} s */
     const structName = s=>names.value(s);
@@ -921,7 +958,8 @@ export function emitStage(program, which, options, given, partner){
             continue;
         }
         declareStructs(symbol.type);
-        privates.push(`var<private> ${p}g_${symbol.name}: ${typeOf(symbol.type)};`);
+        privates.push(`var<${space(tessControl && symbol.storage === 'out')}>`
+            + ` ${p}g_${symbol.name}: ${typeOf(symbol.type)};`);
     }
     for (const name of linked.uses)
     {
@@ -932,15 +970,18 @@ export function emitStage(program, which, options, given, partner){
             continue;
         }
         declareStructs(type);
-        privates.push(`var<private> ${p}${name}: ${typeOf(type)};`);
+        privates.push(`var<${space(tessControl && (name === 'gl_out'
+            || name === 'gl_TessLevelOuter' || name === 'gl_TessLevelInner'))}>`
+            + ` ${p}${name}: ${typeOf(type)};`);
     }
     // What the entry point reads whether or not main wrote it.
-    const read = vertex ? [['gl_Position', 'vec4f']]
+    const read = vertex || tessEvaluation ? [['gl_Position', 'vec4f']]
         : geometry ? [['gl_Position', 'vec4f'], ['gl_PrimitiveID', 'i32'],
             ...program.feedback?.varyings.some(v=>v.path === 'gl_PointSize')
                 ? [['gl_PointSize', 'f32']] : []]
-            : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
-                program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
+            : tessControl ? []
+                : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
+                    program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
     for (const [name, type] of read)
     {
         if (!linked.uses.has(name))
@@ -2531,6 +2572,13 @@ export function emitStage(program, which, options, given, partner){
                     out.pre.push(node.name === 'EmitVertex' ? `${p}emit();` : `${p}cut();`);
                     return;
                 }
+                // A control shader's invocations meet (4.00 language section
+                // 8.15); it stands only in main, outside any control flow.
+                if (!node.user && node.name === 'barrier' && tessControl)
+                {
+                    out.pre.push('workgroupBarrier();');
+                    return;
+                }
                 if (node.user)
                 {
                     const code = expr(node, out);
@@ -2714,7 +2762,8 @@ ${[...copiesIn, ...body, ...fallback].join('\n')}
                 ? `${p}gl_PointSize` : '1.0f'}), 0u, 0u, 0u);`];
         let at = 2;
         const kept = program.geometry ? program.geometryInputs.map(input=>({
-            path: input.vertexPath, type: input.type })) : feedbackLeaves(program, true);
+            path: input.vertexPath, type: input.type }))
+            : program.tessEvaluation ? tessellationInputs(program) : feedbackLeaves(program, true);
         for (const value of kept)
         {
             for (const leaf of leavesOf(`${p}${value.path}`, value.type))
@@ -2826,7 +2875,14 @@ ${[...linked.uses.has('gl_PrimitiveIDIn')
     /** @type {Interface} */
     const fields = [];
     let entry;
-    if (vertex || geometry)
+    /** @param {string[]} out @returns {TessEntryContext} */
+    const entryContext = out=>({ program, linked, p, leavesOf, initial, declarations, out });
+    if (tessControl)
+    {
+        entry = /** @type {NonNullable<StageOptions['entry']>} */ (options.entry)(
+            entryContext([]));
+    }
+    else if (vertex || geometry || tessEvaluation)
     {
         if (partner === 'glsl')
         {
@@ -2926,7 +2982,10 @@ ${[...linked.uses.has('gl_PrimitiveIDIn')
             inputs.push('@builtin(instance_index) instanceIndex: u32');
             prologue.push(`    ${p}gl_InstanceID = i32(instanceIndex);`);
         }
-        entry = geometry ? geometryEntry() : options.compute ? vertexComputeEntry() : `@vertex
+        entry = geometry ? geometryEntry()
+            : tessEvaluation ? /** @type {NonNullable<StageOptions['entry']>} */ (options.entry)(
+                entryContext(out))
+                : options.compute ? vertexComputeEntry() : `@vertex
 fn vertexMain(${inputs.join(', ')}) -> VertexOut {
 ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
         `    let clip = ${p}gl_Position;`,
@@ -3118,10 +3177,13 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
         merged.push(copies[k], copies[k + 1], copies[k + 2]);
     }
     plan.copies = Int32Array.from(merged);
-    const blockName = vertex ? 'VertexBlock' : geometry ? 'GeometryBlock' : 'FragmentBlock';
+    const blockName = vertex ? 'VertexBlock' : geometry ? 'GeometryBlock'
+        : tessControl ? 'ControlBlock' : tessEvaluation ? 'EvaluationBlock' : 'FragmentBlock';
     const group = fragment ? GLSL_FRAGMENT_GROUP : 0;
-    const binding = vertex ? GLSL_VERTEX_BINDING : geometry ? GLSL_GEOMETRY_BINDING
-        : GLSL_FRAGMENT_BINDING;
+    // The evaluation shader is the draw's vertex stage; the control shader a
+    // compute pass, whose block takes the binding a geometry shader's would.
+    const binding = vertex || tessEvaluation ? GLSL_VERTEX_BINDING
+        : geometry || tessControl ? GLSL_GEOMETRY_BINDING : GLSL_FRAGMENT_BINDING;
     const blockCode = blockMembers.length > 0
         ? `struct ${blockName} {\n${blockMembers.join('\n')}\n};
 @group(${group}) @binding(${binding}) var<uniform> ${p}u: ${blockName};`

@@ -40,6 +40,7 @@ import {
     interfaceStruct, registersOf,
     samplerTypeOf, samplerVarTypeOf, swizzledTexel, textureTypeOf,
 } from './glsl-wgsl.js';
+import { controlEntry, evaluationEntry, tessRegisters } from './glsl-wgsl-tess.js';
 
 /**
  * @typedef {Object} UnitState
@@ -1306,7 +1307,44 @@ ${stage.code}
     };
     try
     {
-        if (program.geometry)
+        if (program.tessEvaluation)
+        {
+            if (!program.vertex || !program.fragment)
+            {
+                throw new Error('tessellation is drawn without a vertex or a fragment shader,'
+                    + ' which this implementation does not do');
+            }
+            if (program.geometry)
+            {
+                throw new Error('a geometry shader after tessellation shaders is drawn, which'
+                    + ' this implementation does not do');
+            }
+            const vertex = emitStage(program, 'vertex', { ...options, compute: true }, null,
+                'glsl');
+            const control = program.tessControl ? emitStage(program, 'tessControl',
+                { ...options, entry: controlEntry }, null, 'glsl') : null;
+            const evaluation = emitStage(program, 'tessEvaluation',
+                { ...options, entry: evaluationEntry }, null, 'glsl');
+            const fragment = emitStage(program, 'fragment', options, evaluation.fields, 'glsl');
+            parts.push(interfaceStruct(evaluation.fields), evaluation.code, fragment.code);
+            stages.vertex = evaluation.plan;
+            stages.fragment = fragment.plan;
+            stages.samplers = [...new Set([...evaluation.usedSamplers,
+                ...fragment.usedSamplers])];
+            stages.blocks = [...new Set([...evaluation.usedBlocks, ...fragment.usedBlocks])];
+            parts.unshift(...samplerDeclarations(program, stages.samplers));
+            stages.tessellation = {
+                vertex: { code: module(vertex, state.attributes.length > 0
+                    ? fixedVertexIn(state) : ''), plan: vertex.plan,
+                samplers: vertex.usedSamplers, blocks: vertex.usedBlocks },
+                control: control ? { code: module(control, ''), plan: control.plan,
+                    samplers: control.usedSamplers, blocks: control.usedBlocks } : null,
+                ...tessRegisters(program),
+                layout: /** @type {import('./glsl-link-tess.js').TessLayout} */ (
+                    program.tessLayout),
+            };
+        }
+        else if (program.geometry)
         {
             if (!program.vertex || !program.fragment)
             {
@@ -1415,6 +1453,21 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  *     with a geometry shader: the draw's vertex stage then reads what they made
  * @property {{ vertex: ComputeStage, inputs: number }} [capture]  the vertex stage as a
  *     pass keeping what transform feedback captures, for a program without one
+ * @property {TessellationPasses} [tessellation]  the passes before the draw, for a
+ *     program with tessellation shaders: the draw's vertex stage is the evaluation shader
+ */
+
+/**
+ * The compute passes a program with tessellation shaders runs before its draw
+ * (`gpu-tessellation.js`).
+ *
+ * @typedef {Object} TessellationPasses
+ * @property {ComputeStage} vertex  its vertex shader over every control point of the draw
+ * @property {ComputeStage | null} control  its control shader, a workgroup a patch
+ * @property {number} inputs  the registers the vertex pass writes a control point
+ * @property {number} pointRegisters  a control point the evaluation shader reads
+ * @property {number} patchRegisters  a patch's levels and values
+ * @property {import('./glsl-link-tess.js').TessLayout} layout
  */
 
 /**

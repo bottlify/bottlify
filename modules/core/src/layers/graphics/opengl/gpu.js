@@ -61,6 +61,7 @@ import {
     topologyOf, vertexRange,
 } from './gpu-layout.js';
 import { createGlGeometry } from './gpu-geometry.js';
+import { TESS_DRAW_ENTRIES, createGlTessellation } from './gpu-tessellation.js';
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
     VERTEX_PROGRAM_BINDING,
@@ -139,6 +140,15 @@ const PRIMITIVES_GENERATED = 0x8c87;
 /** The list a geometry shader's primitives are drawn as, by their vertices. */
 const GEOMETRY_TOPOLOGIES = /** @type {('point-list' | 'line-list' | 'triangle-list')[]} */ ([
     'point-list', 'point-list', 'line-list', 'triangle-list']);
+
+/**
+ * The list the tessellator's primitives are drawn as.
+ *
+ * @param {import('./glsl-link-tess.js').TessLayout} layout
+ * @returns {'point-list' | 'line-list' | 'triangle-list'}
+ */
+const tessellatedTopology = layout=>(layout.pointMode ? 'point-list'
+    : layout.mode === 'isolines' ? 'line-list' : 'triangle-list');
 
 /**
  * GL filter → the sampler's filters.
@@ -649,6 +659,8 @@ export function createGpuRenderer(services){
      * @property {boolean} [glsl]  the textures are visible to the vertex stage too
      * @property {number[]} [blocks]  a GLSL program's uniform blocks the stages read
      * @property {boolean} [geometry]  the draw reads what a geometry shader made (group 2)
+     * @property {boolean} [tessellation]  the draw's vertex stage is an evaluation shader
+     *     reading what the tessellation passes made (group 2)
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -677,11 +689,13 @@ export function createGpuRenderer(services){
             const fragmentBlock = glsl.fragment !== null;
             const blocks = glsl.blocks ?? [];
             const geometry = !!glsl.geometry;
+            const tessellation = !!glsl.tessellation;
             const key = `g${textures.map(t=>`${t.binding}${t.layout.viewDimension}`
                 + `${t.layout.sampleType}${t.layout.multisampled ? 'm' : ''}`).join(',')}|`
                 + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`
-                + `${geometry ? '|gs' : ''}`;
-            return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry };
+                + `${geometry ? '|gs' : ''}${tessellation ? '|ts' : ''}`;
+            return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry,
+                tessellation };
         }
         /** @type {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }[]} */
         const textures = [];
@@ -820,7 +834,7 @@ export function createGpuRenderer(services){
                 }],
             }));
         }
-        else if (plan.geometry)
+        else if (plan.geometry || plan.tessellation)
         {
             groups.push(backend.createBindGroupLayout({ label: `gl:${plan.key}#none`,
                 entries: [] }));
@@ -833,6 +847,12 @@ export function createGpuRenderer(services){
                 entries: [{ binding: 0, visibility: VERTEX_STAGE,
                     buffer: { type: 'read-only-storage' } }],
             }));
+        }
+        else if (plan.tessellation)
+        {
+            // What the tessellation passes made, which the evaluation shader reads.
+            groups.push(backend.createBindGroupLayout({
+                label: `gl:${plan.key}#tessellation`, entries: TESS_DRAW_ENTRIES }));
         }
         const made = {
             groups,
@@ -991,6 +1011,12 @@ export function createGpuRenderer(services){
         backend,
         uniform: view=>scratchUniforms.write(view),
         lose: detail=>lose(detail),
+    });
+    const tessellationPasses = createGlTessellation({
+        backend,
+        uniform: view=>scratchUniforms.write(view),
+        lose: detail=>lose(detail),
+        vertexPass: geometryPasses.vertexPass,
     });
 
     /** The sampler the shown copy is read through: one texel to one pixel. */
@@ -2861,10 +2887,11 @@ export function createGpuRenderer(services){
         // The descriptor only when the key has no pipeline yet: it is a dozen
         // objects a draw, for a state that repeats all frame.
         const passes = generated.glsl?.geometry ?? null;
+        const tessellation = generated.glsl?.tessellation ?? null;
         // A geometry shader's draw reads its vertices out of what the passes
-        // before it made, not out of arrays.
+        // before it made, not out of arrays; so does an evaluation shader's.
         const pipeline = pipelines.get(pipelineKey)
-            ?? pipelineFor(pipelineKey, generated, passes
+            ?? pipelineFor(pipelineKey, generated, passes || tessellation
                 ? { ...drawDescriptor(state), vertexBuffers: [] } : drawDescriptor(state),
             pipelineKey === key ? plan : planOfKinds(plan, kinds));
         // One draw, one MVP: shared with any program stage that reads the
@@ -2984,6 +3011,38 @@ export function createGpuRenderer(services){
             geometry = prepared.drawn;
             kept = prepared.kept;
         }
+        /** @type {any} */
+        let tessellated = null;
+        if (tessellation && executable)
+        {
+            if (scene.feedback)
+            {
+                lose('transform feedback captured nothing of a draw through tessellation'
+                    + ' shaders: this implementation does not capture what they make');
+            }
+            const vertexGroup = computeGroup(tessellation.vertex, GLSL_VERTEX_BINDING, idBias);
+            const controlGroup = tessellation.control
+                ? computeGroup(tessellation.control, GLSL_GEOMETRY_BINDING) : null;
+            const prepared = tessellationPasses.prepare({
+                key: `tess|${key}|${vertexGroup.signature}|${controlGroup?.signature ?? ''}`,
+                passes: tessellation, vertexGroup, controlGroup,
+                slots: slots.map((slot, k)=>({ gpu: slot.gpu, offset: slot.offset,
+                    stride: layout.slots[k]?.stride ?? 0,
+                    instance: (layout.slots[k]?.divisor ?? 0) > 0 })),
+                indices: indices ? { gpu: indices.gpu, offset: indices.offset,
+                    bytes: indices.format === 'uint16' ? 2 : 4 } : null,
+                first, baseVertex, positions: count, instances,
+                patchVertices: scene.patch?.vertices ?? 3,
+                outer: scene.patch?.outer ?? [1, 1, 1, 1],
+                inner: scene.patch?.inner ?? [1, 1],
+            });
+            if (!prepared)
+            {
+                return;
+            }
+            dispatchAll(recording, prepared.passes);
+            tessellated = prepared.drawn;
+        }
         // Transform feedback: what the last pass kept, written into the
         // buffers bound (stream output); without a geometry shader the vertex
         // shader runs as a pass of its own to keep it.
@@ -3011,7 +3070,7 @@ export function createGpuRenderer(services){
             }
         }
         const counting = feedbackCounts.get(context) ?? null;
-        if (counting?.generated && !passes)
+        if (counting?.generated && !passes && !tessellation)
         {
             counting.generated.samples += Math.floor(count / vpp) * instances;
         }
@@ -3127,13 +3186,14 @@ export function createGpuRenderer(services){
             vertexUniforms,
             fragmentUniforms,
             blocks,
-            slots: geometry ? [] : slots,
-            indices: geometry ? null : indices,
+            slots: geometry || tessellated ? [] : slots,
+            indices: geometry || tessellated ? null : indices,
             count,
             first,
             baseVertex,
             instances,
             geometry,
+            tessellation: tessellated,
             bindings,
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
@@ -3817,11 +3877,15 @@ export function createGpuRenderer(services){
         // A flat value is the provoking vertex's: GL's last, WebGPU's first,
         // so where a flat value is drawn each primitive is turned round.
         const glsl = drawn.programs.glsl?.linked ?? null;
-        const provoking = !geometryLayout && drawn.lastProvokes && (drawn.flat
+        // Patches are read in order, a patch's control points after another's.
+        const tessLayout = glsl?.tessEvaluation ? glsl.tessLayout ?? null : null;
+        const provoking = !geometryLayout && !tessLayout && drawn.lastProvokes && (drawn.flat
             || !!glsl?.varyings.some(varying=>varying.interpolation === 'flat'))
             ? lastProvoking(request.mode, request.count) : null;
-        const order = geometryLayout ? geometryOrder(request.mode, request.count) : provoking;
-        const list = geometryLayout ? order === null : provoking ? false : isList(request.mode);
+        const order = tessLayout ? null : geometryLayout
+            ? geometryOrder(request.mode, request.count) : provoking;
+        const list = tessLayout ? true : geometryLayout ? order === null : provoking ? false
+            : isList(request.mode);
         const expanded = list ? null : geometryLayout || provoking
             ? reordered(/** @type {Uint32Array} */ (order), scanned ? scanned.indices : null)
             : /** @type {Uint32Array} */ (expandIndices(request.mode,
@@ -3895,8 +3959,9 @@ export function createGpuRenderer(services){
             indices ? 0 : request.first - from,
             (expanded && !scanned ? request.first : 0) - from
                 + (scanned ? request.baseVertex ?? 0 : 0),
-            geometryLayout ? GEOMETRY_TOPOLOGIES[geometryLayout.outputVertices]
-                : topologyOf(request.mode), instances, from);
+            tessLayout ? tessellatedTopology(tessLayout)
+                : geometryLayout ? GEOMETRY_TOPOLOGIES[geometryLayout.outputVertices]
+                    : topologyOf(request.mode), instances, from);
         return true;
     };
 
@@ -4328,6 +4393,15 @@ export function createGpuRenderer(services){
          * @type {{ command: any, readBack: () => Promise<Uint8Array[]> }[]}
          */
         const tallies = [];
+        /**
+         * The draws through the tessellator, whose asked room is read back
+         * after the frame (`createGlTessellation`'s grow).
+         *
+         * @type {any[]}
+         */
+        const tessellatedDraws = [];
+        /** @type {(() => Promise<Uint8Array[]>) | null} */
+        let roomRead = null;
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -4579,6 +4653,19 @@ export function createGpuRenderer(services){
                     pass.drawIndirect(command.geometry.args.gpu, command.geometry.args.offset,
                         true);
                 }
+                else if (command.tessellation)
+                {
+                    if (!command.fragmentUniforms)
+                    {
+                        pass.setBindings(FRAGMENT_PROGRAM_GROUP,
+                            pipeline.groups[FRAGMENT_PROGRAM_GROUP], []);
+                    }
+                    pass.setBindings(GLSL_GEOMETRY_DRAW_GROUP,
+                        pipeline.groups[GLSL_GEOMETRY_DRAW_GROUP], command.tessellation.group);
+                    pass.drawIndirect(command.tessellation.args.gpu,
+                        command.tessellation.args.offset, false);
+                    tessellatedDraws.push(command.tessellation);
+                }
                 else if (command.indices)
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -4603,6 +4690,12 @@ export function createGpuRenderer(services){
                     probes[probes.length - 1].after = frame.snapshot(target.colour);
                     pass = null;
                 }
+            }
+            if (tessellatedDraws.length > 0)
+            {
+                // Every draw's asked room in one read, after the draws.
+                roomRead = frame.copyOut(tessellatedDraws.map(drawn=>({ buffer: drawn.args.gpu,
+                    offset: drawn.args.offset + tessellationPasses.askedOffset, size: 8 })));
             }
             if (read)
             {
@@ -4664,6 +4757,15 @@ export function createGpuRenderer(services){
             {
                 command.generated.samples += word(results?.[1]);
             }
+        }
+        if (roomRead)
+        {
+            // Not waited for: the room grows for later draws, and this frame's
+            // replay goes on meanwhile.
+            const asked = tessellatedDraws.map(drawn=>drawn.asked);
+            roomRead().then(results=>tessellationPasses.grow(results.map((bytes, k)=>({
+                asked: asked[k], words: new Uint32Array(bytes.buffer, bytes.byteOffset, 2) }))))
+                .catch(()=>{});
         }
         await countQueries(recording, slots, counted);
         return copied ? copied() : null;
@@ -5069,6 +5171,9 @@ export function createGpuRenderer(services){
             samplers: samplers.size,
             unflushed: unflushed.size,
             failures: [...failures],
+            // Draws through the tessellator, the room its buffers have, and
+            // the frames that drew fewer patches than they were given.
+            tessellation: tessellationPasses.diagnostics(),
             // Empty unless the build asked for a dump; the probe texts of the
             // frame's draws land on its lines as the replay resolves them.
             lastDump,

@@ -509,6 +509,7 @@ export function createGlGeometry(services){
 
     return {
         prepare,
+        vertexPass,
         vertexCapture,
         begin,
         streamOut,
