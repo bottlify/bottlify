@@ -53,7 +53,7 @@ import {
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
-import { TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
+import { SIZED_FORMATS, TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
 import { rootKeyOf } from './texture-views.js';
 import {
@@ -1230,7 +1230,11 @@ export function createGpuRenderer(services){
             const internal = layout.sampleType === 'sint' ? TEX.RGBA8I
                 : layout.sampleType === 'uint' ? TEX.RGBA8UI
                     : layout.sampleType === 'depth' ? TEX.DEPTH_COMPONENT32F : GL.RGBA8;
-            const sized = sizedFormatOf(internal);
+            // RGBA8 by its own entry: `sizedFormatOf` keeps it as a legacy
+            // level, which goes up as a 2D texture whatever the target, and a
+            // 3D or array sampler given that view fails its bind group and
+            // with it the frame's every command.
+            const sized = SIZED_FORMATS.get(internal);
             const texel = layout.sampleType === 'depth' ? new Uint8Array(new Float32Array([1])
                 .buffer) : layout.sampleType === 'float' ? new Uint8Array([0, 0, 0, 255])
                 : new Uint8Array(4);

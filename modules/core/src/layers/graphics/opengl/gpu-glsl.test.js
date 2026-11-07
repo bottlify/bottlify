@@ -137,6 +137,35 @@ void main() { c = colour; }`);
     assert.ok(r.divergences.every(d=>/with no buffer bound to its binding point [35]/.test(d)));
 });
 
+test('a 3D or array sampler with nothing complete bound reads an incomplete texture of its own'
+    + ' shape: a 2D one fails the bind group, and WebGPU drops the frame with it', async()=>{
+    const r = rig();
+    const { gl } = r;
+    use(gl, `#version 130
+in vec3 position; out vec2 uv;
+void main() { uv = position.xy; gl_Position = vec4(position, 1.0); }`, `#version 130
+in vec2 uv; out vec4 c;
+uniform sampler3D volume; uniform sampler2DArray layers;
+void main() { c = texture(volume, vec3(uv, 0.5)) + texture(layers, vec3(uv, 0.0)); }`);
+    r.floats(0x1000, TRIANGLE);
+    gl.glVertexAttribPointerARB(0, 3, GL.FLOAT, 0, 12, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    const layout = r.gpu.of('createBindGroupLayout')
+        .filter((/** @type {any} */ call)=>/^gl:g/.test(call.descriptor.label))
+        .flatMap((/** @type {any} */ call)=>call.descriptor.entries)
+        .filter((/** @type {any} */ e)=>e.texture);
+    const bound = boundEntries(r.gpu);
+    assert.deepEqual(layout.map((/** @type {any} */ e)=>{
+        const view = bound.find((/** @type {any} */ b)=>b.binding === e.binding).resource;
+        return [e.texture.viewDimension, view.viewDescriptor?.dimension,
+            view.texture.descriptor.dimension ?? '2d',
+            view.texture.descriptor.size.depthOrArrayLayers];
+    }), [['3d', '3d', '3d', 1], ['2d-array', '2d-array', '2d', 1]]);
+});
+
 test('a block whose binding point holds nothing reads zeros, and says so', async()=>{
     const r = rig();
     const { gl } = r;
