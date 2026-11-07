@@ -42,6 +42,7 @@ import { transform } from './matrix.js';
 import { rasterLine, rasterPoint, rasterTriangle, toByte, writeFragment } from './raster.js';
 import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
 import { swizzleTexel } from './objects.js';
+import { stippleKeeps } from './legacy-state.js';
 
 /**
  * @typedef {Object} PipelineVertex
@@ -166,6 +167,8 @@ import { swizzleTexel } from './objects.js';
  *           record, present exactly when `stencil` is -- and equal to it whenever
  *           two-sided stencil testing (`GL_STENCIL_TEST_TWO_SIDE_EXT`) is off, per the
  *           extension's "front for all fragments" rule for a disabled test
+ * @property {{ words: Uint32Array, key: string } | null} [polygonStipple]  the
+ *           stipple filled polygons are cut by, when it is on (`context-legacy.js`)
  * @property {{ factor: number, units: number, clamp: number } | null} polygonOffset   when filled
  *           polygons are offset
  * @property {boolean} colourSum
@@ -855,9 +858,19 @@ export function drawPrimitive(scene, mode, vertices){
         }
         else
         {
+            const pattern = scene.polygonStipple;
+            // Rows run down here and the stipple's up from the bottom one.
+            const fill = pattern
+                ? (/** @type {import('./raster.js').Fragment} */ fragment)=>{
+                    if (stippleKeeps(pattern, fragment.x, target.height - 1 - fragment.y))
+                    {
+                        emit(fragment);
+                    }
+                }
+                : emit;
             for (let i = 1; i + 1 < shaded.length; i++)
             {
-                rasterTriangle(target, [shaded[0], shaded[i], shaded[i + 1]], scene.scissor, emit);
+                rasterTriangle(target, [shaded[0], shaded[i], shaded[i + 1]], scene.scissor, fill);
             }
         }
     }

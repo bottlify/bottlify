@@ -392,6 +392,7 @@ export function createSceneBuilder(kernel){
                     zpass: back(GL.STENCIL_BACK_PASS_DEPTH_PASS),
                 };
             })(),
+            polygonStipple: side.polygonStipple?.() ?? null,
             polygonOffset: on(GL.POLYGON_OFFSET_FILL)
                 ? {
                     factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],

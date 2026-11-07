@@ -2041,6 +2041,8 @@ export function createGpuRenderer(services){
                 ? { mode: scene.fog.mode, fromCoordinate: scene.fog.fromCoordinate }
                 : null,
             alphaFunc: scene.alphaTest ? scene.alphaTest.func : null,
+            // The stipple cuts filled primitives only (OpenGL 2.1 section 3.5.2).
+            stipple: topology === 'triangle-list' ? scene.polygonStipple?.key ?? '' : '',
             flat: scene.flat,
             blend: scene.blend,
             depth: {

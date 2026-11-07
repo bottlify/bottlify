@@ -1223,6 +1223,22 @@ was set. *2026-11-07.*
 enable it yet; the 4.0 entry points are handed out with the rest of 4.0. *2026-11-07.*
 
 **A194. Patches reaching the immediate drawing path are a loss:** that path has no tessellator.
+
+**A200. Temporary: pixel transfer reaches colour only, at 8 bits a component.** Scale, bias and
+GL_MAP_COLOR's maps apply where an image is RGBA bytes: what glDrawPixels and the byte path of a
+texture upload unpack, and what glReadPixels reads before it packs it. A luminance image is
+expanded to RGBA before its transfer and each channel transferred, rather than the luminance
+alone. GL_MAP_STENCIL, the index shift and offset and the depth scale and bias are kept and
+answered and change nothing, which setting one says once: nothing here carries indices,
+stencil or depth through a transfer. *2026-11-07.*
+
+**A201. The imaging subset is absent:** GL_ARB_imaging is not reported, so its 1.2 getters
+(glGetColorTable, glGetConvolutionFilter, glGetSeparableFilter, glGetHistogram, glGetMinmax)
+are not obtainable, and 4.5's glGetn forms of them refuse every target with GL_INVALID_ENUM, as
+a context without the subset does; glPixelTransfer refuses the subset's names. *2026-11-07.*
+
+**A202. GL_MAX_PIXEL_MAP_TABLE is 256** (the minimum is 32), and GL_MAX_EVAL_ORDER stays at
+the minimum, 8. *2026-11-07.*
 *2026-11-07.*
 
 **A195. Temporary: a draw of a capture (glDrawTransformFeedback) draws what its first buffer's

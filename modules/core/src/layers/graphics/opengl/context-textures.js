@@ -1005,6 +1005,11 @@ export function installTextureCalls(context, kernel){
             return null;
         }
         const texels = unpackImage(bytes, width, height, format, type, unpack);
+        if (texels)
+        {
+            // Scale, bias and the colour maps (`context-legacy.js`).
+            kernel.side.pixelTransfer?.()?.(texels);
+        }
         return texels ?? 'refused';
     }
 

@@ -72,6 +72,9 @@ import { controlEntry, evaluationEntry, tessRegisters } from './glsl-wgsl-tess.j
  * @property {boolean} colourSum
  * @property {{ mode: number, fromCoordinate: boolean } | null} fog
  * @property {number | null} alphaFunc  null when the alpha test is off
+ * @property {string} [stipple]  the polygon stipple's words in hex, its bottom row
+ *           first, for filled primitives drawn under one (`context-legacy.js`);
+ *           empty or absent otherwise
  * @property {boolean} flat
  * @property {import('./pipeline.js').SceneBlend | null} blend
  * @property {{ test: boolean, func: number, write: boolean }} depth
@@ -510,6 +513,7 @@ export function drawKey(state){
         targetsKey(state.targets),
         state.glsl ? `g${state.glsl.id}${state.twoSide ? 't' : ''}${state.samplerSwizzles
             ? `s${state.samplerSwizzles}` : ''}` : '-',
+        state.stipple || '-',
     ].join('|');
 }
 
@@ -585,6 +589,7 @@ export function sameKeyInputs(a, b){
         || !a.frontIsCcw !== !b.frontIsCcw || a.colourMask !== b.colourMask
         || !a.depthClamp !== !b.depthClamp
         || (a.samplerSwizzles ?? '') !== (b.samplerSwizzles ?? '')
+        || (a.stipple ?? '') !== (b.stipple ?? '')
         || !sameItems(a.strides, b.strides) || (a.steps ?? '') !== (b.steps ?? '')
         || a.attributes.length !== b.attributes.length || a.units.length !== b.units.length)
     {
@@ -1204,12 +1209,42 @@ const INTEGER_FORMAT = /[su]int$/;
  *             programs: ProgramStages | null, glsl?: GlslStages }}
  */
 export function generateDraw(state){
-    const made = state.glsl ? generateGlslDraw(state)
+    const generated = state.glsl ? generateGlslDraw(state)
         : state.vertexProgram || state.fragmentProgram ? generateProgramDraw(state)
             : generateFixedDraw(state);
+    const made = state.stipple && generated.code !== ''
+        ? { ...generated, code: stippled(generated.code, state.stipple) } : generated;
     const targets = state.targets?.length ?? 1;
     return targets > 1 && !state.glsl && made.code !== '' ? { ...made,
         code: broadcast(made.code, targets) } : made;
+}
+
+/** Where every draw's fragment stage starts: the fixed one's, a program's, a GLSL one's. */
+const FRAGMENT_ENTRY = /fn fragmentMain\(input: VertexOut[^{]*\{\n/;
+
+/**
+ * A fragment stage cut by the polygon stipple: the fragment whose window
+ * position's bit of the pattern is clear is discarded before anything else
+ * runs (OpenGL 2.1 section 3.5.2). The window's rows run up from the bottom
+ * one, as `uniforms.misc` turns the target's into.
+ *
+ * @param {string} code @param {string} pattern  `DrawState.stipple`
+ * @returns {string}
+ */
+export function stippled(code, pattern){
+    const words = pattern.match(/.{8}/g) ?? [];
+    const test = `    let glStippleX = u32(input.position.x) & 31u;
+    let glStippleY = u32(select(input.position.y, uniforms.misc.w - input.position.y,
+        uniforms.misc.z > 0.0)) & 31u;
+    if (((glStipple[glStippleY] >> glStippleX) & 1u) == 0u)
+    {
+        discard;
+    }
+`;
+    return `${code.replace(FRAGMENT_ENTRY, entry=>`${entry}${test}`)}
+var<private> glStipple: array<u32, 32> = array<u32, 32>(${words.map(word=>`0x${word}u`)
+        .join(', ')});
+`;
 }
 
 /**

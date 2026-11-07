@@ -39,6 +39,7 @@ import { GLSL_LIMITS } from './glsl-builtins.js';
 import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
 import { TESSELLATION_STATE } from './context-tessellation.js';
+import { LEGACY_ENABLES, LEGACY_STATE } from './legacy-state.js';
 
 /**
  * OpenGL 3.2's limits of geometry shaders and of what the stages pass, the
@@ -205,6 +206,8 @@ export const DEFAULT_ENABLES = Object.freeze([
         query: GL.VERTEX_PROGRAM_TWO_SIDE_ARB, name: 'GL_VERTEX_PROGRAM_TWO_SIDE_ARB',
         kind: 'bool', value: [0],
     },
+    // The evaluators' maps (`context-legacy.js`).
+    ...LEGACY_ENABLES,
 ]);
 
 /**
@@ -679,7 +682,7 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.MAX_LIST_NESTING, name: 'GL_MAX_LIST_NESTING', kind: 'int', value: [64] },
     { query: GL.MAX_NAME_STACK_DEPTH, name: 'GL_MAX_NAME_STACK_DEPTH', kind: 'int', value: [64] },
     { query: GL.MAX_EVAL_ORDER, name: 'GL_MAX_EVAL_ORDER', kind: 'int', value: [8] },
-    { query: GL.MAX_PIXEL_MAP_TABLE, name: 'GL_MAX_PIXEL_MAP_TABLE', kind: 'int', value: [32] },
+    { query: GL.MAX_PIXEL_MAP_TABLE, name: 'GL_MAX_PIXEL_MAP_TABLE', kind: 'int', value: [256] },
     {
         query: GL.MAX_ELEMENTS_VERTICES, name: 'GL_MAX_ELEMENTS_VERTICES', kind: 'int',
         value: [4096],
@@ -1185,6 +1188,8 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.MAX_SAMPLES, name: 'GL_MAX_SAMPLES', kind: 'int', value: [4] },
     // OpenGL 4.0's tessellation.
     ...TESSELLATION_STATE,
+    // Pixel transfer, the pixel maps' sizes and the evaluators' grids.
+    ...LEGACY_STATE,
 ]);
 
 /**
