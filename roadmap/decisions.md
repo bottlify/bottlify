@@ -1057,9 +1057,9 @@ incomplete, while programs that sample one with the default filter expect a valu
 of another type than its buffer's is converted to it, and a buffer no output covers is written
 zero; the specification leaves the last two undefined. *2026-11-06.*
 
-**A118. Temporary: a second-source fragment output (index 1) is accepted and not written.**
-GL_MAX_DUAL_SOURCE_DRAW_BUFFERS is 1, as 3.3 requires, but no blend factor reads the second
-colour yet. *2026-11-06.*
+**A118. A second-source fragment output (index 1) is written and blended by** where the device
+has dual-source blending; where it has not, a draw blending by it is a loss (A185).
+GL_MAX_DUAL_SOURCE_DRAW_BUFFERS is 1, as 3.3 requires. *2026-11-07.*
 
 **A119. Temporary: an OpenGL timer query reads the processor's clock.** GL_TIME_ELAPSED is the
 nanoseconds of the page's clock between glBeginQuery and glEndQuery as the calls are made, and

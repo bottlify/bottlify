@@ -324,11 +324,17 @@ kernel, and where a system call would be, a trap into the bridge fires instead (
 | OPFS | The translation store, `cork/<id>.v3/` |
 | Server | The code of cork and its worker (`/engine/cork/`). A bundle may bring translations ready-made |
 
-**Memory.** All of the program's memory is one `WebAssembly.Memory` of fixed size, shared in the
-`isolated` mode: 1 GiB for the program by default, plus cork's tables. The layout (program address
-`a` at offset `a`, the state block with the registers, 512 bytes, in the program's first 64 KiB,
-which a Windows program never maps, on pages that fault the program's stores, and after the
-program's memory cork's tables with one flag byte per 4 KiB page) is in
+**Memory.** All of the program's memory is one `WebAssembly.Memory`, shared in the `isolated`
+mode: up to 1 GiB for the program by default. In a 32-bit process over shared memory it holds only
+the RAM the program has been given and grows as it is given more, by powers of two (256 MiB at the
+start on one to three executors, 512 MiB on more); cork's tables and the other executors' pages
+then lie in a range of the program's own space the process keeps from it (at the top of the
+libraries' space under the thread stacks, at the heap's start, or cut out of the heap at
+0x14000000 for four executors or more). A 64-bit process, a run without shared memory and one
+with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. The layout
+(program address `a` at offset `a`, the state block with the registers, 512 bytes, in the
+program's first 64 KiB, which a Windows program never maps, on pages that fault the program's
+stores, and cork's tables with one flag byte per 4 KiB page) is in
 [cork's README](cork/README.md#how-it-works). With several executors, each further one
 has a state page and tables of its own (`executorLayout`), while the program's memory is
 everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`, `NO_EXECUTE`, and
