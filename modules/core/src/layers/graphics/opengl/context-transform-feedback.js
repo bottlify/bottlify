@@ -21,7 +21,14 @@
  *   GL_INVALID_OPERATION otherwise. Paused, draws capture nothing and the
  *   program may change.
  * - **Objects** (glGenTransformFeedbacks, glBindTransformFeedback) hold
- *   whether capture is active and paused; object 0 is the default one.
+ *   whether capture is active and paused, and the buffers bound to their
+ *   points (4.0); object 0 is the default one. The 4.5 calls name an object
+ *   instead of binding it.
+ * - **A draw of what was captured** (glDrawTransformFeedback, 4.0) draws as
+ *   many vertices as the object's last capture wrote into its first buffer:
+ *   a number only the device knows, so the device counts it
+ *   (`gpu-geometry.js` capturedArgs), up to the most the capture's draws
+ *   could have written, which is what the draw is laid out for here.
  */
 
 import { GL } from './constants.js';
@@ -31,8 +38,13 @@ export const FEEDBACK_CALLS_NOT_COMPILED = Object.freeze([
     'glBeginTransformFeedback', 'glEndTransformFeedback', 'glPauseTransformFeedback',
     'glResumeTransformFeedback', 'glGenTransformFeedbacks', 'glDeleteTransformFeedbacks',
     'glIsTransformFeedback', 'glBindTransformFeedback', 'glTransformFeedbackVaryings',
-    'glGetTransformFeedbackVarying',
+    'glGetTransformFeedbackVarying', 'glCreateTransformFeedbacks',
+    'glTransformFeedbackBufferBase', 'glTransformFeedbackBufferRange',
+    'glGetTransformFeedbackiv', 'glGetTransformFeedbacki_v', 'glGetTransformFeedbacki64_v',
 ]);
+
+/** MAX_VERTEX_STREAMS (4.0): the streams a capture names; only stream 0 is ever written. */
+const VERTEX_STREAMS = 4;
 
 /**
  * The modes each primitive glBeginTransformFeedback names takes (table 2.10 of 3.0).
@@ -60,6 +72,18 @@ const GEOMETRY_CAPTURED = Object.freeze(/** @type {Record<string, number>} */ ({
  * @property {boolean} paused
  * @property {number} primitive  what glBeginTransformFeedback named
  * @property {FeedbackSession | null} session  what its capture writes, while active
+ * @property {any[]} points  its transform feedback buffer points
+ * @property {Captured | null} captured  what its last capture wrote, once one has ended
+ * @property {boolean} ended  a capture has ended while it was bound
+ */
+
+/**
+ * What a capture that ended wrote, for a draw of it: the vertices in the
+ * first buffer from `offset` on, `stride` bytes each, at most `most`.
+ *
+ * @typedef {Object} Captured
+ * @property {import('./objects.js').BufferObject} buffer
+ * @property {number} offset @property {number} stride @property {number} most
  */
 
 /**
@@ -72,6 +96,8 @@ const GEOMETRY_CAPTURED = Object.freeze(/** @type {Record<string, number>} */ ({
  * @property {({ buffer: import('./objects.js').BufferObject, offset: number,
  *     size: number } | null)[]} buffers  `size` the range's bytes, the whole
  *     buffer's past the offset for glBindBufferBase
+ * @property {number} most  the vertices its draws may have captured, as the
+ *     renderer counts them (Infinity where it cannot)
  */
 
 /**
@@ -80,9 +106,18 @@ const GEOMETRY_CAPTURED = Object.freeze(/** @type {Record<string, number>} */ ({
  */
 export function installTransformFeedbackCalls(context, kernel){
     const { enter, setError, setState, diverge } = kernel;
+    /** The points every object's are made by: the uniform buffer calls own the targets. */
+    const pointsOf = ()=>kernel.side.feedbackPoints;
     /** @type {FeedbackObject} */
     const fallback = { name: 0, bound: true, active: false, paused: false, primitive: 0,
-        session: null };
+        session: null, points: pointsOf()?.current() ?? [], captured: null, ended: false };
+    /**
+     * A new object: a name generated and now bound, or made by glCreate.
+     *
+     * @param {number} name @returns {FeedbackObject}
+     */
+    const made = name=>({ name, bound: true, active: false, paused: false, primitive: 0,
+        session: null, points: pointsOf()?.make() ?? [], captured: null, ended: false });
     /** @type {Map<number, FeedbackObject | null>} names, null until first bound */
     const objects = new Map([[0, fallback]]);
     let current = fallback;
@@ -141,7 +176,7 @@ export function installTransformFeedbackCalls(context, kernel){
             current.paused = false;
             current.primitive = primitive;
             current.session = { primitive, feedback,
-                buffers: points.slice(0, feedback.strides.length) };
+                buffers: points.slice(0, feedback.strides.length), most: 0 };
             for (const bound of current.session.buffers)
             {
                 if (bound)
@@ -171,6 +206,13 @@ export function installTransformFeedbackCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            const session = /** @type {FeedbackSession} */ (current.session);
+            const first = session.buffers[0];
+            const stride = session.feedback.strides[0] * 4;
+            current.captured = first && stride > 0 ? { buffer: first.buffer,
+                offset: first.offset, stride,
+                most: Math.min(Math.floor(first.size / stride), session.most) } : null;
+            current.ended = true;
             current.active = false;
             current.paused = false;
             current.session = null;
@@ -249,6 +291,7 @@ export function installTransformFeedbackCalls(context, kernel){
                 if (current.name === name)
                 {
                     current = fallback;
+                    pointsOf()?.use(fallback.points);
                 }
                 objects.delete(name);
             }
@@ -283,12 +326,151 @@ export function installTransformFeedbackCalls(context, kernel){
             let object = objects.get(name);
             if (!object)
             {
-                object = { name, bound: true, active: false, paused: false, primitive: 0,
-                    session: null };
+                object = made(name);
                 objects.set(name, object);
             }
             current = object;
+            pointsOf()?.use(current.points);
             publish();
+        },
+
+        // --- objects named rather than bound (4.5) ---
+
+        /** @param {number} count @returns {number[]} */
+        glCreateTransformFeedbacks(count){
+            if (!enter('glCreateTransformFeedbacks', [count]))
+            {
+                return [];
+            }
+            if (count < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return [];
+            }
+            /** @type {number[]} */
+            const names = [];
+            for (let name = 1; names.length < count; name++)
+            {
+                if (!objects.has(name))
+                {
+                    objects.set(name, made(name));
+                    names.push(name);
+                }
+            }
+            return names;
+        },
+
+        /**
+         * glTransformFeedbackBufferBase (`size` null) and Range.
+         *
+         * @param {number} name @param {number} index @param {number} buffer
+         * @param {number} offset @param {number | null} size
+         */
+        transformFeedbackBuffer(name, index, buffer, offset, size){
+            const call = size === null ? 'glTransformFeedbackBufferBase'
+                : 'glTransformFeedbackBufferRange';
+            if (!enter(call, size === null ? [name, index, buffer]
+                : [name, index, buffer, offset, size]))
+            {
+                return;
+            }
+            const object = objects.get(name);
+            if (!object || object.active)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            pointsOf()?.put(object.points, index, buffer, offset, size);
+        },
+
+        /**
+         * glGetTransformFeedbackiv: whether the object captures, and is paused.
+         *
+         * @param {number} name @param {number} pname @returns {number[] | null}
+         */
+        glGetTransformFeedbackiv(name, pname){
+            if (!enter('glGetTransformFeedbackiv', [name, pname]))
+            {
+                return null;
+            }
+            const object = objects.get(name);
+            if (!object)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            if (pname === GL.TRANSFORM_FEEDBACK_ACTIVE)
+            {
+                return [object.active ? 1 : 0];
+            }
+            if (pname === GL.TRANSFORM_FEEDBACK_PAUSED)
+            {
+                return [object.paused ? 1 : 0];
+            }
+            setError(GL.INVALID_ENUM);
+            return null;
+        },
+
+        /**
+         * glGetTransformFeedbacki_v (the buffer at a point) and _i64_v (its
+         * range's start and size).
+         *
+         * @param {number} name @param {number} pname @param {number} index
+         * @param {boolean} wide  the 64-bit form
+         * @returns {number[] | null}
+         */
+        transformFeedbackIndexed(name, pname, index, wide){
+            if (!enter(wide ? 'glGetTransformFeedbacki64_v' : 'glGetTransformFeedbacki_v',
+                [name, pname, index]))
+            {
+                return null;
+            }
+            const object = objects.get(name);
+            if (!object)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            /** @type {number[]} */
+            const asked = wide ? [GL.TRANSFORM_FEEDBACK_BUFFER_START,
+                GL.TRANSFORM_FEEDBACK_BUFFER_SIZE] : [GL.TRANSFORM_FEEDBACK_BUFFER_BINDING];
+            if (!asked.includes(pname))
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (index < 0 || index >= object.points.length)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const point = pointsOf()?.read(object.points, index) ?? null;
+            return [pname === GL.TRANSFORM_FEEDBACK_BUFFER_BINDING ? point?.name ?? 0
+                : pname === GL.TRANSFORM_FEEDBACK_BUFFER_START ? point?.offset ?? 0
+                    : point?.size ?? 0];
+        },
+    });
+
+    Object.assign(kernel.side, {
+        /**
+         * What a draw of a capture draws (glDrawTransformFeedback): the
+         * object's last capture of `stream`, or the error why it cannot.
+         *
+         * @param {number} name @param {number} stream
+         * @returns {{ captured: Captured | null } | { error: number }}
+         */
+        feedbackCaptured: (name, stream)=>{
+            const object = objects.get(name);
+            if (!object || stream < 0 || stream >= VERTEX_STREAMS)
+            {
+                return { error: GL.INVALID_VALUE };
+            }
+            if (!object.ended)
+            {
+                return { error: GL.INVALID_OPERATION };
+            }
+            // Only stream 0 is ever captured into.
+            return { captured: stream === 0 ? object.captured : null };
         },
     });
 }

@@ -970,6 +970,35 @@ export function laterEntryPoints(h){
         glIsTransformFeedback: ([name])=>current()?.glIsTransformFeedback(name >>> 0) ?? GL.FALSE,
         glBindTransformFeedback: ([target, name])=>answer(current()
             ?.glBindTransformFeedback(target >>> 0, name >>> 0)),
+        glDrawTransformFeedback: ([mode, name])=>answer(current()?.drawTransformFeedback(
+            mode >>> 0, name >>> 0, 0, 1)),
+        glDrawTransformFeedbackStream: ([mode, name, stream])=>answer(current()
+            ?.drawTransformFeedback(mode >>> 0, name >>> 0, stream >>> 0, 1)),
+        glDrawTransformFeedbackInstanced: ([mode, name, instances])=>answer(current()
+            ?.drawTransformFeedback(mode >>> 0, name >>> 0, 0, instances | 0)),
+        glDrawTransformFeedbackStreamInstanced: ([mode, name, stream, instances])=>answer(
+            current()?.drawTransformFeedback(mode >>> 0, name >>> 0, stream >>> 0,
+                instances | 0)),
+        glCreateTransformFeedbacks: generator((context, count)=>
+            context.glCreateTransformFeedbacks(count)),
+        glTransformFeedbackBufferBase: ([name, index, buffer])=>answer(current()
+            ?.transformFeedbackBuffer(name >>> 0, index >>> 0, buffer >>> 0, 0, null)),
+        glTransformFeedbackBufferRange: ([name, index, buffer, offset, size])=>answer(current()
+            ?.transformFeedbackBuffer(name >>> 0, index >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+        glGetTransformFeedbackiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.glGetTransformFeedbackiv(name >>> 0, pname >>> 0), 'word')),
+        glGetTransformFeedbacki_v: ([name, pname, index, out])=>call(context=>writeQuery(out,
+            context.transformFeedbackIndexed(name >>> 0, pname >>> 0, index >>> 0, false),
+            'word')),
+        glGetTransformFeedbacki64_v: ([name, pname, index, out])=>call(context=>{
+            const values = context.transformFeedbackIndexed(name >>> 0, pname >>> 0,
+                index >>> 0, true);
+            if (values)
+            {
+                writeInt64s(out, values);
+            }
+        }),
 
         glGetUniformIndices: ([program, count, names, out])=>call(context=>{
             const indices = context.glGetUniformIndices(program >>> 0,

@@ -78,10 +78,12 @@ export function installUniformBufferCalls(context, kernel){
     /**
      * A point's binding, or null where its buffer has been deleted since.
      *
-     * @param {number} target @param {number} index @returns {BufferBinding | null}
+     * @param {number} target @param {number} index
+     * @param {(BufferBinding | null)[]} [points]  the target's in use by default
+     * @returns {BufferBinding | null}
      */
-    const live = (target, index)=>{
-        const points = /** @type {(BufferBinding | null)[]} */ (tables.get(target));
+    const live = (target, index, points)=>{
+        points ??= /** @type {(BufferBinding | null)[]} */ (tables.get(target));
         const point = points[index];
         if (point && kernel.shareGroup().buffers.objects.get(point.name) !== point.buffer)
         {
@@ -103,39 +105,67 @@ export function installUniformBufferCalls(context, kernel){
         {
             return;
         }
-        const row = TARGETS.get(target);
         const points = tables.get(target);
-        if (!row || !points)
+        if (!points)
         {
             setError(GL.INVALID_ENUM);
-            return;
-        }
-        if (index < 0 || index >= points.length)
-        {
-            setError(GL.INVALID_VALUE);
             return;
         }
         // What transform feedback writes stays bound while it does.
         if (target === GL.TRANSFORM_FEEDBACK_BUFFER && kernel.side.feedbackActive?.())
         {
-            setError(GL.INVALID_OPERATION);
+            if (index >= 0 && index < points.length)
+            {
+                setError(GL.INVALID_OPERATION);
+            }
+            else
+            {
+                setError(GL.INVALID_VALUE);
+            }
             return;
+        }
+        if (put(target, points, index, name, offset, size, true))
+        {
+            setState(/** @type {any} */ (TARGETS.get(target)).general, [name]);
+        }
+    };
+
+    /**
+     * A point of `points` given a buffer, or the error why not: `made` lets
+     * a name never bound become a buffer object, as glBindBufferBase does
+     * and the 4.5 transform feedback calls do not.
+     *
+     * @param {number} target @param {(BufferBinding | null)[]} points @param {number} index
+     * @param {number} name @param {number} offset @param {number | null} size
+     * @param {boolean} made @returns {boolean}
+     */
+    const put = (target, points, index, name, offset, size, made)=>{
+        const row = /** @type {any} */ (TARGETS.get(target));
+        if (index < 0 || index >= points.length)
+        {
+            setError(GL.INVALID_VALUE);
+            return false;
         }
         if (target === GL.TRANSFORM_FEEDBACK_BUFFER && size !== null && size % 4 !== 0)
         {
             setError(GL.INVALID_VALUE);
-            return;
+            return false;
         }
         if (name !== 0 && size !== null && (size <= 0 || offset < 0
             || offset % row.alignment !== 0))
         {
             setError(GL.INVALID_VALUE);
-            return;
+            return false;
         }
         const group = kernel.shareGroup();
         let buffer = name === 0 ? undefined : group.buffers.objects.get(name);
         if (name !== 0 && !buffer)
         {
+            if (!made)
+            {
+                setError(GL.INVALID_VALUE);
+                return false;
+            }
             // A name glBindBuffer would have made an object of, as it does.
             buffer = createBufferObject(name);
             group.buffers.define(name, buffer);
@@ -143,7 +173,7 @@ export function installUniformBufferCalls(context, kernel){
         }
         points[index] = buffer ? { name, buffer, offset: size === null ? 0 : offset,
             size: size ?? 0 } : null;
-        setState(row.general, [name]);
+        return true;
     };
 
     // The indexed queries, through the table the context's glGet*i_v reads.
@@ -173,6 +203,42 @@ export function installUniformBufferCalls(context, kernel){
     Object.assign(kernel.side, {
         /** What each transform feedback point holds: what a capture writes into. */
         feedbackBuffers: ()=>ranges(GL.TRANSFORM_FEEDBACK_BUFFER),
+        /**
+         * The transform feedback points of each feedback object (OpenGL 4.0:
+         * the points are the bound object's state).
+         */
+        feedbackPoints: {
+            /** A new object's points, none holding a buffer. */
+            make: ()=>/** @type {(BufferBinding | null)[]} */ (
+                new Array(FEEDBACK_LIMITS.buffers).fill(null)),
+            /**
+             * Makes `points` the points the target's calls and captures use.
+             *
+             * @param {(BufferBinding | null)[]} points
+             */
+            use: points=>{
+                tables.set(GL.TRANSFORM_FEEDBACK_BUFFER, points);
+            },
+            /** The points in use now, the default object's at first. */
+            current: ()=>/** @type {(BufferBinding | null)[]} */ (
+                tables.get(GL.TRANSFORM_FEEDBACK_BUFFER)),
+            /**
+             * glTransformFeedbackBufferBase and Range: a point of an object's
+             * given a buffer that exists, or the error why not.
+             *
+             * @param {(BufferBinding | null)[]} points @param {number} index
+             * @param {number} name @param {number} offset @param {number | null} size
+             * @returns {boolean}
+             */
+            put: (points, index, name, offset, size)=>put(GL.TRANSFORM_FEEDBACK_BUFFER, points,
+                index, name, offset, size, false),
+            /**
+             * What a point holds, as glGetTransformFeedbacki_v answers it.
+             *
+             * @param {(BufferBinding | null)[]} points @param {number} index
+             */
+            read: (points, index)=>live(GL.TRANSFORM_FEEDBACK_BUFFER, index, points),
+        },
         /**
          * What each uniform buffer point holds for a draw: the buffer, and
          * the range a block reads from (a whole buffer from 0).

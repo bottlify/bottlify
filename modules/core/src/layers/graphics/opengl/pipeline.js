@@ -198,9 +198,10 @@ import { swizzleTexel } from './objects.js';
  *           binding point holds (glBindBufferRange), for a GLSL program's blocks
  * @property {{ primitive: number, feedback: import('./glsl-link.js').Feedback,
  *     buffers: ({ buffer: import('./objects.js').BufferObject, offset: number,
- *     size: number } | null)[] } | null} [feedback]
+ *     size: number } | null)[], most: number } | null} [feedback]
  *           what transform feedback captures a draw into, while it does
- *           (`context-transform-feedback.js` FeedbackSession)
+ *           (`context-transform-feedback.js` FeedbackSession); the renderer
+ *           adds to `most` the vertices each draw may capture
  * @property {boolean} [discard]  GL_RASTERIZER_DISCARD: the draw rasterizes nothing
  * @property {{ vertices: number, outer: readonly number[], inner: readonly number[] }
  *     | null} [patch]  GL_PATCH_VERTICES and the default levels, for a program with

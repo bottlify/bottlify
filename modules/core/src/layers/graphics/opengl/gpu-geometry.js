@@ -41,6 +41,41 @@ const MOST_BYTES = 1 << 27;
 const REGISTER = 16;
 /** The buffers whose filled size a counter is kept for, at the most. */
 const MOST_COUNTERS = 4096;
+/** A draw of a capture's arguments: five words, as a storage binding is sized in 16s. */
+const CAPTURED_ARGS_BYTES = 32;
+
+/**
+ * The arguments of a draw of what transform feedback captured
+ * (glDrawTransformFeedback): the vertices a buffer's counter says its
+ * capture wrote past `params[0].z` bytes, `params[0].y` bytes each, at most
+ * `params[2].w` (what the draw's order was laid out for); of them a draw takes
+ * `floor((n - a) / b) * c`, `params[2].xyz` (a list: 0, its vertices a
+ * primitive, the same; a strip of triangles 2, 1, 3). `params[1]`: the
+ * instances, the first vertex, the base vertex and whether it is indexed.
+ */
+const CAPTURED_WGSL = /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> counters: array<u32>;
+@group(0) @binding(1) var<uniform> params: array<vec4u, 4>;
+@group(0) @binding(2) var<storage, read_write> args: array<u32>;
+
+@compute @workgroup_size(1)
+fn drawCaptured() {
+    let filled = counters[params[0].x];
+    let skipped = min(filled, params[0].z);
+    let n = min(select(0u, (filled - skipped) / params[0].y, params[0].y != 0u), params[2].w);
+    let shape = params[2];
+    args[0] = select(0u, (n - shape.x) / shape.y * shape.z, n > shape.x);
+    args[1] = params[1].x;
+    if (params[1].w != 0u) {
+        args[2] = 0u;
+        args[3] = params[1].z;
+        args[4] = 0u;
+    } else {
+        args[2] = params[1].y;
+        args[3] = 0u;
+    }
+}
+`;
 
 const COMPUTE_STAGE = 4;
 /** @param {number} binding @param {string} type */
@@ -131,7 +166,7 @@ export function createGlGeometry(services){
     const pipelines = new Map();
     /** @type {Record<string, any>} */
     const scratch = {};
-    const counted = { draws: 0, invocations: 0, refused: 0, captured: 0 };
+    const counted = { draws: 0, invocations: 0, refused: 0, captured: 0, capturedDraws: 0 };
 
     /**
      * A buffer between the passes, grown as a draw needs: an outgrown one
@@ -507,12 +542,55 @@ export function createGlGeometry(services){
         ];
     };
 
+    /**
+     * The pass writing a draw of a capture's arguments, read where the draw
+     * is made (`drawIndirect`): one slot for every such draw, as the passes
+     * and the draws run in the order recorded.
+     *
+     * @param {object} buffer  the capture's first buffer object
+     * @param {{ offset: number, stride: number, most: number, shape: readonly number[],
+     *     instances: number, first: number, baseVertex: number, indexed: boolean }} draw
+     * @returns {{ pass: { pipeline: Promise<any>, label: string, groups: object[][],
+     *     grid: number[] }, args: { gpu: any, offset: number } } | null}
+     */
+    const capturedArgs = (buffer, draw)=>{
+        const counter = counterFor(buffer);
+        if (counter < 0)
+        {
+            return null;
+        }
+        const args = scratchOf('captured', CAPTURED_ARGS_BYTES, BufferUsage.INDIRECT);
+        counted.capturedDraws++;
+        return {
+            pass: {
+                pipeline: computeFor('so-counter:captured', CAPTURED_WGSL, 'drawCaptured',
+                    [COUNTER_ENTRIES], 'gl:draw-captured'),
+                label: 'gl:draw-captured',
+                groups: [[
+                    { binding: COUNTER_BINDING.counters, resource: whole(countersOf(),
+                        MOST_COUNTERS * 4) },
+                    { binding: COUNTER_BINDING.params, resource: uniform(new Uint32Array([
+                        counter, draw.stride, draw.offset, 0,
+                        draw.instances, draw.first, draw.baseVertex >>> 0, draw.indexed ? 1 : 0,
+                        draw.shape[0], draw.shape[1], draw.shape[2],
+                        Math.min(draw.most, 0xffffffff),
+                        0, 0, 0, 0])) },
+                    { binding: COUNTER_BINDING.args, resource: whole(args,
+                        CAPTURED_ARGS_BYTES) },
+                ]],
+                grid: [1, 1, 1],
+            },
+            args: { gpu: args.gpu, offset: 0 },
+        };
+    };
+
     return {
         prepare,
         vertexPass,
         vertexCapture,
         begin,
         streamOut,
+        capturedArgs,
         /** The counters buffer, whose first two words a draw's queries read. */
         counters: ()=>countersOf().gpu,
         /** Sixteen zero bytes, which a counter is cleared from. */

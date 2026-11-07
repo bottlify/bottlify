@@ -643,9 +643,11 @@ export function installArrayCalls(context, kernel){
      * @param {number} count
      * @param {{ type: number, indices: number | Uint8Array, baseVertex?: number } | null} indexed
      * @param {Instancing} [instancing]
+     * @param {import('./context-transform-feedback.js').Captured} [captured]  a draw of
+     *     what transform feedback captured, `count` the most it may draw
      * @returns {boolean}
      */
-    function drawFromArrays(mode, first, count, indexed, instancing = ONE_INSTANCE){
+    function drawFromArrays(mode, first, count, indexed, instancing = ONE_INSTANCE, captured){
         if (!kernel.drawArrays)
         {
             refusal = 'no device';
@@ -699,6 +701,7 @@ export function installArrayCalls(context, kernel){
             baseVertex: indexed?.baseVertex ?? 0,
             instances: instancing.instances,
             baseInstance: instancing.baseInstance,
+            captured,
             lock: locked,
             read: view ? (at, n)=>view(at, n) : ()=>new Uint8Array(0),
             bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
@@ -1237,6 +1240,53 @@ export function installArrayCalls(context, kernel){
     }
 
     /**
+     * A draw of what a transform feedback object's last capture wrote
+     * (OpenGL 4.0 and 4.2 glDrawTransformFeedback and its forms): as many
+     * vertices as it wrote into its first buffer, counted by the device.
+     *
+     * @param {string} name @param {number} mode @param {number} object
+     * @param {number} stream @param {number} instances
+     */
+    function drawCaptured(name, mode, object, stream, instances){
+        refreshMapped();
+        if (!coreAllows(mode))
+        {
+            return;
+        }
+        if (!PRIMITIVE_MODES.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const found = kernel.side.feedbackCaptured?.(object, stream)
+            ?? { error: GL.INVALID_VALUE };
+        if ('error' in found)
+        {
+            setError(found.error);
+            return;
+        }
+        if (instances < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (kernel.inPrimitive() || !takesMode(mode))
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const captured = found.captured;
+        if (!captured || captured.most === 0 || instances === 0 || !hasVertexSource()
+            || drawFromArrays(mode, 0, captured.most, null, { instances, baseInstance: 0 },
+                captured))
+        {
+            return;
+        }
+        lose(`${name} drew nothing: how many vertices it draws is counted on the device,`
+            + ` and the draw could not be made there (${refusal})`);
+    }
+
+    /**
      * A draw by an index list, each index moved by the base vertex (OpenGL 3.2)
      * before the arrays are read, as many times as there are instances.
      *
@@ -1702,6 +1752,21 @@ export function installArrayCalls(context, kernel){
         },
 
         // --- instances and base vertices (OpenGL 3.1, 3.2, 4.2) ---
+
+        /**
+         * glDrawTransformFeedback, its stream form (4.0) and their instanced
+         * forms (4.2).
+         *
+         * @param {number} mode @param {number} object @param {number} stream
+         * @param {number} instances
+         */
+        drawTransformFeedback(mode, object, stream, instances){
+            if (!enter('drawTransformFeedback', [mode, object, stream, instances]))
+            {
+                return;
+            }
+            drawCaptured('glDrawTransformFeedback', mode, object, stream, instances);
+        },
 
         /**
          * @param {number} mode @param {number} first @param {number} count

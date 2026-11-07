@@ -1199,6 +1199,16 @@ enable it yet; the 4.0 entry points are handed out with the rest of 4.0. *2026-1
 **A194. Patches reaching the immediate drawing path are a loss:** that path has no tessellator.
 *2026-11-07.*
 
+**A195. Temporary: a draw of a capture (glDrawTransformFeedback) draws what its first buffer's
+last capture wrote,** counted on the device by the buffer's counter as Direct3D's DrawAuto is: a
+capture into the same buffer by another object since is the one drawn. Only stream 0 is ever
+captured into, so a draw of another stream draws nothing. *2026-11-07.*
+
+**A196. Temporary: a draw of a capture through a geometry shader or tessellation, or captured
+again, is a loss,** as their passes are laid out on the processor for a count only the device
+has; a line loop of it is drawn without its closing line, and GL_PRIMITIVES_GENERATED does not
+count it. Each is said. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

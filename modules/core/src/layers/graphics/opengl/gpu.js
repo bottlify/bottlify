@@ -400,7 +400,26 @@ function describeCensus(texture){
  * @property {number} [baseVertex]  added to every index (glDrawElementsBaseVertex)
  * @property {number} [instances]  how many instances, one when absent
  * @property {number} [baseInstance]  the first per-instance element (GL 4.2)
+ * @property {{ buffer: import('./objects.js').BufferObject, offset: number, stride: number,
+ *     most: number }} [captured]  a draw of what transform feedback captured
+ *     (glDrawTransformFeedback, `context-transform-feedback.js` Captured): `count` is the
+ *     most it may draw, and the device counts how many it does
  */
+
+/**
+ * What a draw of a capture takes of the vertices counted on the device, by
+ * mode: `floor((n - a) / b) * c` vertices or indices of n, the order of each
+ * mode being the same in its first indices whatever the count
+ * (`expandMode`).
+ *
+ * @type {ReadonlyMap<number, readonly number[]>}
+ */
+export const CAPTURED_SHAPES = new Map([
+    [GL.POINTS, [0, 1, 1]], [GL.LINES, [0, 2, 2]], [GL.TRIANGLES, [0, 3, 3]],
+    [GL.LINE_STRIP, [1, 1, 2]], [GL.LINE_LOOP, [1, 1, 2]],
+    [GL.TRIANGLE_STRIP, [2, 1, 3]], [GL.TRIANGLE_FAN, [2, 1, 3]], [GL.POLYGON, [2, 1, 3]],
+    [GL.QUADS, [0, 4, 6]], [GL.QUAD_STRIP, [2, 2, 6]],
+]);
 
 /**
  * An occlusion query as the renderer counts it: the samples its draws passed
@@ -2680,7 +2699,8 @@ export function createGpuRenderer(services){
         // Instances drawn one after another are not one draw's instances:
         // joined, the second range of each would come before the first's next.
         if (a.kind !== 'draw' || b.kind !== 'draw' || !a.indices || !b.indices
-            || a.instances !== 1 || b.instances !== 1 || !shareEveryDependency(a, b)
+            || a.instances !== 1 || b.instances !== 1 || a.counted || b.counted
+            || !shareEveryDependency(a, b)
             || a.occluded !== b.occluded || a.conditioned !== b.conditioned
             || b.indices.offset !== a.indices.offset + a.count * indexBytes(a.indices.format))
         {
@@ -2725,9 +2745,11 @@ export function createGpuRenderer(services){
      * @param {number} [instances]  how many instances (glDrawArraysInstanced)
      * @param {number} [idBias]  the program's vertex number of the vertex the
      *     device numbers 0: where the draw put its arrays (gl_VertexID)
+     * @param {{ gpu: any, offset: number } | null} [counted]  the arguments the device
+     *     wrote for a draw of what transform feedback captured, which it is made by
      */
     const record = (context, scene, layout, slots, indices, count, first, baseVertex, topology,
-        instances = 1, idBias = 0)=>
+        instances = 1, idBias = 0, counted = null)=>
     {
         const surfaces = drawables.get(context);
         if (!surfaces)
@@ -3072,7 +3094,15 @@ export function createGpuRenderer(services){
         const counting = feedbackCounts.get(context) ?? null;
         if (counting?.generated && !passes && !tessellation)
         {
-            counting.generated.samples += Math.floor(count / vpp) * instances;
+            if (counted)
+            {
+                diverge('a draw of what transform feedback captured was not counted by'
+                    + ' GL_PRIMITIVES_GENERATED: its count is the device\'s');
+            }
+            else
+            {
+                counting.generated.samples += Math.floor(count / vpp) * instances;
+            }
         }
         const tallied = !!kept && (!!counting?.written || (!!counting?.generated && !!passes));
         if (tallied)
@@ -3081,6 +3111,9 @@ export function createGpuRenderer(services){
         }
         if (feedback && session && kept && executable)
         {
+            // The most a draw of the capture may later draw: what a geometry
+            // shader emits is known only on the device.
+            session.most += passes ? Infinity : Math.floor(count / vpp) * vpp * instances;
             const writes = feedbackWrites(executable.linked, passes ? 1 + passes.fields : 2,
                 !passes);
             const targets = session.buffers.map((bound, slot)=>{
@@ -3194,6 +3227,7 @@ export function createGpuRenderer(services){
             instances,
             geometry,
             tessellation: tessellated,
+            counted,
             bindings,
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
@@ -3868,6 +3902,13 @@ export function createGpuRenderer(services){
         // A geometry shader reads each primitive's vertices whole, adjacent
         // ones included, in the order it takes them.
         const geometryLayout = drawn.programs.glsl?.linked.geometryLayout ?? null;
+        const shape = request.captured ? CAPTURED_SHAPES.get(request.mode) ?? null : null;
+        if (request.captured && (!shape || geometryLayout || drawn.feedback
+            || drawn.programs.glsl?.linked.tessEvaluation))
+        {
+            // The passes before a draw are laid out for the count it draws.
+            return false;
+        }
         if (geometryLayout && !drawsGeometryInput(request.mode, geometryLayout.input))
         {
             diverge(`a draw of mode ${hex(request.mode)} through a geometry shader that takes`
@@ -3954,14 +3995,34 @@ export function createGpuRenderer(services){
             };
         }
         packedSample = null;
+        const first = indices ? 0 : request.first - from;
+        const baseVertex = (expanded && !scanned ? request.first : 0) - from
+            + (scanned ? request.baseVertex ?? 0 : 0);
+        /** @type {{ gpu: any, offset: number } | null} */
+        let counted = null;
+        if (request.captured && shape)
+        {
+            if (request.mode === GL.LINE_LOOP)
+            {
+                diverge('a line loop of what transform feedback captured was drawn without'
+                    + ' its closing line');
+            }
+            const made = geometryPasses.capturedArgs(request.captured.buffer, {
+                offset: request.captured.offset, stride: request.captured.stride,
+                most: request.count, shape, instances, first, baseVertex, indexed: !!indices });
+            if (!made)
+            {
+                return false;
+            }
+            bufferFor(request.captured.buffer).gpu.markRead();
+            dispatchAll(recordingOf(context), [made.pass]);
+            counted = made.args;
+        }
         record(context, drawn, layout, slots,
-            indices, indices ? indices.count : request.count,
-            indices ? 0 : request.first - from,
-            (expanded && !scanned ? request.first : 0) - from
-                + (scanned ? request.baseVertex ?? 0 : 0),
+            indices, indices ? indices.count : request.count, first, baseVertex,
             tessLayout ? tessellatedTopology(tessLayout)
                 : geometryLayout ? GEOMETRY_TOPOLOGIES[geometryLayout.outputVertices]
-                    : topologyOf(request.mode), instances, from);
+                    : topologyOf(request.mode), instances, from, counted);
         return true;
     };
 
@@ -4670,8 +4731,19 @@ export function createGpuRenderer(services){
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
                         command.indices.offset);
-                    pass.drawIndexed(command.count, command.instances, command.first,
-                        command.baseVertex);
+                    if (command.counted)
+                    {
+                        pass.drawIndirect(command.counted.gpu, command.counted.offset, true);
+                    }
+                    else
+                    {
+                        pass.drawIndexed(command.count, command.instances, command.first,
+                            command.baseVertex);
+                    }
+                }
+                else if (command.counted)
+                {
+                    pass.drawIndirect(command.counted.gpu, command.counted.offset, false);
                 }
                 else
                 {
