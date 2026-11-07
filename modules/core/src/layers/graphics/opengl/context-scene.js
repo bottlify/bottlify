@@ -292,6 +292,7 @@ export function createSceneBuilder(kernel){
                 threeD: side.textureBoundAt(index, GL.TEXTURE_3D),
                 oneDArray: side.textureBoundAt(index, TEX.TEXTURE_1D_ARRAY),
                 twoDArray: side.textureBoundAt(index, TEX.TEXTURE_2D_ARRAY),
+                cubeArray: side.textureBoundAt(index, TEX.TEXTURE_CUBE_MAP_ARRAY),
             }))
             : [];
         const genericAttribs = programmed && programsSide

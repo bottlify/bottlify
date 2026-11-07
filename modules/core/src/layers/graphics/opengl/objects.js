@@ -74,6 +74,8 @@ const MIPMAP_FILTERS = new Set([
  *           kept as its own bytes in (`formats.js`), or absent for one kept as RGBA
  * @property {Uint8Array | null} [data]  that format's bytes, slices one after another,
  *           or null where this context keeps none
+ * @property {TextureLevel} [source]  the level a texture view's level reads its bytes
+ *           from (`texture-views.js`)
  */
 
 /**
@@ -107,6 +109,10 @@ const MIPMAP_FILTERS = new Set([
  * @property {Map<number, DirtyRect | null>} dirty   the level keys written
  *           since a copy kept elsewhere last read them, each with the
  *           rectangle written or `null` for the whole level
+ * @property {{ root: TextureObject, minLevel: number, numLevels: number, minLayer: number,
+ *     numLayers: number, internal: number }} [view]  a texture view's (4.3): the
+ *           texture whose storage it reads, the range of its levels and layers, and
+ *           its own internal format (`texture-views.js`)
  */
 
 /**
@@ -538,6 +544,25 @@ export function createShareGroup(){
  */
 
 /**
+ * The array targets, whose layers are one level each (a 1D array's its
+ * rows): GL_TEXTURE_1D_ARRAY, 2D_ARRAY, CUBE_MAP_ARRAY, 2D_MULTISAMPLE_ARRAY.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const LAYERED_TARGETS = new Set([0x8c18, 0x8c1a, 0x9009, 0x9102]);
+
+/**
+ * The level an attached texture image is in: a cube map's face its own, an
+ * array's layer (`face`) one of its level's.
+ *
+ * @param {{ texture: TextureObject, level: number, face: number }} attachment
+ */
+export function attachedLevelKey(attachment){
+    return LAYERED_TARGETS.has(attachment.texture.target) ? levelKey(attachment.level)
+        : levelKey(attachment.level, attachment.face);
+}
+
+/**
  * @typedef {{ kind: 'texture', texture: TextureObject, level: number,
  *     face: number } | { kind: 'renderbuffer', renderbuffer: RenderbufferObject }} Attachment
  */
@@ -592,7 +617,7 @@ export function attachmentImage(attachment){
             ? { holds, width: rb.width, height: rb.height, internalFormat: rb.internalFormat }
             : null;
     }
-    const level = attachment.texture.levels.get(levelKey(attachment.level, attachment.face));
+    const level = attachment.texture.levels.get(attachedLevelKey(attachment));
     if (!level || level.width === 0 || level.height === 0)
     {
         return null;

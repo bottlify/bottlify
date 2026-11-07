@@ -16,7 +16,10 @@
  *   the processor's rasteriser skips the same fragments.
  * - **Pixel transfer maps 8-bit colour.** Scale, bias and GL_MAP_COLOR are
  *   applied where an image is RGBA bytes: what glDrawPixels and a texture
- *   upload unpack, and what glReadPixels reads before it is packed. The
+ *   upload unpack, what glCopyPixels and a copy into a texture read from the
+ *   processor's framebuffer, and what glReadPixels and glGetTexImage read
+ *   before it is packed; a sized format's own bytes and a copy the device
+ *   makes skip it and say so (`transferSkipped`, decision A215). The
  *   stencil and index maps and shifts and the depth scale and bias are kept
  *   and answered and reach nothing: no transfer here carries indices,
  *   stencil or depth through them, and setting one says so.
@@ -219,6 +222,20 @@ export function installLegacyCalls(context, kernel){
         /** The stipple a draw of filled primitives is cut by, or null when it is off. */
         polygonStipple: ()=>(on(GL.POLYGON_STIPPLE) ? stipple : null),
         pixelTransfer,
+        /**
+         * Says that `what` passed by the pixel transfer set: a path whose
+         * pixels are never RGBA bytes here (a sized format's own, or a copy
+         * the device makes). Nothing while the transfer changes nothing.
+         *
+         * @param {string} what
+         */
+        transferSkipped: what=>{
+            if (pixelTransfer())
+            {
+                diverge(`${what} was made without the pixel transfer set (scale, bias,`
+                    + ' GL_MAP_COLOR): it is applied only where pixels are 8-bit RGBA here');
+            }
+        },
     });
 
     // --- guest memory and the pixel buffers ---

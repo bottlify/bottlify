@@ -48,13 +48,15 @@ import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import {
-    FACE_STRIDE, attachmentImage, createTextureObject, isTextureComplete, levelKey,
+    FACE_STRIDE, attachedLevelKey, attachmentImage, createTextureObject, isTextureComplete,
+    levelKey,
     swizzleCode,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
+import { rootKeyOf } from './texture-views.js';
 import {
     CANONICAL_LAYOUT, clientReads, drawsGeometryInput, expandIndices, geometryOrder,
     instanceElements, isList, lastProvoking, lockedFor, packVertices, planLayout, scanIndices,
@@ -1211,19 +1213,27 @@ export function createGpuRenderer(services){
         {
             const target = layout.viewDimension === '3d' ? GL.TEXTURE_3D
                 : layout.viewDimension === '2d-array' ? TEX.TEXTURE_2D_ARRAY
-                    : layout.viewDimension === 'cube' ? GL.TEXTURE_CUBE_MAP : GL.TEXTURE_2D;
+                    : layout.viewDimension === 'cube-array' ? TEX.TEXTURE_CUBE_MAP_ARRAY
+                        : layout.viewDimension === 'cube' ? GL.TEXTURE_CUBE_MAP : GL.TEXTURE_2D;
+            // A cube map array has a cube's six faces at the least.
+            const layers = target === TEX.TEXTURE_CUBE_MAP_ARRAY ? 6 : 1;
             const internal = layout.sampleType === 'sint' ? TEX.RGBA8I
                 : layout.sampleType === 'uint' ? TEX.RGBA8UI
                     : layout.sampleType === 'depth' ? TEX.DEPTH_COMPONENT32F : GL.RGBA8;
             const sized = sizedFormatOf(internal);
-            const data = layout.sampleType === 'depth' ? new Uint8Array(new Float32Array([1])
+            const texel = layout.sampleType === 'depth' ? new Uint8Array(new Float32Array([1])
                 .buffer) : layout.sampleType === 'float' ? new Uint8Array([0, 0, 0, 255])
                 : new Uint8Array(4);
+            const data = new Uint8Array(texel.length * layers);
+            for (let layer = 0; layer < layers; layer++)
+            {
+                data.set(texel, layer * texel.length);
+            }
             texture = createTextureObject(0, target);
             for (let face = 0; face < (target === GL.TEXTURE_CUBE_MAP ? 6 : 1); face++)
             {
                 texture.levels.set(levelKey(0, face), /** @type {any} */ ({
-                    width: 1, height: 1, depth: 1, internalFormat: internal, border: 0,
+                    width: 1, height: 1, depth: layers, internalFormat: internal, border: 0,
                     baseFormat: sized?.base ?? GL.RGBA, sized, data,
                 }));
             }
@@ -1396,8 +1406,11 @@ export function createGpuRenderer(services){
         const cube = target === GL.TEXTURE_CUBE_MAP;
         const solid = target === GL.TEXTURE_3D;
         const oneArray = target === TEX.TEXTURE_1D_ARRAY;
+        // A cube map array's faces are a 2D array's layers, sampled as cubes
+        // through a view of them (`sampleView`).
+        const cubeArray = target === TEX.TEXTURE_CUBE_MAP_ARRAY;
         const twoArray = target === TEX.TEXTURE_2D_ARRAY
-            || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY;
+            || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY || cubeArray;
         const baseDepth = base.depth ?? 1;
         const layers = cube ? 6 : twoArray ? baseDepth : oneArray ? base.height : 1;
         const height = oneArray ? 1 : base.height;
@@ -1456,9 +1469,11 @@ export function createGpuRenderer(services){
                         || storage.sampleType === 'depth' ? 'u' : 'i',
                 // A depth format with a stencil is bound for sampling through
                 // its depth alone.
-                sampleView: storage.depth
-                    ? gpu.texture.createView({ label: `gl-texture:${texture.name}:depth`,
-                        dimension: dimension ?? '2d', aspect: 'depth-only' })
+                sampleView: storage.depth || cubeArray
+                    ? gpu.texture.createView({
+                        label: `gl-texture:${texture.name}:${cubeArray ? 'cubes' : 'depth'}`,
+                        dimension: cubeArray ? 'cube-array' : dimension ?? '2d',
+                        aspect: storage.depth ? 'depth-only' : 'all' })
                     : null,
             };
             textures.set(texture, record);
@@ -1590,6 +1605,72 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The dimension a texture view's target samples as (4.3 table 8.21).
+     *
+     * @param {number} target @returns {string}
+     */
+    const viewDimensionOf = target=>(target === GL.TEXTURE_CUBE_MAP ? 'cube'
+        : target === TEX.TEXTURE_CUBE_MAP_ARRAY ? 'cube-array'
+            : target === TEX.TEXTURE_2D_ARRAY || target === TEX.TEXTURE_1D_ARRAY
+                || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY ? '2d-array'
+                : target === GL.TEXTURE_3D ? '3d' : '2d');
+
+    /** @type {WeakMap<import('./objects.js').TextureObject, { of: TextureRecord,
+     *     record: TextureRecord }>} each texture view's copy, and its root's it was made of */
+    const viewRecords = new WeakMap();
+
+    /**
+     * A texture view's copy (4.3 section 8.18): its root's surface, brought
+     * up to date as the root's own, read through a view of the levels and
+     * layers the view covers, in the view's dimension. WebGPU views a
+     * surface only in its own format, so a view in another of its class
+     * reads the root's texels as the root's format, which is said.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {Recording} recording
+     * @returns {TextureRecord}
+     */
+    const viewRecordFor = (texture, recording)=>{
+        const range = /** @type {NonNullable<typeof texture.view>} */ (texture.view);
+        const root = textureFor(range.root, recording);
+        const kept = viewRecords.get(texture);
+        if (kept && kept.of === root)
+        {
+            return kept.record;
+        }
+        const dimension = viewDimensionOf(texture.target);
+        const levels = Math.min(range.numLevels, root.levels - range.minLevel);
+        if (levels <= 0)
+        {
+            lose('a texture view names levels its original\'s copy on the device does not'
+                + ' hold, and samples as incomplete');
+            return textureFor(incompleteTexture(dimension === 'cube'), recording);
+        }
+        const sized = sizedFormatOf(range.internal);
+        const asked = sized ? storageFor(sized, true)?.format ?? null : TEXTURE_FORMAT;
+        if (asked !== root.format)
+        {
+            lose(`a texture view in ${asked ?? 'a format this device has none of'} reads its`
+                + ` original as ${root.format}: WebGPU reinterprets no surface's format`);
+        }
+        const layers = dimension === 'cube' ? 6 : dimension === 'cube-array'
+            || dimension === '2d-array' ? range.numLayers : 1;
+        const view = root.gpu.texture.createView({
+            label: `gl-texture:${texture.name}:view`, dimension,
+            baseMipLevel: range.minLevel, mipLevelCount: levels,
+            baseArrayLayer: range.minLayer, arrayLayerCount: layers,
+            aspect: root.storage?.depth ? 'depth-only' : 'all',
+        });
+        /** @type {TextureRecord} */
+        const record = { ...root, levels, cube: dimension === 'cube',
+            width: Math.max(1, root.width >> range.minLevel),
+            height: Math.max(1, root.height >> range.minLevel), views: new Map(),
+            sampleView: view };
+        viewRecords.set(texture, { of: root, record });
+        return record;
+    };
+
+    /**
      * The GPU copy of a texture, uploaded or brought up to date for a command
      * of `recording`.
      *
@@ -1598,6 +1679,10 @@ export function createGpuRenderer(services){
      * @returns {TextureRecord}
      */
     const textureFor = (texture, recording)=>{
+        if (texture.view)
+        {
+            return viewRecordFor(texture, recording);
+        }
         const cube = texture.target === GL.TEXTURE_CUBE_MAP;
         const base = /** @type {import('./objects.js').TextureLevel} */ (
             texture.levels.get(levelKey(0)));
@@ -3651,7 +3736,7 @@ export function createGpuRenderer(services){
     const baseFormatOfImage = attachment=>{
         if (attachment.kind === 'texture')
         {
-            return attachment.texture.levels.get(levelKey(attachment.level, attachment.face))
+            return attachment.texture.levels.get(attachedLevelKey(attachment))
                 ?.baseFormat ?? GL.RGBA;
         }
         const format = attachment.renderbuffer.internalFormat;
@@ -3837,11 +3922,21 @@ export function createGpuRenderer(services){
      * @returns {any}
      */
     const levelView = (texture, level, face, recording)=>{
+        if (texture.view)
+        {
+            // A view's level is its root's, at the root's level and layer.
+            const at = rootKeyOf(texture.target, texture.view, levelKey(level, face));
+            const rootLevel = (at?.key ?? 0) % FACE_STRIDE;
+            const rootFace = at?.slice ? at.slice.from
+                : ((at?.key ?? 0) - rootLevel) / FACE_STRIDE;
+            return levelView(texture.view.root, rootLevel, rootFace, recording);
+        }
         const textureRecord = textureFor(texture, recording);
         const key = levelKey(level, face);
         // An array's layer is named where a cube's face is; its level is one.
         const layered = texture.target === TEX.TEXTURE_2D_ARRAY
-            || texture.target === TEX.TEXTURE_1D_ARRAY;
+            || texture.target === TEX.TEXTURE_1D_ARRAY
+            || texture.target === TEX.TEXTURE_CUBE_MAP_ARRAY;
         const image = texture.levels.get(layered ? levelKey(level) : key);
         if (image)
         {
@@ -4163,7 +4258,8 @@ export function createGpuRenderer(services){
     {
         const surfaces = drawables.get(context);
         const layered = texture.target === TEX.TEXTURE_2D_ARRAY
-            || texture.target === TEX.TEXTURE_1D_ARRAY;
+            || texture.target === TEX.TEXTURE_1D_ARRAY
+            || texture.target === TEX.TEXTURE_CUBE_MAP_ARRAY;
         if (!surfaces || width <= 0 || height <= 0
             || !texture.levels.get(levelKey(level, layered ? 0 : face)))
         {
@@ -4342,14 +4438,16 @@ export function createGpuRenderer(services){
         }
         const recording = recordingOf(context);
         const copy = textureFor(texture, recording);
-        if ((copy.kind ?? 'f') !== 'f' || copy.shape?.endsWith('3d')
-            || copy.shape?.endsWith('2d-array'))
+        if ((copy.kind ?? 'f') !== 'f' || copy.shape?.endsWith('3d'))
         {
             lose(`glGenerateMipmap of a texture of ${copy.format}: its levels are made by a`
                 + ' filtered draw of one 2D level, which this texture does not take');
             return;
         }
-        const faces = copy.cube ? 6 : 1;
+        // An array's layers (a cube map array's faces among them) are drawn
+        // down one at a time, as a cube map's faces are.
+        const faces = copy.cube ? 6 : copy.shape?.endsWith('2d-array')
+            ? texture.levels.get(levelKey(0))?.depth ?? 1 : 1;
         const pipeline = pipelineFor(blitKey(copy.format), generateBlit(),
             showDescriptor(copy.format), SINGLE_TEXTURE_PLAN);
         for (let face = 0; face < faces; face++)

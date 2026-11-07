@@ -35,8 +35,11 @@
  */
 
 import { GL } from './constants.js';
-import { RENDERBUFFER_FORMATS, attachmentImage, levelKey } from './objects.js';
-import { componentTypeOf } from './formats.js';
+import {
+    LAYERED_TARGETS, RENDERBUFFER_FORMATS, attachedLevelKey, attachmentImage, levelKey,
+} from './objects.js';
+import { TEX, componentTypeOf } from './formats.js';
+import { rgbaOf } from './texture-levels.js';
 
 /**
  * @typedef {import('./objects.js').RenderbufferObject} RenderbufferObject
@@ -86,7 +89,7 @@ export function framebufferStatus(fbo){
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
         const sized = attachment.kind === 'texture'
-            ? attachment.texture.levels.get(levelKey(attachment.level, attachment.face))?.sized
+            ? attachment.texture.levels.get(attachedLevelKey(attachment))?.sized
             : null;
         if (sized && (sized.compressed || sized.packing === 'rgb9e5'
             || (attachment.kind === 'texture' && attachment.texture.target === GL.TEXTURE_3D)))
@@ -551,6 +554,58 @@ export function installFramebufferCalls(context, kernel){
         },
 
         /**
+         * glFramebufferTextureLayer (3.0): a layer of an array's level, a
+         * cube map array's layer-face among them (4.0), drawn into as a 2D
+         * image. A 3D texture's slice is not taken: GL_INVALID_OPERATION, as
+         * a draw here reaches no slice of one.
+         *
+         * @param {number} target @param {number} attachment @param {number} name
+         * @param {number} level @param {number} layer
+         */
+        glFramebufferTextureLayer(target, attachment, name, level, layer){
+            if (!enter('glFramebufferTextureLayer', [target, attachment, name, level, layer]))
+            {
+                return;
+            }
+            const texture = name === 0 ? null : kernel.shareGroup().textures.objects.get(name);
+            if (!texture)
+            {
+                // A detach, or a name that is no texture.
+                framebufferTexture(target, attachment, name === 0 ? GL.TEXTURE_2D : GL.TEXTURE_3D,
+                    name, level);
+                return;
+            }
+            if (!LAYERED_TARGETS.has(texture.target))
+            {
+                const fbo = boundTo(target);
+                setError(fbo === undefined || !validAttachment(attachment) ? GL.INVALID_ENUM
+                    : GL.INVALID_OPERATION);
+                return;
+            }
+            const maxLevel = Math.log2(record(GL.MAX_TEXTURE_SIZE).values[0]);
+            // A layer past the texture's own makes the framebuffer incomplete;
+            // past MAX_ARRAY_TEXTURE_LAYERS it is no layer at all.
+            if (layer < 0 || layer >= record(TEX.MAX_ARRAY_TEXTURE_LAYERS).values[0]
+                || level < 0 || level > maxLevel)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const fbo = boundTo(target);
+            if (fbo === undefined || !validAttachment(attachment))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (!fbo)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            attach(fbo, attachment, { kind: 'texture', texture, level, face: layer });
+        },
+
+        /**
          * @param {number} target @param {number} attachment @param {number} rbTarget
          * @param {number} name
          */
@@ -631,7 +686,7 @@ export function installFramebufferCalls(context, kernel){
             const colour = image?.holds === 'colour';
             // A texture kept as a sized format answers from its format.
             const sized = attached.kind === 'texture'
-                ? attached.texture.levels.get(levelKey(attached.level, attached.face))?.sized
+                ? attached.texture.levels.get(attachedLevelKey(attached))?.sized
                 : null;
             const bits = /** @type {number[]} */ ([GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE,
                 GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,
@@ -654,7 +709,9 @@ export function installFramebufferCalls(context, kernel){
                             ? CUBE_FACES[attached.face] : 0]
                         : (setError(GL.INVALID_ENUM), null);
                 case GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
-                    return attached.kind === 'texture' ? [0] : (setError(GL.INVALID_ENUM), null);
+                    return attached.kind === 'texture'
+                        ? [LAYERED_TARGETS.has(attached.texture.target) ? attached.face : 0]
+                        : (setError(GL.INVALID_ENUM), null);
                 case GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
                 case GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
                 case GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
@@ -1063,7 +1120,9 @@ export function installFramebufferCalls(context, kernel){
             {
                 return;
             }
-            if (target !== GL.TEXTURE_2D && target !== GL.TEXTURE_CUBE_MAP)
+            const layered = target === TEX.TEXTURE_2D_ARRAY
+                || target === TEX.TEXTURE_CUBE_MAP_ARRAY;
+            if (target !== GL.TEXTURE_2D && target !== GL.TEXTURE_CUBE_MAP && !layered)
             {
                 setError(GL.INVALID_ENUM);
                 return;
@@ -1083,7 +1142,29 @@ export function installFramebufferCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            if (target === TEX.TEXTURE_CUBE_MAP_ARRAY && base.width !== base.height)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             const levels = Math.floor(Math.log2(Math.max(base.width, base.height))) + 1;
+            if (layered)
+            {
+                // An array's levels keep its layers; each layer is its own image.
+                for (let level = 1; level < levels; level++)
+                {
+                    const made = layeredLevel(base, level, kernel.gpuBacked());
+                    if (made.lost)
+                    {
+                        kernel.lose(`glGenerateMipmap of an array of ${base.sized?.name ?? 'a'}`
+                            + ' format made no texels on the processor: only 8-bit components'
+                            + ' are averaged here');
+                    }
+                    texture.levels.set(levelKey(level), made.level);
+                }
+                kernel.generateMipmap?.(texture);
+                return;
+            }
             for (let face = 0; face < faces; face++)
             {
                 const top = texture.levels.get(levelKey(0, face));
@@ -1154,6 +1235,44 @@ export function installFramebufferCalls(context, kernel){
 }
 
 /**
+ * A mipmap level of an array (2D or of cube maps) made from its base level:
+ * the base's layers each averaged down, where the context keeps the base's
+ * bytes and they are 8-bit components; on a device the level is made there
+ * and holds none here. `lost` says the processor's could not be made.
+ *
+ * @param {import('./objects.js').TextureLevel} base @param {number} level
+ * @param {boolean} device
+ * @returns {{ level: import('./objects.js').TextureLevel, lost: boolean }}
+ */
+function layeredLevel(base, level, device){
+    const width = Math.max(1, base.width >> level);
+    const height = Math.max(1, base.height >> level);
+    const layers = base.depth ?? 1;
+    const sized = base.sized ?? null;
+    const channels = sized && !sized.compressed && sized.packing === null
+        && sized.bits.every(bits=>bits === 0 || bits === 8) && sized.depth === 0
+        && sized.stencil === 0 ? sized.bits.filter(bits=>bits > 0).length : 0;
+    /** @type {Uint8Array | null} */
+    let data = null;
+    if (!device && base.data && channels > 0)
+    {
+        const slice = base.width * base.height * channels;
+        const made = width * height * channels;
+        data = new Uint8Array(made * layers);
+        for (let layer = 0; layer < layers; layer++)
+        {
+            data.set(downsampleBytes(base.data.subarray(layer * slice, (layer + 1) * slice),
+                base.width, base.height, level, channels), layer * made);
+        }
+    }
+    /** @type {import('./objects.js').TextureLevel} */
+    const made = { width, height, depth: layers, internalFormat: base.internalFormat,
+        border: 0, baseFormat: base.baseFormat, sized, data, compressed: null,
+        texels: data && sized ? rgbaOf(data, sized, width, height, layers) : null };
+    return { level: made, lost: !device && !!base.data && !data };
+}
+
+/**
  * A mipmap level's texels made from the base level's by averaging, where
  * the context keeps the base level's: the processor's half of
  * glGenerateMipmap. A level rendered on the device has none here, and is
@@ -1164,19 +1283,26 @@ export function installFramebufferCalls(context, kernel){
  * @returns {Uint8Array | null}
  */
 function downsample(texels, width, height, level){
-    if (!texels)
-    {
-        return null;
-    }
+    return texels ? downsampleBytes(texels, width, height, level, 4) : null;
+}
+
+/**
+ * An image of `channels` bytes a texel, averaged down to `level`.
+ *
+ * @param {Uint8Array} texels @param {number} width @param {number} height
+ * @param {number} level @param {number} channels
+ * @returns {Uint8Array}
+ */
+function downsampleBytes(texels, width, height, level, channels){
     const w = Math.max(1, width >> level);
     const h = Math.max(1, height >> level);
     const step = 1 << level;
-    const out = new Uint8Array(w * h * 4);
+    const out = new Uint8Array(w * h * channels);
     for (let y = 0; y < h; y++)
     {
         for (let x = 0; x < w; x++)
         {
-            for (let c = 0; c < 4; c++)
+            for (let c = 0; c < channels; c++)
             {
                 let sum = 0;
                 let count = 0;
@@ -1184,11 +1310,11 @@ function downsample(texels, width, height, level){
                 {
                     for (let dx = 0; dx < step && x * step + dx < width; dx++)
                     {
-                        sum += texels[((y * step + dy) * width + x * step + dx) * 4 + c];
+                        sum += texels[((y * step + dy) * width + x * step + dx) * channels + c];
                         count++;
                     }
                 }
-                out[(y * w + x) * 4 + c] = Math.round(sum / Math.max(1, count));
+                out[(y * w + x) * channels + c] = Math.round(sum / Math.max(1, count));
             }
         }
     }
