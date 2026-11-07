@@ -30,6 +30,8 @@
  * decisions `enter` makes. Passed to every `context-*.js` installer.
  *
  * @typedef {Object} ContextKernel
+ * @property {boolean} core  a core profile (or a forward-compatible 3.0 or 3.1):
+ *     what the compatibility profile adds is refused
  * @property {(name: string, args: any[]) => boolean} enter
  * @property {(work: () => void) => void} executed  runs `work` as made outside any
  *     list being compiled: for a call a list does not hold, whose draws are made now

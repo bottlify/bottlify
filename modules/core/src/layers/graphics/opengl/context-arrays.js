@@ -97,6 +97,10 @@ const BINDING_QUERIES = new Map([
  * draw's count, instances, first and base instance; an elements draw's
  * count, instances, first index, base vertex and base instance.
  */
+/** The primitives a core profile does not draw (3.2 appendix E.2). */
+/** @type {ReadonlySet<number>} */
+const CORE_REMOVED_MODES = new Set([GL.QUADS, GL.QUAD_STRIP, GL.POLYGON]);
+
 const ARRAYS_COMMAND_WORDS = 4;
 const ELEMENTS_COMMAND_WORDS = 5;
 
@@ -1150,6 +1154,30 @@ export function installArrayCalls(context, kernel){
     }
 
     /**
+     * Whether a core profile lets a draw be made: it draws only from a
+     * vertex array object, and no quads or polygons (3.2 appendix E.2).
+     *
+     * @param {number} mode @returns {boolean}
+     */
+    function coreAllows(mode){
+        if (!kernel.core)
+        {
+            return true;
+        }
+        if (CORE_REMOVED_MODES.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return false;
+        }
+        if (record(GL.VERTEX_ARRAY_BINDING).values[0] === 0)
+        {
+            setError(GL.INVALID_OPERATION);
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * A draw by a range of the arrays, as many times as there are instances.
      *
      * @param {string} name @param {number} mode @param {number} first @param {number} count
@@ -1157,6 +1185,10 @@ export function installArrayCalls(context, kernel){
      */
     function drawArraysWith(name, mode, first, count, instancing){
         refreshMapped();
+        if (!coreAllows(mode))
+        {
+            return;
+        }
         if (count < 0 || first < 0 || instancing.instances < 0)
         {
             setError(GL.INVALID_VALUE);
@@ -1191,6 +1223,10 @@ export function installArrayCalls(context, kernel){
      */
     function drawElementsWith(name, mode, count, type, indices, baseVertex, instancing){
         refreshMapped();
+        if (!coreAllows(mode))
+        {
+            return;
+        }
         if (count < 0 || instancing.instances < 0)
         {
             setError(GL.INVALID_VALUE);

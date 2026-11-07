@@ -49,6 +49,7 @@ import { ES2_CALLS_NOT_COMPILED, installEs2Calls } from './context-es2.js';
 import { installViewportCalls } from './context-viewports.js';
 import { LATER_CALLS_NOT_COMPILED, installLaterCalls } from './context-later.js';
 import { DEBUG_CALLS_NOT_COMPILED, installDebugCalls } from './context-debug.js';
+import { GL_CORE_REMOVED } from './registry.js';
 import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
 import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
 import {
@@ -145,6 +146,16 @@ const NOT_COMPILABLE = new Set([
     ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED,
     ...DSA_CALLS_NOT_COMPILED,
 ]);
+
+/**
+ * The calls a core profile does not have (3.2 and later, and a
+ * forward-compatible context's deprecated ones): the registry's list, under
+ * the names the context calls them by, their ARB and EXT spellings too.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const CORE_REMOVED = new Set(GL_CORE_REMOVED.split(' ')
+    .flatMap(name=>[name, `${name}ARB`, `${name}EXT`]));
 
 /** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([
@@ -307,6 +318,10 @@ export function createGlContext(options = {}){
 
     let attached = false;
     const version = options.version ?? DEFAULT_VERSION;
+    // A core profile, or a forward-compatible context of 3.0 or 3.1, which
+    // has none of what 3.0 deprecated either.
+    const core = (version.profile & GL.CONTEXT_CORE_PROFILE_BIT) !== 0
+        || (version.flags & GL.CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) !== 0;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
     for (const { query, ...entry } of versionState(version, extensions.length))
     {
@@ -379,6 +394,13 @@ export function createGlContext(options = {}){
      * @returns {boolean} whether the caller should do its work
      */
     const enter = (name, args)=>{
+        if (core && CORE_REMOVED.has(name))
+        {
+            // What a core profile removed is still a function a program can
+            // obtain, and calling it is an error (OpenGL 3.2 appendix E.2).
+            setError(GL.INVALID_OPERATION);
+            return false;
+        }
         if (primitive && !ALLOWED_IN_BEGIN.has(name))
         {
             setError(GL.INVALID_OPERATION);
@@ -445,6 +467,7 @@ export function createGlContext(options = {}){
 
     /** @type {ContextKernel} */
     const kernel = {
+        core,
         clearWith,
         enter,
         executed: work=>{
@@ -779,6 +802,12 @@ export function createGlContext(options = {}){
             }
             if (name === GL.EXTENSIONS)
             {
+                if (core)
+                {
+                    // A core profile reads them one by one (glGetStringi).
+                    setError(GL.INVALID_ENUM);
+                    return null;
+                }
                 return extensions.join(' ');
             }
             if (name === GL.PROGRAM_ERROR_STRING_ARB)
@@ -1868,6 +1897,12 @@ export function createGlContext(options = {}){
     installViewportCalls(context, kernel);
     installLaterCalls(context, kernel);
     installDebugCalls(context, kernel);
+    // A context made for debugging starts with its debug output on (4.3
+    // section 20.2).
+    if ((version.flags & GL.CONTEXT_FLAG_DEBUG_BIT) !== 0)
+    {
+        setState(GL.DEBUG_OUTPUT, [1]);
+    }
     installSyncCalls(context, kernel);
     installEs2Calls(context, kernel);
     installSamplerCalls(context, kernel);
