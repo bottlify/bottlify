@@ -21,6 +21,7 @@ import { createGpuRenderer } from './gpu.js';
 import { geometryOrder, stripWithAdjacency } from './gpu-layout.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { GLSL_GEOMETRY_PASS_BINDING } from './glsl-wgsl.js';
 
 function rig(){
     const gpu = createFakeDevice();
@@ -188,4 +189,39 @@ test('the vertices a geometry shader reads a primitive, adjacency by its table',
         [0, 1, 2, 3, 1, 2, 3, 4]);
     assert.deepEqual([...geometryOrder(GL.TRIANGLE_STRIP, 4) ?? []], [0, 1, 2, 2, 1, 3]);
     assert.equal(geometryOrder(GL.TRIANGLES_ADJACENCY, 12), null);
+});
+
+test('a geometry shader\'s invocations (4.0) run a primitive that many times, numbered', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const made = program(gl, [[GL.VERTEX_SHADER, VS], [GL.GEOMETRY_SHADER, `#version 400
+layout(triangles, invocations = 3) in; layout(triangle_strip, max_vertices = 3) out;
+in vec3 tint[]; out vec3 colour;
+void main() {
+    for (int i = 0; i < 3; i++) {
+        colour = tint[i] * float(gl_InvocationID); gl_Position = gl_in[i].gl_Position;
+        EmitVertex();
+    }
+}`], [GL.FRAGMENT_SHADER, FS]]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [1], gl.glGetProgramInfoLog(made));
+    gl.glUseProgram(made);
+    r.floats(0x1000, [0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1]);
+    gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glDrawArrays(GL.TRIANGLE_STRIP, 0, 4);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    const gs = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>m.descriptor.code)
+        .find((/** @type {string} */ code)=>code.includes('fn geometryMain'));
+    assert.match(gs, /let primitive = id\.x \/ 3u;/);
+    assert.match(gs, /ygl_InvocationID = i32\(id\.x % 3u\);/);
+    assert.match(gs, /let in0 = \(primitive \* 3u \+ 0u\)/, 'each invocation reads its primitive');
+    // Two triangles, three invocations each: six runs of the shader.
+    const pass = r.gpu.of('dispatchWorkgroups').find((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label === 'gl:gs');
+    const params = pass.groups[1].entries.find((/** @type {any} */ e)=>
+        e.binding === GLSL_GEOMETRY_PASS_BINDING.params).resource;
+    assert.equal(new Uint32Array(params.buffer.bytes.buffer, params.buffer.bytes.byteOffset
+        + params.offset, 1)[0], 6, 'gsParams.invocations');
+    assert.equal(gl.glGetIntegerv(GL.MAX_GEOMETRY_SHADER_INVOCATIONS)[0], 32);
 });

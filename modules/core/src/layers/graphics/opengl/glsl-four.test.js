@@ -17,7 +17,7 @@ import { GL } from './constants.js';
 import { compileShader } from './context-glsl.js';
 import { createGlContext } from './context.js';
 import { linkProgram } from './glsl-link.js';
-import { emitStage } from './glsl-wgsl.js';
+import { emitStage, interfaceStruct } from './glsl-wgsl.js';
 import { canonicalAttribName } from './arb-program.js';
 
 const PASS = `#version 400
@@ -27,7 +27,7 @@ in vec4 position; out vec4 colour; void main() { colour = position; gl_Position 
  * The fragment stage's WGSL for `fragment` after `vertex`.
  *
  * @param {string} fragment @param {string} [vertex]
- * @returns {{ code: string, program: any }}
+ * @returns {{ code: string, program: any, struct: string }}
  */
 function fragmentOf(fragment, vertex = PASS){
     /** @param {string} source @param {'vertex' | 'fragment'} stage */
@@ -48,7 +48,8 @@ function fragmentOf(fragment, vertex = PASS){
     const options = { attributes, flat: false, twoSide: false, alphaFunc: null, targets: 1,
         targetScalars: ['f32'], compare: ()=>'true' };
     const vs = emitStage(program, 'vertex', options, null, 'glsl');
-    return { code: emitStage(program, 'fragment', options, vs.fields, 'glsl').code, program };
+    return { code: emitStage(program, 'fragment', options, vs.fields, 'glsl').code, program,
+        struct: interfaceStruct(vs.fields) };
 }
 
 test('4.00\'s integer functions: carries, borrows, a 64-bit product\'s words, bit fields', ()=>{
@@ -202,4 +203,22 @@ void main() { c = colour * float(k + v.y + m[1][1]) * f; }`]])
     const sorted = list=>[...list].sort((a, b)=>a - b);
     assert.deepEqual(sorted(types), sorted([GL.FLOAT, GL.DOUBLE, 0x8f46, 0x8ffc]),
         'GL_DOUBLE, GL_DOUBLE_VEC2 and GL_DOUBLE_MAT2');
+});
+
+test('4.00\'s samples: WGSL\'s index and masks, a `sample` input at each sample', ()=>{
+    const { code, struct } = fragmentOf(`#version 400
+sample in vec4 colour; out vec4 c;
+void main() { c = colour + vec4(gl_SamplePosition, float(gl_SampleID), float(gl_SampleMaskIn[0]));
+    if (colour.x > 0.5) { gl_SampleMask[0] = 1; } }`, `#version 400
+in vec4 position; sample out vec4 colour;
+void main() { colour = position; gl_Position = position; }`);
+    assert.match(struct, /@interpolate\(perspective, sample\) i0: vec4f/);
+    assert.ok(code.includes('@builtin(sample_index) sampleIndex: u32,'
+        + ' @builtin(sample_mask) sampleMaskIn: u32)'));
+    assert.match(code, /fgl_SampleID = i32\(sampleIndex\);/);
+    assert.match(code, /fgl_SampleMaskIn\[0\] = bitcast<i32>\(sampleMaskIn\);/);
+    assert.match(code, /fgl_SampleMask\[0\] = -1i;[\s\S]*fmain\(\);[\s\S]*out\.mask = bitcast<u32>\(fgl_SampleMask\[0\]\);/,
+        'every sample kept where the shader does not write the mask');
+    assert.match(code, /@builtin\(sample_mask\) mask: u32,/);
+    assert.match(code, /fgl_SamplePosition = vec2f\(fract\(input\.position\.x\), select\(fract\(input\.position\.y\), 1\.0f - fract/);
 });

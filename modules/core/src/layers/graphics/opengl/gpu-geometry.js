@@ -287,7 +287,7 @@ export function createGlGeometry(services){
         const vpp = layout.outputVertices;
         const most = Math.max(1, layout.maxVertices);
         const prims = Math.floor(draw.positions / vertices);
-        const invocations = draw.instances * prims;
+        const invocations = draw.instances * prims * Math.max(1, layout.invocations ?? 1);
         if (invocations === 0)
         {
             return null;

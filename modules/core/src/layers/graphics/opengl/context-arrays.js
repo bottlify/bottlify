@@ -704,6 +704,7 @@ export function installArrayCalls(context, kernel){
             baseVertex: indexed?.baseVertex ?? 0,
             instances: instancing.instances,
             baseInstance: instancing.baseInstance,
+            drawID,
             captured,
             lock: locked,
             read: view ? (at, n)=>view(at, n) : ()=>new Uint8Array(0),
@@ -1465,6 +1466,29 @@ export function installArrayCalls(context, kernel){
     }
 
     /**
+     * Which draw of a multi-draw the draw being made is (gl_DrawID, 4.6
+     * section 11.1.3.9): 0 for a draw of its own.
+     */
+    let drawID = 0;
+
+    /**
+     * Makes `draw` the `index`-th draw of a multi-draw.
+     *
+     * @param {number} index @param {() => void} draw
+     */
+    function numbered(index, draw){
+        drawID = index;
+        try
+        {
+            draw();
+        }
+        finally
+        {
+            drawID = 0;
+        }
+    }
+
+    /**
      * Arrays draws by indirect commands, made now even while a list is
      * compiled: a list does not hold them (4.6 compatibility section 21.4).
      *
@@ -1472,10 +1496,10 @@ export function installArrayCalls(context, kernel){
      */
     function drawArraysIndirectly(name, mode, commands){
         kernel.executed(()=>{
-            for (const [count, instances, first, baseInstance] of commands ?? [])
-            {
-                drawArraysWith(name, mode, first, count, { instances, baseInstance });
-            }
+            (commands ?? []).forEach(([count, instances, first, baseInstance], k)=>{
+                numbered(k, ()=>drawArraysWith(name, mode, first, count,
+                    { instances, baseInstance }));
+            });
         });
     }
 
@@ -1499,12 +1523,11 @@ export function installArrayCalls(context, kernel){
         }
         const size = componentBytes(type);
         kernel.executed(()=>{
-            for (const [count, instances, firstIndex, baseVertex, baseInstance]
-                of commands() ?? [])
-            {
-                drawElementsWith(name, mode, count, type, firstIndex * size, baseVertex | 0,
-                    { instances, baseInstance });
-            }
+            (commands() ?? []).forEach((command, k)=>{
+                const [count, instances, firstIndex, baseVertex, baseInstance] = command;
+                numbered(k, ()=>drawElementsWith(name, mode, count, type, firstIndex * size,
+                    baseVertex | 0, { instances, baseInstance }));
+            });
         });
     }
 
@@ -1771,6 +1794,16 @@ export function installArrayCalls(context, kernel){
         // --- instances and base vertices (OpenGL 3.1, 3.2, 4.2) ---
 
         /**
+         * A draw call made as the `index`-th of a multi-draw
+         * (glMultiDrawArrays and glMultiDrawElements, `exports-later.js`).
+         *
+         * @param {number} index @param {() => void} draw
+         */
+        numberedDraw(index, draw){
+            numbered(index, draw);
+        },
+
+        /**
          * glDrawTransformFeedback, its stream form (4.0) and their instanced
          * forms (4.2).
          *
@@ -1885,8 +1918,8 @@ export function installArrayCalls(context, kernel){
                 return;
             }
             counts.forEach((count, k)=>{
-                drawElementsWith('glMultiDrawElementsBaseVertex', mode, count, type, indices[k],
-                    baseVertices[k] ?? 0, ONE_INSTANCE);
+                numbered(k, ()=>drawElementsWith('glMultiDrawElementsBaseVertex', mode, count,
+                    type, indices[k], baseVertices[k] ?? 0, ONE_INSTANCE));
             });
         },
 

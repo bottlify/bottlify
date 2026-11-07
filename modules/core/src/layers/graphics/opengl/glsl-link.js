@@ -100,6 +100,7 @@ export const SUBROUTINE_LIMITS = Object.freeze({ functions: 256, locations: 1024
  * @property {string} fragmentPath  what the fragment stage reads it into
  * @property {'smooth' | 'flat' | 'noperspective'} interpolation
  * @property {boolean} centroid
+ * @property {boolean} [sample]  interpolated at each sample (4.0's `sample`)
  */
 
 /**
@@ -187,6 +188,8 @@ export const SUBROUTINE_LIMITS = Object.freeze({ functions: 256, locations: 1024
  * @property {'points' | 'line_strip' | 'triangle_strip'} output
  * @property {number} outputVertices  a primitive's: 1, 2 or 3
  * @property {number} maxVertices  what one invocation emits at the most
+ * @property {number} invocations  how many times it runs a primitive (4.0's
+ *     `layout(invocations)`, 1 otherwise), gl_InvocationID numbering them
  */
 
 /**
@@ -607,6 +610,7 @@ export function linkProgram(given){
                 interpolation: integer ? 'flat' : input.interpolation ?? from.interpolation
                     ?? 'smooth',
                 centroid: input.centroid,
+                sample: input.sample,
             });
         }
     }
@@ -1237,7 +1241,8 @@ function shapeOf(info){
  * @param {boolean} [arrayed]  a geometry shader's inputs: each an array a
  *     vertex, matched by its element (a path's `[]` the vertex)
  * @returns {{ name: string, type: GlslType, path: string, used: boolean, legacy: boolean,
- *     interpolation: 'smooth' | 'flat' | 'noperspective' | null, centroid: boolean }[]}
+ *     interpolation: 'smooth' | 'flat' | 'noperspective' | null, centroid: boolean,
+ *     sample?: boolean }[]}
  */
 function interfaceOf(stage, direction, error, arrayed = false){
     /** @type {ReturnType<typeof interfaceOf>} */
@@ -1266,7 +1271,8 @@ function interfaceOf(stage, direction, error, arrayed = false){
                 entries.push({ name: `${block.name}.${member.name}`, type: member.type,
                     path: `g_${symbol.name}${each}.m_${member.name}`, used, legacy: false,
                     interpolation: member.qualifiers.interpolation ?? own?.interpolation ?? null,
-                    centroid: member.qualifiers.centroid || !!own?.centroid });
+                    centroid: member.qualifiers.centroid || !!own?.centroid,
+                    sample: member.qualifiers.sample || !!own?.sample });
             }
             continue;
         }
@@ -1274,7 +1280,7 @@ function interfaceOf(stage, direction, error, arrayed = false){
             type: vertexed ? /** @type {any} */ (symbol.type).element : symbol.type,
             path: `g_${symbol.name}${each}`, used,
             legacy: symbol.storage === 'varying', interpolation: own?.interpolation ?? null,
-            centroid: !!own?.centroid });
+            centroid: !!own?.centroid, sample: !!own?.sample });
     }
     return entries;
 }
@@ -1426,6 +1432,12 @@ function geometryLayoutOf(units, error){
     const input = said('input', name=>GEOMETRY_INPUTS.has(name));
     const output = said('output', name=>GEOMETRY_OUTPUTS.has(name));
     const most = said('output', name=>name === 'max_vertices');
+    const invocations = said('input', name=>name === 'invocations') ?? 1;
+    if (typeof invocations !== 'number' || invocations < 1
+        || invocations > GEOMETRY_SHADER_INVOCATIONS)
+    {
+        error(`geometry shader: invocations must be 1 to ${GEOMETRY_SHADER_INVOCATIONS}`);
+    }
     if (input === null)
     {
         error('geometry shader: no input primitive is declared');
@@ -1448,8 +1460,12 @@ function geometryLayoutOf(units, error){
         output: /** @type {GeometryLayout['output']} */ (output),
         outputVertices: /** @type {number} */ (GEOMETRY_OUTPUTS.get(String(output))),
         maxVertices: Number(most),
+        invocations: Number(invocations),
     };
 }
+
+/** GL_MAX_GEOMETRY_SHADER_INVOCATIONS (4.0 table 6.44): the minimum, 32. */
+export const GEOMETRY_SHADER_INVOCATIONS = 32;
 
 /** @param {import('./glsl-types.js').StructType} struct @returns {string} */
 function describe(struct){

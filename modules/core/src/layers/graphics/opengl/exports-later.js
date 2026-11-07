@@ -838,7 +838,7 @@ export function laterEntryPoints(h){
             const count = readTyped('i', counts, n);
             for (let k = 0; k < n; k++)
             {
-                context.glDrawArrays(mode >>> 0, first[k], count[k]);
+                context.numberedDraw(k, ()=>context.glDrawArrays(mode >>> 0, first[k], count[k]));
             }
         }),
         glMultiDrawElements: ([mode, counts, type, indices, primcount])=>call(context=>{
@@ -847,7 +847,8 @@ export function laterEntryPoints(h){
             const pointers = readPointers(indices, n);
             for (let k = 0; k < n; k++)
             {
-                context.glDrawElements(mode >>> 0, count[k], type >>> 0, pointers[k]);
+                context.numberedDraw(k, ()=>context.glDrawElements(mode >>> 0, count[k],
+                    type >>> 0, pointers[k]));
             }
         }),
 

@@ -408,11 +408,15 @@ function describeCensus(texture){
  * @property {number} [baseVertex]  added to every index (glDrawElementsBaseVertex)
  * @property {number} [instances]  how many instances, one when absent
  * @property {number} [baseInstance]  the first per-instance element (GL 4.2)
+ * @property {number} [drawID]  which draw of a multi-draw this is (gl_DrawID, 4.6)
  * @property {{ buffer: import('./objects.js').BufferObject, offset: number, stride: number,
  *     most: number }} [captured]  a draw of what transform feedback captured
  *     (glDrawTransformFeedback, `context-transform-feedback.js` Captured): `count` is the
  *     most it may draw, and the device counts how many it does
  */
+
+/** A draw's numbers where nothing names them: an immediate-mode draw's. */
+const NO_DRAW_NUMBERS = Object.freeze({ baseVertex: 0, baseInstance: 0, drawID: 0 });
 
 /**
  * What a draw of a capture takes of the vertices counted on the device, by
@@ -2867,6 +2871,14 @@ export function createGpuRenderer(services){
     let lastDraw = null;
 
     /**
+     * The numbers a draw by arrays gives gl_BaseVertex, gl_BaseInstance and
+     * gl_DrawID (4.6 section 11.1.3.9): the base vertex an indexed draw names,
+     * 0 otherwise, its base instance, and its place in a multi-draw.
+     */
+    /** @type {{ baseVertex: number, baseInstance: number, drawID: number }} */
+    let drawNumbers = NO_DRAW_NUMBERS;
+
+    /**
      * The first vertex of an immediate-mode draw, for the dump line: what the
      * program handed over, before any of it reached the device.
      *
@@ -2959,6 +2971,13 @@ export function createGpuRenderer(services){
             plans.set(key, plan);
         }
         const executable = scene.programs.glsl;
+        const lastVertexStage = executable ? executable.linked.geometry
+            ?? executable.linked.tessEvaluation ?? executable.linked.vertex : null;
+        if (lastVertexStage?.uses.has('gl_CullDistance'))
+        {
+            diverge('a program wrote gl_CullDistance, and no primitive was culled by it:'
+                + ' WebGPU clips by distances, and culls by none');
+        }
         /** @param {BindPlan['textures'][number]} entry */
         const sampledTexture = entry=>{
             let texture = entry.sampler !== undefined && executable
@@ -3568,6 +3587,8 @@ export function createGpuRenderer(services){
      * @returns {Float32Array}
      */
     const glslUniforms = (plan, executable, scene, mvp, idBias = 0)=>{
+        const numbers = [idBias, drawNumbers.baseVertex, drawNumbers.baseInstance,
+            drawNumbers.drawID];
         const matricesOnly = plan.state.every(s=>MATRIX_ONLY.test(s.name));
         const refs = plan.state.length === 0 ? [] : [scene.modelview, scene.projection, mvp];
         /** @type {number[]} */
@@ -3578,7 +3599,7 @@ export function createGpuRenderer(services){
         }
         if (plan.idBias !== undefined)
         {
-            values.push(idBias);
+            values.push(...numbers);
         }
         if (plan.state.some(s=>s.name === 'gl_DepthRange'))
         {
@@ -3623,7 +3644,7 @@ export function createGpuRenderer(services){
         }
         if (plan.idBias !== undefined)
         {
-            new Int32Array(block.buffer)[plan.idBias] = idBias;
+            new Int32Array(block.buffer).set(numbers, plan.idBias);
         }
         glslBlocks.set(plan, { id: executable.id, version: executable.version, refs, values,
             block });
@@ -4047,6 +4068,24 @@ export function createGpuRenderer(services){
         {
             return false;
         }
+        drawNumbers = { baseVertex: request.indices ? request.baseVertex ?? 0 : 0,
+            baseInstance: request.baseInstance ?? 0, drawID: request.drawID ?? 0 };
+        try
+        {
+            return drawArraysNumbered(context, request, scene);
+        }
+        finally
+        {
+            drawNumbers = NO_DRAW_NUMBERS;
+        }
+    };
+
+    /**
+     * @param {object} context
+     * @param {DrawRequest} request
+     * @param {() => import('./pipeline.js').Scene} scene
+     */
+    const drawArraysNumbered = (context, request, scene)=>{
         const layout = planLayout(request.arrays);
         if (!layout)
         {

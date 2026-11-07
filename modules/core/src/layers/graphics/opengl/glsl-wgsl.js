@@ -457,6 +457,10 @@ function interpolateOf(varying){
         return '@interpolate(flat) ';
     }
     const kind = varying.interpolation === 'noperspective' ? 'linear' : 'perspective';
+    if (varying.sample)
+    {
+        return `@interpolate(${kind}, sample) `;
+    }
     if (varying.centroid)
     {
         return `@interpolate(${kind}, centroid) `;
@@ -3637,6 +3641,9 @@ ${[...fetch, ...prologue, ...initial, `    ${p}main();`,
             program.geometryLayout);
         const vertices = layout.inputVertices;
         const most = Math.max(1, layout.maxVertices);
+        // A primitive's invocations run one after another (4.0's instancing):
+        // the n-th of them reads primitive n / invocations.
+        const runs = Math.max(1, layout.invocations ?? 1);
         const inputs = geometryInputRegisters(program);
         // What transform feedback captures, after what the fragment stage reads.
         const captured = feedbackLeaves(program, false).flatMap(leaf=>leavesOf(`${p}${leaf.path}`,
@@ -3674,7 +3681,7 @@ ${[...fetch, ...prologue, ...initial, `    ${p}main();`,
         const loads = [];
         for (let j = 0; j < vertices; j++)
         {
-            loads.push(`    let in${j} = (id.x * ${vertices}u + ${j}u) * ${inputs}u;`);
+            loads.push(`    let in${j} = (primitive * ${vertices}u + ${j}u) * ${inputs}u;`);
             if (linked.uses.has('gl_in'))
             {
                 loads.push(`    ${p}gl_in[${j}].m_gl_Position = bitcast<vec4f>(gsIn[in${j}]);`,
@@ -3695,8 +3702,11 @@ ${[...fetch, ...prologue, ...initial, `    ${p}main();`,
 fn geometryMain(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= gsParams.invocations) { return; }
     gsInvocation = id.x;
+    let primitive = id.x / ${runs}u;
 ${[...linked.uses.has('gl_PrimitiveIDIn')
-        ? [`    ${p}gl_PrimitiveIDIn = i32(id.x % max(1u, gsParams.prims));`] : [],
+        ? [`    ${p}gl_PrimitiveIDIn = i32(primitive % max(1u, gsParams.prims));`] : [],
+    ...linked.uses.has('gl_InvocationID')
+        ? [`    ${p}gl_InvocationID = i32(id.x % ${runs}u);`] : [],
     ...loads, ...initial, `    ${p}main();`,
     '    gsCounts[id.x * 2u] = vec4u(gsMade, 0u, 0u, 0u);',
     '    gsCounts[id.x * 2u + 1u] = vec4u(gsEmitted, 0u, 0u, 0u);'].join('\n')}
@@ -3830,15 +3840,29 @@ ${[...used.map(([name])=>`    ${p}${name} = ${name}In;`), ...prologue, ...initia
             : fixedOutputs(linked, p, /** @type {FixedVaryings} */ (options.fixed));
         /** @type {string[]} */
         const inputs = options.attributes.length > 0 ? ['vertex: VertexIn'] : [];
-        if (vertex && linked.uses.has('gl_VertexID'))
+        // The draw's own numbers (`plan.idBias`): what gl_VertexID adds to
+        // WebGPU's index, which counts from where the draw put its arrays,
+        // and 4.60's base vertex, base instance and draw index.
+        const drawNumbers = /** @type {const} */ ([['gl_VertexID', 'x'], ['gl_BaseVertex', 'y'],
+            ['gl_BaseInstance', 'z'], ['gl_DrawID', 'w']]).filter(([name])=>vertex
+            && linked.uses.has(name));
+        if (drawNumbers.length > 0)
         {
-            // WebGPU's index counts from where the draw put its arrays; GL's
-            // from the program's own first vertex (`plan.idBias`).
-            inputs.push('@builtin(vertex_index) vertexIndex: u32');
             blockMembers.push('    id_bias: vec4i,');
             plan.idBias = slot * 4;
             slot++;
-            prologue.push(`    ${p}gl_VertexID = i32(vertexIndex) + ${p}u.id_bias.x;`);
+        }
+        for (const [name, part] of drawNumbers)
+        {
+            if (name === 'gl_VertexID')
+            {
+                inputs.push('@builtin(vertex_index) vertexIndex: u32');
+                prologue.push(`    ${p}gl_VertexID = i32(vertexIndex) + ${p}u.id_bias.x;`);
+            }
+            else
+            {
+                prologue.push(`    ${p}${name} = ${p}u.id_bias.${part};`);
+            }
         }
         if (vertex && linked.uses.has('gl_InstanceID'))
         {
@@ -3968,6 +3992,31 @@ ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
         {
             inputs.push(`    ${p}gl_PointCoord = vec2f(0.5f);`);
         }
+        // 4.0's samples: WGSL's own index and mask; a sample's place is
+        // where WebGPU puts the position when the stage runs a sample at a
+        // time, which naming the index makes it do; GL's y runs up.
+        const perSample = ['gl_SampleID', 'gl_SamplePosition'].some(name=>linked.uses.has(name));
+        const maskIn = linked.uses.has('gl_SampleMaskIn');
+        if (linked.uses.has('gl_SampleID'))
+        {
+            inputs.push(`    ${p}gl_SampleID = i32(sampleIndex);`);
+        }
+        if (linked.uses.has('gl_SamplePosition'))
+        {
+            inputs.push(`    ${p}gl_SamplePosition = vec2f(fract(input.position.x), select(`
+                + 'fract(input.position.y), 1.0f - fract(input.position.y),'
+                + ' uniforms.misc.z > 0.0f));');
+        }
+        if (maskIn)
+        {
+            inputs.push(`    ${p}gl_SampleMaskIn[0] = bitcast<i32>(sampleMaskIn);`);
+        }
+        const writesMask = linked.uses.has('gl_SampleMask');
+        if (writesMask)
+        {
+            // A path that does not write it keeps every sample.
+            inputs.push(`    ${p}gl_SampleMask[0] = -1i;`);
+        }
         const own = (program.outputs ?? []).filter(o=>o.index === 0);
         /**
          * What target k is written: the fragment shader's own output at
@@ -4009,14 +4058,22 @@ ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
         {
             outputs.push(`    out.depth = clamp(${p}gl_FragDepth, 0.0f, 1.0f);`);
         }
+        if (writesMask)
+        {
+            outputs.push(`    out.mask = bitcast<u32>(${p}gl_SampleMask[0]);`);
+        }
         const alpha = options.alphaFunc === null ? []
             : [`    if (!(${options.compare(options.alphaFunc, `${colour(0)}.a`,
                 'uniforms.misc.x')})) {`, '        discard;', '    }'];
         declarations.push(`struct FragmentOut {\n${scalars.map((scalar, k)=>
             `    @location(${k}) c${k}: vec4${suffixOf(scalar)},`).join('\n')}${writesDepth
-            ? '\n    @builtin(frag_depth) depth: f32,' : ''}\n};`);
+            ? '\n    @builtin(frag_depth) depth: f32,' : ''}${writesMask
+            ? '\n    @builtin(sample_mask) mask: u32,' : ''}\n};`);
+        const sampleInputs = `${perSample ? ', @builtin(sample_index) sampleIndex: u32' : ''}${
+            maskIn ? ', @builtin(sample_mask) sampleMaskIn: u32' : ''}`;
         entry = `@fragment
-fn fragmentMain(input: VertexOut, @builtin(front_facing) facing: bool) -> FragmentOut {
+fn fragmentMain(input: VertexOut, @builtin(front_facing) facing: bool${sampleInputs})`
+            + ` -> FragmentOut {
 ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut;', ...outputs,
         '    return out;'].join('\n')}
 }`;

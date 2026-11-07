@@ -1231,6 +1231,11 @@ syntax error at the call): a subroutine uniform is one function's name. A draw i
 program's module written for the functions the program chose (glUniformSubroutinesuiv), each
 choice its own module. *2026-11-07.*
 
+**A180. Temporary: gl_CullDistance culls nothing,** said once a draw: WebGPU clips a primitive by
+distances (clip_distances) and has no culling by them, which GL makes of the whole primitive when
+one distance is negative at every vertex. gl_HelperInvocation is false: a helper invocation runs
+no store here, so a shader that steers its writes by it does the same. *2026-11-07.*
+
 **A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
 many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an
 indirect dispatch sized there. *2026-11-07.*
