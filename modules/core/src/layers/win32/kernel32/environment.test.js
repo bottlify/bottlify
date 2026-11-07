@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
-    machineArchitecture,
+    machineArchitecture, sessionEnvironment,
 } from './environment.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
@@ -521,4 +521,28 @@ test('a process on a 64-bit machine sees its own architecture whatever its paren
         { PROCESSOR_ARCHITECTURE: 'AMD64', TEMP: 'T' });
     assert.deepEqual(machineArchitecture({}, { long: false, wow64: true }),
         { PROCESSOR_ARCHITECTURE: 'x86', PROCESSOR_ARCHITEW6432: 'AMD64' });
+});
+
+test('a session starts with what the registry\'s environment keys hold, Path joined', ()=>{
+    // An installer that adds its folder to the system Path (Windows
+    // Installer's `[~];...`) is heard by every program started after it.
+    const base = { Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS', SystemRoot: 'C:\\WINDOWS',
+        TEMP: 'C:\\WINDOWS\\TEMP' };
+    const block = sessionEnvironment(base, [
+        { name: 'PATH', value: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\Vendor\\Common',
+            expand: false },
+        { name: 'VENDOR_HOME', value: '%SystemRoot%\\Vendor', expand: true },
+        { name: 'LITERAL', value: '%SystemRoot%', expand: false },
+    ], [
+        { name: 'Path', value: '%VENDOR_HOME%\\bin', expand: true },
+        { name: 'TEMP', value: 'C:\\Users\\User\\Temp', expand: false },
+    ]);
+    assert.deepEqual(block, {
+        Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\Vendor\\Common;C:\\WINDOWS\\Vendor\\bin',
+        SystemRoot: 'C:\\WINDOWS',
+        TEMP: 'C:\\Users\\User\\Temp',
+        VENDOR_HOME: 'C:\\WINDOWS\\Vendor',
+        LITERAL: '%SystemRoot%',
+    }, 'the machine\'s over the defaults, the user\'s over those, each name as first spelled');
+    assert.deepEqual(sessionEnvironment(base, [], []), base, 'nothing there: the defaults');
 });

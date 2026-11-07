@@ -112,6 +112,50 @@ export function defaultEnvironment(windows, folders, processors = 1, process = {
 }
 
 /**
+ * A registry value an environment block is built from: its name, its text,
+ * and whether it is REG_EXPAND_SZ.
+ *
+ * @typedef {{ name: string, value: string, expand: boolean }} EnvironmentValue
+ */
+
+/**
+ * The variables a session's first program starts with, as Windows builds
+ * the block (CreateEnvironmentBlock): the machine's own, then the machine's
+ * `Session Manager\Environment` values over them, then the user's
+ * `Environment` values over those, each REG_EXPAND_SZ expanded against what
+ * is set by then. Path is the one joined rather than replaced: the machine's,
+ * then the user's. What an installer added to either is in every program
+ * started after it.
+ *
+ * @param {Readonly<Record<string, string>>} base
+ * @param {readonly EnvironmentValue[]} machine
+ * @param {readonly EnvironmentValue[]} user
+ * @returns {Record<string, string>}
+ */
+export function sessionEnvironment(base, machine, user){
+    /** @type {Record<string, string>} */
+    const block = { ...base };
+    /** @param {string} name */
+    const spelling = name=>Object.keys(block).find(key=>key.toUpperCase() === name.toUpperCase());
+    /** @param {string} text */
+    const expand = text=>text.replace(/%([^%]+)%/g, (whole, name)=>{
+        const key = spelling(name);
+        return key === undefined ? whole : block[key];
+    });
+    for (const [values, joined] of /** @type {const} */ ([[machine, false], [user, true]]))
+    {
+        for (const { name, value, expand: expanding } of values)
+        {
+            const text = expanding ? expand(value) : value;
+            const key = spelling(name) ?? name;
+            block[key] = joined && name.toUpperCase() === 'PATH' && block[key]
+                ? `${block[key]};${text}` : text;
+        }
+    }
+    return block;
+}
+
+/**
  * A process's variables on a 64-bit machine as the process sees them,
  * whatever its parent's said: WOW64 sets a 32-bit process's architecture to
  * x86 with the machine's in PROCESSOR_ARCHITEW6432, and a 64-bit process
@@ -159,24 +203,27 @@ export function createEnvironmentFunctions(host){
     /**
      * Names compare without regard to case, as Windows compares them, and
      * keep the spelling they were first set with: the block lists `Path` as
-     * it was given, and `PATH` finds it.
+     * it was given, and `PATH` finds it. Read when the process first asks:
+     * a session's block comes from the registry, which holds what the bottle
+     * installed only once its volume is mounted.
      *
-     * @type {Map<string, { name: string, value: string }>}
+     * @type {Map<string, { name: string, value: string }> | null}
      */
-    const byFolded = new Map(Object.entries(host.environment())
-        .map(([name, value])=>[name.toUpperCase(), { name, value }]));
+    let folded = null;
+    const byFolded = ()=>(folded ??= new Map(Object.entries(host.environment())
+        .map(([name, value])=>[name.toUpperCase(), { name, value }])));
     const variables = {
         /** @param {string} name */
-        get: name=>byFolded.get(name.toUpperCase())?.value,
+        get: name=>byFolded().get(name.toUpperCase())?.value,
         /** @param {string} name @param {string} value */
         set: (name, value)=>{
-            const folded = name.toUpperCase();
-            byFolded.set(folded, { name: byFolded.get(folded)?.name ?? name, value });
+            const key = name.toUpperCase();
+            byFolded().set(key, { name: byFolded().get(key)?.name ?? name, value });
         },
         /** @param {string} name */
-        delete: name=>byFolded.delete(name.toUpperCase()),
+        delete: name=>byFolded().delete(name.toUpperCase()),
         /** @returns {[string, string][]} */
-        entries: ()=>[...byFolded.values()].map(({ name, value })=>[name, value]),
+        entries: ()=>[...byFolded().values()].map(({ name, value })=>[name, value]),
     };
 
     /**
