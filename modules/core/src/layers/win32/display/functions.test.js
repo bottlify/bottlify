@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDwmapiFunctions, createSessionInformationFunctions, createShcoreFunctions }
+import { createDwmapiFunctions, createSessionInformationFunctions, createShcoreFunctions,
+    DWMAPI_ORDINALS }
     from './functions.js';
 
 function setup(){
@@ -62,6 +63,11 @@ test('composition on, a window\'s frame its rectangle, attributes kept as set', 
     assert.equal(fns.DwmGetWindowAttribute.handler([0x10010, 20, 0x404, 4]), 0);
     assert.equal(view.getUint32(0x404, true), 1);
     assert.equal(fns.DwmGetWindowAttribute.handler([0x10010, 99, 0x404, 4]) >>> 0, 0x80070057);
+    // DWM_EC_DISABLECOMPOSITION is accepted and changes nothing, as from Windows 8.
+    assert.equal(fns.DwmEnableComposition.handler(), 0);
+    assert.equal(fns.DwmIsCompositionEnabled.handler([0x100]), 0);
+    assert.equal(view.getUint32(0x100, true), 1);
+    assert.equal(DWMAPI_ORDINALS[102], 'DwmEnableComposition', 'by its number, as exported');
 });
 
 test('the console session, active, the machine\'s user\'s', ()=>{

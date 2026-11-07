@@ -134,6 +134,14 @@ export function createShcoreFunctions(host){
     };
 }
 
+/**
+ * dwmapi's exports a program may import by number alone; 102 is also
+ * exported by name, and a benchmark links it this way.
+ *
+ * @type {Record<number, string>}
+ */
+export const DWMAPI_ORDINALS = { 102: 'DwmEnableComposition' };
+
 /** @param {DisplayHost} host */
 export function createDwmapiFunctions(host){
     /** What a program set, by window and attribute, read back as it was. @type {Map<string, Uint8Array>} */
@@ -229,6 +237,13 @@ export function createDwmapiFunctions(host){
 
         /** HRESULT DwmFlush(void) */
         DwmFlush: { argBytes: 0, handler: ()=>S_OK },
+
+        /**
+         * HRESULT DwmEnableComposition(UINT uCompositionAction): S_OK and
+         * nothing changes, as from Windows 8, where composition cannot be
+         * turned off - DwmIsCompositionEnabled above says the same.
+         */
+        DwmEnableComposition: { argBytes: 4, handler: ()=>S_OK },
     };
 }
 
