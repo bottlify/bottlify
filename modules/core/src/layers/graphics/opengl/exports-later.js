@@ -832,6 +832,9 @@ export function laterEntryPoints(h){
                 context.glMultiDrawElementsBaseVertex(mode >>> 0, readTyped('i', counts, n),
                     type >>> 0, readPointers(indices, n), drawcount | 0, readTyped('i', bases, n));
             }),
+        glClipControl: ([origin, depth])=>answer(current()?.glClipControl(origin >>> 0,
+            depth >>> 0)),
+
         // --- program pipelines ---
 
         glGenProgramPipelines: generator((context, count)=>context.genProgramPipelines(count,

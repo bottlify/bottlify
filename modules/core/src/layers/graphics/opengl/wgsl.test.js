@@ -235,8 +235,8 @@ test('the clip depth is remapped, and an absent attribute is the current value',
     const { code } = generateDraw(state({
         attributes: CANONICAL_LAYOUT.attributes.filter(a=>a.name === 'position'),
     }));
-    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
-        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)'));
+    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y * uniforms.clipControl.x,'
+        + ' clip.z * uniforms.clipControl.y + clip.w * uniforms.clipControl.z, clip.w)'));
     assert.match(code, /out\.color = uniforms\.color;/);
     assert.match(code, /out\.secondary = uniforms\.secondary;/);
 });
@@ -286,7 +286,8 @@ test('the uniform block layout the shader declares is the one the renderer fills
     assert.equal(UNIFORM.lights, UNIFORM.material + 5 * 4);
     assert.equal(UNIFORM.clipPlanes, UNIFORM.lights + LIGHTS * 24,
         'a light is six vectors: three colours, position, spot, attenuation');
-    assert.equal(UNIFORM.floats, UNIFORM.clipPlanes + CLIP_PLANES * 4);
+    assert.equal(UNIFORM.clipControl, UNIFORM.clipPlanes + CLIP_PLANES * 4);
+    assert.equal(UNIFORM.floats, UNIFORM.clipControl + 4);
     assert.equal(UNIFORM.floats % 4, 0);
 });
 
@@ -436,8 +437,8 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
             offset: 0, format: 'float32x3' }],
         strides: [12],
     })).code;
-    const remap = '    out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
-        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);';
+    const remap = '    out.position = vec4f(clip.x, clip.y * uniforms.clipControl.x,'
+        + ' clip.z * uniforms.clipControl.y + clip.w * uniforms.clipControl.z, clip.w);';
     assert.ok(fixed.includes(remap), 'the fixed stage remaps the depth the way GL does');
     assert.ok(emitted.code.includes(remap), 'the invariant position is the fixed one');
     assert.ok(emitted.code.includes(

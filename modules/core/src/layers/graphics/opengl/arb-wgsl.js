@@ -64,16 +64,19 @@
 import { canonicalAttribName } from './arb-program.js';
 
 /**
- * The fixed stage's position, from GL's clip space into WebGPU's, which the
- * position-invariant option has to reproduce exactly. `uniforms.misc.y` is
- * the depth range's direction: -1 when it runs backwards, which a WebGPU
- * viewport cannot express. `uniforms.misc.z` is the target's row order: 1
- * for the window's back buffer, whose rows run down as WebGPU's do, and -1
- * for a framebuffer object's, drawn upside down so that its first row is
- * GL's bottom one, which is the row a texture made from it holds first.
+ * Every stage's position, from GL's clip space into WebGPU's: one
+ * expression, which the position-invariant option reproduces bit for bit.
+ * `uniforms.clipControl.x` is the sign of y: the target's row order (1 for
+ * the window's back buffer, whose rows run down as WebGPU's do, -1 for a
+ * framebuffer object's, drawn upside down so that its first row is GL's
+ * bottom one, which is the row a texture made from it holds first), turned
+ * round again for glClipControl's GL_UPPER_LEFT. z is `clip.z * .y + clip.w
+ * * .z`: GL's -w..w halved into WebGPU's 0..w (0.5, 0.5), or GL_ZERO_TO_ONE's
+ * as it is (1, 0), each run backwards where the depth range does (-0.5, 0.5;
+ * -1, 1), which a WebGPU viewport cannot express.
  */
-export const CLIP_REMAP = 'vec4f(clip.x, clip.y * uniforms.misc.z,'
-    + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)';
+export const CLIP_REMAP = 'vec4f(clip.x, clip.y * uniforms.clipControl.x,'
+    + ' clip.z * uniforms.clipControl.y + clip.w * uniforms.clipControl.z, clip.w)';
 
 export { canonicalAttribName };
 
@@ -1123,12 +1126,10 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
     body.push(...lines);
     if (!ir.positionInvariant && writesPosition)
     {
-        // GL's clip z runs -w..w and WebGPU's 0..w. The program may write the
-        // position one component at a time (a DP4 per matrix row), so the
-        // remap runs once here, against the w the program actually wrote,
-        // turned round as the fixed stage turns it for a backwards range.
-        body.push('    out.position.z = (out.position.z * uniforms.misc.y + out.position.w)'
-            + ' * 0.5;');
+        // The program may write the position one component at a time (a DP4
+        // per matrix row), so the remap runs once here, on what it wrote.
+        body.push('    let clip = out.position;');
+        body.push(`    out.position = ${CLIP_REMAP};`);
     }
     body.push('    return out;');
 

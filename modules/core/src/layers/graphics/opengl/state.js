@@ -379,6 +379,12 @@ export const DEFAULT_STATE = Object.freeze([
     },
     // OpenGL 4.6's (GL_ARB_polygon_offset_clamp): zero clamps nothing.
     { query: GL.POLYGON_OFFSET_CLAMP, name: 'GL_POLYGON_OFFSET_CLAMP', kind: 'float', value: [0] },
+    // OpenGL 4.5's glClipControl.
+    { query: GL.CLIP_ORIGIN, name: 'GL_CLIP_ORIGIN', kind: 'enum', value: [GL.LOWER_LEFT] },
+    {
+        query: GL.CLIP_DEPTH_MODE, name: 'GL_CLIP_DEPTH_MODE', kind: 'enum',
+        value: [GL.NEGATIVE_ONE_TO_ONE],
+    },
     { query: GL.RENDER_MODE, name: 'GL_RENDER_MODE', kind: 'enum', value: [GL.RENDER] },
     {
         query: GL.PERSPECTIVE_CORRECTION_HINT, name: 'GL_PERSPECTIVE_CORRECTION_HINT',

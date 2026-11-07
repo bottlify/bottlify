@@ -34,7 +34,8 @@
  *   the target's rows run down from the top (the drawable's back buffer) and
  *   -1 where they run up (a framebuffer object's, drawn upside down so a
  *   texture holds its first row at t = 0), and `uniforms.misc.w` is its
- *   height. gl_Position's y, gl_FragCoord's y and dFdy's sign follow it.
+ *   height. gl_FragCoord's y and dFdy's sign follow it; gl_Position's y
+ *   follows it and glClipControl's origin (`CLIP_REMAP`).
  *
  * GLSL statements that are expressions in WGSL's eyes -- an assignment, an
  * increment, a call with `out` arguments inside a larger expression -- are
@@ -46,6 +47,7 @@ import { FLOAT, INT, baseOf, componentsOf, glslName, vectorOf } from './glsl-typ
 import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
+import { CLIP_REMAP } from './arb-wgsl.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
 import { BUFFER_ROW } from './objects.js';
 
@@ -257,8 +259,7 @@ fn vertexMain(@builtin(vertex_index) gsVertex: u32) -> VertexOut {
     let base = gsVertex * ${registers}u;
     var out: VertexOut;
     let clip = bitcast<vec4f>(gsVertices[base]);
-    out.position = vec4f(clip.x, clip.y * uniforms.misc.z, (clip.z * uniforms.misc.y + clip.w)`
-        + ` * 0.5, clip.w);
+    out.position = ${CLIP_REMAP};
 ${fields.map((f, k)=>`    out.${f.field} = `
         + `${fromRegister(`gsVertices[base + ${k + 1}u]`, f.type)};`).join('\n')}
     return out;
@@ -2989,8 +2990,7 @@ ${[...linked.uses.has('gl_PrimitiveIDIn')
 fn vertexMain(${inputs.join(', ')}) -> VertexOut {
 ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
         `    let clip = ${p}gl_Position;`,
-        '    out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
-            + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);',
+        `    out.position = ${CLIP_REMAP};`,
         ...out, '    return out;'].join('\n')}
 }`;
     }

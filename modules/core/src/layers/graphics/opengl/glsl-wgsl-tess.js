@@ -29,6 +29,7 @@
 import { fromRegister, geometryInputRegisters, registersOf, toRegister } from './glsl-wgsl.js';
 import { DOMAIN_BINDING } from '../d3d10/wgsl.js';
 import { tessellatorKind } from './glsl-link-tess.js';
+import { CLIP_REMAP } from './arb-wgsl.js';
 
 /**
  * @typedef {import('./glsl-link.js').LinkedProgram} LinkedProgram
@@ -287,8 +288,7 @@ ${[...uses(ctx, 'gl_TessCoord') ? [`    ${p}gl_TessCoord = vec3f(teAt.x, teAt.y,
         ? [`    ${p}gl_PrimitiveID = i32(tePatch % max(1u, teParams[0].y));`] : [],
     ...patch, ...ctx.initial, `    ${p}main();`, '    var out: VertexOut;',
     `    let clip = ${p}gl_Position;`,
-    '    out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
-        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);',
+    `    out.position = ${CLIP_REMAP};`,
     ...ctx.out, '    return out;'].join('\n')}
 }`;
 }

@@ -138,6 +138,9 @@ import { swizzleTexel } from './objects.js';
  * @property {ArrayLike<number>} projection
  * @property {readonly number[]} viewport   x, y, width, height
  * @property {readonly number[]} depthRange
+ * @property {{ upperLeft: boolean, zeroToOne: boolean }} [clipControl]  glClipControl's
+ *           origin and depth mode (4.5), GL_LOWER_LEFT and GL_NEGATIVE_ONE_TO_ONE when
+ *           absent
  * @property {import('./raster.js').Framebuffer} framebuffer
  * @property {import('./raster.js').Box} scissor
  * @property {readonly (readonly number[])[]} clipPlanes  eye space, enabled only

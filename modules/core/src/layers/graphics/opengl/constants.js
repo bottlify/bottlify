@@ -564,6 +564,10 @@ export const GL = Object.freeze({
     PRIMITIVE_RESTART_INDEX: 0x8f9e,
     PRIMITIVE_RESTART_FIXED_INDEX: 0x8d69,
     POLYGON_OFFSET_CLAMP: 0x8e1b,
+    CLIP_ORIGIN: 0x935c,
+    CLIP_DEPTH_MODE: 0x935d,
+    NEGATIVE_ONE_TO_ONE: 0x935e,
+    ZERO_TO_ONE: 0x935f,
     SAMPLE_SHADING: 0x8c36,
     // OpenGL 4.3's debug output.
     DEBUG_OUTPUT: 0x92e0,

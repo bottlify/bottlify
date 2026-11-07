@@ -42,12 +42,14 @@ const VARYINGS = { texcoords: [0, 1, 2, 3], fogCoord: false };
 
 
 /** The program's own position, turned from GL's clip depth into WebGPU's. */
-const REMAP_Z = new RegExp(String.raw`out\.position\.z = \(out\.position\.z \* uniforms\.misc\.y`
-    + String.raw` \+ out\.position\.w\) \* 0\.5;`);
+const REMAP_Z = new RegExp(String.raw`let clip = out\.position;\n`
+    + String.raw`    out\.position = vec4f\(clip\.x, clip\.y \* uniforms\.clipControl\.x,`
+    + String.raw` clip\.z \* uniforms\.clipControl\.y \+ clip\.w \* uniforms\.clipControl\.z,`
+    + String.raw` clip\.w\);`);
 /** The fixed stage's position line, which position invariance reproduces. */
 const REMAP_POSITION = new RegExp(String.raw`out\.position = vec4f\(clip\.x,`
-    + String.raw` clip\.y \* uniforms\.misc\.z,`
-    + String.raw` \(clip\.z \* uniforms\.misc\.y \+ clip\.w\) \* 0\.5, clip\.w\);`);
+    + String.raw` clip\.y \* uniforms\.clipControl\.x, clip\.z \* uniforms\.clipControl\.y`
+    + String.raw` \+ clip\.w \* uniforms\.clipControl\.z, clip\.w\);`);
 test('every vertex instruction emits its arithmetic in vec4f', ()=>{
     const { code } = vertex(`!!ARBvp1.0
 TEMP r0, r1, r2, r3;
@@ -161,7 +163,7 @@ END
     assert.match(masked.code, /out\.position\.w = v\d+\.w;/);
     assert.match(masked.code, REMAP_Z);
     const writes = masked.code.indexOf('out.position.w =');
-    const remap = masked.code.indexOf('out.position.z = (out.position.z * uniforms.misc.y');
+    const remap = masked.code.indexOf('let clip = out.position;');
     assert.ok(remap > writes, 'the remap runs after the program wrote the position');
 });
 

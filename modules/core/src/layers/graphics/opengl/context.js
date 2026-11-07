@@ -1200,6 +1200,26 @@ export function createGlContext(options = {}){
             }
         },
 
+        /**
+         * glClipControl (4.5): where window y starts, and clip z's range.
+         *
+         * @param {number} origin @param {number} depth
+         */
+        glClipControl(origin, depth){
+            if (!enter('glClipControl', [origin, depth]))
+            {
+                return;
+            }
+            if ((origin !== GL.LOWER_LEFT && origin !== GL.UPPER_LEFT)
+                || (depth !== GL.NEGATIVE_ONE_TO_ONE && depth !== GL.ZERO_TO_ONE))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.CLIP_ORIGIN, [origin]);
+            setState(GL.CLIP_DEPTH_MODE, [depth]);
+        },
+
         /** @param {number} width */
         glLineWidth(width){
             setPositive('glLineWidth', GL.LINE_WIDTH, width);

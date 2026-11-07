@@ -2258,6 +2258,7 @@ export function createGpuRenderer(services){
      *           fog: import('./pipeline.js').Scene['fog'],
      *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
      *           depthDirection: number, ySign: number, height: number,
+     *           upperLeft: boolean, zeroToOne: boolean,
      *           modelview: ArrayLike<number>,
      *           block: Float32Array, lit: boolean,
      *           clipPlanes: readonly (readonly number[])[] }>}
@@ -2325,7 +2326,9 @@ export function createGpuRenderer(services){
             && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
             && sameAlphaTest(cached.alphaTest, scene.alphaTest)
             && cached.depthDirection === depthDirectionOf(scene) && cached.ySign === ySign
-            && cached.height === target.height)
+            && cached.height === target.height
+            && cached.upperLeft === !!scene.clipControl?.upperLeft
+            && cached.zeroToOne === !!scene.clipControl?.zeroToOne)
         {
             stats.uniformsReused++;
             return cached.block;
@@ -2396,9 +2399,15 @@ export function createGpuRenderer(services){
         }
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
         const depthDirection = depthDirectionOf(scene);
-        block[UNIFORM.misc + 1] = depthDirection;
         block[UNIFORM.misc + 2] = ySign;
         block[UNIFORM.misc + 3] = target.height;
+        const upperLeft = !!scene.clipControl?.upperLeft;
+        const zeroToOne = !!scene.clipControl?.zeroToOne;
+        // `CLIP_REMAP`'s factors: GL_ZERO_TO_ONE's z is WebGPU's as it is,
+        // run backwards (w - z) for a backwards depth range.
+        block[UNIFORM.clipControl] = upperLeft ? -ySign : ySign;
+        block[UNIFORM.clipControl + 1] = zeroToOne ? depthDirection : depthDirection * 0.5;
+        block[UNIFORM.clipControl + 2] = zeroToOne ? (depthDirection < 0 ? 1 : 0) : 0.5;
         if (scene.lighting)
         {
             writeLighting(block, scene.lighting);
@@ -2412,7 +2421,7 @@ export function createGpuRenderer(services){
             mvp, modelview: scene.modelview, units: scene.units, current: scene.current,
             fog: scene.fog, alphaTest: scene.alphaTest, depthDirection, block,
             lit: scene.lighting !== null, clipPlanes: scene.clipPlanes, ySign,
-            height: target.height,
+            height: target.height, upperLeft, zeroToOne,
         });
         return block;
     };

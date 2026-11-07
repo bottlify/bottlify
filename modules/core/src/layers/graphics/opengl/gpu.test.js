@@ -937,7 +937,8 @@ test('a depth range run backwards is the viewport\'s range with the depth turned
         const uniforms = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
         const block = new Float32Array(uniforms[uniforms.length - 2].bytes.buffer,
             uniforms[uniforms.length - 2].bytes.byteOffset, UNIFORM.floats);
-        assert.equal(block[UNIFORM.misc + 1], -1, 'the vertex stage turns the depth round');
+        assert.deepEqual([...block.subarray(UNIFORM.clipControl, UNIFORM.clipControl + 3)],
+            [1, -0.5, 0.5], 'the vertex stage turns the depth round');
 
         context.glDepthRange(0.1, 0.9);
         context.glBegin(GL.TRIANGLES);
@@ -949,8 +950,49 @@ test('a depth range run backwards is the viewport\'s range with the depth turned
         const again = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
         const forward = new Float32Array(again[again.length - 2].bytes.buffer,
             again[again.length - 2].bytes.byteOffset, UNIFORM.floats);
-        assert.equal(forward[UNIFORM.misc + 1], 1, 'and leaves a forward range alone');
+        assert.deepEqual([...forward.subarray(UNIFORM.clipControl, UNIFORM.clipControl + 3)],
+            [1, 0.5, 0.5], 'and leaves a forward range alone');
     });
+
+test('glClipControl: the origin turns y round, GL_ZERO_TO_ONE takes z as it is', async()=>{
+    const r = rig();
+    const { context } = r;
+    /** @returns {Promise<number[]>} y's sign, z's and w's factors into z, of the last draw */
+    const drawn = async()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+        await r.swap();
+        const blocks = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
+        const last = blocks[blocks.length - 2];
+        return [...new Float32Array(last.bytes.buffer, last.bytes.byteOffset, UNIFORM.floats)
+            .subarray(UNIFORM.clipControl, UNIFORM.clipControl + 3)];
+    };
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_ORIGIN), [GL.LOWER_LEFT]);
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_DEPTH_MODE), [GL.NEGATIVE_ONE_TO_ONE]);
+    context.glClipControl(GL.UPPER_LEFT, GL.ZERO_TO_ONE);
+    assert.deepEqual(await drawn(), [-1, 1, 0], 'upside down, z as it is');
+    context.glDepthRange(1, 0);
+    assert.deepEqual(await drawn(), [-1, -1, 1], 'w - z for a backwards range');
+    context.glClipControl(GL.LOWER_LEFT, GL.NEGATIVE_ONE_TO_ONE);
+    assert.deepEqual(await drawn(), [1, -0.5, 0.5]);
+    context.glClipControl(GL.LOWER_LEFT, GL.ZERO_TO_ONE);
+    assert.deepEqual(await drawn(), [1, -1, 1], 'the depth mode alone is a change');
+    context.glClipControl(GL.UPPER_LEFT + 7, GL.ZERO_TO_ONE);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM);
+    context.glClipControl(GL.LOWER_LEFT, GL.LOWER_LEFT);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM);
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_DEPTH_MODE), [GL.ZERO_TO_ONE],
+        'a refused call changes nothing');
+    context.glClipControl(GL.UPPER_LEFT, GL.ZERO_TO_ONE);
+    context.glPushAttrib(GL.TRANSFORM_BIT);
+    context.glClipControl(GL.LOWER_LEFT, GL.NEGATIVE_ONE_TO_ONE);
+    context.glPopAttrib();
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_ORIGIN), [GL.UPPER_LEFT],
+        'kept by GL_TRANSFORM_BIT');
+});
 
 test('a read of depth on the device path is reported, not answered', ()=>{
     const r = rig();

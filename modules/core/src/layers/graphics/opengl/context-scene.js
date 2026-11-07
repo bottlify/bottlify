@@ -325,6 +325,8 @@ export function createSceneBuilder(kernel){
             projection: kernel.stacks.projection.current,
             viewport: record(GL.VIEWPORT).values,
             depthRange: record(GL.DEPTH_RANGE).values,
+            clipControl: { upperLeft: record(GL.CLIP_ORIGIN).values[0] === GL.UPPER_LEFT,
+                zeroToOne: record(GL.CLIP_DEPTH_MODE).values[0] === GL.ZERO_TO_ONE },
             framebuffer: kernel.framebuffer(),
             scissor: kernel.scissorBox(),
             clipPlanes,
