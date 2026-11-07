@@ -547,6 +547,7 @@ export const GL = Object.freeze({
     T2F_C4F_N3F_V3F: 0x2a2c,
     T4F_C4F_N3F_V4F: 0x2a2d,
     DOUBLE: 0x140a,
+    HALF_FLOAT: 0x140b,
     UNSIGNED_SHORT_5_6_5_REV: 0x8364,
     UNSIGNED_SHORT_4_4_4_4_REV: 0x8365,
     UNSIGNED_SHORT_1_5_5_5_REV: 0x8366,

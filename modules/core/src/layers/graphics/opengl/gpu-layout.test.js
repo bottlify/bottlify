@@ -12,6 +12,7 @@ import {
     instanceElements, packVertices, planLayout, scanIndices, topologyOf, vertexFormatOf,
     vertexRange,
 } from './gpu-layout.js';
+import { readElement } from './arrays.js';
 
 /** @param {Partial<import('./arrays.js').ArrayPointer>} fields */
 const pointer = fields=>({ size: 3, type: GL.FLOAT, stride: 0, pointer: 0, buffer: 0, ...fields });
@@ -83,6 +84,28 @@ test('a pointer off a word boundary opens its slot at the word below it', ()=>{
         { name: 'position', pointer: pointer({ size: 2, type: GL.SHORT, stride: 8, pointer: 2 }),
             normalised: false },
     ]), null);
+});
+
+test('half floats (3.0, GL_ARB_half_float_vertex) go to the GPU as they lie in pairs and fours,'
+    + ' and are read as values where they cannot', ()=>{
+    assert.deepEqual(vertexFormatOf(GL.HALF_FLOAT, 4, false),
+        { format: 'float16x4', components: 4, scalar: 'f32', bytes: 8 });
+    assert.equal(vertexFormatOf(GL.HALF_FLOAT, 2, true)?.format, 'float16x2',
+        'a float type is never normalised');
+    assert.equal(vertexFormatOf(GL.HALF_FLOAT, 3, false), null);
+    const layout = planLayout([
+        { name: 'position', pointer: pointer({ type: GL.FLOAT, size: 2, stride: 32, buffer: 4 }),
+            normalised: false },
+        { name: 'attrib1', pointer: pointer({ type: GL.HALF_FLOAT, size: 4, stride: 32,
+            pointer: 8, buffer: 4 }), normalised: false },
+    ]);
+    assert.deepEqual(layout?.attributes.map(a=>a.format), ['float32x2', 'float16x4']);
+    // 1.0, -2.0, 0.5, 65504 and the smallest subnormal, 2^-24.
+    const halves = new Uint16Array([0x3c00, 0xc000, 0x3800, 0x7bff, 0x0001]);
+    const bytes = new Uint8Array(halves.buffer);
+    assert.deepEqual(readElement((at, length)=>bytes.subarray(at, at + length),
+        { size: 3, type: GL.HALF_FLOAT, stride: 4, pointer: 0, buffer: 0 }, 1, true),
+    [0.5, 65504, 2 ** -24], 'the second element, four bytes on, never normalised');
 });
 
 test('an array the GPU has no format for refuses the whole layout', ()=>{

@@ -137,6 +137,10 @@ function makeVertexFormat(type, size, normalised){
         case GL.FLOAT:
             return { format: size === 1 ? 'float32' : `float32x${size}`,
                 components: size, scalar: 'f32', bytes };
+        case GL.HALF_FLOAT:
+            return size === 2 || size === 4
+                ? { format: `float16x${size}`, components: size, scalar: 'f32', bytes }
+                : null;
         case GL.INT:
             return { format: size === 1 ? 'sint32' : `sint32x${size}`,
                 components: size, scalar: 'i32', bytes };

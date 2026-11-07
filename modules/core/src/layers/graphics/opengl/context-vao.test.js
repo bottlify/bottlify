@@ -97,3 +97,28 @@ test('deleting the bound object leaves the default one bound', ()=>{
     gl.glBindVertexArray(vao);
     assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a deleted name no longer binds');
 });
+
+test('half float arrays (3.0, GL_ARB_half_float_vertex) are taken by the pointer calls that'
+    + ' name them, an object of the vertex array they are set in', ()=>{
+    const gl = fixture();
+    const [vertices] = gl.glGenBuffersARB(1);
+    const [vao] = gl.glGenVertexArrays(1);
+    gl.glBindVertexArray(vao);
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, vertices);
+    gl.glVertexAttribPointerARB(1, 4, GL.HALF_FLOAT, 0, 32, 8);
+    gl.glVertexPointer(2, GL.HALF_FLOAT, 0, 0x10);
+    gl.glTexCoordPointer(2, GL.HALF_FLOAT, 0, 0x20);
+    gl.glNormalPointer(GL.HALF_FLOAT, 0, 0x30);
+    gl.glColorPointer(4, GL.HALF_FLOAT, 0, 0x40);
+    gl.glFogCoordPointerEXT(GL.HALF_FLOAT, 0, 0x50);
+    gl.glSecondaryColorPointerEXT(3, GL.HALF_FLOAT, 0, 0x60);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    gl.glBindVertexArray(0);
+    gl.glBindVertexArray(vao);
+    assert.deepEqual(gl.glGetVertexAttribfvARB(1, GL.VERTEX_ATTRIB_ARRAY_TYPE_ARB),
+        [GL.HALF_FLOAT]);
+    assert.deepEqual(gl.glGetIntegerv(GL.VERTEX_ARRAY_TYPE), [GL.HALF_FLOAT]);
+    assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_COORD_ARRAY_TYPE), [GL.HALF_FLOAT]);
+    gl.glVertexAttribIPointer(2, 4, GL.HALF_FLOAT, 0, 0);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'not an integer type');
+});
