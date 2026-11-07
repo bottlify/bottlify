@@ -971,6 +971,20 @@ export function installArrayCalls(context, kernel){
         },
     });
 
+    /**
+     * What transform feedback wrote is on the device, and a read here is of
+     * the program's own bytes: said, as what it reads is not what was captured.
+     *
+     * @param {string} name @param {import('./objects.js').BufferObject} buffer
+     */
+    function readsCaptured(name, buffer){
+        if (buffer.captured)
+        {
+            lose(`${name} read a buffer transform feedback wrote on the device: it read what`
+                + ' the program last stored there, not what was captured');
+        }
+    }
+
     /** The geometry shader of the program in use, if it has one. */
     function geometryLayout(){
         return kernel.side.glslExecutable?.()?.linked.geometryLayout ?? null;
@@ -1628,6 +1642,7 @@ export function installArrayCalls(context, kernel){
             }
             buffer.data = new Uint8Array(size);
             buffer.size = size;
+            buffer.captured = false;
             buffer.usage = usage;
             buffer.written = size > 0 ? { start: 0, end: size } : null;
             buffer.version++;
@@ -1711,6 +1726,7 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return null;
             }
+            readsCaptured('glGetBufferSubDataARB', buffer);
             return buffer.data.slice(offset, offset + size);
         },
 
@@ -1734,6 +1750,7 @@ export function installArrayCalls(context, kernel){
             {
                 return 0;
             }
+            readsCaptured('glMapBufferARB', buffer);
             if (buffer.mapped !== 0)
             {
                 setError(GL.INVALID_OPERATION);
@@ -1763,6 +1780,7 @@ export function installArrayCalls(context, kernel){
             {
                 return 0;
             }
+            readsCaptured('glMapBufferRange', buffer);
             if (offset < 0 || length < 0 || offset + length > buffer.size
                 || (access & ~MAP_BITS) !== 0)
             {

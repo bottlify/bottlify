@@ -142,6 +142,13 @@ export function installTransformFeedbackCalls(context, kernel){
             current.primitive = primitive;
             current.session = { primitive, feedback,
                 buffers: points.slice(0, feedback.strides.length) };
+            for (const bound of current.session.buffers)
+            {
+                if (bound)
+                {
+                    bound.buffer.captured = true;
+                }
+            }
             if (kernel.feedback)
             {
                 kernel.feedback.begin(current.session);

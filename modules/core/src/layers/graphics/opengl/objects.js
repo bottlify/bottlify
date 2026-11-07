@@ -110,6 +110,7 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} usage
  * @property {number} access
  * @property {Uint8Array} data
+ * @property {boolean} [captured]  transform feedback has written it on the device
  * @property {number} mapped  the guest address it is mapped at, or zero
  * @property {number} mapBlock  the guest memory the map was given, to give back
  * @property {number} accessFlags  the MAP_*_BIT a map asked for, zero when not mapped

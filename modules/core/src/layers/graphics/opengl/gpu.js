@@ -4704,7 +4704,7 @@ export function createGpuRenderer(services){
          * written from the start of its range again.
          *
          * @param {object} context
-         * @param {import('./context-transform-feedback.js').FeedbackSession} session
+         * @param {NonNullable<import('./pipeline.js').Scene['feedback']>} session
          */
         beginFeedback(context, session){
             const recording = recordingOf(context);

@@ -240,4 +240,7 @@ in vec3 normal; out vec4 c; void main() { c = vec4(normal, 1.0); }`]])
         const code = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>
             m.descriptor.code).find((/** @type {string} */ c)=>c.includes('fn streamOut('));
         assert.match(code, /so0\[base \+ 2u\] = vertices\[v \* 3u \+ 2u\]\[2\]/);
+        // What was captured is on the device: a read here says it is not that.
+        gl.glGetBufferSubDataARB(GL.TRANSFORM_FEEDBACK_BUFFER, 0, 4);
+        assert.ok(r.divergences.some(d=>/read a buffer transform feedback wrote/.test(d)));
     });

@@ -187,8 +187,11 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
  *             size: number } | null)[]} [uniformBuffers]  what each uniform buffer
  *           binding point holds (glBindBufferRange), for a GLSL program's blocks
- * @property {import('./context-transform-feedback.js').FeedbackSession | null} [feedback]
+ * @property {{ primitive: number, feedback: import('./glsl-link.js').Feedback,
+ *     buffers: ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *     size: number } | null)[] } | null} [feedback]
  *           what transform feedback captures a draw into, while it does
+ *           (`context-transform-feedback.js` FeedbackSession)
  * @property {boolean} [discard]  GL_RASTERIZER_DISCARD: the draw rasterizes nothing
  */
 
