@@ -36,16 +36,19 @@ import { GL } from './constants.js';
 import { compileFront } from './glsl-front.js';
 import { GLSL_EXTENSIONS } from './glsl-versions.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
-import { BLOCK_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
+import { BLOCK_LIMITS, COMPUTE_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
 
 /**
  * The GLSL versions a shader may name: those the WGSL emitter writes whole
- * (`glsl-wgsl.js`). A later one fails to compile with the specification's
- * message for a version the implementation does not support.
+ * (`glsl-wgsl.js`), and 4.20 and 4.30, in which compute shaders, storage
+ * blocks, images and atomic counters are written (decision A170): a feature
+ * of theirs the emitter does not write fails the link with its reason. A
+ * later one fails to compile with the specification's message for a version
+ * the implementation does not support.
  */
-export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330]);
+export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 420, 430]);
 
 /**
  * The built-in constants of 1.30 and later as this implementation answers
@@ -69,6 +72,9 @@ export const CONTEXT_CONSTANTS = Object.freeze({
     gl_MaxTextureCoords: GLSL_LIMITS.textureCoords,
     gl_MaxClipPlanes: GLSL_LIMITS.clipPlanes,
     gl_MaxLights: GLSL_LIMITS.lights,
+    gl_MaxComputeWorkGroupSize: [...COMPUTE_LIMITS.size],
+    gl_MaxComputeWorkGroupCount: [...COMPUTE_LIMITS.count],
+    gl_MaxComputeTextureImageUnits: GLSL_LIMITS.textureImageUnits,
 });
 
 // GL_ARB_shader_objects' own enums; its other queries are the 2.0 ones.
@@ -117,9 +123,9 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {boolean} [separable]  PROGRAM_SEPARABLE (4.1)
  */
 
-/** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment'>} */
+/** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment' | 'compute'>} */
 const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.GEOMETRY_SHADER, 'geometry'],
-    [GL.FRAGMENT_SHADER, 'fragment']]);
+    [GL.FRAGMENT_SHADER, 'fragment'], [GL.COMPUTE_SHADER, 'compute']]);
 
 /** What GEOMETRY_INPUT_TYPE and GEOMETRY_OUTPUT_TYPE answer, by the layout's word. */
 const GEOMETRY_PRIMITIVES = Object.freeze(/** @type {Record<string, number>} */ ({
@@ -141,7 +147,8 @@ const COMPILED_KEPT = 256;
 const SHADER_EXTENSIONS = Object.keys(GLSL_EXTENSIONS);
 
 /**
- * @param {readonly string[]} sources @param {'vertex' | 'geometry' | 'fragment'} stage
+ * @param {readonly string[]} sources
+ * @param {'vertex' | 'geometry' | 'fragment' | 'compute'} stage
  * @returns {{ ok: boolean, log: string, unit: ShaderUnit | null }}
  */
 export function compileShader(sources, stage){
@@ -566,7 +573,7 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const stage = /** @type {'vertex' | 'geometry' | 'fragment'} */ (
+            const stage = /** @type {'vertex' | 'geometry' | 'fragment' | 'compute'} */ (
                 SHADER_TYPES.get(shader.type));
             const result = compileShader(shader.sources ?? [], stage);
             shader.compiled = result.ok;
@@ -766,6 +773,7 @@ export function installShaderCalls(context, kernel){
                 vertex: units(GL.VERTEX_SHADER),
                 geometry: units(GL.GEOMETRY_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
+                compute: units(GL.COMPUTE_SHADER),
                 feedback: program.feedback ?? undefined,
                 attribBindings: program.bindings,
                 fragDataBindings: program.fragData,
@@ -943,6 +951,15 @@ export function installShaderCalls(context, kernel){
                         : GEOMETRY_PRIMITIVES[pname === GL.GEOMETRY_INPUT_TYPE ? layout.input
                             : layout.output]];
                 }
+                // A compute program's work group (4.3), INVALID_OPERATION for
+                // any other (section 7.13).
+                case GL.COMPUTE_WORK_GROUP_SIZE:
+                    if (!program.linked || !linked?.localSize)
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    return [...linked.localSize];
                 // OpenGL 4.1's program binaries, of which no format is known.
                 case GL.PROGRAM_BINARY_LENGTH:
                     return [0];
@@ -1416,6 +1433,8 @@ export function installShaderCalls(context, kernel){
                     return [own.stages.fragment ? 1 : 0];
                 case GL.UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
                     return [own.stages.geometry ? 1 : 0];
+                case GL.UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
+                    return [own.stages.compute ? 1 : 0];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

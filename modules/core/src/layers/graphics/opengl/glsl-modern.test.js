@@ -79,9 +79,9 @@ in vec4 position; void main() { gl_Position = position; }`;
 const WHITE = `#version 130
 out vec4 c; void main() { c = vec4(1.0); }`;
 
-test('1.30, 1.40, 1.50 and 3.30 compile; a later version is refused as unsupported', ()=>{
-    assert.deepEqual(EMITTED_VERSIONS, [110, 120, 130, 140, 150, 330]);
-    for (const version of ['130', '140', '150', '150 compatibility', '330 core'])
+test('1.30 to 3.30, 4.20 and 4.30 compile; 4.00 and 4.10 are refused as unsupported', ()=>{
+    assert.deepEqual(EMITTED_VERSIONS, [110, 120, 130, 140, 150, 330, 420, 430]);
+    for (const version of ['130', '140', '150', '150 compatibility', '330 core', '420', '430 core'])
     {
         const compiled = compileShader([`#version ${version}\nvoid main() {}`], 'vertex');
         assert.ok(compiled.ok, `${version}: ${compiled.log}`);

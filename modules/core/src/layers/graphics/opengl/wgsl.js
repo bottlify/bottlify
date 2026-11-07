@@ -1397,6 +1397,36 @@ ${parts.join('\n\n')}
 }
 
 /**
+ * A compute program's one pass (OpenGL 4.3 section 19): the fixed block,
+ * the stage's own uniforms, samplers and uniform blocks, and the stage, its
+ * entry point `computeMain`.
+ *
+ * @param {import('./glsl-link.js').LinkedProgram} program
+ * @param {Map<number, string>} [swizzles]  each sampler's texture swizzle (3.3)
+ * @returns {ComputeStage & { error?: string }}
+ */
+export function generateGlslCompute(program, swizzles){
+    try
+    {
+        const stage = emitStage(program, 'compute', /** @type {any} */ ({
+            attributes: [], flat: false, twoSide: false, alphaFunc: null, targets: 0,
+            compare: compareExpression, swizzles,
+        }), null, 'glsl');
+        const code = `${UNIFORM_STRUCT}
+${[...stage.usedBlocks].sort((a, b)=>a - b).map(index=>blockDeclaration(program, index))
+        .join('\n')}
+${samplerDeclarations(program, stage.usedSamplers).join('\n')}
+${stage.code}
+`;
+        return { code, plan: stage.plan, samplers: stage.usedSamplers, blocks: stage.usedBlocks };
+    }
+    catch (e){
+        return { code: '', plan: null, samplers: [], blocks: [],
+            error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+/**
  * A vertex's registers the geometry pass writes: gl_Position, the fields,
  * then what transform feedback captures.
  *

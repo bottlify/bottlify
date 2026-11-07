@@ -61,6 +61,7 @@ import {
     topologyOf, vertexRange,
 } from './gpu-layout.js';
 import { createGlGeometry } from './gpu-geometry.js';
+import { createGlCompute } from './gpu-compute.js';
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
     VERTEX_PROGRAM_BINDING,
@@ -1739,8 +1740,12 @@ export function createGpuRenderer(services){
                     size: capacity,
                     // Storage too: what a pass before a geometry shader reads
                     // an array out of.
+                    // Indirect and a copy source too: what a dispatch reads its
+                    // grid from, and what a read of data the device wrote
+                    // copies back.
                     usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
-                        | BufferUsage.STORAGE | BufferUsage.COPY_DST,
+                        | BufferUsage.STORAGE | BufferUsage.INDIRECT | BufferUsage.COPY_SRC
+                        | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
                 }),
                 size: buffer.size,
@@ -4733,7 +4738,42 @@ export function createGpuRenderer(services){
     const sameRect = (a, b)=>a !== null && a.x === b.x && a.y === b.y && a.width === b.width
         && a.height === b.height && a.minDepth === b.minDepth && a.maxDepth === b.maxDepth;
 
+    const computes = createGlCompute({
+        backend,
+        attached: context=>drawables.has(context),
+        recordingOf: context=>recordingOf(context),
+        mvpFor: (context, scene)=>mvpFor(context, scene),
+        // A compute stage has no window to flip into.
+        uniformsOf: (context, scene, mvp)=>uniformsOf(context, scene, mvp,
+            { flipped: false, height: 1 }),
+        glslUniforms: (plan, executable, scene, mvp)=>glslUniforms(plan, executable, scene, mvp),
+        uniform: view=>scratchUniforms.write(view),
+        textureForSampler: (scene, executable, entry)=>textureForSampler(scene, executable,
+            entry),
+        textureFor: (texture, recording)=>textureFor(texture, recording),
+        samplerFor: (texture, filtered, compared)=>samplerFor(texture, filtered, compared),
+        uniformBlocksFor: (scene, executable, blocks, recording)=>uniformBlocksFor(scene,
+            executable, blocks, recording),
+        samplerSwizzlesOf: (scene, executable)=>samplerSwizzlesOf(scene, executable),
+        bufferFor: buffer=>bufferFor(buffer),
+        dispatchAll: (recording, work)=>dispatchAll(recording, /** @type {any} */ (work)),
+        diverge: (detail, severity)=>(severity === 'loss' ? lose(detail) : diverge(detail)),
+    });
+
     return {
+        /**
+         * A compute dispatch of the current program (4.3 chapter 19),
+         * recorded in its turn among the context's draws.
+         *
+         * @param {object} context
+         * @param {{ grid: [number, number, number] }
+         *     | { indirect: { buffer: import('./objects.js').BufferObject, offset: number } }}
+         *     request
+         * @param {() => import('./pipeline.js').Scene} sceneOf
+         * @returns {boolean} whether it was recorded
+         */
+        dispatchCompute: (context, request, sceneOf)=>computes.dispatch(context, request,
+            sceneOf()),
         /**
          * A buffer object the program deleted: its GPU copy goes back once the
          * frames that drew from it are submitted.

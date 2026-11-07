@@ -383,6 +383,12 @@ export function laterEntryPoints(h){
         glMemoryBarrierByRegion: ([barriers])=>answer(current()?.glMemoryBarrier(barriers >>> 0,
             true)),
         glTextureBarrier: ()=>answer(current()?.glTextureBarrier()),
+
+        // --- compute (4.3) ---
+        glDispatchCompute: ([x, y, z])=>answer(current()?.glDispatchCompute(x >>> 0, y >>> 0,
+            z >>> 0)),
+        glDispatchComputeIndirect: ([offset])=>answer(current()?.glDispatchComputeIndirect(
+            offset | 0)),
         glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
         glGetInternalformativ: ([target, internal, pname, size, out])=>call(context=>{
             const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,

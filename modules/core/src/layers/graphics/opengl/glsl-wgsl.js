@@ -62,6 +62,8 @@ export const GLSL_VERTEX_BINDING = 17;
 export const GLSL_FRAGMENT_BINDING = 18;
 export const GLSL_FRAGMENT_GROUP = 1;
 export const GLSL_GEOMETRY_BINDING = 19;
+/** Where a compute shader's own uniforms are bound (4.3), in group 0 of its pass. */
+export const GLSL_COMPUTE_BINDING = 20;
 
 /**
  * Group 1 of the vertex shader run as a compute pass before a geometry
@@ -570,6 +572,23 @@ function paddedIsValue(type){
 /** The swizzle letters. */
 const XYZW = 'xyzw';
 
+/** The built-in functions that write memory: atomics, image stores, counters. */
+const WRITING_CALLS = /^(atomic|imageStore|imageAtomic)/;
+
+/**
+ * GLSL's barriers (4.30 language section 8.16) as WGSL's: an invocation's
+ * control barrier, which also orders the work group's memory, and the
+ * memory barriers of what a work group shares and of what lives in storage.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const BARRIERS = Object.freeze({
+    barrier: 'workgroupBarrier', memoryBarrierShared: 'workgroupBarrier',
+    groupMemoryBarrier: 'workgroupBarrier', memoryBarrier: 'storageBarrier',
+    memoryBarrierBuffer: 'storageBarrier', memoryBarrierImage: 'storageBarrier',
+    memoryBarrierAtomicCounter: 'storageBarrier',
+});
+
 /** The WGSL scalar of each GLSL one. */
 const SCALARS = /** @type {Record<string, string>} */ ({ float: 'f32', int: 'i32', uint: 'u32',
     bool: 'bool' });
@@ -582,7 +601,7 @@ const SIMPLE = /^([A-Za-z_][A-Za-z0-9_.]*|[0-9][0-9.e+]*[fi]?)$/;
 
 /**
  * @param {LinkedProgram} program
- * @param {'vertex' | 'geometry' | 'fragment'} which
+ * @param {'vertex' | 'geometry' | 'fragment' | 'compute'} which
  * @param {StageOptions} options
  * @param {Interface | null} given  the interface the other stage chose, for
  *     the fragment stage; null for the vertex stage, which chooses it
@@ -594,7 +613,8 @@ export function emitStage(program, which, options, given, partner){
     const vertex = which === 'vertex';
     const geometry = which === 'geometry';
     const fragment = which === 'fragment';
-    const p = vertex ? 'v' : geometry ? 'y' : 'f';
+    const computing = which === 'compute';
+    const p = vertex ? 'v' : geometry ? 'y' : computing ? 'c' : 'f';
     const names = namer(p);
     /** @param {StructType} s */
     const structName = s=>names.value(s);
@@ -921,7 +941,9 @@ export function emitStage(program, which, options, given, partner){
             continue;
         }
         declareStructs(symbol.type);
-        privates.push(`var<private> ${p}g_${symbol.name}: ${typeOf(symbol.type)};`);
+        // A compute shader's shared variables are its work group's (4.3).
+        privates.push(`var<${symbol.storage === 'shared' ? 'workgroup' : 'private'}>`
+            + ` ${p}g_${symbol.name}: ${typeOf(symbol.type)};`);
     }
     for (const name of linked.uses)
     {
@@ -936,11 +958,12 @@ export function emitStage(program, which, options, given, partner){
     }
     // What the entry point reads whether or not main wrote it.
     const read = vertex ? [['gl_Position', 'vec4f']]
-        : geometry ? [['gl_Position', 'vec4f'], ['gl_PrimitiveID', 'i32'],
-            ...program.feedback?.varyings.some(v=>v.path === 'gl_PointSize')
-                ? [['gl_PointSize', 'f32']] : []]
-            : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
-                program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
+        : computing ? []
+            : geometry ? [['gl_Position', 'vec4f'], ['gl_PrimitiveID', 'i32'],
+                ...program.feedback?.varyings.some(v=>v.path === 'gl_PointSize')
+                    ? [['gl_PointSize', 'f32']] : []]
+                : [[program.writesData ? 'gl_FragData' : 'gl_FragColor',
+                    program.writesData ? 'array<vec4f, 4>' : 'vec4f']];
     for (const [name, type] of read)
     {
         if (!linked.uses.has(name))
@@ -1006,7 +1029,7 @@ export function emitStage(program, which, options, given, partner){
         }
         if (node.node === 'assign' || node.node === 'postfix'
             || (node.node === 'unary' && (node.op === '++' || node.op === '--'))
-            || (node.node === 'call' && node.user))
+            || (node.node === 'call' && (node.user || WRITING_CALLS.test(node.name))))
         {
             return true;
         }
@@ -2531,6 +2554,11 @@ export function emitStage(program, which, options, given, partner){
                     out.pre.push(node.name === 'EmitVertex' ? `${p}emit();` : `${p}cut();`);
                     return;
                 }
+                if (!node.user && BARRIERS[node.name])
+                {
+                    out.pre.push(`${BARRIERS[node.name]}();`);
+                    return;
+                }
                 if (node.user)
                 {
                     const code = expr(node, out);
@@ -2821,12 +2849,43 @@ ${[...linked.uses.has('gl_PrimitiveIDIn')
 }`;
     }
 
+    // --- a compute shader's entry point (4.3) ---
+
+    /**
+     * The work group's invocations, each the built-ins it reads set from
+     * WGSL's own, then main.
+     *
+     * @returns {string}
+     */
+    function computeEntry(){
+        const [x, y, z] = /** @type {[number, number, number]} */ (program.localSize);
+        /** @type {[string, string, string][]} */
+        const builtins = [
+            ['gl_GlobalInvocationID', 'global_invocation_id', 'vec3u'],
+            ['gl_LocalInvocationID', 'local_invocation_id', 'vec3u'],
+            ['gl_WorkGroupID', 'workgroup_id', 'vec3u'],
+            ['gl_NumWorkGroups', 'num_workgroups', 'vec3u'],
+            ['gl_LocalInvocationIndex', 'local_invocation_index', 'u32'],
+        ];
+        const used = builtins.filter(([name])=>linked.uses.has(name));
+        return `@compute @workgroup_size(${x}, ${y}, ${z})
+fn computeMain(${used.map(([name, builtin, type])=>`@builtin(${builtin}) ${name}In: ${type}`)
+        .join(', ')}) {
+${[...used.map(([name])=>`    ${p}${name} = ${name}In;`), ...prologue, ...initial,
+        `    ${p}main();`].join('\n')}
+}`;
+    }
+
     // --- the interface and the entry point ---
 
     /** @type {Interface} */
     const fields = [];
     let entry;
-    if (vertex || geometry)
+    if (computing)
+    {
+        entry = computeEntry();
+    }
+    else if (vertex || geometry)
     {
         if (partner === 'glsl')
         {
@@ -3118,10 +3177,11 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
         merged.push(copies[k], copies[k + 1], copies[k + 2]);
     }
     plan.copies = Int32Array.from(merged);
-    const blockName = vertex ? 'VertexBlock' : geometry ? 'GeometryBlock' : 'FragmentBlock';
+    const blockName = vertex ? 'VertexBlock' : geometry ? 'GeometryBlock'
+        : computing ? 'ComputeBlock' : 'FragmentBlock';
     const group = fragment ? GLSL_FRAGMENT_GROUP : 0;
     const binding = vertex ? GLSL_VERTEX_BINDING : geometry ? GLSL_GEOMETRY_BINDING
-        : GLSL_FRAGMENT_BINDING;
+        : computing ? GLSL_COMPUTE_BINDING : GLSL_FRAGMENT_BINDING;
     const blockCode = blockMembers.length > 0
         ? `struct ${blockName} {\n${blockMembers.join('\n')}\n};
 @group(${group}) @binding(${binding}) var<uniform> ${p}u: ${blockName};`

@@ -47,7 +47,7 @@ import { canonicalAttribName } from './arb-program.js';
  * One stage of a linked program, merged from its shader objects.
  *
  * @typedef {Object} LinkedStage
- * @property {'vertex' | 'geometry' | 'fragment'} stage
+ * @property {'vertex' | 'geometry' | 'fragment' | 'compute'} stage
  * @property {UserFunction} main
  * @property {UserFunction[]} functions  the definitions main reaches, callees first
  * @property {VariableSymbol[]} globals  every global the stage's shaders declare
@@ -98,7 +98,8 @@ import { canonicalAttribName } from './arb-program.js';
  * @property {number} size  UNIFORM_BLOCK_DATA_SIZE, in bytes
  * @property {'std140' | 'std430'} packing
  * @property {import('./glsl-layout.js').MemberLayout[]} members
- * @property {{ vertex: boolean, geometry: boolean, fragment: boolean }} stages
+ * @property {{ vertex: boolean, geometry: boolean, fragment: boolean,
+ *     compute?: boolean }} stages
  * @property {number} binding  the binding point a link leaves it at: the
  *     shader's `layout(binding)` (4.20), else 0
  */
@@ -211,11 +212,27 @@ export const FEEDBACK_LIMITS = Object.freeze({
  * @property {FragmentOutput[]} outputs  the fragment shader's own outputs
  * @property {UniformBlock[]} blocks  the active uniform blocks, by index
  * @property {BlockUniform[]} blockUniforms  their active uniforms
+ * @property {LinkedStage | null} [compute]  a compute program's one stage (4.3)
+ * @property {[number, number, number]} [localSize]  its work group's size
  */
 
 /** The uniform blocks a stage may read, and all its stages together (OpenGL 3.1). */
 export const BLOCK_LIMITS = Object.freeze({
     perStage: 10, combined: 20, bindings: 24, size: 16384,
+});
+
+/**
+ * A compute dispatch's limits (OpenGL 4.3 table 23.53): WebGPU's own
+ * defaults where they are under GL's minimums - a work group of at most 256
+ * invocations, 256 by 256 by 64, and 16 KiB of shared memory against GL's
+ * 1024, 1024 by 1024 by 64 and 32 KiB (decision A171) - and GL's minimum
+ * where WebGPU allows as much: 65535 groups along each axis.
+ */
+export const COMPUTE_LIMITS = Object.freeze({
+    count: Object.freeze([65535, 65535, 65535]),
+    size: Object.freeze([256, 256, 64]),
+    invocations: 256,
+    sharedBytes: 16384,
 });
 
 /** @param {GlslType} type */
@@ -256,6 +273,7 @@ const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_s
 
 /**
  * @param {{ vertex: ShaderUnit[], geometry?: ShaderUnit[], fragment: ShaderUnit[],
+ *     compute?: ShaderUnit[],
  *     feedback?: { names: readonly string[], mode: 'interleaved' | 'separate' },
  *     attribBindings: Map<string, number>,
  *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
@@ -265,6 +283,7 @@ const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_s
 export function linkProgram(given){
     const { vertex, fragment, attribBindings } = given;
     const geometry = given.geometry ?? [];
+    const compute = given.compute ?? [];
     const fragDataBindings = given.fragDataBindings ?? new Map();
     /** @type {string[]} */
     const errors = [];
@@ -273,13 +292,15 @@ export function linkProgram(given){
         errors.push(`ERROR: ${message}`);
     };
 
-    if (vertex.length === 0 && fragment.length === 0 && geometry.length === 0)
+    if (vertex.length === 0 && fragment.length === 0 && geometry.length === 0
+        && compute.length === 0)
     {
         return { ok: false, log: 'ERROR: no shaders are attached\n' };
     }
 
     /**
-     * @param {'vertex' | 'geometry' | 'fragment'} stage @param {ShaderUnit[]} units
+     * @param {'vertex' | 'geometry' | 'fragment' | 'compute'} stage
+     * @param {ShaderUnit[]} units
      * @returns {LinkedStage | null}
      */
     const mergeStage = (stage, units)=>{
@@ -420,7 +441,15 @@ export function linkProgram(given){
     const vs = mergeStage('vertex', vertex);
     const gs = mergeStage('geometry', geometry);
     const fs = mergeStage('fragment', fragment);
+    const cs = mergeStage('compute', compute);
     const geometryLayout = gs ? geometryLayoutOf(geometry, error) : null;
+    if (cs && (vs || gs || fs))
+    {
+        // OpenGL 4.3 section 7.3: a program with a compute shader has no
+        // other stage.
+        error('a compute shader is linked with shaders of other stages');
+    }
+    const localSize = cs ? localSizeOf(compute, error) : null;
     if (gs && !vs)
     {
         // OpenGL 3.2 section 2.12: a geometry shader takes what a vertex
@@ -631,7 +660,7 @@ export function linkProgram(given){
     // --- uniforms ---
     /** @type {Map<string, VariableSymbol>} */
     const uniformRoots = new Map();
-    for (const stage of [vs, gs, fs])
+    for (const stage of [vs, gs, fs, cs])
     {
         for (const symbol of usedOf(stage, 'uniform'))
         {
@@ -745,7 +774,7 @@ export function linkProgram(given){
     }
 
     // --- uniform blocks ---
-    const { blocks, blockUniforms } = uniformBlocksOf(vs, gs, fs, error);
+    const { blocks, blockUniforms } = uniformBlocksOf(vs, gs, fs, error, cs);
 
     if (errors.length > 0)
     {
@@ -759,8 +788,50 @@ export function linkProgram(given){
             attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
             blocks, blockUniforms,
+            ...cs ? { compute: cs, localSize: /** @type {[number, number, number]} */ (
+                localSize) } : {},
         },
     };
+}
+
+/**
+ * A compute shader's work group size (section 4.4.1.4 of the 4.30
+ * language): declared in at least one of its shader objects, the same in
+ * every one that declares it.
+ *
+ * @param {ShaderUnit[]} units @param {(message: string) => void} error
+ * @returns {[number, number, number]}
+ */
+function localSizeOf(units, error){
+    /** @type {[number, number, number] | null} */
+    let size = null;
+    for (const unit of units)
+    {
+        const layout = /** @type {Record<string, any>} */ (unit.layouts.input);
+        const said = ['local_size_x', 'local_size_y', 'local_size_z'].map(k=>layout[k]);
+        if (said.every(v=>typeof v !== 'number'))
+        {
+            continue;
+        }
+        const here = /** @type {[number, number, number]} */ (said.map(v=>(
+            typeof v === 'number' ? v : 1)));
+        if (size && size.some((v, k)=>v !== here[k]))
+        {
+            error('compute shader: the local size is declared differently in two shaders');
+        }
+        size = here;
+    }
+    if (!size)
+    {
+        error('compute shader: no local size is declared');
+        return [1, 1, 1];
+    }
+    if (size[0] * size[1] * size[2] > COMPUTE_LIMITS.invocations)
+    {
+        error(`compute shader: a work group of ${size.join(' by ')} is more than`
+            + ` GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS (${COMPUTE_LIMITS.invocations})`);
+    }
+    return size;
 }
 
 /**
@@ -845,16 +916,17 @@ function fragmentOutputsOf(fs, bindings, error){
  * @param {LinkedStage | null} vs @param {LinkedStage | null} gs
  * @param {LinkedStage | null} fs
  * @param {(message: string) => void} error
+ * @param {LinkedStage | null} [cs]
  * @returns {{ blocks: UniformBlock[], blockUniforms: BlockUniform[] }}
  */
-function uniformBlocksOf(vs, gs, fs, error){
+function uniformBlocksOf(vs, gs, fs, error, cs = null){
     /** @type {UniformBlock[]} */
     const blocks = [];
     /** @type {BlockUniform[]} */
     const blockUniforms = [];
     /** @type {Map<string, { info: import('./glsl-check.js').InterfaceBlock, first: number }>} */
     const byName = new Map();
-    for (const stage of [vs, gs, fs])
+    for (const stage of [vs, gs, fs, cs])
     {
         if (!stage)
         {
@@ -924,7 +996,7 @@ function uniformBlocksOf(vs, gs, fs, error){
                     blockName: info.name, element: k, instance: info.instance,
                     size: laid.size, packing, members: laid.members,
                     stages: { vertex: stage === vs, geometry: stage === gs,
-                        fragment: stage === fs },
+                        fragment: stage === fs, compute: stage === cs },
                     binding: typeof info.layout.binding === 'number' ? binding + k : 0,
                 });
             }
