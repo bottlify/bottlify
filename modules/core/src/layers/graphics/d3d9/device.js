@@ -285,7 +285,11 @@ export function createPalettes(){
 /** @type {DeviceCaps} */
 export const DEFAULT_CAPS = Object.freeze({
     maxPointSize: 64.0,
-    depthTexture2d: false,
+    // A shadow map: a depth texture drawn into as the depth buffer and
+    // sampled as the comparison of a reference with what it holds (Wine's
+    // d3d9 visual.c shadow_test), in the depth formats the table knows: D16,
+    // D24X8 and D24S8, the era's hardware ones. Not a cube map.
+    depthTexture2d: true,
     compressedTextures: false,
     depthCube: false,
     depthPlain: false,

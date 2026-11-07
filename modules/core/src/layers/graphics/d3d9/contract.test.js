@@ -102,8 +102,21 @@ test('the adapter answers format questions from the table its creates consult', 
         D3D_OK);
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.SURFACE, D3DFMT.D24S8),
         D3DERR_NOTAVAILABLE, 'a depth format is not a colour target');
-    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.D24S8), D3DERR_NOTAVAILABLE,
-        'depth textures are off unless the capability says otherwise');
+    // Wine's d3d9 visual.c shadow_test: a shadow map in the formats of the
+    // era's hardware ones, and in no other depth format, and not as a cube.
+    for (const format of [D3DFMT.D16, D3DFMT.D24X8, D3DFMT.D24S8])
+    {
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.TEXTURE, format),
+            D3D_OK, `a ${format} shadow map`);
+    }
+    // D16_LOCKABLE, D32, D15S1, D24X4S4, D32F_LOCKABLE, D24FS8.
+    for (const format of [70, 71, 73, 79, 82, 83])
+    {
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.TEXTURE, format),
+            D3DERR_NOTAVAILABLE, `no ${format} texture`);
+    }
+    assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.CUBETEXTURE, D3DFMT.D24S8),
+        D3DERR_NOTAVAILABLE, 'no depth cube map');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
         'a compressed format is legal whatever compressedTextures says -- it only chooses'
             + ' how the surface travels to the GPU');

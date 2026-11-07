@@ -2004,3 +2004,84 @@ test('a texture left bound while it is the target samples a copy of it taken bef
     assert.equal(order[0].source.texture, draws[1].stageBindings[0].view.texture,
         'the copy is of the bound texture');
 });
+
+test('a depth texture is drawn into as the depth buffer and sampled as a shadow map: its depth'
+    + ' compared with the reference, by a shader and by the fixed stages', async()=>{
+    // Wine's d3d9 visual.c shadow_test: D24S8 made with D3DUSAGE_DEPTHSTENCIL,
+    // its level the depth buffer of one draw, then bound to stage 0.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ texture?: any }} */
+    const made = {};
+    assert.equal(device.CreateTexture(8, 8, 1, D3DUSAGE.DEPTHSTENCIL, D3DFMT.D24S8,
+        D3DPOOL.DEFAULT, made), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const level = {};
+    assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const original = {};
+    assert.equal(device.GetDepthStencilSurface(original), D3D_OK);
+    const triangle = new Uint8Array([vertex(0, 0, 0), vertex(8, 0, 0), vertex(0, 8, 0)]
+        .flatMap(bytes=>[...bytes]));
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetDepthStencilSurface(level.surface), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE),
+        D3D_OK);
+    assert.equal(device.SetDepthStencilSurface(original.surface), D3D_OK);
+    assert.equal(device.SetTexture(0, made.texture), D3D_OK);
+    // ps_2_0: dcl_2d s0; dcl t0; texld r0, t0, s0; texldp r1, t0, s0;
+    // mov r0.y, r1.x; mov oC0, r0.
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader([0xffff0200, 0x0200001f, 0x90000000, 0xa00f0800,
+        0x0200001f, 0x80000000, 0xb00f0000, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800,
+        0x03010042, 0x800f0001, 0xb0e40000, 0xa0e40800, 0x02000001, 0x80020000, 0x80000001,
+        0x02000001, 0x800f0800, 0x80e40000, 0x0000ffff], ps), D3D_OK);
+    assert.equal(device.SetFVF(FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT)), D3D_OK);
+    assert.equal(device.SetPixelShader(ps.shader), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+    assert.equal(device.SetPixelShader(null), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1), D3D_OK);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.deepEqual(h.gpu.errors, [], 'the device took the frame');
+    const attachedDepths = new Set(h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>
+        call.descriptor.depthStencilAttachment?.view.texture));
+    const draws = h.device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw');
+    assert.equal(draws.length, 3);
+    for (const draw of draws.slice(1))
+    {
+        const binding = draw.stageBindings?.[0] ?? draw.program?.samplerBindings?.[0];
+        assert.ok(binding, 'stage 0 is bound');
+        assert.ok(attachedDepths.has(binding.view.texture),
+            'the texture drawn into as the depth buffer');
+        assert.equal(binding.view.texture.descriptor.label, 'texture');
+        assert.equal(binding.view.viewDescriptor?.aspect, 'depth-only');
+        assert.equal(binding.sampler.descriptor.compare, 'less-equal');
+    }
+    const modules = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).join('\n');
+    assert.match(modules, /var tex0: texture_depth_2d;\n.* var samp0: sampler_comparison;/,
+        'the shader\'s sampler');
+    assert.match(modules, /var texture0: texture_depth_2d;/, 'the fixed stage\'s');
+    assert.equal((modules.match(/textureSampleCompareLevel\(tex0, samp0,/g) ?? []).length, 2,
+        'texld and texldp, the second over w');
+    assert.match(modules, /textureSampleCompareLevel\(texture0, sampler0,/);
+    // The layouts the pipelines are made with say the same, or WebGPU
+    // refuses the pipeline: the shader's sampler group and the fixed stages'.
+    const layouts = h.gpu.of('createBindGroupLayout').map((/** @type {any} */ call)=>
+        call.descriptor);
+    for (const prefix of ['samplers:', 'fixed-function:'])
+    {
+        const layout = layouts.find((/** @type {any} */ one)=>one.label.startsWith(prefix)
+            && one.entries.some((/** @type {any} */ entry)=>entry.sampler?.type === 'comparison'));
+        assert.ok(layout, `a ${prefix} layout with a comparison sampler`);
+        assert.ok(layout.entries.some((/** @type {any} */ entry)=>
+            entry.texture?.sampleType === 'depth'), 'and a depth texture');
+    }
+});

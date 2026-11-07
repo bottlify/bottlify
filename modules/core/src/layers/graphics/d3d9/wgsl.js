@@ -315,7 +315,8 @@ export function varyingLocation(usage, index){
  *     writes (`varyingLocation`): what a fragment stage made for it may read.
  * @property {number[]} reads     A pixel stage's varyings, as the locations it
  *     reads: what the vertex stage paired with it has to write.
- * @property {{ index: number, type: string }[]} samplers
+ * @property {{ index: number, type: string, compared?: boolean }[]} samplers
+ *     `compared` for a shadow map's (`SamplerVariant.compared`).
  * @property {number} constants   How many float registers the shader reaches.
  * @property {number} [viewportRegister]
  * @property {number} [fogRegister]  A vertex shader carrying fog: the fog colour's
@@ -367,6 +368,13 @@ export function varyingLocation(usage, index){
  * @property {'2d' | '3d'} [dimension]  The bound texture's, where the sampler
  *     is declared the other of the two: the texture is declared and read as
  *     it is, from the coordinate's first two or three components.
+ * @property {true} [compared]  A depth texture is bound, a shadow map: the
+ *     sampler is a comparison sampler and every read through it answers, in
+ *     each channel, whether the coordinate's z (over its w where the read
+ *     projects) is no further than the depth held at its x and y, as
+ *     Direct3D 9 hardware samples a depth texture (Wine's d3d9 visual.c
+ *     shadow_test). Its other properties do not apply: the comparison
+ *     sampler filters and addresses as the stage's state asks.
  */
 
 /**
@@ -569,7 +577,7 @@ const FOUR_FLOATS = Object.freeze({ components: 4, scalar: 'f32', bgra: false })
  * @param {Object} options
  * @param {boolean} options.vertex
  * @param {number} options.constants   Float registers to declare.
- * @param {{ index: number, type: string }[]} options.samplers
+ * @param {{ index: number, type: string, compared?: boolean }[]} options.samplers
  * @param {string[]} options.inputFields    Lines inside the input structure.
  * @param {string[]} options.outputFields   Lines inside the output structure.
  * @param {boolean} [options.clipDistances]  Whether the stage writes clip distances.
@@ -591,9 +599,9 @@ function moduleHeader(options){
     const base = options.vertex ? VERTEX_SAMPLER_BINDING : 0;
     options.samplers.forEach((entry, at)=>{
         header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${base + at * 2})`
-            + ` var tex${entry.index}: ${entry.type};`);
+            + ` var tex${entry.index}: ${entry.compared ? 'texture_depth_2d' : entry.type};`);
         header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${base + at * 2 + 1})`
-            + ` var samp${entry.index}: sampler;`);
+            + ` var samp${entry.index}: ${entry.compared ? 'sampler_comparison' : 'sampler'};`);
     });
     const inName = options.vertex ? 'VsIn' : 'PsIn';
     const outName = options.vertex ? 'VsOut' : 'PsOut';
@@ -698,7 +706,7 @@ export function translateShader(parsed, options = {}){
     const usesParts = new Set();
     /** @type {ShaderInput[]} */
     const inputs = [];
-    /** @type {{ index: number, type: string }[]} */
+    /** @type {{ index: number, type: string, compared?: boolean }[]} */
     const samplers = [];
     /**
      * The semantic each numbered register was declared with: a vertex
@@ -1003,6 +1011,18 @@ export function translateShader(parsed, options = {}){
         : `(${expression}).${components}`);
 
     /**
+     * A read of a shadow map (`SamplerVariant.compared`): the coordinate's z,
+     * held to [0, 1], against the depth at its x and y through the sampler's
+     * comparison, the answer in every channel. A depth texture has its one
+     * level, which is the level read, wherever the read is made.
+     *
+     * @param {number} index  The sampler's.
+     * @param {string} at  A vec4f expression, divided already where the read projects.
+     */
+    const comparedRead = (index, at)=>`vec4f(textureSampleCompareLevel(tex${index},`
+        + ` samp${index}, ${swizzled(at, 'xy')}, clamp(${swizzled(at, 'z')}, 0.0, 1.0)))`;
+
+    /**
      * A 1.x read of the texture bound at a stage, of the dimension the caller
      * says it has, at the leading components of `at` that dimension takes.
      *
@@ -1010,13 +1030,19 @@ export function translateShader(parsed, options = {}){
      */
     const stageSample = (stage, at)=>{
         const dimension = options.stageDimensions?.[stage] ?? '2d';
+        const compared = options.sampling?.[stage]?.compared === true && dimension === '2d';
         if (!samplers.some(one=>one.index === stage))
         {
             samplers.push({
                 index: stage,
                 type: TEXTURE_TYPE[/** @type {keyof typeof TEXTURE_TYPE} */ (dimension)]
                     ?? TEXTURE_TYPE['2d'],
+                ...(compared ? { compared } : {}),
             });
+        }
+        if (compared)
+        {
+            return comparedRead(stage, at);
         }
         const components = dimension === '2d' ? 2 : 3;
         const coordinates = swizzled(at, components === 2 ? 'xy' : 'xyz');
@@ -1166,6 +1192,12 @@ export function translateShader(parsed, options = {}){
         const coordinates = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
         const components = coordinates.length;
         const project = (instruction.control & 0x1) !== 0;
+        if (entry.compared)
+        {
+            const whole = src(instruction, 0);
+            return comparedRead(entry.index, project ? `(${whole} / ${swizzled(whole, 'w')})`
+                : whole);
+        }
         const bias = (instruction.control & 0x2) !== 0;
         const at = project
             ? `(${src(instruction, 0)}.${coordinates} / ${src(instruction, 0)}.w)`
@@ -1204,7 +1236,10 @@ export function translateShader(parsed, options = {}){
                     {
                         fail(`sampler type ${declaration.samplerType} is not translated`);
                     }
-                    samplers.push({ index: dest.index, type: type ?? 'texture_2d<f32>' });
+                    const compared = options.sampling?.[dest.index]?.compared === true
+                        && (type ?? 'texture_2d<f32>') === 'texture_2d<f32>';
+                    samplers.push({ index: dest.index, type: type ?? 'texture_2d<f32>',
+                        ...(compared ? { compared } : {}) });
                 }
                 else if (dest.type === REGISTER.INPUT && vertex)
                 {

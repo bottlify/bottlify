@@ -159,9 +159,11 @@ function lookUp(table, value, what){
  * @property {number} [colorKey]
  *     Direct3D 7 colour keying in force on this stage's texture: the key as
  *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
- * @property {'cube' | '3d'} [dimension]
+ * @property {'cube' | '3d' | 'shadow'} [dimension]
  *     The texture the stage samples, when it is not two-dimensional: its
- *     coordinate is then three components and its binding another kind.
+ *     coordinate is then three components and its binding another kind; or a
+ *     depth texture, a shadow map, which the stage compares with the
+ *     coordinate's z.
  * @property {number} [ones]
  *     The channels the stage's texture samples as one that the GPU's texture
  *     lacks (`sampledOnes` in `d3d9/constants.js`), when there are any.

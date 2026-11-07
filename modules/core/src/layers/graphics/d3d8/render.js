@@ -214,6 +214,7 @@ const variantsKey = variants=>Array.from(variants, variant=>(variant
     ? `${variant.lodBias ? 'b' : 0}/${variant.mirrorOnce ?? 0}`
         + `/${variant.border ? `${variant.border.mask}:${variant.border.colour}` : ''}`
         + (variant.dimension ? `/${variant.dimension}` : '')
+        + (variant.compared ? '/z' : '')
     : '')).join(',');
 
 
@@ -2327,14 +2328,17 @@ const EMPTY_BLOCK = new Float32Array(0);
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
  * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number,
- *     stageLimit?: number }} [how]  `stageLimit`: the stages kept, the rest as if disabled
+ *     comparedOf?: (texture: any) => boolean, stageLimit?: number }} [how]
+ *     `stageLimit`: the stages kept, the rest as if disabled
  *     `onesOf` is the channels a texture samples as one that the GPU's texture
- *     lacks (`sampledOnes`); none when absent.
+ *     lacks (`sampledOnes`); none when absent. `comparedOf` says a texture is a
+ *     shadow map, which its stage compares with (dimension 'shadow').
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
  *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
 export function stageCascade(model, layout, how = {}){
     const onesOf = how.onesOf ?? (()=>0);
+    const comparedOf = how.comparedOf ?? (()=>false);
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
     const stages = [];
     /** @type {(any | null)[]} */
@@ -2396,10 +2400,14 @@ export function stageCascade(model, layout, how = {}){
         }
         const samples = readsTexture(key.colorOp, key.colorArg1, key.colorArg2, key.colorArg0)
             || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2, key.alphaArg0);
-        const dimension = samples ? textureDimensionOf(texture) : '2d';
-        const ones = samples ? onesOf(texture) : 0;
-        const lodBias = samples ? lodBiasOf(get(D3DTSS.MIPMAPLODBIAS)) : 0;
-        const addressing = samples ? addressVariantOf(get, dimension) : NO_ADDRESS_VARIANT;
+        // A shadow map is compared through a sampler of its own, which
+        // filters and addresses as the stage asks.
+        const shadow = samples && comparedOf(texture);
+        const dimension = shadow ? 'shadow' : samples ? textureDimensionOf(texture) : '2d';
+        const ones = samples && !shadow ? onesOf(texture) : 0;
+        const lodBias = samples && !shadow ? lodBiasOf(get(D3DTSS.MIPMAPLODBIAS)) : 0;
+        const addressing = samples && !shadow ? addressVariantOf(get, dimension)
+            : NO_ADDRESS_VARIANT;
         stages.push(dimension === '2d' && ones === 0 && lodBias === 0
             && addressing === NO_ADDRESS_VARIANT ? key : {
                 ...key,
@@ -2427,6 +2435,9 @@ export function stageCascade(model, layout, how = {}){
 
 /** What `addressVariantOf` answers for a stage that addresses as a WebGPU sampler can. */
 const NO_ADDRESS_VARIANT = Object.freeze({});
+
+/** The variant of a sampler a shadow map is bound to (`SamplerVariant.compared`). */
+const COMPARED_VARIANT = Object.freeze({ compared: true });
 
 /**
  * The address modes of a sampler that no WebGPU sampler has, by axis (1 u,
@@ -6471,6 +6482,74 @@ export function createRenderer(options){
     };
 
     /**
+     * Whether a texture is a shadow map: made in a depth format, drawn into as
+     * the depth buffer, and sampled as the comparison of a reference with the
+     * depth it holds.
+     *
+     * @param {any} texture
+     * @returns {boolean}
+     */
+    const comparedTexture = texture=>!!texture
+        && FORMAT_INFO[textures.get(texture)?.format]?.depth === true;
+
+    /**
+     * A shadow map's sampler: the stage's filter and addressing, comparing
+     * the reference with what the texture holds as Direct3D 9 hardware does,
+     * one where it is no further than the depth. A linear filter blends the
+     * answers of the texels it reads (percentage-closer filtering).
+     *
+     * @param {Map<number, number>} states
+     */
+    const comparisonSamplerFor = states=>{
+        const descriptor = { ...samplerDescriptorOf(states, mipsApplied), compare: 'less-equal' };
+        const key = Object.values(descriptor).join('|');
+        const existing = programSamplers.get(key);
+        if (existing)
+        {
+            return existing;
+        }
+        if (!createSampler)
+        {
+            throw new Error(
+                'graphics/d3d8: a textured draw needs a sampler factory and none was supplied');
+        }
+        const made = createSampler({ label: `sampler:${key}`, ...descriptor });
+        programSamplers.set(key, made);
+        return made;
+    };
+
+    /**
+     * A shadow map's depth, as a sampled binding takes it: a view of the depth
+     * aspect alone, which a format with stencil needs.
+     *
+     * @type {WeakMap<object, any>}
+     */
+    const depthViews = new WeakMap();
+    /** @param {any} surface */
+    const depthViewOf = surface=>{
+        let view = depthViews.get(surface);
+        if (!view)
+        {
+            view = surface.texture.createView({ label: `${surface.label}:depth`,
+                aspect: 'depth-only' });
+            depthViews.set(surface, view);
+        }
+        return view;
+    };
+
+    /**
+     * The view a stage samples a bound texture through: a shadow map's depth
+     * aspect, or the texture's own view (`sampledView`).
+     *
+     * @param {any} texture @param {RenderModel} model @param {number} stage
+     */
+    const stageViewOf = (texture, model, stage)=>{
+        const surface = uploadIfDirty(texture);
+        return comparedTexture(texture) ? depthViewOf(surface)
+            : sampledView(surface, model, stage);
+    };
+
+    /**
      * Numbers name states for as long as the renderer lives and are never
      * reused, so a key made before a table was cleared cannot name a different
      * state after it.
@@ -6707,9 +6786,9 @@ export function createRenderer(options){
             // A binding moves no state version, and a managed texture's own
             // level of detail is part of how it is sampled.
             const lod = lodOf(texture);
-            const view = texture ? sampledView(uploadIfDirty(texture), model, planned.stage)
+            const view = texture ? stageViewOf(texture, model, planned.stage)
                 : placeholderView(planned.dimension);
-            const sampler = lod === planned.lod
+            const sampler = lod === planned.lod || planned.compared
                 ? planned.sampler
                 : programSamplerFor(model.stageStates(planned.stage), lod);
             boundTextures[index] = texture;
@@ -6965,6 +7044,15 @@ export function createRenderer(options){
             // components it takes (Wine's d3d9 test_mismatched_sample_types).
             const crossed = dimension !== null && bound !== null && dimension !== bound
                 && dimension !== 'cube' && bound !== 'cube' ? bound : null;
+            // A shadow map under a sampler of two dimensions (or a 1.x
+            // stage's) is compared: its comparison sampler filters and
+            // addresses it.
+            if (comparedTexture(texture) && (dimension === null || dimension === '2d'))
+            {
+                variants ??= [];
+                variants[index] = COMPARED_VARIANT;
+                continue;
+            }
             const addressing = addressVariantOf(variantState,
                 crossed ?? dimension ?? bound ?? '2d');
             if (lodBias !== 0 || addressing !== NO_ADDRESS_VARIANT || crossed)
@@ -7305,7 +7393,9 @@ export function createRenderer(options){
                 binding,
                 dimension: samplerDimension(entry.type),
                 lod,
-                sampler: programSamplerFor(model.stageStates(stage), lod),
+                compared: entry.compared === true,
+                sampler: entry.compared === true ? comparisonSamplerFor(model.stageStates(stage))
+                    : programSamplerFor(model.stageStates(stage), lod),
             };
         };
         const samplerPlan = [
@@ -7421,7 +7511,7 @@ export function createRenderer(options){
             stage: index,
             texture,
             record: texture ? textures.get(texture) : null,
-            view: texture ? sampledView(uploadIfDirty(texture), model, index) : placeholderView(),
+            view: texture ? stageViewOf(texture, model, index) : placeholderView(),
             sampler: pieces.samplers[index],
             placeholder: !texture,
         }));
@@ -7539,7 +7629,7 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
-        }, { shaderCoordinates: true, onesOf: onesOfTexture });
+        }, { shaderCoordinates: true, onesOf: onesOfTexture, comparedOf: comparedTexture });
         const state = {
             ...pipelineStateOf(model, {
                 diverge: stateDiverge,
@@ -7563,7 +7653,9 @@ export function createRenderer(options){
             state,
             truncated: cascade.truncated,
             sampling: cascade.textures.map(texture=>texture !== null),
-            samplers: cascade.stages.map((stage, index)=>samplerFor(model.stageStates(index))),
+            samplers: cascade.stages.map((stage, index)=>(stage.dimension === 'shadow'
+                ? comparisonSamplerFor(model.stageStates(index))
+                : samplerFor(model.stageStates(index)))),
             source: {
                 key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
                     + `${streamsKey(layout)}/${pipelineKey(state)}`,
@@ -7611,7 +7703,10 @@ export function createRenderer(options){
             if (texture)
             {
                 shape |= DIMENSION_CODES[textureDimensionOf(texture)] << (stage * 2);
-                shape |= ((onesOfTexture(texture) >>> 1) & 3) << (STAGE_COUNT * 2 + stage * 2);
+                // A shadow map writes 1, green filled without blue, which no
+                // fill is.
+                shape |= (comparedTexture(texture) ? 1 : (onesOfTexture(texture) >>> 1) & 3)
+                    << (STAGE_COUNT * 2 + stage * 2);
             }
         }
         return shape;
@@ -9433,6 +9528,7 @@ export function createRenderer(options){
             }
         }
         const cascade = stageCascade(model, layout, { onesOf: onesOfTexture,
+            comparedOf: comparedTexture,
             ...(stageLimit() < 0 ? {} : { stageLimit: stageLimit() }) });
         keyStages(model, cascade);
         reportCascade(cascade);
@@ -9448,9 +9544,11 @@ export function createRenderer(options){
             return {
                 texture,
                 record: texture ? textures.get(texture) : null,
-                view: texture ? sampledView(uploadIfDirty(texture), model, index)
+                view: texture ? stageViewOf(texture, model, index)
                     : placeholderView(),
-                sampler: samplerFor(model.stageStates(index)),
+                sampler: cascade.stages[index]?.dimension === 'shadow'
+                    ? comparisonSamplerFor(model.stageStates(index))
+                    : samplerFor(model.stageStates(index)),
                 // Which of those two it was, recorded rather than inferred: a
                 // stage bound to the placeholder samples a texture nothing
                 // wrote, and every piece of state around it still names the
@@ -9985,7 +10083,11 @@ export function createRenderer(options){
             // The GPU's copy of a texture that makes its own levels holds the
             // whole chain, of which the program sees the top.
             const gpuLevels = desc.gpuLevels ?? levels;
-            const target = ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0;
+            // A depth texture (a shadow map) is drawn into as the depth
+            // buffer and never written by the guest, which cannot lock one of
+            // the default pool, whatever usage it was made with.
+            const target = ((desc.usage ?? 0) & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL))
+                !== 0 || FORMAT_INFO[desc.format]?.depth === true;
             const entry = {
                 gpu: null, dirty: !target, base: 0, levels, faces, texture, gpuLevels,
                 autogen: gpuLevels > levels,

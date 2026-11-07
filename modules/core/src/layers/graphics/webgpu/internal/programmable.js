@@ -330,6 +330,27 @@ export function samplerDimension(type){
     return type === 'texture_3d<f32>' || type === '3d' ? '3d' : '2d';
 }
 
+/**
+ * What a translated shader's sampler binds: its dimension (`samplerDimension`),
+ * or 'shadow' for a shadow map's, a depth texture and a comparison sampler
+ * (`compared`, or the fixed stage's own 'shadow').
+ *
+ * @param {{ type: string, compared?: boolean }} entry
+ * @returns {string}
+ */
+export const samplerBindingOf = entry=>(entry.compared === true || entry.type === 'shadow'
+    ? 'shadow' : samplerDimension(entry.type));
+
+/**
+ * A sampler group's texture and sampler entries for one binding kind
+ * (`samplerBindingOf`).
+ *
+ * @param {string} kind
+ */
+const samplerLayoutOf = kind=>(kind === 'shadow'
+    ? { texture: { sampleType: 'depth' }, sampler: { type: 'comparison' } }
+    : { texture: kind === '2d' ? {} : { viewDimension: kind }, sampler: {} });
+
 /** GPUShaderStage bits. */
 const VERTEX_STAGE = 1;
 const FRAGMENT_STAGE = 2;
@@ -358,7 +379,8 @@ export function createProgramCache({ backend }){
     let reused = 0;
 
     /**
-     * @param {readonly string[]} dimensions  Each pixel sampler's: '2d', 'cube' or '3d'.
+     * @param {readonly string[]} dimensions  Each pixel sampler's: '2d', 'cube', '3d' or
+     *     'shadow' (`samplerBindingOf`).
      * @param {readonly string[]} [vertexDimensions]  Each vertex sampler's, bound
      *     from VERTEX_SAMPLER_BINDING on.
      */
@@ -382,19 +404,20 @@ export function createProgramCache({ backend }){
         const samplerEntries = [];
         for (let index = 0; index < samplerCount; index++)
         {
+            const kind = samplerLayoutOf(dimensions[index]);
             samplerEntries.push({ binding: index * 2, visibility: FRAGMENT_STAGE,
-                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
+                texture: kind.texture });
             samplerEntries.push(
-                { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: {} });
+                { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: kind.sampler });
         }
         vertexDimensions.forEach((dimension, index)=>{
             // A vertex texture is read at a level, never filtered between texels'
             // derivatives, so it binds as a plain sampled texture like the rest.
+            const kind = samplerLayoutOf(dimension);
             samplerEntries.push({ binding: VERTEX_SAMPLER_BINDING + index * 2,
-                visibility: VERTEX_STAGE,
-                texture: dimension === '2d' ? {} : { viewDimension: dimension } });
+                visibility: VERTEX_STAGE, texture: kind.texture });
             samplerEntries.push({ binding: VERTEX_SAMPLER_BINDING + index * 2 + 1,
-                visibility: VERTEX_STAGE, sampler: {} });
+                visibility: VERTEX_STAGE, sampler: kind.sampler });
         });
         const groups = [
             constants(VERTEX_STAGE),
@@ -435,10 +458,8 @@ export function createProgramCache({ backend }){
                         { code: program.pixel.wgsl, label: `ps:${program.key}` }),
                 ]);
                 const descriptor = pipelineDescriptor(state, null);
-                const bound = layoutsFor(program.pixel.samplers.map(
-                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)),
-                (program.vertex.samplers ?? []).map(
-                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)));
+                const bound = layoutsFor(program.pixel.samplers.map(samplerBindingOf),
+                    (program.vertex.samplers ?? []).map(samplerBindingOf));
                 return {
                     bindGroupLayouts: bound.groups,
                     gpu: await backend.createRenderPipelineAsync({

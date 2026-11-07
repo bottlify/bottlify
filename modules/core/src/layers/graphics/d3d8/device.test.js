@@ -1793,8 +1793,9 @@ test('an unusable usage combination is refused whatever the entry point', ()=>{
         device.CreateTexture(16, 16, 1, D3DUSAGE.WRITEONLY, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, out),
         D3DERR_INVALIDCALL, 'nor a write-only texture');
     assert.equal(
-        device.CreateTexture(16, 16, 1, 0, D3DFMT.D24S8, D3DPOOL.DEFAULT, out),
-        D3DERR_INVALIDCALL, 'nor a depth texture the adapter does not offer');
+        device.CreateTexture(16, 16, 1, D3DUSAGE.DEPTHSTENCIL, D3DFMT.D24S8, D3DPOOL.MANAGED,
+            out),
+        D3DERR_INVALIDCALL, 'nor a depth texture outside the default pool');
 
     assertFullyReleased(device);
 });

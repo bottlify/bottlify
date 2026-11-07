@@ -289,8 +289,9 @@ export function createBackend(options){
     const fixedFunctionLayouts = new Map();
 
     /**
-     * @param {readonly string[]} dimensions  Each stage's texture: '2d', 'cube' or '3d'.
-     *     A binding of one kind does not take a view of another.
+     * @param {readonly string[]} dimensions  Each stage's texture: '2d', 'cube', '3d' or
+     *     'shadow' (a depth texture compared). A binding of one kind does not take a
+     *     view of another.
      */
     const layoutForStages = dimensions=>{
         const key = dimensions.join(',');
@@ -308,9 +309,13 @@ export function createBackend(options){
         ];
         for (let index = 0; index < stageCount; index++)
         {
+            // A shadow map is a depth texture read through a comparison sampler.
+            const shadow = dimensions[index] === 'shadow';
             entries.push({ binding: 1 + index * 2, visibility: 2,
-                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
-            entries.push({ binding: 2 + index * 2, visibility: 2, sampler: {} });
+                texture: shadow ? { sampleType: 'depth' }
+                    : dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
+            entries.push({ binding: 2 + index * 2, visibility: 2,
+                sampler: shadow ? { type: 'comparison' } : {} });
         }
         const group = device.createBindGroupLayout({
             label: `fixed-function:${key}`,

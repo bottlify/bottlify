@@ -1314,7 +1314,7 @@ function fragmentBody(state, specularEnable, position = 'input.position',
             // The stage's own coordinate, made from the set the program bound
             // through the stage's transform; a cube or volume stage reads
             // three components, divided by w where the stage projects.
-            const flat = (stage.dimension ?? '2d') === '2d';
+            const flat = (stage.dimension ?? '2d') === '2d' || stage.dimension === 'shadow';
             const own = sprite ? 'vec4f(input.sprite, 0.0, 1.0)' : `input.coord${index}`;
             const coordinate = flat ? own
                 : ((stage.transform ?? 0) & TRANSFORM_PROJECTED) !== 0
@@ -1658,7 +1658,8 @@ function bordered(read, border, raw, axes){
  *     itself is compared, not the filtered sample, which blends it with its
  *     neighbours, and its colour alone.
  * @param {readonly string[]} [dimensions]
- *     Per stage, '2d', 'cube' or '3d': a cube or volume stage samples three
+ *     Per stage, '2d', 'cube', '3d' or 'shadow' (a depth texture, `shadowSample`):
+ *     a cube or volume stage samples three
  *     components, and is sampled by `cubeSample` or `volumeSample`.
  * @param {readonly number[]} [ones]
  *     Per stage, the channels its texture samples as one (`sampledWithOnes`).
@@ -1682,6 +1683,11 @@ function sampleFunctions(count, keys = [], dimensions = [], ones = [], stages = 
             : `uniforms.stagesHigh[${(index - 3) >> 2}][${(index - 3) & 3}]`;
         const dimension = dimensions[index] ?? '2d';
         const lod = levelOfDetail(stages[index]?.lodBias);
+        if (dimension === 'shadow')
+        {
+            lines.push(shadowSample(index, stages[index]));
+            continue;
+        }
         if (dimension !== '2d')
         {
             lines.push(dimension === 'cube'
@@ -1731,6 +1737,28 @@ ${keyTest(index, keys[index] ?? null)
 `);
     }
     return lines.join('\n');
+}
+
+/**
+ * The sampling of a stage whose texture is a depth texture, a shadow map: the
+ * coordinate's z, divided by w where the stage projects, against the depth
+ * held at its x and y, one where the reference is no further than the depth
+ * and zero where it is, in every channel. The comparison and the filter are
+ * the stage's own comparison sampler's, which filters the answers of the
+ * texels it reads together where the stage filters linearly.
+ *
+ * @param {number} index
+ * @param {import('./pipeline.js').StageKey} [stage]
+ */
+function shadowSample(index, stage){
+    const at = ((stage?.transform ?? 0) & TRANSFORM_PROJECTED) !== 0
+        ? 'select(carried / carried.w, vec4f(0.0), carried.w == 0.0)' : 'carried';
+    return `fn sampleStage${index}(carried: vec4f) -> vec4f {
+    let at = ${at};
+    return vec4f(textureSampleCompareLevel(texture${index}, sampler${index}, at.xy,`
+        + ` clamp(at.z, 0.0, 1.0)));
+}
+`;
 }
 
 /**
@@ -1883,7 +1911,7 @@ function widened(name, format){
 
 /** The WGSL texture type of each sampled dimension. */
 const TEXTURE_TYPE = Object.freeze({ '2d': 'texture_2d<f32>', cube: 'texture_cube<f32>',
-    '3d': 'texture_3d<f32>' });
+    '3d': 'texture_3d<f32>', shadow: 'texture_depth_2d' });
 
 /**
  * The colour-key test inside a stage's sample, or nothing for a stage with
@@ -1918,7 +1946,8 @@ function literalOf(value){
  * `group`: the fixed-function pipeline's own group after its block, or the
  * programmable layout's sampler group from its start.
  *
- * @param {readonly string[]} dimensions  Each stage's: '2d', 'cube' or '3d'.
+ * @param {readonly string[]} dimensions  Each stage's: '2d', 'cube', '3d' or 'shadow', a
+ *     depth texture read through a comparison sampler.
  * @param {number} group @param {number} first @returns {string}
  */
 function samplerDeclarations(dimensions, group, first){
@@ -1930,7 +1959,8 @@ function samplerDeclarations(dimensions, group, first){
             + ` var texture${index}: ${
                 /** @type {Record<string, string>} */ (TEXTURE_TYPE)[dimensions[index]]};`);
         lines.push(`@group(${group}) @binding(${first + 1 + index * 2})`
-            + ` var sampler${index}: sampler;`);
+            + ` var sampler${index}: ${dimensions[index] === 'shadow'
+                ? 'sampler_comparison' : 'sampler'};`);
     }
     return lines.join('\n');
 }
