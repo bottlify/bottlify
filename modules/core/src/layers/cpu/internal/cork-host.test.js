@@ -1004,3 +1004,40 @@ test('a tested read of the null page reads its zeros in translated code, not at 
         assert.ok(engineState.held > 1000, 'a read of the engine\'s state still leaves, for zeros');
     });
 
+
+test('a memory with an engine range holds its floor, and grows as the host gives the guest more',
+    ()=>{
+        const MIB = 1 << 20;
+        const grown = host({ memorySize: 256 * MIB, engineArea: { at: 64 * MIB, span: 32 * MIB } });
+        assert.equal(grown.growing(), true);
+        // The floor: up to the engine's range's end, a power of two -- 128 MiB, not 256.
+        assert.equal(grown.ramHeld(), 128 * MIB);
+        assert.equal(grown.wasmMemory().buffer.byteLength, 128 * MIB + engine.WRAP_SLACK,
+            'the memory holds the floor and the slack, not the whole RAM');
+        assert.equal(grown.readU32(200 * MIB), 0, 'past the RAM held: zero, as a page never given');
+        assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (128 * MIB - 1));
+
+        /** @type {number[]} */
+        const told = [];
+        grown.onGrow((/** @type {number} */ held)=>told.push(held));
+        // A host write past it -- an image, a file read into a buffer -- grows it first.
+        grown.writeData(200 * MIB, Uint8Array.of(1, 2, 3, 4));
+        assert.equal(grown.ramHeld(), 256 * MIB);
+        assert.deepEqual(told, [256 * MIB]);
+        assert.equal(grown.readU32(200 * MIB), 0x04030201);
+        assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (256 * MIB - 1));
+        assert.equal(grown.growTo(512 * MIB), 256 * MIB, 'never past the ceiling');
+
+        // The engine's range is the engine's: a host write across it goes around it.
+        const range = grown.engineRange();
+        const before = grown.wasmMemory().buffer.slice(range.from, range.from + 16);
+        grown.writeData(range.from - 4, new Uint8Array(24).fill(0xee));
+        assert.deepEqual(
+            new Uint8Array(grown.wasmMemory().buffer.slice(range.from, range.from + 16)),
+            new Uint8Array(before));
+        assert.equal(grown.readU32(range.from - 4), 0xeeeeeeee);
+
+        const fixed = host({ memorySize: 256 * MIB });
+        assert.equal(fixed.growing(), false, 'no range: the whole RAM, as before');
+        assert.ok(fixed.wasmMemory().buffer.byteLength > 256 * MIB);
+    });

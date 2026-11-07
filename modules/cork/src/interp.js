@@ -405,9 +405,9 @@ export class BlockMemory {
         // array is cheaper than a DataView call.
         this.pageFlags = new Uint8Array(buffer, pageFlagsAt(layout), Tables.PAGE_FLAGS_SIZE);
         this.bytes8 = new Uint8Array(buffer);
-        this.words16 = new Uint16Array(buffer, 0, buffer.byteLength >>> 1);
-        this.words32 = new Uint32Array(buffer, 0, buffer.byteLength >>> 2);
-        this.words64 = new BigUint64Array(buffer, 0, buffer.byteLength >>> 3);
+        this.words16 = new Uint16Array(buffer, 0, Math.floor(buffer.byteLength / 2));
+        this.words32 = new Uint32Array(buffer, 0, Math.floor(buffer.byteLength / 4));
+        this.words64 = new BigUint64Array(buffer, 0, Math.floor(buffer.byteLength / 8));
         this.fittedMask = this.wrapAt < 0 ? 0 : this.view.getUint32(this.wrapAt, true);
     }
 

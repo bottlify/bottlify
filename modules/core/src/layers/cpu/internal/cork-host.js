@@ -165,6 +165,11 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {{ everyMs: number, bytes: number } | false} [gcNudge]  How the threads holding
  *     the guest's memory bring JavaScriptCore's collections forward (`gc-nudge.js`), as the
  *     process settled it; an executor's worker nudges by it.
+ * @property {{ at: number, span: number }} [engineArea]  A range of the guest's own space the
+ *     process keeps from the program, `at` a MiB boundary: the memory then grows as the guest
+ *     is given more (`growTo`), the engine's tables and other executors' pages kept there,
+ *     where the whole `memorySize` was committed at the start. Only over shared memory, for
+ *     a 32-bit process and a `memorySize` a power of two; a fixed memory otherwise.
  * @property {32 | 64} [bits]  64 for a long-mode (x86-64) process: the engine's 64-bit state
  *     block, run on its long-mode interpreter, on one executor. Default 32.
  */
@@ -260,9 +265,10 @@ export function createCorkHost(config){
     // first 64 KiB, where the state page lies instead (`ownLayout`), and RAM
     // addressed from 0 is shorter code on arm64. An engine whose layout has no
     // such choice keeps its own.
-    const own = ownLayout({ ramSize: memorySize, processors: executors, ramBase: 0,
+    const layoutOptions = { ramSize: memorySize, processors: executors, ramBase: 0,
         ...(long ? { bits } : {}),
-        ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) });
+        ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) };
+    let own = ownLayout(layoutOptions);
     const blockSize = long ? engine.STATE_BLOCK_SIZE_64 : STATE_BLOCK_SIZE;
     // The guest's addresses the state page and the wasm interpreter's statics
     // past it hold: closed to the program for good. Its first page stays open,
@@ -272,11 +278,8 @@ export function createCorkHost(config){
         ? { from: own.regs, to: own.regs + WASM_INTERPRETER_STATICS_AT + WASM_INTERPRETER_STATICS }
         : { from: 0, to: 0 };
     /** Whether the engine holds a guest address. @param {number} address */
-    const engineHolds = address=>address >= enginePages.from && address < enginePages.to;
-    // Every field from the start of a state block, as the block's views read
-    // it: the same on every executor, whose blocks a thread's context moves
-    // between (`blockLayout`).
-    const inBlock = blockFields(own);
+    const engineHolds = address=>engineRanges.some(range=>address >= range.from
+        && address < range.to);
     const tables = tablesSize(own);
     // A profiling run (`blockProfile`) has the block profile past the tables,
     // and the interpreter tier in wasm its hot counts past that.
@@ -285,9 +288,46 @@ export function createCorkHost(config){
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
         && corkConfig?.wasmInterpreter !== false;
     const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
-    const firstPages = pagesFor(own, past);
     // Every other executor's: its state page, its tables and what lies past them.
     const executorPages = Math.ceil((executorBytes(own) - tables + past) / 65536);
+    const sharedPages = executors > 1 ? Math.ceil(engine.SHARED_CODE_BYTES / 65536) : 0;
+    // Shared where the host can share it -- a page that is cross-origin
+    // isolated, or node -- so another worker can read and write guest memory
+    // in place; the translated code runs as fast on either.
+    const shared = corkConfig?.sharedMemory !== false && typeof SharedArrayBuffer === 'function'
+        && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
+    // A growing memory (`engineArea`): the first executor's tables, the other
+    // executors' pages and their shared record in a range of the guest's own
+    // space the process keeps from the program, RAM at 0 up to a ceiling of
+    // `memorySize`, and the memory holding only the RAM the guest has been given,
+    // grown as it is given more (`growTo`) -- where a memory of the whole RAM was
+    // committed by every process at its start. Only over shared memory, whose
+    // growth leaves every view taken as it was; a 32-bit process; a RAM a power
+    // of two; an engine that knows the layout (`WRAP_SLACK`).
+    const area = config.engineArea;
+    const areaBytes = Math.ceil(past / 65536) * 65536
+        + ((executors - 1) * executorPages + sharedPages) * 65536;
+    const growing = area !== undefined && shared && !long
+        && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
+        && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
+        && area.at + areaBytes <= memorySize;
+    /** The RAM a growing memory always holds: up to its engine's range, a power of two. */
+    const ramFloor = growing
+        ? Math.max(0x100000, 2 ** Math.ceil(Math.log2(area.at + areaBytes))) : memorySize;
+    if (growing)
+    {
+        own = ownLayout({ ...layoutOptions, tablesAt: area.at, ramFloor });
+    }
+    /** The engine's range inside the guest's space, empty where it has none. */
+    const engineArea = growing ? { from: area.at, to: area.at + areaBytes } : { from: 0, to: 0 };
+    /** Every guest range the engine holds, in address order: closed to the program. */
+    const engineRanges = [enginePages, engineArea].filter(range=>range.to > range.from)
+        .sort((a, b)=>a.from - b.from);
+    // Every field from the start of a state block, as the block's views read
+    // it: the same on every executor, whose blocks a thread's context moves
+    // between (`blockLayout`).
+    const inBlock = blockFields(own);
+    const firstPages = growing ? Math.ceil((own.tables + past) / 65536) : pagesFor(own, past);
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
         : (firstPages + (index - 1) * executorPages) * 65536);
@@ -297,28 +337,32 @@ export function createCorkHost(config){
     // Past every executor's pages, the record they keep together of who holds
     // code where and which stores reached it (`shared-code.js`).
     const sharedAt = executors > 1 ? (firstPages + (executors - 1) * executorPages) * 65536 : -1;
-    const pages = firstPages + (executors - 1) * executorPages
-        + (executors > 1 ? Math.ceil(engine.SHARED_CODE_BYTES / 65536) : 0);
-    // Shared where the host can share it -- a page that is cross-origin
-    // isolated, or node -- so another worker can read and write guest memory
-    // in place; the translated code runs as fast on either.
-    const shared = corkConfig?.sharedMemory !== false && typeof SharedArrayBuffer === 'function'
-        && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
+    // A growing memory starts with its floor and the slack past it, and may
+    // grow to its whole RAM's (wasm's 4 GiB at most).
+    const pages = growing ? (ramFloor + engine.WRAP_SLACK) / 65536
+        : firstPages + (executors - 1) * executorPages + sharedPages;
+    const maximumPages = growing
+        ? Math.min(65536, (memorySize + engine.WRAP_SLACK) / 65536) : pages;
     if (given !== undefined && given.buffer.byteLength < pages * 65536)
     {
         throw new Error(`cpu: a memory of ${given.buffer.byteLength} bytes has no room for`
             + ` ${executors} executors`);
     }
+    // A growing memory takes a gone one that holds at least its floor: the same
+    // ceiling, and what the other grew to is kept, closed past the floor.
     const taken = given === undefined && reused !== undefined
-        && reused.memory.buffer.byteLength === pages * 65536
+        && (growing ? reused.memory.buffer.byteLength >= pages * 65536
+            : reused.memory.buffer.byteLength === pages * 65536)
         && (typeof SharedArrayBuffer === 'function'
             && reused.memory.buffer instanceof SharedArrayBuffer) === shared
         ? reused.memory : undefined;
     const memory = given ?? taken
-        ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
-    // The memory past the guest's RAM: the engine's tables and pages for every
-    // executor, which the translator's zone holds before any module of it.
-    const engineBytes = memory.buffer.byteLength - own.ramBase - memorySize;
+        ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
+    // The memory past the guest's RAM, or a growing memory's engine range: the
+    // engine's tables and pages for every executor, which the translator's zone
+    // holds before any module of it.
+    const engineBytes = growing ? areaBytes
+        : memory.buffer.byteLength - own.ramBase - memorySize;
     // A ceiling only where the iOS hack runs (`crossTailCalls` false): a phone's tab is
     // what it is for. Elsewhere it let a desktop's other executors, a sixteenth of the
     // zone each, let modules go and bring them back without end: CoD4 on four cores
@@ -337,10 +381,15 @@ export function createCorkHost(config){
         const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
         bytes.fill(0, 0, own.ramBase + guestEnd);
         bytes.fill(0, own.ramBase + memorySize);
+        // A growing memory's tables lie inside the guest's space, wherever the
+        // guest's end was.
+        bytes.fill(0, engineArea.from, engineArea.to);
     }
 
-    // The memory is fixed (initial === maximum), so the buffer never detaches
-    // and the views are taken once.
+    // A fixed memory (initial === maximum) never detaches its buffer, and a
+    // growing one is shared, whose growth leaves every view as it was: the
+    // views over the engine's pages are taken once. Those over the RAM are
+    // taken again as the memory grows (`fitRam`).
     const block = new Uint8Array(memory.buffer, stateBase, blockSize);
     const blockView = new DataView(memory.buffer, stateBase, blockSize);
     const reg32 = new Int32Array(memory.buffer, layout.regs, 8);
@@ -351,9 +400,38 @@ export function createCorkHost(config){
     const regLow = index=>(reg64 === null ? reg32[index] >>> 0
         : Number(reg64[index] & 0xffffffffn));
     const xmm = new Uint32Array(memory.buffer, layout.xmm, long ? 64 : 32);
-    const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
-    const whole = new DataView(memory.buffer);
-    const wholeWords = new Int32Array(memory.buffer);
+    /** The process's wrap word, as a dword index (`ramFloor`), -1 for a fixed memory. */
+    const wrapWord = growing ? /** @type {number} */ (own.wrap) >>> 2 : -1;
+    let wholeWords = new Int32Array(memory.buffer);
+    /** The RAM the memory holds now: a growing memory's, as its wrap word says. */
+    const heldNow = ()=>(wrapWord < 0 ? memorySize
+        : (Atomics.load(wholeWords, wrapWord) >>> 0) + 1);
+    if (growing && executor === 0 && given === undefined)
+    {
+        Atomics.store(wholeWords, wrapWord, (ramFloor - 1) | 0);
+    }
+    let held = heldNow();
+    let ram = new Uint8Array(memory.buffer, layout.ramBase, held);
+    let whole = new DataView(memory.buffer);
+    /** @type {((held: number) => void)[]} */
+    const growListeners = [];
+    /**
+     * The views over the RAM taken again where the memory grew since they
+     * were: on the process's own executor by its `growTo`, on another one at
+     * its next slice. Answers whether they were.
+     */
+    const fitRam = ()=>{
+        const now = heldNow();
+        if (now === held)
+        {
+            return false;
+        }
+        held = now;
+        wholeWords = new Int32Array(memory.buffer);
+        whole = new DataView(memory.buffer);
+        ram = new Uint8Array(memory.buffer, layout.ramBase, held);
+        return true;
+    };
     // The process's own executor's interrupt word (`layout.interrupt`), where
     // the process has others: they store it when they need its answer, and its
     // translated code leaves at the next back edge; it reads and clears it.
@@ -381,8 +459,33 @@ export function createCorkHost(config){
      *
      * @param {number} address @param {number} length
      */
-    const acrossEngine = (address, length)=>address < enginePages.to
-        && address + length > enginePages.from;
+    const acrossEngine = (address, length)=>engineRanges.some(range=>address < range.to
+        && address + length > range.from);
+    /**
+     * A host write past the RAM the memory holds grows it first (`growTo`):
+     * what the host puts in the guest's memory -- an image, a stack, a file
+     * read into a buffer -- is memory the guest was given.
+     *
+     * @param {number} end  one past the write's last byte
+     */
+    /**
+     * Whether the memory holds `[address, address + length)` of RAM: asked again
+     * of the wrap word where it did not, another executor having grown it.
+     *
+     * @param {number} address @param {number} length
+     */
+    const holds = (address, length)=>address + length <= held
+        || (fitRam() && address + length <= held);
+    const reach = (/** @type {number} */ end)=>{
+        if (end > held && !fitRam() && executor === 0)
+        {
+            growTo(end);
+        }
+        else if (end > held)
+        {
+            fitRam();
+        }
+    };
     /**
      * The host's write into the RAM. A short one at an aligned address goes in
      * a dword at a time, each one store, as an x86 dword store is: the shared
@@ -414,29 +517,50 @@ export function createCorkHost(config){
     };
     /** @param {number} address @param {Uint8Array} bytes */
     const copyAround = (address, bytes)=>{
+        reach(address + bytes.length);
         if (!acrossEngine(address, bytes.length))
         {
             copyIn(address, bytes);
             return;
         }
-        if (address < enginePages.from)
+        let from = address;
+        for (const range of engineRanges)
         {
-            copyIn(address, bytes.subarray(0, enginePages.from - address));
+            const end = address + bytes.length;
+            if (range.to <= from || range.from >= end)
+            {
+                continue;
+            }
+            if (from < range.from)
+            {
+                copyIn(from, bytes.subarray(from - address, range.from - address));
+            }
+            from = Math.max(from, range.to);
         }
-        if (address + bytes.length > enginePages.to)
+        if (from < address + bytes.length)
         {
-            copyIn(enginePages.to, bytes.subarray(enginePages.to - address));
+            copyIn(from, bytes.subarray(from - address));
         }
     };
     /** @param {number} address @param {number} value @param {number} length */
     const fillAround = (address, value, length)=>{
+        reach(address + length);
         if (!acrossEngine(address, length))
         {
             ram.fill(value, address, address + length);
             return;
         }
-        ram.fill(value, address, Math.min(address + length, enginePages.from));
-        ram.fill(value, Math.max(address, enginePages.to), address + length);
+        let from = address;
+        for (const range of engineRanges)
+        {
+            if (range.to <= from || range.from >= address + length)
+            {
+                continue;
+            }
+            ram.fill(value, from, Math.max(from, range.from));
+            from = Math.max(from, range.to);
+        }
+        ram.fill(value, from, Math.max(from, address + length));
     };
 
     // The boot state: the registers a thread starts with, and nothing run.
@@ -729,10 +853,88 @@ export function createCorkHost(config){
     {
         runtime.pages?.markRange(0, closedBelow, PAGE_INACCESSIBLE);
     }
-    if (enginePages.to > enginePages.from)
+    for (const range of engineRanges)
     {
-        runtime.pages?.markRange(enginePages.from, enginePages.to - enginePages.from,
-            PAGE_INACCESSIBLE);
+        runtime.pages?.markRange(range.from, range.to - range.from, PAGE_INACCESSIBLE);
+    }
+    // A growing memory's pages past the RAM it holds: closed until it grows,
+    // so every access translated code tests faults there rather than reaching
+    // past the memory.
+    if (held < memorySize)
+    {
+        runtime.pages?.markRange(held, memorySize - held, PAGE_INACCESSIBLE);
+    }
+    /**
+     * Pages past the RAM held that the program closed itself (`pageAccess`): a
+     * reservation not committed, PAGE_NOACCESS. They stay closed when the
+     * memory grows over them. One byte a page, made the first time it is needed.
+     *
+     * @type {Uint8Array | null}
+     */
+    let closedPastHeld = null;
+    /**
+     * Grows a growing memory to hold `end` bytes of RAM, in a power of two up to
+     * the ceiling: its pages added, the views taken again, the new pages opened
+     * but those the program closed or the engine holds, and the wrap word set
+     * last, so a read wrapped by it finds the memory there. Only the process's
+     * own executor grows; the others take the views again at their next slice.
+     * Answers the RAM held, which is less than `end` where the memory could not
+     * grow -- past the ceiling, or a browser that refused the pages.
+     *
+     * @param {number} end
+     */
+    function growTo(end){
+        if (!growing || executor !== 0 || end <= held)
+        {
+            return held;
+        }
+        let want = held;
+        while (want < end && want < memorySize)
+        {
+            want *= 2;
+        }
+        want = Math.min(want, memorySize);
+        const wantPages = Math.min(65536, (want + engine.WRAP_SLACK) / 65536);
+        const havePages = memory.buffer.byteLength / 65536;
+        try
+        {
+            if (wantPages > havePages)
+            {
+                memory.grow(wantPages - havePages);
+            }
+        }
+        catch {
+            return held;
+        }
+        const from = held;
+        wholeWords = new Int32Array(memory.buffer);
+        whole = new DataView(memory.buffer);
+        ram = new Uint8Array(memory.buffer, layout.ramBase, want);
+        // Opened page by page where the program closed some, at once otherwise.
+        const firstPage = from >>> 12;
+        const lastPage = Math.ceil(want / 4096);
+        let runStart = firstPage;
+        for (let page = firstPage; page <= lastPage; page++)
+        {
+            const kept = page < lastPage && (closedPastHeld?.[page] === 1
+                || engineHolds(page * 4096));
+            if (kept || page === lastPage)
+            {
+                if (page > runStart)
+                {
+                    runtime.pages?.clearRange(runStart * 4096, (page - runStart) * 4096,
+                        PAGE_INACCESSIBLE);
+                }
+                runStart = page + 1;
+            }
+        }
+        held = want;
+        Atomics.store(wholeWords, wrapWord, (want - 1) | 0);
+        for (const listener of growListeners)
+        {
+            listener(want);
+        }
+        return held;
     }
     // And nothing below `runsFrom` runs on either interpreter: the wasm tier
     // leaves a fetch there to the host, which faults it.
@@ -904,7 +1106,7 @@ export function createCorkHost(config){
         };
         // A page the program closed itself, inside RAM: translated reads that
         // wrap into RAM would read it as zeros, so they test from now on.
-        if (page !== null && page.address >>> 0 >= closedBelow && page.address >>> 0 < memorySize
+        if (page !== null && page.address >>> 0 >= closedBelow && page.address >>> 0 < held
             && !engineHolds(page.address >>> 0))
         {
             runtime.readsFaulted?.();
@@ -1384,6 +1586,8 @@ export function createCorkHost(config){
             // What the process's other executors wrote over code meanwhile.
             runtime.takeCodeWrites();
         }
+        // The memory may have grown on another executor since the last slice.
+        fitRam();
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick: `hlt` holds a processor until its next
@@ -1615,15 +1819,15 @@ export function createCorkHost(config){
         setResult(value){
             const top = (block[inBlock.x87Top] - 1) & 7;
             const empty = block[inBlock.x87Empty];
-            const held = (empty >>> top & 1) === 0;
+            const occupied = (empty >>> top & 1) === 0;
             block[inBlock.x87Top] = top;
             block[inBlock.x87Empty] = empty & ~(1 << top);
-            if (held)
+            if (occupied)
             {
                 const status = blockView.getUint16(inBlock.x87Status, true);
                 blockView.setUint16(inBlock.x87Status, status | 0x201, true);
             }
-            blockView.setFloat64(x87At(top), held ? -Infinity : value, true);
+            blockView.setFloat64(x87At(top), occupied ? -Infinity : value, true);
             dropExact(1 << top);
         },
         /** @param {number} index */
@@ -1637,12 +1841,12 @@ export function createCorkHost(config){
         },
         depth(){
             const empty = block[inBlock.x87Empty];
-            let held = 0;
+            let count = 0;
             for (let index = 0; index < 8; index++)
             {
-                held += (empty >>> index & 1) === 0 ? 1 : 0;
+                count += (empty >>> index & 1) === 0 ? 1 : 0;
             }
-            return held;
+            return count;
         },
         controlWord: ()=>blockView.getUint16(inBlock.x87Control, true),
         /** `fldcw`. @param {number} word */
@@ -1743,7 +1947,7 @@ export function createCorkHost(config){
         runSlice,
 
         /** One byte of guest memory, for the runtime's decoder. @param {number} address */
-        readByte: address=>ram[address],
+        readByte: address=>(holds(address, 1) ? ram[address] : 0),
         /** Cork's own memory. */
         wasmMemory: ()=>memory,
         /** The eager flags word. */
@@ -1780,10 +1984,20 @@ export function createCorkHost(config){
         raiseTrap,
 
         /** @param {number} address @param {number} length @returns {Uint8Array} */
-        readPhysical: (address, length)=>ram.subarray(address, address + length),
+        readPhysical: (address, length)=>{
+            if (holds(address, length))
+            {
+                return ram.subarray(address, address + length);
+            }
+            // Past the RAM a growing memory holds: zeros, as a page never given.
+            const bytes = new Uint8Array(length);
+            bytes.set(ram.subarray(Math.min(address, held), Math.min(address + length, held)));
+            return bytes;
+        },
         /** @param {number} address */
-        readU32: address=>((address & 3) === 0 ? wholeWords[ramOffset(address) >>> 2] >>> 0
-            : whole.getUint32(ramOffset(address), true)),
+        readU32: address=>(!holds(address, 4) ? 0
+            : (address & 3) === 0 ? wholeWords[ramOffset(address) >>> 2] >>> 0
+                : whole.getUint32(ramOffset(address), true)),
         /**
          * Dwords, signed, into an array: a host call's stack words in one call.
          *
@@ -1791,13 +2005,15 @@ export function createCorkHost(config){
          */
         readU32sInto: (address, count, into, at)=>{
             const from = ramOffset(address);
+            const inside = holds(address, count * 4);
             for (let word = 0; word < count; word++)
             {
-                into[at + word] = whole.getInt32(from + word * 4, true);
+                into[at + word] = inside || holds(address + word * 4, 4)
+                    ? whole.getInt32(from + word * 4, true) : 0;
             }
         },
         /** @param {number} address */
-        readF32: address=>whole.getFloat32(ramOffset(address), true),
+        readF32: address=>(holds(address, 4) ? whole.getFloat32(ramOffset(address), true) : 0),
 
         /** @param {number} address @param {Uint8Array} bytes */
         writePhysical: (address, bytes)=>{
@@ -1923,8 +2139,9 @@ export function createCorkHost(config){
          * @param {number} address
          * @returns {number | null}
          */
-        wrappedAddress: address=>(typeof engine.wrappedAddress === 'function'
-            ? engine.wrappedAddress(address, memorySize) : null),
+        wrappedAddress: address=>(growing ? (address & held - 1) >>> 0
+            : typeof engine.wrappedAddress === 'function'
+                ? engine.wrappedAddress(address, memorySize) : null),
         /**
          * Opens or closes pages to the program, as a reservation's commit and
          * VirtualProtect do: a closed one faults any access, with its address.
@@ -1944,27 +2161,64 @@ export function createCorkHost(config){
             }
             const start = Math.max(address >>> 0, closedBelow);
             const end = Math.min((address >>> 0) + (length >>> 0), memorySize);
-            // Either side of the engine's pages.
-            for (const [from, to] of [[start, Math.min(end, enginePages.from)],
-                [Math.max(start, enginePages.to), end]])
+            // Past the RAM a growing memory holds the pages stay closed; what the
+            // program asked is kept for when the memory grows over them (`growTo`).
+            if (end > held && length > 0)
             {
-                if (to <= from)
+                closedPastHeld ??= new Uint8Array(0x100000);
+                closedPastHeld.fill(open ? 0 : 1, Math.max(start, held) >>> 12,
+                    Math.ceil(end / 4096));
+            }
+            // Either side of the engine's pages, inside the RAM held.
+            let from = start;
+            const inside = Math.min(end, held);
+            for (const range of [...engineRanges, { from: inside, to: inside }])
+            {
+                const to = Math.min(range.from, inside);
+                if (to > from)
                 {
-                    continue;
+                    if (open)
+                    {
+                        runtime.pages.clearRange(from, to - from, PAGE_INACCESSIBLE);
+                    }
+                    else
+                    {
+                        runtime.pages.markRange(from, to - from, PAGE_INACCESSIBLE);
+                    }
                 }
-                if (open)
-                {
-                    runtime.pages.clearRange(from, to - from, PAGE_INACCESSIBLE);
-                }
-                else
-                {
-                    runtime.pages.markRange(from, to - from, PAGE_INACCESSIBLE);
-                }
+                from = Math.max(from, range.to);
             }
             return true;
         },
-        /** The guest's RAM in place, byte 0 at address 0. @returns {Uint8Array} */
-        ramView: ()=>ram,
+        /** The guest's RAM in place, byte 0 at address 0, as much of it as the memory holds. */
+        ramView: ()=>{
+            fitRam();
+            return ram;
+        },
+        /**
+         * Grows a growing memory to hold `end` bytes of RAM (`growTo`); answers the
+         * RAM it holds, the whole RAM for a memory that does not grow.
+         *
+         * @param {number} end
+         */
+        growTo: end=>growTo(end >>> 0),
+        /** The RAM the memory holds now. */
+        ramHeld: ()=>{
+            fitRam();
+            return held;
+        },
+        /** Whether the memory grows as the guest is given more (`engineArea`). */
+        growing: ()=>growing,
+        /**
+         * Called with the RAM held each time the memory grows.
+         *
+         * @param {(held: number) => void} listener
+         */
+        onGrow: listener=>{
+            growListeners.push(listener);
+        },
+        /** The guest range the engine keeps for its tables, empty where none. */
+        engineRange: ()=>({ ...engineArea }),
         /** The state block, for the block-based context capture and the tests. */
         block: ()=>block,
         blockLayout: ()=>inBlock,

@@ -296,7 +296,8 @@ export function createLender(options){
  * @param {Object} options
  * @param {SharedArrayBuffer} options.slots
  * @param {SharedArrayBuffer} options.stash
- * @param {Uint8Array} options.memory  the guest's memory
+ * @param {Uint8Array | (() => Uint8Array)} options.memory  the guest's memory, or what
+ *     answers it as it is now: a memory that grows is a longer view after it grew
  * @param {number} [options.base]      the guest address of `memory`'s first byte
  * @returns {(slot: number, address: number, length: number,
  *     use: (bytes: Uint8Array) => void) => void}
@@ -304,6 +305,7 @@ export function createLender(options){
  *     and the slot done after
  */
 export function createBorrower({ slots, stash, memory, base = 0 }){
+    const view = typeof memory === 'function' ? memory : ()=>memory;
     const states = new Int32Array(slots);
     const stashBytes = new Uint8Array(stash);
     return (slot, address, length, use)=>{
@@ -312,7 +314,7 @@ export function createBorrower({ slots, stash, memory, base = 0 }){
         {
             if (was === LEND.LENT)
             {
-                use(memory.subarray(address - base, address - base + length));
+                use(view().subarray(address - base, address - base + length));
             }
             else if (was === LEND.STASHED)
             {

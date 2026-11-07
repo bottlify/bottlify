@@ -494,6 +494,7 @@ export function createGraphicsModule(){
                     // Where the memory is shared the worker writes what it reads
                     // back in place, and says only where.
                     sharedMemory: ()=>memory.shared?.() ?? null,
+                    memoryGrown: listener=>memory.onGrow?.(listener),
                     adoptMemory: (address, length)=>memory.adopt?.(address, length),
                     lendMemory: config?.lendMemory !== false,
                     // The bound the run's presenter holds a device here to, for

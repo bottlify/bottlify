@@ -169,6 +169,8 @@ export function assemble(parts){
  *        library needs a base of its own: it has no relocations, so one that
  *        asks for the program's base cannot be loaded beside it.
  * @param {boolean} [options.dll]  A library: its entry point is DllMain.
+ * @param {boolean} [options.largeAddressAware]  A 32-bit image linked /LARGEADDRESSAWARE:
+ *        given addresses past 2 GiB.
  * @param {32 | 64} [options.bits]  64: an x86-64 image (PE32+), its import
  *        tables, thread-local directory and callbacks eight bytes a pointer.
  * @param {{ id: number, text: string }} [options.manifest]
@@ -493,7 +495,8 @@ export function buildExe(options){
     head.u32(0).u32(0); // no symbol table
     head.u16(bits === 64 ? 0xf0 : 0xe0); // size of optional header
     // EXECUTABLE_IMAGE with 32BIT_MACHINE or LARGE_ADDRESS_AWARE, and DLL
-    head.u16((bits === 64 ? 0x0022 : 0x0102) | (options.dll ? 0x2000 : 0));
+    head.u16((bits === 64 ? 0x0022 : 0x0102) | (options.dll ? 0x2000 : 0)
+        | (options.largeAddressAware ? 0x0020 : 0));
 
     // Optional header (PE32, or PE32+: no BaseOfData, the base and the four
     // stack and heap sizes eight bytes)

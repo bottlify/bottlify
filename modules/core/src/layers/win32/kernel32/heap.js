@@ -144,6 +144,16 @@ const PAGE_READWRITE_VIEW = 0x04;
 const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
 
 /**
+ * Where a process's user address space ends: 2 GiB less 64 KiB, or past an arena
+ * that reaches further -- a large-address-aware program's on 64-bit Windows, 4 GiB
+ * less 64 KiB -- the 64 KiB past the arena's end.
+ *
+ * @param {{ base: number, size: number }} arena
+ */
+export const userSpaceTop = arena=>Math.max(USER_ADDRESS_SPACE_TOP,
+    arena.base + arena.size + 0x10000);
+
+/**
  * MEMORY_BASIC_INFORMATION as a process of either width compiled it. Seven
  * fields, and the order matters more than the size: a caller reads State to
  * decide whether the address is usable at all. At 64 bits the two addresses
@@ -454,11 +464,15 @@ export function createAddressIndex(){
  * Deterministic: the same sequence of requests yields the same addresses,
  * which is what makes a heap bug reproducible.
  *
- * @param {{ base: number, size: number, alignment?: number }} arena  Memory nothing has
+ * @param {{ base: number, size: number, alignment?: number,
+ *     reach?: (end: number) => boolean }} arena  Memory nothing has
  *        written yet, and where every block starts and how its size is rounded:
- *        ALIGNMENT, or ALIGNMENT_64 in a 64-bit process. The base is on it.
+ *        ALIGNMENT, or ALIGNMENT_64 in a 64-bit process. The base is on it. `reach`
+ *        grows the guest's memory to hold a block's end before the block is handed
+ *        out, false where it cannot: the block is then refused as one nothing fits.
+ *        A reservation (`reserving`) is not held, only its commits are.
  */
-export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }){
+export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, reach }){
     /** @type {FreeSpan[][]} */
     const bins = Array.from({ length: BINS }, ()=>[]);
     // Three maps by address, and none of them is ever deleted from: an entry
@@ -601,9 +615,11 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
          * @param {Object} [options]
          * @param {number} [options.alignment]
          * @param {any} [options.owner]
+         * @param {boolean} [options.reserving]  address space only, its pages held as
+         *     they are committed
          * @returns {number} the address, or 0 when nothing fits
          */
-        allocate(bytes, { alignment = least, owner = null } = {}){
+        allocate(bytes, { alignment = least, owner = null, reserving = false } = {}){
             // A zero-byte request still yields a distinct pointer, because a
             // program compares it against NULL to decide whether it failed.
             const capacity = Math.max(least, roundUp(bytes, least));
@@ -620,6 +636,10 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
             }
             const start = roundUp(span.base, alignment);
             const end = start + capacity;
+            if (!reserving && reach !== undefined && !reach(end))
+            {
+                return 0;
+            }
             const spanEnd = span.base + span.size;
             remove(span);
             if (start > span.base)
@@ -651,9 +671,10 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
          * @param {number} bytes
          * @param {Object} [options]
          * @param {any} [options.owner]
+         * @param {boolean} [options.reserving]  as `allocate`'s
          * @returns {boolean} false when any of the range is taken or outside the arena
          */
-        allocateAt(address, bytes, { owner = null } = {}){
+        allocateAt(address, bytes, { owner = null, reserving = false } = {}){
             const capacity = Math.max(least, roundUp(bytes, least));
             const start = address >>> 0;
             const end = start + capacity;
@@ -670,7 +691,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
                     break;
                 }
             }
-            if (span === null)
+            if (span === null || (!reserving && reach !== undefined && !reach(end)))
             {
                 return false;
             }
@@ -830,6 +851,8 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
 /**
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
+ * @property {(end: number) => boolean} [reach]  Grows the guest's memory to hold `end`
+ *           (`createHeapAllocator`'s); false where it cannot.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose
  *           MEMORY_BASIC_INFORMATION and MEM_ADDRESS_REQUIREMENTS are wider.
  * @property {any} [allocator]  An allocator over that arena, when one is shared.
@@ -860,7 +883,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
  *           assembling caller wired one. VirtualQuery uses it to coalesce a
  *           free gap into one answer instead of one page; without it a free
  *           gap is reported as running to the top of user address space.
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, kind?: string) => void} [divergence]
  *           Where a refused allocation is reported: a program that is told it
  *           has run out of memory says so in its own words and exits, and
  *           without this nothing says how much it asked for and what was left.
@@ -895,6 +918,8 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT }
  */
 export function createHeapFunctions(host){
     const MEMORY_BASIC_INFORMATION = memoryBasicInformation(host.pointerSize);
+    /** This process's user address space's end, read when asked (`userSpaceTop`). */
+    const spaceTop = ()=>userSpaceTop(host.arena);
     // One allocator for the whole arena, whoever asks. The caller may bring its
     // own so that everything guest memory is handed out from -- the heap, a DIB
     // section, COM task memory -- comes from the same free list rather than from
@@ -1095,6 +1120,13 @@ export function createHeapFunctions(host){
      * @param {boolean} on
      */
     const markCommitted = (reservation, from, to, on)=>{
+        // A commit is memory the guest is given: the guest's memory grows to
+        // hold it (`reach`), where its reservation did not.
+        if (on && host.reach?.(to) === false)
+        {
+            host.divergence?.('VirtualAlloc', 'a commit up to 0x' + to.toString(16)
+                + ' past the memory the browser would give', 'loss');
+        }
         /** @type {{ from: number, to: number }[]} */
         const kept = [];
         let start = from;
@@ -1273,7 +1305,7 @@ export function createHeapFunctions(host){
                 MEM_PRIVATE];
         }
         const next = host.nextRegionAfter ? host.nextRegionAfter(at) : null;
-        let limit = next ? next.base : USER_ADDRESS_SPACE_TOP;
+        let limit = next ? next.base : spaceTop();
         if (host.arena.base > at && host.arena.base < limit)
         {
             limit = host.arena.base;
@@ -1465,12 +1497,12 @@ export function createHeapFunctions(host){
             // Past the end of user address space Windows refuses the
             // reservation as an invalid parameter, as it does here: no
             // divergence, the program is asking where nothing can be.
-            if (start + span > USER_ADDRESS_SPACE_TOP)
+            if (start + span > spaceTop())
             {
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            if (!allocator.allocateAt(start, span, { owner: VIRTUAL }))
+            if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
                 host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
@@ -1578,7 +1610,7 @@ export function createHeapFunctions(host){
         // pages up to the granule's end is within its rights, and was
         // refused here as if it had left its reservation.
         const span = roundUp(size, ALLOCATION_GRANULARITY);
-        const placed = allocator.allocate(span, { owner: VIRTUAL,
+        const placed = allocator.allocate(span, { owner: VIRTUAL, reserving: true,
             alignment: Math.max(ALLOCATION_GRANULARITY, where?.alignment ?? 0) });
             // Where the span asked for has no room, as there is none above
             // what the arena reaches: refused, the reservation given back.
@@ -2528,7 +2560,7 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 const at = address >>> 0;
-                if (at >= USER_ADDRESS_SPACE_TOP)
+                if (at >= spaceTop())
                 {
                     // Windows refuses a query at or above lpMaximumApplicationAddress
                     // outright, which is what stops a walker there; answering a free
@@ -2582,7 +2614,7 @@ export function createHeapFunctions(host){
                 for (let index = 0; index < count; index++)
                 {
                     const at = view.getUint32(index * 8, true);
-                    const [, , , , state, protect, type] = at >= USER_ADDRESS_SPACE_TOP
+                    const [, , , , state, protect, type] = at >= spaceTop()
                         ? [0, 0, 0, 0, 0, 0, 0] : regionAnswer(at);
                     const shared = type === MEM_IMAGE;
                     const attributes = state !== MEM_COMMIT ? 0
@@ -2607,7 +2639,7 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: ([address, size])=>{
                 const at = address >>> 0;
-                if ((size >>> 0) === 0 || at >= USER_ADDRESS_SPACE_TOP
+                if ((size >>> 0) === 0 || at >= spaceTop()
                     || regionAnswer(at)[4] !== MEM_COMMIT)
                 {
                     return ERROR_INVALID_PARAMETER;

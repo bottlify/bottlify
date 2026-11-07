@@ -24,7 +24,8 @@ other (memory access, guest calls, COM publishing). The settings below are the o
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `memorySize` | 1 GiB | Guest RAM, a power of two: an address space. What the program holds of it is counted in the guest's zone ([Memory zones](#memory-zones)). |
+| `memorySize` | 1 GiB | Guest RAM, a power of two up to 4 GiB: an address space. Over shared memory a 32-bit process's memory starts small and grows, in powers of two, as the program is given more (a commit, a heap, a write into it), so a process holds what its program took rather than the whole of `memorySize`. Past 2 GiB only such a memory is possible (elsewhere the size is cut to 2 GiB), and only a program linked large-address-aware gets addresses past 2 GiB, as on a 64-bit Windows. What the program holds is counted in the guest's zone ([Memory zones](#memory-zones)). |
+| `cpu.grow` | `true` | `false` gives each process the whole of `memorySize` from the start. |
 | `cpu.cores` | automatic | How many processors the program is told it has, 1 to 32, and how many executors run its threads at once: past the process's own thread each is a worker over the same memory. Unset, a browser page that can share memory (cross-origin isolated, not `compatible`) gets one fewer than the host's processors (`navigator.hardwareConcurrency`), at most eight; Safari, a phone, and any page that cannot share memory get one. Under Node it is `BOTTLIFY_CORES` from the environment, or one. `executors`, its older name, is refused. |
 | `cork.moduleUrl` | beside `core.js` | Where the translator is loaded from, for a bundler that moves it. |
 | `cork.config.store` | `'local'` | Where translations are kept between runs: `'local'`, the origin's private file system; a store of your own, when the engine runs on the calling thread; `null`, none. |

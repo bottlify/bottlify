@@ -84,14 +84,19 @@ const TWO_32 = 0x100000000;
  * @param {number} [options.physicalPages]
  * @param {number} [options.at]  where in RAM the page is kept (`sharedPageAt`):
  *     its own address unless given
+ * @param {boolean} [options.ownRegion]  false where the page lies inside the heap's
+ *     region, as in a memory that grows, which keeps it at the top of the RAM it holds
+ *     and moves it up as it grows: the page is then no region of its own, and the
+ *     heap hands out nothing that reaches it (`SHARED_PAGE_GUARD`)
  * @returns {{ address: number,
  *     refresh: (milliseconds: number, systemTimeMs: number) => void } | null}
  *     null where the page cannot be had: memory too small to hold it, or taken
  */
 export function createSharedUserData(options){
-    const { memory, version, physicalPages = 0x40000, at: place = SHARED_USER_DATA } = options;
+    const { memory, version, physicalPages = 0x40000, at: place = SHARED_USER_DATA,
+        ownRegion = true } = options;
     /** @param {string} access */
-    const region = access=>memory.register({
+    const region = access=>ownRegion && memory.register({
         name: 'kuser-shared-data',
         base: place,
         size: KUSER.SIZE,
@@ -129,10 +134,13 @@ export function createSharedUserData(options){
         memory.writeBytes(place, page);
     } catch {
         // A machine given less memory than reaches the address has no page.
-        memory.unregister('kuser-shared-data');
+        if (ownRegion)
+        {
+            memory.unregister('kuser-shared-data');
+        }
         return null;
     }
-    if (words)
+    if (words && ownRegion)
     {
         memory.unregister('kuser-shared-data');
         region(memory.Access.READ);

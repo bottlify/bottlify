@@ -475,14 +475,16 @@ export function serveGraphics(scope, deps){
 
     /**
      * @param {string} api @param {any} options @param {MessagePort} port
-     * @param {Uint8Array | null} memory  the guest's RAM, where it is shared
+     * @param {Uint8Array | null} given  the guest's RAM, where it is shared
      * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer } | null} lending
      *     the parts of a lending, where the engine lends guest memory rather than copying it
      * @param {number | undefined} source  the process it draws for
      * @param {number | undefined} frameLatency  the frames its presents may leave the GPU
      *     drawing; absent, Direct3D's default
      */
-    const root = async(api, options, port, memory, lending, source, frameLatency)=>{
+    const root = async(api, options, port, given, lending, source, frameLatency)=>{
+        // The guest's memory, taken again when it grows (a `memory` message).
+        let memory = given;
         const { device, backend: shared } = await /** @type {Promise<any>} */ (opened);
         // A bound of its own, as a Direct3D device has. It counts a frame done
         // when this thread hears so from the browser's GPU process, which a
@@ -521,11 +523,13 @@ export function serveGraphics(scope, deps){
          *
          * @param {number} block @param {number} measurement @param {number} count
          */
-        const words = memory
-            ? new Int32Array(memory.buffer, memory.byteOffset, memory.length >>> 2) : null;
+        let words = memory
+            ? new Int32Array(memory.buffer, memory.byteOffset, Math.floor(memory.length / 4))
+            : null;
         const storeCount = words
             ? (/** @type {number} */ block, /** @type {number} */ measurement,
-                /** @type {number} */ count)=>storeCountIn(words, block, measurement, count)
+                /** @type {number} */ count)=>storeCountIn(/** @type {Int32Array} */ (words),
+                block, measurement, count)
             : undefined;
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
@@ -590,7 +594,9 @@ export function serveGraphics(scope, deps){
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 // The program has memory; what of it this side reads is what it is sent.
                 readMemory: true,
-                borrow: memory && lending ? createBorrower({ ...lending, memory }) : undefined,
+                borrow: memory && lending
+                    ? createBorrower({ ...lending, memory: ()=>/** @type {Uint8Array} */ (memory) })
+                    : undefined,
                 writeMemory: wrote,
                 storeCount,
                 divergence: (/** @type {string} */ name, /** @type {string} */ detail,
@@ -617,6 +623,17 @@ export function serveGraphics(scope, deps){
         const captured = capture?.root({ api, options, source, lending: lending !== null,
             memory: memory?.length ?? 0 }) ?? 0;
         port.onmessage = event=>{
+            // The guest's memory grew: the longer view of it, before any batch
+            // that may lend from what it gained, which come after on this port.
+            if (event.data?.type === 'memory')
+            {
+                memory = event.data.memory ?? memory;
+                words = memory
+                    ? new Int32Array(memory.buffer, memory.byteOffset,
+                        Math.floor(memory.length / 4))
+                    : null;
+                return;
+            }
             if (event.data?.type === 'close')
             {
                 capture?.close(captured);

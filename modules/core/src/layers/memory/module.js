@@ -173,7 +173,9 @@ export function createMemoryModule(){
                     }
                     ramWords = ram && typeof SharedArrayBuffer === 'function'
                         && ram.buffer instanceof SharedArrayBuffer && ram.byteOffset % 4 === 0
-                        ? new Int32Array(ram.buffer, ram.byteOffset, ram.byteLength >>> 2) : null;
+                        ? new Int32Array(ram.buffer, ram.byteOffset,
+                            Math.floor(ram.byteLength / 4))
+                        : null;
                 }
                 return ramWords;
             };
@@ -188,11 +190,18 @@ export function createMemoryModule(){
                         return null;
                     }
                     ramQuads = words.byteOffset % 8 === 0
-                        ? new BigInt64Array(words.buffer, words.byteOffset, words.length >>> 1)
+                        ? new BigInt64Array(words.buffer, words.byteOffset,
+                            Math.floor(words.length / 2))
                         : null;
                 }
                 return ramQuads;
             };
+            // A memory that grows as the guest is given more: these views end where
+            // it ended, and are taken again.
+            /** @type {any} */ (cpu).onGrow?.(()=>{
+                ramWords = undefined;
+                ramQuads = undefined;
+            });
 
             current = state;
             return {
@@ -237,6 +246,29 @@ export function createMemoryModule(){
                  */
                 pageAccess: (address, length, open)=>live()
                     && /** @type {any} */ (cpu).pageAccess?.(address, length, open) === true,
+                /**
+                 * Grows the guest's memory to hold `end` bytes of RAM, where it grows
+                 * as the guest is given more (the cpu layer's `growTo`): what gives the
+                 * guest memory -- an allocator placing a block, a mapping -- asks for
+                 * its reach first. Answers the RAM held, less than `end` where the
+                 * memory could not grow.
+                 *
+                 * @param {number} end
+                 * @returns {number}
+                 */
+                reach: end=>(live() ? /** @type {any} */ (cpu).growTo?.(end) ?? Infinity : 0),
+                /** The RAM the guest's memory holds now. @returns {number} */
+                held: ()=>(live() ? /** @type {any} */ (cpu).ramHeld?.() ?? Infinity : 0),
+                /** Whether the guest's memory grows as the guest is given more. */
+                growing: ()=>live() && /** @type {any} */ (cpu).growing?.() === true,
+                /**
+                 * Called with the RAM held each time the guest's memory grows.
+                 *
+                 * @param {(held: number) => void} listener
+                 */
+                onGrow: listener=>/** @type {any} */ (cpu).onGrow?.(listener),
+                /** The guest range the engine keeps for its tables; empty where none. */
+                engineRange: ()=>/** @type {any} */ (cpu).engineRange?.() ?? { from: 0, to: 0 },
                 /** @param {number} address */
                 find: address=>live() ? state.regions.find(address) : undefined,
                 /** @param {number} address */

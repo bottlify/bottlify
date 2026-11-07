@@ -250,6 +250,13 @@ const MAX_PATH_BYTES = 261;
 const REFUSED_OPENS_KEPT = 32;
 
 /**
+ * What a block handed out keeps clear of above it: the system's shared page,
+ * which a memory that grows keeps 128 KiB below the top of the RAM it holds
+ * (`sharedPageAt`, where an untested read of 0x7FFE0000 finds it).
+ */
+const SHARED_PAGE_GUARD = 0x20000;
+
+/**
  * Every version of the D3DX 9 helper library, d3dx9_24 to d3dx9_43, bound to
  * one table: the versions' mathematics is the same, and a program imports the
  * one its SDK named. Only the version each answers to is its own.
@@ -1188,8 +1195,22 @@ export function createWin32Module(){
             // every host path is handed is the arena's allocator with those
             // found, sized and freed where they are.
             const alignment = pointerSize === 8 ? ALIGNMENT_64 : undefined;
+            /**
+             * The guest's memory grown to hold what is handed out up to `end`, where
+             * it grows as the guest is given more (the memory layer's `reach`), and
+             * the 128 KiB past it, where the system's shared page is kept at the top
+             * of the RAM held (`sharedPageAt`) and no block may reach.
+             *
+             * @param {number} end
+             */
+            const arenaReach = end=>{
+                // Past 0x7FFE0000 the RAM held is past 2 GiB, and the page with it
+                // at its own address, which the heap keeps out of its hands.
+                const want = end <= 0x7ffe0000 ? end + SHARED_PAGE_GUARD : end;
+                return (memory.reach?.(want) ?? Infinity) >= want;
+            };
             const guestHeap = createGuestHeap({
-                allocator: createHeapAllocator({ ...arena, alignment }),
+                allocator: createHeapAllocator({ ...arena, alignment, reach: arenaReach }),
                 arena, alignment,
                 memory: {
                     readU16: address=>memory.readU16(address),
@@ -2312,6 +2333,7 @@ export function createWin32Module(){
                     ...createHeapFunctions({
                         pointerSize,
                         arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
+                        reach: arenaReach,
                         guestHeap,
                         // A child's memory, reached where the child runs.
                         childOf: childProcessOf,

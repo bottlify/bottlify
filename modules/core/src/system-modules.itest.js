@@ -65,9 +65,11 @@ test('the system modules take their own images\' room in the module window, and 
         {
             const [, name, base, size] = /^(.*) 0x([0-9a-f]+)\+0x([0-9a-f]+) \S+$/.exec(line) ?? [];
             const at = parseInt(base, 16);
-            // The window holds the system modules and the arena the process
-            // starts from; a program that brings no library brings nothing else.
-            if (at < moduleBase || at >= stackPoolBase || name === 'process-startup')
+            // The window holds the system modules, the arena the process starts
+            // from and the engine's range at its top; a program that brings no
+            // library brings nothing else.
+            if (at < moduleBase || at >= stackPoolBase || name === 'process-startup'
+                || name === 'engine')
             {
                 continue;
             }

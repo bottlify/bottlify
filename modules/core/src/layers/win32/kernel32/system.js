@@ -859,7 +859,10 @@ export function createSystemFunctions(host){
             // The same span in a 64-bit process: its memory is the window
             // below 4 GiB (`roadmap/x64.md`), and the high halves stay zero.
             view.setUint32(layout.MINIMUM_ADDRESS, MINIMUM_APPLICATION_ADDRESS, true);
-            view.setUint32(layout.MAXIMUM_ADDRESS, MAXIMUM_APPLICATION_ADDRESS, true);
+            // Past 2 GiB where the arena reaches further: a large-address-aware
+            // program's 4 GiB on 64-bit Windows.
+            view.setUint32(layout.MAXIMUM_ADDRESS, Math.max(MAXIMUM_APPLICATION_ADDRESS,
+                (host.ramTop ?? 0) + 0xffff), true);
             // The processors the machine has, whatever the process is
             // narrowed to: dwActiveProcessorMask, then dwNumberOfProcessors.
             view.setUint32(layout.ACTIVE_MASK, processors.systemMask(), true);

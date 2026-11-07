@@ -272,7 +272,7 @@ const hashText = (hash, text)=>{
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
  * @property {{ cores?: number, eager?: boolean, placement?: 'spread' | 'concentrate',
- *           gcNudge?: boolean | { everyMs?: number, bytes?: number } }} [cpu]
+ *           gcNudge?: boolean | { everyMs?: number, bytes?: number }, grow?: boolean }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -295,6 +295,8 @@ const hashText = (hash, text)=>{
  *           past 256 MB, unless named) so that JavaScriptCore collects its young
  *           garbage before it piles up; on by default where JavaScriptCore runs and
  *           nowhere else, `false` for none.
+ *           `grow`: `false` gives the process its whole `memorySize` from the start
+ *           instead of a memory that grows as the program is given more.
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
@@ -1434,6 +1436,54 @@ export { jumpBytes, relocatablePrefix };
 
 /** Where the heap's arena begins under an image that ends below it (`spaceAbove`). */
 const HEAP_FLOOR = 0x0c000000;
+
+/**
+ * Where a large-address-aware 32-bit process's space ends on a 64-bit Windows:
+ * the last 64 KiB below 4 GiB are never the program's.
+ */
+const LARGE_ADDRESS_TOP = 0xfffe0000;
+
+/**
+ * The engine's range in a process's guest space: its tables and other
+ * executors' pages (19.25 MiB an executor, 4.2 MiB of a record they share past
+ * one). With it the memory holds only the RAM the guest has been given and
+ * grows as it is given more (`CorkHostConfig.engineArea`); without one every
+ * process commits the whole of `memorySize` at its start.
+ *
+ * At the top of the libraries' space, under the thread stacks, where 16 MiB is
+ * left the libraries below it -- one that does not fit takes heap space, as it
+ * does already when the space is full; otherwise at the heap's start, the heap
+ * past it (`inHeap`), where it ends short of 0x10000000, the base a library is
+ * most often linked for. None for a 64-bit process, a RAM that is not a power of
+ * two, or an image of the program's own lying where the range would.
+ *
+ * @param {{ long: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
+ *     heapStart: number, executors: number,
+ *     image: { imageBase: number, sizeOfImage: number } }} what
+ * @returns {{ at: number, span: number, inHeap: boolean } | undefined}
+ */
+export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, heapStart,
+    executors, image })
+{
+    const MIB = 0x100000;
+    const span = (20 * Math.max(1, executors) + 8) * MIB;
+    if (long || memorySize < 2 ** 28 || 2 ** Math.round(Math.log2(memorySize)) !== memorySize)
+    {
+        return undefined;
+    }
+    const clear = (/** @type {number} */ at)=>at % MIB === 0 && at + span < memorySize
+        && !(image.imageBase < at + span && image.imageBase + image.sizeOfImage > at);
+    const top = Math.floor((stackPoolStart - span) / MIB) * MIB;
+    if (top >= moduleBase + 16 * MIB && clear(top))
+    {
+        return { at: top, span, inHeap: false };
+    }
+    if (heapStart + span <= 0x10000000 && clear(heapStart))
+    {
+        return { at: heapStart, span, inHeap: true };
+    }
+    return undefined;
+}
 
 /**
  * Where the address space above the program begins: the system modules, the
@@ -3966,8 +4016,28 @@ async function buildApp(options){
     const long = mainImage.bits === 64;
     /** The machine every image mapped into the process must be (`parsePe`). */
     const processBits = long ? 64 : 32;
-    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_BASE }
+    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_START }
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage, mainImage.imageBase);
+    // The engine's range in the guest's space (`engineAreaFor`): where the
+    // memory grows as the guest is given more, rather than every process
+    // committing the whole of `memorySize`. Only over shared memory, and not
+    // where the run asks for the whole memory from the start (`cpu.grow` false).
+    const mayGrow = options.cpu?.grow !== false && options.cork?.config?.sharedMemory !== false
+        && typeof SharedArrayBuffer === 'function'
+        && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
+    /** @param {number} size */
+    const areaFor = size=>(mayGrow ? engineAreaFor({ long, memorySize: size,
+        moduleBase: MODULE_BASE, stackPoolStart: STACK_POOL_START, heapStart: HEAP_START,
+        executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
+    // Past 2 GiB the RAM is all of wasm's 4 GiB, which only a memory that grows
+    // holds -- its tables inside the guest's space, not past it: 2 GiB otherwise.
+    const askedMemory = options.memorySize ?? DEFAULT_MEMORY_SIZE;
+    const memorySize = askedMemory > 2 ** 31 && areaFor(askedMemory) === undefined ? 2 ** 31
+        : askedMemory;
+    const engineArea = areaFor(memorySize);
+    const HEAP_BASE = HEAP_START + (engineArea?.inHeap ? engineArea.span : 0);
+    /** Where the libraries' space ends: at the engine's range where that lies at its top. */
+    const LIBRARIES_END = engineArea && !engineArea.inHeap ? engineArea.at : STACK_POOL_START;
     /** The program's image lies in the heap's span, which gives that part up (`spaceAbove`). */
     const imageInHeap = mainImage.imageBase >= HEAP_BASE;
     // Where a thread that is not the first gets its stack. Above the space
@@ -3984,8 +4054,12 @@ async function buildApp(options){
     // pool with room for only one thread.
     const threadStackSize = Math.min(stackReserveOf(mainImage.stackReserve),
         Math.floor(STACK_POOL_WHOLE / 16));
-    const memorySize = options.memorySize ?? DEFAULT_MEMORY_SIZE;
-    const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
+    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB, as a
+    // 64-bit Windows gives them, where the RAM reaches them; any other stays
+    // below, where it may keep a pointer's sign.
+    const HEAP_SIZE = memorySize > 2 ** 31 && mainImage.largeAddressAware
+        && options.heapSize === undefined
+        ? LARGE_ADDRESS_TOP - HEAP_BASE : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
     /**
      * The modules win32 implements, filled in below. win32 is built before they
@@ -4467,6 +4541,7 @@ async function buildApp(options){
         },
         cpu: {
             memorySize,
+            ...(engineArea ? { engineArea } : {}),
             reused: options.reusedMemory ?? undefined,
             initialStack: mainStack.initialStack,
             // The first 64 KiB, which Windows never maps: a store there faults,
@@ -4478,7 +4553,7 @@ async function buildApp(options){
             zeroReadsBelow: 0x10000,
             // The system's shared page in a RAM short of it, read where RAM keeps
             // it (`sharedPageAt`).
-            readThrough: memorySize > SHARED_USER_DATA ? []
+            readThrough: memorySize > SHARED_USER_DATA && engineArea === undefined ? []
                 : [[SHARED_USER_DATA, SHARED_USER_DATA + KUSER.SIZE]],
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
@@ -5623,6 +5698,13 @@ async function buildApp(options){
         name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
         kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
     });
+    // A heap past 2 GiB (`LARGE_ADDRESS_TOP`) runs over the system's shared
+    // page, where it lies once the RAM held reaches past it: the heap never
+    // hands it out, nor the 64 KiB after it, as Windows maps neither.
+    if (HEAP_BASE < SHARED_USER_DATA && HEAP_BASE + HEAP_SIZE > SHARED_USER_DATA + 0x20000)
+    {
+        win32.heap().allocateAt(SHARED_USER_DATA, 0x20000, { owner: 'kuser', reserving: true });
+    }
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
     // has to be the address that works later (§13.3), and a module conjured on
@@ -6707,7 +6789,7 @@ async function buildApp(options){
     // the map yet, and below the stack pool; and nowhere anything is mapped.
     const librarySpace = {
         floor: imageInHeap ? MODULE_BASE : mainImage.imageBase + mainImage.sizeOfImage,
-        limit: STACK_POOL_START,
+        limit: LIBRARIES_END,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
             base < region.base + region.size && region.base < base + size) ?? null,
@@ -7268,21 +7350,45 @@ async function buildApp(options){
     // In a RAM short of 0x7FFE0000 the page is kept where the engine's
     // untested reads find it: an engine that wraps elsewhere would have the
     // program read the heap there, so it stops the start instead.
-    const sharedAt = sharedPageAt(memorySize);
+    // In a memory that grows (`engineArea`) the page is where the engine
+    // wraps 0x7FFE0000 into the RAM it holds now, and moves up with it.
+    const growing = cpu.growing?.() === true;
+    let sharedAt = growing ? cpu.wrappedAddress(SHARED_USER_DATA) : sharedPageAt(memorySize);
     const wrapped = cpu.wrappedAddress?.(SHARED_USER_DATA) ?? null;
     if (wrapped !== null && wrapped !== sharedAt)
     {
         throw new Error(`kernel32: the engine reads 0x7FFE0000 at 0x${wrapped.toString(16)},`
             + ` the shared page is kept at 0x${sharedAt.toString(16)}`);
     }
-    const sharedData = createSharedUserData({ memory, version: windowsVersion(options.windows),
-        at: sharedAt });
+    const version = windowsVersion(options.windows);
+    let sharedData = createSharedUserData({ memory, version, at: sharedAt,
+        ownRegion: !growing });
+    const refresh = ()=>sharedData?.refresh(kernel.clock.virtualTime(),
+        kernel.clock.wallClock());
     if (sharedData)
     {
-        const refresh = ()=>sharedData.refresh(kernel.clock.virtualTime(),
-            kernel.clock.wallClock());
         refresh();
         kernel.clock.whenMoved(refresh);
+    }
+    if (growing)
+    {
+        // The engine's range is the engine's: nothing is mapped there.
+        const range = cpu.engineRange();
+        memory.register({ name: 'engine', base: range.from, size: range.to - range.from,
+            kind: memory.RegionKind.THUNK_DATA, access: memory.Access.NONE });
+        cpu.onGrow(()=>{
+            const at = cpu.wrappedAddress(SHARED_USER_DATA);
+            if (at === sharedAt || !sharedData)
+            {
+                return;
+            }
+            // Its old place becomes the heap's: left as zeros, as arena never
+            // handed out is.
+            memory.writeBytes(sharedAt, new Uint8Array(KUSER.SIZE));
+            sharedAt = at;
+            sharedData = createSharedUserData({ memory, version, at, ownRegion: false });
+            refresh();
+        });
     }
 
     // The program's first thread. Everything after this runs under the

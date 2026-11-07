@@ -342,6 +342,9 @@ function join(worker, connection){
  * @param {() => Uint8Array | null} [options.sharedMemory]  the guest's RAM over a
  *     SharedArrayBuffer, which the worker then writes such pixels into itself; asked
  *     when a root is made, once the machine has memory
+ * @param {(listener: () => void) => void} [options.memoryGrown]  told each time the
+ *     guest's memory grows (the memory layer's `onGrow`): a root that lends from it is
+ *     sent the longer view, ahead of any batch that may lend from what it gained
  * @param {(address: number, length: number) => void} [options.adoptMemory]
  *     told where the worker wrote the shared RAM, which this thread takes as its own write
  * @param {boolean} [options.lendMemory]  where the RAM is shared, whether what a Direct3D 8
@@ -355,7 +358,8 @@ function join(worker, connection){
  * @returns {GraphicsWorkerEnd}
  */
 export function connectGraphicsWorker(options){
-    const { worker, device, presentTo, writeMemory, sharedMemory, adoptMemory, divergence, lost,
+    const { worker, device, presentTo, writeMemory, sharedMemory, memoryGrown, adoptMemory,
+        divergence, lost,
         failed, lendMemory = true, source, maxFrameLatency } = options;
     /** Whether this thread may wait on the worker, which a lend's claim may have to. */
     let mayBlock = /** @type {boolean | null} */ (null);
@@ -502,6 +506,16 @@ export function connectGraphicsWorker(options){
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
                 memory: lending ? memory : null, lending, source, frameLatency: maxFrameLatency },
             [port2]);
+            if (lending)
+            {
+                memoryGrown?.(()=>{
+                    const now = sharedMemory?.() ?? null;
+                    if (now !== null)
+                    {
+                        port1.postMessage({ type: 'memory', memory: now });
+                    }
+                });
+            }
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
                 on: {
