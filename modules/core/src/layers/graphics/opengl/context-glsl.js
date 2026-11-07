@@ -34,6 +34,7 @@
 
 import { GL } from './constants.js';
 import { compileFront } from './glsl-front.js';
+import { GLSL_EXTENSIONS } from './glsl-versions.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
 import { BLOCK_LIMITS, linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
@@ -123,6 +124,8 @@ let executables = 0;
  */
 const COMPILED = new Map();
 const COMPILED_KEPT = 256;
+/** The extensions a shader's #extension may enable: what the front end has of each. */
+const SHADER_EXTENSIONS = Object.keys(GLSL_EXTENSIONS);
 
 /**
  * @param {readonly string[]} sources @param {'vertex' | 'fragment'} stage
@@ -138,7 +141,7 @@ export function compileShader(sources, stage){
         return known;
     }
     const result = compileFront(sources, stage, { versions: EMITTED_VERSIONS,
-        constants: CONTEXT_CONSTANTS });
+        constants: CONTEXT_CONSTANTS, extensions: SHADER_EXTENSIONS });
     COMPILED.set(key, result);
     if (COMPILED.size > COMPILED_KEPT)
     {

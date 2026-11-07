@@ -29,6 +29,8 @@ import {
     BOOL, FLOAT, INT, UINT, arrayOf, basicType, typeSince, vectorOf,
 } from './glsl-types.js';
 
+const VEC4_TYPE = vectorOf('float', 4);
+
 /**
  * @typedef {import('./glsl-types.js').GlslType} GlslType
  * @typedef {import('./glsl-types.js').StructType} StructType
@@ -194,8 +196,46 @@ for (const [section, name, returnName, paramNames, outs, bias] of GLSL_CATALOG)
  * @returns {ModernOverload[]}
  */
 export function modernOverloads(name, language){
-    return (MODERN.get(name) ?? []).filter(o=>o.since <= language.version
-        && (!o.compatibility || language.compatibility));
+    const brought = language.functions.has(name);
+    return [...(MODERN.get(name) ?? []).filter(o=>(o.since <= language.version || brought)
+        && (!o.compatibility || language.compatibility)), ...extensionOverloads(name, language)];
+}
+
+/** @param {string} name @param {GlslType[]} params @returns {ModernOverload} */
+const extensionLookup = (name, params)=>Object.freeze({
+    name, params, directions: params.map(()=>/** @type {'in'} */ ('in')),
+    returns: VEC4_TYPE, since: 110, compatibility: false, stages: null, stage: null,
+});
+
+/**
+ * The functions extensions define themselves, by extension: GL_ARB_texture_rectangle's
+ * lookups, which have no bias or level forms.
+ *
+ * @type {Readonly<Record<string, readonly ModernOverload[]>>}
+ */
+const EXTENSION_FUNCTIONS = Object.freeze({
+    GL_ARB_texture_rectangle: (()=>{
+        const rect = /** @type {GlslType} */ (basicType('sampler2DRect'));
+        const shadow = /** @type {GlslType} */ (basicType('sampler2DRectShadow'));
+        const vec = /** @param {number} n */ n=>vectorOf('float', n);
+        return [extensionLookup('texture2DRect', [rect, vec(2)]),
+            extensionLookup('texture2DRectProj', [rect, vec(3)]),
+            extensionLookup('texture2DRectProj', [rect, vec(4)]),
+            extensionLookup('shadow2DRect', [shadow, vec(3)]),
+            extensionLookup('shadow2DRectProj', [shadow, vec(4)])];
+    })(),
+});
+
+/**
+ * The overloads of `name` the extensions a shader enabled define, in every
+ * version (1.x's lookups included).
+ *
+ * @param {string} name @param {Language} language
+ * @returns {ModernOverload[]}
+ */
+export function extensionOverloads(name, language){
+    return [...language.extensions].flatMap(extension=>(EXTENSION_FUNCTIONS[extension] ?? [])
+        .filter(o=>o.name === name));
 }
 
 // --- constants ---
@@ -359,6 +399,29 @@ const VARIABLES = new Map();
  * @returns {Record<string, BuiltinVariable>}
  */
 export function builtinVariablesFor(stage, language, constants = GLSL_CONSTANTS){
+    const vars = versionVariables(stage, language, constants);
+    if (stage !== 'vertex' || language.extensions.size === 0)
+    {
+        return vars;
+    }
+    const more = { ...vars };
+    if (language.extensions.has('GL_EXT_gpu_shader4'))
+    {
+        more.gl_VertexID ??= { type: INT, role: 'in' };
+        more.gl_InstanceID ??= { type: INT, role: 'in' };
+    }
+    if (language.extensions.has('GL_ARB_draw_instanced'))
+    {
+        more.gl_InstanceIDARB = { type: INT, role: 'in', alias: 'gl_InstanceID' };
+    }
+    return more;
+}
+
+/**
+ * @param {Stage} stage @param {Language} language @param {GlslConstants} constants
+ * @returns {Record<string, BuiltinVariable>}
+ */
+function versionVariables(stage, language, constants){
     if (language.version < 130 && (stage === 'vertex' || stage === 'fragment'))
     {
         return BUILTIN_VARIABLES[stage];
