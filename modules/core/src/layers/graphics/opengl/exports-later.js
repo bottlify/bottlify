@@ -21,6 +21,7 @@
 
 import { GL } from './constants.js';
 import { TIMEOUT_IGNORED } from './context-sync.js';
+import { TESS } from './context-tessellation.js';
 
 /**
  * What `exports.js` lends: the current context, and its readers and writers
@@ -392,6 +393,12 @@ export function laterEntryPoints(h){
             true)),
         glTextureBarrier: ()=>answer(current()?.glTextureBarrier()),
         glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
+        // Tessellation's (4.0): the inner levels are two values, the outer four.
+        glPatchParameteri: ([pname, value])=>answer(current()?.glPatchParameteri(pname >>> 0,
+            value | 0)),
+        glPatchParameterfv: ([pname, values])=>answer(current()?.glPatchParameterfv(pname >>> 0,
+            (values >>> 0) === 0 ? [] : readTyped('f', values,
+                (pname >>> 0) === TESS.PATCH_DEFAULT_INNER_LEVEL ? 2 : 4))),
         glGetInternalformativ: ([target, internal, pname, size, out])=>call(context=>{
             const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,
                 pname >>> 0);

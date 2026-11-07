@@ -27,6 +27,7 @@ import { clientBytes, transferError, unpackToStorage } from './texture-transfer.
 import { TEXTURE_UNITS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
 import { drawsGeometryInput, expandMode } from './gpu-layout.js';
+import { TESS, tessellationTakes } from './context-tessellation.js';
 
 /** The conventional arrays after the position, in the order a draw reads them. */
 const CONVENTIONAL = /** @type {const} */ (['color', 'secondary', 'normal', 'fogCoord']);
@@ -57,7 +58,12 @@ const PRIMITIVE_MODES = new Set([
     GL.POINTS, GL.LINES, GL.LINE_LOOP, GL.LINE_STRIP, GL.TRIANGLES, GL.TRIANGLE_STRIP,
     GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON, GL.LINES_ADJACENCY,
     GL.LINE_STRIP_ADJACENCY, GL.TRIANGLES_ADJACENCY, GL.TRIANGLE_STRIP_ADJACENCY,
+    TESS.PATCHES,
 ]);
+
+/** The primitives the tessellator makes, as a geometry shader after it takes them. */
+const TESSELLATED = Object.freeze({ triangles: GL.TRIANGLES, quads: GL.TRIANGLES,
+    isolines: GL.LINES });
 
 /** GL_MIN_MAP_BUFFER_ALIGNMENT: a map starts on a boundary of it, past the range's offset. */
 const MAP_ALIGNMENT = 64;
@@ -730,6 +736,12 @@ export function installArrayCalls(context, kernel){
                 + ' and drew nothing');
             return;
         }
+        if (mode === TESS.PATCHES)
+        {
+            lose(`${name} drew patches where the draw could not reach the device, and drew`
+                + ' nothing');
+            return;
+        }
         const plain = WITHOUT_ADJACENCY.get(mode);
         if (plain !== undefined)
         {
@@ -1151,8 +1163,18 @@ export function installArrayCalls(context, kernel){
      */
     function takesMode(mode){
         const layout = geometryLayout();
-        return (!layout || drawsGeometryInput(mode, layout.input))
-            && (kernel.side.feedbackTakes?.(mode, layout) ?? true);
+        const linked = /** @type {import('./glsl-link.js').LinkedProgram | undefined} */ (
+            kernel.side.glslExecutable?.()?.linked);
+        if (!tessellationTakes(mode, linked))
+        {
+            return false;
+        }
+        // After tessellation a geometry shader takes the tessellator's
+        // primitives (OpenGL 4.0 section 2.13.1).
+        const tessellated = linked?.tessLayout ? linked.tessLayout.pointMode ? GL.POINTS
+            : TESSELLATED[linked.tessLayout.mode] : mode;
+        return (!layout || drawsGeometryInput(tessellated, layout.input))
+            && (kernel.side.feedbackTakes?.(tessellated, layout) ?? true);
     }
 
     /**

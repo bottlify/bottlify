@@ -35,6 +35,7 @@ import { BUILTIN_ATTRIBUTES, GLSL_LIMITS } from './glsl-builtins.js';
 import { baseOf, componentsOf, glslName, innermost } from './glsl-types.js';
 import { blockLayout, blockVariables } from './glsl-layout.js';
 import { canonicalAttribName } from './arb-program.js';
+import { linkTessellation } from './glsl-link-tess.js';
 
 /**
  * @typedef {import('./glsl-types.js').GlslType} GlslType
@@ -47,7 +48,7 @@ import { canonicalAttribName } from './arb-program.js';
  * One stage of a linked program, merged from its shader objects.
  *
  * @typedef {Object} LinkedStage
- * @property {'vertex' | 'geometry' | 'fragment'} stage
+ * @property {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'} stage
  * @property {UserFunction} main
  * @property {UserFunction[]} functions  the definitions main reaches, callees first
  * @property {VariableSymbol[]} globals  every global the stage's shaders declare
@@ -98,7 +99,8 @@ import { canonicalAttribName } from './arb-program.js';
  * @property {number} size  UNIFORM_BLOCK_DATA_SIZE, in bytes
  * @property {'std140' | 'std430'} packing
  * @property {import('./glsl-layout.js').MemberLayout[]} members
- * @property {{ vertex: boolean, geometry: boolean, fragment: boolean }} stages
+ * @property {{ vertex: boolean, geometry: boolean, fragment: boolean,
+ *     tessControl?: boolean, tessEvaluation?: boolean }} stages
  * @property {number} binding  the binding point a link leaves it at: the
  *     shader's `layout(binding)` (4.20), else 0
  */
@@ -190,6 +192,12 @@ export const FEEDBACK_LIMITS = Object.freeze({
 /**
  * @typedef {Object} LinkedProgram
  * @property {LinkedStage | null} vertex
+ * @property {LinkedStage | null} [tessControl]
+ * @property {LinkedStage | null} [tessEvaluation]
+ * @property {import('./glsl-link-tess.js').TessLayout | null} [tessLayout]
+ * @property {import('./glsl-link-tess.js').TessInput[]} [controlInputs]
+ * @property {import('./glsl-link-tess.js').TessInput[]} [evaluationInputs]
+ * @property {import('./glsl-link-tess.js').TessInput[]} [patchInputs]
  * @property {LinkedStage | null} geometry
  * @property {GeometryInput[]} geometryInputs  what the geometry stage reads of
  *     the vertex stage's, by name
@@ -256,6 +264,7 @@ const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_s
 
 /**
  * @param {{ vertex: ShaderUnit[], geometry?: ShaderUnit[], fragment: ShaderUnit[],
+ *     tessControl?: ShaderUnit[], tessEvaluation?: ShaderUnit[],
  *     feedback?: { names: readonly string[], mode: 'interleaved' | 'separate' },
  *     attribBindings: Map<string, number>,
  *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
@@ -265,6 +274,8 @@ const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_s
 export function linkProgram(given){
     const { vertex, fragment, attribBindings } = given;
     const geometry = given.geometry ?? [];
+    const tessControl = given.tessControl ?? [];
+    const tessEvaluation = given.tessEvaluation ?? [];
     const fragDataBindings = given.fragDataBindings ?? new Map();
     /** @type {string[]} */
     const errors = [];
@@ -273,13 +284,14 @@ export function linkProgram(given){
         errors.push(`ERROR: ${message}`);
     };
 
-    if (vertex.length === 0 && fragment.length === 0 && geometry.length === 0)
+    if (vertex.length === 0 && fragment.length === 0 && geometry.length === 0
+        && tessControl.length === 0 && tessEvaluation.length === 0)
     {
         return { ok: false, log: 'ERROR: no shaders are attached\n' };
     }
 
     /**
-     * @param {'vertex' | 'geometry' | 'fragment'} stage @param {ShaderUnit[]} units
+     * @param {LinkedStage['stage']} stage @param {ShaderUnit[]} units
      * @returns {LinkedStage | null}
      */
     const mergeStage = (stage, units)=>{
@@ -418,9 +430,13 @@ export function linkProgram(given){
     };
 
     const vs = mergeStage('vertex', vertex);
+    const tcs = mergeStage('tessControl', tessControl);
+    const tes = mergeStage('tessEvaluation', tessEvaluation);
     const gs = mergeStage('geometry', geometry);
     const fs = mergeStage('fragment', fragment);
     const geometryLayout = gs ? geometryLayoutOf(geometry, error) : null;
+    const tessellation = linkTessellation({ vertex: vs, control: tcs, evaluation: tes,
+        controlUnits: tessControl, evaluationUnits: tessEvaluation }, error);
     if (gs && !vs)
     {
         // OpenGL 3.2 section 2.12: a geometry shader takes what a vertex
@@ -440,9 +456,12 @@ export function linkProgram(given){
     // --- what the geometry stage reads of the vertex stage's outputs ---
     /** @type {GeometryInput[]} */
     const geometryInputs = [];
-    if (vs && gs)
+    // A geometry shader after tessellation reads the evaluation stage's.
+    const beforeGeometry = tes ?? vs;
+    if (beforeGeometry && gs)
     {
-        const outputs = new Map(interfaceOf(vs, 'out', error).map(entry=>[entry.name, entry]));
+        const outputs = new Map(interfaceOf(beforeGeometry, 'out', error)
+            .map(entry=>[entry.name, entry]));
         for (const input of interfaceOf(gs, 'in', error, true))
         {
             if (!input.used)
@@ -452,14 +471,15 @@ export function linkProgram(given){
             const from = outputs.get(input.name);
             if (!from)
             {
-                error(`geometry shader input '${input.name}' is not declared in the vertex`
-                    + ' shader');
+                error(`geometry shader input '${input.name}' is not declared in the`
+                    + ` ${beforeGeometry.stage} shader`);
                 continue;
             }
             if (glslName(from.type) !== glslName(input.type))
             {
-                error(`input '${input.name}' has type ${glslName(from.type)} in the vertex`
-                    + ` shader and ${glslName(input.type)}[] in the geometry shader`);
+                error(`input '${input.name}' has type ${glslName(from.type)} in the`
+                    + ` ${beforeGeometry.stage} shader and ${glslName(input.type)}[] in the`
+                    + ' geometry shader');
                 continue;
             }
             geometryInputs.push({ name: input.name, type: input.type, vertexPath: from.path,
@@ -471,7 +491,7 @@ export function linkProgram(given){
     /** @type {Varying[]} */
     const varyings = [];
     // What the fragment stage reads is the geometry stage's where there is one.
-    const before = gs ?? vs;
+    const before = gs ?? tes ?? vs;
     if (before && fs)
     {
         const outputs = new Map(interfaceOf(before, 'out', error).map(entry=>[entry.name, entry]));
@@ -631,7 +651,7 @@ export function linkProgram(given){
     // --- uniforms ---
     /** @type {Map<string, VariableSymbol>} */
     const uniformRoots = new Map();
-    for (const stage of [vs, gs, fs])
+    for (const stage of [vs, tcs, tes, gs, fs])
     {
         for (const symbol of usedOf(stage, 'uniform'))
         {
@@ -745,7 +765,7 @@ export function linkProgram(given){
     }
 
     // --- uniform blocks ---
-    const { blocks, blockUniforms } = uniformBlocksOf(vs, gs, fs, error);
+    const { blocks, blockUniforms } = uniformBlocksOf([vs, tcs, tes, gs, fs], error);
 
     if (errors.length > 0)
     {
@@ -756,6 +776,7 @@ export function linkProgram(given){
         log: '',
         program: {
             vertex: vs, geometry: gs, geometryInputs, geometryLayout, feedback, fragment: fs,
+            tessControl: tcs, tessEvaluation: tes, ...tessellation,
             attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
             blocks, blockUniforms,
@@ -842,19 +863,18 @@ function fragmentOutputsOf(fs, bindings, error){
  * laid out as a std140 one: where it lies is the implementation's to say,
  * and the program asks.
  *
- * @param {LinkedStage | null} vs @param {LinkedStage | null} gs
- * @param {LinkedStage | null} fs
+ * @param {(LinkedStage | null)[]} stages  in the order the pipeline runs them
  * @param {(message: string) => void} error
  * @returns {{ blocks: UniformBlock[], blockUniforms: BlockUniform[] }}
  */
-function uniformBlocksOf(vs, gs, fs, error){
+function uniformBlocksOf(stages, error){
     /** @type {UniformBlock[]} */
     const blocks = [];
     /** @type {BlockUniform[]} */
     const blockUniforms = [];
     /** @type {Map<string, { info: import('./glsl-check.js').InterfaceBlock, first: number }>} */
     const byName = new Map();
-    for (const stage of [vs, gs, fs])
+    for (const stage of stages)
     {
         if (!stage)
         {
@@ -923,8 +943,10 @@ function uniformBlocksOf(vs, gs, fs, error){
                     name: info.arrays.length > 0 ? `${info.name}[${k}]` : info.name,
                     blockName: info.name, element: k, instance: info.instance,
                     size: laid.size, packing, members: laid.members,
-                    stages: { vertex: stage === vs, geometry: stage === gs,
-                        fragment: stage === fs },
+                    stages: { vertex: stage.stage === 'vertex',
+                        geometry: stage.stage === 'geometry', fragment: stage.stage === 'fragment',
+                        tessControl: stage.stage === 'tessControl',
+                        tessEvaluation: stage.stage === 'tessEvaluation' },
                     binding: typeof info.layout.binding === 'number' ? binding + k : 0,
                 });
             }

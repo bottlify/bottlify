@@ -39,6 +39,7 @@ import { GLSL_CONSTANTS } from './glsl-library.js';
 import { BLOCK_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
+import { TESS, tessellationProgramAnswer } from './context-tessellation.js';
 
 /**
  * The GLSL versions a shader may name: those the WGSL emitter writes whole
@@ -46,6 +47,15 @@ import { componentsOf } from './glsl-types.js';
  * message for a version the implementation does not support.
  */
 export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330]);
+
+/**
+ * The versions a tessellation shader may name: the language has the stages
+ * from 4.00 (`glsl-versions.js`), and the emitter writes what a control or
+ * evaluation shader of any of them may say (`glsl-wgsl-tess.js`).
+ */
+const TESSELLATION_VERSIONS = Object.freeze([400, 410, 420, 430, 440, 450, 460]);
+
+/** @typedef {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'} ShaderStage */
 
 /**
  * The built-in constants of 1.30 and later as this implementation answers
@@ -133,8 +143,9 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {{ key: string, executable: Executable | null, versions: number[] } | null} made
  */
 
-/** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment'>} */
+/** The shader types. @type {Map<number, ShaderStage>} */
 const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.GEOMETRY_SHADER, 'geometry'],
+    [TESS.TESS_CONTROL_SHADER, 'tessControl'], [TESS.TESS_EVALUATION_SHADER, 'tessEvaluation'],
     [GL.FRAGMENT_SHADER, 'fragment']]);
 
 /** What GEOMETRY_INPUT_TYPE and GEOMETRY_OUTPUT_TYPE answer, by the layout's word. */
@@ -183,7 +194,7 @@ const COMPILED_KEPT = 256;
 const SHADER_EXTENSIONS = Object.keys(GLSL_EXTENSIONS);
 
 /**
- * @param {readonly string[]} sources @param {'vertex' | 'geometry' | 'fragment'} stage
+ * @param {readonly string[]} sources @param {ShaderStage} stage
  * @returns {{ ok: boolean, log: string, unit: ShaderUnit | null }}
  */
 export function compileShader(sources, stage){
@@ -195,7 +206,10 @@ export function compileShader(sources, stage){
         COMPILED.set(key, known);
         return known;
     }
-    const result = compileFront(sources, stage, { versions: EMITTED_VERSIONS,
+    const tessellation = stage === 'tessControl' || stage === 'tessEvaluation';
+    const versions = tessellation ? [...EMITTED_VERSIONS, ...TESSELLATION_VERSIONS]
+        : EMITTED_VERSIONS;
+    const result = compileFront(sources, stage, { versions,
         constants: CONTEXT_CONSTANTS, extensions: SHADER_EXTENSIONS });
     COMPILED.set(key, result);
     if (COMPILED.size > COMPILED_KEPT)
@@ -739,8 +753,7 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const stage = /** @type {'vertex' | 'geometry' | 'fragment'} */ (
-                SHADER_TYPES.get(shader.type));
+            const stage = /** @type {ShaderStage} */ (SHADER_TYPES.get(shader.type));
             const result = compileShader(shader.sources ?? [], stage);
             shader.compiled = result.ok;
             shader.log = result.log;
@@ -938,6 +951,8 @@ export function installShaderCalls(context, kernel){
             const result = linkProgram({
                 vertex: units(GL.VERTEX_SHADER),
                 geometry: units(GL.GEOMETRY_SHADER),
+                tessControl: units(TESS.TESS_CONTROL_SHADER),
+                tessEvaluation: units(TESS.TESS_EVALUATION_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
                 feedback: program.feedback ?? undefined,
                 attribBindings: program.bindings,
@@ -1365,9 +1380,21 @@ export function installShaderCalls(context, kernel){
                     return [program.retrievable ? 1 : 0];
                 case GL.PROGRAM_SEPARABLE:
                     return [program.separable ? 1 : 0];
-                default:
+                default: {
+                    const answer = tessellationProgramAnswer(pname,
+                        program.linked ? linked ?? null : null);
+                    if (answer === 'invalid')
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    if (answer)
+                    {
+                        return answer;
+                    }
                     setError(GL.INVALID_ENUM);
                     return null;
+                }
             }
         },
 
@@ -1831,6 +1858,10 @@ export function installShaderCalls(context, kernel){
                     return [own.stages.fragment ? 1 : 0];
                 case GL.UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
                     return [own.stages.geometry ? 1 : 0];
+                case TESS.UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
+                    return [own.stages.tessControl ? 1 : 0];
+                case TESS.UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
+                    return [own.stages.tessEvaluation ? 1 : 0];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

@@ -149,3 +149,22 @@ test('in a 64-bit process the strings\' pointers are eight bytes apart', ()=>{
     gl('glGetShaderSource', shader, 64, length, source);
     assert.equal(read(source, word(length)), 'void main() { gl_FragColor = vec4(0.5); }');
 });
+
+test('glPatchParameterfv reads four outer levels or two inner ones', ()=>{
+    const { gl, put, bytes } = library();
+    /** @param {number[]} values */
+    const floats = values=>put(new Uint8Array(Float32Array.from(values).buffer));
+    /** @param {number} at @param {number} count */
+    const readFloats = (at, count)=>[...new Float32Array(bytes.slice(at, at + count * 4).buffer)];
+    gl('glPatchParameteri', 0x8e72, 5);
+    gl('glPatchParameterfv', 0x8e74, floats([2, 3, 4, 5]));
+    gl('glPatchParameterfv', 0x8e73, floats([6, 7]));
+    const out = put(new Array(8).fill(0));
+    gl('glGetFloatv', 0x8e74, out);
+    assert.deepEqual(readFloats(out, 4), [2, 3, 4, 5]);
+    gl('glGetFloatv', 0x8e73, out);
+    assert.deepEqual(readFloats(out, 2), [6, 7]);
+    gl('glGetIntegerv', 0x8e72, out);
+    assert.equal(new DataView(bytes.buffer).getInt32(out, true), 5);
+    assert.equal(gl('glGetError'), GL.NO_ERROR);
+});
