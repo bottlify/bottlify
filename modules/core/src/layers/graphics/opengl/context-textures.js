@@ -31,11 +31,42 @@ import {
 } from './texture.js';
 import { SIZED_FORMATS, TEX, sizedFormatOf } from './formats.js';
 import {
-    clientBytes, decodeClient, encodeStorage, packFromStorage, transferError, unpackToStorage,
+    clientBytes, decodeClient, decodeStorage, encodeStorage, packFromStorage, transferError,
+    unpackToStorage,
 } from './texture-transfer.js';
 import {
     blankStorage, copyBox, rgbaOf, sizedLevelAnswer, storageBytes, uncompressedTwin,
 } from './texture-levels.js';
+import {
+    S3TC_BLOCK_BYTES, UNSIZED_FORMATS, copyCompatible, copyFormatOf, mipLevels, rawFromKept,
+    rawIntoKept,
+} from './texture-copy.js';
+
+/** glGetTexParameter's names for what glTexStorage makes (OpenGL 4.2, GL_ARB_texture_storage). */
+export const TEXTURE_IMMUTABLE_FORMAT = 0x912f;
+export const TEXTURE_IMMUTABLE_LEVELS = 0x82df;
+
+/**
+ * The levels glTexStorage gave a texture, which no image call may change the
+ * shape of from then on (section 8.19). Kept beside the object rather than in
+ * its parameters, which glTexParameter writes. Shared by every context of a
+ * share group, as the textures are.
+ *
+ * @type {WeakMap<import('./objects.js').TextureObject, number>}
+ */
+const immutableLevels = new WeakMap();
+
+/**
+ * The calls of the texture storage, copy, clear and read-back extensions a
+ * display list does not record: they run as they are reached. Each names
+ * its texture or its images itself, and a list replayed later would find
+ * other objects under those names.
+ */
+export const TEXTURE_CALLS_NOT_COMPILED = Object.freeze([
+    'glTexStorage1D', 'glTexStorage2D', 'glTexStorage3D', 'glCopyImageSubData',
+    'glClearTexImage', 'glClearTexSubImage', 'glGetTextureSubImage',
+    'glGetCompressedTextureSubImage',
+]);
 
 
 /**
@@ -282,6 +313,80 @@ const S3TC_FORMATS = new Set([
 const RGBA8 = /** @type {import('./formats.js').SizedFormat} */ (SIZED_FORMATS.get(GL.RGBA8));
 
 /**
+ * The targets each glTexStorage call names, proxies included (section 8.19).
+ *
+ * @type {Record<1 | 2 | 3, ReadonlySet<number>>}
+ */
+const STORAGE_TARGETS = {
+    1: new Set([GL.TEXTURE_1D, GL.PROXY_TEXTURE_1D]),
+    2: new Set([GL.TEXTURE_2D, GL.PROXY_TEXTURE_2D, TEX.TEXTURE_1D_ARRAY,
+        TEX.PROXY_TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP, GL.PROXY_TEXTURE_CUBE_MAP]),
+    3: new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D, TEX.TEXTURE_2D_ARRAY,
+        TEX.PROXY_TEXTURE_2D_ARRAY]),
+};
+
+/** The target each proxy stands for. @type {ReadonlyMap<number, number>} */
+const PROXY_TARGETS = new Map([
+    [GL.PROXY_TEXTURE_1D, GL.TEXTURE_1D], [GL.PROXY_TEXTURE_2D, GL.TEXTURE_2D],
+    [GL.PROXY_TEXTURE_3D, GL.TEXTURE_3D], [GL.PROXY_TEXTURE_CUBE_MAP, GL.TEXTURE_CUBE_MAP],
+    [TEX.PROXY_TEXTURE_1D_ARRAY, TEX.TEXTURE_1D_ARRAY],
+    [TEX.PROXY_TEXTURE_2D_ARRAY, TEX.TEXTURE_2D_ARRAY],
+]);
+
+/**
+ * The targets glCopyImageSubData names an image by (section 18.3.3): a
+ * renderbuffer, or a texture target that is no proxy, no buffer and no
+ * cube's face. The rectangle, cube array and multisample targets are among
+ * them though no texture here is ever one: a name given with them is no
+ * object of theirs.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const COPY_TARGETS = new Set([GL.RENDERBUFFER, GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D,
+    TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_CUBE_MAP, 0x84f5, 0x9009, 0x9100,
+    0x9102]);
+
+/**
+ * One image glCopyImageSubData reads or writes: a renderbuffer, or a level
+ * of a texture, with its extent as the call addresses it (a 1D array's
+ * layers its height, a cube's faces and an array's layers its depth).
+ *
+ * @typedef {{ texture?: import('./objects.js').TextureObject,
+ *     renderbuffer?: import('./objects.js').RenderbufferObject, level: number,
+ *     cube: boolean, format: import('./texture-copy.js').CopyFormat, width: number,
+ *     height: number, depth: number, samples: number }} CopyImage
+ *
+ * @typedef {{ texture: import('./objects.js').TextureObject,
+ *     first: import('./objects.js').TextureLevel, width: number, height: number,
+ *     depth: number, cube: boolean }} NamedLevel
+ */
+
+/**
+ * A stand-in sized format for an S3TC format's blocks, which `copyBox` and
+ * `storageBytes` measure by their bytes alone.
+ *
+ * @param {number} internal
+ * @returns {import('./formats.js').SizedFormat}
+ */
+const blockFormat = internal=>/** @type {import('./formats.js').SizedFormat} */ ({
+    ...RGBA8, internal: 0, compressed: true,
+    base: S3TC_BLOCK_BYTES.get(internal) === 8 ? GL.RED : GL.RGBA });
+
+/**
+ * The sized format whose bits a legacy level's RGBA bytes stand for, where
+ * the two differ (RGB8, RGB16, RGBA16, RGB10_A2): what a copy moves of it.
+ * Null for RGBA8, which is its own bytes, and for a format of OpenGL 1.x the
+ * view classes do not list, copied only to its own format and so as bytes.
+ *
+ * @param {number} internal
+ * @returns {import('./formats.js').SizedFormat | null}
+ */
+const legacyRaw = internal=>{
+    const as = SIZED_FORMATS.get(internal);
+    return as && as !== RGBA8 && !as.compressed && !UNSIZED_FORMATS.has(internal) ? as : null;
+};
+
+/**
  * A client image in any layout the transfer reads, as RGBA bytes: what a
  * legacy level keeps. Values outside [0, 1] are clamped as the conversion to
  * an unsigned normalised format clamps them.
@@ -344,6 +449,14 @@ export function installTextureCalls(context, kernel){
     let active = 0;
     /** @type {number[][]} the current texture coordinates, per unit */
     const texCoords = Array.from({ length: TEXTURE_UNITS }, ()=>[0, 0, 0, 1]);
+    /**
+     * The texture a call of direct state access names, standing in for the
+     * one bound to its target on the active unit while the bound form's code
+     * does the work: nothing a program can see is rebound.
+     *
+     * @type {import('./objects.js').TextureObject | null}
+     */
+    let named = null;
 
     Object.assign(kernel.side, {
         units,
@@ -454,6 +567,10 @@ export function installTextureCalls(context, kernel){
          * @param {number} target
          */
         textureBoundAt(unitIndex, target){
+            if (named !== null && unitIndex === active && named.target === target)
+            {
+                return named;
+            }
             const unit = units[unitIndex];
             if (!unit || !unit.bindings.has(target))
             {
@@ -515,6 +632,10 @@ export function installTextureCalls(context, kernel){
      * @returns {import('./objects.js').TextureObject | null}
      */
     function textureBound(unitIndex, target){
+        if (named !== null && unitIndex === active && named.target === target)
+        {
+            return named;
+        }
         const unit = units[unitIndex];
         if (!unit.bindings.has(target))
         {
@@ -762,9 +883,14 @@ export function installTextureCalls(context, kernel){
         pixels)
     {
         const isProxy = PROXIES.has(target);
-        if (!isProxy && !imageTarget(target))
+        const bound = isProxy ? null : imageTarget(target);
+        if (!isProxy && !bound)
         {
             setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (bound && immutable(bound.texture))
+        {
             return;
         }
         const keeping = keptFormatOf(internal, target, depth);
@@ -1411,6 +1537,14 @@ export function installTextureCalls(context, kernel){
         {
             return [1];
         }
+        if (parameter === TEXTURE_IMMUTABLE_FORMAT)
+        {
+            return [immutableLevels.has(texture) ? GL.TRUE : GL.FALSE];
+        }
+        if (parameter === TEXTURE_IMMUTABLE_LEVELS)
+        {
+            return [immutableLevels.get(texture) ?? 0];
+        }
         if (!texture.parameters.has(parameter))
         {
             setError(GL.INVALID_ENUM);
@@ -1671,6 +1805,24 @@ export function installTextureCalls(context, kernel){
         {
             return;
         }
+        if (immutable(image.texture))
+        {
+            return;
+        }
+        image.texture.levels.set(levelKey(level, image.face),
+            s3tcLevel(internal, width, height, border, kernel.keepTexels ? bytes : null));
+        markDirty(image.texture, levelKey(level, image.face), null);
+        kernel.shareGroup().used = true;
+    }
+
+    /**
+     * A level of an S3TC format, kept as its blocks.
+     *
+     * @param {number} internal @param {number} width @param {number} height
+     * @param {number} border @param {Uint8Array | null} kept  the blocks, null for none
+     * @returns {import('./objects.js').TextureLevel}
+     */
+    function s3tcLevel(internal, width, height, border, kept){
         // Decoded when something reads them -- the processor's rasteriser, a
         // read-back, a device that takes no blocks -- and not otherwise: a
         // device that samples the blocks never asks, and the decode was the
@@ -1682,10 +1834,9 @@ export function installTextureCalls(context, kernel){
         // them every draw and keeps them.
         /** @type {Uint8Array | null | undefined} */
         let decoded;
-        const kept = kernel.keepTexels ? bytes : null;
         const decode = ()=>(kept && width > 0 && height > 0
             ? decodeS3tc(kept, internal, width, height) : null);
-        image.texture.levels.set(levelKey(level, image.face), {
+        return {
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
             get texels(){
@@ -1697,11 +1848,9 @@ export function installTextureCalls(context, kernel){
                 return decoded;
             },
             compressedFormat: internal,
-            compressedBytes: size,
+            compressedBytes: compressedBytes(internal, width, height),
             compressed: kept ? { format: internal, bytes: kept } : null,
-        });
-        markDirty(image.texture, levelKey(level, image.face), null);
-        kernel.shareGroup().used = true;
+        };
     }
 
     /**
@@ -1745,6 +1894,10 @@ export function installTextureCalls(context, kernel){
         }
         const image = /** @type {NonNullable<ReturnType<typeof imageTarget>>} */ (
             imageTarget(target));
+        if (immutable(image.texture))
+        {
+            return;
+        }
         image.texture.levels.set(levelKey(level, image.face), sizedLevel(internal, sized, width,
             height, depth, bytes && kernel.keepTexels ? bytes.slice() : null, null));
         markDirty(image.texture, levelKey(level, image.face), null);
@@ -1794,7 +1947,1123 @@ export function installTextureCalls(context, kernel){
         }
     }
 
+    /**
+     * Whether a texture's levels were fixed by glTexStorage, which makes a
+     * call that would define them again GL_INVALID_OPERATION.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @returns {boolean}
+     */
+    function immutable(texture){
+        if (!immutableLevels.has(texture))
+        {
+            return false;
+        }
+        setError(GL.INVALID_OPERATION);
+        return true;
+    }
+
+    /**
+     * A level with a shape and nothing in it, in the format glTexStorage
+     * gives every level: kept as an image call with no pixels would keep it.
+     *
+     * @param {number} internal @param {number} target
+     * @param {number} width @param {number} height @param {number} depth
+     * @returns {import('./objects.js').TextureLevel}
+     */
+    function blankLevel(internal, target, width, height, depth){
+        const sized = sizedFormatOf(internal);
+        // On a device a level's pixels are its copy's there; bytes here would
+        // only be held twice.
+        const blank = !kernel.gpuBacked();
+        if (sized?.compressed)
+        {
+            return sizedLevel(internal, sized, width, height, depth, null, null, blank);
+        }
+        if (S3TC_BLOCK_BYTES.has(internal) && !ARRAYS.has(target))
+        {
+            return s3tcLevel(internal, width, height, 0, null);
+        }
+        const keeping = keptFormatOf(internal, target, depth);
+        if (keeping)
+        {
+            return sizedLevel(internal, keeping.kept, width, height, depth, null,
+                keeping.legacyBase, blank);
+        }
+        return { width, height, internalFormat: internal, border: 0,
+            baseFormat: /** @type {number} */ (baseFormatOf(internal)), texels: null,
+            compressed: null };
+    }
+
+    /**
+     * glTexStorage1D, 2D and 3D (OpenGL 4.6 section 8.19): every level of the
+     * texture bound to `target` defined at once, each half the one above, and
+     * the texture immutable from then on.
+     *
+     * @param {string} name @param {1 | 2 | 3} dimensions @param {number} target
+     * @param {number} levels @param {number} internal
+     * @param {number} width @param {number} height @param {number} depth
+     */
+    function texStorage(name, dimensions, target, levels, internal, width, height, depth){
+        if (!enter(name, [target, levels, internal, width, height, depth]))
+        {
+            return;
+        }
+        if (!STORAGE_TARGETS[dimensions].has(target))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (UNSIZED_FORMATS.has(internal)
+            || (!SIZED_FORMATS.has(internal) && baseFormatOf(internal) === null))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (levels < 1 || width < 1 || height < 1 || depth < 1)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        const real = PROXY_TARGETS.get(target) ?? target;
+        const solid = real === GL.TEXTURE_3D;
+        const oneArray = real === TEX.TEXTURE_1D_ARRAY;
+        const cube = real === GL.TEXTURE_CUBE_MAP;
+        const flat = dimensions === 1 || oneArray;
+        if (levels > mipLevels(width, flat ? 1 : height, solid ? depth : 1))
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const max = record(cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE).values[0];
+        const size3d = record(GL.MAX_3D_TEXTURE_SIZE).values[0];
+        const layers = record(TEX.MAX_ARRAY_TEXTURE_LAYERS)?.values[0] ?? 256;
+        const fits = solid ? width <= size3d && height <= size3d && depth <= size3d
+            : width <= max && (oneArray ? height <= layers : height <= max)
+                && (dimensions === 3 ? depth <= layers : true);
+        if (!fits || (cube && width !== height))
+        {
+            // A proxy answers by what it leaves, not by an error.
+            if (!PROXIES.has(target))
+            {
+                setError(GL.INVALID_VALUE);
+            }
+            return;
+        }
+        const sized = sizedFormatOf(internal);
+        const blocks = sized?.compressed || S3TC_BLOCK_BYTES.has(internal);
+        if ((blocks && (flat || solid))
+            || (solid && (sized?.kind === 'depth' || sized?.kind === 'stencil')))
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (PROXIES.has(target))
+        {
+            return;
+        }
+        const texture = textureBound(active, target);
+        if (!texture || texture.name === 0)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (immutable(texture))
+        {
+            return;
+        }
+        texture.levels.clear();
+        texture.dirty.clear();
+        for (let level = 0; level < levels; level++)
+        {
+            const w = Math.max(1, width >> level);
+            const h = dimensions === 1 ? 1 : oneArray ? height : Math.max(1, height >> level);
+            const d = solid ? Math.max(1, depth >> level) : dimensions === 3 ? depth : 1;
+            for (let face = 0; face < (cube ? 6 : 1); face++)
+            {
+                texture.levels.set(levelKey(level, face), blankLevel(internal, real, w, h, d));
+                markDirty(texture, levelKey(level, face), null);
+            }
+        }
+        immutableLevels.set(texture, levels);
+        kernel.shareGroup().used = true;
+    }
+
+    /**
+     * One image of glCopyImageSubData's, or the error naming it raises.
+     *
+     * @param {number} name @param {number} target @param {number} level
+     * @returns {CopyImage | number}
+     */
+    function copyImageOf(name, target, level){
+        if (target === GL.RENDERBUFFER)
+        {
+            const renderbuffer = name === 0 ? undefined
+                : kernel.shareGroup().renderbuffers.objects.get(name);
+            if (!renderbuffer || level !== 0)
+            {
+                return GL.INVALID_VALUE;
+            }
+            return { renderbuffer, level, cube: false,
+                format: /** @type {import('./texture-copy.js').CopyFormat} */ (
+                    copyFormatOf(renderbuffer.internalFormat)),
+                width: renderbuffer.width, height: renderbuffer.height, depth: 1,
+                samples: Math.max(1, renderbuffer.samples) };
+        }
+        const texture = name === 0 ? undefined : kernel.shareGroup().textures.objects.get(name);
+        const base = texture?.levels.get(levelKey(level));
+        if (!texture || texture.target !== target || level < 0 || !base)
+        {
+            return GL.INVALID_VALUE;
+        }
+        const cube = target === GL.TEXTURE_CUBE_MAP;
+        // A cube's faces must be one image each of the same size; past the
+        // base level, the texture complete (Mesa's reading of 18.3.3, which
+        // asks only the base level of a level-zero copy).
+        if ((cube && [1, 2, 3, 4, 5].some(face=>{
+            const other = texture.levels.get(levelKey(level, face));
+            return !other || other.width !== base.width || other.height !== base.height;
+        })) || (level > 0 && !immutableLevels.has(texture) && !isTextureComplete(texture)))
+        {
+            return GL.INVALID_OPERATION;
+        }
+        return { texture, level, cube,
+            format: /** @type {import('./texture-copy.js').CopyFormat} */ (
+                copyFormatOf(base.internalFormat)),
+            width: base.width, height: target === GL.TEXTURE_1D ? 1 : base.height,
+            depth: cube ? 6 : target === GL.TEXTURE_3D || target === TEX.TEXTURE_2D_ARRAY
+                ? base.depth ?? 1 : 1,
+            samples: 1 };
+    }
+
+    /**
+     * Whether a box lies in an image, its corners on a compressed format's
+     * blocks except at the image's edges (section 18.3.3).
+     *
+     * @param {CopyImage} image @param {import('./texture-levels.js').Box} box
+     * @returns {boolean}
+     */
+    function boxFits(image, box){
+        if (box.x < 0 || box.y < 0 || box.z < 0 || box.width < 0 || box.height < 0
+            || box.depth < 0 || box.x + box.width > image.width
+            || box.y + box.height > image.height || box.z + box.depth > image.depth)
+        {
+            return false;
+        }
+        const onBlocks = (/** @type {number} */ at, /** @type {number} */ extent,
+            /** @type {number} */ whole)=>at % 4 === 0 && (extent % 4 === 0 || at + extent === whole);
+        return !image.format.compressed || (onBlocks(box.x, box.width, image.width)
+            && onBlocks(box.y, box.height, image.height));
+    }
+
+    /**
+     * The level one slice of an image is (a cube's face, or the texture's
+     * level with the slice as its z), or null for a renderbuffer.
+     *
+     * @param {{ texture?: import('./objects.js').TextureObject, level: number,
+     *     cube: boolean }} image
+     * @param {number} z
+     * @returns {{ key: number, level: import('./objects.js').TextureLevel, z: number } | null}
+     */
+    function sliceOf(image, z){
+        if (!image.texture)
+        {
+            return null;
+        }
+        const key = levelKey(image.level, image.cube ? z : 0);
+        const level = /** @type {import('./objects.js').TextureLevel} */ (
+            image.texture.levels.get(key));
+        return { key, level, z: image.cube ? 0 : z };
+    }
+
+    /**
+     * The raw texels or blocks of a box of one level, packed in the box's
+     * order, or null where this side holds none of them (a level whose pixels
+     * the device holds alone).
+     *
+     * @param {import('./objects.js').TextureLevel} level
+     * @param {import('./texture-levels.js').Box} box
+     * @returns {Uint8Array | null}
+     */
+    function readRaw(level, box){
+        if (level.sized)
+        {
+            if (!level.data)
+            {
+                return null;
+            }
+            const kept = new Uint8Array(storageBytes(level.sized, box.width, box.height,
+                box.depth));
+            copyBox(level.data, level.sized, level.width, level.height, box, kept, 'read');
+            return rawFromKept(kept, level.sized);
+        }
+        if (level.compressedFormat !== undefined)
+        {
+            const bytes = level.compressed?.bytes;
+            if (!bytes)
+            {
+                return null;
+            }
+            const blocks = blockFormat(level.compressedFormat);
+            const out = new Uint8Array(storageBytes(blocks, box.width, box.height));
+            copyBox(bytes, blocks, level.width, level.height, box, out, 'read');
+            return out;
+        }
+        const texels = level.texels;
+        if (!texels)
+        {
+            return null;
+        }
+        const rgba = new Uint8Array(box.width * box.height * 4);
+        copyBox(texels, RGBA8, level.width, level.height, box, rgba, 'read');
+        const as = legacyRaw(level.internalFormat);
+        return as ? rawFromKept(encodeStorage(decodeStorage(rgba, RGBA8), as), as) : rgba;
+    }
+
+    /**
+     * Raw texels or blocks written over a box of one level; marked for the
+     * device unless the device made the same copy itself.
+     *
+     * @param {import('./objects.js').TextureObject} texture @param {number} key
+     * @param {import('./objects.js').TextureLevel} level
+     * @param {import('./texture-levels.js').Box} box @param {Uint8Array} raw
+     * @param {boolean} mark
+     */
+    function writeRaw(texture, key, level, box, raw, mark){
+        const sized = level.sized;
+        if (sized)
+        {
+            const kept = new Uint8Array(storageBytes(sized, box.width, box.height, box.depth));
+            if (level.data)
+            {
+                copyBox(level.data, sized, level.width, level.height, box, kept, 'read');
+            }
+            rawIntoKept(raw, kept, sized);
+            if (mark)
+            {
+                writeSizedBox(texture, key, level, box, kept);
+            }
+            else if (level.data)
+            {
+                copyBox(level.data, sized, level.width, level.height, box, kept, 'write');
+                rgbaCache.delete(level);
+            }
+            return;
+        }
+        if (level.compressedFormat !== undefined)
+        {
+            const format = level.compressedFormat;
+            const blocks = blockFormat(format);
+            const bytes = level.compressed?.bytes.slice()
+                ?? new Uint8Array(storageBytes(blocks, level.width, level.height));
+            copyBox(bytes, blocks, level.width, level.height, box, raw, 'write');
+            texture.levels.set(key, s3tcLevel(format, level.width, level.height, level.border,
+                kernel.keepTexels ? bytes : null));
+            if (mark)
+            {
+                markDirty(texture, key, null);
+            }
+            return;
+        }
+        const as = legacyRaw(level.internalFormat);
+        let rgba = raw;
+        if (as)
+        {
+            const kept = rawIntoKept(raw, blankStorage(as, box.width, box.height, 1), as);
+            rgba = encodeStorage(decodeStorage(kept, as), RGBA8);
+        }
+        conformTexels(rgba, level.baseFormat);
+        writeSubImage(level, box.x, box.y, box.width, box.height, rgba);
+        level.compressed = null;
+        if (mark)
+        {
+            markDirty(texture, key, { x: box.x, y: box.y, width: box.width,
+                height: box.height });
+        }
+    }
+
+    /**
+     * glCopyImageSubData (OpenGL 4.3, GL_ARB_copy_image): a box of texels
+     * from one image into another, bits as they are. On a device the copy is
+     * the device's when both images live there in one format; otherwise it is
+     * made here, from the bytes this side holds, and the box goes up.
+     *
+     * @param {number[]} args  the call's fifteen arguments
+     */
+    function copyImageSubData(args){
+        if (!enter('glCopyImageSubData', args))
+        {
+            return;
+        }
+        const [srcName, srcTarget, srcLevel, srcX, srcY, srcZ, dstName, dstTarget, dstLevel,
+            dstX, dstY, dstZ, width, height, depth] = args;
+        if (!COPY_TARGETS.has(srcTarget) || !COPY_TARGETS.has(dstTarget))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const source = copyImageOf(srcName, srcTarget, srcLevel);
+        const destination = typeof source === 'number' ? source
+            : copyImageOf(dstName, dstTarget, dstLevel);
+        if (typeof source === 'number' || typeof destination === 'number')
+        {
+            setError(/** @type {number} */ (typeof source === 'number' ? source : destination));
+            return;
+        }
+        // A box of blocks is as many texels of an uncompressed format as it
+        // has blocks, and the other way round.
+        const scale = source.format.compressed === destination.format.compressed ? 1
+            : source.format.compressed ? 1 / 4 : 4;
+        const across = (/** @type {number} */ extent)=>(scale < 1 ? Math.ceil(extent / 4)
+            : extent * scale);
+        const from = { x: srcX, y: srcY, z: srcZ, width, height, depth };
+        const into = { x: dstX, y: dstY, z: dstZ, width: across(width), height: across(height),
+            depth };
+        if (destination.format.compressed && !source.format.compressed)
+        {
+            // Blocks written at the image's edge stop at it.
+            into.width = Math.min(into.width, destination.width - dstX);
+            into.height = Math.min(into.height, destination.height - dstY);
+        }
+        if (!boxFits(source, from) || !boxFits(destination, into))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (!copyCompatible(source.format, destination.format)
+            || source.samples !== destination.samples)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (width === 0 || height === 0 || depth === 0)
+        {
+            return;
+        }
+        const device = kernel.gpuBacked() && kernel.copyImage?.(
+            { texture: source.texture, renderbuffer: source.renderbuffer, level: srcLevel,
+                x: srcX, y: srcY, z: srcZ },
+            { texture: destination.texture, renderbuffer: destination.renderbuffer,
+                level: dstLevel, x: dstX, y: dstY, z: dstZ },
+            { width, height, depth }) === true;
+        let lost = false;
+        for (let k = 0; k < depth; k++)
+        {
+            const read = sliceOf(source, srcZ + k);
+            const written = sliceOf(destination, dstZ + k);
+            const raw = read ? readRaw(read.level, { ...from, z: read.z, depth: 1 }) : null;
+            if (!written || !raw)
+            {
+                lost ||= !device && kernel.keepTexels;
+                continue;
+            }
+            const holds = written.level.sized ? written.level.data
+                : written.level.compressedFormat !== undefined
+                    ? written.level.compressed?.bytes : written.level.texels;
+            if (device && !holds)
+            {
+                continue;
+            }
+            writeRaw(/** @type {import('./objects.js').TextureObject} */ (destination.texture),
+                written.key, written.level, { ...into, z: written.z, depth: 1 }, raw, !device);
+        }
+        if (lost)
+        {
+            lose('glCopyImageSubData copied nothing: '
+                + (source.renderbuffer || destination.renderbuffer
+                    ? 'a renderbuffer\'s pixels live on the device alone'
+                    : 'the source\'s pixels live on the device, in another format'));
+        }
+    }
+
+    /**
+     * A fill or read-back's level: the texture by its name and the level,
+     * with its extent as the calls address it, or the error.
+     *
+     * @param {number} textureName @param {number} level @param {number} missing
+     *     the error for a name that is no texture
+     * @returns {NamedLevel | number | null} null: no image at that level
+     */
+    function namedLevel(textureName, level, missing){
+        const texture = textureName === 0 ? undefined
+            : kernel.shareGroup().textures.objects.get(textureName);
+        if (!texture)
+        {
+            return missing;
+        }
+        if (level < 0 || level >= mipLevels(record(GL.MAX_TEXTURE_SIZE).values[0]))
+        {
+            return GL.INVALID_VALUE;
+        }
+        const first = texture.levels.get(levelKey(level));
+        if (!first)
+        {
+            return null;
+        }
+        const cube = texture.target === GL.TEXTURE_CUBE_MAP;
+        return { texture, first, cube, width: first.width,
+            height: texture.target === GL.TEXTURE_1D ? 1 : first.height,
+            depth: cube ? 6 : first.depth ?? 1 };
+    }
+
+    /**
+     * glClearTexImage and glClearTexSubImage (OpenGL 4.4, GL_ARB_clear_texture):
+     * a box of a level filled with one texel, given as one pixel of `format`
+     * and `type` and converted as an image's would be; zeros where none is.
+     * The pixel is read whole from the program's memory: the unpack state
+     * and buffer do not apply to it.
+     *
+     * @param {string} name @param {number} textureName @param {number} level
+     * @param {import('./texture-levels.js').Box | null} box  null: the whole level
+     * @param {number} format @param {number} type @param {number | Uint8Array | null} data
+     */
+    function clearTexImage(name, textureName, level, box, format, type, data){
+        const memory = kernel.memory();
+        const tight = { alignment: 1, rowLength: 0, skipRows: 0, skipPixels: 0,
+            swapBytes: false };
+        // Read before a list or a twin decides anything, as an image is.
+        const pixel = data instanceof Uint8Array ? data
+            : data && memory && transferError(RGBA8, format, type) !== GL.INVALID_ENUM
+                ? memory.read(data, clientBytes(1, 1, 1, format, type, tight)) : null;
+        if (!enter(name, [textureName, level, box, format, type, pixel]))
+        {
+            return;
+        }
+        const found = namedLevel(textureName, level, GL.INVALID_OPERATION);
+        if (found === null || typeof found === 'number')
+        {
+            setError(found ?? GL.INVALID_OPERATION);
+            return;
+        }
+        const { texture, first } = found;
+        if (first.sized?.compressed || first.compressedFormat !== undefined)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const kept = first.sized ?? RGBA8;
+        if (!checkTransfer(kept, format, type))
+        {
+            return;
+        }
+        const whole = box ?? { x: 0, y: 0, z: 0, width: found.width, height: found.height,
+            depth: found.depth };
+        if (whole.width < 0 || whole.height < 0 || whole.depth < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (whole.x < 0 || whole.y < 0 || whole.z < 0 || whole.x + whole.width > found.width
+            || whole.y + whole.height > found.height || whole.z + whole.depth > found.depth)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const values = pixel ? decodeClient(pixel, 1, 1, 1, format, type, tight)
+            : new Float64Array(4);
+        if (!values)
+        {
+            lose(`${name} with format ${format} and type ${type} wrote nothing: this`
+                + ' implementation does not read that layout');
+            return;
+        }
+        const texel = encodeStorage(values, kept);
+        if (!first.sized)
+        {
+            conformTexels(texel, first.baseFormat);
+        }
+        if (whole.width === 0 || whole.height === 0 || whole.depth === 0)
+        {
+            return;
+        }
+        const image = { texture, level, cube: found.cube };
+        for (let k = 0; k < (found.cube ? whole.depth : 1); k++)
+        {
+            const slice = /** @type {NonNullable<ReturnType<typeof sliceOf>>} */ (
+                sliceOf(image, whole.z + k));
+            const target = { ...whole, z: slice.z, depth: found.cube ? 1 : whole.depth };
+            const fill = new Uint8Array(target.width * target.height * target.depth
+                * texel.length);
+            for (let at = 0; at < fill.length; at += texel.length)
+            {
+                fill.set(texel, at);
+            }
+            if (slice.level.sized)
+            {
+                writeSizedBox(texture, slice.key, slice.level, target, fill);
+                continue;
+            }
+            writeSubImage(slice.level, target.x, target.y, target.width, target.height, fill);
+            slice.level.compressed = null;
+            markDirty(texture, slice.key, { x: target.x, y: target.y, width: target.width,
+                height: target.height });
+        }
+    }
+
+    /**
+     * glGetTextureSubImage (OpenGL 4.5, GL_ARB_get_texture_sub_image): a box
+     * of a level as a client image, packed by the pack state. A cube map's
+     * faces are its z, packed as the images of a 3D one.
+     *
+     * @param {string} name @param {number} textureName @param {number} level
+     * @param {import('./texture-levels.js').Box | null} box  null: the whole level
+     * @param {number} format @param {number} type @param {number} bufSize
+     * @param {number} [missing]  the error for a name that is no texture
+     * @returns {Uint8Array | null}
+     */
+    function getTextureSubImage(name, textureName, level, box, format, type, bufSize,
+        missing = GL.INVALID_VALUE)
+    {
+        if (!enter(name, [textureName, level, box, format, type, bufSize]))
+        {
+            return null;
+        }
+        const found = namedLevel(textureName, level, missing);
+        if (found === null || typeof found === 'number')
+        {
+            // A level with no image packs nothing, and is no error.
+            if (found !== null)
+            {
+                setError(found);
+            }
+            return null;
+        }
+        const { first } = found;
+        // Blocks are read back as the eight-bit components they decode to.
+        const kept = first.sized && !first.sized.compressed ? first.sized : RGBA8;
+        if (!checkTransfer(kept, format, type))
+        {
+            return null;
+        }
+        const whole = box ?? { x: 0, y: 0, z: 0, width: found.width, height: found.height,
+            depth: found.depth };
+        if (whole.x < 0 || whole.y < 0 || whole.z < 0 || whole.width < 0 || whole.height < 0
+            || whole.depth < 0 || whole.x + whole.width > found.width
+            || whole.y + whole.height > found.height || whole.z + whole.depth > found.depth)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const state = transferState(true);
+        if (clientBytes(whole.width, whole.height, whole.depth, format, type, state) > bufSize)
+        {
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        if (!kernel.keepTexels)
+        {
+            diverge(`${name} was accepted and read zeros: the texels live with the context`
+                + ' that draws, in the graphics worker, and are not read back');
+        }
+        const image = { texture: found.texture, level, cube: found.cube };
+        const slices = found.cube ? whole.depth : 1;
+        const depth = found.cube ? 1 : whole.depth;
+        const sliceBytes = storageBytes(kept, whole.width, whole.height, depth);
+        const stored = new Uint8Array(sliceBytes * slices);
+        for (let k = 0; k < slices; k++)
+        {
+            const slice = /** @type {NonNullable<ReturnType<typeof sliceOf>>} */ (
+                sliceOf(image, whole.z + k));
+            const source = kept === slice.level.sized ? slice.level.data : slice.level.texels;
+            const into = stored.subarray(k * sliceBytes, (k + 1) * sliceBytes);
+            if (source)
+            {
+                copyBox(source, kept, slice.level.width, slice.level.height,
+                    { ...whole, z: slice.z, depth }, into, 'read');
+            }
+            else
+            {
+                into.set(blankStorage(kept, whole.width, whole.height, depth));
+            }
+        }
+        return packFromStorage(stored, whole.width, whole.height, whole.depth, format, type,
+            state, kept);
+    }
+
+    /**
+     * glGetCompressedTextureSubImage (OpenGL 4.5): a box of a compressed
+     * level's blocks, as the program gave them.
+     *
+     * @param {string} name @param {number} textureName @param {number} level
+     * @param {import('./texture-levels.js').Box | null} box  null: the whole level
+     * @param {number} bufSize
+     * @param {number} [missing]  the error for a name that is no texture
+     * @returns {Uint8Array | null}
+     */
+    function getCompressedTextureSubImage(name, textureName, level, box, bufSize,
+        missing = GL.INVALID_VALUE)
+    {
+        if (!enter(name, [textureName, level, box, bufSize]))
+        {
+            return null;
+        }
+        const found = namedLevel(textureName, level, missing);
+        if (found === null || typeof found === 'number')
+        {
+            setError(found ?? GL.INVALID_OPERATION);
+            return null;
+        }
+        const { first } = found;
+        const blocks = first.sized?.compressed ? first.sized
+            : first.compressedFormat !== undefined ? blockFormat(first.compressedFormat) : null;
+        if (!blocks)
+        {
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const whole = box ?? { x: 0, y: 0, z: 0, width: found.width, height: found.height,
+            depth: found.depth };
+        const image = { texture: found.texture, level, cube: found.cube, width: found.width,
+            height: found.height, depth: found.depth, samples: 1,
+            format: { internal: first.internalFormat, compressed: true, bytes: 16,
+                viewClass: null } };
+        if (!boxFits(image, whole))
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const slices = found.cube ? whole.depth : 1;
+        const depth = found.cube ? 1 : whole.depth;
+        const sliceBytes = storageBytes(blocks, whole.width, whole.height, depth);
+        if (sliceBytes * slices > bufSize)
+        {
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const out = new Uint8Array(sliceBytes * slices);
+        for (let k = 0; k < slices; k++)
+        {
+            const slice = /** @type {NonNullable<ReturnType<typeof sliceOf>>} */ (
+                sliceOf(image, whole.z + k));
+            const source = slice.level.sized ? slice.level.data : slice.level.compressed?.bytes;
+            if (source)
+            {
+                copyBox(source, blocks, slice.level.width, slice.level.height,
+                    { ...whole, z: slice.z, depth }, out.subarray(k * sliceBytes), 'read');
+            }
+            else if (kernel.keepTexels)
+            {
+                diverge(`${name} read zeros: the level's blocks are not held on this side`);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * @param {string} name  the call, as a list and the errors know it
+     * @param {number} target
+     * @param {number} level
+     * @param {number} parameter
+     * @returns {number[] | null}
+     */
+    function getTexLevelParameter(name, target, level, parameter){
+        if (!enter(name, [target, level, parameter]))
+        {
+            return null;
+        }
+        const image = imageTarget(target);
+        if (!image || level < 0)
+        {
+            setError(image ? GL.INVALID_VALUE : GL.INVALID_ENUM);
+            return null;
+        }
+        const stored = image.texture.levels.get(levelKey(level, image.face));
+        const width = stored?.width ?? 0;
+        const height = stored?.height ?? 0;
+        if (parameter === TEX.TEXTURE_DEPTH)
+        {
+            return [stored ? stored.depth ?? 1 : 0];
+        }
+        if (stored?.sized && parameter !== GL.TEXTURE_INTERNAL_FORMAT
+            && parameter !== GL.TEXTURE_COMPRESSED_IMAGE_SIZE)
+        {
+            const answer = sizedLevelAnswer(stored.sized, parameter);
+            if (answer !== undefined)
+            {
+                return [answer];
+            }
+        }
+        const base = stored?.baseFormat ?? GL.RGBA;
+        const hasAlpha = base === GL.RGBA || base === GL.LUMINANCE_ALPHA || base === GL.ALPHA
+            || base === GL.INTENSITY;
+        const hasColour = base !== GL.ALPHA;
+        switch (parameter)
+        {
+            case GL.TEXTURE_WIDTH:
+                return [width];
+            case GL.TEXTURE_HEIGHT:
+                return [height];
+            case GL.TEXTURE_INTERNAL_FORMAT:
+                return [stored?.internalFormat ?? 1];
+            case GL.TEXTURE_RED_SIZE:
+            case GL.TEXTURE_GREEN_SIZE:
+            case GL.TEXTURE_BLUE_SIZE:
+                return [stored && hasColour ? 8 : 0];
+            case GL.TEXTURE_ALPHA_SIZE:
+                return [stored && hasAlpha ? 8 : 0];
+            case TEX.TEXTURE_LUMINANCE_SIZE:
+                return [stored && (base === GL.LUMINANCE || base === GL.LUMINANCE_ALPHA)
+                    ? 8 : 0];
+            case TEX.TEXTURE_INTENSITY_SIZE:
+                return [stored && base === GL.INTENSITY ? 8 : 0];
+            case TEX.TEXTURE_DEPTH_SIZE:
+            case TEX.TEXTURE_STENCIL_SIZE:
+            case TEX.TEXTURE_SHARED_SIZE:
+                return [0];
+            case TEX.TEXTURE_RED_TYPE:
+            case TEX.TEXTURE_GREEN_TYPE:
+            case TEX.TEXTURE_BLUE_TYPE:
+                return [stored && hasColour && base !== GL.LUMINANCE
+                    && base !== GL.LUMINANCE_ALPHA && base !== GL.INTENSITY
+                    ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+            case TEX.TEXTURE_ALPHA_TYPE:
+                return [stored && hasAlpha && base !== GL.INTENSITY
+                    ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+            case TEX.TEXTURE_LUMINANCE_TYPE:
+                return [stored && (base === GL.LUMINANCE || base === GL.LUMINANCE_ALPHA)
+                    ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+            case TEX.TEXTURE_INTENSITY_TYPE:
+                return [stored && base === GL.INTENSITY ? GL.UNSIGNED_NORMALIZED : GL.NONE];
+            case TEX.TEXTURE_DEPTH_TYPE:
+                return [GL.NONE];
+            case GL.TEXTURE_COMPRESSED:
+                return [stored?.compressedFormat ? 1 : 0];
+            case GL.TEXTURE_COMPRESSED_IMAGE_SIZE:
+                if (!stored?.compressedFormat)
+                {
+                    setError(GL.INVALID_OPERATION);
+                    return null;
+                }
+                return [stored.compressedBytes ?? 0];
+            default:
+                setError(GL.INVALID_ENUM);
+                return null;
+        }
+    }
+
+    /**
+     * @param {string} name  the call, as a list and the errors know it
+     * @param {number} target
+     * @param {number} level
+     * @param {number} xoffset
+     * @param {number} yoffset
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     */
+    function copyTexSubImage2D(name, target, level, xoffset, yoffset, x, y, width, height){
+        const args = [target, level, xoffset, yoffset, x, y, width, height];
+        const image = imageTarget(target);
+        if (!image)
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const existing = image.texture.levels.get(levelKey(level, image.face));
+        if (!existing)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (existing.sized)
+        {
+            copySubImage(name, args, image, level, existing, { x: xoffset,
+                y: yoffset, z: 0, width, height, depth: 1 }, x, y);
+            return;
+        }
+        if (width < 0 || height < 0 || xoffset < 0 || yoffset < 0
+            || xoffset + width > existing.width || yoffset + height > existing.height)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (kernel.gpuBacked())
+        {
+            // The copy lands on the device, into the level as it already
+            // stands there. Not marked dirty, or the next draw would upload
+            // the processor's texels over what the copy wrote.
+            if (!enter(name, [...args, null]))
+            {
+                return;
+            }
+            kernel.copyToTexture?.(image.texture, level, image.face, xoffset, yoffset, x, y,
+                width, height);
+            return;
+        }
+        const texels = framebufferTexels(x, y, width, height);
+        if (!enter(name, [...args, texels]))
+        {
+            return;
+        }
+        conformTexels(texels, existing.baseFormat);
+        writeSubImage(existing, xoffset, yoffset, width, height, texels);
+        existing.compressed = null;
+        markDirty(image.texture, levelKey(level, image.face), { x: xoffset, y: yoffset,
+            width, height });
+    }
+
+    /**
+     * A rectangle of the framebuffer into one slice of a 3D texture or
+     * one layer of an array.
+     *
+     * @param {string} name  the call, as a list and the errors know it
+     * @param {number} target @param {number} level
+     * @param {number} xoffset @param {number} yoffset @param {number} zoffset
+     * @param {number} x @param {number} y @param {number} width @param {number} height
+     */
+    function copyTexSubImage3D(name, target, level, xoffset, yoffset, zoffset, x, y, width,
+        height)
+    {
+        const args = [target, level, xoffset, yoffset, zoffset, x, y, width, height];
+        const image = IMAGE_TARGETS[3].has(target) && !PROXIES.has(target)
+            ? imageTarget(target) : null;
+        if (!image)
+        {
+            enter(name, args);
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const existing = image.texture.levels.get(levelKey(level, image.face));
+        if (!existing?.sized)
+        {
+            enter(name, args);
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        copySubImage(name, args, image, level, existing, { x: xoffset,
+            y: yoffset, z: zoffset, width, height, depth: 1 }, x, y);
+    }
+
+    /**
+     * Rewrites a rectangle of an S3TC level. The decoded texels are
+     * written into the RGBA image, which is what sampling reads.
+     *
+     * @param {string} name  the call, as a list and the errors know it
+     * @param {number} target
+     * @param {number} level
+     * @param {number} x0
+     * @param {number} y0
+     * @param {number} width
+     * @param {number} height
+     * @param {number} format
+     * @param {number} size
+     * @param {number | Uint8Array | null} [data]
+     */
+    function compressedTexSubImage2D(name, target, level, x0, y0, width, height, format, size,
+        data)
+    {
+        const image = imageTarget(target);
+        if (!image || !S3TC_FORMATS.has(format) && !sizedFormatOf(format)?.compressed)
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const existing = image.texture.levels.get(levelKey(level, image.face));
+        if (existing?.sized?.compressed)
+        {
+            compressedSizedSub(name,
+                [target, level, x0, y0, width, height, format, size], image, level, existing,
+                { x: x0, y: y0, z: 0, width, height, depth: 1 }, format, size, data ?? null);
+            return;
+        }
+        if (!existing || existing.compressedFormat !== format)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (x0 % 4 !== 0 || y0 % 4 !== 0 || x0 + width > existing.width
+            || y0 + height > existing.height || size !== compressedBytes(format, width, height))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        const bytes = guestBytes(data ?? null, size);
+        const texels = bytes ? decodeS3tc(bytes, format, width, height) : null;
+        const args = [target, level, x0, y0, width, height, format, size, texels];
+        if (!enter(name, args))
+        {
+            return;
+        }
+        if (texels)
+        {
+            writeSubImage(existing, x0, y0, width, height, texels);
+            // The rectangle arrived decoded, so the level's kept blocks no
+            // longer match it: the whole texture falls back to the
+            // decoded path rather than travel as blocks with a hole in them.
+            existing.compressed = null;
+            markDirty(image.texture, levelKey(level, image.face), { x: x0, y: y0,
+                width, height });
+        }
+    }
+
+    /**
+     * @param {string} name  the call, as a list and the errors know it
+     * @param {number} target @param {number} level
+     * @param {number} x0 @param {number} y0 @param {number} z0
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {number} format @param {number} size
+     * @param {number | Uint8Array | null} [data]
+     */
+    function compressedTexSubImage3D(name, target, level, x0, y0, z0, width, height, depth,
+        format, size, data)
+    {
+        const image = target === TEX.TEXTURE_2D_ARRAY ? imageTarget(target) : null;
+        const existing = image?.texture.levels.get(levelKey(level, image.face));
+        if (!image || !existing?.sized?.compressed)
+        {
+            enter(name, [target]);
+            setError(image ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
+            return;
+        }
+        compressedSizedSub(name,
+            [target, level, x0, y0, z0, width, height, depth, format, size], image, level,
+            existing, { x: x0, y: y0, z: z0, width, height, depth }, format, size,
+            data ?? null);
+    }
+
+    /**
+     * glTexParameterIiv and glTexParameterIuiv (3.0): what glTexParameteriv
+     * sets, the border colour kept as the integers given.
+     *
+     * @param {string} name  the call, as a list and the errors know it
+     * @param {number} target @param {number} parameter @param {number[]} values
+     */
+    function texParameterI(name, target, parameter, values){
+        if (parameter !== GL.TEXTURE_BORDER_COLOR)
+        {
+            texParameter(name, target, parameter, values);
+            return;
+        }
+        if (!enter(name, [target, parameter, values]))
+        {
+            return;
+        }
+        const texture = BIND_TARGETS.some(t=>t === target) ? textureBound(active, target)
+            : null;
+        if (!texture || values.length < 4)
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        texture.borderColour = values.slice(0, 4);
+        texture.parametersVersion++;
+    }
+
+    Object.assign(kernel.side, {
+        /**
+         * The bound forms' work for a call that names its texture (OpenGL
+         * 4.5 direct state access, `context-dsa.js`): `body` runs with
+         * `texture` standing in for the one bound to its target on the
+         * active unit, and every call it makes takes the name it is given,
+         * which is what a list and the errors know it by.
+         *
+         * @template T
+         * @param {import('./objects.js').TextureObject} texture @param {() => T} body
+         * @returns {T}
+         */
+        withTexture(texture, body){
+            const was = named;
+            named = texture;
+            try
+            {
+                return body();
+            }
+            finally
+            {
+                named = was;
+            }
+        },
+        textureCalls: Object.freeze({
+            texSubImage, texParameter, getTexParameter, texParameterI, getTexLevelParameter,
+            copyTexSubImage2D, copyTexSubImage3D, compressedTexSubImage2D,
+            compressedTexSubImage3D, texStorage, getTextureSubImage,
+            getCompressedTextureSubImage, clearTexImage,
+        }),
+        /** @param {import('./objects.js').TextureObject} texture */
+        immutableLevels: texture=>immutableLevels.get(texture) ?? 0,
+    });
+
     Object.assign(context, {
+        // --- GL_ARB_texture_storage (4.2) ---
+
+        /**
+         * @param {number} target @param {number} levels @param {number} internal
+         * @param {number} width
+         */
+        glTexStorage1D(target, levels, internal, width){
+            texStorage('glTexStorage1D', 1, target, levels, internal, width, 1, 1);
+        },
+
+        /**
+         * @param {number} target @param {number} levels @param {number} internal
+         * @param {number} width @param {number} height
+         */
+        glTexStorage2D(target, levels, internal, width, height){
+            texStorage('glTexStorage2D', 2, target, levels, internal, width, height, 1);
+        },
+
+        /**
+         * @param {number} target @param {number} levels @param {number} internal
+         * @param {number} width @param {number} height @param {number} depth
+         */
+        glTexStorage3D(target, levels, internal, width, height, depth){
+            texStorage('glTexStorage3D', 3, target, levels, internal, width, height, depth);
+        },
+
+        // --- GL_ARB_copy_image (4.3) ---
+
+        /**
+         * @param {number} srcName @param {number} srcTarget @param {number} srcLevel
+         * @param {number} srcX @param {number} srcY @param {number} srcZ
+         * @param {number} dstName @param {number} dstTarget @param {number} dstLevel
+         * @param {number} dstX @param {number} dstY @param {number} dstZ
+         * @param {number} width @param {number} height @param {number} depth
+         */
+        glCopyImageSubData(srcName, srcTarget, srcLevel, srcX, srcY, srcZ, dstName, dstTarget,
+            dstLevel, dstX, dstY, dstZ, width, height, depth)
+        {
+            copyImageSubData([srcName, srcTarget, srcLevel, srcX, srcY, srcZ, dstName,
+                dstTarget, dstLevel, dstX, dstY, dstZ, width, height, depth]);
+        },
+
+        // --- GL_ARB_clear_texture (4.4) ---
+
+        /**
+         * glClearTexImage and glClearTexSubImage: `box` null fills the whole level.
+         *
+         * @param {string} name @param {number} texture @param {number} level
+         * @param {import('./texture-levels.js').Box | null} box
+         * @param {number} format @param {number} type @param {number | Uint8Array | null} data
+         */
+        clearTexImage(name, texture, level, box, format, type, data){
+            clearTexImage(name === 'glClearTexImage' ? name : 'glClearTexSubImage', texture,
+                level, box, format, type, data);
+        },
+
+        // --- GL_ARB_get_texture_sub_image (4.5) ---
+
+        /**
+         * @param {number} texture @param {number} level
+         * @param {import('./texture-levels.js').Box} box
+         * @param {number} format @param {number} type @param {number} bufSize
+         * @returns {Uint8Array | null} the client image
+         */
+        glGetTextureSubImage(texture, level, box, format, type, bufSize){
+            return getTextureSubImage('glGetTextureSubImage', texture, level, box, format, type,
+                bufSize);
+        },
+
+        /**
+         * @param {number} texture @param {number} level
+         * @param {import('./texture-levels.js').Box} box @param {number} bufSize
+         * @returns {Uint8Array | null} the blocks
+         */
+        glGetCompressedTextureSubImage(texture, level, box, bufSize){
+            return getCompressedTextureSubImage('glGetCompressedTextureSubImage', texture, level,
+                box, bufSize);
+        },
+
         /** @param {number} count @returns {number[]} */
         glGenTextures(count){
             if (!enter('glGenTextures', [count]))
@@ -1941,24 +3210,7 @@ export function installTextureCalls(context, kernel){
          * @param {number} target @param {number} parameter @param {number[]} values
          */
         texParameterI(target, parameter, values){
-            if (parameter !== GL.TEXTURE_BORDER_COLOR)
-            {
-                texParameter('glTexParameterIiv', target, parameter, values);
-                return;
-            }
-            if (!enter('texParameterI', [target, parameter, values]))
-            {
-                return;
-            }
-            const texture = BIND_TARGETS.some(t=>t === target) ? textureBound(active, target)
-                : null;
-            if (!texture || values.length < 4)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            texture.borderColour = values.slice(0, 4);
-            texture.parametersVersion++;
+            return texParameterI('texParameterI', target, parameter, values);
         },
 
         /** @param {number} target @param {number} parameter @returns {number[] | null} */
@@ -1978,88 +3230,7 @@ export function installTextureCalls(context, kernel){
          * @returns {number[] | null}
          */
         glGetTexLevelParameteriv(target, level, parameter){
-            if (!enter('glGetTexLevelParameteriv', [target, level, parameter]))
-            {
-                return null;
-            }
-            const image = imageTarget(target);
-            if (!image || level < 0)
-            {
-                setError(image ? GL.INVALID_VALUE : GL.INVALID_ENUM);
-                return null;
-            }
-            const stored = image.texture.levels.get(levelKey(level, image.face));
-            const width = stored?.width ?? 0;
-            const height = stored?.height ?? 0;
-            if (parameter === TEX.TEXTURE_DEPTH)
-            {
-                return [stored ? stored.depth ?? 1 : 0];
-            }
-            if (stored?.sized && parameter !== GL.TEXTURE_INTERNAL_FORMAT
-                && parameter !== GL.TEXTURE_COMPRESSED_IMAGE_SIZE)
-            {
-                const answer = sizedLevelAnswer(stored.sized, parameter);
-                if (answer !== undefined)
-                {
-                    return [answer];
-                }
-            }
-            const base = stored?.baseFormat ?? GL.RGBA;
-            const hasAlpha = base === GL.RGBA || base === GL.LUMINANCE_ALPHA || base === GL.ALPHA
-                || base === GL.INTENSITY;
-            const hasColour = base !== GL.ALPHA;
-            switch (parameter)
-            {
-                case GL.TEXTURE_WIDTH:
-                    return [width];
-                case GL.TEXTURE_HEIGHT:
-                    return [height];
-                case GL.TEXTURE_INTERNAL_FORMAT:
-                    return [stored?.internalFormat ?? 1];
-                case GL.TEXTURE_RED_SIZE:
-                case GL.TEXTURE_GREEN_SIZE:
-                case GL.TEXTURE_BLUE_SIZE:
-                    return [stored && hasColour ? 8 : 0];
-                case GL.TEXTURE_ALPHA_SIZE:
-                    return [stored && hasAlpha ? 8 : 0];
-                case TEX.TEXTURE_LUMINANCE_SIZE:
-                    return [stored && (base === GL.LUMINANCE || base === GL.LUMINANCE_ALPHA)
-                        ? 8 : 0];
-                case TEX.TEXTURE_INTENSITY_SIZE:
-                    return [stored && base === GL.INTENSITY ? 8 : 0];
-                case TEX.TEXTURE_DEPTH_SIZE:
-                case TEX.TEXTURE_STENCIL_SIZE:
-                case TEX.TEXTURE_SHARED_SIZE:
-                    return [0];
-                case TEX.TEXTURE_RED_TYPE:
-                case TEX.TEXTURE_GREEN_TYPE:
-                case TEX.TEXTURE_BLUE_TYPE:
-                    return [stored && hasColour && base !== GL.LUMINANCE
-                        && base !== GL.LUMINANCE_ALPHA && base !== GL.INTENSITY
-                        ? GL.UNSIGNED_NORMALIZED : GL.NONE];
-                case TEX.TEXTURE_ALPHA_TYPE:
-                    return [stored && hasAlpha && base !== GL.INTENSITY
-                        ? GL.UNSIGNED_NORMALIZED : GL.NONE];
-                case TEX.TEXTURE_LUMINANCE_TYPE:
-                    return [stored && (base === GL.LUMINANCE || base === GL.LUMINANCE_ALPHA)
-                        ? GL.UNSIGNED_NORMALIZED : GL.NONE];
-                case TEX.TEXTURE_INTENSITY_TYPE:
-                    return [stored && base === GL.INTENSITY ? GL.UNSIGNED_NORMALIZED : GL.NONE];
-                case TEX.TEXTURE_DEPTH_TYPE:
-                    return [GL.NONE];
-                case GL.TEXTURE_COMPRESSED:
-                    return [stored?.compressedFormat ? 1 : 0];
-                case GL.TEXTURE_COMPRESSED_IMAGE_SIZE:
-                    if (!stored?.compressedFormat)
-                    {
-                        setError(GL.INVALID_OPERATION);
-                        return null;
-                    }
-                    return [stored.compressedBytes ?? 0];
-                default:
-                    setError(GL.INVALID_ENUM);
-                    return null;
-            }
+            return getTexLevelParameter('glGetTexLevelParameteriv', target, level, parameter);
         },
 
         /**
@@ -2136,24 +3307,8 @@ export function installTextureCalls(context, kernel){
          * @param {number} x @param {number} y @param {number} width @param {number} height
          */
         glCopyTexSubImage3D(target, level, xoffset, yoffset, zoffset, x, y, width, height){
-            const args = [target, level, xoffset, yoffset, zoffset, x, y, width, height];
-            const image = IMAGE_TARGETS[3].has(target) && !PROXIES.has(target)
-                ? imageTarget(target) : null;
-            if (!image)
-            {
-                enter('glCopyTexSubImage3D', args);
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            const existing = image.texture.levels.get(levelKey(level, image.face));
-            if (!existing?.sized)
-            {
-                enter('glCopyTexSubImage3D', args);
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            copySubImage('glCopyTexSubImage3D', args, image, level, existing, { x: xoffset,
-                y: yoffset, z: zoffset, width, height, depth: 1 }, x, y);
+            return copyTexSubImage3D('glCopyTexSubImage3D', target, level, xoffset, yoffset,
+                zoffset, x, y, width, height);
         },
 
         /**
@@ -2238,6 +3393,10 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
+            if (immutable(image.texture))
+            {
+                return;
+            }
             const sized = sizedFormatOf(internalFormat);
             if (sized)
             {
@@ -2289,54 +3448,8 @@ export function installTextureCalls(context, kernel){
          * @param {number} height
          */
         glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height){
-            const args = [target, level, xoffset, yoffset, x, y, width, height];
-            const image = imageTarget(target);
-            if (!image)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            const existing = image.texture.levels.get(levelKey(level, image.face));
-            if (!existing)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            if (existing.sized)
-            {
-                copySubImage('glCopyTexSubImage2D', args, image, level, existing, { x: xoffset,
-                    y: yoffset, z: 0, width, height, depth: 1 }, x, y);
-                return;
-            }
-            if (width < 0 || height < 0 || xoffset < 0 || yoffset < 0
-                || xoffset + width > existing.width || yoffset + height > existing.height)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            if (kernel.gpuBacked())
-            {
-                // The copy lands on the device, into the level as it already
-                // stands there. Not marked dirty, or the next draw would upload
-                // the processor's texels over what the copy wrote.
-                if (!enter('glCopyTexSubImage2D', [...args, null]))
-                {
-                    return;
-                }
-                kernel.copyToTexture?.(image.texture, level, image.face, xoffset, yoffset, x, y,
-                    width, height);
-                return;
-            }
-            const texels = framebufferTexels(x, y, width, height);
-            if (!enter('glCopyTexSubImage2D', [...args, texels]))
-            {
-                return;
-            }
-            conformTexels(texels, existing.baseFormat);
-            writeSubImage(existing, xoffset, yoffset, width, height, texels);
-            existing.compressed = null;
-            markDirty(image.texture, levelKey(level, image.face), { x: xoffset, y: yoffset,
-                width, height });
+            return copyTexSubImage2D('glCopyTexSubImage2D', target, level, xoffset, yoffset, x,
+                y, width, height);
         },
 
         /**
@@ -2508,48 +3621,8 @@ export function installTextureCalls(context, kernel){
          * @param {number | Uint8Array | null} [data]
          */
         glCompressedTexSubImage2DARB(target, level, x0, y0, width, height, format, size, data){
-            const image = imageTarget(target);
-            if (!image || !S3TC_FORMATS.has(format) && !sizedFormatOf(format)?.compressed)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            const existing = image.texture.levels.get(levelKey(level, image.face));
-            if (existing?.sized?.compressed)
-            {
-                compressedSizedSub('glCompressedTexSubImage2DARB',
-                    [target, level, x0, y0, width, height, format, size], image, level, existing,
-                    { x: x0, y: y0, z: 0, width, height, depth: 1 }, format, size, data ?? null);
-                return;
-            }
-            if (!existing || existing.compressedFormat !== format)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            if (x0 % 4 !== 0 || y0 % 4 !== 0 || x0 + width > existing.width
-                || y0 + height > existing.height || size !== compressedBytes(format, width, height))
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            const bytes = guestBytes(data ?? null, size);
-            const texels = bytes ? decodeS3tc(bytes, format, width, height) : null;
-            const args = [target, level, x0, y0, width, height, format, size, texels];
-            if (!enter('glCompressedTexSubImage2DARB', args))
-            {
-                return;
-            }
-            if (texels)
-            {
-                writeSubImage(existing, x0, y0, width, height, texels);
-                // The rectangle arrived decoded, so the level's kept blocks no
-                // longer match it: the whole texture falls back to the
-                // decoded path rather than travel as blocks with a hole in them.
-                existing.compressed = null;
-                markDirty(image.texture, levelKey(level, image.face), { x: x0, y: y0,
-                    width, height });
-            }
+            return compressedTexSubImage2D('glCompressedTexSubImage2DARB', target, level, x0, y0,
+                width, height, format, size, data);
         },
 
         /**
@@ -2638,18 +3711,8 @@ export function installTextureCalls(context, kernel){
         glCompressedTexSubImage3DARB(target, level, x0, y0, z0, width, height, depth, format,
             size, data)
         {
-            const image = target === TEX.TEXTURE_2D_ARRAY ? imageTarget(target) : null;
-            const existing = image?.texture.levels.get(levelKey(level, image.face));
-            if (!image || !existing?.sized?.compressed)
-            {
-                enter('glCompressedTexSubImage3DARB', [target]);
-                setError(image ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
-                return;
-            }
-            compressedSizedSub('glCompressedTexSubImage3DARB',
-                [target, level, x0, y0, z0, width, height, depth, format, size], image, level,
-                existing, { x: x0, y: y0, z: z0, width, height, depth }, format, size,
-                data ?? null);
+            return compressedTexSubImage3D('glCompressedTexSubImage3DARB', target, level, x0, y0,
+                z0, width, height, depth, format, size, data);
         },
     });
 }

@@ -472,6 +472,9 @@ export function createGlContext(options = {}){
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
                     width, height, kernel.side.readFramebuffer?.() ?? null)
             : null,
+        copyImage: gpu?.copyImage
+            ? (from, into, size)=>attached && gpu.copyImage(context, from, into, size)
+            : null,
         fence: gpu?.fence
             ? ()=>(attached ? gpu.fence(context) : null)
             : null,

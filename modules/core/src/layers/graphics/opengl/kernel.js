@@ -26,6 +26,16 @@
  */
 
 /**
+ * One image of a copy between images (glCopyImageSubData): a texture's level
+ * or a renderbuffer, and the corner of the box in it -- for a cube map, z is
+ * the face; for a 1D array, y is the layer.
+ *
+ * @typedef {{ texture?: import('./objects.js').TextureObject,
+ *     renderbuffer?: import('./objects.js').RenderbufferObject, level: number, x: number,
+ *     y: number, z: number }} CopiedImage
+ */
+
+/**
  * What the entry points share: the state, the error flag, and the three
  * decisions `enter` makes. Passed to every `context-*.js` installer.
  *
@@ -54,6 +64,11 @@
  *           Copies a rectangle of the framebuffer into a texture level on the
  *           device, as a render pass into a view of that level. Null in a build
  *           that draws on the processor, where the copy reads `framebuffer()`.
+ * @property {((from: CopiedImage, into: CopiedImage, size: { width: number, height: number,
+ *             depth: number }) => boolean) | null} [copyImage]
+ *           glCopyImageSubData on the device: true when the device copies the
+ *           box itself (both images live there in one format), false when the
+ *           copy is to be made from this side's bytes and uploaded.
  * @property {((texture: import('./objects.js').TextureObject) => void) | null} [generateMipmap]
  *           glGenerateMipmap's levels made on the device from the base level
  * @property {((request: { srcX0: number, srcY0: number, srcX1: number, srcY1: number,
