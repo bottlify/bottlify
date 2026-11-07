@@ -3118,7 +3118,12 @@ export function createWin32Module(){
                     folders,
                     // The namespace a folder browser walks is the volume every
                     // file call uses, published through the same vtables COM uses.
-                    volume: { ...volume, drives: ()=>filesystem.drives() },
+                    // Built over the volume rather than spread from it: its file
+                    // calls - mkdir, rename, remove - are inherited, and a copy of
+                    // its own properties alone left shell32 with no way to make a
+                    // folder.
+                    volume: Object.assign(Object.create(volume),
+                        { drives: ()=>filesystem.drives() }),
                     publish: comVtables.publish,
                 }),
 
