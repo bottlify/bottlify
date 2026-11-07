@@ -46,6 +46,7 @@ import {
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
 import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
 import { ES2_CALLS_NOT_COMPILED, installEs2Calls } from './context-es2.js';
+import { installViewportCalls } from './context-viewports.js';
 import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
 import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
 import {
@@ -984,6 +985,7 @@ export function createGlContext(options = {}){
             if (enter('glDepthRange', [near, far]))
             {
                 setState(GL.DEPTH_RANGE, [clamp01(near), clamp01(far)]);
+                kernel.side.allViewports?.(GL.DEPTH_RANGE);
             }
         },
 
@@ -1198,7 +1200,10 @@ export function createGlContext(options = {}){
          * @param {number} height
          */
         glViewport(x, y, width, height){
-            setBox('glViewport', GL.VIEWPORT, x, y, width, height);
+            if (setBox('glViewport', GL.VIEWPORT, x, y, width, height))
+            {
+                kernel.side.allViewports?.(GL.VIEWPORT);
+            }
         },
 
         /**
@@ -1208,7 +1213,10 @@ export function createGlContext(options = {}){
          * @param {number} height
          */
         glScissor(x, y, width, height){
-            setBox('glScissor', GL.SCISSOR_BOX, x, y, width, height);
+            if (setBox('glScissor', GL.SCISSOR_BOX, x, y, width, height))
+            {
+                kernel.side.allViewports?.(GL.SCISSOR_BOX);
+            }
         },
 
         /** @param {number} mode */
@@ -1731,6 +1739,9 @@ export function createGlContext(options = {}){
                 textures: kernel.side.saveServerTextures(mask),
                 lighting: kernel.side.saveServerLighting(mask),
                 programs: kernel.side.saveServerPrograms(mask),
+                // State an installer keeps past the records: indexed state.
+                others: (kernel.side.attribSavers ?? []).map(
+                    (/** @type {{ save: (mask: number) => any }} */ saver)=>saver.save(mask)),
             });
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
         },
@@ -1750,6 +1761,9 @@ export function createGlContext(options = {}){
             kernel.side.restoreServerTextures(saved.mask, saved.textures);
             kernel.side.restoreServerLighting(saved.lighting);
             kernel.side.restoreServerPrograms(saved.programs);
+            (kernel.side.attribSavers ?? []).forEach(
+                (/** @type {{ restore: (kept: any) => void }} */ saver, /** @type {number} */ k)=>
+                    saver.restore(saved.others[k]));
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
         },
 
@@ -1837,6 +1851,7 @@ export function createGlContext(options = {}){
     // Last: a new vertex array object starts from the arrays as the others left them.
     installVertexArrayCalls(context, kernel);
     installIndexedCalls(context, kernel);
+    installViewportCalls(context, kernel);
     installSyncCalls(context, kernel);
     installEs2Calls(context, kernel);
     installSamplerCalls(context, kernel);
@@ -1969,18 +1984,20 @@ export function createGlContext(options = {}){
      * @param {number} y
      * @param {number} width
      * @param {number} height
+     * @returns {boolean} whether the box was taken
      */
     function setBox(name, query, x, y, width, height){
         if (!enter(name, [x, y, width, height]))
         {
-            return;
+            return false;
         }
         if (width < 0 || height < 0)
         {
             setError(GL.INVALID_VALUE);
-            return;
+            return false;
         }
         setState(query, [x, y, width, height]);
+        return true;
     }
 
     /**

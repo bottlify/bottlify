@@ -229,6 +229,9 @@ export const GL_EXTENSIONS = Object.freeze({
         'glDrawElementsInstancedBaseVertexBaseInstance',
     ],
     GL_ARB_copy_buffer: ['glCopyBufferSubData'],
+    GL_ARB_viewport_array: ['glViewportArrayv', 'glViewportIndexedf', 'glViewportIndexedfv',
+        'glScissorArrayv', 'glScissorIndexed', 'glScissorIndexedv', 'glDepthRangeArrayv',
+        'glDepthRangeIndexed', 'glGetFloati_v', 'glGetDoublei_v'],
     GL_ARB_ES2_compatibility: ['glReleaseShaderCompiler', 'glShaderBinary',
         'glGetShaderPrecisionFormat', 'glDepthRangef', 'glClearDepthf'],
     GL_ARB_vertex_array_object: [

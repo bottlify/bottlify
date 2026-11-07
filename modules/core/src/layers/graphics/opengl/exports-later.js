@@ -48,6 +48,11 @@ const asFloat = word=>{
     return bits.getFloat32(0, true);
 };
 /** @param {number} low @param {number} high */
+const asDouble = (low, high)=>{
+    bits.setUint32(0, low >>> 0, true);
+    bits.setUint32(4, high >>> 0, true);
+    return bits.getFloat64(0, true);
+};
 
 /**
  * @param {LaterHelpers} h
@@ -473,6 +478,27 @@ export function laterEntryPoints(h){
         ...blendsApart(),
         glGetIntegeri_v: ([target, index, out])=>call(context=>writeQuery(out,
             context.glGetIntegeri_v(target >>> 0, index >>> 0), 'word')),
+        glGetFloati_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetFloati_v(target >>> 0, index >>> 0), 'float')),
+        glGetDoublei_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetFloati_v(target >>> 0, index >>> 0), 'double')),
+        glViewportArrayv: ([first, count, values])=>call(context=>context.glViewportArrayv(
+            first >>> 0, count | 0, readTyped('f', values, 4 * Math.max(0, count | 0)))),
+        glViewportIndexedf: ([index, x, y, width, height])=>answer(current()?.glViewportArrayv(
+            index >>> 0, 1, [x, y, width, height].map(asFloat))),
+        glViewportIndexedfv: ([index, values])=>call(context=>context.glViewportArrayv(
+            index >>> 0, 1, readTyped('f', values, 4))),
+        glScissorArrayv: ([first, count, values])=>call(context=>context.glScissorArrayv(
+            first >>> 0, count | 0, readTyped('i', values, 4 * Math.max(0, count | 0)))),
+        glScissorIndexed: ([index, x, y, width, height])=>answer(current()?.glScissorArrayv(
+            index >>> 0, 1, [x | 0, y | 0, width | 0, height | 0])),
+        glScissorIndexedv: ([index, values])=>call(context=>context.glScissorArrayv(
+            index >>> 0, 1, readTyped('i', values, 4))),
+        glDepthRangeArrayv: ([first, count, values])=>call(context=>context.glDepthRangeArrayv(
+            first >>> 0, count | 0, readTyped('d', values, 2 * Math.max(0, count | 0)))),
+        glDepthRangeIndexed: ([index, nearLow, nearHigh, farLow, farHigh])=>answer(
+            current()?.glDepthRangeArrayv(index >>> 0, 1, [asDouble(nearLow, nearHigh),
+                asDouble(farLow, farHigh)])),
         glGetBooleani_v: ([target, index, out])=>call(context=>writeQuery(out,
             context.glGetBooleani_v(target >>> 0, index >>> 0), 'byte')),
         glGetInteger64i_v: ([target, index, out])=>call(context=>writeInt64s(out,

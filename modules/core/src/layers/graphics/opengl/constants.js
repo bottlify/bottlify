@@ -1059,6 +1059,14 @@ export const GL = Object.freeze({
     MAX_VARYING_VECTORS: 0x8dfc,
     MAX_FRAGMENT_UNIFORM_VECTORS: 0x8dfd,
 
+    // --- OpenGL 4.1's viewport arrays ---
+    MAX_VIEWPORTS: 0x825b,
+    VIEWPORT_SUBPIXEL_BITS: 0x825c,
+    VIEWPORT_BOUNDS_RANGE: 0x825d,
+    LAYER_PROVOKING_VERTEX: 0x825e,
+    VIEWPORT_INDEX_PROVOKING_VERTEX: 0x825f,
+    UNDEFINED_VERTEX: 0x8260,
+
     // --- OpenGL 2.1: pixel buffer objects, sRGB textures ---
     PIXEL_PACK_BUFFER: 0x88eb,
     PIXEL_UNPACK_BUFFER: 0x88ec,

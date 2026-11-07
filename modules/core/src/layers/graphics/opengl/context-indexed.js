@@ -34,12 +34,13 @@ const BUFFERS = GLSL_LIMITS.drawBuffers;
 
 /** The calls of this file a display list does not record: the queries. */
 export const INDEXED_CALLS_NOT_COMPILED = Object.freeze([
-    'glGetIntegeri_v', 'glGetBooleani_v', 'glGetInteger64i_v', 'glGetInteger64v',
+    'glGetIntegeri_v', 'glGetBooleani_v', 'glGetInteger64i_v', 'glGetInteger64v', 'glGetFloati_v',
     'glIsEnabledi',
 ]);
 
 /**
- * @typedef {(index: number) => { kind: 'int' | 'bool' | 'int64', values: number[] } | null}
+ * @typedef {(index: number) => { kind: 'int' | 'bool' | 'int64' | 'float', values: number[] }
+ *     | null}
  *     IndexedQuery
  */
 
@@ -191,8 +192,28 @@ export function installIndexedCalls(context, kernel){
         return answer;
     };
 
+    /**
+     * The other indexed capabilities (the scissor test per viewport, 4.1),
+     * each installer's own.
+     *
+     * @type {Map<number, { count: number, set: (index: number, on: boolean) => void,
+     *     get: (index: number) => boolean }>}
+     */
+    const enables = kernel.side.indexedEnables ??= new Map();
+
     /** @param {number} cap @param {number} index @param {boolean} on */
     const enableAt = (cap, index, on)=>{
+        const other = enables.get(cap);
+        if (other)
+        {
+            if (index < 0 || index >= other.count)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            other.set(index, on);
+            return;
+        }
         if (cap !== GL.BLEND)
         {
             setError(GL.INVALID_ENUM);
@@ -231,6 +252,16 @@ export function installIndexedCalls(context, kernel){
             if (!enter('glIsEnabledi', [cap, index]))
             {
                 return GL.FALSE;
+            }
+            const other = enables.get(cap);
+            if (other)
+            {
+                if (index < 0 || index >= other.count)
+                {
+                    setError(GL.INVALID_VALUE);
+                    return GL.FALSE;
+                }
+                return other.get(index) ? GL.TRUE : GL.FALSE;
             }
             if (cap !== GL.BLEND)
             {
@@ -347,7 +378,18 @@ export function installIndexedCalls(context, kernel){
         /** @param {number} target @param {number} index @returns {number[] | null} */
         glGetIntegeri_v(target, index){
             const answer = lookUp('glGetIntegeri_v', target, index);
-            return answer ? answer.values.map(v=>(answer.kind === 'int64' ? Number(v) : v)) : null;
+            return answer ? answer.values.map(v=>(answer.kind === 'float' ? Math.round(v)
+                : answer.kind === 'int64' ? Number(v) : v)) : null;
+        },
+
+        /**
+         * glGetFloati_v and glGetDoublei_v (4.1): the values as they are.
+         *
+         * @param {number} target @param {number} index @returns {number[] | null}
+         */
+        glGetFloati_v(target, index){
+            const answer = lookUp('glGetFloati_v', target, index);
+            return answer ? answer.values.map(Number) : null;
         },
 
         /** @param {number} target @param {number} index @returns {number[] | null} */

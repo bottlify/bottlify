@@ -866,6 +866,25 @@ export const DEFAULT_STATE = Object.freeze([
         value: [GLSL_LIMITS.varyingFloats / 4],
     },
     { query: GL.SHADER_COMPILER, name: 'GL_SHADER_COMPILER', kind: 'bool', value: [1] },
+    // OpenGL 4.1's viewport arrays: sixteen, at whole pixels, the bounds the
+    // specification's least.
+    { query: GL.MAX_VIEWPORTS, name: 'GL_MAX_VIEWPORTS', kind: 'int', value: [16] },
+    {
+        query: GL.VIEWPORT_SUBPIXEL_BITS, name: 'GL_VIEWPORT_SUBPIXEL_BITS', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.VIEWPORT_BOUNDS_RANGE, name: 'GL_VIEWPORT_BOUNDS_RANGE', kind: 'float',
+        value: [-32768, 32767],
+    },
+    {
+        query: GL.LAYER_PROVOKING_VERTEX, name: 'GL_LAYER_PROVOKING_VERTEX', kind: 'enum',
+        value: [GL.UNDEFINED_VERTEX],
+    },
+    {
+        query: GL.VIEWPORT_INDEX_PROVOKING_VERTEX, name: 'GL_VIEWPORT_INDEX_PROVOKING_VERTEX',
+        kind: 'enum', value: [GL.UNDEFINED_VERTEX],
+    },
     {
         query: GL.NUM_SHADER_BINARY_FORMATS, name: 'GL_NUM_SHADER_BINARY_FORMATS', kind: 'int',
         value: [0],

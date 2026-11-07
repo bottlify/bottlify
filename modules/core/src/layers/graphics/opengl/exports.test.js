@@ -1373,3 +1373,22 @@ test('OpenGL ES 2.0\'s calls take floats and write their precisions to guest mem
         view.getInt32(out + 8, true)], [127, 127, 23]);
     assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
 });
+
+test('the indexed viewport calls take floats and doubles, and answer them', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glViewportIndexedf.handler([2, floatBits(1), floatBits(2), floatBits(3),
+        floatBits(4)]);
+    const out = 0x4000;
+    table.glGetFloati_v.handler([GL.VIEWPORT, 2, out]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getFloat32(out + at, true)), [1, 2, 3, 4]);
+    table.glDepthRangeIndexed.handler([1, ...doubleBits(0.25), ...doubleBits(0.75)]);
+    table.glGetDoublei_v.handler([GL.DEPTH_RANGE, 1, out]);
+    assert.deepEqual([view.getFloat64(out, true), view.getFloat64(out + 8, true)], [0.25, 0.75]);
+    [5, 6, 7, 8].forEach((v, i)=>view.setInt32(0x3000 + i * 4, v, true));
+    table.glScissorIndexedv.handler([3, 0x3000]);
+    table.glGetIntegeri_v.handler([GL.SCISSOR_BOX, 3, out]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(out + at, true)), [5, 6, 7, 8]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
