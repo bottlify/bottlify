@@ -393,6 +393,10 @@ export function laterEntryPoints(h){
         glBindImageTexture: ([unit, texture, level, layered, layer, access, format])=>answer(
             current()?.glBindImageTexture(unit >>> 0, texture >>> 0, level | 0,
                 (layered & 0xff) !== 0, layer | 0, access >>> 0, format >>> 0)),
+        // --- atomic counters (4.2) ---
+        glGetActiveAtomicCounterBufferiv: ([program, index, pname, out])=>call(context=>
+            writeQuery(out, context.glGetActiveAtomicCounterBufferiv(program >>> 0, index >>> 0,
+                pname >>> 0), 'word')),
         // --- shader storage blocks (4.3) ---
         glShaderStorageBlockBinding: ([program, index, binding])=>answer(
             current()?.glShaderStorageBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),

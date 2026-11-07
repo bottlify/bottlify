@@ -39,7 +39,7 @@ import { GLSL_CONSTANTS } from './glsl-library.js';
 import { BLOCK_LIMITS, COMPUTE_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
 import { IMAGE_LIMITS } from './glsl-storage.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
-import { componentsOf } from './glsl-types.js';
+import { ATOMIC_UINT, componentsOf } from './glsl-types.js';
 
 /**
  * The GLSL versions a shader may name: those the WGSL emitter writes whole
@@ -203,6 +203,8 @@ export function glTypeOf(type){
             return SAMPLER_TYPES[`${type.sampled === 'float' ? '' : type.sampled}${type.dim}`
                 + `${type.ms ? 'MS' : ''}${type.array ? 'Array' : ''}`
                 + `${type.shadow ? 'Shadow' : ''}`] ?? 0;
+        case 'atomic':
+            return 0x92db; // GL_UNSIGNED_INT_ATOMIC_COUNTER
         case 'image': {
             // GL_IMAGE_1D on, eleven shapes a kind of value (4.2 table 7.3).
             const shape = ['1D', '2D', '3D', '2DRect', 'Cube', 'Buffer', '1DArray', '2DArray',
@@ -240,18 +242,36 @@ const SAMPLER_TYPES = /** @type {Record<string, number>} */ ({
 
 /**
  * The uniforms a program lists (section 2.11.4 of 3.1): its default block's
- * leaves, then its named blocks' variables.
+ * leaves, then its named blocks' variables, then its atomic counters.
  *
  * @param {LinkedProgram} linked
  * @returns {{ name: string, size: number, type: GlslType, block: number, offset: number,
- *     arrayStride: number, matrixStride: number, rowMajor: boolean }[]}
+ *     arrayStride: number, matrixStride: number, rowMajor: boolean, counters: number }[]}
+ *     `counters` an atomic counter's buffer's index, -1 for every other
  */
 function activeUniforms(linked){
+    const buffers = counterBuffersOf(linked);
     return [
         ...linked.uniforms.map(u=>({ name: u.name, size: u.size, type: u.type, block: -1,
-            offset: -1, arrayStride: -1, matrixStride: -1, rowMajor: false })),
-        ...(linked.blockUniforms ?? []),
+            offset: -1, arrayStride: -1, matrixStride: -1, rowMajor: false, counters: -1 })),
+        ...(linked.blockUniforms ?? []).map(u=>({ ...u, counters: -1 })),
+        // An atomic counter is a uniform with no location (4.2 section 7.3.1),
+        // in the buffer of its binding.
+        ...(linked.counters ?? []).map(c=>({ name: c.count > 1 ? `${c.name}[0]` : c.name,
+            size: c.count, type: ATOMIC_UINT, block: -1, offset: c.offset,
+            arrayStride: c.count > 1 ? 4 : 0, matrixStride: 0, rowMajor: false,
+            counters: buffers.indexOf(c.binding) })),
     ];
+}
+
+/**
+ * The atomic counter buffers a program reads (4.2 section 7.3.1): its
+ * counters' bindings, each once, in order.
+ *
+ * @param {LinkedProgram} linked @returns {number[]}
+ */
+export function counterBuffersOf(linked){
+    return [...new Set((linked.counters ?? []).map(c=>c.binding))].sort((a, b)=>a - b);
 }
 
 /**
@@ -947,6 +967,8 @@ export function installShaderCalls(context, kernel){
                         .map(u=>u.name.length + 1)) : 0];
                 case GL.ACTIVE_UNIFORM_BLOCKS:
                     return [linked ? linked.blocks.length : 0];
+                case GL.ACTIVE_ATOMIC_COUNTER_BUFFERS:
+                    return [linked ? counterBuffersOf(linked).length : 0];
                 case GL.ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
                     return [linked ? Math.max(0, ...linked.blocks
                         .map(b=>b.name.length + 1)) : 0];
@@ -1544,10 +1566,12 @@ export function installShaderCalls(context, kernel){
                 [GL.UNIFORM_NAME_LENGTH]: u=>u.name.length + 1,
                 [GL.UNIFORM_BLOCK_INDEX]: u=>u.block,
                 [GL.UNIFORM_OFFSET]: u=>u.offset,
-                [GL.UNIFORM_ARRAY_STRIDE]: u=>(u.block < 0 ? -1 : u.size > 1 || u.arrayStride > 0
-                    ? u.arrayStride : 0),
+                // An atomic counter's stride is its buffer's (4.2 section 7.3.1).
+                [GL.UNIFORM_ARRAY_STRIDE]: u=>(u.block < 0 && u.counters < 0 ? -1
+                    : u.size > 1 || u.arrayStride > 0 ? u.arrayStride : 0),
                 [GL.UNIFORM_MATRIX_STRIDE]: u=>(u.block < 0 ? -1 : u.matrixStride),
                 [GL.UNIFORM_IS_ROW_MAJOR]: u=>(u.rowMajor ? 1 : 0),
+                [GL.UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX]: u=>u.counters,
             };
             const answer = read[pname];
             if (!answer)

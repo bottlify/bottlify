@@ -27,6 +27,7 @@
 import { GL } from './constants.js';
 import { BLOCK_LIMITS, COMPUTE_LIMITS } from './glsl-link.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
+import { counterBuffersOf } from './context-glsl.js';
 import {
     COUNTER_LIMITS, IMAGE_LIMITS, IMAGE_UNIT_FORMATS, STORAGE_BUFFER_OFFSET_ALIGNMENT,
     STORAGE_LIMITS,
@@ -35,7 +36,7 @@ import {
 /** The calls of this file a display list does not record (4.6 compatibility 21.4). */
 export const COMPUTE_CALLS_NOT_COMPILED = Object.freeze([
     'glDispatchCompute', 'glDispatchComputeIndirect', 'glShaderStorageBlockBinding',
-    'glGetProgramResourceIndex', 'glBindImageTexture',
+    'glGetProgramResourceIndex', 'glBindImageTexture', 'glGetActiveAtomicCounterBufferiv',
 ]);
 
 /**
@@ -206,6 +207,67 @@ export function installComputeCalls(context, kernel, gpu){
                 return;
             }
             units[unit] = { name, level, layered, layer, access, format };
+        },
+
+        /**
+         * glGetActiveAtomicCounterBufferiv (4.2 section 7.3.1): what a
+         * program's counter buffer, by its index among them, holds.
+         *
+         * @param {number} programName @param {number} index @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetActiveAtomicCounterBufferiv(programName, index, pname){
+            if (!enter('glGetActiveAtomicCounterBufferiv', [programName, index, pname]))
+            {
+                return null;
+            }
+            const program = kernel.side.programObject?.(programName);
+            if (!program)
+            {
+                return null;
+            }
+            const linked = program.linked ? program.executable?.linked : null;
+            const buffers = linked ? counterBuffersOf(linked) : [];
+            if (!linked || index < 0 || index >= buffers.length)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const binding = buffers[index];
+            /** @type {import('./glsl-storage.js').AtomicCounter[]} */
+            const all = linked.counters ?? [];
+            const counters = all.filter(c=>c.binding === binding);
+            /** @param {'vertex' | 'geometry' | 'fragment' | 'compute'} stage */
+            const referenced = stage=>[counters.some(c=>c.stages[stage]) ? 1 : 0];
+            // The counters' indices among the active uniforms, which list
+            // them after every other (`context-glsl.js` activeUniforms).
+            const first = linked.uniforms.length + (linked.blockUniforms ?? []).length;
+            switch (pname)
+            {
+                case GL.ATOMIC_COUNTER_BUFFER_BINDING:
+                    return [binding];
+                case GL.ATOMIC_COUNTER_BUFFER_DATA_SIZE:
+                    return [Math.max(...counters.map(c=>c.offset + 4 * c.count))];
+                case GL.ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTERS:
+                    return [counters.length];
+                case GL.ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTER_INDICES:
+                    return all.flatMap((c, k)=>(c.binding === binding
+                        ? [first + k] : []));
+                case GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_VERTEX_SHADER:
+                    return referenced('vertex');
+                case GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_GEOMETRY_SHADER:
+                    return referenced('geometry');
+                case GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_FRAGMENT_SHADER:
+                    return referenced('fragment');
+                case GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER:
+                    return referenced('compute');
+                case GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_CONTROL_SHADER:
+                case GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_EVALUATION_SHADER:
+                    return [0];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
         },
 
         /**
