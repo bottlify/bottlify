@@ -140,7 +140,7 @@ test('a renderbuffer\'s storage and its queries; DEPTH_STENCIL attaches to both 
     gl.bindRenderbuffer(GL.RENDERBUFFER, rb, false);
     gl.glRenderbufferStorageMultisample(GL.RENDERBUFFER, 0, 0x1234, 4, 4);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
-    gl.glRenderbufferStorageMultisample(GL.RENDERBUFFER, 0, GL.DEPTH24_STENCIL8, 4096, 4);
+    gl.glRenderbufferStorageMultisample(GL.RENDERBUFFER, 0, GL.DEPTH24_STENCIL8, 8193, 4);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'past GL_MAX_RENDERBUFFER_SIZE');
     gl.glRenderbufferStorageMultisample(GL.RENDERBUFFER, 0, GL.DEPTH24_STENCIL8, 16, 8);
     const query = (/** @type {number} */ pname)=>

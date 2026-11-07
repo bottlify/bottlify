@@ -109,13 +109,13 @@ test('a transposed matrix loads as its transpose, and a window position needs no
         assert.deepEqual(gl.glGetBooleanv(GL.CURRENT_RASTER_POSITION_VALID), [1]);
     });
 
-test('3D textures: OpenGL 3.0\'s minimum size is taken, past it is a value error', ()=>{
+test('3D textures: WebGPU\'s size is taken, past it is a value error', ()=>{
     const gl = fixture();
-    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 256, 16, 16, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
+    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 2048, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
-    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 257, 16, 16, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
+    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 2049, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
     gl.glTexImage3D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
-    assert.deepEqual(gl.glGetIntegerv(GL.MAX_3D_TEXTURE_SIZE), [256]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_3D_TEXTURE_SIZE), [2048]);
 });

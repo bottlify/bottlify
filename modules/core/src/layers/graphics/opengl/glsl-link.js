@@ -623,6 +623,16 @@ export function linkProgram(given){
             ?? [], error) : null;
     const feedback = declared ?? (given.feedback && given.feedback.names.length > 0 && before
         ? feedbackOf(before, given.feedback, error) : null);
+    // A vertex emitted to a stream past 0 is not rasterised (OpenGL 4.0); what
+    // it would add to a transform feedback buffer is not written here, so a
+    // program capturing while it emits to one does not link (A182).
+    const streams = new Set([...gs?.functions ?? [], ...gs?.subroutineFunctions ?? []]
+        .flatMap(fn=>[...fn.streams ?? []]));
+    if (feedback && streams.size > 0)
+    {
+        error(`geometry shader: transform feedback with vertices emitted to stream ${
+            Math.min(...streams)} is not supported`);
+    }
 
     // --- attributes ---
     /** @type {{ name: string, type: GlslType, location: number }[]} */

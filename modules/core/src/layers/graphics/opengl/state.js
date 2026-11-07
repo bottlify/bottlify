@@ -640,7 +640,8 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.INDEX_MODE, name: 'GL_INDEX_MODE', kind: 'bool', value: [0] },
 
     // --- implementation limits ---
-    { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [2048] },
+    // WebGPU's default maxTextureDimension2D, which every adapter gives (A181).
+    { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [8192] },
     // OpenGL 4.3's vertex attribute bindings, at the specification's least.
     {
         query: GL.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, name: 'GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET',
@@ -660,7 +661,7 @@ export const DEFAULT_STATE = Object.freeze([
     },
     {
         query: GL.MAX_CUBE_MAP_TEXTURE_SIZE, name: 'GL_MAX_CUBE_MAP_TEXTURE_SIZE', kind: 'int',
-        value: [2048],
+        value: [8192],
     },
     {
         query: GL.MAX_TEXTURE_UNITS, name: 'GL_MAX_TEXTURE_UNITS', kind: 'int',
@@ -1003,8 +1004,8 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.MAX_DRAW_BUFFERS, name: 'GL_MAX_DRAW_BUFFERS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],
     },
-    // OpenGL 3.0's minimums, both well inside WebGPU's 3D size and layers.
-    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [256] },
+    // WebGPU's default maxTextureDimension3D; the layers stay at its maxTextureArrayLayers.
+    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [2048] },
     // A buffer texture's texels (3.1) lie in rows of a 2D texture, as many
     // as its sides allow of a buffer WebGPU binds; its range starts anywhere
     // on a word.
@@ -1034,7 +1035,7 @@ export const DEFAULT_STATE = Object.freeze([
     // A rectangle (3.1) is as large as any 2D texture here.
     {
         query: GL.MAX_RECTANGLE_TEXTURE_SIZE, name: 'GL_MAX_RECTANGLE_TEXTURE_SIZE', kind: 'int',
-        value: [2048],
+        value: [8192],
     },
     { query: 0x88ff, name: 'GL_MAX_ARRAY_TEXTURE_LAYERS', kind: 'int', value: [256] },
 
@@ -1186,7 +1187,7 @@ export const DEFAULT_STATE = Object.freeze([
     },
     {
         query: GL.MAX_RENDERBUFFER_SIZE, name: 'GL_MAX_RENDERBUFFER_SIZE', kind: 'int',
-        value: [2048],
+        value: [8192],
     },
     { query: GL.MAX_SAMPLES, name: 'GL_MAX_SAMPLES', kind: 'int', value: [4] },
     // OpenGL 4.0's tessellation.

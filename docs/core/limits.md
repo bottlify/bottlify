@@ -183,12 +183,16 @@ event, an error. Neither stops the program.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.
-- OpenGL goes up to 2.1 with GLSL 1.20 and framebuffer objects; no 3.x context
-  (`wglCreateContextAttribsARB`). A framebuffer whose attachments differ in size, or has separate
-  depth and stencil images or a depth texture, is `GL_FRAMEBUFFER_UNSUPPORTED`; multisampled
-  renderbuffers draw with one sample; `glBlitFramebuffer` copies colour only; occlusion queries
-  answer the viewport's area; 3D textures are accepted and kept nowhere, and a GLSL program that
-  samples one does not link.
+- OpenGL goes up to 4.5, compatibility and core profiles (`wglCreateContextAttribsARB`), with
+  GLSL 1.10 to 4.60; 4.6 waits for SPIR-V shaders (`glSpecializeShader`). A feature the shader
+  translator does not write fails the program's link with its reason. Doubles are single
+  precision; a geometry shader's streams past 0 are not captured (such a program does not
+  link); `gl_ViewportIndex` and `gl_Layer` route nothing; arrays of subroutine uniforms are
+  refused. Every target draws with one sample a pixel. A framebuffer whose attachments differ
+  in size, has separate depth and stencil images, or a slice of a 3D texture is
+  `GL_FRAMEBUFFER_UNSUPPORTED`; `glBlitFramebuffer` copies colour only. Some limits are below
+  4.5's minimums: 8192 texels a side (2048 for 3D, 256 layers), 8 texture units, 4 draw
+  buffers, 32 varying components, 4 image uniforms a stage, WebGPU's compute limits.
 - Direct3D 11 tessellation runs as compute passes before the draw: the vertex shader over the
   control points, the hull shader a patch an invocation, the fixed-function tessellator (Microsoft's
   reference, bit for bit), and the domain shader as the vertex stage of an indirect draw. An

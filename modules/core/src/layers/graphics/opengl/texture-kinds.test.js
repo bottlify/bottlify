@@ -201,7 +201,7 @@ test('a rectangle has one level, no mipmap filter, no repeat, and its own bindin
     assert.equal(gl.glGetError(), GL.NO_ERROR);
     assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_RECTANGLE), [name]);
     assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D), [0]);
-    assert.deepEqual(gl.glGetIntegerv(GL.MAX_RECTANGLE_TEXTURE_SIZE), [2048]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_RECTANGLE_TEXTURE_SIZE), [8192]);
     const [fresh] = gl.glGenTextures(1);
     gl.glBindTexture(GL.TEXTURE_RECTANGLE, fresh);
     assert.deepEqual([GL.TEXTURE_MIN_FILTER, GL.TEXTURE_WRAP_S, GL.TEXTURE_WRAP_T]

@@ -3397,6 +3397,18 @@ export function emitStage(program, which, options, given, partner){
                     out.pre.push(node.name === 'EmitVertex' ? `${p}emit();` : `${p}cut();`);
                     return;
                 }
+                // Stream 0 is the one rasterised; a vertex emitted to another
+                // reaches only transform feedback, which the link refused (A182).
+                if (!node.user && (node.name === 'EmitStreamVertex'
+                    || node.name === 'EndStreamPrimitive'))
+                {
+                    if (node.args[0].constant[0] === 0)
+                    {
+                        out.pre.push(node.name === 'EmitStreamVertex' ? `${p}emit();`
+                            : `${p}cut();`);
+                    }
+                    return;
+                }
                 // Outside a compute stage an invocation's own accesses are in
                 // its order already, and WGSL has these barriers in compute alone;
                 // a control shader's invocations meet at barrier() (4.00 language

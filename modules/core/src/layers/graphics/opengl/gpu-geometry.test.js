@@ -225,3 +225,46 @@ void main() {
         + params.offset, 1)[0], 6, 'gsParams.invocations');
     assert.equal(gl.glGetIntegerv(GL.MAX_GEOMETRY_SHADER_INVOCATIONS)[0], 32);
 });
+
+test('stream 0 is the stream drawn; another one\'s vertices are not, and capturing with them '
+    + 'does not link', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const streams = `#version 400
+layout(triangles) in; layout(triangle_strip, max_vertices = 6) out;
+in vec3 tint[]; out vec3 colour;
+void main() {
+    for (int i = 0; i < 3; i++) {
+        colour = tint[i]; gl_Position = gl_in[i].gl_Position; EmitStreamVertex(0);
+    }
+    EndStreamPrimitive(0);
+    for (int i = 0; i < 3; i++) {
+        colour = vec3(1.0); gl_Position = vec4(9.0); EmitStreamVertex(1);
+    }
+    EndStreamPrimitive(1);
+}`;
+    const made = program(gl, [[GL.VERTEX_SHADER, VS], [GL.GEOMETRY_SHADER, streams],
+        [GL.FRAGMENT_SHADER, FS]]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [1], gl.glGetProgramInfoLog(made));
+    gl.glUseProgram(made);
+    r.floats(0x1000, [0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1]);
+    gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    const code = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>m.descriptor.code)
+        .find((/** @type {string} */ text)=>/fn geometryMain/.test(text));
+    // The shader's own main, which the pass's entry point calls.
+    const main = code.slice(code.indexOf('fn ymain('), code.indexOf('fn geometryMain'));
+    assert.equal(main.match(/emit\(\);/g)?.length, 1, 'stream 0\'s vertex alone is emitted');
+    assert.equal(main.match(/cut\(\);/g)?.length, 1);
+    assert.doesNotMatch(main, /Stream/);
+
+    const capturing = program(gl, [[GL.VERTEX_SHADER, VS], [GL.GEOMETRY_SHADER, streams],
+        [GL.FRAGMENT_SHADER, FS]]);
+    gl.glTransformFeedbackVaryings(capturing, ['colour'], GL.INTERLEAVED_ATTRIBS);
+    gl.glLinkProgram(capturing);
+    assert.deepEqual(gl.glGetProgramiv(capturing, GL.LINK_STATUS), [0]);
+    assert.match(gl.glGetProgramInfoLog(capturing), /stream 1 is not supported/);
+});

@@ -1236,6 +1236,19 @@ distances (clip_distances) and has no culling by them, which GL makes of the who
 one distance is negative at every vertex. gl_HelperInvocation is false: a helper invocation runs
 no store here, so a shader that steers its writes by it does the same. *2026-11-07.*
 
+**A181. Temporary: some limits answer below OpenGL 4.5's minimums,** the version being reported
+because every entry point of it is here: textures 8192 texels a side (16384 asked), 3D textures
+2048 a side and 256 layers (2048 asked), which are WebGPU's defaults every adapter gives; 8
+texture units for a stage and for all together, 4 draw buffers and colour attachments (8 asked;
+WebGPU's 32 bytes of colour a sample do not hold eight wide targets), 32 varying components;
+with A171 and A173 for compute and images. A program that sizes itself by the queries works; one
+that takes the minimums for granted is refused at the call that goes past them. *2026-11-07.*
+
+**A182. Temporary: a geometry shader's vertex streams past 0 are emitted nowhere,** which is what
+GL makes of them without transform feedback (stream 0 alone is rasterised); a program that
+captures while its geometry shader emits to another stream does not link, and the primitive
+queries of those streams count nothing. *2026-11-07.*
+
 **A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
 many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an
 indirect dispatch sized there. *2026-11-07.*

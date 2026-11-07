@@ -122,6 +122,7 @@ import { hasStage, languageOf } from './glsl-versions.js';
  * @property {Token} at
  * @property {string[]} [subroutines]  the subroutine types it may be called as
  * @property {number} [subroutineIndex]  its `layout(index)`, where it has one (4.30)
+ * @property {Set<number>} [streams]  the vertex streams past 0 it emits to (4.00)
  */
 
 /**
@@ -1685,6 +1686,10 @@ export function checkShader(ast, options){
             if (!args[0].constant)
             {
                 fail(args[0].at, `'${name}' : the stream must be a constant expression`);
+            }
+            else if (args[0].constant[0] !== 0 && current)
+            {
+                (current.streams ??= new Set()).add(args[0].constant[0]);
             }
         }
         if (name === 'barrier' && stage === 'tessControl')

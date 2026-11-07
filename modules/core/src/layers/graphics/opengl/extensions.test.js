@@ -153,8 +153,8 @@ test('without a way to hand out addresses, nothing is advertised and nothing is 
 
 test('the version string claims only what the entry points implement', ()=>{
     const { table, readString } = library();
-    assert.equal(readString(table.glGetString.handler([GL.VERSION])), '3.3');
-    assert.equal(readString(table.glGetString.handler([GL.SHADING_LANGUAGE_VERSION])), '3.30');
+    assert.equal(readString(table.glGetString.handler([GL.VERSION])), '4.5');
+    assert.equal(readString(table.glGetString.handler([GL.SHADING_LANGUAGE_VERSION])), '4.50');
 });
 
 test('every state in the default table is in an attribute group or deliberately not saved', ()=>{
