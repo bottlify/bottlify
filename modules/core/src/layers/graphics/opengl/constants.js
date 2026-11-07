@@ -629,6 +629,10 @@ export const GL = Object.freeze({
     MAP_FLUSH_EXPLICIT_BIT: 0x0010,
     MAP_UNSYNCHRONIZED_BIT: 0x0020,
     COPY_READ_BUFFER: 0x8f36,
+    DRAW_INDIRECT_BUFFER: 0x8f3f,
+    DRAW_INDIRECT_BUFFER_BINDING: 0x8f43,
+    PARAMETER_BUFFER: 0x80ee,
+    PARAMETER_BUFFER_BINDING: 0x80ef,
     COPY_WRITE_BUFFER: 0x8f37,
     // OpenGL 3.1's uniform buffers (GL_ARB_uniform_buffer_object).
     UNIFORM_BUFFER: 0x8a11,

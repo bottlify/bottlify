@@ -121,6 +121,10 @@ const NOT_COMPILABLE = new Set([
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
     'glVertexAttribIPointer', 'getVertexAttribI',
+    // Draws whose commands a buffer object holds (4.6 compatibility 21.4).
+    'glDrawArraysIndirect', 'glDrawElementsIndirect', 'glMultiDrawArraysIndirect',
+    'glMultiDrawElementsIndirect', 'glMultiDrawArraysIndirectCount',
+    'glMultiDrawElementsIndirectCount',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
@@ -428,6 +432,18 @@ export function createGlContext(options = {}){
     const kernel = {
         clearWith,
         enter,
+        executed: work=>{
+            const held = compiling;
+            compiling = null;
+            try
+            {
+                work();
+            }
+            finally
+            {
+                compiling = held;
+            }
+        },
         setError,
         record,
         setState,

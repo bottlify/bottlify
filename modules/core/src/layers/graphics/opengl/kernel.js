@@ -31,6 +31,8 @@
  *
  * @typedef {Object} ContextKernel
  * @property {(name: string, args: any[]) => boolean} enter
+ * @property {(work: () => void) => void} executed  runs `work` as made outside any
+ *     list being compiled: for a call a list does not hold, whose draws are made now
  * @property {(code: number) => void} setError
  * @property {(query: number) => import('./state.js').StateRecord} record
  * @property {(query: number, values: number[]) => void} setState

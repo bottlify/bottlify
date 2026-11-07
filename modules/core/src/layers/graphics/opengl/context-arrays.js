@@ -73,7 +73,17 @@ const BINDING_QUERIES = new Map([
     [GL.COPY_READ_BUFFER, GL.COPY_READ_BUFFER],
     [GL.COPY_WRITE_BUFFER, GL.COPY_WRITE_BUFFER],
     [GL.UNIFORM_BUFFER, GL.UNIFORM_BUFFER_BINDING],
+    [GL.DRAW_INDIRECT_BUFFER, GL.DRAW_INDIRECT_BUFFER_BINDING],
+    [GL.PARAMETER_BUFFER, GL.PARAMETER_BUFFER_BINDING],
 ]);
+
+/**
+ * The words of one indirect command (OpenGL 4.6 section 10.4): an arrays
+ * draw's count, instances, first and base instance; an elements draw's
+ * count, instances, first index, base vertex and base instance.
+ */
+const ARRAYS_COMMAND_WORDS = 4;
+const ELEMENTS_COMMAND_WORDS = 5;
 
 /** The access bits glMapBufferRange takes (OpenGL 3.0 section 2.9.3). */
 const MAP_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_RANGE_BIT
@@ -1065,6 +1075,114 @@ export function installArrayCalls(context, kernel){
         return true;
     }
 
+    /**
+     * The words of indirect commands (4.0, 4.3): `count` commands of `words`
+     * each, `stride` bytes apart, from the bound DRAW_INDIRECT_BUFFER or,
+     * with none bound, from the program's memory, which the compatibility
+     * profile allows. Null, and the error raised, when they cannot be read.
+     *
+     * @param {number} offset @param {number} count @param {number} stride
+     * @param {number} words
+     * @returns {number[][] | null}
+     */
+    function indirectCommands(offset, count, stride, words){
+        if (offset % 4 !== 0 || stride % 4 !== 0 || count < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const step = stride || words * 4;
+        const bound = record(GL.DRAW_INDIRECT_BUFFER_BINDING).values[0];
+        const buffer = bound === 0 ? null : kernel.shareGroup().buffers.objects.get(bound);
+        if (buffer && (buffer.mapped || (count > 0
+            && offset + (count - 1) * step + words * 4 > buffer.data.length)))
+        {
+            // A command past the store's end, or one mapped, is refused.
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const read = readerFor({ size: 1, type: GL.UNSIGNED_INT, stride: 0, pointer: 0,
+            buffer: bound });
+        if (!read)
+        {
+            lose('an indirect draw read its commands from memory there is no way to read,'
+                + ' and drew nothing');
+            return null;
+        }
+        return Array.from({ length: count }, (unused, k)=>Array.from({ length: words },
+            (none, w)=>readIndex(read, offset + k * step, GL.UNSIGNED_INT, w)));
+    }
+
+    /**
+     * How many indirect draws a counted call (4.6) makes: the word at
+     * `offset` of the bound PARAMETER_BUFFER, no more than `most`. Null, and
+     * the error raised, when there is none to read.
+     *
+     * @param {number} offset @param {number} most
+     * @returns {number | null}
+     */
+    function drawCountAt(offset, most){
+        if (offset % 4 !== 0 || most < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const bound = record(GL.PARAMETER_BUFFER_BINDING).values[0];
+        const buffer = bound === 0 ? null : kernel.shareGroup().buffers.objects.get(bound);
+        if (!buffer || buffer.mapped || offset + 4 > buffer.data.length)
+        {
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const read = /** @type {NonNullable<ReturnType<typeof readerFor>>} */ (readerFor(
+            { size: 1, type: GL.UNSIGNED_INT, stride: 0, pointer: 0, buffer: bound }));
+        return Math.min(most, readIndex(read, offset, GL.UNSIGNED_INT, 0));
+    }
+
+    /**
+     * Arrays draws by indirect commands, made now even while a list is
+     * compiled: a list does not hold them (4.6 compatibility section 21.4).
+     *
+     * @param {string} name @param {number} mode @param {number[][] | null} commands
+     */
+    function drawArraysIndirectly(name, mode, commands){
+        kernel.executed(()=>{
+            for (const [count, instances, first, baseInstance] of commands ?? [])
+            {
+                drawArraysWith(name, mode, first, count, { instances, baseInstance });
+            }
+        });
+    }
+
+    /**
+     * Elements draws by indirect commands, which read their indices from the
+     * bound element buffer, never from the program's memory.
+     *
+     * @param {string} name @param {number} mode @param {number} type
+     * @param {() => number[][] | null} commands
+     */
+    function drawElementsIndirectly(name, mode, type, commands){
+        if (!INDEX_TYPES.has(type))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (record(GL.ELEMENT_ARRAY_BUFFER_BINDING).values[0] === 0)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const size = componentBytes(type);
+        kernel.executed(()=>{
+            for (const [count, instances, firstIndex, baseVertex, baseInstance]
+                of commands() ?? [])
+            {
+                drawElementsWith(name, mode, count, type, firstIndex * size, baseVertex | 0,
+                    { instances, baseInstance });
+            }
+        });
+    }
+
     Object.assign(context, {
         /**
          * glPrimitiveRestartIndex (3.1): the index that restarts while
@@ -1423,6 +1541,87 @@ export function installArrayCalls(context, kernel){
             counts.forEach((count, k)=>{
                 drawElementsWith('glMultiDrawElementsBaseVertex', mode, count, type, indices[k],
                     baseVertices[k] ?? 0, ONE_INSTANCE);
+            });
+        },
+
+        // --- indirect draws (4.0, 4.3, 4.6) ---
+
+        /** @param {number} mode @param {number} indirect */
+        glDrawArraysIndirect(mode, indirect){
+            if (enter('glDrawArraysIndirect', [mode, indirect]))
+            {
+                drawArraysIndirectly('glDrawArraysIndirect', mode,
+                    indirectCommands(indirect, 1, 0, ARRAYS_COMMAND_WORDS));
+            }
+        },
+
+        /** @param {number} mode @param {number} type @param {number} indirect */
+        glDrawElementsIndirect(mode, type, indirect){
+            if (enter('glDrawElementsIndirect', [mode, type, indirect]))
+            {
+                drawElementsIndirectly('glDrawElementsIndirect', mode, type,
+                    ()=>indirectCommands(indirect, 1, 0, ELEMENTS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} indirect @param {number} drawcount
+         * @param {number} stride
+         */
+        glMultiDrawArraysIndirect(mode, indirect, drawcount, stride){
+            if (enter('glMultiDrawArraysIndirect', [mode, indirect, drawcount, stride]))
+            {
+                drawArraysIndirectly('glMultiDrawArraysIndirect', mode,
+                    indirectCommands(indirect, drawcount, stride, ARRAYS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} type @param {number} indirect
+         * @param {number} drawcount @param {number} stride
+         */
+        glMultiDrawElementsIndirect(mode, type, indirect, drawcount, stride){
+            if (enter('glMultiDrawElementsIndirect', [mode, type, indirect, drawcount, stride]))
+            {
+                drawElementsIndirectly('glMultiDrawElementsIndirect', mode, type,
+                    ()=>indirectCommands(indirect, drawcount, stride, ELEMENTS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} indirect @param {number} drawcount  the
+         *     count's offset in the parameter buffer
+         * @param {number} most @param {number} stride
+         */
+        glMultiDrawArraysIndirectCount(mode, indirect, drawcount, most, stride){
+            if (!enter('glMultiDrawArraysIndirectCount', [mode, indirect, drawcount, most,
+                stride]))
+            {
+                return;
+            }
+            const count = drawCountAt(drawcount, most);
+            if (count !== null)
+            {
+                drawArraysIndirectly('glMultiDrawArraysIndirectCount', mode,
+                    indirectCommands(indirect, count, stride, ARRAYS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} type @param {number} indirect
+         * @param {number} drawcount  the count's offset in the parameter buffer
+         * @param {number} most @param {number} stride
+         */
+        glMultiDrawElementsIndirectCount(mode, type, indirect, drawcount, most, stride){
+            if (!enter('glMultiDrawElementsIndirectCount', [mode, type, indirect, drawcount,
+                most, stride]))
+            {
+                return;
+            }
+            drawElementsIndirectly('glMultiDrawElementsIndirectCount', mode, type, ()=>{
+                const count = drawCountAt(drawcount, most);
+                return count === null ? null
+                    : indirectCommands(indirect, count, stride, ELEMENTS_COMMAND_WORDS);
             });
         },
 

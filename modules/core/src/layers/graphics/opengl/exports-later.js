@@ -643,6 +643,22 @@ export function laterEntryPoints(h){
         glDrawElementsInstancedBaseVertexBaseInstance: a=>answer(
             current()?.glDrawElementsInstancedBaseVertexBaseInstance(a[0] >>> 0, a[1] | 0,
                 a[2] >>> 0, a[3] >>> 0, a[4] | 0, a[5] | 0, a[6] >>> 0)),
+        glDrawArraysIndirect: ([mode, indirect])=>answer(
+            current()?.glDrawArraysIndirect(mode >>> 0, indirect >>> 0)),
+        glDrawElementsIndirect: ([mode, type, indirect])=>answer(
+            current()?.glDrawElementsIndirect(mode >>> 0, type >>> 0, indirect >>> 0)),
+        glMultiDrawArraysIndirect: ([mode, indirect, drawcount, stride])=>answer(
+            current()?.glMultiDrawArraysIndirect(mode >>> 0, indirect >>> 0, drawcount | 0,
+                stride | 0)),
+        glMultiDrawElementsIndirect: ([mode, type, indirect, drawcount, stride])=>answer(
+            current()?.glMultiDrawElementsIndirect(mode >>> 0, type >>> 0, indirect >>> 0,
+                drawcount | 0, stride | 0)),
+        glMultiDrawArraysIndirectCount: ([mode, indirect, drawcount, most, stride])=>answer(
+            current()?.glMultiDrawArraysIndirectCount(mode >>> 0, indirect >>> 0,
+                drawcount >>> 0, most | 0, stride | 0)),
+        glMultiDrawElementsIndirectCount: ([mode, type, indirect, drawcount, most, stride])=>
+            answer(current()?.glMultiDrawElementsIndirectCount(mode >>> 0, type >>> 0,
+                indirect >>> 0, drawcount >>> 0, most | 0, stride | 0)),
         glMultiDrawElementsBaseVertex: ([mode, counts, type, indices, drawcount, bases])=>
             call(context=>{
                 const n = Math.max(0, drawcount | 0);
