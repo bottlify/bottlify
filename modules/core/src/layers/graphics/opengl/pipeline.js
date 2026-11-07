@@ -217,6 +217,9 @@ import { stippleKeeps } from './legacy-state.js';
  *           what transform feedback captures a draw into, while it does
  *           (`context-transform-feedback.js` FeedbackSession); the renderer
  *           adds to `most` the vertices each draw may capture
+ * @property {{ key: string, chosen: Map<string, Map<string, string>> } | null} [subroutines]
+ *           the function each of a GLSL program's subroutine uniforms names, by stage
+ *           (4.0), where the program chose; `key` names the choice
  * @property {boolean} [discard]  GL_RASTERIZER_DISCARD: the draw rasterizes nothing
  * @property {{ vertices: number, outer: readonly number[], inner: readonly number[] }
  *     | null} [patch]  GL_PATCH_VERTICES and the default levels, for a program with

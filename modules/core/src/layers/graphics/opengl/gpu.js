@@ -2032,7 +2032,8 @@ export function createGpuRenderer(services){
                     ? [{ format: target.formats[0] || COLOUR_FORMAT,
                         mask: scene.perBuffer.masks[0], blend: scene.perBuffer.blend[0] }]
                     : undefined,
-            glsl: glsl ? { id: glsl.id, program: glsl.linked } : null,
+            glsl: glsl ? { id: glsl.id, program: glsl.linked,
+                subroutines: scene.subroutines ?? null } : null,
             samplerSwizzles: glsl ? samplerSwizzlesOf(scene, glsl) : '',
             twoSide: glsl ? scene.twoSide : false,
             units,

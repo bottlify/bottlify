@@ -121,6 +121,7 @@ import { hasStage, languageOf } from './glsl-versions.js';
  * @property {Set<VariableSymbol>} uses  the global and built-in variables it names
  * @property {Token} at
  * @property {string[]} [subroutines]  the subroutine types it may be called as
+ * @property {number} [subroutineIndex]  its `layout(index)`, where it has one (4.30)
  */
 
 /**
@@ -3108,6 +3109,12 @@ export function checkShader(ast, options){
                 fail(decl.at, `'${decl.name}' : a subroutine function cannot be overloaded`);
             }
             fn.subroutines = q.subroutine.map(t=>t.text);
+            // 4.30's explicit index of a subroutine function (section 4.4.4).
+            const index = /** @type {Record<string, any>} */ (layoutOf(q)).index;
+            if (typeof index === 'number')
+            {
+                fn.subroutineIndex = index;
+            }
         }
         if (!decl.body)
         {

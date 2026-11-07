@@ -67,7 +67,24 @@ import { linkTessellation } from './glsl-link-tess.js';
  *     shaders name, with the types this version gives them
  * @property {import('./glsl-types.js').StructType[]} structs  one per name
  * @property {number} version
+ * @property {UserFunction[]} [subroutineFunctions]  its subroutine functions (4.0) a
+ *     call reaches, in the order they are declared
  */
+
+/**
+ * A stage's subroutines (4.0 section 7.9): each function a subroutine
+ * uniform may name by its index, and each active subroutine uniform by its
+ * location with the indices of the functions of its type.
+ *
+ * @typedef {Object} StageSubroutines
+ * @property {{ name: string, key: string, index: number }[]} functions
+ * @property {{ name: string, type: string, location: number, compatible: number[] }[]}
+ *     uniforms
+ * @property {number} locations  GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS
+ */
+
+/** GL_MAX_SUBROUTINES and GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS (4.0 table 6.48). */
+export const SUBROUTINE_LIMITS = Object.freeze({ functions: 256, locations: 1024 });
 
 /**
  * A value the vertex stage passes the fragment stage (section 4.3.4 of 1.30,
@@ -202,6 +219,8 @@ export const FEEDBACK_LIMITS = Object.freeze({
 /**
  * @typedef {Object} LinkedProgram
  * @property {LinkedStage | null} vertex
+ * @property {Record<string, StageSubroutines>} [subroutines]  by stage, the stages with
+ *     subroutines (4.0)
  * @property {LinkedStage | null} [tessControl]
  * @property {LinkedStage | null} [tessEvaluation]
  * @property {import('./glsl-link-tess.js').TessLayout | null} [tessLayout]
@@ -428,6 +447,18 @@ export function linkProgram(given){
             for (const symbol of fn.uses)
             {
                 uses.add(symbol.name);
+                // A call through a subroutine uniform may reach every function
+                // of its type (4.0 section 2.11.4): each is the stage's.
+                if (symbol.subroutine)
+                {
+                    for (const other of defined.values())
+                    {
+                        if (other.subroutines?.includes(symbol.subroutine))
+                        {
+                            visit(other.key);
+                        }
+                    }
+                }
             }
             state.set(key, 'done');
             ordered.push(fn);
@@ -458,6 +489,8 @@ export function linkProgram(given){
         }
         return {
             stage, main, functions: ordered, globals: [...globals.values()], uses, builtins,
+            subroutineFunctions: [...defined.values()].filter(fn=>fn.subroutines
+                && state.get(fn.key) === 'done'),
             structs: [...structs.values()],
             version: Math.max(...units.map(unit=>unit.version)),
         };
@@ -848,6 +881,17 @@ export function linkProgram(given){
         }
     }
 
+    /** @type {Record<string, StageSubroutines>} */
+    const subroutines = {};
+    for (const stage of [vs, tcs, tes, gs, fs, cs])
+    {
+        const table = stage ? subroutinesOf(stage, error) : null;
+        if (stage && table)
+        {
+            subroutines[stage.stage] = table;
+        }
+    }
+
     if (errors.length > 0)
     {
         return { ok: false, log: `${errors.join('\n')}\n` };
@@ -856,6 +900,7 @@ export function linkProgram(given){
         ok: true,
         log: '',
         program: {
+            subroutines,
             vertex: vs, geometry: gs, geometryInputs, geometryLayout, feedback, fragment: fs,
             tessControl: tcs, tessEvaluation: tes, ...tessellation,
             attributes, builtinAttributes, uniforms, locations,
@@ -864,6 +909,91 @@ export function linkProgram(given){
             ...cs ? { compute: cs, localSize: /** @type {[number, number, number]} */ (
                 localSize) } : {},
         },
+    };
+}
+
+/**
+ * A stage's subroutine table (4.0 section 7.9, 4.3's explicit indices and
+ * locations): its subroutine functions numbered from 0, those a
+ * `layout(index)` places first, in the order they are declared; its active
+ * subroutine uniforms placed likewise, `layout(location)` first. Null for a
+ * stage with neither.
+ *
+ * @param {LinkedStage} stage @param {(message: string) => void} error
+ * @returns {StageSubroutines | null}
+ */
+function subroutinesOf(stage, error){
+    const functions = stage.subroutineFunctions ?? [];
+    const uniforms = stage.globals.filter(symbol=>symbol.subroutine && stage.uses.has(symbol.name));
+    if (functions.length === 0 && uniforms.length === 0)
+    {
+        return null;
+    }
+    /**
+     * Numbers for `items`, the explicit ones kept and refused when two meet
+     * or one is past `most`, the rest the lowest free in order.
+     *
+     * @template T
+     * @param {T[]} items @param {(item: T) => number | undefined} explicit
+     * @param {number} most @param {string} what @param {(item: T) => string} name
+     * @returns {Map<T, number>}
+     */
+    const place = (items, explicit, most, what, name)=>{
+        /** @type {Map<T, number>} */
+        const at = new Map();
+        /** @type {Set<number>} */
+        const taken = new Set();
+        for (const item of items)
+        {
+            const given = explicit(item);
+            if (given === undefined)
+            {
+                continue;
+            }
+            if (taken.has(given) || given < 0 || given >= most)
+            {
+                error(`${stage.stage} shader: ${what} ${given} of '${name(item)}' is taken or past`
+                    + ` the last (${most})`);
+            }
+            taken.add(given);
+            at.set(item, given);
+        }
+        let next = 0;
+        for (const item of items)
+        {
+            if (at.has(item))
+            {
+                continue;
+            }
+            while (taken.has(next))
+            {
+                next++;
+            }
+            if (next >= most)
+            {
+                error(`${stage.stage} shader: more ${what}s than the ${most} there are`);
+            }
+            taken.add(next);
+            at.set(item, next);
+        }
+        return at;
+    };
+    const indices = place(functions, fn=>fn.subroutineIndex, SUBROUTINE_LIMITS.functions,
+        'subroutine index', fn=>fn.name);
+    const locations = place(uniforms, symbol=>{
+        const given = symbol.qualifiers?.layout.location;
+        return typeof given === 'number' ? given : undefined;
+    }, SUBROUTINE_LIMITS.locations, 'subroutine uniform location', symbol=>symbol.name);
+    return {
+        functions: functions.map(fn=>({ name: fn.name, key: fn.key,
+            index: /** @type {number} */ (indices.get(fn)) })),
+        uniforms: uniforms.map(symbol=>({ name: symbol.name,
+            type: /** @type {string} */ (symbol.subroutine),
+            location: /** @type {number} */ (locations.get(symbol)),
+            compatible: functions.filter(fn=>fn.subroutines?.includes(
+                /** @type {string} */ (symbol.subroutine))).map(fn=>
+                /** @type {number} */ (indices.get(fn))) })),
+        locations: Math.max(0, ...[...locations.values()].map(at=>at + 1)),
     };
 }
 

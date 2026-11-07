@@ -20,7 +20,7 @@
  * - **What has no older call** - buffer variables and storage blocks, the
  *   transform feedback buffers, inputs and outputs of stages other than the
  *   vertex and fragment ones - is read from the link (`glsl-link.js`).
- * - **No subroutine is linked**: the subroutine interfaces are empty lists,
+ * - **Subroutines** are the link's tables (`glsl-link.js` StageSubroutines),
  *   asked as the others are.
  * - **A program never linked, or last linked unsuccessfully, has no active
  *   resource**: its lists are empty, and a location asked of it is
@@ -134,7 +134,10 @@ const COUNTER_REFERENCED = Object.freeze({
     compute: GL.ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER,
 });
 
-/** The subroutine interfaces (none is ever linked). @type {Set<number>} */
+/** The stages the subroutine interfaces below name, in their order. */
+const SUBROUTINE_STAGE_NAMES = ['vertex', 'tessControl', 'tessEvaluation', 'geometry',
+    'fragment', 'compute'];
+/** The subroutine interfaces. @type {Set<number>} */
 const SUBROUTINES = new Set([I.VERTEX_SUBROUTINE, I.TESS_CONTROL_SUBROUTINE,
     I.TESS_EVALUATION_SUBROUTINE, I.GEOMETRY_SUBROUTINE, I.FRAGMENT_SUBROUTINE,
     I.COMPUTE_SUBROUTINE]);
@@ -497,9 +500,31 @@ export function installInterfaceCalls(context, kernel){
                     ]);
                 });
             }
-            default:
-                // The subroutine interfaces: no subroutine is ever linked.
-                return [];
+            default: {
+                // The subroutine interfaces: a stage's subroutine functions in
+                // the order of their indices, its subroutine uniforms with the
+                // locations they take (4.0 section 7.9).
+                const order = SUBROUTINES.has(programInterface) ? [...SUBROUTINES]
+                    : [...SUBROUTINE_UNIFORMS];
+                const stage = SUBROUTINE_STAGE_NAMES[order.indexOf(programInterface)];
+                const table = linked.subroutines?.[stage];
+                if (!table)
+                {
+                    return [];
+                }
+                if (SUBROUTINES.has(programInterface))
+                {
+                    return [...table.functions].sort((a, b)=>a.index - b.index).map(fn=>
+                        resource(fn.name, [[I.NAME_LENGTH, ()=>[fn.name.length + 1]]]));
+                }
+                return table.uniforms.map(uniform=>resource(uniform.name, [
+                    [I.NAME_LENGTH, ()=>[uniform.name.length + 1]],
+                    [I.ARRAY_SIZE, ()=>[1]],
+                    [I.NUM_COMPATIBLE_SUBROUTINES, ()=>[uniform.compatible.length]],
+                    [I.COMPATIBLE_SUBROUTINES, ()=>[...uniform.compatible]],
+                    [I.LOCATION, ()=>[uniform.location]],
+                ]));
+            }
         }
     };
 

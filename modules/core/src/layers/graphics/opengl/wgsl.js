@@ -111,7 +111,9 @@ import { controlEntry, evaluationEntry, tessRegisters } from './glsl-wgsl-tess.j
  *           when there is more than `targetFormat` with `colourMask`: a
  *           framebuffer object's draw buffers, each with the channels it is
  *           written in (an RGB attachment's alpha is not)
- * @property {{ id: number, program: import('./glsl-link.js').LinkedProgram } | null} [glsl]
+ * @property {{ id: number, program: import('./glsl-link.js').LinkedProgram,
+ *     subroutines?: { key: string, chosen: Map<string, Map<string, string>> } | null }
+ *     | null} [glsl]  a GLSL program, with the functions its subroutine uniforms name
  *           the GLSL program in use: its link, by a number unique to it
  * @property {boolean} [twoSide]  GL_VERTEX_PROGRAM_TWO_SIDE, for a GLSL program
  * @property {string} [samplerSwizzles]  the swizzles (3.3) of the textures a GLSL
@@ -512,7 +514,8 @@ export function drawKey(state){
             : '-',
         targetsKey(state.targets),
         state.glsl ? `g${state.glsl.id}${state.twoSide ? 't' : ''}${state.samplerSwizzles
-            ? `s${state.samplerSwizzles}` : ''}` : '-',
+            ? `s${state.samplerSwizzles}` : ''}${state.glsl.subroutines
+            ? `r${state.glsl.subroutines.key}` : ''}` : '-',
         state.stipple || '-',
     ].join('|');
 }
@@ -641,6 +644,7 @@ export function sameKeyInputs(a, b){
         return false;
     }
     if (targetsKey(a.targets) !== targetsKey(b.targets) || (a.glsl?.id ?? 0) !== (b.glsl?.id ?? 0)
+        || (a.glsl?.subroutines?.key ?? '') !== (b.glsl?.subroutines?.key ?? '')
         || !a.twoSide !== !b.twoSide)
     {
         return false;
@@ -1305,6 +1309,8 @@ function generateGlslDraw(state){
     const options = {
         attributes: state.attributes, flat: state.flat, twoSide: !!state.twoSide,
         swizzles: swizzlesOf(state.samplerSwizzles),
+        subroutines: /** @type {NonNullable<DrawState['glsl']>} */ (state.glsl).subroutines
+            ?.chosen,
         alphaFunc: state.alphaFunc, targets, compare: compareExpression,
         targetScalars: (state.targets?.map(t=>t.format) ?? [state.targetFormat])
             .map(format=>(/sint$/.test(format) ? 'i32' : /uint$/.test(format) ? 'u32' : 'f32')),

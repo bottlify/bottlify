@@ -1226,6 +1226,11 @@ uniform or storage block keeps its eight bytes and layout: it is read into the f
 nearest, and written back as the double that f32 is; packDouble2x32 and unpackDouble2x32 go
 through the same conversion. A dvec3 or dvec4 input takes its two locations. *2026-11-07.*
 
+**A179. Temporary: an array of subroutine uniforms is refused** where a call indexes it (a
+syntax error at the call): a subroutine uniform is one function's name. A draw is made with the
+program's module written for the functions the program chose (glUniformSubroutinesuiv), each
+choice its own module. *2026-11-07.*
+
 **A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
 many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an
 indirect dispatch sized there. *2026-11-07.*

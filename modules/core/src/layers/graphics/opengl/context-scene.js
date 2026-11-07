@@ -444,6 +444,7 @@ export function createSceneBuilder(kernel){
             counterBuffers: glsl ? side.counterBuffers?.() ?? [] : [],
             imageUnits: glsl ? side.imageUnits?.() ?? [] : [],
             feedback: glsl ? side.feedbackSession?.() ?? null : null,
+            subroutines: glsl ? side.subroutineChoice?.() ?? null : null,
             patch: glsl?.linked.tessEvaluation ? {
                 vertices: record(TESS.PATCH_VERTICES).values[0],
                 outer: record(TESS.PATCH_DEFAULT_OUTER_LEVEL).values,

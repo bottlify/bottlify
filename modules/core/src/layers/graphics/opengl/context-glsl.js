@@ -2178,6 +2178,352 @@ export function installShaderCalls(context, kernel){
                 : { values, float };
         },
     });
+    installSubroutineCalls(context, kernel, objectOf, ()=>currentProgram?.executable
+        ?? (boundPipeline && Object.values(boundPipeline.stages).some(Boolean)
+            ? pipelineExecutable(boundPipeline) : null));
+}
+
+/** The subroutine stages, by their shader type (4.0 section 7.9). @type {Map<number, string>} */
+const SUBROUTINE_STAGES = new Map(/** @type {[number, string][]} */ ([[GL.VERTEX_SHADER, 'vertex'],
+    [TESS.TESS_CONTROL_SHADER, 'tessControl'], [TESS.TESS_EVALUATION_SHADER, 'tessEvaluation'],
+    [GL.GEOMETRY_SHADER, 'geometry'], [GL.FRAGMENT_SHADER, 'fragment'],
+    [GL.COMPUTE_SHADER, 'compute']]));
+
+/** The subroutine queries' names (4.0 tables 6.47 and 6.48). */
+const SUB = Object.freeze({
+    ACTIVE_SUBROUTINES: 0x8de5, ACTIVE_SUBROUTINE_UNIFORMS: 0x8de6,
+    ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS: 0x8e47, ACTIVE_SUBROUTINE_MAX_LENGTH: 0x8e48,
+    ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH: 0x8e49, NUM_COMPATIBLE_SUBROUTINES: 0x8e4a,
+    COMPATIBLE_SUBROUTINES: 0x8e4b, UNIFORM_SIZE: 0x8a38, UNIFORM_NAME_LENGTH: 0x8a39,
+});
+
+/**
+ * Subroutines (OpenGL 4.0 section 7.9): which function each subroutine
+ * uniform of the program in use names, a stage at a time; the queries of a
+ * program's subroutine tables (`glsl-link.js` StageSubroutines). What a
+ * draw is made with is the program's module made for the functions chosen
+ * (`subroutineChoice`): a choice is per draw, as the specification's
+ * uniforms are the context's, lost when another program comes into use.
+ *
+ * @param {any} context @param {import('./kernel.js').ContextKernel} kernel
+ * @param {(name: number, kind: 'program') => ProgramObject | null} objectOf
+ * @param {() => Executable | null} running  the executable draws run
+ */
+function installSubroutineCalls(context, kernel, objectOf, running){
+    const { enter, setError } = kernel;
+    /** @type {Map<string, number[]>} the index chosen at each location, by stage */
+    let choices = new Map();
+    /** @type {Executable | null} what the choices were made for */
+    let chosenFor = null;
+
+    /** The choices of the executable in use: none where it changed since they were made. */
+    const current = ()=>{
+        const executable = running();
+        if (executable !== chosenFor)
+        {
+            choices = new Map();
+            chosenFor = executable;
+        }
+        return executable;
+    };
+
+    /**
+     * A shader type's stage, or null with GL_INVALID_ENUM.
+     *
+     * @param {number} type @returns {string | null}
+     */
+    const stageOf = type=>{
+        const stage = SUBROUTINE_STAGES.get(type);
+        if (!stage)
+        {
+            setError(GL.INVALID_ENUM);
+            return null;
+        }
+        return stage;
+    };
+
+    /**
+     * A program's subroutine table for a stage, an empty one where the stage
+     * has none, or null with the error set.
+     *
+     * @param {number} programName @param {number} type
+     * @returns {import('./glsl-link.js').StageSubroutines | null}
+     */
+    const tableOf = (programName, type)=>{
+        const stage = stageOf(type);
+        const program = stage ? objectOf(programName, 'program') : null;
+        if (!stage || !program)
+        {
+            return null;
+        }
+        return (program.linked ? program.executable?.linked.subroutines?.[stage] : null)
+            ?? { functions: [], uniforms: [], locations: 0 };
+    };
+
+    Object.assign(kernel.side, {
+        /**
+         * What the program in use's module is made for: the function each
+         * chosen subroutine uniform names, by stage, and a key of it; null
+         * where nothing was chosen.
+         *
+         * @returns {{ key: string, chosen: Map<string, Map<string, string>> } | null}
+         */
+        subroutineChoice: ()=>{
+            const executable = current();
+            const tables = executable?.linked.subroutines;
+            if (!tables || choices.size === 0)
+            {
+                return null;
+            }
+            /** @type {Map<string, Map<string, string>>} */
+            const chosen = new Map();
+            const parts = [];
+            for (const [stage, indices] of choices)
+            {
+                const table = tables[stage];
+                /** @type {Map<string, string>} */
+                const named = new Map();
+                for (const uniform of table?.uniforms ?? [])
+                {
+                    const fn = table?.functions.find(f=>f.index === indices[uniform.location]);
+                    if (fn)
+                    {
+                        named.set(uniform.name, fn.key);
+                    }
+                }
+                chosen.set(stage, named);
+                parts.push(`${stage}:${indices.join(',')}`);
+            }
+            return { key: parts.join(';'), chosen };
+        },
+    });
+
+    Object.assign(context, {
+        /** @param {number} programName @param {number} type @param {string} name */
+        glGetSubroutineUniformLocation(programName, type, name){
+            if (!enter('glGetSubroutineUniformLocation', [programName, type, name]))
+            {
+                return -1;
+            }
+            const table = tableOf(programName, type);
+            return table?.uniforms.find(u=>u.name === name)?.location ?? -1;
+        },
+
+        /** @param {number} programName @param {number} type @param {string} name */
+        glGetSubroutineIndex(programName, type, name){
+            if (!enter('glGetSubroutineIndex', [programName, type, name]))
+            {
+                return GL.INVALID_INDEX;
+            }
+            const table = tableOf(programName, type);
+            return table?.functions.find(f=>f.name === name)?.index ?? GL.INVALID_INDEX;
+        },
+
+        /**
+         * glGetActiveSubroutineUniformiv: an active subroutine uniform's
+         * compatible functions, its size and its name's length.
+         *
+         * @param {number} programName @param {number} type @param {number} index
+         * @param {number} pname @returns {number[] | null}
+         */
+        glGetActiveSubroutineUniformiv(programName, type, index, pname){
+            if (!enter('glGetActiveSubroutineUniformiv', [programName, type, index, pname]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            const uniform = table.uniforms[index];
+            if (!uniform)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            switch (pname)
+            {
+                case SUB.NUM_COMPATIBLE_SUBROUTINES:
+                    return [uniform.compatible.length];
+                case SUB.COMPATIBLE_SUBROUTINES:
+                    return [...uniform.compatible];
+                case SUB.UNIFORM_SIZE:
+                    return [1];
+                case SUB.UNIFORM_NAME_LENGTH:
+                    return [uniform.name.length + 1];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+
+        /**
+         * @param {number} programName @param {number} type @param {number} index
+         * @returns {string | null}
+         */
+        glGetActiveSubroutineUniformName(programName, type, index){
+            if (!enter('glGetActiveSubroutineUniformName', [programName, type, index]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            const uniform = table.uniforms[index];
+            if (!uniform)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return uniform.name;
+        },
+
+        /**
+         * @param {number} programName @param {number} type @param {number} index
+         * @returns {string | null}
+         */
+        glGetActiveSubroutineName(programName, type, index){
+            if (!enter('glGetActiveSubroutineName', [programName, type, index]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            const fn = table.functions.find(f=>f.index === index);
+            if (!fn)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return fn.name;
+        },
+
+        /**
+         * glUniformSubroutinesuiv: the function every location of a stage's
+         * subroutine uniforms names, all at once.
+         *
+         * @param {number} type @param {readonly number[]} indices
+         */
+        glUniformSubroutinesuiv(type, indices){
+            if (!enter('glUniformSubroutinesuiv', [type, [...indices]]))
+            {
+                return;
+            }
+            const stage = stageOf(type);
+            if (!stage)
+            {
+                return;
+            }
+            const executable = current();
+            if (!executable)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const table = executable.linked.subroutines?.[stage]
+                ?? { functions: [], uniforms: [], locations: 0 };
+            if (indices.length !== table.locations
+                || indices.some(index=>!table.functions.some(f=>f.index === index)))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (table.uniforms.some(u=>!u.compatible.includes(indices[u.location])))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            choices.set(stage, [...indices]);
+        },
+
+        /**
+         * @param {number} type @param {number} location
+         * @returns {number[] | null}
+         */
+        glGetUniformSubroutineuiv(type, location){
+            if (!enter('glGetUniformSubroutineuiv', [type, location]))
+            {
+                return null;
+            }
+            const stage = stageOf(type);
+            if (!stage)
+            {
+                return null;
+            }
+            const executable = current();
+            if (!executable)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            const table = executable.linked.subroutines?.[stage];
+            if (!table || location < 0 || location >= table.locations)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const chosen = choices.get(stage)?.[location];
+            // Never chosen: the function a draw calls, its type's first.
+            const uniform = table.uniforms.find(u=>u.location === location);
+            return [chosen ?? uniform?.compatible[0] ?? 0];
+        },
+
+        /**
+         * glGetProgramStageiv: a stage's subroutine counts and longest names.
+         *
+         * @param {number} programName @param {number} type @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetProgramStageiv(programName, type, pname){
+            if (!enter('glGetProgramStageiv', [programName, type, pname]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            /** @param {{ name: string }[]} list */
+            const longest = list=>list.reduce((most, item)=>Math.max(most, item.name.length + 1),
+                0);
+            switch (pname)
+            {
+                case SUB.ACTIVE_SUBROUTINES:
+                    return [table.functions.length];
+                case SUB.ACTIVE_SUBROUTINE_UNIFORMS:
+                    return [table.uniforms.length];
+                case SUB.ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS:
+                    return [table.locations];
+                case SUB.ACTIVE_SUBROUTINE_MAX_LENGTH:
+                    return [longest(table.functions)];
+                case SUB.ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH:
+                    return [longest(table.uniforms)];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+    });
+
+    // glUseProgram, even of the program in use, and a pipeline's change lose
+    // the choices (4.0 section 7.9).
+    for (const name of ['glUseProgram', 'glBindProgramPipeline', 'glUseProgramStages',
+        'glLinkProgram'])
+    {
+        const plain = context[name];
+        context[name] = (/** @type {any[]} */ ...args)=>{
+            const answer = plain.apply(context, args);
+            choices = new Map();
+            return answer;
+        };
+    }
 }
 
 /**
@@ -2219,6 +2565,9 @@ export const SHADER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
     'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary', 'programUniform',
     'getnUniform', 'genProgramPipelines', 'glDeleteProgramPipelines', 'glIsProgramPipeline',
+    'glGetSubroutineUniformLocation', 'glGetSubroutineIndex', 'glGetActiveSubroutineUniformiv',
+    'glGetActiveSubroutineUniformName', 'glGetActiveSubroutineName', 'glGetUniformSubroutineuiv',
+    'glGetProgramStageiv',
     'glBindProgramPipeline', 'glUseProgramStages', 'glActiveShaderProgram',
     'glValidateProgramPipeline', 'glGetProgramPipelineiv', 'glGetProgramPipelineInfoLog',
     'glCreateShaderProgramv',

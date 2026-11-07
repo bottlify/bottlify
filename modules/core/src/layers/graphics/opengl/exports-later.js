@@ -904,6 +904,29 @@ export function laterEntryPoints(h){
         glClipControl: ([origin, depth])=>answer(current()?.glClipControl(origin >>> 0,
             depth >>> 0)),
 
+        // --- subroutines (4.0) ---
+
+        glGetSubroutineUniformLocation: ([program, type, name])=>current()
+            ?.glGetSubroutineUniformLocation(program >>> 0, type >>> 0, h.readName(name)) ?? -1,
+        glGetSubroutineIndex: ([program, type, name])=>current()
+            ?.glGetSubroutineIndex(program >>> 0, type >>> 0, h.readName(name)) ?? GL.INVALID_INDEX,
+        glGetActiveSubroutineUniformiv: ([program, type, index, pname, out])=>call(context=>
+            writeQuery(out, context.glGetActiveSubroutineUniformiv(program >>> 0, type >>> 0,
+                index >>> 0, pname >>> 0), 'word')),
+        glGetActiveSubroutineUniformName: ([program, type, index, size, length, out])=>call(
+            context=>answerString(context.glGetActiveSubroutineUniformName(program >>> 0,
+                type >>> 0, index >>> 0), size, length, out)),
+        glGetActiveSubroutineName: ([program, type, index, size, length, out])=>call(
+            context=>answerString(context.glGetActiveSubroutineName(program >>> 0, type >>> 0,
+                index >>> 0), size, length, out)),
+        glUniformSubroutinesuiv: ([type, count, indices])=>call(context=>
+            context.glUniformSubroutinesuiv(type >>> 0, (count | 0) > 0
+                ? readTyped('ui', indices, count | 0).map(v=>v >>> 0) : [])),
+        glGetUniformSubroutineuiv: ([type, location, out])=>call(context=>writeQuery(out,
+            context.glGetUniformSubroutineuiv(type >>> 0, location | 0), 'word')),
+        glGetProgramStageiv: ([program, type, pname, out])=>call(context=>writeQuery(out,
+            context.glGetProgramStageiv(program >>> 0, type >>> 0, pname >>> 0), 'word')),
+
         // --- program pipelines ---
 
         glGenProgramPipelines: generator((context, count)=>context.genProgramPipelines(count,

@@ -410,6 +410,8 @@ export function textureLayoutOf(type){
  *     vertex stage run as a compute pass, which reads them as words
  * @property {boolean} [compute]  the vertex stage runs as a compute pass, for the
  *     geometry shader after it (`vertexCompute`)
+ * @property {Map<string, Map<string, string>>} [subroutines]  by stage, the function
+ *     (its key) each subroutine uniform names (4.0), where the program chose one
  * @property {Map<number, string>} [swizzles]  the swizzle (3.3) of the texture each
  *     sampler reads, where it is not the identity (`objects.js` swizzleCode)
  * @property {(context: TessEntryContext) => string} [entry]
@@ -1889,6 +1891,10 @@ export function emitStage(program, which, options, given, partner){
             case 'construct':
                 return construct(node, out);
             case 'call':
+                if (node.subroutine)
+                {
+                    return subroutineCall(node, out);
+                }
                 return node.user ? userCall(node, out) : builtinCall(node, out);
             case 'literal':
                 return constantCode(node.constant, node.type);
@@ -2313,6 +2319,33 @@ export function emitStage(program, which, options, given, partner){
             count += wanted;
         });
         return `${typeOf(type)}(${pieces.join(', ')})`;
+    }
+
+    /**
+     * A call through a subroutine uniform (4.0 section 6.1.2): a call of the
+     * function the uniform names for this draw (`options.subroutines`, which
+     * the program's module is made for), or of the first of its type where
+     * none was chosen, as GL leaves that undefined.
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function subroutineCall(node, out){
+        const uniform = program.subroutines?.[which]?.uniforms.find(u=>u.name
+            === node.subroutine.name);
+        const functions = program.subroutines?.[which]?.functions ?? [];
+        const chosen = options.subroutines?.get(which)?.get(node.subroutine.name)
+            ?? functions.find(f=>f.index === uniform?.compatible[0])?.key;
+        const fn = linked.functions.find(f=>f.key === chosen);
+        if (!fn)
+        {
+            // A type no function has: nothing to call.
+            for (const arg of node.args)
+            {
+                discardValue(expr(arg, out), out);
+            }
+            return node.type.kind === 'void' ? '' : `${typeOf(node.type)}()`;
+        }
+        return userCall({ ...node, user: fn }, out);
     }
 
     /** @param {any} node @param {Emit} out @returns {string} */
@@ -3379,7 +3412,7 @@ export function emitStage(program, which, options, given, partner){
                     discardValue(expr(node, out), out);
                     return;
                 }
-                if (node.user)
+                if (node.user || node.subroutine)
                 {
                     const code = expr(node, out);
                     if (code !== '')
