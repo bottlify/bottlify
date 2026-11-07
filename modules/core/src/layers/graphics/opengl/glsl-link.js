@@ -616,8 +616,13 @@ export function linkProgram(given){
     }
 
     // --- what transform feedback captures ---
-    const feedback = given.feedback && given.feedback.names.length > 0 && before
-        ? feedbackOf(before, given.feedback, error) : null;
+    // The last stage's own xfb qualifiers (4.4) set it, glTransformFeedbackVaryings'
+    // names then going unread (4.4 section 11.1.2.1).
+    const declared = before ? shaderFeedbackOf(before,
+        /** @type {Record<string, ShaderUnit[]>} */ (/** @type {unknown} */ (given))[before.stage]
+            ?? [], error) : null;
+    const feedback = declared ?? (given.feedback && given.feedback.names.length > 0 && before
+        ? feedbackOf(before, given.feedback, error) : null);
 
     // --- attributes ---
     /** @type {{ name: string, type: GlslType, location: number }[]} */
@@ -1392,6 +1397,127 @@ function feedbackOf(stage, given, error){
         error(`transform feedback writes more than ${most} components to a buffer`);
     }
     return { mode: given.mode, varyings, strides };
+}
+
+/**
+ * What a stage's xfb qualifiers capture (4.4 section 11.1.2.1, the 4.40
+ * language's 4.4.2.1): each output given an `xfb_offset`, or a member of a
+ * block given one, into its `xfb_buffer` (the stage's default buffer
+ * otherwise) at that offset; a buffer's stride its `xfb_stride`, or the end
+ * of what is captured into it. Null where the stage says none.
+ *
+ * @param {LinkedStage} stage @param {ShaderUnit[]} units
+ * @param {(message: string) => void} error
+ * @returns {Feedback | null}
+ */
+function shaderFeedbackOf(stage, units, error){
+    let defaultBuffer = 0;
+    /** @type {Map<number, number>} the bytes a vertex each buffer's stride says */
+    const declaredStrides = new Map();
+    for (const unit of units)
+    {
+        const out = /** @type {Record<string, any>} */ (unit.layouts.output);
+        if (typeof out.xfb_buffer === 'number')
+        {
+            defaultBuffer = out.xfb_buffer;
+            if (typeof out.xfb_stride === 'number')
+            {
+                declaredStrides.set(out.xfb_buffer, out.xfb_stride);
+            }
+        }
+    }
+    /** @type {{ name: string, type: GlslType, path: string, buffer: number, offset: number }[]} */
+    const captured = [];
+    for (const symbol of stage.globals)
+    {
+        if (symbol.storage !== 'out')
+        {
+            continue;
+        }
+        const layout = /** @type {Record<string, any>} */ (symbol.qualifiers?.layout ?? {});
+        const buffer = typeof layout.xfb_buffer === 'number' ? layout.xfb_buffer : defaultBuffer;
+        if (typeof layout.xfb_stride === 'number')
+        {
+            declaredStrides.set(buffer, layout.xfb_stride);
+        }
+        const block = symbol.block;
+        if (block && block.instance === symbol.name)
+        {
+            // A block given an offset captures every member, each after the
+            // one before unless it states its own; one not given an offset
+            // captures only the members that state one.
+            const whole = typeof layout.xfb_offset === 'number';
+            let next = whole ? layout.xfb_offset : null;
+            for (const member of block.members)
+            {
+                const own = /** @type {Record<string, any>} */ (member.qualifiers.layout ?? {});
+                const offset = typeof own.xfb_offset === 'number' ? own.xfb_offset
+                    : whole ? next : null;
+                if (offset !== null)
+                {
+                    captured.push({ name: `${block.name}.${member.name}`, type: member.type,
+                        path: `g_${symbol.name}.m_${member.name}`, buffer, offset });
+                    next = offset + 4 * wordsOf(member.type.kind === 'array'
+                        ? member.type.element : member.type)
+                        * (member.type.kind === 'array' ? member.type.length : 1);
+                }
+            }
+            continue;
+        }
+        if (typeof layout.xfb_offset === 'number')
+        {
+            captured.push({ name: symbol.name, type: symbol.type, path: `g_${symbol.name}`,
+                buffer, offset: layout.xfb_offset });
+        }
+    }
+    if (captured.length === 0)
+    {
+        return null;
+    }
+    /** @type {FeedbackVarying[]} */
+    const varyings = [];
+    /** @type {number[]} */
+    const strides = [];
+    captured.sort((a, b)=>a.buffer - b.buffer || a.offset - b.offset);
+    /** @type {Map<number, number>} where each buffer's captured bytes reach */
+    const ends = new Map();
+    for (const item of captured)
+    {
+        const type = item.type;
+        const element = type.kind === 'array' ? type.element : type;
+        const words = wordsOf(element) * (type.kind === 'array' ? type.length : 1);
+        const align = 'base' in element && element.base === 'double' ? 8 : 4;
+        if (item.buffer < 0 || item.buffer >= FEEDBACK_LIMITS.buffers || item.offset % align !== 0)
+        {
+            error(`transform feedback output '${item.name}' is at an offset or buffer it cannot`
+                + ' be (its xfb_buffer past the last, or its xfb_offset not aligned)');
+            continue;
+        }
+        if (item.offset < (ends.get(item.buffer) ?? 0))
+        {
+            error(`transform feedback output '${item.name}' overlaps another in buffer`
+                + ` ${item.buffer}`);
+            continue;
+        }
+        ends.set(item.buffer, item.offset + words * 4);
+        varyings.push({ name: item.name, type, size: type.kind === 'array' ? type.length : 1,
+            path: item.path, buffer: item.buffer, word: item.offset / 4 });
+    }
+    for (const [buffer, end] of ends)
+    {
+        const stride = declaredStrides.get(buffer) ?? end;
+        if (stride < end || stride % 4 !== 0)
+        {
+            error(`transform feedback buffer ${buffer}: its xfb_stride ${stride} is not a multiple`
+                + ` of 4 that holds what is captured (${end} bytes)`);
+        }
+        while (strides.length <= buffer)
+        {
+            strides.push(0);
+        }
+        strides[buffer] = Math.max(end, stride) / 4;
+    }
+    return { mode: 'interleaved', varyings, strides };
 }
 
 /**

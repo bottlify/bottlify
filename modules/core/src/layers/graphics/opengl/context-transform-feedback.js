@@ -166,8 +166,10 @@ export function installTransformFeedbackCalls(context, kernel){
             /** @type {import('./glsl-link.js').Feedback | null} */
             const feedback = executable?.linked.feedback ?? null;
             const points = kernel.side.feedbackBuffers?.() ?? [];
+            // Every buffer something is captured into is bound (4.4's xfb
+            // qualifiers may leave one between them unused).
             if (current.active || !feedback
-                || feedback.strides.some((_, slot)=>!points[slot]))
+                || feedback.strides.some((words, slot)=>words > 0 && !points[slot]))
             {
                 setError(GL.INVALID_OPERATION);
                 return;

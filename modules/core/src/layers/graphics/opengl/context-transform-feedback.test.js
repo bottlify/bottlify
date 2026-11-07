@@ -246,3 +246,65 @@ in vec3 normal; out vec4 c; void main() { c = vec4(normal, 1.0); }`]])
         assert.equal((await read).length, 4);
         assert.ok(!r.divergences.some(d=>/read a buffer transform feedback wrote/.test(d)));
     });
+
+test('4.4\'s xfb qualifiers say what is captured, where, and glTransformFeedbackVaryings goes'
+    + ' unread', ()=>{
+    const unit = /** @type {any} */ (compileShader([`#version 440
+layout(xfb_buffer = 2, xfb_stride = 32) out;
+in vec4 position;
+layout(xfb_buffer = 0, xfb_offset = 16) out vec4 colour;
+layout(xfb_offset = 12) out float w;
+out Block { layout(xfb_offset = 0) vec2 a; float b; } block;
+out float skipped;
+void main() { colour = position; w = 1.0; block.a = position.xy; block.b = 2.0;
+    skipped = 3.0; gl_Position = position; }`], 'vertex').unit);
+    const linked = /** @type {any} */ (linkProgram({ vertex: [unit], fragment: [],
+        attribBindings: new Map(), feedback: { names: ['skipped'], mode: 'separate' } }));
+    assert.ok(linked.ok, linked.log);
+    const feedback = linked.program.feedback;
+    assert.deepEqual(feedback.varyings.map((/** @type {any} */ v)=>[v.name, v.buffer, v.word]),
+        [['colour', 0, 4], ['Block.a', 2, 0], ['w', 2, 3]],
+        'the default buffer is 2; of a block with no offset, the members stating one');
+    assert.deepEqual(feedback.strides, [8, 0, 8], 'buffer 0 ends with colour; 2 is 32 bytes');
+    assert.equal(feedback.mode, 'interleaved');
+    const writes = feedbackWrites(linked.program, 2, true);
+    assert.deepEqual(writes.find(w=>w.slot === 0)?.words.map(w=>w.word), [4, 5, 6, 7],
+        'colour at its offset, the bytes before it unwritten');
+
+    const overlapping = /** @type {any} */ (compileShader([`#version 440
+layout(xfb_offset = 0) out vec4 a; layout(xfb_offset = 8) out float b;
+void main() { a = vec4(0.0); b = 1.0; gl_Position = a; }`], 'vertex').unit);
+    const overlap = /** @type {any} */ (linkProgram({ vertex: [overlapping], fragment: [],
+        attribBindings: new Map() }));
+    assert.ok(!overlap.ok, 'two outputs over the same bytes');
+    assert.match(overlap.log, /overlaps another in buffer 0/);
+});
+
+test('begin needs a buffer bound where something is captured, not between them', ()=>{
+    const { gl } = rig();
+    const program = gl.glCreateProgram();
+    const shader = gl.glCreateShader(GL.VERTEX_SHADER);
+    gl.glShaderSource(shader, [`#version 440
+in vec4 position; layout(xfb_buffer = 0, xfb_offset = 0) out vec4 a;
+layout(xfb_buffer = 2, xfb_offset = 0) out float b;
+void main() { a = position; b = 1.0; gl_Position = position; }`]);
+    gl.glCompileShader(shader);
+    gl.glAttachShader(program, shader);
+    gl.glLinkProgram(program);
+    assert.deepEqual(gl.glGetProgramiv(program, GL.LINK_STATUS), [1],
+        gl.glGetProgramInfoLog(program));
+    gl.glUseProgram(program);
+    const [first, last] = gl.glGenBuffersARB(2);
+    for (const name of [first, last])
+    {
+        gl.glBindBufferARB(GL.ARRAY_BUFFER, name);
+        gl.glBufferDataARB(GL.ARRAY_BUFFER, 256, 0, GL.STATIC_DRAW);
+    }
+    gl.glBindBufferBase(GL.TRANSFORM_FEEDBACK_BUFFER, 0, first);
+    gl.glBeginTransformFeedback(GL.POINTS);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'buffer 2 is not bound');
+    gl.glBindBufferBase(GL.TRANSFORM_FEEDBACK_BUFFER, 2, last);
+    gl.glBeginTransformFeedback(GL.POINTS);
+    assert.equal(gl.glGetError(), GL.NO_ERROR, 'buffer 1 captures nothing');
+    gl.glEndTransformFeedback();
+});
