@@ -1286,6 +1286,9 @@ function storageAndNamedEntryPoints(h){
         glNamedFramebufferRenderbuffer: a=>answer(current()?.namedFramebuffer(
             'glFramebufferRenderbuffer', a[0] >>> 0, false, true, [a[1] >>> 0, a[2] >>> 0,
                 a[3] >>> 0])),
+        glFramebufferTexture: ([target, attachment, texture, level])=>answer(
+            current()?.glFramebufferTexture(target >>> 0, attachment >>> 0, texture >>> 0,
+                level | 0)),
         glNamedFramebufferTexture: a=>answer(current()?.namedFramebufferTexture(a[0] >>> 0,
             a[1] >>> 0, a[2] >>> 0, a[3] | 0, null)),
         glNamedFramebufferTextureLayer: a=>answer(current()?.namedFramebufferTexture(

@@ -289,3 +289,29 @@ test('through the exports: names written out, words and boxes as the bound forms
         assert.equal(new DataView(bytes.buffer).getInt32(out, true), GL.NEAREST);
         assert.equal(gl('glGetError'), GL.NO_ERROR);
     });
+
+test('glFramebufferTexture (3.2) attaches a texture of one image a level as its target names it',
+    ()=>{
+        const gl = fixture();
+        const [fbo] = gl.glCreateFramebuffers(1);
+        const [plain, rectangle] = [gl.glCreateTextures(GL.TEXTURE_2D, 1)[0],
+            gl.glCreateTextures(GL.TEXTURE_RECTANGLE, 1)[0]];
+        gl.textureStorage(2, plain, 1, GL.RGBA8, 4, 4, 1);
+        gl.textureStorage(2, rectangle, 1, GL.RGBA8, 4, 4, 1);
+        gl.glFramebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, plain, 0);
+        error(gl, GL.INVALID_OPERATION, 'the window takes no texture');
+        gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+        gl.glFramebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, plain, 0);
+        gl.glFramebufferTexture(GL.DRAW_FRAMEBUFFER, GL.COLOR_ATTACHMENT0 + 1, rectangle, 0);
+        error(gl, GL.NO_ERROR);
+        const ask = (/** @type {number} */ attachment, /** @type {number} */ pname)=>
+            gl.namedFramebuffer('glGetFramebufferAttachmentParameteriv', fbo, false, true,
+                [attachment, pname]);
+        assert.deepEqual(ask(GL.COLOR_ATTACHMENT0, GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME),
+            [plain]);
+        assert.deepEqual(ask(GL.COLOR_ATTACHMENT0 + 1, GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME),
+            [rectangle], 'a rectangle as itself');
+        assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+        gl.glFramebufferTexture(GL.TEXTURE_2D, GL.COLOR_ATTACHMENT0, plain, 0);
+        error(gl, GL.INVALID_ENUM);
+    });

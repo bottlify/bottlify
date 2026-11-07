@@ -78,6 +78,7 @@ export const DSA_CALLS_NOT_COMPILED = Object.freeze([
     'glGetTextureLevelParameter', 'glGenerateTextureMipmap', 'glBindTextureUnit',
     'glGetTextureImage', 'glGetCompressedTextureImage', 'glCreateBuffers', 'namedBuffer',
     'glCopyNamedBufferSubData', 'namedFramebuffer', 'namedFramebufferTexture',
+    'glFramebufferTexture',
     'glBlitNamedFramebuffer',
     'glCheckNamedFramebufferStatus', 'glInvalidateNamedFramebuffer', 'namedRenderbuffer',
     'glCreateSamplers',
@@ -646,6 +647,17 @@ export function installDirectStateCalls(context, kernel){
                 }
                 textarget = CUBE_FACES[layer ?? 0];
             }
+            else if (object && (object.target === GL.TEXTURE_RECTANGLE
+                || object.target === GL.TEXTURE_2D_MULTISAMPLE))
+            {
+                // One image a level, attached as its own target names it.
+                if (layer !== null)
+                {
+                    setError(GL.INVALID_OPERATION);
+                    return;
+                }
+                textarget = object.target;
+            }
             else if (object && object.target !== GL.TEXTURE_1D && object.target !== GL.TEXTURE_2D)
             {
                 // A layer of a 3D texture or an array, as glFramebufferTextureLayer
@@ -659,6 +671,35 @@ export function installDirectStateCalls(context, kernel){
             }
             boundFramebuffers({ draw: name }, ()=>context.framebufferTexture(GL.DRAW_FRAMEBUFFER,
                 attachment, textarget, texture, level));
+        },
+
+        /**
+         * glFramebufferTexture (3.2): the named form's, on the framebuffer
+         * bound to `target`; the window's own takes no texture.
+         *
+         * @param {number} target @param {number} attachment @param {number} texture
+         * @param {number} level
+         */
+        glFramebufferTexture(target, attachment, texture, level){
+            if (!enter('glFramebufferTexture', [target, attachment, texture, level]))
+            {
+                return;
+            }
+            const query = target === GL.READ_FRAMEBUFFER ? GL.READ_FRAMEBUFFER_BINDING
+                : target === GL.FRAMEBUFFER || target === GL.DRAW_FRAMEBUFFER
+                    ? GL.FRAMEBUFFER_BINDING : 0;
+            if (query === 0)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const name = record(query).values[0];
+            if (name === 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            context.namedFramebufferTexture(name, attachment, texture, level, null);
         },
 
         /**
