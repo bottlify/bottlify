@@ -30,7 +30,18 @@
  * `GL_VERSIONS`, which the extension string does not name.
  */
 
-import { GL_FEATURE_COMMANDS, GL_SIGNATURES } from './registry.js';
+import { GL_EXTENSION_COMMANDS, GL_FEATURE_COMMANDS, GL_SIGNATURES } from './registry.js';
+
+/**
+ * An extension's commands as the registry lists them: for the extensions
+ * reported whole, whose every command answers here, each spelt as the
+ * extension spells it (an ARB name is the core function's handler,
+ * `exports.js`).
+ *
+ * @param {string} name
+ * @returns {string[]}
+ */
+const registryCommands = name=>(GL_EXTENSION_COMMANDS[name] ?? '').split(' ').filter(Boolean);
 
 /**
  * A command's arguments as the registry declares them (`registry.js`), a
@@ -305,6 +316,73 @@ export const GL_EXTENSIONS = Object.freeze({
     GL_ARB_copy_image: ['glCopyImageSubData'],
     GL_ARB_clear_texture: ['glClearTexImage', 'glClearTexSubImage'],
     GL_ARB_get_texture_sub_image: ['glGetTextureSubImage', 'glGetCompressedTextureSubImage'],
+    // What 1.3 to 2.1 made core under the extensions' own names, for the
+    // programs that look for them by name.
+    GL_ARB_window_pos: registryCommands('GL_ARB_window_pos'),
+    GL_ARB_transpose_matrix: registryCommands('GL_ARB_transpose_matrix'),
+    GL_ARB_point_parameters: registryCommands('GL_ARB_point_parameters'),
+    GL_ARB_multisample: registryCommands('GL_ARB_multisample'),
+    GL_ARB_depth_texture: [],
+    GL_ARB_shadow: [],
+    GL_ARB_occlusion_query: registryCommands('GL_ARB_occlusion_query'),
+    GL_ARB_pixel_buffer_object: [],
+    GL_ARB_draw_buffers: registryCommands('GL_ARB_draw_buffers'),
+    // 3.0 to 3.3's, each whole.
+    GL_ARB_texture_float: [],
+    GL_ARB_half_float_pixel: [],
+    GL_ARB_half_float_vertex: [],
+    GL_ARB_color_buffer_float: registryCommands('GL_ARB_color_buffer_float'),
+    GL_ARB_depth_buffer_float: [],
+    GL_ARB_texture_rg: [],
+    GL_ARB_depth_clamp: [],
+    GL_ARB_seamless_cube_map: [],
+    GL_ARB_sync: registryCommands('GL_ARB_sync'),
+    GL_ARB_sampler_objects: registryCommands('GL_ARB_sampler_objects'),
+    GL_ARB_timer_query: registryCommands('GL_ARB_timer_query'),
+    GL_ARB_occlusion_query2: [],
+    GL_ARB_vertex_type_2_10_10_10_rev: registryCommands('GL_ARB_vertex_type_2_10_10_10_rev'),
+    GL_ARB_texture_rgb10_a2ui: [],
+    GL_ARB_shader_bit_encoding: [],
+    // 4.0 to 4.6's. What a shader's #extension enables of them is
+    // glsl-versions.js's, and each is reported with it.
+    GL_ARB_draw_indirect: registryCommands('GL_ARB_draw_indirect'),
+    GL_ARB_draw_buffers_blend: registryCommands('GL_ARB_draw_buffers_blend'),
+    GL_ARB_sample_shading: registryCommands('GL_ARB_sample_shading'),
+    GL_ARB_gpu_shader5: [],
+    GL_ARB_gpu_shader_fp64: registryCommands('GL_ARB_gpu_shader_fp64'),
+    GL_ARB_shader_subroutine: registryCommands('GL_ARB_shader_subroutine'),
+    GL_ARB_tessellation_shader: registryCommands('GL_ARB_tessellation_shader'),
+    GL_ARB_texture_cube_map_array: [],
+    GL_ARB_texture_gather: [],
+    GL_ARB_texture_query_lod: [],
+    GL_ARB_transform_feedback2: registryCommands('GL_ARB_transform_feedback2'),
+    GL_ARB_transform_feedback3: registryCommands('GL_ARB_transform_feedback3'),
+    GL_ARB_separate_shader_objects: registryCommands('GL_ARB_separate_shader_objects'),
+    GL_ARB_vertex_attrib_64bit: registryCommands('GL_ARB_vertex_attrib_64bit'),
+    GL_ARB_shading_language_420pack: [],
+    GL_ARB_transform_feedback_instanced: registryCommands('GL_ARB_transform_feedback_instanced'),
+    GL_ARB_conservative_depth: [],
+    GL_ARB_shader_atomic_counters: registryCommands('GL_ARB_shader_atomic_counters'),
+    GL_ARB_shader_image_load_store: registryCommands('GL_ARB_shader_image_load_store'),
+    GL_ARB_map_buffer_alignment: [],
+    GL_ARB_arrays_of_arrays: [],
+    GL_ARB_compute_shader: registryCommands('GL_ARB_compute_shader'),
+    GL_ARB_explicit_uniform_location: [],
+    GL_ARB_fragment_layer_viewport: [],
+    GL_ARB_framebuffer_no_attachments: registryCommands('GL_ARB_framebuffer_no_attachments'),
+    GL_ARB_multi_draw_indirect: registryCommands('GL_ARB_multi_draw_indirect'),
+    GL_ARB_shader_storage_buffer_object: registryCommands('GL_ARB_shader_storage_buffer_object'),
+    GL_ARB_texture_query_levels: [],
+    GL_ARB_enhanced_layouts: [],
+    GL_ARB_direct_state_access: registryCommands('GL_ARB_direct_state_access'),
+    GL_ARB_cull_distance: [],
+    GL_ARB_derivative_control: [],
+    GL_ARB_shader_texture_image_samples: [],
+    GL_ARB_indirect_parameters: registryCommands('GL_ARB_indirect_parameters'),
+    GL_ARB_shader_draw_parameters: [],
+    GL_ARB_shader_group_vote: [],
+    GL_ARB_polygon_offset_clamp: registryCommands('GL_ARB_polygon_offset_clamp'),
+    GL_ARB_robustness: registryCommands('GL_ARB_robustness'),
 });
 
 /** WGL extensions: name -> the functions it defines. */
@@ -603,7 +681,6 @@ export const EXTENSION_WORDS = (()=>{
     return Object.freeze(words);
 })();
 
-/** Every extension function name, for telling one from a core entry point. */
 /**
  * GL extensions that are implemented, sized and obtainable but left out of
  * the string a program reads: a program that finds them takes a path this
@@ -616,6 +693,7 @@ export const EXTENSION_WORDS = (()=>{
 /** @type {ReadonlySet<string>} */
 export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([]));
 
+/** Every extension function name, for telling one from a core entry point. */
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),
     ...PENDING_VERSION_FUNCTIONS,

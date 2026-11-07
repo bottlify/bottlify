@@ -2324,6 +2324,9 @@ export function createOpengl(services){
                 current()?.queryIntoBuffer(name >>> 0, pname >>> 0, offset | 0, wide,
                     !suffix.startsWith('u'), buffer >>> 0));
         }
+        // GL_ARB_occlusion_query's names for 1.5's, which wait the same way.
+        forms.glGetQueryObjectivARB = forms.glGetQueryObjectiv;
+        forms.glGetQueryObjectuivARB = forms.glGetQueryObjectuiv;
         return forms;
     }
 
@@ -2450,6 +2453,8 @@ export function createOpengl(services){
     };
 
     Object.assign(swaps, debug.waiting);
+    // GL_ARB_robustness's name for 4.5's, which waits the same way.
+    swaps.glReadnPixelsARB = swaps.glReadnPixels;
 
     /**
      * Bytes a read of a buffer object answers into guest memory: at once, or

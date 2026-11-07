@@ -1259,6 +1259,22 @@ GL makes of them without transform feedback (stream 0 alone is rasterised); a pr
 captures while its geometry shader emits to another stream does not link, and the primitive
 queries of those streams count nothing. *2026-11-07.*
 
+**A183. Every context reports the same extensions, whatever version and profile it was asked
+for:** a 2.1 context names GL_ARB_compute_shader, a core 4.6 context GL_ARB_window_pos, as a
+Windows driver's compatibility contexts do. An extension is reported when every command it
+defines answers here and what it adds works; one that 4.x made core is reported with that
+version's decisions (A178 for GL_ARB_gpu_shader_fp64, A180 for GL_ARB_cull_distance, A182 and
+A195 for GL_ARB_transform_feedback3's streams), and a shader of an earlier version that enables
+it compiles what the version has of it (`glsl-versions.js`). *2026-11-07.*
+
+**A184. An extension's own spelling of a later version's GLSL name is that name:**
+textureQueryLOD (GL_ARB_texture_query_lod) is 4.00's textureQueryLod, anyInvocationARB and its
+kin (GL_ARB_shader_group_vote) 4.60's votes, gl_BaseVertexARB, gl_BaseInstanceARB and
+gl_DrawIDARB (GL_ARB_shader_draw_parameters) 4.60's variables, as gl_InstanceIDARB is
+gl_InstanceID. The extensions' wording differs from the versions' in places (the vote
+functions' result where invocations are inactive); the version's behaviour is the one run.
+*2026-11-07.*
+
 **A190. A geometry shader after tessellation runs over the most the tessellator may make:** the
 evaluation shader as a compute pass over every index the tessellator's room holds and the
 geometry shader's passes over as many primitives, both reading how many indices it wrote from
@@ -1273,8 +1289,9 @@ makes. Through a geometry shader it is captured (A190). *2026-11-07.*
 rounding by the spacing happen in the tessellator when a draw reads them, so a query answers what
 was set. *2026-11-07.*
 
-**A193. Temporary: GL_ARB_tessellation_shader is not reported.** A `#version 150` shader cannot
-enable it yet; the 4.0 entry points are handed out with the rest of 4.0. *2026-11-07.*
+**A193. GL_ARB_tessellation_shader is reported,** a shader of 1.50 to 3.30 enabling it compiling
+both stages, `patch`, barrier() and the tessellation constants as 4.00 has them; what tessellation
+draws is A190 to A192's. *2026-11-07.*
 
 **A194. Patches reaching the immediate drawing path are a loss:** that path has no tessellator.
 
@@ -1305,9 +1322,9 @@ again, is a loss,** as their passes are laid out on the processor for a count on
 has; a line loop of it is drawn without its closing line, and GL_PRIMITIVES_GENERATED does not
 count it. Each is said. *2026-11-07.*
 
-**A210. Temporary: GL_ARB_texture_cube_map_array is not reported.** The cube map array target
-is there for a shader of GLSL 4.00 or later, which names samplerCubeArray itself; no shader of an
-earlier version can enable the extension yet. *2026-11-07.*
+**A210. GL_ARB_texture_cube_map_array is reported,** a shader of 1.30 or later enabling it naming
+the cube map array samplers and taking every overload of the functions its version has over them.
+*2026-11-07.*
 
 **A211. Temporary: a texture view in another format of its original's class reads the
 original's texels in the original's format on the device,** said as a loss: WebGPU views a
