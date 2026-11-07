@@ -1142,8 +1142,8 @@ buffer, cube map array, multisample) with GL_INVALID_ENUM, and says so. *2026-11
 were, which is what a program may find after an invalidation anyway; the checks are made.
 *2026-11-07.*
 
-**A137. Temporary: glNamedFramebufferTexture of a whole cube map attaches its first face,** and
-says so, until layered rendering exists. *2026-11-07.*
+**A137. glNamedFramebufferTexture of a whole cube map or array attaches it layered** (A130): a
+draw reaches the first face or layer unless a geometry shader chooses another. *2026-11-07.*
 
 **A138. glClearTexImage reads its one pixel as it lies in the program's memory,** with no
 unpack state and no unpack buffer, as glClearBufferData does by section 6.3.2. *2026-11-07.*
