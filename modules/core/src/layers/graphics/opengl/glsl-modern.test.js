@@ -79,15 +79,17 @@ in vec4 position; void main() { gl_Position = position; }`;
 const WHITE = `#version 130
 out vec4 c; void main() { c = vec4(1.0); }`;
 
-test('1.30 to 3.30, 4.20 and 4.30 compile; 4.00 and 4.10 are refused as unsupported', ()=>{
-    assert.deepEqual(EMITTED_VERSIONS, [110, 120, 130, 140, 150, 330, 420, 430]);
-    for (const version of ['130', '140', '150', '150 compatibility', '330 core', '420', '430 core'])
+test('every version from 1.10 to 4.60 compiles; one past them is refused', ()=>{
+    assert.deepEqual(EMITTED_VERSIONS, [110, 120, 130, 140, 150, 330, 400, 410, 420, 430, 440,
+        450, 460]);
+    for (const version of ['130', '140', '150', '150 compatibility', '330 core', '400', '410 core',
+        '420', '430 core', '440', '450 compatibility', '460 core'])
     {
         const compiled = compileShader([`#version ${version}\nvoid main() {}`], 'vertex');
         assert.ok(compiled.ok, `${version}: ${compiled.log}`);
     }
-    assert.match(compileShader(['#version 400\nvoid main() {}'], 'vertex').log,
-        /version 400 is not supported/);
+    assert.match(compileShader(['#version 470\nvoid main() {}'], 'vertex').log,
+        /version 470 is not supported/);
 });
 
 test('an input reads the output of its name; a block member by Block.member', ()=>{

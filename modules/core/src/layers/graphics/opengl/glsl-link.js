@@ -41,7 +41,7 @@ const IMAGE_FORMAT_NAMES = new Set([...IMAGE_FORMATS.map(([name])=>name), 'rg16f
     'rg16_snorm', 'rg8_snorm', 'r16_snorm', 'r8_snorm', 'rg16i', 'rg8i', 'r16i', 'r8i',
     'rgb10_a2ui', 'rg16ui', 'rg8ui', 'r16ui', 'r8ui']);
 import { BUILTIN_ATTRIBUTES, GLSL_LIMITS } from './glsl-builtins.js';
-import { baseOf, componentsOf, glslName, innermost } from './glsl-types.js';
+import { baseOf, columnSlots, componentsOf, glslName, innermost } from './glsl-types.js';
 import { blockLayout, blockVariables } from './glsl-layout.js';
 import { canonicalAttribName } from './arb-program.js';
 import { linkTessellation } from './glsl-link-tess.js';
@@ -601,7 +601,7 @@ export function linkProgram(given){
             return typeof explicit === 'number' ? explicit : attribBindings.get(symbol.name);
         };
         /** @param {GlslType} type */
-        const slotsOf = type=>(type.kind === 'matrix' ? type.cols : 1);
+        const slotsOf = type=>(type.kind === 'matrix' ? type.cols : 1) * columnSlots(type);
         /** @type {Set<number>} */
         const taken = new Set();
         // Locations a conventional attribute the shader reads aliases.

@@ -1182,9 +1182,9 @@ GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT is 4:** nothing here needs a coarser boundary
 **A154. glTexBuffer and glTexBufferRange run when they are reached, a list open or not,** as the
 buffer object calls do. *2026-11-07.*
 
-**A170. GLSL 4.20 and 4.30 are taken where a compute shader, storage blocks, images and atomic
-counters are written;** 4.00 and 4.10 stay refused outside the tessellation stages until the
-features they bring are written. *2026-11-07.*
+**A170. Every GLSL version from 1.10 to 4.60 is taken;** a feature the WGSL emitter does not
+write fails the program's link with its reason rather than the shader's compile, so a shader of
+the version compiles as the specification's grammar and rules say. *2026-11-07.*
 
 **A171. Temporary: the compute limits are WebGPU's defaults,** below GL's minimums: 256
 invocations a work group against 1024, 256 by 256 by 64 against 1024 by 1024 by 64, and 16 KiB of
@@ -1207,6 +1207,24 @@ ones and others) are taken by glBindImageTexture and refused where a shader uses
 touches is atomic words throughout; signed min and max on block words and every atomicCompSwap
 are compare-and-swap loops; memoryBarrier*() outside a compute shader emits nothing, an
 invocation's own accesses being in its order already. *2026-11-07.*
+
+**A176. textureQueryLod is worked out from the coordinates' derivatives** (the specification's
+lambda over the base level's size, a cube map's on its major axis' face), x clamped to the
+texture's levels: WGSL has no query of the level the device takes, and the sampler's minimum and
+maximum level and its filter are not weighed. *2026-11-07.*
+
+**A177. interpolateAtCentroid and interpolateAtSample answer the input at the pixel's centre,
+interpolateAtOffset the input moved along its derivatives:** every target here is drawn with one
+sample a pixel (A85, A150), so its centroid and its samples are its centre; WGSL has no
+interpolation at an offset, and a linear step along dFdx and dFdy is exact for an input linear in
+window space and close for a perspective one. *2026-11-07.*
+
+**A178. Temporary: a double is carried as an f32** (WGSL has no 64-bit float): its arithmetic,
+its uniforms (glUniform*d keep what an f32 holds, and glGetUniformdv answers it), its vertex
+inputs (glVertexAttribLPointer, said once), and its varyings are single precision. A double in a
+uniform or storage block keeps its eight bytes and layout: it is read into the f32 rounded to
+nearest, and written back as the double that f32 is; packDouble2x32 and unpackDouble2x32 go
+through the same conversion. A dvec3 or dvec4 input takes its two locations. *2026-11-07.*
 
 **A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
 many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an

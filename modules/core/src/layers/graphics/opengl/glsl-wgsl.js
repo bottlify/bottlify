@@ -43,7 +43,9 @@
  * `?:` whose right side would then run unconditionally become `if`s.
  */
 
-import { FLOAT, INT, baseOf, componentsOf, glslName, vectorOf } from './glsl-types.js';
+import {
+    FLOAT, INT, baseOf as declaredBase, columnSlots, componentsOf, glslName, vectorOf,
+} from './glsl-types.js';
 import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
@@ -544,7 +546,8 @@ function paddedType(type, padded){
     {
         case 'scalar':
         case 'vector':
-            return type.base === 'float' ? 'vec4f' : type.base === 'uint' ? 'vec4u' : 'vec4i';
+            return type.base === 'float' || type.base === 'double' ? 'vec4f'
+                : type.base === 'uint' ? 'vec4u' : 'vec4i';
         case 'matrix':
             return type.rows === 2 ? `array<vec4f, ${type.cols}>` : `mat${type.cols}x${type.rows}f`;
         case 'array':
@@ -564,26 +567,11 @@ function wgslType(type, structName){
     switch (type.kind)
     {
         case 'scalar':
-            if (type.base === 'double')
-            {
-                throw new Error('glsl: a double has no WGSL type, and this implementation'
-                    + ' carries none');
-            }
             return SCALARS[type.base];
         case 'vector':
-            if (type.base === 'double')
-            {
-                throw new Error('glsl: a double has no WGSL type, and this implementation'
-                    + ' carries none');
-            }
             return type.base === 'bool' ? `vec${type.size}<bool>`
                 : `vec${type.size}${suffixOf(SCALARS[type.base])}`;
         case 'matrix':
-            if (type.base === 'double')
-            {
-                throw new Error('glsl: a double has no WGSL type, and this implementation'
-                    + ' carries none');
-            }
             return `mat${type.cols}x${type.rows}f`;
         case 'struct':
             return structName(type);
@@ -682,8 +670,23 @@ const imageUse = (image, index, ways)=>{
 };
 
 /** The WGSL scalar of each GLSL one. */
+/**
+ * The WGSL scalar of each GLSL base type. A double is carried as an f32
+ * (decision A178): WGSL has no 64-bit float.
+ */
 const SCALARS = /** @type {Record<string, string>} */ ({ float: 'f32', int: 'i32', uint: 'u32',
-    bool: 'bool' });
+    bool: 'bool', double: 'f32' });
+
+/**
+ * A type's base as the emitter writes it: a double's is a float's, the value
+ * being carried as one (decision A178); only a block's words see the double.
+ *
+ * @param {GlslType} type @returns {import('./glsl-types.js').ScalarBase | null}
+ */
+const baseOf = type=>{
+    const base = declaredBase(type);
+    return base === 'double' ? 'float' : base;
+};
 
 /** The vector suffix of each WGSL scalar. @param {string} scalar */
 const suffixOf = scalar=>(scalar === 'f32' ? 'f' : scalar === 'i32' ? 'i' : 'u');
@@ -1008,7 +1011,7 @@ export function emitStage(program, which, options, given, partner){
             const parts = [];
             for (let c = 0; c < columns; c++)
             {
-                const location = attribute.location + c;
+                const location = attribute.location + c * columnSlots(type);
                 const name = canonicalAttribName(location);
                 const index = layoutNames.indexOf(name);
                 const four = index >= 0 ? attributeValue(options.attributes[index], 4, scalar)
@@ -1149,6 +1152,10 @@ export function emitStage(program, which, options, given, partner){
     const usedSamplers = new Set();
     /** The sizes of matrix the stage inverts. @type {Set<number>} */
     const usedInverses = new Set();
+    /** @type {Set<string>} the unsigned types a 32-by-32 multiply's high word is asked of */
+    const usedWideMultiplies = new Set();
+    /** Whether a double's two words are turned into an f32 or back (`doubleBitsFunctions`). */
+    let usedDoubleBits = false;
 
     /**
      * @typedef {Object} Emit
@@ -1379,17 +1386,21 @@ export function emitStage(program, which, options, given, partner){
                 return placeOf(inner.block, at, plus, type.element, inner.rowMajor,
                     inner.packing);
             }
+            // A double's component is eight bytes, the f32 carrying it read
+            // from them (decision A178).
+            const double = /** @type {any} */ (type).base === 'double';
+            const element = double ? 8 : 4;
             if (type.kind === 'matrix')
             {
                 // A column: a vector of a column-major matrix, the column's
                 // components of each row of a row-major one.
-                const { at, plus } = moved(inner.rowMajor ? 4 : inner.matrixStride);
-                return { ...placeOf(inner.block, at, plus, vectorOf('float', type.rows), false,
-                    inner.packing), step: inner.rowMajor ? inner.matrixStride : 4 };
+                const { at, plus } = moved(inner.rowMajor ? element : inner.matrixStride);
+                return { ...placeOf(inner.block, at, plus, vectorOf(type.base, type.rows), false,
+                    inner.packing), step: inner.rowMajor ? inner.matrixStride : element };
             }
-            const { at, plus } = moved(inner.step);
+            const { at, plus } = moved(double && inner.step === 4 ? 8 : inner.step);
             return placeOf(inner.block, at, plus, vectorOf(
-                /** @type {any} */ (baseOf(type)), 1), false, inner.packing);
+                /** @type {any} */ (declaredBase(type)), 1), false, inner.packing);
         }
         return null;
     }
@@ -1451,6 +1462,17 @@ export function emitStage(program, which, options, given, partner){
         switch (type.kind)
         {
             case 'scalar': {
+                if (/** @type {any} */ (type).base === 'double')
+                {
+                    usedDoubleBits = true;
+                    const bits = once(out, `${p}floatToDouble(${value})`, vectorOf('uint', 2));
+                    for (const [k, part] of [[0, 'x'], [4, 'y']])
+                    {
+                        writeBlock({ ...place, at: at + Number(k), type: vectorOf('uint', 1) },
+                            `${bits}.${part}`, out);
+                    }
+                    return;
+                }
                 const ref = storageWord(block, at, plus);
                 writtenStorage.add(storageOf(block));
                 const word = asWord(value, type);
@@ -1460,9 +1482,11 @@ export function emitStage(program, which, options, given, partner){
             }
             case 'vector': {
                 const from = once(out, value, type);
+                const step = /** @type {any} */ (type).base === 'double' && place.step === 4 ? 8
+                    : place.step;
                 for (let k = 0; k < type.size; k++)
                 {
-                    writeBlock({ ...place, at: at + k * place.step,
+                    writeBlock({ ...place, at: at + k * step,
                         type: vectorOf(/** @type {any} */ (type).base, 1) },
                     `${from}.${XYZW[k]}`, out);
                 }
@@ -1470,11 +1494,13 @@ export function emitStage(program, which, options, given, partner){
             }
             case 'matrix': {
                 const from = once(out, value, type);
+                const element = /** @type {any} */ (type).base === 'double' ? 8 : 4;
                 for (let c = 0; c < type.cols; c++)
                 {
-                    writeBlock({ ...place, type: vectorOf('float', type.rows),
-                        at: at + c * (place.rowMajor ? 4 : place.matrixStride),
-                        step: place.rowMajor ? place.matrixStride : 4 }, `${from}[${c}]`, out);
+                    writeBlock({ ...place, type: vectorOf(/** @type {any} */ (type).base, type.rows),
+                        at: at + c * (place.rowMajor ? element : place.matrixStride),
+                        step: place.rowMajor ? place.matrixStride : element }, `${from}[${c}]`,
+                    out);
                 }
                 return;
             }
@@ -1554,11 +1580,23 @@ export function emitStage(program, which, options, given, partner){
         {
             case 'scalar': {
                 const word = blockWord(block, at, plus);
+                if (type.base === 'double')
+                {
+                    usedDoubleBits = true;
+                    return `${p}doubleToFloat(${word}, ${blockWord(block, at + 4, plus)})`;
+                }
                 return type.base === 'uint' ? word : type.base === 'bool' ? `(${word} != 0u)`
                     : `bitcast<${SCALARS[type.base]}>(${word})`;
             }
             case 'vector': {
                 const n = type.size;
+                if (type.base === 'double')
+                {
+                    // Eight bytes a component, or the row's stride in a row-major matrix.
+                    const step = place.step === 4 ? 8 : place.step;
+                    return `${typeOf(type)}(${Array.from({ length: n }, (_, k)=>readBlock({
+                        ...place, at: at + k * step, type: vectorOf('double', 1) })).join(', ')})`;
+                }
                 const first = (at >> 2) & 3;
                 const words = block >= 0 && plus === null && place.step === 4
                     && first + n <= 4 ? `glb${block}[${at >> 4}].${XYZW.slice(first, first + n)}`
@@ -1568,10 +1606,11 @@ export function emitStage(program, which, options, given, partner){
                     ? `(${words} != vec${n}u(0u))` : `bitcast<${typeOf(type)}>(${words})`;
             }
             case 'matrix': {
+                const element = type.base === 'double' ? 8 : 4;
                 const columns = Array.from({ length: type.cols }, (_, c)=>readBlock({
-                    ...place, type: vectorOf('float', type.rows),
-                    at: at + c * (place.rowMajor ? 4 : place.matrixStride),
-                    step: place.rowMajor ? place.matrixStride : 4 }));
+                    ...place, type: vectorOf(type.base, type.rows),
+                    at: at + c * (place.rowMajor ? element : place.matrixStride),
+                    step: place.rowMajor ? place.matrixStride : element }));
                 return `${typeOf(type)}(${columns.join(', ')})`;
             }
             case 'array': {
@@ -2663,6 +2702,94 @@ export function emitStage(program, which, options, given, partner){
                 return type.kind === 'scalar' ? '0.0f' : `${typeOf(type)}()`;
             case 'ftransform':
                 return `(uniforms.modelViewProjection * ${p}gl_Vertex)`;
+            case 'uaddCarry':
+            case 'usubBorrow': {
+                const T = typeOf(type);
+                const a = once(out, expr(node.args[0], out), type);
+                const b = once(out, expr(node.args[1], out), type);
+                const add = name === 'uaddCarry';
+                const result = temp(out, `${a} ${add ? '+' : '-'} ${b}`, T);
+                // A sum wrapped is below either operand; a difference wrapped
+                // had the larger subtracted.
+                store(node.args[2], `select(${T}(0u), ${T}(1u), ${add ? `${result} < ${a}`
+                    : `${a} < ${b}`})`, out);
+                return result;
+            }
+            case 'umulExtended':
+            case 'imulExtended': {
+                const argType = node.args[0].type;
+                const T = typeOf(argType);
+                const size = argType.kind === 'vector' ? argType.size : 1;
+                const U = size === 1 ? 'u32' : `vec${size}u`;
+                usedWideMultiplies.add(U);
+                const a = once(out, expr(node.args[0], out), argType);
+                const b = once(out, expr(node.args[1], out), argType);
+                const signed = name === 'imulExtended';
+                const ua = signed ? temp(out, `bitcast<${U}>(${a})`, U) : a;
+                const ub = signed ? temp(out, `bitcast<${U}>(${b})`, U) : b;
+                let high = `${p}mulHigh_${U.replace(/[<>]/g, '')}(${ua}, ${ub})`;
+                if (signed)
+                {
+                    // Two's complement: each negative operand took the other
+                    // 2^32 times too many into the unsigned high word.
+                    const zero = `${T}(0)`;
+                    high = `(${high} - select(${U}(0u), ${ub}, ${a} < ${zero})`
+                        + ` - select(${U}(0u), ${ua}, ${b} < ${zero}))`;
+                }
+                store(node.args[2], signed ? `bitcast<${T}>(${high})` : high, out);
+                store(node.args[3], `${a} * ${b}`, out);
+                return '';
+            }
+            case 'bitfieldExtract': {
+                const [v, offset, bits] = node.args.map((/** @type {any} */ a)=>expr(a, out));
+                return `extractBits(${v}, u32(${offset}), u32(${bits}))`;
+            }
+            case 'bitfieldInsert': {
+                const [base, insert, offset, bits] = node.args.map((/** @type {any} */ a)=>
+                    expr(a, out));
+                return `insertBits(${base}, ${insert}, u32(${offset}), u32(${bits}))`;
+            }
+            case 'frexp': {
+                const parts = `t${temps++}`;
+                out.pre.push(`let ${parts} = frexp(${expr(node.args[0], out)});`);
+                store(node.args[1], `${parts}.exp`, out);
+                return `${parts}.fract`;
+            }
+            case 'ldexp':
+                return `ldexp(${expr(node.args[0], out)}, ${expr(node.args[1], out)})`;
+            case 'interpolateAtCentroid':
+            case 'interpolateAtSample': {
+                // Every target here is drawn with one sample a pixel (decisions
+                // A85, A150): its centroid and its samples are its centre,
+                // where the input already is.
+                if (node.args[1])
+                {
+                    discardValue(expr(node.args[1], out), out);
+                }
+                return expr(node.args[0], out);
+            }
+            case 'interpolateAtOffset': {
+                // The input moved along its derivatives, GL's y up (decision A177).
+                const v = once(out, expr(node.args[0], out), type);
+                const at = once(out, expr(node.args[1], out), node.args[1].type);
+                return `(${v} + dpdx(${v}) * ${at}.x + dpdy(${v}) * (${at}.y * -uniforms.misc.z))`;
+            }
+            case 'packDouble2x32': {
+                usedDoubleBits = true;
+                const words = once(out, expr(node.args[0], out), node.args[0].type);
+                return `${p}doubleToFloat(${words}.x, ${words}.y)`;
+            }
+            case 'unpackDouble2x32':
+                usedDoubleBits = true;
+                return `${p}floatToDouble(${expr(node.args[0], out)})`;
+            case 'anyInvocation':
+            case 'allInvocations':
+                // A group of one invocation, which the specification leaves
+                // the implementation to choose (4.60 section 8.18).
+                return expr(node.args[0], out);
+            case 'allInvocationsEqual':
+                discardValue(expr(node.args[0], out), out);
+                return 'true';
             default:
                 throw new Error(`glsl: the built-in '${name}' has no translation`);
         }
@@ -2679,6 +2806,12 @@ export function emitStage(program, which, options, given, partner){
      * @param {any} node @param {Emit} out @returns {string}
      */
     function textureCall(node, out){
+        const sampler = node.args[0];
+        if (sampler.node === 'index' && sampler.object.node === 'name'
+            && sampler.object.symbol.storage !== 'param' && !sampler.index.constant)
+        {
+            return chosenSampler(node, out);
+        }
         const value = lookup(node, out);
         const [tex] = samplerPair(node.args[0]).split(', ');
         const type = /** @type {import('./glsl-types.js').SamplerType} */ (node.args[0].type);
@@ -2692,6 +2825,36 @@ export function emitStage(program, which, options, given, partner){
         }
         const scalar = SCALARS[type.sampled ?? 'float'];
         return swizzledTexel(temp(out, value, `vec4<${scalar}>`), code, scalar);
+    }
+
+    /**
+     * A lookup through an element of a sampler array that an expression
+     * picks (4.00: an expression dynamically uniform): each element is a
+     * binding of its own, so a switch makes the lookup through the one the
+     * index names; out of range it is the last's, as GL leaves such an
+     * index undefined.
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function chosenSampler(node, out){
+        const sampler = node.args[0];
+        const length = sampler.object.type.length;
+        const index = temp(out, `i32(${expr(sampler.index, out)})`, 'i32');
+        const result = `t${temps++}`;
+        out.pre.push(`var ${result}: ${typeOf(node.type)};`, `switch (${index}) {`);
+        for (let k = 0; k < length; k++)
+        {
+            /** @type {Emit} */
+            const caseOut = { pre: [] };
+            const element = { ...sampler, index: { ...sampler.index, constant: [k] } };
+            const value = textureCall({ ...node, args: [element, ...node.args.slice(1)] },
+                caseOut);
+            out.pre.push(`    ${k === length - 1 ? 'default' : `case ${k}`}: {`,
+                ...caseOut.pre.map(line=>`        ${line}`), `        ${result} = ${value};`,
+                '    }');
+        }
+        out.pre.push('}');
+        return result;
     }
 
     /**
@@ -2739,10 +2902,22 @@ export function emitStage(program, which, options, given, partner){
             }
             return type.array ? `vec3i(vec2i(${d}), ${layers})` : `vec2i(${d})`;
         }
-        if (name.startsWith('textureGather') || name.startsWith('textureQuery')
-            || name === 'textureSamples')
+        if (name === 'textureQueryLevels')
         {
-            throw new Error(`glsl: the built-in '${name}' has no translation`);
+            return `i32(textureNumLevels(${tex}))`;
+        }
+        if (name === 'textureSamples')
+        {
+            // A multisample texture is kept with one sample a texel (decision A150).
+            return '1i';
+        }
+        if (name === 'textureQueryLod')
+        {
+            return queryLod(tex, rest[0], dim, type, out);
+        }
+        if (name.startsWith('textureGather'))
+        {
+            return gather(node, tex, smp, out);
         }
         const P = once(out, expr(rest[0], out), rest[0].type);
         const pSize = rest[0].type.kind === 'vector' ? rest[0].type.size : 1;
@@ -2845,6 +3020,98 @@ export function emitStage(program, which, options, given, partner){
             sample = `textureSample(${head}${offsetCode})`;
         }
         return sample;
+    }
+
+    /**
+     * textureQueryLod (4.00 section 8.9.1): the level the lookup's
+     * derivatives choose, x clamped to the texture's levels and y not, worked
+     * out from the coordinates' derivatives scaled by the base level's size
+     * as the specification's lambda is (a cube map's on its major axis'
+     * face); WGSL has no query of the level the hardware takes (decision
+     * A176).
+     *
+     * @param {string} tex @param {any} coordinate @param {string} dim
+     * @param {import('./glsl-types.js').SamplerType} type @param {Emit} out
+     * @returns {string}
+     */
+    function queryLod(tex, coordinate, dim, type, out){
+        const P = once(out, expr(coordinate, out), coordinate.type);
+        const size = `vec2f(textureDimensions(${tex}))`;
+        let du;
+        let dv;
+        if (dim === 'Cube')
+        {
+            const at = temp(out, `${P}.xyz`, 'vec3f');
+            const major = temp(out, `max(abs(${at}.x), max(abs(${at}.y), abs(${at}.z)))`, 'f32');
+            const scale = temp(out, `${size}.x * 0.5f / ${major}`, 'f32');
+            du = `(dpdx(${at}) * ${scale})`;
+            dv = `(dpdy(${at}) * ${scale})`;
+        }
+        else if (dim === '3D')
+        {
+            const scale = `vec3f(textureDimensions(${tex}))`;
+            du = `(dpdx(${P}.xyz) * ${scale})`;
+            dv = `(dpdy(${P}.xyz) * ${scale})`;
+        }
+        else if (dim === '1D')
+        {
+            const at = coordinate.type.kind === 'vector' ? `${P}.x` : P;
+            du = `vec2f(dpdx(${at}) * ${size}.x, 0.0f)`;
+            dv = `vec2f(dpdy(${at}) * ${size}.x, 0.0f)`;
+        }
+        else
+        {
+            du = `(dpdx(${P}.xy) * ${size})`;
+            dv = `(dpdy(${P}.xy) * ${size})`;
+        }
+        const lambda = temp(out, `0.5f * log2(max(max(dot(${du}, ${du}), dot(${dv}, ${dv})),`
+            + ' 1e-30f))', 'f32');
+        const most = `f32(textureNumLevels(${tex}) - 1u)`;
+        return `vec2f(clamp(${lambda}, 0.0f, ${most}), ${lambda})`;
+    }
+
+    /**
+     * textureGather and its offset forms (4.00 section 8.9.4): WGSL's gather
+     * of one component, or of the comparisons for a shadow sampler, in GL's
+     * order of the four texels (i0j1, i1j1, i1j0, i0j0). textureGatherOffsets
+     * gathers once an offset and keeps each footprint's i0j0 texel.
+     *
+     * @param {any} node @param {string} tex @param {string} smp @param {Emit} out
+     * @returns {string}
+     */
+    function gather(node, tex, smp, out){
+        const name = node.name;
+        const type = /** @type {import('./glsl-types.js').SamplerType} */ (node.args[0].type);
+        const rest = node.args.slice(1);
+        const P = once(out, expr(rest[0], out), rest[0].type);
+        const c = type.dim === 'Cube' ? 3 : 2;
+        const pSize = rest[0].type.kind === 'vector' ? rest[0].type.size : 1;
+        let coords = pSize === c ? P : `${P}.${XYZW.slice(0, c)}`;
+        if (type.dim === '2DRect')
+        {
+            coords = `(${coords} / vec2f(textureDimensions(${tex})))`;
+        }
+        const layer = type.array ? `, i32(floor(${P}.${XYZW[c]} + 0.5f))` : '';
+        let at = 1;
+        const reference = type.shadow ? expr(rest[at++], out) : null;
+        const offsets = name === 'textureGatherOffsets' ? rest[at++]
+            : name === 'textureGatherOffset' ? rest[at++] : null;
+        const component = !type.shadow && rest[at] ? expr(rest[at], out) : '0';
+        /** @param {string | null} offset */
+        const gatherOnce = offset=>{
+            const tail = offset === null ? '' : `, ${offset}`;
+            return reference !== null
+                ? `textureGatherCompare(${tex}, ${smp}, ${coords}${layer}, ${reference}${tail})`
+                : `textureGather(${component}, ${tex}, ${smp}, ${coords}${layer}${tail})`;
+        };
+        if (name !== 'textureGatherOffsets')
+        {
+            return gatherOnce(offsets === null ? null : expr(offsets, out));
+        }
+        const list = expr(/** @type {any} */ (offsets), out);
+        const scalar = type.shadow ? 'f32' : SCALARS[type.sampled ?? 'float'];
+        return `vec4<${scalar}>(${[0, 1, 2, 3].map(k=>`${gatherOnce(`${list}[${k}]`)}.w`)
+            .join(', ')})`;
     }
 
     // --- statements ---
@@ -3103,6 +3370,13 @@ export function emitStage(program, which, options, given, partner){
                     {
                         out.pre.push(`${BARRIERS[node.name]}();`);
                     }
+                    return;
+                }
+                if (!node.user && node.type.kind === 'void')
+                {
+                    // A built-in of no value (umulExtended) writes its out
+                    // parameters as it is translated.
+                    discardValue(expr(node, out), out);
                     return;
                 }
                 if (node.user)
@@ -3783,6 +4057,8 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
     return {
         code: [...memoryDeclarations, ...declarations, blockCode, ...privates, ...loaders,
             ...[...usedInverses].sort().map(n=>inverseFunction(p, n)),
+            ...[...usedWideMultiplies].sort().map(U=>mulHighFunction(p, U)),
+            usedDoubleBits ? doubleBitsFunctions(p) : '',
             ...[...dynamicBlocks].sort((a, b)=>a - b).map(b=>`fn ${p}ubw${b}(o: u32) -> u32 {
     return glb${b}[o >> 4u][(o >> 2u) & 3u];
 }`), ...functions, entry]
@@ -3825,6 +4101,88 @@ function fixedOutputs(linked, p, fixed){
             : 'vec4f(0.0f, 0.0f, 0.0f, 1.0f)'};`);
     }
     return lines;
+}
+
+/**
+ * A double's words as the f32 that carries it, and an f32 as a double's
+ * words (decision A178): exponent and fraction moved between the two
+ * layouts, rounded to nearest where the double has more than an f32 holds;
+ * a double past an f32's range is its infinity, below it its zero.
+ *
+ * @param {string} p  the stage's prefix
+ * @returns {string}
+ */
+function doubleBitsFunctions(p){
+    return `fn ${p}doubleToFloat(lo: u32, hi: u32) -> f32 {
+    let sign = hi & 0x80000000u;
+    let exponent = i32((hi >> 20u) & 0x7ffu);
+    if (exponent == 0x7ff) {
+        let nan = (hi & 0xfffffu) != 0u || lo != 0u;
+        return bitcast<f32>(sign | select(0x7f800000u, 0x7fc00000u, nan));
+    }
+    let e = exponent - 1023 + 127;
+    if (exponent == 0 || e < -23) {
+        return bitcast<f32>(sign);
+    }
+    if (e >= 255) {
+        return bitcast<f32>(sign | 0x7f800000u);
+    }
+    // 52 fraction bits to 23, the 29 dropped rounding to nearest, ties to even.
+    var fraction = ((hi & 0xfffffu) << 3u) | (lo >> 29u);
+    let dropped = lo & 0x1fffffffu;
+    if (e <= 0) {
+        // Below an f32's normal range: its subnormal, the implicit bit shown.
+        let value = ldexp(1.0f + f32(fraction) / 8388608.0f, exponent - 1023);
+        return bitcast<f32>(sign | bitcast<u32>(value));
+    }
+    var bits = (u32(e) << 23u) | fraction;
+    if (dropped > 0x10000000u || (dropped == 0x10000000u && (bits & 1u) == 1u)) {
+        bits = bits + 1u;
+    }
+    return bitcast<f32>(sign | bits);
+}
+
+fn ${p}floatToDouble(v: f32) -> vec2u {
+    let bits = bitcast<u32>(v);
+    let sign = bits & 0x80000000u;
+    let exponent = (bits >> 23u) & 0xffu;
+    var fraction = bits & 0x7fffffu;
+    if (exponent == 0xffu) {
+        return vec2u(fraction << 29u, sign | 0x7ff00000u | (fraction >> 3u));
+    }
+    if (exponent == 0u) {
+        if (fraction == 0u) {
+            return vec2u(0u, sign);
+        }
+        // A subnormal f32 is a normal double: its leading bit made implicit.
+        let lead = firstLeadingBit(fraction);
+        let shift = 23u - lead;
+        fraction = (fraction << shift) & 0x7fffffu;
+        let e = u32(1023 - 126) - shift;
+        return vec2u(fraction << 29u, sign | (e << 20u) | (fraction >> 3u));
+    }
+    let e = exponent - 127u + 1023u;
+    return vec2u(fraction << 29u, sign | (e << 20u) | (fraction >> 3u));
+}`;
+}
+
+/**
+ * The high word of a 32-by-32-bit unsigned product, which WGSL has no
+ * 64-bit integer for (umulExtended, imulExtended): the product of 16-bit
+ * halves, their carries gathered, component by component.
+ *
+ * @param {string} p  the stage's prefix @param {string} U  u32 or vecNu
+ * @returns {string}
+ */
+function mulHighFunction(p, U){
+    return `fn ${p}mulHigh_${U}(a: ${U}, b: ${U}) -> ${U} {
+    let m = ${U}(0xffffu);
+    let s = ${U}(16u);
+    let al = a & m; let ah = a >> s; let bl = b & m; let bh = b >> s;
+    let low = al * bl; let cross1 = al * bh; let cross2 = ah * bl;
+    let middle = (low >> s) + (cross1 & m) + (cross2 & m);
+    return ah * bh + (cross1 >> s) + (cross2 >> s) + (middle >> s);
+}`;
 }
 
 /**

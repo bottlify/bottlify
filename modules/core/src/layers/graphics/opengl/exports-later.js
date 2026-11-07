@@ -356,6 +356,20 @@ export function laterEntryPoints(h){
                 writeQuery(out, answered.values, 'float');
             }
         }),
+        glGetUniformdv: ([program, location, out])=>call(context=>{
+            const answered = context.getUniform(program >>> 0, location | 0);
+            if (answered)
+            {
+                writeQuery(out, answered.values, 'double');
+            }
+        }),
+        glGetnUniformdv: ([program, location, size, out])=>call(context=>{
+            const answered = context.getnUniform(program >>> 0, location | 0, (size | 0) / 2);
+            if (answered)
+            {
+                writeQuery(out, answered.values, 'double');
+            }
+        }),
         glGetUniformiv: ([program, location, out])=>call(context=>{
             const answered = context.getUniform(program >>> 0, location | 0);
             if (answered)
@@ -1104,6 +1118,41 @@ export function laterEntryPoints(h){
                         address, (count | 0) * n) : [], kind, n, null));
         }
     }
+    // OpenGL 4.0's doubles, each two words on the stack.
+    for (const n of [1, 2, 3, 4])
+    {
+        /** @param {number[]} args @param {number} at */
+        const doubles = (args, at)=>Array.from({ length: n }, (_, k)=>
+            asDouble(args[at + 2 * k], args[at + 2 * k + 1]));
+        handlers[`glUniform${n}d`] = args=>answer(current()?.uniform(args[0] | 0, 1,
+            doubles(args, 1), 'd', n));
+        handlers[`glUniform${n}dv`] = ([location, count, address])=>call(context=>
+            context.uniform(location | 0, count | 0, (count | 0) > 0
+                ? readTyped('d', address, (count | 0) * n) : [], 'd', n));
+        handlers[`glProgramUniform${n}d`] = args=>answer(current()?.programUniform(
+            args[0] >>> 0, args[1] | 0, 1, doubles(args, 2), 'd', n, null));
+        handlers[`glProgramUniform${n}dv`] = ([program, location, count, address])=>
+            call(context=>context.programUniform(program >>> 0, location | 0, count | 0,
+                (count | 0) > 0 ? readTyped('d', address, (count | 0) * n) : [], 'd', n, null));
+    }
+    for (const cols of [2, 3, 4])
+    {
+        for (const rows of [2, 3, 4])
+        {
+            const doubleName = cols === rows ? `glUniformMatrix${cols}dv`
+                : `glUniformMatrix${cols}x${rows}dv`;
+            handlers[doubleName] = ([location, count, transpose, address])=>call(context=>
+                context.uniformMatrix(location | 0, count | 0, transpose & 0xff,
+                    (count | 0) > 0 ? readTyped('d', address, (count | 0) * cols * rows) : [],
+                    cols, rows, 'd'));
+            handlers[doubleName.replace('glUniform', 'glProgramUniform')] =
+                ([program, location, count, transpose, address])=>call(context=>
+                    context.programUniform(program >>> 0, location | 0, count | 0,
+                        (count | 0) > 0 ? readTyped('d', address, (count | 0) * cols * rows)
+                            : [], 'd', cols * rows,
+                        { cols, rows, transpose: (transpose & 0xff) !== 0 }));
+        }
+    }
     for (const cols of [2, 3, 4])
     {
         for (const rows of [2, 3, 4])
@@ -1363,6 +1412,29 @@ function storageAndNamedEntryPoints(h){
                 relative >>> 0, 'float')),
         glVertexAttribIFormat: ([index, size, type, relative])=>answer(current()
             ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, 0, relative >>> 0, 'int')),
+        glVertexAttribLPointer: ([index, size, type, stride, pointer])=>answer(current()
+            ?.glVertexAttribLPointer(index >>> 0, size | 0, type >>> 0, stride | 0,
+                pointer >>> 0)),
+        glGetVertexAttribLdv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'double')),
+        // The current value of a double input (4.1), as the shader carries it
+        // (decision A178); the components not given are (0, 0, 1).
+        glVertexAttribL1d: ([index, xl, xh])=>answer(current()?.glVertexAttrib4fARB(
+            index >>> 0, asDouble(xl, xh), 0, 0, 1)),
+        glVertexAttribL2d: ([index, xl, xh, yl, yh])=>answer(current()?.glVertexAttrib4fARB(
+            index >>> 0, asDouble(xl, xh), asDouble(yl, yh), 0, 1)),
+        glVertexAttribL3d: ([index, xl, xh, yl, yh, zl, zh])=>answer(current()
+            ?.glVertexAttrib4fARB(index >>> 0, asDouble(xl, xh), asDouble(yl, yh),
+                asDouble(zl, zh), 1)),
+        glVertexAttribL4d: ([index, xl, xh, yl, yh, zl, zh, wl, wh])=>answer(current()
+            ?.glVertexAttrib4fARB(index >>> 0, asDouble(xl, xh), asDouble(yl, yh),
+                asDouble(zl, zh), asDouble(wl, wh))),
+        ...Object.fromEntries([1, 2, 3, 4].map(n=>[`glVertexAttribL${n}dv`,
+            (/** @type {number[]} */ [index, address])=>call(context=>{
+                const v = readTyped('d', address, n);
+                context.glVertexAttrib4fARB(index >>> 0, v[0], n > 1 ? v[1] : 0, n > 2 ? v[2] : 0,
+                    n > 3 ? v[3] : 1);
+            })])),
         glVertexAttribLFormat: ([index, size, type, relative])=>answer(current()
             ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, 0, relative >>> 0, 'long')),
         glVertexAttribBinding: ([index, point])=>answer(current()

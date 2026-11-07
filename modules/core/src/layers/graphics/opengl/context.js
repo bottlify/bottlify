@@ -139,7 +139,7 @@ const NOT_COMPILABLE = new Set([
     'glGetProgramEnvParameterfvARB', 'glGetProgramLocalParameterfvARB',
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
-    'glVertexAttribIPointer', 'getVertexAttribI',
+    'glVertexAttribIPointer', 'glVertexAttribLPointer', 'getVertexAttribI',
     // Draws whose commands a buffer object holds (4.6 compatibility 21.4).
     'glDrawArraysIndirect', 'glDrawElementsIndirect', 'glMultiDrawArraysIndirect',
     'glMultiDrawElementsIndirect', 'glMultiDrawArraysIndirectCount',

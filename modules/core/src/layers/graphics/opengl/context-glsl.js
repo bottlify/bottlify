@@ -43,14 +43,14 @@ import { ATOMIC_UINT, componentsOf } from './glsl-types.js';
 import { TESS, tessellationProgramAnswer } from './context-tessellation.js';
 
 /**
- * The GLSL versions a shader may name: those the WGSL emitter writes whole
- * (`glsl-wgsl.js`), and 4.20 and 4.30, in which compute shaders, storage
- * blocks, images and atomic counters are written (decision A170): a feature
- * of theirs the emitter does not write fails the link with its reason. A
- * later one fails to compile with the specification's message for a version
- * the implementation does not support.
+ * The GLSL versions a shader may name: every one from 1.10 to 4.60. A
+ * feature of one the emitter does not write (`glsl-wgsl.js`) fails the link
+ * with its reason (decision A170); a later version fails to compile with the
+ * specification's message for a version the implementation does not
+ * support.
  */
-export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 420, 430]);
+export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 400, 410, 420,
+    430, 440, 450, 460]);
 
 /**
  * The versions a tessellation shader may name: the language has the stages
@@ -242,14 +242,24 @@ export function glTypeOf(type){
     {
         case 'scalar':
             return type.base === 'float' ? GL.FLOAT : type.base === 'int' ? GL.INT
-                : type.base === 'uint' ? GL.UNSIGNED_INT : GL.BOOL;
+                : type.base === 'uint' ? GL.UNSIGNED_INT : type.base === 'double' ? GL.DOUBLE
+                    : GL.BOOL;
         case 'vector': {
             const at = type.size - 2;
             return type.base === 'float' ? GL.FLOAT_VEC2 + at
                 : type.base === 'int' ? GL.INT_VEC2 + at
-                    : type.base === 'uint' ? GL.UNSIGNED_INT_VEC2 + at : GL.BOOL_VEC2 + at;
+                    : type.base === 'uint' ? GL.UNSIGNED_INT_VEC2 + at
+                        // GL_DOUBLE_VEC2 on (4.0 table 7.3).
+                        : type.base === 'double' ? 0x8ffc + at : GL.BOOL_VEC2 + at;
         }
         case 'matrix':
+            if (type.base === 'double')
+            {
+                // GL_DOUBLE_MAT2 on: the square ones, then 2x3, 2x4, 3x2, 3x4, 4x2, 4x3.
+                return 0x8f46 + (type.cols === type.rows ? type.cols - 2
+                    : 3 + ['2x3', '2x4', '3x2', '3x4', '4x2', '4x3'].indexOf(
+                        `${type.cols}x${type.rows}`));
+            }
             if (type.cols === type.rows)
             {
                 return GL.FLOAT_MAT2 + type.cols - 2;
@@ -469,7 +479,7 @@ export function installShaderCalls(context, kernel){
      * @param {number} location
      * @param {number} count
      * @param {ArrayLike<number>} values
-     * @param {'f' | 'i' | 'u'} kind
+     * @param {'f' | 'i' | 'u' | 'd'} kind  glUniform*d's for a double (4.0)
      * @param {number} components  per element, or a matrix's columns times rows
      * @param {{ cols: number, rows: number, transpose: boolean } | null} matrix
      * @param {ProgramObject} [program]  glProgramUniform's (4.1), the current one's otherwise
@@ -499,7 +509,8 @@ export function installShaderCalls(context, kernel){
         }
         else if (matrix)
         {
-            if (type.kind !== 'matrix' || type.cols !== matrix.cols || type.rows !== matrix.rows)
+            if (type.kind !== 'matrix' || type.cols !== matrix.cols || type.rows !== matrix.rows
+                || (type.base === 'double') !== (kind === 'd'))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
@@ -510,7 +521,8 @@ export function installShaderCalls(context, kernel){
             const base = type.kind === 'scalar' || type.kind === 'vector' ? type.base : null;
             if (base === null || componentsOf(type) !== components
                 || (base === 'float' && kind !== 'f') || (base === 'int' && kind !== 'i')
-                || (base === 'uint' && kind !== 'u'))
+                || (base === 'uint' && kind !== 'u') || (base === 'double' && kind !== 'd')
+                || (base === 'bool' && kind === 'd'))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
@@ -536,8 +548,9 @@ export function installShaderCalls(context, kernel){
             }
         }
         const elements = Math.min(count, leaf.size - element);
-        const stored = type.kind === 'scalar' || type.kind === 'vector' ? type.base
-            : opaque ? 'int' : 'float';
+        // A double is kept as the f32 a shader carries it as (decision A178).
+        const stored = type.kind === 'scalar' || type.kind === 'vector'
+            ? type.base === 'double' ? 'float' : type.base : opaque ? 'int' : 'float';
         const { floats, ints } = executable;
         let changed = false;
         for (let e = 0; e < elements; e++)
@@ -2055,7 +2068,7 @@ export function installShaderCalls(context, kernel){
          * elements.
          *
          * @param {number} location @param {number} count @param {ArrayLike<number>} values
-         * @param {'f' | 'i' | 'u'} kind @param {number} components
+         * @param {'f' | 'i' | 'u' | 'd'} kind @param {number} components
          */
         uniform(location, count, values, kind, components){
             // A list replays the values, not the program's memory they came from.
@@ -2067,17 +2080,18 @@ export function installShaderCalls(context, kernel){
         },
 
         /**
-         * glUniformMatrix{234}[x{234}]fv.
+         * glUniformMatrix{234}[x{234}]fv, and dv (4.0).
          *
          * @param {number} location @param {number} count @param {number} transpose
          * @param {ArrayLike<number>} values @param {number} cols @param {number} rows
+         * @param {'f' | 'd'} [kind]
          */
-        uniformMatrix(location, count, transpose, values, cols, rows){
+        uniformMatrix(location, count, transpose, values, cols, rows, kind = 'f'){
             if (enter('uniformMatrix', [location, count, transpose, Array.from(values), cols,
-                rows]))
+                rows, kind]))
             {
-                writeUniform(`glUniformMatrix${cols}x${rows}fv`, location, count, values, 'f',
-                    cols * rows, { cols, rows, transpose: transpose !== 0 });
+                writeUniform(`glUniformMatrix${cols}x${rows}${kind}v`, location, count, values,
+                    kind, cols * rows, { cols, rows, transpose: transpose !== 0 });
             }
         },
 
@@ -2087,7 +2101,7 @@ export function installShaderCalls(context, kernel){
          * columns, rows and transposition of a matrix's.
          *
          * @param {number} programName @param {number} location @param {number} count
-         * @param {ArrayLike<number>} values @param {'f' | 'i' | 'u'} kind
+         * @param {ArrayLike<number>} values @param {'f' | 'i' | 'u' | 'd'} kind
          * @param {number} components
          * @param {{ cols: number, rows: number, transpose: boolean } | null} matrix
          */
@@ -2102,7 +2116,7 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            writeUniform(matrix ? `glProgramUniformMatrix${matrix.cols}x${matrix.rows}fv`
+            writeUniform(matrix ? `glProgramUniformMatrix${matrix.cols}x${matrix.rows}${kind}v`
                 : `glProgramUniform${components}${kind}`, location, count, values, kind,
             components, matrix, program);
         },
@@ -2154,7 +2168,8 @@ export function installShaderCalls(context, kernel){
             const at = leaf.offset + element * leaf.words;
             const type = leaf.type;
             const float = type.kind === 'matrix'
-                || ((type.kind === 'scalar' || type.kind === 'vector') && type.base === 'float');
+                || ((type.kind === 'scalar' || type.kind === 'vector')
+                    && (type.base === 'float' || type.base === 'double'));
             const source = float ? executable.floats : executable.ints;
             const values = Array.from(source.subarray(at, at + leaf.words));
             const unsigned = (type.kind === 'scalar' || type.kind === 'vector')

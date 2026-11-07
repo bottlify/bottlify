@@ -80,9 +80,18 @@ function prototypes(text){
      * @type {string[]}
      */
     const imageParams = [];
+    // A prototype whose parameters run over several lines (umulExtended's) is
+    // read whole, its lines joined.
+    let pending = '';
     for (const raw of text.split('\n'))
     {
-        const line = raw.trim();
+        const line = (pending === '' ? raw.trim() : `${pending} ${raw.trim()}`);
+        pending = '';
+        if (inSource && /^[\w ]+\s+\w+\s*\([^)]*$/.test(line))
+        {
+            pending = line;
+            continue;
+        }
         const image = /^\{empty\}:: (gimage\w+) _image_, (\w+) _P_(, int _sample_)?$/.exec(line);
         if (image && !conditions.includes('ESSL'))
         {
@@ -103,7 +112,7 @@ function prototypes(text){
         }
         if (/^==+ /.test(line) && !inSource)
         {
-            section = line.replace(/^==+ /, '');
+            section = line.replace(/^==+ /, '').trim();
             continue;
         }
         if (line === '----')

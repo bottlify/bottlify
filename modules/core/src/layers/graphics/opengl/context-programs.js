@@ -85,7 +85,7 @@ const INTEGER_ATTRIB_TYPES = new Set([
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function installProgramCalls(context, kernel){
-    const { enter, setError, record, setState } = kernel;
+    const { enter, setError, record, setState, diverge } = kernel;
 
     /** @type {Map<number, number>} target -> the bound program's name */
     const bindings = new Map([[GL.VERTEX_PROGRAM_ARB, 0], [GL.FRAGMENT_PROGRAM_ARB, 0]]);
@@ -744,6 +744,44 @@ export function installProgramCalls(context, kernel){
             array.pointer = pointer;
             array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
             array.integer = 1;
+            kernel.side.attribBinding?.fromPointer(index);
+        },
+
+        /**
+         * glVertexAttribLPointer (4.1): an array of doubles a shader's double
+         * input reads, carried at single precision as the shader carries a
+         * double (decision A178).
+         *
+         * @param {number} index @param {number} size @param {number} type
+         * @param {number} stride @param {number} pointer
+         */
+        glVertexAttribLPointer(index, size, type, stride, pointer){
+            if (!enter('glVertexAttribLPointer', [index, size, type, stride, pointer]))
+            {
+                return;
+            }
+            if (!(index >= 0) || index >= GENERIC_ATTRIBS || size < 1 || size > 4 || stride < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (type !== GL.DOUBLE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            diverge('a 64-bit vertex attribute (glVertexAttribLPointer) is read at single'
+                + ' precision');
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
+            array.size = size;
+            array.type = type;
+            array.normalised = 0;
+            array.stride = stride;
+            array.pointer = pointer;
+            array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+            array.integer = 0;
             kernel.side.attribBinding?.fromPointer(index);
         },
 
