@@ -36,7 +36,7 @@ import { GL } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
-import { BLOCK_LIMITS } from './glsl-link.js';
+import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
 
 /**
@@ -116,6 +116,7 @@ export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.DITHER, name: 'GL_DITHER', kind: 'bool', value: [1] },
     // OpenGL 3.1 and 4.3: an index that ends one primitive and starts the next.
     { query: GL.PRIMITIVE_RESTART, name: 'GL_PRIMITIVE_RESTART', kind: 'bool', value: [0] },
+    { query: GL.RASTERIZER_DISCARD, name: 'GL_RASTERIZER_DISCARD', kind: 'bool', value: [0] },
     {
         query: GL.PRIMITIVE_RESTART_FIXED_INDEX, name: 'GL_PRIMITIVE_RESTART_FIXED_INDEX',
         kind: 'bool', value: [0],
@@ -909,6 +910,43 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.UNIFORM_BUFFER_OFFSET_ALIGNMENT, name: 'GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT',
         kind: 'int', value: [256],
+    },
+    // Transform feedback (OpenGL 3.0, 4.0): the general binding, the object
+    // bound and whether it captures, and the limits (`FEEDBACK_LIMITS`).
+    {
+        query: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING, name: 'GL_TRANSFORM_FEEDBACK_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_BINDING, name: 'GL_TRANSFORM_FEEDBACK_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_ACTIVE, name: 'GL_TRANSFORM_FEEDBACK_ACTIVE', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_PAUSED, name: 'GL_TRANSFORM_FEEDBACK_PAUSED', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS', kind: 'int',
+        value: [FEEDBACK_LIMITS.interleavedComponents],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS', kind: 'int',
+        value: [FEEDBACK_LIMITS.separateAttribs],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS', kind: 'int',
+        value: [FEEDBACK_LIMITS.separateComponents],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_BUFFERS, name: 'GL_MAX_TRANSFORM_FEEDBACK_BUFFERS',
+        kind: 'int', value: [FEEDBACK_LIMITS.buffers],
     },
     // OpenGL 3.2's geometry shaders: their limits are the language's
     // (`GLSL_CONSTANTS`), which a shader's gl_Max* constants read too.

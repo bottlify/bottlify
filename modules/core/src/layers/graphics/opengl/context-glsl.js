@@ -36,7 +36,7 @@ import { GL } from './constants.js';
 import { compileFront } from './glsl-front.js';
 import { GLSL_EXTENSIONS } from './glsl-versions.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
-import { BLOCK_LIMITS, linkProgram } from './glsl-link.js';
+import { BLOCK_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
 
@@ -109,6 +109,8 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {Map<string, number>} bindings  glBindAttribLocation's, for the next link
  * @property {Map<string, { location: number, index: number }>} fragData
  *     glBindFragDataLocation's, for the next link
+ * @property {{ names: string[], mode: 'interleaved' | 'separate' } | null} feedback
+ *     glTransformFeedbackVaryings', for the next link
  * @property {Executable | null} executable
  * @property {number} users  the contexts it is current in
  */
@@ -651,7 +653,7 @@ export function installShaderCalls(context, kernel){
             /** @type {ProgramObject} */
             const program = { kind: 'program', name, shaders: [], deleted: false, linked: false,
                 validated: false, log: '', bindings: new Map(), fragData: new Map(),
-                executable: null, users: 0 };
+                feedback: null, executable: null, users: 0 };
             namespace().define(name, program);
             kernel.shareGroup().used = true;
             return name;
@@ -736,6 +738,12 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
+            if (kernel.side.feedbackActive?.() && program === currentProgram)
+            {
+                // Transform feedback is capturing what it runs (section 2.15).
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             program.validated = false;
             const notCompiled = program.shaders.filter(shader=>!shader.compiled);
             if (notCompiled.length > 0)
@@ -752,6 +760,7 @@ export function installShaderCalls(context, kernel){
                 vertex: units(GL.VERTEX_SHADER),
                 geometry: units(GL.GEOMETRY_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
+                feedback: program.feedback ?? undefined,
                 attribBindings: program.bindings,
                 fragDataBindings: program.fragData,
             });
@@ -777,6 +786,11 @@ export function installShaderCalls(context, kernel){
         glUseProgram(programName){
             if (!enter('glUseProgram', [programName]))
             {
+                return;
+            }
+            if (kernel.side.feedbackActive?.())
+            {
+                setError(GL.INVALID_OPERATION);
                 return;
             }
             if (programName === 0)
@@ -900,6 +914,14 @@ export function installShaderCalls(context, kernel){
                 case GL.ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
                     return [linked ? Math.max(0, ...linked.blocks
                         .map(b=>b.name.length + 1)) : 0];
+                case GL.TRANSFORM_FEEDBACK_BUFFER_MODE:
+                    return [linked?.feedback?.mode === 'separate' ? GL.SEPARATE_ATTRIBS
+                        : GL.INTERLEAVED_ATTRIBS];
+                case GL.TRANSFORM_FEEDBACK_VARYINGS:
+                    return [linked?.feedback?.varyings.length ?? 0];
+                case GL.TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH:
+                    return [Math.max(0, ...(linked?.feedback?.varyings ?? [])
+                        .map(v=>v.name.length + 1))];
                 // A program linked with a geometry shader answers these, any
                 // other INVALID_OPERATION (OpenGL 3.2 section 6.1.16).
                 case GL.GEOMETRY_VERTICES_OUT:
@@ -1070,6 +1092,60 @@ export function installShaderCalls(context, kernel){
                 return null;
             }
             return { name: entry.name, size: 1, type: glTypeOf(entry.type) };
+        },
+
+        /**
+         * glTransformFeedbackVaryings: what the next link captures.
+         *
+         * @param {number} programName @param {readonly string[]} names @param {number} mode
+         */
+        glTransformFeedbackVaryings(programName, names, mode){
+            if (!enter('glTransformFeedbackVaryings', [programName, names, mode]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            if (mode !== GL.INTERLEAVED_ATTRIBS && mode !== GL.SEPARATE_ATTRIBS)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (mode === GL.SEPARATE_ATTRIBS && names.length > FEEDBACK_LIMITS.separateAttribs)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            program.feedback = { names: [...names],
+                mode: mode === GL.SEPARATE_ATTRIBS ? 'separate' : 'interleaved' };
+        },
+
+        /**
+         * @param {number} programName @param {number} index
+         * @returns {{ name: string, size: number, type: number } | null}
+         */
+        glGetTransformFeedbackVarying(programName, index){
+            if (!enter('glGetTransformFeedbackVarying', [programName, index]))
+            {
+                return null;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return null;
+            }
+            const varying = program.executable?.linked.feedback?.varyings[index];
+            if (!varying)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const type = varying.type?.kind === 'array' ? varying.type.element : varying.type;
+            // A gap answers GL_NONE and the components it skips (4.0).
+            return { name: varying.name, size: varying.size, type: type ? glTypeOf(type) : 0 };
         },
 
         // --- uniforms ---

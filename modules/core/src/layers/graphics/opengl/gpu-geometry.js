@@ -30,8 +30,8 @@
  */
 
 import {
-    GEOMETRY_INDEX_BINDING, GEOMETRY_SCAN_BINDING, GEOMETRY_SCAN_WGSL, STREAM_ARGS_WORDS,
-    geometryIndexWgsl,
+    COUNTER, COUNTER_BINDING, COUNTER_WGSL, GEOMETRY_INDEX_BINDING, GEOMETRY_SCAN_BINDING,
+    GEOMETRY_SCAN_WGSL, STREAM_ARGS_WORDS, STREAM_OUT_BINDING, geometryIndexWgsl, streamOutWgsl,
 } from '../d3d10/geometry-wgsl.js';
 import { GLSL_GEOMETRY_PASS_BINDING, GLSL_VERTEX_PASS_BINDING } from './glsl-wgsl.js';
 
@@ -39,6 +39,8 @@ import { GLSL_GEOMETRY_PASS_BINDING, GLSL_VERTEX_PASS_BINDING } from './glsl-wgs
 const MOST_BYTES = 1 << 27;
 /** A register between the passes: four words. */
 const REGISTER = 16;
+/** The buffers whose filled size a counter is kept for, at the most. */
+const MOST_COUNTERS = 4096;
 
 const COMPUTE_STAGE = 4;
 /** @param {number} binding @param {string} type */
@@ -63,6 +65,20 @@ const INDEX_ENTRIES = Object.freeze([
     entry(GEOMETRY_INDEX_BINDING.offsets, 'read-only-storage'),
     entry(GEOMETRY_INDEX_BINDING.indices, 'storage'),
     entry(GEOMETRY_INDEX_BINDING.params, 'uniform'),
+]);
+
+const STREAM_OUT_ENTRIES = Object.freeze([
+    entry(STREAM_OUT_BINDING.vertices, 'read-only-storage'),
+    entry(STREAM_OUT_BINDING.indices, 'read-only-storage'),
+    entry(STREAM_OUT_BINDING.args, 'read-only-storage'),
+    entry(STREAM_OUT_BINDING.counters, 'storage'),
+    entry(STREAM_OUT_BINDING.params, 'uniform'),
+    ...[0, 1, 2, 3].map(index=>entry(STREAM_OUT_BINDING.buffers + index, 'storage')),
+]);
+const COUNTER_ENTRIES = Object.freeze([
+    entry(COUNTER_BINDING.counters, 'storage'),
+    entry(COUNTER_BINDING.params, 'uniform'),
+    entry(COUNTER_BINDING.args, 'storage'),
 ]);
 
 /** @param {number} slots the draw's arrays @returns {object[]} */
@@ -113,7 +129,7 @@ export function createGlGeometry(services){
     const pipelines = new Map();
     /** @type {Record<string, any>} */
     const scratch = {};
-    const counted = { draws: 0, invocations: 0, refused: 0 };
+    const counted = { draws: 0, invocations: 0, refused: 0, captured: 0 };
 
     /**
      * A buffer between the passes, grown as a draw needs: an outgrown one
@@ -181,6 +197,41 @@ export function createGlGeometry(services){
     };
 
     /**
+     * The vertex shader over every position of a draw and instance, what it
+     * keeps written into `out`.
+     *
+     * @param {GeometryDraw} draw @param {string} code @param {number} positions
+     * @param {number} perInstance @param {object} out
+     */
+    const vertexPass = (draw, code, positions, perInstance, out)=>{
+        const slots = Math.max(1, draw.slots.length);
+        const zeros = scratchOf('zeros', 16);
+        const vertexParams = new Uint32Array(8 + 4 * slots);
+        vertexParams.set([positions, perInstance, draw.indices ? draw.indices.bytes : 0,
+            draw.indices ? draw.indices.offset : 0, draw.first, draw.baseVertex >>> 0, 0, 0]);
+        draw.slots.forEach((slot, k)=>{
+            vertexParams.set([slot.offset, slot.stride, slot.instance ? 1 : 0, 0], 8 + 4 * k);
+        });
+        /** @param {any} gpu */
+        const words = gpu=>({ buffer: gpu, offset: 0, size: Math.max(4, (gpu.size ?? 4) & ~3) });
+        return {
+            pipeline: computeFor(`vs|${draw.key}|${slots}`, code, 'vertexCompute',
+                [draw.vertexGroup.layout, vertexPassEntries(slots)], 'gl:vs-geometry'),
+            label: 'gl:vs-geometry',
+            groups: [draw.vertexGroup.entries, [
+                { binding: GLSL_VERTEX_PASS_BINDING.indices,
+                    resource: draw.indices ? words(draw.indices.gpu) : whole(zeros, 16) },
+                { binding: GLSL_VERTEX_PASS_BINDING.out, resource: out },
+                { binding: GLSL_VERTEX_PASS_BINDING.params, resource: uniform(vertexParams) },
+                ...Array.from({ length: slots }, (_, k)=>({
+                    binding: GLSL_VERTEX_PASS_BINDING.slots + k,
+                    resource: draw.slots[k] ? words(draw.slots[k].gpu) : whole(zeros, 16) })),
+            ]],
+            grid: [Math.ceil(positions / 64), 1, 1],
+        };
+    };
+
+    /**
      * The passes before a draw through a geometry shader, and what its draw
      * binds and reads, or null where it makes nothing.
      *
@@ -188,7 +239,9 @@ export function createGlGeometry(services){
      * @returns {{ passes: { pipeline: Promise<any>, label: string, groups: object[][],
      *     grid: number[] }[],
      *     drawn: { group: object[], args: { gpu: any, offset: number },
-     *         indexBuffer: { gpu: any, format: string, offset: number } } } | null}
+     *         indexBuffer: { gpu: any, format: string, offset: number } },
+     *     kept: { vertices: object, registers: number, indices: object, args: object,
+     *         room: number, vpp: number } } | null}
      */
     const prepare = draw=>{
         const { passes } = draw;
@@ -204,6 +257,7 @@ export function createGlGeometry(services){
         }
         const positions = draw.instances * prims * vertices;
         const vsBytes = positions * passes.inputs * REGISTER;
+
         const placesBytes = invocations * most * passes.outputs * REGISTER;
         const room = invocations * Math.max(1, most - vpp + 1);
         const indicesBytes = room * vpp * 4;
@@ -214,7 +268,6 @@ export function createGlGeometry(services){
                 + ' what they could make is past the room a buffer between the passes has');
             return null;
         }
-        const slots = Math.max(1, draw.slots.length);
         const vsOut = scratchOf('vertices', vsBytes);
         const places = scratchOf('places', placesBytes);
         const startsBytes = invocations * most * 4;
@@ -223,35 +276,11 @@ export function createGlGeometry(services){
         const offsets = scratchOf('offsets', invocations * 16);
         const indices = scratchOf('indices', indicesBytes, BufferUsage.INDEX);
         const args = scratchOf('args', 4 * STREAM_ARGS_WORDS * 4, BufferUsage.INDIRECT);
-        const zeros = scratchOf('zeros', 16);
 
         // 1. the vertex shader over every position
-        const vertexParams = new Uint32Array(8 + 4 * slots);
-        vertexParams.set([positions, prims * vertices, draw.indices ? draw.indices.bytes : 0,
-            draw.indices ? draw.indices.offset : 0, draw.first, draw.baseVertex >>> 0, 0, 0]);
-        draw.slots.forEach((slot, k)=>{
-            vertexParams.set([slot.offset, slot.stride, slot.instance ? 1 : 0, 0], 8 + 4 * k);
-        });
-        const vertexPipeline = computeFor(`vs|${draw.key}|${slots}`, passes.vertex.code,
-            'vertexCompute', [draw.vertexGroup.layout, vertexPassEntries(slots)],
-            'gl:vs-geometry');
         /** @type {{ pipeline: Promise<any>, label: string, groups: object[][], grid: number[] }[]} */
-        const recorded = [{
-            pipeline: vertexPipeline, label: 'gl:vs-geometry',
-            groups: [draw.vertexGroup.entries, [
-                { binding: GLSL_VERTEX_PASS_BINDING.indices, resource: draw.indices
-                    ? { buffer: draw.indices.gpu, offset: 0, size: undefined }
-                    : whole(zeros, 16) },
-                { binding: GLSL_VERTEX_PASS_BINDING.out, resource: whole(vsOut, vsBytes) },
-                { binding: GLSL_VERTEX_PASS_BINDING.params, resource: uniform(vertexParams) },
-                ...Array.from({ length: slots }, (_, k)=>({
-                    binding: GLSL_VERTEX_PASS_BINDING.slots + k,
-                    resource: draw.slots[k]
-                        ? { buffer: draw.slots[k].gpu, offset: 0, size: undefined }
-                        : whole(zeros, 16) })),
-            ]],
-            grid: [Math.ceil(positions / 64), 1, 1],
-        }];
+        const recorded = [vertexPass(draw, passes.vertex.code, positions, prims * vertices,
+            whole(vsOut, vsBytes))];
 
         // 2. the geometry shader
         recorded.push({
@@ -315,11 +344,175 @@ export function createGlGeometry(services){
                 args: { gpu: args.gpu, offset: 0 },
                 indexBuffer: { gpu: indices.gpu, format: 'uint32', offset: 0 },
             },
+            kept: { vertices: whole(places, placesBytes), registers: passes.outputs,
+                indices: whole(indices, indicesBytes), args: argsResource, room, vpp },
         };
+    };
+
+    // --- transform feedback: stream output into buffer objects ---
+
+    /** The device's counters (`COUNTER`): stream 0's primitives, then buffers' filled bytes. */
+    let counters = /** @type {any} */ (null);
+    const countersOf = ()=>{
+        if (!counters)
+        {
+            counters = backend.createDynamicBuffer({ label: 'gl:feedback:counters',
+                size: MOST_COUNTERS * 4,
+                usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
+                keep: false, gpuOnly: true });
+        }
+        counters.markRead();
+        return counters;
+    };
+    /** @type {WeakMap<object, number>} a buffer object -> its filled size's counter */
+    const counterOf = new WeakMap();
+    let nextCounter = COUNTER.filled;
+    /** @param {object} buffer @returns {number} its counter, or -1 past the most */
+    const counterFor = buffer=>{
+        let index = counterOf.get(buffer);
+        if (index === undefined)
+        {
+            if (nextCounter >= MOST_COUNTERS)
+            {
+                return -1;
+            }
+            index = nextCounter++;
+            counterOf.set(buffer, index);
+        }
+        return index;
+    };
+
+    /**
+     * What glBeginTransformFeedback does on the device: each buffer's
+     * filled size put at the start of its range, in its turn among the
+     * GPU's work.
+     *
+     * @param {({ object: object, offset: number } | null)[]} buffers
+     * @returns {{ pipeline: Promise<any>, label: string, groups: object[][],
+     *     grid: number[] } | null}
+     */
+    const begin = buffers=>{
+        const words = new Uint32Array(16);
+        buffers.slice(0, 4).forEach((buffer, slot)=>{
+            const counter = buffer ? counterFor(buffer.object) : -1;
+            if (counter >= 0 && buffer)
+            {
+                words.set([counter, buffer.offset, 1, 0], slot * 4);
+            }
+        });
+        const zeros = scratchOf('zeros', 16);
+        return {
+            pipeline: computeFor('so-counter:set', COUNTER_WGSL, 'setFilled', [COUNTER_ENTRIES],
+                'gl:feedback-begin'),
+            label: 'gl:feedback-begin',
+            groups: [[
+                { binding: COUNTER_BINDING.counters, resource: whole(countersOf(),
+                    MOST_COUNTERS * 4) },
+                { binding: COUNTER_BINDING.params, resource: uniform(words) },
+                { binding: COUNTER_BINDING.args, resource: whole(zeros, 16) },
+            ]],
+            grid: [1, 1, 1],
+        };
+    };
+
+    /**
+     * The vertex shader over every position of a draw without a geometry
+     * shader, keeping what transform feedback captures, and the list stream
+     * output reads it by: each position in order, `vpp` a primitive.
+     *
+     * @param {GeometryDraw} draw  its `passes` unused: the capture's code is `code`
+     * @param {string} code @param {number} registers @param {number} vpp
+     */
+    const vertexCapture = (draw, code, registers, vpp)=>{
+        const prims = Math.floor(draw.positions / vpp);
+        const positions = draw.instances * prims * vpp;
+        if (positions === 0)
+        {
+            return null;
+        }
+        const bytes = positions * registers * REGISTER;
+        if (bytes > MOST_BYTES)
+        {
+            services.lose(`a draw of ${positions} positions captured nothing: what transform`
+                + ' feedback keeps of it is past the room a buffer between the passes has');
+            return null;
+        }
+        const vsOut = scratchOf('captured', bytes);
+        const room = draw.instances * prims;
+        const args = new Uint32Array(4 * STREAM_ARGS_WORDS);
+        args[5] = room;
+        return {
+            passes: [vertexPass(draw, code, positions, prims * vpp, whole(vsOut, bytes))],
+            kept: { vertices: whole(vsOut, bytes), registers, room, vpp,
+                indices: uniform(Uint32Array.from({ length: positions }, (_, k)=>k)),
+                args: uniform(args) },
+        };
+    };
+
+    /**
+     * Stream output of what a draw's last pass kept: whole primitives into
+     * the capture's buffers, after what each holds, then the counters moved on.
+     *
+     * @param {string} key  the writes' identity, for the code's cache
+     * @param {{ vertices: object, registers: number, indices: object, args: object,
+     *     room: number, vpp: number }} kept
+     * @param {import('../d3d10/geometry-wgsl.js').StreamOutWrite[]} writes
+     * @param {({ object: object, gpu: any, end: number, stride: number } | null)[]} buffers
+     */
+    const streamOut = (key, kept, writes, buffers)=>{
+        const params = new Uint32Array(20);
+        /** @type {object[]} */
+        const bound = [];
+        for (let slot = 0; slot < 4; slot++)
+        {
+            const buffer = buffers[slot] ?? null;
+            const counter = buffer ? counterFor(buffer.object) : -1;
+            if (buffer && counter >= 0)
+            {
+                params.set([counter, buffer.end, buffer.stride, 1], slot * 4);
+                bound.push({ binding: STREAM_OUT_BINDING.buffers + slot, resource: {
+                    buffer: buffer.gpu, offset: 0, size: Math.max(4, buffer.gpu.size & ~3) } });
+            }
+            else
+            {
+                // Two writable bindings may not share a buffer.
+                bound.push({ binding: STREAM_OUT_BINDING.buffers + slot,
+                    resource: whole(scratchOf(`unbound-${slot}`, 16), 16) });
+            }
+        }
+        params[16] = kept.room;
+        const stage = { streams: [0], outputVertices: kept.vpp, outputRegisters: kept.registers };
+        const code = streamOutWgsl(stage, writes);
+        const cached = `so:${key}|${kept.vpp}|${kept.registers}`;
+        const group = [[
+            { binding: STREAM_OUT_BINDING.vertices, resource: kept.vertices },
+            { binding: STREAM_OUT_BINDING.indices, resource: kept.indices },
+            { binding: STREAM_OUT_BINDING.args, resource: kept.args },
+            { binding: STREAM_OUT_BINDING.counters, resource: whole(countersOf(),
+                MOST_COUNTERS * 4) },
+            { binding: STREAM_OUT_BINDING.params, resource: uniform(params) },
+            ...bound,
+        ]];
+        counted.captured++;
+        return [
+            { pipeline: computeFor(`${cached}|out`, code, 'streamOut', [STREAM_OUT_ENTRIES],
+                'gl:stream-out'), label: 'gl:stream-out', groups: group,
+            grid: [Math.ceil((kept.room * kept.vpp) / 64), 1, 1] },
+            { pipeline: computeFor(`${cached}|done`, code, 'streamOutDone', [STREAM_OUT_ENTRIES],
+                'gl:stream-out-done'), label: 'gl:stream-out-done', groups: group,
+            grid: [1, 1, 1] },
+        ];
     };
 
     return {
         prepare,
+        vertexCapture,
+        begin,
+        streamOut,
+        /** The counters buffer, whose first two words a draw's queries read. */
+        counters: ()=>countersOf().gpu,
+        /** Sixteen zero bytes, which a counter is cleared from. */
+        zeros: ()=>scratchOf('zeros', 16).gpu,
         diagnostics: ()=>({ ...counted }),
     };
 }

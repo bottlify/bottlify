@@ -85,6 +85,7 @@ const BINDING_QUERIES = new Map([
     [GL.COPY_READ_BUFFER, GL.COPY_READ_BUFFER],
     [GL.COPY_WRITE_BUFFER, GL.COPY_WRITE_BUFFER],
     [GL.UNIFORM_BUFFER, GL.UNIFORM_BUFFER_BINDING],
+    [GL.TRANSFORM_FEEDBACK_BUFFER, GL.TRANSFORM_FEEDBACK_BUFFER_BINDING],
 ]);
 
 /** The access bits glMapBufferRange takes (OpenGL 3.0 section 2.9.3). */
@@ -977,13 +978,15 @@ export function installArrayCalls(context, kernel){
 
     /**
      * Whether the program in use draws a mode: one with a geometry shader
-     * only the modes of its input primitive (OpenGL 3.2 section 2.12.1).
+     * only the modes of its input primitive (OpenGL 3.2 section 2.12.1),
+     * and while transform feedback captures only the modes of its primitive.
      *
      * @param {number} mode
      */
     function takesMode(mode){
         const layout = geometryLayout();
-        return !layout || drawsGeometryInput(mode, layout.input);
+        return (!layout || drawsGeometryInput(mode, layout.input))
+            && (kernel.side.feedbackTakes?.(mode, layout) ?? true);
     }
 
     /**

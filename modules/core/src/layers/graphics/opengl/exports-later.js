@@ -682,6 +682,25 @@ export function laterEntryPoints(h){
                 length, out)),
         glUniformBlockBinding: ([program, index, binding])=>answer(
             current()?.glUniformBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        // --- transform feedback ---
+
+        glTransformFeedbackVaryings: ([program, count, names, mode])=>answer(current()
+            ?.glTransformFeedbackVaryings(program >>> 0, readPointers(names, Math.max(0,
+                count | 0)).map(pointer=>h.readName(pointer)), mode >>> 0)),
+        glGetTransformFeedbackVarying: args=>active(args, 'glGetTransformFeedbackVarying'),
+        glBeginTransformFeedback: ([primitive])=>answer(current()
+            ?.glBeginTransformFeedback(primitive >>> 0)),
+        glEndTransformFeedback: ()=>answer(current()?.glEndTransformFeedback()),
+        glPauseTransformFeedback: ()=>answer(current()?.glPauseTransformFeedback()),
+        glResumeTransformFeedback: ()=>answer(current()?.glResumeTransformFeedback()),
+        glGenTransformFeedbacks: generator((context, count)=>
+            context.glGenTransformFeedbacks(count)),
+        glDeleteTransformFeedbacks: deleter((context, names)=>
+            context.glDeleteTransformFeedbacks(names)),
+        glIsTransformFeedback: ([name])=>current()?.glIsTransformFeedback(name >>> 0) ?? GL.FALSE,
+        glBindTransformFeedback: ([target, name])=>answer(current()
+            ?.glBindTransformFeedback(target >>> 0, name >>> 0)),
+
         glGetUniformIndices: ([program, count, names, out])=>call(context=>{
             const indices = context.glGetUniformIndices(program >>> 0,
                 readPointers(names, count | 0).map(pointer=>h.readName(pointer)));
@@ -707,7 +726,8 @@ export function laterEntryPoints(h){
     /**
      * glGetActiveAttrib and glGetActiveUniform: a name, a size and a type.
      *
-     * @param {number[]} args @param {'glGetActiveAttrib' | 'glGetActiveUniform'} which
+     * @param {number[]} args
+     * @param {'glGetActiveAttrib' | 'glGetActiveUniform' | 'glGetTransformFeedbackVarying'} which
      */
     function active([program, index, size, lengthOut, sizeOut, typeOut, out], which){
         return call(context=>{

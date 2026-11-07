@@ -1245,7 +1245,7 @@ function generateGlslDraw(state){
 ${UNIFORM_STRUCT}
 ${more}
 ${[...stage.usedBlocks].sort((a, b)=>a - b).map(index=>blockDeclaration(program, index))
-    .join('\n')}
+        .join('\n')}
 ${samplerDeclarations(program, stage.usedSamplers).join('\n')}
 ${stage.code}
 `;

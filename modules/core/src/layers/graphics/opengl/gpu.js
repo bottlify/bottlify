@@ -73,7 +73,7 @@ import {
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
 import {
     GLSL_BLOCK_BINDING, GLSL_GEOMETRY_BINDING, GLSL_GEOMETRY_DRAW_GROUP, GLSL_VERTEX_BINDING,
-    samplerTypeOf, textureLayoutOf,
+    feedbackWrites, samplerTypeOf, textureLayoutOf,
 } from './glsl-wgsl.js';
 
 /**
@@ -132,6 +132,8 @@ const ZERO_MATRIX = new Float64Array(16);
 const VERTEX_STAGE = 1;
 const FRAGMENT_STAGE = 2;
 const COMPUTE_STAGE = 4;
+/** GL_PRIMITIVES_GENERATED, a query target counted here (`context-queries.js` the rest). */
+const PRIMITIVES_GENERATED = 0x8c87;
 
 /** The list a geometry shader's primitives are drawn as, by their vertices. */
 const GEOMETRY_TOPOLOGIES = /** @type {('point-list' | 'line-list' | 'triangle-list')[]} */ ([
@@ -508,6 +510,14 @@ export function createGpuRenderer(services){
      * @type {WeakMap<object, OcclusionCount>}
      */
     const activeQueries = new WeakMap();
+    /**
+     * The queries counting each context's primitives (PRIMITIVES_GENERATED,
+     * TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN), while they count.
+     *
+     * @type {WeakMap<object, { generated: OcclusionCount | null,
+     *     written: OcclusionCount | null }>}
+     */
+    const feedbackCounts = new WeakMap();
     /**
      * The query each context's rendering is conditional on
      * (glBeginConditionalRender), and whether the condition is inverted.
@@ -961,8 +971,10 @@ export function createGpuRenderer(services){
         BufferUsage.INDEX | BufferUsage.STORAGE | BufferUsage.COPY_DST, 1 << 18);
     // The uniforms of the passes a geometry shader's draw runs, at the
     // offsets a uniform binding may start at.
+    // Storage too: the list and the arguments stream output reads after a
+    // vertex pass of its own.
     const scratchUniforms = ring('gl-scratch-uniforms',
-        BufferUsage.UNIFORM | BufferUsage.COPY_DST, 1 << 16, 256);
+        BufferUsage.UNIFORM | BufferUsage.STORAGE | BufferUsage.COPY_DST, 1 << 16, 256);
     const geometryPasses = createGlGeometry({
         backend,
         uniform: view=>scratchUniforms.write(view),
@@ -2525,6 +2537,21 @@ export function createGpuRenderer(services){
         && a.b === b.b && a.a === b.a);
 
     /**
+     * Compute passes recorded in their turn among the draws.
+     *
+     * @param {Recording} recording
+     * @param {{ pipeline: Promise<any>, label: string, groups: object[][], grid: number[] }[]} work
+     */
+    const dispatchAll = (recording, work)=>{
+        for (const pass of work)
+        {
+            recording.commands.push({ kind: 'dispatch',
+                pipeline: pipelineSlot(recording, pass.pipeline), label: pass.label,
+                groups: pass.groups, grid: pass.grid });
+        }
+    };
+
+    /**
      * Joins the draw just pushed into the one before it in the same
      * recording, when the join is provably picture-identical: the same
      * pipeline, bindings and uniform blocks -- the state-version cache above
@@ -2545,6 +2572,7 @@ export function createGpuRenderer(services){
      * @param {Recording} recording
      */
     const joinLastDraw = recording=>{
+
         const commands = recording.commands;
         if (commands.length < 2)
         {
@@ -2781,72 +2809,76 @@ export function createGpuRenderer(services){
                 : null;
         const blocks = plan.blocks && plan.blocks.length > 0 && executable
             ? uniformBlocksFor(scene, executable, plan.blocks, recording) : NO_BLOCKS;
+        /**
+         * Group 0 of a compute pass: the fixed block, the stage's own,
+         * its textures and its uniform blocks, all at offsets of their
+         * own (a compute pass binds no dynamic offset).
+         *
+         * @param {import('./wgsl.js').ComputeStage} stage @param {number} binding
+         * @param {number} [bias]
+         */
+        const computeGroup = (stage, binding, bias = 0)=>{
+            // Called only for a draw under a GLSL program.
+            const running = /** @type {NonNullable<typeof executable>} */ (executable);
+            /** @param {ArrayBufferView} view */
+            const uniform = view=>{
+                const written = scratchUniforms.write(view);
+                return { buffer: written.gpu, offset: written.offset,
+                    size: Math.ceil(view.byteLength / 16) * 16 };
+            };
+            /** @type {object[]} */
+            const groupLayout = [{ binding: 0, visibility: COMPUTE_STAGE,
+                buffer: { type: 'uniform' } }];
+            const entries = [{ binding: 0, resource: uniform(uniforms) }];
+            let signature = '';
+            if (stage.plan)
+            {
+                groupLayout.push({ binding, visibility: COMPUTE_STAGE,
+                    buffer: { type: 'uniform' } });
+                entries.push({ binding, resource: uniform(glslUniforms(stage.plan, running,
+                    scene, mvp, bias)) });
+            }
+            for (const index of stage.samplers)
+            {
+                const textureLayout = textureLayoutOf(samplerTypeOf(
+                    running.linked.samplers[index]));
+                const entry = { binding: 1 + index * 2, unit: -1, sampler: index,
+                    cube: textureLayout.viewDimension === 'cube', layout: textureLayout };
+                const texture = sampledTexture(entry);
+                const copy = textureFor(texture, recording);
+                const kind = copy.kind ?? 'f';
+                const compared = textureLayout.sampleType === 'depth';
+                const loaded = textureLayout.sampleType === 'sint'
+                    || textureLayout.sampleType === 'uint';
+                const unfilterable = kind === 'u' && !compared && !loaded;
+                signature += kind;
+                groupLayout.push({ binding: entry.binding, visibility: COMPUTE_STAGE, texture: {
+                    viewDimension: textureLayout.viewDimension,
+                    sampleType: textureLayout.sampleType !== 'float' ? textureLayout.sampleType
+                        : unfilterable ? 'unfilterable-float' : 'float',
+                    multisampled: textureLayout.multisampled } },
+                { binding: entry.binding + 1, visibility: COMPUTE_STAGE, sampler: {
+                    type: compared ? 'comparison' : unfilterable ? 'non-filtering'
+                        : 'filtering' } });
+                entries.push({ binding: entry.binding, resource: copy.sampleView
+                    ?? copy.gpu.view },
+                { binding: entry.binding + 1, resource: samplerFor(texture,
+                    kind === 'f' || compared || loaded, compared) });
+            }
+            for (const index of stage.blocks)
+            {
+                groupLayout.push({ binding: GLSL_BLOCK_BINDING + index,
+                    visibility: COMPUTE_STAGE, buffer: { type: 'uniform' } });
+                entries.push(...uniformBlocksFor(scene, running, [index], recording));
+            }
+            return { layout: groupLayout, entries, signature };
+        };
         /** @type {any} */
         let geometry = null;
+        /** @type {any} */
+        let kept = null;
         if (passes && executable)
         {
-            /**
-             * Group 0 of a compute pass: the fixed block, the stage's own,
-             * its textures and its uniform blocks, all at offsets of their
-             * own (a compute pass binds no dynamic offset).
-             *
-             * @param {import('./wgsl.js').ComputeStage} stage @param {number} binding
-             * @param {number} [bias]
-             */
-            const computeGroup = (stage, binding, bias = 0)=>{
-                /** @param {ArrayBufferView} view */
-                const uniform = view=>{
-                    const written = scratchUniforms.write(view);
-                    return { buffer: written.gpu, offset: written.offset,
-                        size: Math.ceil(view.byteLength / 16) * 16 };
-                };
-                /** @type {object[]} */
-                const groupLayout = [{ binding: 0, visibility: COMPUTE_STAGE,
-                    buffer: { type: 'uniform' } }];
-                const entries = [{ binding: 0, resource: uniform(uniforms) }];
-                let signature = '';
-                if (stage.plan)
-                {
-                    groupLayout.push({ binding, visibility: COMPUTE_STAGE,
-                        buffer: { type: 'uniform' } });
-                    entries.push({ binding, resource: uniform(glslUniforms(stage.plan, executable,
-                        scene, mvp, bias)) });
-                }
-                for (const index of stage.samplers)
-                {
-                    const textureLayout = textureLayoutOf(samplerTypeOf(
-                        executable.linked.samplers[index]));
-                    const entry = { binding: 1 + index * 2, unit: -1, sampler: index,
-                        cube: textureLayout.viewDimension === 'cube', layout: textureLayout };
-                    const texture = sampledTexture(entry);
-                    const copy = textureFor(texture, recording);
-                    const kind = copy.kind ?? 'f';
-                    const compared = textureLayout.sampleType === 'depth';
-                    const loaded = textureLayout.sampleType === 'sint'
-                        || textureLayout.sampleType === 'uint';
-                    const unfilterable = kind === 'u' && !compared && !loaded;
-                    signature += kind;
-                    groupLayout.push({ binding: entry.binding, visibility: COMPUTE_STAGE, texture: {
-                        viewDimension: textureLayout.viewDimension,
-                        sampleType: textureLayout.sampleType !== 'float' ? textureLayout.sampleType
-                            : unfilterable ? 'unfilterable-float' : 'float',
-                        multisampled: textureLayout.multisampled } },
-                    { binding: entry.binding + 1, visibility: COMPUTE_STAGE, sampler: {
-                        type: compared ? 'comparison' : unfilterable ? 'non-filtering'
-                            : 'filtering' } });
-                    entries.push({ binding: entry.binding, resource: copy.sampleView
-                        ?? copy.gpu.view },
-                    { binding: entry.binding + 1, resource: samplerFor(texture,
-                        kind === 'f' || compared || loaded, compared) });
-                }
-                for (const index of stage.blocks)
-                {
-                    groupLayout.push({ binding: GLSL_BLOCK_BINDING + index,
-                        visibility: COMPUTE_STAGE, buffer: { type: 'uniform' } });
-                    entries.push(...uniformBlocksFor(scene, executable, [index], recording));
-                }
-                return { layout: groupLayout, entries, signature };
-            };
             const vertexGroup = computeGroup(passes.vertex, GLSL_VERTEX_BINDING, idBias);
             const geometryGroup = computeGroup(passes.geometry, GLSL_GEOMETRY_BINDING);
             if (executable.linked.geometry?.uses.has('gl_Layer'))
@@ -2868,13 +2900,73 @@ export function createGpuRenderer(services){
             {
                 return;
             }
-            for (const pass of prepared.passes)
-            {
-                recording.commands.push({ kind: 'dispatch',
-                    pipeline: pipelineSlot(recording, pass.pipeline), label: pass.label,
-                    groups: pass.groups, grid: pass.grid });
-            }
+            dispatchAll(recording, prepared.passes);
             geometry = prepared.drawn;
+            kept = prepared.kept;
+        }
+        // Transform feedback: what the last pass kept, written into the
+        // buffers bound (stream output); without a geometry shader the vertex
+        // shader runs as a pass of its own to keep it.
+        const session = scene.feedback ?? null;
+        const feedback = session && executable ? executable.linked.feedback : null;
+        const capture = generated.glsl?.capture ?? null;
+        const vpp = topology === 'point-list' ? 1 : topology === 'line-list' ? 2 : 3;
+        if (feedback && !passes && capture && executable)
+        {
+            const vertexGroup = computeGroup(capture.vertex, GLSL_VERTEX_BINDING, idBias);
+            const made = geometryPasses.vertexCapture({
+                key: `${key}|capture|${vertexGroup.signature}`, passes: /** @type {any} */ (null),
+                vertexGroup, geometryGroup: vertexGroup,
+                slots: slots.map((slot, k)=>({ gpu: slot.gpu, offset: slot.offset,
+                    stride: layout.slots[k]?.stride ?? 0,
+                    instance: (layout.slots[k]?.divisor ?? 0) > 0 })),
+                indices: indices ? { gpu: indices.gpu, offset: indices.offset,
+                    bytes: indices.format === 'uint16' ? 2 : 4 } : null,
+                first, baseVertex, positions: count, instances,
+            }, capture.vertex.code, capture.inputs, vpp);
+            if (made)
+            {
+                dispatchAll(recording, made.passes);
+                kept = made.kept;
+            }
+        }
+        const counting = feedbackCounts.get(context) ?? null;
+        if (counting?.generated && !passes)
+        {
+            counting.generated.samples += Math.floor(count / vpp) * instances;
+        }
+        const tallied = !!kept && (!!counting?.written || (!!counting?.generated && !!passes));
+        if (tallied)
+        {
+            recording.commands.push({ kind: 'clearCounts' });
+        }
+        if (feedback && session && kept && executable)
+        {
+            const writes = feedbackWrites(executable.linked, passes ? 1 + passes.fields : 2,
+                !passes);
+            const targets = session.buffers.map((bound, slot)=>{
+                if (!bound)
+                {
+                    return null;
+                }
+                const backing = bufferFor(bound.buffer);
+                backing.gpu.markRead();
+                return { object: bound.buffer, gpu: backing.gpu.gpu,
+                    end: bound.offset + bound.size, stride: feedback.strides[slot] * 4 };
+            });
+            dispatchAll(recording, geometryPasses.streamOut(`${executable.id}`, kept, writes,
+                targets));
+        }
+        if (tallied && counting)
+        {
+            recording.commands.push({ kind: 'tally', written: feedback ? counting.written : null,
+                generated: passes ? counting.generated : null,
+                args: passes ? kept.args : null });
+        }
+        if (scene.discard)
+        {
+            // GL_RASTERIZER_DISCARD: the passes ran, and nothing is drawn.
+            return;
         }
         stats.draws++;
         recording.counts.draws++;
@@ -4011,6 +4103,13 @@ export function createGpuRenderer(services){
         const slots = [];
         /** @type {(() => Promise<number[]>) | null} */
         let counted = null;
+        /**
+         * The primitives each counted draw wrote and made, read back once
+         * the frame is submitted.
+         *
+         * @type {{ command: any, readBack: () => Promise<Uint8Array[]> }[]}
+         */
+        const tallies = [];
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -4098,6 +4197,21 @@ export function createGpuRenderer(services){
                 {
                     // A staged copy closes the pass it lands in.
                     backend.uploadTexture(command.upload);
+                    pass = null;
+                    continue;
+                }
+                if (command.kind === 'clearCounts')
+                {
+                    frame.copyBuffer(geometryPasses.zeros(), 0, geometryPasses.counters(), 0, 8);
+                    pass = null;
+                    continue;
+                }
+                if (command.kind === 'tally')
+                {
+                    tallies.push({ command, readBack: frame.copyOut([
+                        { buffer: geometryPasses.counters(), offset: 0, size: 4 },
+                        ...command.args ? [{ buffer: command.args.buffer,
+                            offset: command.args.offset + 20, size: 4 }] : []]) });
                     pass = null;
                     continue;
                 }
@@ -4304,6 +4418,21 @@ export function createGpuRenderer(services){
                 + ` census=[${probe.command.bindings
                     .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
                     .join(' ')}]`;
+        }
+        for (const { command, readBack } of tallies)
+        {
+            const results = await readBack().catch(()=>null);
+            /** @param {Uint8Array | undefined} bytes */
+            const word = bytes=>(bytes ? new DataView(bytes.buffer, bytes.byteOffset, 4)
+                .getUint32(0, true) : 0);
+            if (command.written)
+            {
+                command.written.samples += word(results?.[0]);
+            }
+            if (command.generated)
+            {
+                command.generated.samples += word(results?.[1]);
+            }
         }
         await countQueries(recording, slots, counted);
         return copied ? copied() : null;
@@ -4559,6 +4688,46 @@ export function createGpuRenderer(services){
                 }
                 return out;
             });
+        },
+
+        /**
+         * What glBeginTransformFeedback does: each buffer of the capture
+         * written from the start of its range again.
+         *
+         * @param {object} context
+         * @param {import('./context-transform-feedback.js').FeedbackSession} session
+         */
+        beginFeedback(context, session){
+            const recording = recordingOf(context);
+            const set = geometryPasses.begin(session.buffers.map(bound=>(bound
+                ? { object: bound.buffer, offset: bound.offset } : null)));
+            if (set)
+            {
+                dispatchAll(recording, [set]);
+            }
+        },
+
+        /**
+         * Counts the context's primitives into `query` (a target's of
+         * PRIMITIVES_GENERATED and TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN), or
+         * stops counting them (null).
+         *
+         * @param {object} context @param {number} target @param {OcclusionCount | null} query
+         */
+        countFeedback(context, target, query){
+            const counts = feedbackCounts.get(context) ?? { generated: null, written: null };
+            counts[target === PRIMITIVES_GENERATED ? 'generated' : 'written'] = query;
+            feedbackCounts.set(context, counts);
+        },
+
+        /**
+         * A query that counts primitives ended: finished once what was
+         * recorded up to here has been replayed and counted.
+         *
+         * @param {object} context @param {OcclusionCount} query
+         */
+        endCount(context, query){
+            (recordingOf(context).ending ??= []).push(query);
         },
 
         /**

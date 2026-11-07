@@ -423,6 +423,8 @@ export function createSceneBuilder(kernel){
             textureMatrices,
             boundTextures,
             uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
+            feedback: glsl ? side.feedbackSession?.() ?? null : null,
+            discard: on(GL.RASTERIZER_DISCARD),
 
             /**
              * The colour a vertex ends up with: lit, or its own.
