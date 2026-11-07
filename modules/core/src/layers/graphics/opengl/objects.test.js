@@ -21,14 +21,20 @@ test('unionRect covers both rectangles exactly', ()=>{
 test('markDirty records a first rectangle as it is', ()=>{
     const texture = createTextureObject(1, GL.TEXTURE_2D);
     markDirty(texture, 0, { x: 2, y: 3, width: 4, height: 5 });
-    assert.deepEqual(texture.dirty.get(0), { x: 2, y: 3, width: 4, height: 5 });
+    assert.deepEqual(texture.dirty.get(0), [{ x: 2, y: 3, width: 4, height: 5 }]);
 });
 
-test('markDirty unions a second rectangle into the first', ()=>{
+test('markDirty keeps a second rectangle apart from the first, one inside another dropped', ()=>{
     const texture = createTextureObject(1, GL.TEXTURE_2D);
     markDirty(texture, 0, { x: 0, y: 0, width: 2, height: 2 });
     markDirty(texture, 0, { x: 1, y: 1, width: 2, height: 2 });
-    assert.deepEqual(texture.dirty.get(0), { x: 0, y: 0, width: 3, height: 3 });
+    assert.deepEqual(texture.dirty.get(0), [{ x: 0, y: 0, width: 2, height: 2 },
+        { x: 1, y: 1, width: 2, height: 2 }]);
+    markDirty(texture, 0, { x: 1, y: 1, width: 1, height: 1 });
+    assert.equal(texture.dirty.get(0)?.length, 2, 'inside one held');
+    markDirty(texture, 0, { x: 0, y: 0, width: 4, height: 4 });
+    assert.deepEqual(texture.dirty.get(0), [{ x: 0, y: 0, width: 4, height: 4 }],
+        'around both');
 });
 
 test('markDirty with null always wins: the whole level, however small a rect follows', ()=>{
@@ -50,6 +56,6 @@ test('markDirty keeps each level key separate', ()=>{
     const texture = createTextureObject(1, GL.TEXTURE_2D);
     markDirty(texture, 0, { x: 0, y: 0, width: 1, height: 1 });
     markDirty(texture, 1, null);
-    assert.deepEqual(texture.dirty.get(0), { x: 0, y: 0, width: 1, height: 1 });
+    assert.deepEqual(texture.dirty.get(0), [{ x: 0, y: 0, width: 1, height: 1 }]);
     assert.equal(texture.dirty.get(1), null);
 });

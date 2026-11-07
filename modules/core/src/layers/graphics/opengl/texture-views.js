@@ -477,7 +477,7 @@ export class ViewDirty
     }
 
     /**
-     * @param {number} key @param {import('./objects.js').DirtyRect | null} rect
+     * @param {number} key @param {import('./objects.js').DirtyRect[] | null} rect
      * @returns {this}
      */
     set(key, rect){

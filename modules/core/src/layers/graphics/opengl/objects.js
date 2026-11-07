@@ -106,9 +106,9 @@ const MIPMAP_FILTERS = new Set([
  *           buffer's version the level was last made from
  * @property {{ samples: number, fixed: boolean }} [multisample]  a multisample texture's
  *           (3.2): the samples asked and whether their locations are fixed
- * @property {Map<number, DirtyRect | null>} dirty   the level keys written
+ * @property {Map<number, DirtyRect[] | null>} dirty   the level keys written
  *           since a copy kept elsewhere last read them, each with the
- *           rectangle written or `null` for the whole level
+ *           rectangles written or `null` for the whole level
  * @property {{ root: TextureObject, minLevel: number, numLevels: number, minLayer: number,
  *     numLayers: number, internal: number }} [view]  a texture view's (4.3): the
  *           texture whose storage it reads, the range of its levels and layers, and
@@ -339,6 +339,12 @@ export function unionRect(a, b){
  * later small write never shrinks what an earlier full upload already
  * promised to send.
  *
+ * Rectangles are kept apart, not joined into one around them: where the
+ * device's copy is the only whole one (its texels let go here, or drawn on the
+ * device), what lies between two writes is not this side's to send -- a font
+ * atlas filled a glyph at a time would go up with every glyph before the last
+ * one blanked. One inside another is dropped.
+ *
  * @param {TextureObject} texture
  * @param {number} key
  * @param {DirtyRect | null} rect
@@ -350,7 +356,26 @@ export function markDirty(texture, key, rect){
         texture.dirty.set(key, null);
         return;
     }
-    texture.dirty.set(key, existing === undefined ? rect : unionRect(existing, rect));
+    if (existing === undefined)
+    {
+        texture.dirty.set(key, [rect]);
+        return;
+    }
+    if (existing.some(held=>contains(held, rect)))
+    {
+        return;
+    }
+    texture.dirty.set(key, [...existing.filter(held=>!contains(rect, held)), rect]);
+}
+
+/**
+ * @param {DirtyRect} outer @param {DirtyRect} inner
+ * @returns {boolean}
+ */
+function contains(outer, inner){
+    return inner.x >= outer.x && inner.y >= outer.y
+        && inner.x + inner.width <= outer.x + outer.width
+        && inner.y + inner.height <= outer.y + outer.height;
 }
 
 /**

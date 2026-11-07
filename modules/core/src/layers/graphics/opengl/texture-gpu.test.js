@@ -415,7 +415,7 @@ for (const features of [[], ['texture-compression-bc']])
         assert.equal(r.gpu.of('copyTextureToTexture').length + r.gpu.of('copyTextureToBuffer')
             .length, 0, 'a block is no texel to a device copy, decoded or not');
         assert.deepEqual([...context.side.textureBoundAt(0, GL.TEXTURE_2D).dirty],
-            [[0, { x: 0, y: 0, width: 1, height: 1 }]], 'the box is to go up');
+            [[0, [{ x: 0, y: 0, width: 1, height: 1 }]]], 'the box is to go up');
         assert.deepEqual(Array.from(context.glGetTextureSubImage(into, 0, { x: 0, y: 0, z: 0,
             width: 1, height: 1, depth: 1 }, TEX.RG_INTEGER, GL.UNSIGNED_INT, 8)),
         Array.from(blocks), 'one block, one texel');

@@ -1211,25 +1211,27 @@ test('a sub-image write after a draw sampled the texture reaches only the draws 
             'once nothing unflushed samples it, a write goes straight to the queue');
     });
 
-test('two overlapping sub-image writes upload their union once', async()=>{
-    const r = rig();
-    const { context } = r;
-    const draw = await definedTexture(r);
+test('two overlapping sub-image writes go up in the order written, nothing around them',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        const draw = await definedTexture(r);
 
-    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array(3 * 3 * 4).fill(1));
-    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 2, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array(3 * 3 * 4).fill(2));
-    draw();
-    await r.swap();
+        context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
+            new Uint8Array(3 * 3 * 4).fill(1));
+        context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 2, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
+            new Uint8Array(3 * 3 * 4).fill(2));
+        draw();
+        await r.swap();
 
-    const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
-    assert.equal(uploads.length, 2, 'the full define, then one upload of the union');
-    const union = uploads[1];
-    // (1,1) 3x3 and (2,2) 3x3 -> (1,1) 4x4.
-    assert.deepEqual([union.destination.origin.x, union.destination.origin.y], [1, 1]);
-    assert.equal(union.bytes.length, 4 * 4 * 4);
-});
+        const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
+        // The level's texels were let go after the define: one rectangle
+        // around both would send (4,1) and (1,4), which nothing wrote.
+        assert.deepEqual(uploads.slice(1).map(w=>[w.destination.origin.x,
+            w.destination.origin.y, w.bytes.length]), [[1, 1, 36], [2, 2, 36]]);
+        assert.deepEqual([...uploads[2].bytes], [...new Uint8Array(36).fill(2)],
+            'the later write last, whole');
+    });
 
 test('a full redefine after a sub-write uploads the whole level again', async()=>{
     const r = rig();
@@ -2121,6 +2123,40 @@ test('on a device a level\'s texels are let go once uploaded', async()=>{
     assert.deepEqual(rect[0].destination.origin, { x: 1, y: 2, z: 0 });
     assert.deepEqual([...rect[0].bytes.subarray(0, 4)], [1, 2, 3, 4]);
     assert.equal(levelsOf(1).get(0).texels, null);
+    assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
+});
+
+test('on a device, rectangles written apart in a level let go go up apart: what lies between'
+    + ' them is the device\'s', async()=>{
+    // A font atlas filled a glyph at a time: one rectangle around two glyphs
+    // would send the texels between them, which this side no longer holds.
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(8 * 4 * 4).fill(0x40));
+    drawUnswapped(context);
+    await r.swap();
+    const uploads = r.gpu.of('writeTexture').length;
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(16).fill(1));
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 5, 1, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(16).fill(2));
+    // Inside the first: no upload of its own.
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4).fill(3));
+    drawUnswapped(context);
+    await r.swap();
+    const sent = r.gpu.of('writeTexture').slice(uploads);
+    assert.deepEqual(sent.map((/** @type {any} */ w)=>[w.destination.origin, w.size]), [
+        [{ x: 0, y: 0, z: 0 }, { width: 2, height: 2, depthOrArrayLayers: 1 }],
+        [{ x: 5, y: 1, z: 0 }, { width: 2, height: 2, depthOrArrayLayers: 1 }],
+    ]);
+    assert.deepEqual([...sent[0].bytes], [...new Uint8Array(12).fill(1), 3, 3, 3, 3]);
+    assert.deepEqual([...sent[1].bytes], [...new Uint8Array(16).fill(2)]);
     assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
 });
 

@@ -49,7 +49,7 @@ import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import {
     FACE_STRIDE, attachedLevelKey, attachmentImage, attachmentLayers, createTextureObject,
-    isTextureComplete, levelKey, swizzleCode,
+    isTextureComplete, levelKey, swizzleCode, unionRect,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
@@ -1319,6 +1319,25 @@ export function createGpuRenderer(services){
     const releasedLevels = new WeakSet();
 
     /**
+     * The rectangles of a level to send: the whole level for `null`; each
+     * rectangle written apart where the device's copy is the only whole one
+     * (texels let go here, or the level drawn or copied into there), since
+     * what lies between them is not this side's; else one around them all,
+     * from texels held here whole.
+     *
+     * @param {import('./objects.js').DirtyRect[] | null} rects
+     * @param {import('./objects.js').TextureLevel} image
+     * @returns {import('./objects.js').DirtyRect[]}
+     */
+    const areasOf = (rects, image)=>{
+        if (rects === null)
+        {
+            return [{ x: 0, y: 0, width: image.width, height: image.height }];
+        }
+        return releasedLevels.has(image) ? rects : [rects.reduce(unionRect)];
+    };
+
+    /**
      * The bytes of one rectangle of a level's decoded texels, packed with no
      * gap between rows -- what an upload of just that rectangle needs, since
      * the level itself is a full-width buffer.
@@ -1540,41 +1559,44 @@ export function createGpuRenderer(services){
                 lose(`a ${sized.name} level could not be decoded for the device`);
                 continue;
             }
-            const whole = rect === null || sized.compressed || solid || twoArray || oneArray
-                || (rect.x === 0 && rect.y === 0 && rect.width === image.width
-                    && rect.height === image.height);
-            /** @type {Uint8Array} */
-            let slice = bytes;
-            const area = whole ? { x: 0, y: 0, width: image.width, height: image.height }
-                : /** @type {import('./objects.js').DirtyRect} */ (rect);
-            if (!whole)
+            const wholeOnly = sized.compressed || solid || twoArray || oneArray;
+            for (const area of areasOf(wholeOnly ? null : rect, image))
             {
-                const texel = bytes.byteLength / (image.width * image.height);
-                slice = new Uint8Array(area.width * area.height * texel);
-                for (let row = 0; row < area.height; row++)
+                const whole = area.x === 0 && area.y === 0 && area.width === image.width
+                    && area.height === image.height;
+                /** @type {Uint8Array} */
+                let slice = bytes;
+                if (!whole)
                 {
-                    const from = ((area.y + row) * image.width + area.x) * texel;
-                    slice.set(bytes.subarray(from, from + area.width * texel),
-                        row * area.width * texel);
+                    const texel = bytes.byteLength / (image.width * image.height);
+                    slice = new Uint8Array(area.width * area.height * texel);
+                    for (let row = 0; row < area.height; row++)
+                    {
+                        const from = ((area.y + row) * image.width + area.x) * texel;
+                        slice.set(bytes.subarray(from, from + area.width * texel),
+                            row * area.width * texel);
+                    }
                 }
-            }
-            const request = {
-                texture: record.gpu.texture,
-                format,
-                mipLevel: level,
-                width: area.width,
-                height: oneArray ? 1 : area.height,
-                origin: { x: area.x, y: area.y, z: cube ? face : 0 },
-                depthOrArrayLayers: oneArray ? image.height : solid || twoArray ? imageDepth : 1,
-                data: ordered ? slice.slice() : slice,
-            };
-            if (ordered)
-            {
-                recording.commands.push({ kind: 'upload', upload: { ...request, staging: true } });
-            }
-            else
-            {
-                backend.uploadTexture(request);
+                const request = {
+                    texture: record.gpu.texture,
+                    format,
+                    mipLevel: level,
+                    width: area.width,
+                    height: oneArray ? 1 : area.height,
+                    origin: { x: area.x, y: area.y, z: cube ? face : 0 },
+                    depthOrArrayLayers: oneArray ? image.height
+                        : solid || twoArray ? imageDepth : 1,
+                    data: ordered ? slice.slice() : slice,
+                };
+                if (ordered)
+                {
+                    recording.commands.push({ kind: 'upload',
+                        upload: { ...request, staging: true } });
+                }
+                else
+                {
+                    backend.uploadTexture(request);
+                }
             }
         }
         texture.dirty.clear();
@@ -1840,24 +1862,26 @@ export function createGpuRenderer(services){
                 });
                 continue;
             }
-            const area = rect ?? { x: 0, y: 0, width: image.width, height: image.height };
             if (image.compressed && rect === null)
             {
                 stats.decoded.levels++;
                 stats.decoded.blockBytes += image.compressed.bytes.byteLength;
                 stats.decoded.texelBytes += image.width * image.height * 4;
             }
-            upload({
-                texture: record.gpu.texture,
-                format: TEXTURE_FORMAT,
-                mipLevel: level,
-                width: area.width,
-                height: area.height,
-                origin: { x: area.x, y: area.y, z: face },
-                // A command keeps bytes of its own: the slice may be a view
-                // of the level the program goes on writing.
-                data: ordered ? sliceRect(image, area).slice() : sliceRect(image, area),
-            });
+            for (const area of areasOf(rect, image))
+            {
+                upload({
+                    texture: record.gpu.texture,
+                    format: TEXTURE_FORMAT,
+                    mipLevel: level,
+                    width: area.width,
+                    height: area.height,
+                    origin: { x: area.x, y: area.y, z: face },
+                    // A command keeps bytes of its own: the slice may be a
+                    // view of the level the program goes on writing.
+                    data: ordered ? sliceRect(image, area).slice() : sliceRect(image, area),
+                });
+            }
         }
         texture.dirty.clear();
         record.usedIn = recording.id;
