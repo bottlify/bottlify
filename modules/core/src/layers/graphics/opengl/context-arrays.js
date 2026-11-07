@@ -55,6 +55,9 @@ const PRIMITIVE_MODES = new Set([
     GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON,
 ]);
 
+/** GL_MIN_MAP_BUFFER_ALIGNMENT: a map starts on a boundary of it, past the range's offset. */
+const MAP_ALIGNMENT = 64;
+
 /**
  * The targets a buffer object binds to, and the query each binding answers:
  * vertex arrays and indices, and since OpenGL 2.1 the pixels a pack reads
@@ -789,7 +792,15 @@ export function installArrayCalls(context, kernel){
      */
     const mapRange = (buffer, offset, length, bits, call)=>{
         const memory = kernel.memory();
-        const address = memory?.allocate ? memory.allocate(Math.max(1, length)) : 0;
+        // A map starts where the store's byte would on a boundary of
+        // GL_MIN_MAP_BUFFER_ALIGNMENT: a range from byte 3 is at 3 past one
+        // (Wine's opengl32 test_memory_map), and SSE copies into a whole map
+        // find it aligned.
+        const skew = offset % MAP_ALIGNMENT;
+        const block = memory?.allocate
+            ? memory.allocate(Math.max(1, length) + skew + MAP_ALIGNMENT - 1) : 0;
+        const address = block === 0 ? 0
+            : (((block + MAP_ALIGNMENT - 1) & -MAP_ALIGNMENT) >>> 0) + skew;
         if (address === 0)
         {
             lose(`${call} could not map a buffer into guest memory: a program that`
@@ -805,6 +816,7 @@ export function installArrayCalls(context, kernel){
                 buffer.data.subarray(offset, offset + length));
         }
         buffer.mapped = address;
+        buffer.mapBlock = block;
         buffer.access = accessOfBits(bits);
         buffer.accessFlags = bits;
         buffer.mapOffset = offset;
@@ -831,8 +843,9 @@ export function installArrayCalls(context, kernel){
     /** The map ended: its memory given back and its state the unmapped one. */
     /** @param {import('./objects.js').BufferObject} buffer */
     const unmap = buffer=>{
-        kernel.memory()?.free?.(buffer.mapped);
+        kernel.memory()?.free?.(buffer.mapBlock);
         buffer.mapped = 0;
+        buffer.mapBlock = 0;
         buffer.accessFlags = 0;
         buffer.mapOffset = 0;
         buffer.mapLength = 0;

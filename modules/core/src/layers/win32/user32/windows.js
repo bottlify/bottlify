@@ -498,6 +498,9 @@ const INFINITE = 0xffffffff;
  */
 const POLLED_KINDS = new Set(['event', 'semaphore', 'timer', 'thread']);
 
+/** How many handles a wait takes: MsgWaitForMultipleObjects one fewer, the input's place. */
+const MAXIMUM_WAIT_OBJECTS = 64;
+
 /** The parent a message-only window is made with. */
 const HWND_MESSAGE = 0xfffffffd;
 
@@ -773,6 +776,11 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           is what this used to do always.
  * @property {(address: number) => void} [release]
  * @property {() => Promise<void>} idle
+ * @property {(args: number[], thread: number) => any} [waitForObjectsOrInput]
+ *           A wait kernel32 holds on `count` handles and the thread's input: its
+ *           answer `count` is input (`inputArrived` set it).
+ * @property {(thread: number) => void} [inputArrived]
+ *           Input came to a thread waiting in `waitForObjectsOrInput`.
  * @property {(args: number[]) => number | Promise<number>} [waitForObjects]
  *           kernel32's WaitForMultipleObjects, by its own arguments. What a
  *           wait that also watches the queue defers the handles to; absent, a
@@ -1719,6 +1727,25 @@ export function createWindowFunctions(host){
             return result;
         });
     };
+
+    /**
+     * The QS_* mask of each thread's last MsgWaitForMultipleObjects that
+     * kernel32 holds: input of those classes to the thread ends the wait
+     * (`waitForObjectsOrInput`). An entry outlives its wait; the next such
+     * wait starts from nothing set.
+     *
+     * @type {Map<number, number>}
+     */
+    const kernelWaits = new Map();
+    host.queue.whenNews?.((thread, arrived)=>{
+        for (const [waiting, mask] of kernelWaits)
+        {
+            if ((thread === null || thread === waiting) && (arrived & mask) !== 0)
+            {
+                host.inputArrived?.(waiting);
+            }
+        }
+    });
 
     /**
      * Whether every handle a wait names is one a poll can answer for whichever
@@ -7326,7 +7353,9 @@ export function createWindowFunctions(host){
         describe: hwnd=>{
             const record = live(hwnd);
             return record ? { threadId: creatorOf(record) ?? 0,
-                className: String(record.className), title: record.title } : null;
+                className: String(record.className), title: record.title,
+                parent: record.parent ?? 0, owner: record.owner ?? 0,
+                style: record.style >>> 0 } : null;
         },
         post: (hwnd, message, wParam, lParam)=>{
             if (!live(hwnd))
@@ -9052,6 +9081,16 @@ export function createWindowFunctions(host){
                 }
                 if (total > 0 && (alertable || !pollable(handles >>> 0, total)))
                 {
+                    // Kernel32's to hold. Waiting for any, input to the thread
+                    // ends it too: a message another process sends while this
+                    // thread waits for that process to end (Wine's opengl32
+                    // test_other_process_parent) left both waiting.
+                    if (!alertable && waitAll === 0 && host.waitForObjectsOrInput
+                        && waiter !== null && total < MAXIMUM_WAIT_OBJECTS)
+                    {
+                        kernelWaits.set(waiter, mask);
+                        return host.waitForObjectsOrInput([total, handles, wait], waiter);
+                    }
                     return askHandles(wait);
                 }
                 const deadline = wait === INFINITE ? null : (host.now?.() ?? 0) + wait;

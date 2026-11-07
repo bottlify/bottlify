@@ -233,6 +233,9 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {number} [depthBits]
  * @property {string} [key]  the window it is: every context made current on it shares
  *           its buffers on a device
+ * @property {{ width: number, height: number, key?: string } | null} [read]  the drawable
+ *           the default framebuffer is read from, where it is another
+ *           (WGL_ARB_make_current_read)
  */
 
 /** @typedef {import('./kernel.js').ContextMemory} ContextMemory */
@@ -775,6 +778,32 @@ export function createGlContext(options = {}){
                 return null;
             }
             return extensions[index];
+        },
+
+        /**
+         * Another drawable's colour as RGBA, its bottom row first, read on the
+         * device: a pbuffer bound as a texture (WGL_ARB_render_texture). Null
+         * on the processor or for a context with no drawable.
+         *
+         * @param {{ width: number, height: number, key?: string }} drawable
+         * @returns {Promise<Uint8Array | null> | null}
+         */
+        readDrawable(drawable){
+            return gpu?.readPixels && attached
+                ? gpu.readPixels(context, { x: 0, y: 0, width: drawable.width,
+                    height: drawable.height }, null, drawable)
+                : null;
+        },
+
+        /**
+         * What was recorded for the device is drawn now: the context is
+         * current no longer, or is going (`gpu.js` flushContext).
+         */
+        flushDevice(){
+            if (attached)
+            {
+                gpu?.flushContext?.(context);
+            }
         },
 
         /** The version, profile and flags the context was made for. */

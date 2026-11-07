@@ -111,6 +111,7 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} access
  * @property {Uint8Array} data
  * @property {number} mapped  the guest address it is mapped at, or zero
+ * @property {number} mapBlock  the guest memory the map was given, to give back
  * @property {number} accessFlags  the MAP_*_BIT a map asked for, zero when not mapped
  * @property {number} mapOffset  where the mapped range starts in the store
  * @property {number} mapLength  how many bytes are mapped
@@ -269,7 +270,8 @@ export function markDirty(texture, key, rect){
  */
 export function createBufferObject(name){
     return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
-        mapped: 0, accessFlags: 0, mapOffset: 0, mapLength: 0, flushed: [], written: null,
+        mapped: 0, mapBlock: 0, accessFlags: 0, mapOffset: 0, mapLength: 0, flushed: [],
+        written: null,
         version: 1 };
 }
 

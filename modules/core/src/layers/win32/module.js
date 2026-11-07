@@ -882,6 +882,14 @@ export function createWin32Module(){
             });
             /** The desktop's own timer, made the first time it has to wait. @type {any} */
             let desktopClock = null;
+            /**
+             * Each thread's event a MsgWaitForMultipleObjects held by kernel32
+             * waits for beside its handles, set when input comes to the thread,
+             * and the guest memory the handles are put in with it.
+             *
+             * @type {Map<number, { event: any, handle: number, array: number }>}
+             */
+            const inputWakes = new Map();
 
             /**
              * Where a thread's start routine returns to.
@@ -3889,6 +3897,46 @@ export function createWin32Module(){
                     /** @param {number[]} args */
                     waitForObjects: args=>
                         libraries['KERNEL32.dll'].WaitForMultipleObjects.handler(args),
+                    /**
+                     * A wait on handles kernel32 holds -- a process, a mutex --
+                     * that input to the thread ends as well: its own event is
+                     * waited for beside them, at index `count`, which is what
+                     * MsgWaitForMultipleObjects answers input with, and
+                     * `inputArrived` sets it.
+                     *
+                     * @param {number[]} args  count, the handles, the timeout
+                     * @param {number} thread
+                     */
+                    waitForObjectsOrInput: ([count, array, timeout], thread)=>{
+                        let held = inputWakes.get(thread);
+                        if (!held)
+                        {
+                            const event = kernel.createEvent({ manualReset: false,
+                                signalled: false, name: `input ${thread}` });
+                            const MAXIMUM_WAIT_OBJECTS = 64;
+                            held = { event, handle: kernel.handles.open('event', event),
+                                array: heap.allocate(MAXIMUM_WAIT_OBJECTS * 4) };
+                            inputWakes.set(thread, held);
+                        }
+                        // What came before was looked at by the caller just now.
+                        kernel.resetEvent(held.event);
+                        const words = new Uint8Array(count * 4 + 4);
+                        words.set(readMemory(array >>> 0, count * 4));
+                        new DataView(words.buffer).setUint32(count * 4, held.handle, true);
+                        writeMemory(held.array, words);
+                        return libraries['KERNEL32.dll'].WaitForMultipleObjects.handler(
+                            [count + 1, held.array, 0, timeout]);
+                    },
+                    /** @param {number | null} thread  null for every thread */
+                    inputArrived: thread=>{
+                        for (const [waiting, held] of inputWakes)
+                        {
+                            if (thread === null || waiting === thread)
+                            {
+                                kernel.setEvent(held.event);
+                            }
+                        }
+                    },
                     now: ()=>kernel.clock.virtualTime(),
                     created: config?.created ?? (()=>{}),
                     /** @param {number} instance @param {number} id */
@@ -4740,6 +4788,8 @@ export function createWin32Module(){
                     createSurfaceDc: attributes=>gdi.createSurfaceDc(attributes),
                     /** @param {number} handle */
                     deleteSurfaceDc: handle=>gdi.deleteSurfaceDc(handle),
+                    /** @param {number} width @param {number} height */
+                    createPbufferDc: (width, height)=>gdi.createPbufferDc(width, height),
                     /** @param {number} hdc */
                     describeDrawable: hdc=>gdi.describeDrawable(hdc),
                     /** @param {number} hdc */

@@ -60,6 +60,19 @@ test('a fence\'s errors, names and queries, as section 5.2 lists them', ()=>{
     assert.deepEqual(gl.glGetInteger64v(SYNC.MAX_SERVER_WAIT_TIMEOUT), [0]);
 });
 
+test('a fence is its share group\'s object: the group has held one, the sharing see it '
+    + '(Wine\'s opengl32 test_sharelists, "sync")', ()=>{
+    const first = fixture(false).gl;
+    const second = fixture(false).gl;
+    const third = fixture(false).gl;
+    assert.equal(first.shareGroup.used, false);
+    const sync = first.glFenceSync(SYNC.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    assert.equal(first.shareGroup.used, true, 'a group that held a sync shares no other');
+    second.shareLists(first);
+    assert.equal(second.glIsSync(sync), GL.TRUE, 'seen where the group is shared');
+    assert.equal(third.glIsSync(sync), GL.FALSE, 'and nowhere else');
+});
+
 test('on a device a fence is signalled once what was recorded before it has been replayed, '
     + 'a wait flushing it', async()=>{
     const { gl, renderer } = fixture(true);
