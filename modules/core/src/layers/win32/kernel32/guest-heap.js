@@ -178,6 +178,8 @@ const OWN = Symbol('guest heap');
  * @property {() => number} handedTo  the first arena address never inside a block
  * @property {() => { blocks: number, used: number, free: number, largestFree: number }}
  *     diagnostics
+ * @property {(count?: number) => { owner: any, bytes: number, blocks: number }[]} [owners]
+ *     what the live blocks hold by owner, the most first
  */
 
 /**
@@ -712,6 +714,7 @@ export function createGuestHeap({ allocator, arena, memory, alignment = 8 }){
                 },
                 handedTo: ()=>allocator.handedTo(),
                 diagnostics: ()=>allocator.diagnostics(),
+                owners: count=>allocator.owners?.(count) ?? [],
             };
         },
 
