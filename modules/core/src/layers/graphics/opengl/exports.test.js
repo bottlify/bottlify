@@ -1356,3 +1356,20 @@ test('WGL_ARB_render_texture: the pbuffer is the image of the texture bound unti
         assert.deepEqual(level(), [0, 0], 'no stereo: the right buffer is none');
         assert.equal(release(WGL.FRONT_RIGHT_ARB), 1);
     });
+
+test('OpenGL ES 2.0\'s calls take floats and write their precisions to guest memory', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glDepthRangef.handler([floatBits(0.25), floatBits(0.75)]);
+    table.glClearDepthf.handler([floatBits(0.5)]);
+    const out = 0x4000;
+    table.glGetFloatv.handler([GL.DEPTH_RANGE, out]);
+    assert.deepEqual([view.getFloat32(out, true), view.getFloat32(out + 4, true)], [0.25, 0.75]);
+    table.glGetFloatv.handler([GL.DEPTH_CLEAR_VALUE, out]);
+    assert.equal(view.getFloat32(out, true), 0.5);
+    table.glGetShaderPrecisionFormat.handler([GL.FRAGMENT_SHADER, GL.HIGH_FLOAT, out, out + 8]);
+    assert.deepEqual([view.getInt32(out, true), view.getInt32(out + 4, true),
+        view.getInt32(out + 8, true)], [127, 127, 23]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});

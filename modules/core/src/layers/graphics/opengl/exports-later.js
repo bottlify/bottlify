@@ -353,6 +353,27 @@ export function laterEntryPoints(h){
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
 
+        // --- OpenGL ES 2.0's calls (4.1) ---
+
+        glDepthRangef: ([near, far])=>answer(current()?.glDepthRange(asFloat(near),
+            asFloat(far))),
+        glClearDepthf: ([depth])=>answer(current()?.glClearDepth(asFloat(depth))),
+        glReleaseShaderCompiler: ()=>answer(current()?.glReleaseShaderCompiler()),
+        // The binary is never read: no format is known.
+        glShaderBinary: ([count, shaders, format, , length])=>call(context=>
+            context.glShaderBinary(readTyped('ui', shaders, Math.max(0, count | 0)),
+                format >>> 0, length | 0)),
+        glGetShaderPrecisionFormat: ([shaderType, precisionType, range, precision])=>
+            call(context=>{
+                const format = context.glGetShaderPrecisionFormat(shaderType >>> 0,
+                    precisionType >>> 0);
+                if (format)
+                {
+                    writeQuery(range, format.range, 'word');
+                    writeQuery(precision, [format.precision], 'word');
+                }
+            }),
+
         glClampColor: ([target, clamp])=>answer(current()?.glClampColor(target >>> 0,
             clamp >>> 0)),
         glTexParameterIiv: ([target, pname, values])=>answer(current()?.texParameterI(

@@ -1044,6 +1044,21 @@ export const GL = Object.freeze({
     DEPTH_COMPONENT32: 0x81a7,
     RGB565: 0x8d62,
 
+    // --- OpenGL 4.1's ES 2.0 compatibility ---
+    FIXED: 0x140c,
+    LOW_FLOAT: 0x8df0,
+    MEDIUM_FLOAT: 0x8df1,
+    HIGH_FLOAT: 0x8df2,
+    LOW_INT: 0x8df3,
+    MEDIUM_INT: 0x8df4,
+    HIGH_INT: 0x8df5,
+    SHADER_BINARY_FORMATS: 0x8df8,
+    NUM_SHADER_BINARY_FORMATS: 0x8df9,
+    SHADER_COMPILER: 0x8dfa,
+    MAX_VERTEX_UNIFORM_VECTORS: 0x8dfb,
+    MAX_VARYING_VECTORS: 0x8dfc,
+    MAX_FRAGMENT_UNIFORM_VECTORS: 0x8dfd,
+
     // --- OpenGL 2.1: pixel buffer objects, sRGB textures ---
     PIXEL_PACK_BUFFER: 0x88eb,
     PIXEL_UNPACK_BUFFER: 0x88ec,

@@ -45,6 +45,7 @@ import {
 } from './version.js';
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
 import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
+import { ES2_CALLS_NOT_COMPILED, installEs2Calls } from './context-es2.js';
 import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
 import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
 import {
@@ -131,6 +132,7 @@ const NOT_COMPILABLE = new Set([
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
+    ...ES2_CALLS_NOT_COMPILED,
     ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED,
 ]);
 
@@ -1836,6 +1838,7 @@ export function createGlContext(options = {}){
     installVertexArrayCalls(context, kernel);
     installIndexedCalls(context, kernel);
     installSyncCalls(context, kernel);
+    installEs2Calls(context, kernel);
     installSamplerCalls(context, kernel);
     installQueryCalls(context, kernel);
     installTransformFeedbackCalls(context, kernel);

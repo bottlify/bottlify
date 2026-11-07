@@ -850,6 +850,38 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.MAX_VARYING_FLOATS, name: 'GL_MAX_VARYING_FLOATS', kind: 'int',
         value: [GLSL_LIMITS.varyingFloats],
     },
+    // OpenGL 4.1's ES 2.0 compatibility: the same limits in vectors, a
+    // compiler always there, no binary formats, and what glReadPixels reads
+    // best.
+    {
+        query: GL.MAX_VERTEX_UNIFORM_VECTORS, name: 'GL_MAX_VERTEX_UNIFORM_VECTORS',
+        kind: 'int', value: [GLSL_LIMITS.vertexUniformComponents / 4],
+    },
+    {
+        query: GL.MAX_FRAGMENT_UNIFORM_VECTORS, name: 'GL_MAX_FRAGMENT_UNIFORM_VECTORS',
+        kind: 'int', value: [GLSL_LIMITS.fragmentUniformComponents / 4],
+    },
+    {
+        query: GL.MAX_VARYING_VECTORS, name: 'GL_MAX_VARYING_VECTORS', kind: 'int',
+        value: [GLSL_LIMITS.varyingFloats / 4],
+    },
+    { query: GL.SHADER_COMPILER, name: 'GL_SHADER_COMPILER', kind: 'bool', value: [1] },
+    {
+        query: GL.NUM_SHADER_BINARY_FORMATS, name: 'GL_NUM_SHADER_BINARY_FORMATS', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.SHADER_BINARY_FORMATS, name: 'GL_SHADER_BINARY_FORMATS', kind: 'enum',
+        value: [],
+    },
+    {
+        query: GL.IMPLEMENTATION_COLOR_READ_FORMAT, name: 'GL_IMPLEMENTATION_COLOR_READ_FORMAT',
+        kind: 'enum', value: [GL.RGBA],
+    },
+    {
+        query: GL.IMPLEMENTATION_COLOR_READ_TYPE, name: 'GL_IMPLEMENTATION_COLOR_READ_TYPE',
+        kind: 'enum', value: [GL.UNSIGNED_BYTE],
+    },
     {
         query: GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS, name: 'GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS',
         kind: 'int', value: [GLSL_LIMITS.vertexTextureImageUnits],

@@ -45,7 +45,7 @@ import { GL } from './constants.js';
 /** @type {Map<number, number>} */
 const TYPE_BYTES = new Map([
     [GL.BYTE, 1], [GL.UNSIGNED_BYTE, 1], [GL.SHORT, 2], [GL.UNSIGNED_SHORT, 2],
-    [GL.INT, 4], [GL.UNSIGNED_INT, 4], [GL.FLOAT, 4], [GL.DOUBLE, 8],
+    [GL.INT, 4], [GL.UNSIGNED_INT, 4], [GL.FLOAT, 4], [GL.DOUBLE, 8], [GL.FIXED, 4],
 ]);
 
 /**
@@ -138,6 +138,9 @@ function readComponent(view, at, type, normalised){
             return view.getFloat32(at, true);
         case GL.DOUBLE:
             return view.getFloat64(at, true);
+        case GL.FIXED:
+            // 16.16 (4.1's ES 2.0 compatibility), never normalised.
+            return view.getInt32(at, true) / 65536;
         default:
             return 0;
     }
