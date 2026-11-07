@@ -336,6 +336,18 @@ export function laterEntryPoints(h){
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
 
+        glClampColor: ([target, clamp])=>answer(current()?.glClampColor(target >>> 0,
+            clamp >>> 0)),
+        glTexParameterIiv: ([target, pname, values])=>answer(current()?.texParameterI(
+            target >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname)))),
+        glTexParameterIuiv: ([target, pname, values])=>answer(current()?.texParameterI(
+            target >>> 0, pname >>> 0, readTyped('ui', values, samplerCount(pname)))),
+        glGetTexParameterIiv: ([target, pname, out])=>call(context=>writeQuery(out,
+            context.glGetTexParameteriv(target >>> 0, pname >>> 0), 'word')),
+        glGetTexParameterIuiv: ([target, pname, out])=>call(context=>writeQuery(out,
+            context.glGetTexParameteriv(target >>> 0, pname >>> 0), 'word')),
+        glGetBufferParameteri64v: ([target, pname, out])=>call(context=>writeInt64s(out,
+            context.glGetBufferParameterivARB(target >>> 0, pname >>> 0))),
         glPrimitiveRestartIndex: ([index])=>answer(current()?.glPrimitiveRestartIndex(
             index >>> 0)),
 

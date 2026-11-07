@@ -84,6 +84,7 @@ import {
  * @property {boolean} frontIsCcw
  * @property {number} viewportHeight  the render target's rows; fragment.position reads it
  * @property {number} colourMask     bits: red 1, green 2, blue 4, alpha 8
+ * @property {boolean} [depthClamp]  depth clamped to the range rather than clipped (GL_DEPTH_CLAMP)
  * @property {{ factor: number, units: number } | null} polygonOffset
  * @property {import('./pipeline.js').SceneProgram | null} vertexProgram
  *           the enabled, loaded vertex program; null draws the fixed stage
@@ -477,6 +478,7 @@ export function drawKey(state){
         stencilBack,
         state.cull,
         state.frontIsCcw ? 'ccw' : 'cw',
+        state.depthClamp ? 'z' : '',
         state.colourMask,
         state.polygonOffset ? `${state.polygonOffset.factor},${state.polygonOffset.units}` : '-',
         state.vertexProgram
@@ -562,6 +564,7 @@ export function sameKeyInputs(a, b){
         || a.depthFormat !== b.depthFormat || !a.colourSum !== !b.colourSum
         || a.alphaFunc !== b.alphaFunc || !a.flat !== !b.flat || a.cull !== b.cull
         || !a.frontIsCcw !== !b.frontIsCcw || a.colourMask !== b.colourMask
+        || !a.depthClamp !== !b.depthClamp
         || !sameItems(a.strides, b.strides) || (a.steps ?? '') !== (b.steps ?? '')
         || a.attributes.length !== b.attributes.length || a.units.length !== b.units.length)
     {
@@ -1484,6 +1487,7 @@ export function drawDescriptor(state){
             topology: state.topology,
             cullMode: state.cull,
             frontFace: state.frontIsCcw ? 'ccw' : 'cw',
+            ...state.depthClamp ? { unclippedDepth: true } : {},
         },
         depthStencil: state.depthFormat === '' ? undefined : {
             format: state.depthFormat,

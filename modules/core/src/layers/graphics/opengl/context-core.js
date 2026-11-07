@@ -198,6 +198,43 @@ export function installCoreCalls(context, kernel){
             }
         },
 
+        // --- colour clamping (3.0) ---
+
+        /**
+         * glClampColor: whether vertex colours, fragment colours and the
+         * colours glReadPixels reads are clamped to [0, 1]. What the device
+         * does is GL_FIXED_ONLY for fragments and reads -- a float buffer
+         * keeps its values, a normalised one clamps -- and clamped vertex
+         * colours; another setting is kept and said once.
+         *
+         * @param {number} target @param {number} clamp
+         */
+        glClampColor(target, clamp){
+            if (!enter('glClampColor', [target, clamp]))
+            {
+                return;
+            }
+            if (target !== GL.CLAMP_VERTEX_COLOR && target !== GL.CLAMP_FRAGMENT_COLOR
+                && target !== GL.CLAMP_READ_COLOR)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (clamp !== GL.TRUE && clamp !== GL.FALSE && clamp !== GL.FIXED_ONLY)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const done = target === GL.CLAMP_VERTEX_COLOR ? GL.TRUE : GL.FIXED_ONLY;
+            if (clamp !== done)
+            {
+                kernel.diverge(`glClampColor(0x${target.toString(16)}) was set to`
+                    + ` 0x${clamp.toString(16)}, kept and not done: colours are clamped as by`
+                    + ` default`);
+            }
+            setState(target, [clamp]);
+        },
+
         // --- draw buffers ---
 
         /** @param {readonly number[]} buffers */

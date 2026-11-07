@@ -1934,6 +1934,33 @@ export function installTextureCalls(context, kernel){
             texParameter('glTexParameterfv', target, parameter, values);
         },
 
+        /**
+         * glTexParameterIiv and glTexParameterIuiv (3.0): what glTexParameteriv
+         * sets, the border colour kept as the integers given.
+         *
+         * @param {number} target @param {number} parameter @param {number[]} values
+         */
+        texParameterI(target, parameter, values){
+            if (parameter !== GL.TEXTURE_BORDER_COLOR)
+            {
+                texParameter('glTexParameterIiv', target, parameter, values);
+                return;
+            }
+            if (!enter('texParameterI', [target, parameter, values]))
+            {
+                return;
+            }
+            const texture = BIND_TARGETS.some(t=>t === target) ? textureBound(active, target)
+                : null;
+            if (!texture || values.length < 4)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            texture.borderColour = values.slice(0, 4);
+            texture.parametersVersion++;
+        },
+
         /** @param {number} target @param {number} parameter @returns {number[] | null} */
         glGetTexParameteriv(target, parameter){
             return getTexParameter('glGetTexParameteriv', target, parameter);

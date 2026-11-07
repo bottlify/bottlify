@@ -1887,6 +1887,7 @@ export function createGpuRenderer(services){
             frontIsCcw: target.flipped ? !scene.frontIsCcw : scene.frontIsCcw,
             viewportHeight: target.height,
             colourMask,
+            depthClamp: depthClampOf(operations),
             polygonOffset: scene.polygonOffset,
             vertexProgram: scene.programs.vertex,
             fragmentProgram: scene.programs.fragment,
@@ -1899,6 +1900,27 @@ export function createGpuRenderer(services){
 
     /** Whether the device clips by the distances a vertex stage writes. */
     const clipDistances = backend.hasFeature?.('clip-distances') === true;
+    const depthClip = backend.hasFeature?.('depth-clip-control') === true;
+    /**
+     * Whether a draw leaves depth unclipped and clamped (GL_DEPTH_CLAMP): what
+     * the device's depth-clip-control does; without it the draw is clipped,
+     * and that is said once.
+     *
+     * @param {{ depthClamp?: boolean }} operations
+     */
+    const depthClampOf = operations=>{
+        if (!operations.depthClamp)
+        {
+            return false;
+        }
+        if (!depthClip)
+        {
+            diverge('GL_DEPTH_CLAMP was enabled on a device without depth-clip-control: depth'
+                + ' is clipped at the near and far planes');
+            return false;
+        }
+        return true;
+    };
 
     /**
      * The user clip planes a draw is clipped by: the fixed vertex stage

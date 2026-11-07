@@ -1095,6 +1095,11 @@ that set it; a window starts at 1. *2026-11-07.*
 offset within one (`address % 64 == offset % 64`), as drivers give, which programs writing it
 with aligned SIMD stores rely on. *2026-11-07.*
 
+**A127. An OpenGL cube map is always filtered across its faces' edges,** as
+GL_TEXTURE_CUBE_MAP_SEAMLESS asks: WebGPU's cube sampling knows no other way. A program that
+leaves the switch off, as its default is, gets the seamless filtering every driver of a 3.2
+card gives anyway. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

@@ -84,6 +84,13 @@ export const CONVENTIONAL_UNITS = 4;
  */
 export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.DITHER, name: 'GL_DITHER', kind: 'bool', value: [1] },
+    // OpenGL 3.2: depth clamped rather than clipped, and cube maps filtered
+    // across their faces' edges.
+    { query: GL.DEPTH_CLAMP, name: 'GL_DEPTH_CLAMP', kind: 'bool', value: [0] },
+    {
+        query: GL.TEXTURE_CUBE_MAP_SEAMLESS, name: 'GL_TEXTURE_CUBE_MAP_SEAMLESS', kind: 'bool',
+        value: [0],
+    },
     // OpenGL 3.1 and 4.3: an index that ends one primitive and starts the next.
     { query: GL.PRIMITIVE_RESTART, name: 'GL_PRIMITIVE_RESTART', kind: 'bool', value: [0] },
     {
@@ -834,6 +841,16 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.PRIMITIVE_RESTART_INDEX, name: 'GL_PRIMITIVE_RESTART_INDEX', kind: 'int',
         value: [0],
+    },
+    // OpenGL 3.0's colour clamping (glClampColor).
+    { query: GL.CLAMP_VERTEX_COLOR, name: 'GL_CLAMP_VERTEX_COLOR', kind: 'int', value: [1] },
+    {
+        query: GL.CLAMP_FRAGMENT_COLOR, name: 'GL_CLAMP_FRAGMENT_COLOR', kind: 'int',
+        value: [GL.FIXED_ONLY],
+    },
+    {
+        query: GL.CLAMP_READ_COLOR, name: 'GL_CLAMP_READ_COLOR', kind: 'int',
+        value: [GL.FIXED_ONLY],
     },
     // A copy's two bindings answer under the target's own name (OpenGL 3.1).
     { query: GL.COPY_READ_BUFFER, name: 'GL_COPY_READ_BUFFER_BINDING', kind: 'int', value: [0] },

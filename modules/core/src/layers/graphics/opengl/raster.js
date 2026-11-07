@@ -96,6 +96,7 @@ const BPP = 4;
  *           Absent when the depth test is off.
  * @property {number} [depthFunc]
  * @property {boolean} depthWrite
+ * @property {boolean} [depthClamp]  GL_DEPTH_CLAMP: depth clamped, not clipped (the device's)
  * @property {((source: number[], destination: number[]) => number[]) | null} blend
  *           Absent when blending is off. Both colours are 0..255.
  * @property {((source: number, destination: number) => number) | null} logicOp

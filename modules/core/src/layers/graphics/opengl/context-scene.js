@@ -404,6 +404,7 @@ export function createSceneBuilder(kernel){
                 depthTest: depthOn ? compare : undefined,
                 depthFunc,
                 depthWrite: on(GL.DEPTH_WRITEMASK),
+                depthClamp: on(GL.DEPTH_CLAMP),
                 blend: blendOn && !(src === GL.ONE && dst === GL.ZERO)
                     ? (/** @type {number[]} */ s, /** @type {number[]} */ d)=>{
                         const sf = s.map(v=>v / 255);
