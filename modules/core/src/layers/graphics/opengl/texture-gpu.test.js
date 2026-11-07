@@ -325,7 +325,7 @@ test('an attachment of a sized format answers its sizes, component type and enco
     assert.equal(ask(GL.DEPTH_ATTACHMENT, GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE), 0);
 });
 
-test('an integer texture as an attachment is a framebuffer this renderer does not draw', ()=>{
+test('an integer texture as an attachment is a complete framebuffer', ()=>{
     const r = rig();
     const { context } = r;
     const [colour] = context.glGenTextures(1);
@@ -335,5 +335,6 @@ test('an integer texture as an attachment is a framebuffer this renderer does no
     const [fbo] = context.glGenFramebuffers(1);
     context.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
     context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, colour, 0);
-    assert.equal(context.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_UNSUPPORTED);
+    assert.equal(context.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE,
+        'a GLSL program writes its integers (gpu-glsl.test.js)');
 });

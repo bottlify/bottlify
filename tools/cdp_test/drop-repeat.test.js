@@ -60,10 +60,11 @@ test('a freeze is listed in its scene with its idle time by what it waited on', 
     slow.ms = 600;
     Object.assign(slow, { idleMs: 500 });
     slow.notes = { instructions: 1000, 'idle-host-wait Sleep': 100,
-        'idle-message-wait others': 400 };
+        'idle-message-wait others': 400, gfxGpuMs: 450 };
     const freezes = freezesOf(frames, 1500, 500);
     assert.equal(freezes[0].length, 0, 'the first scene has none');
     assert.equal(freezes[1].length, 1);
     assert.equal(freezes[1][0].idle, 500);
     assert.deepEqual(freezes[1][0].idleBy[0], ['idle-message-wait others', 400], 'largest first');
+    assert.deepEqual(freezes[1][0].worker, [['gfxGpuMs', 450]], 'and the worker beside it');
 });

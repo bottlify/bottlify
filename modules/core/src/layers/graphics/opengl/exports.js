@@ -48,6 +48,7 @@ import {
     UNANNOUNCED_FUNCTIONS, WGL_EXTENSIONS, registryArguments,
 } from './extensions.js';
 import { laterEntryPoints } from './exports-later.js';
+import { SYNC } from './context-sync.js';
 import {
     choosePixelFormat, choosePixelFormatsARB, decodePixelFormat, encodePixelFormat,
     formatAttribute, PIXEL_FORMATS, PIXELFORMATDESCRIPTOR,
@@ -2259,6 +2260,52 @@ export function createOpengl(services){
     }
 
     /**
+     * glGetQueryObject{iv,uiv,i64v,ui64v}: a result not yet counted is waited
+     * for, so these are among the calls that may wait.
+     *
+     * @returns {Record<string, (args: number[]) => number | Promise<number>>}
+     */
+    function queryResults(){
+        /** @type {Record<string, (args: number[]) => number | Promise<number>>} */
+        const forms = {};
+        for (const [suffix, wide] of /** @type {[string, boolean][]} */ ([
+            ['iv', false], ['uiv', false], ['i64v', true], ['ui64v', true],
+        ]))
+        {
+            forms[`glGetQueryObject${suffix}`] = ([name, pname, out])=>{
+                const context = current();
+                if (!context)
+                {
+                    return 0;
+                }
+                /** @param {number[] | null} values */
+                const write = values=>{
+                    if (values && (out >>> 0) !== 0)
+                    {
+                        if (wide)
+                        {
+                            const bytes = new Uint8Array(values.length * 8);
+                            const view = new DataView(bytes.buffer);
+                            values.forEach((value, k)=>view.setBigUint64(k * 8,
+                                BigInt.asUintN(64, BigInt(Math.trunc(value))), true));
+                            services.writeMemory(out >>> 0, bytes);
+                        }
+                        else
+                        {
+                            writeQuery(out, values.map(value=>Math.min(value, 0xffffffff)),
+                                'word');
+                        }
+                    }
+                    return 0;
+                };
+                const answered = context.glGetQueryObject(name >>> 0, pname >>> 0);
+                return answered instanceof Promise ? answered.then(write) : write(answered);
+            };
+        }
+        return forms;
+    }
+
+    /**
      * The calls here that may wait before they answer: a swap on the device
      * waits, once it is enough frames behind, for the oldest to finish, and a
      * read of pixels on the device for them to be drawn and copied back. Kept
@@ -2311,6 +2358,14 @@ export function createOpengl(services){
             });
         },
 
+        ...queryResults(),
+        // A wait on a fence the device has not reached waits for it, up to
+        // the timeout.
+        glClientWaitSync: ([sync, flags, low, high])=>{
+            const waited = current()?.glClientWaitSync(sync >>> 0, flags >>> 0,
+                (high >>> 0) * 0x100000000 + (low >>> 0));
+            return waited ?? SYNC.WAIT_FAILED;
+        },
         glReadPixels: ([x, y, width, height, format, type, out])=>{
             const context = current();
             if (!context)

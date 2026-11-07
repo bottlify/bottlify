@@ -24,8 +24,10 @@
  * and that is said.
  *
  * `--freeze MS` lists instead every frame of MS or longer inside a scene, run
- * by run: the freezes a person sees, with what the frame was made of and its
- * idle time by what it waited on (the `idle-*` notes the run loop keeps).
+ * by run: the freezes a person sees, with what the frame was made of, its
+ * idle time by what it waited on (the `idle-*` notes the run loop keeps), and
+ * what the graphics worker finished meanwhile (the `gfx*` notes: frames, the
+ * time to their queue, the GPU's own, the worker's replay).
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -149,6 +151,7 @@ export function freezesOf(frames, gap, freeze){
             idle: frame.idleMs ?? 0,
             idleBy: Object.entries(frame.notes ?? {}).filter(([name])=>name.startsWith('idle-'))
                 .sort((one, two)=>two[1] - one[1]),
+            worker: Object.entries(frame.notes ?? {}).filter(([name])=>name.startsWith('gfx')),
         })));
 }
 
@@ -175,9 +178,13 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '
                     const by = one.idleBy.length > 0
                         ? `: ${one.idleBy.map(([name, ms])=>`${name} ${ms.toFixed(0)}`).join(', ')}`
                         : '';
+                    const worker = one.worker.length > 0
+                        ? `; worker ${one.worker.map(([name, value])=>`${name} ${value}`)
+                            .join(' ')}`
+                        : '';
                     console.log(`  scene ${scene} +${one.atS.toFixed(1)} s ${one.ms.toFixed(0)} ms`
                         + ` guest ${one.guest.toFixed(0)} host ${one.host.toFixed(0)}`
-                        + ` idle ${one.idle.toFixed(0)}${by}`);
+                        + ` idle ${one.idle.toFixed(0)}${by}${worker}`);
                 }
             });
         }

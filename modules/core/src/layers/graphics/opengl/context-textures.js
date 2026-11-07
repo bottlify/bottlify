@@ -176,6 +176,26 @@ const WRAPS = new Set([
     GL.CLAMP, GL.REPEAT, GL.CLAMP_TO_EDGE, GL.CLAMP_TO_BORDER, GL.MIRRORED_REPEAT,
 ]);
 
+/**
+ * Whether a value is one a sampling parameter takes: the filters, the wraps
+ * and the comparison, which a texture and a sampler object (3.3) share.
+ * Zero when it is, GL_INVALID_ENUM when it is not; any other parameter is not
+ * this function's to judge.
+ *
+ * @param {number} parameter @param {number} value
+ * @returns {number}
+ */
+export function samplingRefusal(parameter, value){
+    return parameter === GL.TEXTURE_MIN_FILTER && !FILTERS.has(value)
+        || parameter === GL.TEXTURE_MAG_FILTER && value !== GL.NEAREST && value !== GL.LINEAR
+        || (parameter === GL.TEXTURE_WRAP_S || parameter === GL.TEXTURE_WRAP_T
+            || parameter === GL.TEXTURE_WRAP_R) && !WRAPS.has(value)
+        || parameter === TEX.TEXTURE_COMPARE_MODE && value !== GL.NONE
+            && value !== TEX.COMPARE_REF_TO_TEXTURE
+        || parameter === TEX.TEXTURE_COMPARE_FUNC && !COMPARE_FUNCS.has(value)
+        ? GL.INVALID_ENUM : 0;
+}
+
 /** @type {Set<number>} */
 const PIXEL_FORMATS = new Set([
     GL.COLOR_INDEX, GL.STENCIL_INDEX, GL.DEPTH_COMPONENT, GL.RED, GL.GREEN, GL.BLUE, GL.ALPHA,
@@ -1346,10 +1366,7 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (parameter === GL.TEXTURE_MIN_FILTER && !FILTERS.has(value)
-            || parameter === GL.TEXTURE_MAG_FILTER && value !== GL.NEAREST && value !== GL.LINEAR
-            || (parameter === GL.TEXTURE_WRAP_S || parameter === GL.TEXTURE_WRAP_T
-                || parameter === GL.TEXTURE_WRAP_R) && !WRAPS.has(value))
+        if (samplingRefusal(parameter, value))
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -1360,10 +1377,7 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_VALUE);
             return;
         }
-        if (parameter === TEX.TEXTURE_COMPARE_MODE && value !== GL.NONE
-                && value !== TEX.COMPARE_REF_TO_TEXTURE
-            || parameter === TEX.TEXTURE_COMPARE_FUNC && !COMPARE_FUNCS.has(value)
-            || parameter === TEX.DEPTH_TEXTURE_MODE && !DEPTH_TEXTURE_MODES.has(value))
+        if (parameter === TEX.DEPTH_TEXTURE_MODE && !DEPTH_TEXTURE_MODES.has(value))
         {
             setError(GL.INVALID_ENUM);
             return;

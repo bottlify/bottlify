@@ -1020,9 +1020,10 @@ border other than 0 is GL_INVALID_VALUE, as the core profile has it; borders cam
 the compatibility formats they are still kept for. *2026-11-06.*
 
 **A110. Temporary: a framebuffer attachment this renderer cannot draw into answers
-GL_FRAMEBUFFER_UNSUPPORTED:** integer formats, RGB9_E5, compressed formats and 3D slices. The
-specification allows the answer for any combination an implementation cannot draw; integer
-targets come with the GLSL emitter's integer outputs. *2026-11-06.*
+GL_FRAMEBUFFER_UNSUPPORTED:** RGB9_E5, compressed formats and 3D slices. The specification
+allows the answer for any combination an implementation cannot draw. Integer formats are drawn
+into by GLSL programs; a draw without one into an integer buffer draws nothing and says so.
+*2026-11-06.*
 
 **A111. wglGetProcAddress hands out every function implemented, whatever reports it.** A
 function of a version past the context's, or of an extension the string does not name, is
@@ -1030,6 +1031,41 @@ obtainable once it is implemented here, as Windows drivers hand out every functi
 the version and extension strings are the promise a program reads, the pointer is not. Wine's
 opengl32 test calls 4.3 and 4.5 framebuffer queries and EXT_direct_state_access forms through
 pointers it never checks. A function not implemented is still null. *2026-11-06.*
+
+**A112. A GLSL uniform block declared shared or packed is laid out as std140.** Both leave the
+layout to the implementation, which a program reads back through glGetActiveUniformsiv; std140
+is one such layout, and the one the block reader already writes. *2026-11-06.*
+
+**A113. Temporary: ten uniform blocks a stage and twenty combined,** below OpenGL 3.1's minimum
+of twelve a stage. WebGPU binds twelve uniform buffers a stage and the fixed-function and program
+blocks take two of them. A program that uses more blocks fails to link and says why.
+*2026-11-06.*
+
+**A114. A uniform block whose binding point holds nothing, or a range past its buffer, reads
+zeros** and the draw reports it once as a divergence; the specification leaves the result
+undefined. *2026-11-06.*
+
+**A115. Temporary: a shadow lookup with an explicit level or gradients reads the base level, and
+a bias is dropped.** WGSL compares depth only at the base level outside an implicit-level lookup
+in a fragment stage. *2026-11-06.*
+
+**A116. An integer texture read through texture() loads the nearest texel, clamped, whatever its
+filter and wrap modes.** Integer textures are not filterable; GL makes a filtered integer texture
+incomplete, while programs that sample one with the default filter expect a value. *2026-11-06.*
+
+**A117. A fragment output narrower than its colour buffer is written as (x, y, 0, 1),** an output
+of another type than its buffer's is converted to it, and a buffer no output covers is written
+zero; the specification leaves the last two undefined. *2026-11-06.*
+
+**A118. Temporary: a second-source fragment output (index 1) is accepted and not written.**
+GL_MAX_DUAL_SOURCE_DRAW_BUFFERS is 1, as 3.3 requires, but no blend factor reads the second
+colour yet. *2026-11-06.*
+
+**A119. Temporary: an OpenGL timer query reads the processor's clock.** GL_TIME_ELAPSED is the
+nanoseconds of the page's clock between glBeginQuery and glEndQuery as the calls are made, and
+GL_TIMESTAMP the clock at glQueryCounter; the device's own timestamps (`timestamp-query`) are not
+read. A program timing its passes sees how long it took to issue them, not to draw them.
+*2026-11-07.*
 
 ## B. From measured optimisation work
 

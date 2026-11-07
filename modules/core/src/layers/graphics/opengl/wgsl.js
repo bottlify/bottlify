@@ -35,7 +35,10 @@ import { GL } from './constants.js';
 import {
     CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
 } from './arb-wgsl.js';
-import { emitStage, interfaceStruct } from './glsl-wgsl.js';
+import {
+    blockDeclaration, emitStage, interfaceStruct, samplerTypeOf, samplerVarTypeOf,
+    textureTypeOf,
+} from './glsl-wgsl.js';
 
 /**
  * @typedef {Object} UnitState
@@ -92,7 +95,9 @@ import { emitStage, interfaceStruct } from './glsl-wgsl.js';
  *           the enabled user clip planes, in the uniform block's order, and
  *           whether the device clips by the distances a vertex stage writes
  *           (`clip-distances`) or the fragment stage discards what they cut
- * @property {{ format: string, mask: number }[]} [targets]  the colour targets,
+ * @property {{ format: string, mask: number, blend?: boolean }[]} [targets]  the colour
+ *           targets, `blend` false for a draw buffer blending is disabled for
+ *           (glDisablei) where `blend` is on for another,
  *           when there is more than `targetFormat` with `colourMask`: a
  *           framebuffer object's draw buffers, each with the channels it is
  *           written in (an RGB attachment's alpha is not)
@@ -505,7 +510,7 @@ const targetsKey = targets=>{
     let key = '';
     for (const target of targets)
     {
-        key += `${target.format}/${target.mask};`;
+        key += `${target.format}/${target.mask}${target.blend === false ? '/n' : ''};`;
     }
     return key;
 };
@@ -1153,6 +1158,9 @@ ${fragmentBody.join('\n')}
     return { bindings, main };
 }
 
+/** A WebGPU format of integer channels: a colour buffer no blend reaches. */
+const INTEGER_FORMAT = /[su]int$/;
+
 /**
  * The shader pair for a draw state, as one module with both entry points,
  * and -- when a program stage runs -- what its uniform block has to carry.
@@ -1215,13 +1223,15 @@ function generateGlslDraw(state){
     const options = {
         attributes: state.attributes, flat: state.flat, twoSide: !!state.twoSide,
         alphaFunc: state.alphaFunc, targets, compare: compareExpression,
+        targetScalars: (state.targets?.map(t=>t.format) ?? [state.targetFormat])
+            .map(format=>(/sint$/.test(format) ? 'i32' : /uint$/.test(format) ? 'u32' : 'f32')),
         fixed: {
             texcoords: state.units.map(unit=>unit.index),
             fog: state.fog ? fogFactorOf(state.fog) : null,
         },
     };
     /** @type {GlslStages} */
-    const stages = { vertex: null, fragment: null, samplers: [] };
+    const stages = { vertex: null, fragment: null, samplers: [], blocks: [] };
     /** @type {string[]} */
     const parts = [];
     try
@@ -1234,6 +1244,7 @@ function generateGlslDraw(state){
             stages.vertex = vertex.plan;
             stages.fragment = fragment.plan;
             stages.samplers = [...new Set([...vertex.usedSamplers, ...fragment.usedSamplers])];
+            stages.blocks = [...new Set([...vertex.usedBlocks, ...fragment.usedBlocks])];
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
         else if (program.vertex)
@@ -1246,6 +1257,7 @@ function generateGlslDraw(state){
                 fragment.bindings, fragment.main);
             stages.vertex = vertex.plan;
             stages.samplers = vertex.usedSamplers;
+            stages.blocks = vertex.usedBlocks;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
         else
@@ -1260,6 +1272,7 @@ function generateGlslDraw(state){
                 fixedVertexMain({ ...state, clip: null }, varyings), fragment.code);
             stages.fragment = fragment.plan;
             stages.samplers = fragment.usedSamplers;
+            stages.blocks = fragment.usedBlocks;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
     }
@@ -1267,7 +1280,11 @@ function generateGlslDraw(state){
         return { code: '', label, programs: { vertex: null, fragment: null,
             error: e instanceof Error ? e.message : String(e) }, glsl: stages };
     }
-    const vertexIn = program.vertex ? fixedVertexIn(state) : '';
+    stages.blocks.sort((a, b)=>a - b);
+    parts.unshift(...stages.blocks.map(index=>blockDeclaration(program, index)));
+    // A vertex shader that reads no array -- one drawing from gl_VertexID --
+    // takes no vertex struct, which WGSL does not have empty.
+    const vertexIn = program.vertex && state.attributes.length > 0 ? fixedVertexIn(state) : '';
     const code = `diagnostic(off, derivative_uniformity);
 ${UNIFORM_STRUCT}
 ${vertexIn}
@@ -1281,6 +1298,7 @@ ${parts.join('\n\n')}
  * @property {import('./glsl-wgsl.js').BlockPlan | null} vertex
  * @property {import('./glsl-wgsl.js').BlockPlan | null} fragment
  * @property {number[]} samplers  the program's samplers the stages sample, by index
+ * @property {number[]} blocks  the program's uniform blocks the stages read, by index
  */
 
 /**
@@ -1292,9 +1310,10 @@ ${parts.join('\n\n')}
 function samplerDeclarations(program, used){
     return [...used].sort((a, b)=>a - b).map(index=>{
         const sampler = program.samplers[index];
-        const kind = sampler.dim === 'Cube' ? 'texture_cube<f32>' : 'texture_2d<f32>';
+        const type = samplerTypeOf(sampler);
+        const kind = textureTypeOf(type);
         return `@group(0) @binding(${1 + index * 2}) var glt${index}: ${kind};
-@group(0) @binding(${2 + index * 2}) var gls${index}: sampler;`;
+@group(0) @binding(${2 + index * 2}) var gls${index}: ${samplerVarTypeOf(type)};`;
     });
 }
 
@@ -1451,7 +1470,12 @@ export function drawDescriptor(state){
     const backFace = stencilFace(state.stencilBack ?? state.stencil);
     const targets = (state.targets ?? [{ format: state.targetFormat, mask: state.colourMask }])
         .map(target=>(target.format === '' ? null
-            : { format: target.format, blend, writeMask: target.mask }));
+            // An integer buffer is written as it is, never blended
+            // (section 4.1.8 of 3.0); nor is a buffer blending is disabled for.
+            : { format: target.format,
+                blend: INTEGER_FORMAT.test(target.format) || target.blend === false ? undefined
+                    : blend,
+                writeMask: target.mask }));
     return {
         vertexBuffers: buffers,
         target: targets[0],

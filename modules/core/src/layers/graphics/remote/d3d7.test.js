@@ -101,8 +101,10 @@ function corners(/** @type {number[][]} */ points, /** @type {boolean} */ textur
  *
  * @param {(ddraw: any, services: any) => any} make
  * @param {boolean} [ring]
+ * @param {unknown[] | null} [queued]  every frame the device counts, as a graphics worker
+ *     counts them (`frameQueued`)
  */
-async function framesThrough(make, ring = false){
+async function framesThrough(make, ring = false, queued = null){
     const gpu = createFakeDevice();
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
@@ -134,6 +136,10 @@ async function framesThrough(make, ring = false){
         },
         divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
             refused.push(`${api}: ${detail}`),
+        frameQueued: queued ? (/** @type {unknown} */ submitted)=>{
+            queued.push(submitted);
+            return null;
+        } : undefined,
     });
     /** @param {any} request */
     const made = request=>{
@@ -374,4 +380,16 @@ test('Direct3D 7 frames made from command rings ask of the GPU what the calls as
             `${label}: frame ${index} asked the same`));
         assert.deepEqual([...ringed.ram], [...direct.ram], `${label}: the target read back alike`);
     }
+});
+
+test('a Direct3D 7 device drawn elsewhere counts every frame it puts on the queue', async()=>{
+    /** @type {unknown[]} */
+    const queued = [];
+    await framesThrough(loopback, false, queued);
+    /** @type {unknown[]} */
+    const direct = [];
+    await framesThrough(createDirect3D7, false, direct);
+    assert.equal(queued.length, 4, 'every present: three frames, the second showing two surfaces');
+    assert.equal(direct.length, queued.length, 'as many as the device drawn here counts');
+    assert.ok(queued.every(submitted=>submitted instanceof Promise), 'each with its submission');
 });

@@ -60,10 +60,23 @@
  *             dstX0: number, dstY0: number, dstX1: number, dstY1: number,
  *             linear: boolean }) => void) | null} [blit]
  *           glBlitFramebuffer's colour, from the read framebuffer to the draw one
+ * @property {(() => { signalled: () => boolean, done: Promise<void>, flush: () => void }
+ *             | null) | null} [fence]
+ *           What a fence waits on: the commands recorded so far replayed
+ *           (`gpu.js` fence); null where nothing is drawn later than it is called
+ * @property {{ begin: (query: any) => void, end: (query: any) => void, flush: () => void,
+ *     condition: (query: any, inverted: boolean) => void } | null} [queries]
+ *           Occlusion counted on the device and rendering conditional on it
+ *           (`context-queries.js`, `gpu.js`); null where nothing draws later
  * @property {((rect: { x: number, y: number, width: number, height: number })
  *             => Promise<Uint8Array | null> | null) | null} [readBack]
  *           The read buffer's colour on the device, RGBA, its bottom row first:
  *           null where the renderer cannot read it (`gpu.js` readPixels)
+ * @property {(request: { mask: number, colour: readonly number[], depth: number,
+ *             stencil: number, masks?: readonly number[] }) => void} clearWith
+ *           Clears what the mask names within the scissor box: the colour draw
+ *           buffers each under its own mask when `masks` is given
+ *           (`context-indexed.js`), under GL_COLOR_WRITEMASK otherwise
  * @property {((buffer: import('./objects.js').BufferObject) => void) | null} bufferDeleted
  *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on

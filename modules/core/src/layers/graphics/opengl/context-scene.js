@@ -16,6 +16,7 @@
  */
 
 import { GL } from './constants.js';
+import { TEX } from './formats.js';
 import { colourMaterialTargets, lightVertex, normalMatrix, normalise } from './lighting.js';
 import { levelKey } from './objects.js';
 import { compare, drawPrimitive } from './pipeline.js';
@@ -276,6 +277,10 @@ export function createSceneBuilder(kernel){
                 twoD: side.textureBoundAt(index, GL.TEXTURE_2D),
                 cube: side.textureBoundAt(index, GL.TEXTURE_CUBE_MAP),
                 oneD: side.textureBoundAt(index, GL.TEXTURE_1D),
+                // GLSL 1.30's samplers of 3D textures and arrays.
+                threeD: side.textureBoundAt(index, GL.TEXTURE_3D),
+                oneDArray: side.textureBoundAt(index, TEX.TEXTURE_1D_ARRAY),
+                twoDArray: side.textureBoundAt(index, TEX.TEXTURE_2D_ARRAY),
             }))
             : [];
         const genericAttribs = programmed && programsSide
@@ -283,6 +288,8 @@ export function createSceneBuilder(kernel){
             : [];
 
         const blendOn = on(GL.BLEND);
+        // Blending and colour masks per draw buffer, when they differ.
+        const perBuffer = side.perBuffer?.() ?? null;
         const src = record(GL.BLEND_SRC).values[0];
         const dst = record(GL.BLEND_DST).values[0];
         const srcAlpha = record(GL.BLEND_SRC_ALPHA).values[0];
@@ -314,8 +321,12 @@ export function createSceneBuilder(kernel){
             fog,
             units,
             current: kernel.currentAttributes(),
-            blend: blendOn ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
+            blend: blendOn || perBuffer?.blend.some((/** @type {boolean} */ b)=>b)
+                ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
             blendColor: record(GL.BLEND_COLOR).values,
+            perBuffer,
+            // Each unit's sampler object (3.3), when a unit has one.
+            samplers: side.boundSamplers?.() ?? null,
             // The framebuffer object drawn into, or null for the window.
             target: side.drawTarget?.() ?? null,
             readFramebuffer: side.readFramebuffer?.() ?? null,
@@ -411,6 +422,7 @@ export function createSceneBuilder(kernel){
             genericAttribs,
             textureMatrices,
             boundTextures,
+            uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
 
             /**
              * The colour a vertex ends up with: lit, or its own.

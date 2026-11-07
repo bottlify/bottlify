@@ -88,13 +88,11 @@ export function framebufferStatus(fbo){
         const sized = attachment.kind === 'texture'
             ? attachment.texture.levels.get(levelKey(attachment.level, attachment.face))?.sized
             : null;
-        if (sized && (sized.kind === 'int' || sized.kind === 'uint' || sized.compressed
-            || sized.packing === 'rgb9e5'
+        if (sized && (sized.compressed || sized.packing === 'rgb9e5'
             || (attachment.kind === 'texture' && attachment.texture.target === GL.TEXTURE_3D)))
         {
-            // What this renderer cannot draw into: an integer format (its
-            // shaders write floats), a shared exponent (WebGPU renders none),
-            // a slice of a 3D texture.
+            // What this renderer cannot draw into: a shared exponent (WebGPU
+            // renders none), a slice of a 3D texture.
             return GL.FRAMEBUFFER_UNSUPPORTED;
         }
         sizes.push(image);

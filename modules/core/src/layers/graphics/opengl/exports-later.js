@@ -20,6 +20,7 @@
  */
 
 import { GL } from './constants.js';
+import { TIMEOUT_IGNORED } from './context-sync.js';
 
 /**
  * What `exports.js` lends: the current context, and its readers and writers
@@ -54,6 +55,72 @@ const asFloat = word=>{
  */
 export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
+
+    /** How many values a sampler parameter's vector form reads. @param {number} pname */
+    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+
+    /**
+     * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
+     * as the context names it.
+     *
+     * @param {number} low @param {number} high
+     */
+    const timeoutOf = (low, high)=>((low >>> 0) === 0xffffffff && (high >>> 0) === 0xffffffff
+        ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
+
+    /**
+     * glVertexAttribI1i to glVertexAttribI4usv: each form's components, the
+     * missing ones (0, 0, 1) as the 4i form fills them.
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const integerAttributes = ()=>{
+        /** @type {Record<string, (args: number[]) => number>} */
+        const forms = {};
+        /** @param {number} index @param {'int' | 'uint'} kind @param {number[]} given */
+        const set = (index, kind, given)=>{
+            const [x = 0, y = 0, z = 0, w = 1] = given;
+            return answer(current()?.vertexAttribI(index >>> 0, kind, x, y, z, w));
+        };
+        for (const count of [1, 2, 3, 4])
+        {
+            forms[`glVertexAttribI${count}i`] = ([index, ...rest])=>
+                set(index, 'int', rest.slice(0, count).map(v=>v | 0));
+            forms[`glVertexAttribI${count}ui`] = ([index, ...rest])=>
+                set(index, 'uint', rest.slice(0, count).map(v=>v >>> 0));
+            forms[`glVertexAttribI${count}iv`] = ([index, v])=>
+                set(index, 'int', readTyped('i', v, count));
+            forms[`glVertexAttribI${count}uiv`] = ([index, v])=>
+                set(index, 'uint', readTyped('ui', v, count));
+        }
+        for (const [suffix, type, kind] of /** @type {[string, string, 'int' | 'uint'][]} */ ([
+            ['bv', 'b', 'int'], ['sv', 's', 'int'], ['ubv', 'ub', 'uint'], ['usv', 'us', 'uint'],
+        ]))
+        {
+            forms[`glVertexAttribI4${suffix}`] = ([index, v])=>
+                set(index, kind, readTyped(type, v, 4));
+        }
+        return forms;
+    };
+
+    /**
+     * 64-bit answers, as GLint64s: what glGetInteger64v writes.
+     *
+     * @param {number} address @param {number[] | null} values
+     */
+    const writeInt64s = (address, values)=>{
+        if (!values || (address >>> 0) === 0)
+        {
+            return;
+        }
+        const bytes = new Uint8Array(values.length * 8);
+        const view = new DataView(bytes.buffer);
+        values.forEach((value, k)=>view.setBigInt64(k * 8, BigInt(Math.trunc(value)), true));
+        h.writeMemory(address >>> 0, bytes);
+    };
+
+    /** How many values glClearBuffer reads: four for a colour, one otherwise. @param {number} buffer */
+    const clearCount = buffer=>((buffer >>> 0) === GL.COLOR ? 4 : 1);
 
     /**
      * An array of pointers the program hands over, each a pointer's width.
@@ -223,6 +290,91 @@ export function laterEntryPoints(h){
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- sampler objects (3.3) ---
+
+        glGenSamplers: generator((context, count)=>context.glGenSamplers(count)),
+        glDeleteSamplers: deleter((context, names)=>context.glDeleteSamplers(names)),
+        glIsSampler: ([name])=>current()?.glIsSampler(name >>> 0) ?? GL.FALSE,
+        glBindSampler: ([unit, name])=>answer(current()?.glBindSampler(unit >>> 0, name >>> 0)),
+        glSamplerParameteri: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [value | 0])),
+        glSamplerParameterf: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [asFloat(value)])),
+        glSamplerParameteriv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname))
+                .map(v=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? v / 0x7fffffff : v)))),
+        glSamplerParameterfv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('f', values, samplerCount(pname)))),
+        glSamplerParameterIiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname)))),
+        glSamplerParameterIuiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('ui', values, samplerCount(pname)))),
+        glGetSamplerParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0)?.map((/** @type {number} */ v)=>
+                ((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+                    ? Math.round(Math.max(-1, Math.min(1, v)) * 0x7fffffff) : Math.round(v)))
+                ?? null, 'word')),
+        glGetSamplerParameterfv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'float')),
+        glGetSamplerParameterIiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+        glGetSamplerParameterIuiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+
+        // --- sync objects (3.2) ---
+
+        glFenceSync: ([condition, flags])=>current()?.glFenceSync(condition >>> 0, flags >>> 0)
+            ?? 0,
+        glIsSync: ([sync])=>current()?.glIsSync(sync >>> 0) ?? GL.FALSE,
+        glDeleteSync: ([sync])=>answer(current()?.glDeleteSync(sync >>> 0)),
+        glWaitSync: ([sync, flags, low, high])=>answer(current()?.glWaitSync(sync >>> 0,
+            flags >>> 0, timeoutOf(low, high))),
+        glGetSynciv: ([sync, pname, size, length, out])=>call(context=>{
+            const values = (context.glGetSynciv(sync >>> 0, pname >>> 0) ?? [])
+                .slice(0, Math.max(0, size | 0));
+            if ((length >>> 0) !== 0)
+            {
+                writeU32s(length, [values.length]);
+            }
+            writeQuery(out, values, 'word');
+        }),
+
+        // --- integer vertex attributes (3.0) ---
+
+        ...integerAttributes(),
+        glVertexAttribIPointer: ([index, size, type, stride, pointer])=>answer(current()
+            ?.glVertexAttribIPointer(index >>> 0, size | 0, type >>> 0, stride | 0,
+                pointer >>> 0)),
+        glGetVertexAttribIiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'int'), 'word')),
+        glGetVertexAttribIuiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'uint'), 'word')),
+
+        // --- indexed state, 64-bit queries and one buffer's clears (3.0, 3.2) ---
+
+        glEnablei: ([cap, index])=>answer(current()?.glEnablei(cap >>> 0, index >>> 0)),
+        glDisablei: ([cap, index])=>answer(current()?.glDisablei(cap >>> 0, index >>> 0)),
+        glIsEnabledi: ([cap, index])=>current()?.glIsEnabledi(cap >>> 0, index >>> 0)
+            ?? GL.FALSE,
+        glColorMaski: ([index, r, g, b, a])=>answer(current()?.glColorMaski(index >>> 0,
+            r & 0xff, g & 0xff, b & 0xff, a & 0xff)),
+        glGetIntegeri_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetIntegeri_v(target >>> 0, index >>> 0), 'word')),
+        glGetBooleani_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetBooleani_v(target >>> 0, index >>> 0), 'byte')),
+        glGetInteger64i_v: ([target, index, out])=>call(context=>writeInt64s(out,
+            context.glGetInteger64i_v(target >>> 0, index >>> 0))),
+        glGetInteger64v: ([query, out])=>call(context=>writeInt64s(out,
+            context.glGetInteger64v(query >>> 0))),
+        glClearBufferiv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('i', value, clearCount(buffer)), 'int')),
+        glClearBufferuiv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('ui', value, clearCount(buffer)), 'uint')),
+        glClearBufferfv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('f', value, clearCount(buffer)), 'float')),
+        glClearBufferfi: ([buffer, drawBuffer, depth, stencil])=>answer(current()
+            ?.glClearBufferfi(buffer >>> 0, drawBuffer | 0, asFloat(depth), stencil | 0)),
 
         // --- vertex array objects ---
 
@@ -424,10 +576,11 @@ export function laterEntryPoints(h){
         glEndQuery: ([target])=>answer(current()?.glEndQuery(target >>> 0)),
         glGetQueryiv: ([target, pname, out])=>call(context=>writeQuery(out,
             context.glGetQueryiv(target >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectuiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
+        glQueryCounter: ([name, target])=>answer(current()?.glQueryCounter(name >>> 0,
+            target >>> 0)),
+        glBeginConditionalRender: ([name, mode])=>answer(current()
+            ?.glBeginConditionalRender(name >>> 0, mode >>> 0)),
+        glEndConditionalRender: ()=>answer(current()?.glEndConditionalRender()),
 
         // --- 3D textures and texture arrays ---
 
@@ -438,6 +591,65 @@ export function laterEntryPoints(h){
             a[10] >>> 0)),
         glCopyTexSubImage3D: a=>answer(current()?.glCopyTexSubImage3D(a[0] >>> 0, a[1] | 0,
             a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] | 0)),
+
+        // --- 3.0's unsigned uniforms and fragment outputs ---
+
+        glGetUniformuiv: ([program, location, out])=>call(context=>{
+            const answered = context.getUniform(program >>> 0, location | 0);
+            if (answered)
+            {
+                /** @param {number} v */
+                const unsigned = v=>Math.trunc(v) >>> 0;
+                writeQuery(out, answered.float ? answered.values.map(unsigned) : answered.values,
+                    'word');
+            }
+        }),
+        glBindFragDataLocation: ([program, colour, name])=>call(context=>
+            context.bindFragData(program >>> 0, colour >>> 0, 0, h.readName(name))),
+        glBindFragDataLocationIndexed: ([program, colour, index, name])=>call(context=>
+            context.bindFragData(program >>> 0, colour >>> 0, index >>> 0, h.readName(name))),
+        glGetFragDataLocation: ([program, name])=>(current()?.fragData(program >>> 0,
+            h.readName(name), 'location') ?? -1),
+        glGetFragDataIndex: ([program, name])=>(current()?.fragData(program >>> 0,
+            h.readName(name), 'index') ?? -1),
+
+        // --- 3.1's uniform buffers and blocks ---
+
+        glBindBufferBase: ([target, index, buffer])=>answer(current()?.glBindBufferBase(
+            target >>> 0, index >>> 0, buffer >>> 0)),
+        glBindBufferRange: ([target, index, buffer, offset, size])=>answer(
+            current()?.glBindBufferRange(target >>> 0, index >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+        glGetUniformBlockIndex: ([program, name])=>(current()?.glGetUniformBlockIndex(
+            program >>> 0, h.readName(name)) ?? GL.INVALID_INDEX),
+        glGetActiveUniformBlockiv: ([program, index, pname, out])=>call(context=>writeQuery(
+            out, context.glGetActiveUniformBlockiv(program >>> 0, index >>> 0, pname >>> 0),
+            'word')),
+        glGetActiveUniformBlockName: ([program, index, size, length, out])=>call(context=>
+            answerString(context.glGetActiveUniformBlockName(program >>> 0, index >>> 0), size,
+                length, out)),
+        glUniformBlockBinding: ([program, index, binding])=>answer(
+            current()?.glUniformBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glGetUniformIndices: ([program, count, names, out])=>call(context=>{
+            const indices = context.glGetUniformIndices(program >>> 0,
+                readPointers(names, count | 0).map(pointer=>h.readName(pointer)));
+            if (indices && indices.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, indices);
+            }
+        }),
+        glGetActiveUniformsiv: ([program, count, indices, pname, out])=>call(context=>{
+            const list = (count | 0) > 0 && (indices >>> 0) !== 0
+                ? readTyped('ui', indices, count | 0).map(v=>v >>> 0) : [];
+            const values = context.glGetActiveUniformsiv(program >>> 0, list, pname >>> 0);
+            if (values && values.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, values);
+            }
+        }),
+        glGetActiveUniformName: ([program, index, size, length, out])=>call(context=>
+            answerString(context.glGetActiveUniformName(program >>> 0, index >>> 0), size,
+                length, out)),
     };
 
     /**
@@ -464,13 +676,15 @@ export function laterEntryPoints(h){
         });
     }
 
-    // glUniform{1234}{fi} and their vector forms, and the matrices.
+    // glUniform{1234}{f,i,ui} and their vector forms, and the matrices.
     for (const n of [1, 2, 3, 4])
     {
-        for (const kind of /** @type {const} */ (['f', 'i']))
+        for (const kind of /** @type {const} */ (['f', 'i', 'u']))
         {
-            const decode = kind === 'f' ? asFloat : (/** @type {number} */ w)=>w | 0;
-            handlers[`glUniform${n}${kind}`] = args=>{
+            const decode = kind === 'f' ? asFloat : kind === 'u'
+                ? (/** @type {number} */ w)=>w >>> 0 : (/** @type {number} */ w)=>w | 0;
+            const suffix = kind === 'u' ? 'ui' : kind;
+            handlers[`glUniform${n}${suffix}`] = args=>{
                 const context = current();
                 if (context)
                 {
@@ -483,10 +697,10 @@ export function laterEntryPoints(h){
                 }
                 return 0;
             };
-            handlers[`glUniform${n}${kind}v`] = ([location, count, address])=>call(context=>
+            handlers[`glUniform${n}${suffix}v`] = ([location, count, address])=>call(context=>
                 context.uniform(location | 0, count | 0,
-                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : 'i', address,
-                        (count | 0) * n) : [], kind, n));
+                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : kind === 'u' ? 'ui' : 'i',
+                        address, (count | 0) * n) : [], kind, n));
         }
     }
     for (const cols of [2, 3, 4])

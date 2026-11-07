@@ -311,6 +311,69 @@ async function readThrough(remote){
     return [...bytes.subarray(0x4000, 0x4010)];
 }
 
+/**
+ * An occlusion query around one triangle through OPENGL32's exports on a
+ * device that counts no samples, and the result the program reads.
+ *
+ * @param {(factory: any, services: any) => any} [remote]
+ * @returns {Promise<number>}
+ */
+async function queryThrough(remote){
+    const gpu = createFakeDevice({ occlusionSamples: ()=>7 });
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(0x10000);
+    /** @param {number} at @param {number} length */
+    const read = (at, length)=>bytes.subarray(at, at + length);
+    const opengl = createOpengl({
+        readMemory: read,
+        windowMemory: read,
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            bytes.set(value, at),
+        scratch: { allocate: ()=>0x8000 },
+        screen: ()=>({ width: 16, height: 16 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        frameQueued: ()=>null,
+        remote,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    assert.equal(gl('wglSetPixelFormat', 0x900d, 1, 0), 1);
+    assert.equal(gl('wglMakeCurrent', 0x900d, gl('wglCreateContext', 0x900d)), 1);
+    gl('glGenQueries', 1, 0x4000);
+    const name = new DataView(bytes.buffer).getUint32(0x4000, true);
+    gl('glBeginQuery', GL.SAMPLES_PASSED, name);
+    gl('glBegin', GL.TRIANGLES);
+    gl('glVertex2f', floatBits(0), floatBits(0));
+    gl('glVertex2f', floatBits(1), floatBits(0));
+    gl('glVertex2f', floatBits(0), floatBits(1));
+    gl('glEnd');
+    gl('glEndQuery', GL.SAMPLES_PASSED);
+    await gl('glGetQueryObjectuiv', name, 0x8866, 0x4010);
+    return new DataView(bytes.buffer).getUint32(0x4010, true);
+}
+
+test('an occlusion query answers what the device counted, wherever the device is', async()=>{
+    assert.equal(await queryThrough(), 7);
+    assert.equal(await queryThrough(loopback), 7);
+    try
+    {
+        assert.equal(await queryThrough(acrossAPort), 7);
+    }
+    finally
+    {
+        for (const port of ports.splice(0))
+        {
+            port.close();
+        }
+    }
+});
+
 test('glReadPixels on a device writes what was drawn, wherever the device is', async()=>{
     // Bottom row first: the window's top row is the read's bottom one.
     const expected = [0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0];

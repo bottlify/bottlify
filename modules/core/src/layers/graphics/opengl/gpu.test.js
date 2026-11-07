@@ -2395,3 +2395,125 @@ test('a single-buffered window keeps its one buffer across a swap', async()=>{
     assert.deepEqual([...await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE)],
         [0x40, 0x40, 0x40, 0x40]);
 });
+
+test('blending and colour masks set apart per draw buffer reach each target\'s pipeline state, '
+    + 'and glClearBuffer clears one target', async()=>{
+    const r = rig();
+    const { context } = r;
+    const names = context.glGenTextures(2);
+    for (const name of names)
+    {
+        context.glBindTexture(GL.TEXTURE_2D, name);
+        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
+    }
+    context.glGenFramebuffers(1);
+    context.bindFramebuffer(GL.FRAMEBUFFER, 1, false);
+    names.forEach((/** @type {number} */ name, /** @type {number} */ k)=>
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0 + k, GL.TEXTURE_2D,
+            name, 0));
+    context.glDrawBuffers([GL.COLOR_ATTACHMENT0, GL.COLOR_ATTACHMENT0 + 1]);
+    context.glEnable(GL.BLEND);
+    context.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA);
+    context.glDisablei(GL.BLEND, 1);
+    context.glColorMaski(1, 1, 0, 0, 0);
+    context.clearBuffer(GL.COLOR, 1, [0, 1, 0, 1], 'float');
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const targets = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets);
+    const drawn = targets.find((/** @type {any[]} */ list)=>list.length === 2 && list[0].blend);
+    assert.ok(drawn, 'a pipeline over both targets, the first blending');
+    assert.equal(drawn[1].blend, undefined, 'the second does not blend');
+    assert.deepEqual([drawn[0].writeMask, drawn[1].writeMask], [0xf, 0x1]);
+    const cleared = targets.find((/** @type {any[]} */ list)=>list.length === 2
+        && list[0].writeMask === 0);
+    assert.ok(cleared, 'the clear writes the first target nothing');
+    assert.equal(cleared[1].writeMask, 0x1, 'and the second under its own mask');
+
+    // The other way round: only the second buffer blends, and a pipeline
+    // that differs in nothing else is another one.
+    context.glDisable(GL.BLEND);
+    context.glEnablei(GL.BLEND, 1);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const swapped = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets).find((/** @type {any[]} */ list)=>list.length === 2
+        && !list[0].blend && list[1].blend);
+    assert.ok(swapped, 'a pipeline blending the second target alone');
+    assert.deepEqual([swapped[0].writeMask, swapped[1].writeMask], [0xf, 0x1]);
+});
+
+test('a unit\'s sampler object samples its texture in place of the texture\'s own state', async()=>{
+    /** @type {any[]} */
+    const made = [];
+    const r = rig({ createSampler: (/** @type {any} */ descriptor)=>{
+        made.push(descriptor);
+        return { kind: 'sampler', descriptor };
+    } });
+    const { context } = r;
+    r.bytes.set([255, 0, 0, 255], 0x3000);
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x3000);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
+    context.glEnable(GL.TEXTURE_2D);
+    const [sampler] = context.glGenSamplers(1);
+    context.samplerParameter(sampler, GL.TEXTURE_MIN_FILTER, [GL.LINEAR]);
+    context.samplerParameter(sampler, GL.TEXTURE_WRAP_T, [GL.CLAMP_TO_EDGE]);
+    const draw = async()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glTexCoord2f(0, 0);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(0, 8);
+        context.glEnd();
+        await r.swap();
+    };
+    // The sampler the frame's last draw bound, not the last one made: a
+    // descriptor already made is reused.
+    const last = ()=>{
+        /** @param {any} group */
+        const samplerIn = group=>r.gpu.calls.find((/** @type {any} */ c)=>
+            c.op === 'createBindGroup' && c.createBindGroup === group)?.descriptor.entries
+            .map((/** @type {any} */ e)=>e.resource).find((/** @type {any} */ x)=>
+                x?.kind === 'sampler' && /gl-sampler/.test(x.descriptor.label ?? ''));
+        const sets = r.gpu.of('setBindGroup');
+        for (let k = sets.length - 1; k >= 0; k--)
+        {
+            const found = samplerIn(sets[k].group);
+            if (found)
+            {
+                return found.descriptor;
+            }
+        }
+        return null;
+    };
+    await draw();
+    assert.deepEqual([last().minFilter, last().addressModeV], ['nearest', 'repeat'],
+        'the texture\'s own');
+    context.glBindSampler(0, sampler);
+    await draw();
+    assert.deepEqual([last().minFilter, last().magFilter, last().addressModeV],
+        ['linear', 'linear', 'clamp-to-edge'], 'the sampler\'s, every parameter of it');
+    context.glBindSampler(0, 0);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.MIRRORED_REPEAT);
+    await draw();
+    assert.equal(last().addressModeV, 'mirror-repeat', 'the texture\'s again');
+    // The unit the texture is on is the sampler's: unit 1 alone enabled.
+    context.glDisable(GL.TEXTURE_2D);
+    context.glActiveTextureARB(GL.TEXTURE0 + 1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindSampler(1, sampler);
+    await draw();
+    assert.equal(last().addressModeV, 'clamp-to-edge', 'unit 1\'s sampler');
+});

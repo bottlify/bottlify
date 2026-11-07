@@ -52,7 +52,7 @@ import {
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
-import { TEX, gpuStorageOf } from './formats.js';
+import { TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
 import {
     CANONICAL_LAYOUT, clientReads, expandIndices, instanceElements, isList, lockedFor,
@@ -69,6 +69,7 @@ import {
     showDescriptor, showKey, writeLighting,
 } from './wgsl.js';
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
+import { GLSL_BLOCK_BINDING, samplerTypeOf, textureLayoutOf } from './glsl-wgsl.js';
 
 /**
  * A framebuffer object is drawn upside down -- its first row GL's bottom
@@ -77,6 +78,41 @@ import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
  * the vertex stage (`uniforms.misc.z`), the viewport and scissor, the front
  * face and every copy between the two follow it.
  */
+
+/** What a texture holds, or a sampler reads, in a divergence's words. */
+const KIND_WORDS = /** @type {Record<string, string>} */ ({ float: 'a float',
+    sint: 'an integer', uint: 'an unsigned integer', depth: 'a depth (shadow)',
+    stencil: 'a stencil' });
+
+/** A texture's TEXTURE_COMPARE_FUNC as a comparison sampler's function. */
+const COMPARE_FUNCTIONS = /** @type {Record<number, string>} */ ({
+    [GL.NEVER]: 'never', [GL.LESS]: 'less', [GL.EQUAL]: 'equal', [GL.LEQUAL]: 'less-equal',
+    [GL.GREATER]: 'greater', [GL.NOTEQUAL]: 'not-equal', [GL.GEQUAL]: 'greater-equal',
+    [GL.ALWAYS]: 'always',
+});
+
+/**
+ * Which of a unit's bindings a GLSL sampler of each shape reads (`Scene`'s
+ * `boundTextures`): the shapes a unit has no binding for yet read the
+ * incomplete texture.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const BOUND_TARGETS = Object.freeze({
+    '1D': 'oneD', '2D': 'twoD', Cube: 'cube', '3D': 'threeD', '1DArray': 'oneDArray',
+    '2DArray': 'twoDArray', CubeArray: 'cubeArray', '2DRect': 'rectangle',
+    '2DMS': 'twoDMultisample', '2DMSArray': 'twoDMultisampleArray',
+});
+
+/**
+ * A uniform block's binding as a draw records it.
+ *
+ * @typedef {{ binding: number, resource: { buffer: any, offset: number, size: number } }}
+ *     UniformBlockBinding
+ */
+
+/** @type {readonly UniformBlockBinding[]} */
+const NO_BLOCKS = Object.freeze([]);
 
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
@@ -344,6 +380,13 @@ function describeCensus(texture){
  */
 
 /**
+ * An occlusion query as the renderer counts it: the samples its draws passed
+ * so far, and what to tell once the recording that ended it is counted.
+ *
+ * @typedef {{ samples: number, finish: () => void }} OcclusionCount
+ */
+
+/**
  * @typedef {Object} ClearRequest
  * @property {{ fbo: any, width: number, height: number } | null} [target]  the framebuffer
  *     object cleared, or the window
@@ -352,6 +395,8 @@ function describeCensus(texture){
  * @property {number} depth
  * @property {number} stencil
  * @property {readonly boolean[]} colourMask
+ * @property {readonly number[]} [masks]  per draw buffer, the channels cleared (red 1 to
+ *     alpha 8) in place of `colourMask`: glClearBuffer's one buffer, or masks set apart
  * @property {boolean} depthMask
  * @property {number} stencilMask
  * @property {import('./raster.js').Box} scissor
@@ -445,6 +490,23 @@ export function createGpuRenderer(services){
     /** @type {WeakMap<object, DrawableSurfaces>} context -> its drawable's surfaces */
     const drawables = new WeakMap();
     /**
+     * The occlusion query each context counts its draws into (glBeginQuery),
+     * and what counting needs of it: its samples, summed over the draws
+     * recorded while it was active, and `finish`, told once the recording
+     * that ended it has been replayed and counted.
+     *
+     * @type {WeakMap<object, OcclusionCount>}
+     */
+    const activeQueries = new WeakMap();
+    /**
+     * The query each context's rendering is conditional on
+     * (glBeginConditionalRender), and whether the condition is inverted.
+     *
+     * @type {WeakMap<object, { query: { samples: number, available: boolean },
+     *     inverted: boolean }>}
+     */
+    const conditions = new WeakMap();
+    /**
      * The buffers of each window a context was made current on, by its
      * drawable's key: the window's, whichever context draws.
      *
@@ -471,6 +533,9 @@ export function createGpuRenderer(services){
      *     (`lockedFor`), by epoch, slot base and stride
      * @property {{ draws: number, clears: number, copies: number, refused: number,
      *               skipped: number, cut: number, merged: number }} counts
+     * @property {(() => void) | null} replayed  told once its replay has run (`fence`)
+     * @property {OcclusionCount[]} [ending]  the occlusion queries it ended, finished
+     *     once it has been replayed and counted
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -542,12 +607,15 @@ export function createGpuRenderer(services){
      *     and a uniform block per program stage.
      * @property {string} key
      * @property {{ binding: number, cube: boolean, unit: number, sampler?: number,
+     *     layout?: { viewDimension: string, sampleType: string, multisampled: boolean },
      *     unfilterable?: boolean }[]} textures
-     *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value;
-     *     `unfilterable`: bound as a float texture no sampler filters
+     *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value, and
+     *     the texture its type reads (`layout`); `unfilterable`: bound as a float
+     *     texture no sampler filters
      * @property {boolean} vertexBlock
      * @property {boolean} fragmentBlock
      * @property {boolean} [glsl]  the textures are visible to the vertex stage too
+     * @property {number[]} [blocks]  a GLSL program's uniform blocks the stages read
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -567,14 +635,18 @@ export function createGpuRenderer(services){
         if (glsl && state.glsl)
         {
             const program = state.glsl.program;
-            const textures = glsl.samplers.map(index=>({ binding: 1 + index * 2,
-                cube: program.samplers[index].dim === 'Cube', unit: -1, sampler: index }))
-                .sort((a, b)=>a.binding - b.binding);
+            const textures = glsl.samplers.map(index=>{
+                const layout = textureLayoutOf(samplerTypeOf(program.samplers[index]));
+                return { binding: 1 + index * 2, cube: layout.viewDimension === 'cube',
+                    unit: -1, sampler: index, layout };
+            }).sort((a, b)=>a.binding - b.binding);
             const vertexBlock = glsl.vertex !== null;
             const fragmentBlock = glsl.fragment !== null;
-            const key = `g${textures.map(t=>`${t.binding}${t.cube ? 'c' : '2'}`).join(',')}|`
-                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}`;
-            return { key, textures, vertexBlock, fragmentBlock, glsl: true };
+            const blocks = glsl.blocks ?? [];
+            const key = `g${textures.map(t=>`${t.binding}${t.layout.viewDimension}`
+                + `${t.layout.sampleType}${t.layout.multisampled ? 'm' : ''}`).join(',')}|`
+                + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`;
+            return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks };
         }
         /** @type {{ binding: number, cube: boolean, unit: number }[]} */
         const textures = [];
@@ -660,15 +732,25 @@ export function createGpuRenderer(services){
         for (const texture of plan.textures)
         {
             const visibility = plan.glsl ? VERTEX_STAGE | FRAGMENT_STAGE : FRAGMENT_STAGE;
-            const sampleType = texture.unfilterable ? { sampleType: 'unfilterable-float' } : {};
+            const layout = texture.layout;
+            const unfilterable = texture.unfilterable
+                || (!!layout?.multisampled && layout.sampleType === 'float');
+            const sampleType = layout && layout.sampleType !== 'float' ? layout.sampleType
+                : unfilterable ? 'unfilterable-float' : undefined;
             fixedEntries.push({
                 binding: texture.binding,
                 visibility,
-                texture: texture.cube ? { viewDimension: 'cube', ...sampleType } : sampleType,
+                texture: {
+                    ...layout ? { viewDimension: layout.viewDimension }
+                        : texture.cube ? { viewDimension: 'cube' } : {},
+                    ...sampleType ? { sampleType } : {},
+                    ...layout?.multisampled ? { multisampled: true } : {},
+                },
             });
             fixedEntries.push({
                 binding: texture.binding + 1, visibility,
-                sampler: texture.unfilterable ? { type: 'non-filtering' } : {},
+                sampler: layout?.sampleType === 'depth' ? { type: 'comparison' }
+                    : texture.unfilterable ? { type: 'non-filtering' } : {},
             });
         }
         if (plan.vertexBlock)
@@ -677,6 +759,16 @@ export function createGpuRenderer(services){
                 binding: VERTEX_PROGRAM_BINDING,
                 visibility: VERTEX_STAGE,
                 buffer: { type: 'uniform', hasDynamicOffset: true },
+            });
+        }
+        // A program's uniform blocks are the buffer objects bound to them,
+        // at the offsets bound: a group follows the bindings, not the draws.
+        for (const block of plan.blocks ?? [])
+        {
+            fixedEntries.push({
+                binding: GLSL_BLOCK_BINDING + block,
+                visibility: VERTEX_STAGE | FRAGMENT_STAGE,
+                buffer: { type: 'uniform' },
             });
         }
         /** @type {any[]} */
@@ -857,19 +949,20 @@ export function createGpuRenderer(services){
      * key are only built again when `glTexParameter*` actually changed
      * something, not once per unit per draw.
      *
-     * @type {WeakMap<import('./objects.js').TextureObject,
-     *     { version: number, sampler: any, filtered: boolean }>}
+     * @type {WeakMap<object,
+     *     { version: number, sampler: any, filtered: boolean, compared?: boolean }>}
      */
     const samplerByTexture = new WeakMap();
     /**
-     * @param {import('./objects.js').TextureObject} texture
+     * @param {{ parameters: Map<number, number>, parametersVersion: number }} texture  the
+     *     texture, or the sampler object (3.3) its unit samples it through
      * @param {boolean} [filtered]  false for a texture no sampler may filter,
      *     which is read nearest, the nearest level too
      */
-    const samplerFor = (texture, filtered = true)=>{
+    const samplerFor = (texture, filtered = true, compared = false)=>{
         const cached = samplerByTexture.get(texture);
         if (cached && cached.version === texture.parametersVersion
-            && cached.filtered === filtered)
+            && cached.filtered === filtered && cached.compared === compared)
         {
             return cached.sampler;
         }
@@ -895,6 +988,8 @@ export function createGpuRenderer(services){
             addressModeU: wrap(GL.TEXTURE_WRAP_S),
             addressModeV: wrap(GL.TEXTURE_WRAP_T),
             addressModeW: wrap(GL.TEXTURE_WRAP_R),
+            ...compared ? { compare: COMPARE_FUNCTIONS[parameters.get(TEX.TEXTURE_COMPARE_FUNC)
+                ?? GL.LEQUAL] ?? 'less-equal' } : {},
         };
         const key = JSON.stringify(descriptor);
         let sampler = samplers.get(key);
@@ -903,7 +998,8 @@ export function createGpuRenderer(services){
             sampler = createSampler({ label: `gl-sampler:${key}`, ...descriptor });
             samplers.set(key, sampler);
         }
-        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler, filtered });
+        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler, filtered,
+            compared });
         return sampler;
     };
 
@@ -928,6 +1024,53 @@ export function createGpuRenderer(services){
                 });
             }
             incompleteTextures.set(cube, texture);
+        }
+        return texture;
+    };
+
+    /**
+     * The incomplete texture of the shape and kind a GLSL sampler declares:
+     * a float one black and opaque, an integer one zero, a depth one 1 (a
+     * comparison of it passes where LEQUAL would).
+     *
+     * @type {Map<string, import('./objects.js').TextureObject>}
+     */
+    const incompleteShapes = new Map();
+    /**
+     * @param {{ cube: boolean, layout?: { viewDimension: string, sampleType: string,
+     *     multisampled: boolean } }} entry
+     * @returns {import('./objects.js').TextureObject}
+     */
+    const incompleteOf = entry=>{
+        const layout = entry.layout;
+        if (!layout || (layout.sampleType === 'float' && !layout.multisampled
+            && (layout.viewDimension === '2d' || layout.viewDimension === 'cube')))
+        {
+            return incompleteTexture(entry.cube);
+        }
+        const key = `${layout.viewDimension}:${layout.sampleType}`;
+        let texture = incompleteShapes.get(key);
+        if (!texture)
+        {
+            const target = layout.viewDimension === '3d' ? GL.TEXTURE_3D
+                : layout.viewDimension === '2d-array' ? TEX.TEXTURE_2D_ARRAY
+                    : layout.viewDimension === 'cube' ? GL.TEXTURE_CUBE_MAP : GL.TEXTURE_2D;
+            const internal = layout.sampleType === 'sint' ? TEX.RGBA8I
+                : layout.sampleType === 'uint' ? TEX.RGBA8UI
+                    : layout.sampleType === 'depth' ? TEX.DEPTH_COMPONENT32F : GL.RGBA8;
+            const sized = sizedFormatOf(internal);
+            const data = layout.sampleType === 'depth' ? new Uint8Array(new Float32Array([1])
+                .buffer) : layout.sampleType === 'float' ? new Uint8Array([0, 0, 0, 255])
+                : new Uint8Array(4);
+            texture = createTextureObject(0, target);
+            for (let face = 0; face < (target === GL.TEXTURE_CUBE_MAP ? 6 : 1); face++)
+            {
+                texture.levels.set(levelKey(0, face), /** @type {any} */ ({
+                    width: 1, height: 1, depth: 1, internalFormat: internal, border: 0,
+                    baseFormat: sized?.base ?? GL.RGBA, sized, data,
+                }));
+            }
+            incompleteShapes.set(key, texture);
         }
         return texture;
     };
@@ -1521,7 +1664,8 @@ export function createGpuRenderer(services){
             record = {
                 gpu: backend.createDynamicBuffer({
                     size: capacity,
-                    usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.COPY_DST,
+                    usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
+                        | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
                 }),
                 size: buffer.size,
@@ -1581,6 +1725,8 @@ export function createGpuRenderer(services){
                 counts: {
                     draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, merged: 0,
                 },
+                /** @type {(() => void) | null} told once its replay has run */
+                replayed: null,
             };
             unflushed.add(recording.id);
             recordings.set(context, recording);
@@ -1708,8 +1854,14 @@ export function createGpuRenderer(services){
             depthFormat: target.depthFormat,
             targets: target.flipped
                 ? target.formats.map((/** @type {string} */ format, /** @type {number} */ k)=>
-                    ({ format, mask: colourMask & target.masks[k] }))
-                : undefined,
+                    (scene.perBuffer
+                        ? { format, mask: scene.perBuffer.masks[k] & target.masks[k],
+                            blend: scene.perBuffer.blend[k] }
+                        : { format, mask: colourMask & target.masks[k] }))
+                : scene.perBuffer
+                    ? [{ format: target.formats[0] || COLOUR_FORMAT,
+                        mask: scene.perBuffer.masks[0], blend: scene.perBuffer.blend[0] }]
+                    : undefined,
             glsl: glsl ? { id: glsl.id, program: glsl.linked } : null,
             twoSide: glsl ? scene.twoSide : false,
             units,
@@ -2299,6 +2451,15 @@ export function createGpuRenderer(services){
             && entry.sampler === b[i].sampler);
 
     /**
+     * @param {readonly UniformBlockBinding[] | undefined} a
+     * @param {readonly UniformBlockBinding[] | undefined} b
+     */
+    const sameBlocks = (a = NO_BLOCKS, b = NO_BLOCKS)=>a.length === b.length
+        && a.every((entry, i)=>entry.binding === b[i].binding
+            && entry.resource.buffer === b[i].resource.buffer
+            && entry.resource.offset === b[i].resource.offset);
+
+    /**
      * @param {{ x: number, y: number, width: number, height: number }} a
      * @param {{ x: number, y: number, width: number, height: number }} b
      */
@@ -2313,7 +2474,8 @@ export function createGpuRenderer(services){
         && a.indices.format === b.indices.format && a.indices.gpu === b.indices.gpu
         && a.uniforms === b.uniforms && a.vertexUniforms === b.vertexUniforms
         && a.fragmentUniforms === b.fragmentUniforms && sameSlots(a.slots, b.slots)
-        && sameBindings(a.bindings, b.bindings) && matchRect(a.viewport, b.viewport)
+        && sameBindings(a.bindings, b.bindings) && sameBlocks(a.blocks, b.blocks)
+        && matchRect(a.viewport, b.viewport)
         && matchRect(a.scissor, b.scissor) && a.stencilReference === b.stencilReference
         && a.target === b.target && sameColour(a.blendConstant, b.blendConstant);
 
@@ -2353,6 +2515,7 @@ export function createGpuRenderer(services){
         // joined, the second range of each would come before the first's next.
         if (a.kind !== 'draw' || b.kind !== 'draw' || !a.indices || !b.indices
             || a.instances !== 1 || b.instances !== 1 || !shareEveryDependency(a, b)
+            || a.occluded !== b.occluded || a.conditioned !== b.conditioned
             || b.indices.offset !== a.indices.offset + a.count * indexBytes(a.indices.format))
         {
             return;
@@ -2394,9 +2557,11 @@ export function createGpuRenderer(services){
      * @param {number} baseVertex
      * @param {'point-list' | 'line-list' | 'triangle-list'} topology
      * @param {number} [instances]  how many instances (glDrawArraysInstanced)
+     * @param {number} [idBias]  the program's vertex number of the vertex the
+     *     device numbers 0: where the draw put its arrays (gl_VertexID)
      */
     const record = (context, scene, layout, slots, indices, count, first, baseVertex, topology,
-        instances = 1)=>
+        instances = 1, idBias = 0)=>
     {
         const surfaces = drawables.get(context);
         if (!surfaces)
@@ -2428,6 +2593,16 @@ export function createGpuRenderer(services){
                 + ' both, so the front face\'s were applied to the back face\'s test too');
         }
         const state = drawStateOf(scene, layout, topology, target);
+        if (!state.glsl && (state.targets ?? [{ format: state.targetFormat }])
+            .some(t=>/[su]int$/.test(t.format)))
+        {
+            // Only a GLSL program writes integers; the fixed pipeline's and an
+            // assembly program's floats in an integer buffer are undefined
+            // (section 4.1.8 of 3.0), and WebGPU refuses the pipeline.
+            diverge('a draw without a GLSL program wrote an integer colour buffer, and drew'
+                + ' nothing');
+            return;
+        }
         const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
             ? lastDraw.key : drawKey(state);
         lastDraw = { state, key };
@@ -2465,16 +2640,27 @@ export function createGpuRenderer(services){
                 texture = incompleteTexture(entry.cube);
             }
             const sized = texture.levels.get(levelKey(0))?.sized;
-            if (sized && (sized.kind === 'int' || sized.kind === 'uint'
-                || sized.kind === 'stencil'))
+            // What the texture holds against what the shader declares: a
+            // float sampler reads a float or depth texture, an isampler an
+            // int one, a usampler a uint one, a shadow sampler a depth one.
+            const holds = sized?.kind === 'int' ? 'sint' : sized?.kind === 'uint' ? 'uint'
+                : sized?.kind === 'stencil' ? 'stencil' : sized?.kind === 'depth' ? 'depth'
+                    : 'float';
+            const wanted = entry.layout?.sampleType ?? 'float';
+            if (holds !== wanted && !(wanted === 'float' && holds === 'depth'))
             {
-                // The shaders declare every texture as float; an integer one
-                // binds to none of them.
-                diverge(`a draw sampled an integer texture (${sized.name}) through a float`
-                    + ' sampler, and sampled the incomplete texture instead');
-                texture = incompleteTexture(entry.cube);
+                diverge(`a draw sampled ${KIND_WORDS[holds]} texture (${sized?.name ?? 'RGBA'})`
+                    + ` through ${KIND_WORDS[wanted]} sampler, and sampled the incomplete texture`
+                    + ' instead');
+                texture = incompleteOf(entry);
             }
-            else if (sized?.kind === 'depth'
+            else if (wanted === 'float' && holds === 'depth' && entry.layout
+                && texture.parameters.get(TEX.TEXTURE_COMPARE_MODE) === TEX.COMPARE_REF_TO_TEXTURE)
+            {
+                diverge('a draw sampled a depth texture with its comparison on through a sampler'
+                    + ' that is not a shadow one: the depth is read as a value');
+            }
+            else if (sized?.kind === 'depth' && !entry.layout
                 && texture.parameters.get(TEX.TEXTURE_COMPARE_MODE) === TEX.COMPARE_REF_TO_TEXTURE)
             {
                 diverge('a draw sampled a depth texture with its comparison on: the depth is'
@@ -2505,10 +2691,20 @@ export function createGpuRenderer(services){
             const copy = textureFor(texture, recording);
             const kind = copy.kind ?? 'f';
             kinds += kind;
+            const compared = entry.layout?.sampleType === 'depth';
+            // An integer texture is loaded, never sampled: its sampler is a
+            // placeholder, filters and all.
+            const loaded = entry.layout?.sampleType === 'sint'
+                || entry.layout?.sampleType === 'uint';
+            // A unit's sampler object samples in place of the texture's own state.
+            const unit = scene.samplers ? unitOf(scene, executable, entry,
+                plan.fragmentBlock) : -1;
             return {
                 binding: entry.binding,
                 view: copy.sampleView ?? copy.gpu.view,
-                sampler: samplerFor(texture, kind === 'f'),
+                // A comparison filters a depth texture as any other is.
+                sampler: samplerFor(scene.samplers?.[unit] ?? texture,
+                    kind === 'f' || compared || loaded, compared),
                 texture,
             };
         });
@@ -2527,7 +2723,7 @@ export function createGpuRenderer(services){
         const uniforms = uniformsOf(context, scene, mvp, target);
         const glslStages = generated.glsl ?? null;
         const vertexUniforms = glslStages && executable
-            ? glslStages.vertex && glslUniforms(glslStages.vertex, executable, scene, mvp)
+            ? glslStages.vertex && glslUniforms(glslStages.vertex, executable, scene, mvp, idBias)
             : generated.programs?.vertex && state.vertexProgram
                 ? programUniforms(generated.programs.vertex, state.vertexProgram, scene, mvp)
                 : null;
@@ -2536,6 +2732,8 @@ export function createGpuRenderer(services){
             : generated.programs?.fragment && state.fragmentProgram
                 ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene, mvp)
                 : null;
+        const blocks = plan.blocks && plan.blocks.length > 0 && executable
+            ? uniformBlocksFor(scene, executable, plan.blocks, recording) : NO_BLOCKS;
         stats.draws++;
         recording.counts.draws++;
         const rects = rectangles(scene, target);
@@ -2614,6 +2812,7 @@ export function createGpuRenderer(services){
             uniforms,
             vertexUniforms,
             fragmentUniforms,
+            blocks,
             slots,
             indices,
             count,
@@ -2627,6 +2826,9 @@ export function createGpuRenderer(services){
             blendConstant: blendConstantOf(scene.blend, scene.blendColor ?? [0, 0, 0, 0]),
             probe,
             probeDraw: recording.counts.draws - 1,
+            // The occlusion query counting the samples this draw passes.
+            occluded: activeQueries.get(context) ?? null,
+            conditioned: conditions.get(context) ?? null,
         });
         // A dump or a probe addresses a frame's draws by number to find a
         // specific painter or a specific moment; joining two of them into
@@ -2663,22 +2865,92 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The texture unit one binding reads: a GLSL sampler's uniform's, the
+     * unit a fragment program's instruction named, or on the fixed path the
+     * enabled unit at that position.
+     *
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @param {{ binding: number, unit?: number, sampler?: number }} entry
+     * @param {boolean} programFragment
+     * @returns {number}
+     */
+    const unitOf = (scene, executable, entry, programFragment)=>{
+        if (entry.sampler !== undefined && executable)
+        {
+            const sampler = executable.linked.samplers[entry.sampler];
+            return executable.ints[sampler.leaf.offset + sampler.element];
+        }
+        if (programFragment)
+        {
+            return entry.unit ?? 0;
+        }
+        return scene.units[(entry.binding - 1) / 2]?.index ?? 0;
+    };
+
+    /**
      * The texture a GLSL program's sampler reads: what its uniform's unit
      * has bound for the sampler's target, the incomplete texture's value
      * when nothing complete is.
      *
      * @param {import('./pipeline.js').Scene} scene
      * @param {any} executable
-     * @param {{ cube: boolean, sampler?: number }} entry
+     * @param {{ cube: boolean, sampler?: number, layout?: { viewDimension: string,
+     *     sampleType: string, multisampled: boolean } }} entry
      * @returns {import('./objects.js').TextureObject}
      */
     const textureForSampler = (scene, executable, entry)=>{
         const sampler = executable.linked.samplers[/** @type {number} */ (entry.sampler)];
         const unit = executable.ints[sampler.leaf.offset + sampler.element];
-        const bound = scene.boundTextures[unit];
-        const texture = sampler.dim === 'Cube' ? bound?.cube
-            : sampler.dim === '1D' ? bound?.oneD : bound?.twoD;
-        return texture && isTextureComplete(texture) ? texture : incompleteTexture(entry.cube);
+        const bound = /** @type {Record<string, any> | undefined} */ (scene.boundTextures[unit]);
+        const type = samplerTypeOf(sampler);
+        const target = BOUND_TARGETS[`${type.dim}${type.ms ? 'MS' : ''}`
+            + `${type.array ? 'Array' : ''}`];
+        const texture = target ? bound?.[target] : null;
+        return texture && isTextureComplete(texture) ? texture : incompleteOf(entry);
+    };
+
+    /**
+     * The buffer objects a draw's uniform blocks read, at the ranges bound to
+     * the binding points the program gave its blocks (glUniformBlockBinding).
+     * A block whose point has no buffer, or whose bytes run past the buffer,
+     * reads zeros there: the specification leaves both undefined.
+     *
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @param {number[]} blocks @param {Recording} recording
+     * @returns {UniformBlockBinding[]}
+     */
+    const uniformBlocksFor = (scene, executable, blocks, recording)=>blocks.map(index=>{
+        const block = executable.linked.blocks[index];
+        const point = executable.blockBindings?.[index] ?? block.binding;
+        const bound = scene.uniformBuffers?.[point] ?? null;
+        const size = Math.max(16, Math.ceil(block.size / 16) * 16);
+        const binding = GLSL_BLOCK_BINDING + index;
+        if (bound)
+        {
+            const backing = bufferFor(bound.buffer);
+            if (bound.offset + size <= backing.gpu.size)
+            {
+                backing.reads.note(recording.id, bound.offset, bound.offset + size);
+                return { binding,
+                    resource: { buffer: backing.gpu.gpu, offset: bound.offset, size } };
+            }
+        }
+        diverge(`uniform block '${block.name}' was read ${bound
+            ? 'past the end of the buffer bound to it' : 'with no buffer bound to its binding'
+                + ` point ${point}`}, and read zeros there`);
+        return { binding, resource: { buffer: zeroBlock(size), offset: 0, size } };
+    });
+
+    /** A buffer of zeros as large as the largest block asked for. @type {any} */
+    let zeros = null;
+    /** @param {number} size */
+    const zeroBlock = size=>{
+        if (!zeros || zeros.size < size)
+        {
+            zeros = backend.createDynamicBuffer({ size: Math.max(size, 256),
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, label: 'gl-zero-block' });
+        }
+        return zeros.gpu;
     };
 
     /**
@@ -2728,9 +3000,10 @@ export function createGpuRenderer(services){
     /**
      * @param {import('./glsl-wgsl.js').BlockPlan} plan @param {any} executable
      * @param {import('./pipeline.js').Scene} scene @param {Float64Array} mvp
+     * @param {number} [idBias]  what gl_VertexID adds to the device's vertex number
      * @returns {Float32Array}
      */
-    const glslUniforms = (plan, executable, scene, mvp)=>{
+    const glslUniforms = (plan, executable, scene, mvp, idBias = 0)=>{
         const matricesOnly = plan.state.every(s=>MATRIX_ONLY.test(s.name));
         const refs = plan.state.length === 0 ? [] : [scene.modelview, scene.projection, mvp];
         /** @type {number[]} */
@@ -2738,6 +3011,10 @@ export function createGpuRenderer(services){
         for (const attrib of plan.attribs)
         {
             values.push(...currentValueOf(scene, attrib));
+        }
+        if (plan.idBias !== undefined)
+        {
+            values.push(idBias);
         }
         if (plan.state.some(s=>s.name === 'gl_DepthRange'))
         {
@@ -2766,7 +3043,23 @@ export function createGpuRenderer(services){
         }
         for (const attrib of plan.attribs)
         {
-            block.set(currentValueOf(scene, attrib), attrib.offset);
+            const value = currentValueOf(scene, attrib);
+            if (attrib.integer)
+            {
+                // An integer input's current value, as glVertexAttribI* gave it.
+                const into = attrib.integer === 'u32' ? new Uint32Array(block.buffer)
+                    : new Int32Array(block.buffer);
+                into.set(value.map(v=>(attrib.integer === 'u32' ? v >>> 0 : v | 0)),
+                    attrib.offset);
+            }
+            else
+            {
+                block.set(value, attrib.offset);
+            }
+        }
+        if (plan.idBias !== undefined)
+        {
+            new Int32Array(block.buffer)[plan.idBias] = idBias;
         }
         glslBlocks.set(plan, { id: executable.id, version: executable.version, refs, values,
             block });
@@ -3136,7 +3429,7 @@ export function createGpuRenderer(services){
             indices ? 0 : request.first - from,
             (expanded && !scanned ? request.first : 0) - from
                 + (scanned ? request.baseVertex ?? 0 : 0),
-            topologyOf(request.mode), instances);
+            topologyOf(request.mode), instances, from);
         return true;
     };
 
@@ -3428,18 +3721,23 @@ export function createGpuRenderer(services){
             ? (request.colourMask[0] ? 1 : 0) | (request.colourMask[1] ? 2 : 0)
                 | (request.colourMask[2] ? 4 : 0) | (request.colourMask[3] ? 8 : 0)
             : 0;
+        /** @param {number} k @returns {number} draw buffer k's channels cleared */
+        const bufferMask = k=>(mask & GL.COLOR_BUFFER_BIT
+            ? request.masks?.[k] ?? colourMask : 0);
         const hasDepth = target.depthFormat !== '';
         const depth = (mask & GL.DEPTH_BUFFER_BIT) !== 0 && request.depthMask && hasDepth;
         const stencilMask = mask & GL.STENCIL_BUFFER_BIT && hasDepth
             ? request.stencilMask & 0xff : 0;
-        if (colourMask === 0 && !depth && stencilMask === 0)
+        const drawn = target.formats.map((/** @type {string} */ _, /** @type {number} */ k)=>
+            bufferMask(k) & target.masks[k]);
+        if (drawn.every(bits=>bits === 0) && !depth && stencilMask === 0)
         {
             return;
         }
         const state = { targetFormat: target.formats[0] || COLOUR_FORMAT,
-            depthFormat: target.depthFormat, colourMask, depth, stencilMask,
+            depthFormat: target.depthFormat, colourMask: bufferMask(0), depth, stencilMask,
             targets: target.flipped ? target.formats.map((format, k)=>({ format,
-                mask: colourMask & target.masks[k] })) : undefined };
+                mask: drawn[k] })) : undefined };
         const pipeline = pipelineFor(clearKey(state), generateClear(state.targets?.length ?? 1),
             clearDescriptor(state), NO_TEXTURE_PLAN);
         const uniforms = new Float32Array(CLEAR_UNIFORM_FLOATS);
@@ -3479,6 +3777,7 @@ export function createGpuRenderer(services){
             stencilReference: request.stencil & 0xff,
             target,
             blendConstant: null,
+            conditioned: conditions.get(context) ?? null,
         });
     };
 
@@ -3527,6 +3826,14 @@ export function createGpuRenderer(services){
             : recording.pipelines);
         /** @type {(() => Promise<any>) | null} */
         let copied = null;
+        // Occlusion queries: a slot of the frame's set around every draw a
+        // query counts, so that a query may span passes, which WebGPU's
+        // cannot; a slot past the set's last is a draw counted as passing.
+        const counting = recording.commands.some(command=>command.occluded);
+        /** @type {[OcclusionCount, number | null][]} */
+        const slots = [];
+        /** @type {(() => Promise<number[]>) | null} */
+        let counted = null;
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -3589,6 +3896,7 @@ export function createGpuRenderer(services){
                 pass = frame.beginPass({
                     targets: drawn.colours,
                     clear: false,
+                    occlusion: counting,
                     depthTarget: drawn.depth ?? undefined,
                     depthStencilAttachment: drawn.depth
                         ? {
@@ -3634,6 +3942,13 @@ export function createGpuRenderer(services){
                     continue;
                 }
                 const pipeline = outcome.value;
+                // Rendered on a condition the query it names did not meet.
+                const condition = command.conditioned;
+                if (condition && condition.query.available
+                    && (condition.query.samples > 0) === condition.inverted)
+                {
+                    continue;
+                }
                 if (command.kind === 'depth')
                 {
                     frame.writeDepth(command.surface, command.words, pipeline);
@@ -3701,6 +4016,10 @@ export function createGpuRenderer(services){
                         resource: pass.uniforms(command.vertexUniforms),
                     });
                 }
+                for (const block of command.blocks ?? NO_BLOCKS)
+                {
+                    entries.push(block);
+                }
                 pass.setBindings(0, pipeline.groups[0], entries);
                 if (command.fragmentUniforms)
                 {
@@ -3713,6 +4032,7 @@ export function createGpuRenderer(services){
                 command.slots.forEach((/** @type {any} */ slot, /** @type {number} */ index)=>{
                     pass.setVertexBuffer(index, slot.gpu, slot.offset);
                 });
+                const slot = command.occluded ? pass.beginOcclusionQuery() : null;
                 if (command.indices)
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -3724,6 +4044,14 @@ export function createGpuRenderer(services){
                 {
                     pass.draw(command.count, command.instances, command.first);
                 }
+                if (command.occluded)
+                {
+                    if (slot !== null)
+                    {
+                        pass.endOcclusionQuery();
+                    }
+                    slots.push([command.occluded, slot]);
+                }
                 if (probeAt.has(at))
                 {
                     probes[probes.length - 1].after = frame.snapshot(target.colour);
@@ -3733,6 +4061,10 @@ export function createGpuRenderer(services){
             if (read)
             {
                 copied = frame.snapshot(read);
+            }
+            if (counting)
+            {
+                counted = frame.occlusionResults();
             }
             // A frame drawn for a read shows nothing.
             const shownBy = shown ? built[built.length - 1] : null;
@@ -3758,6 +4090,7 @@ export function createGpuRenderer(services){
             // Ended whatever happened, or every later frame fails at beginFrame.
             frame.end();
             unflushed.delete(recording.id);
+            recording.replayed?.();
         }
         // The frame is submitted, so the probe read-backs resolve; each one
         // lands on its own dump line, which the report reads long after.
@@ -3771,7 +4104,67 @@ export function createGpuRenderer(services){
                     .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
                     .join(' ')}]`;
         }
+        await countQueries(recording, slots, counted);
         return copied ? copied() : null;
+    };
+
+    /**
+     * Adds what each counted draw passed to its query, then finishes the
+     * queries this recording ended; a slot past the frame's set counts the
+     * draw as passing, and a count that never came finishes them all the same.
+     *
+     * @param {Recording} recording @param {[OcclusionCount, number | null][]} slots
+     * @param {(() => Promise<number[]>) | null} counted
+     */
+    const countQueries = async(recording, slots, counted)=>{
+        try
+        {
+            const counts = counted && slots.length > 0 ? await counted() : [];
+            for (const [query, slot] of slots)
+            {
+                if (slot === null)
+                {
+                    diverge('an occlusion query counted past the frame\'s set of slots, and'
+                        + ' those draws were counted as passing');
+                }
+                query.samples += slot === null ? 1 : counts[slot] ?? 0;
+            }
+        }
+        finally
+        {
+            for (const query of recording.ending ?? [])
+            {
+                query.finish();
+            }
+        }
+    };
+
+    /**
+     * Replays what the context recorded so far now, in a frame of its own
+     * that shows nothing; what it draws next goes into a recording of its
+     * own over the result.
+     *
+     * @param {object} context @param {DrawableSurfaces} surfaces
+     * @param {any} read  a surface to copy out at the frame's end, or null
+     * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
+     */
+    const flush = (context, surfaces, read)=>{
+        const recording = recordingOf(context);
+        recordings.delete(context);
+        // As the surfaces are now: a swap exchanged before this replay runs
+        // must not move it onto the other buffer.
+        const drawn = { ...surfaces };
+        /** @type {{ width: number, height: number, data: Uint8Array } | null} */
+        let shot = null;
+        chain = chain
+            .then(async()=>{
+                shot = await replay(recording, drawn, null, undefined, read);
+            })
+            .catch(error=>{
+                unflushed.delete(recording.id);
+                lose(error instanceof Error ? error.message : String(error));
+            });
+        return chain.then(()=>shot);
     };
 
     /** @param {any} a @param {any} b */
@@ -3935,20 +4328,7 @@ export function createGpuRenderer(services){
             {
                 return null;
             }
-            // Everything drawn so far is drawn now; what the context draws
-            // after the read goes into a recording of its own over the result.
-            recordings.delete(context);
-            /** @type {{ width: number, height: number, data: Uint8Array } | null} */
-            let shot = null;
-            chain = chain
-                .then(async()=>{
-                    shot = await replay(recording, surfaces, null, undefined, read);
-                })
-                .catch(error=>{
-                    unflushed.delete(recording.id);
-                    lose(error instanceof Error ? error.message : String(error));
-                });
-            return chain.then(()=>{
+            return flush(context, surfaces, read).then(shot=>{
                 if (!shot)
                 {
                     return null;
@@ -3984,30 +4364,101 @@ export function createGpuRenderer(services){
         },
 
         /**
-         * What the context recorded since its last swap or read is drawn now,
-         * shown nowhere: a context made current no longer, or deleted, has
-         * its commands carried out, as wglMakeCurrent flushes the one it
-         * leaves, and another context reading its drawable finds them there.
+         * Counts the samples the context's draws pass into `query` until
+         * `endQuery` (glBeginQuery of an occlusion target).
+         *
+         * @param {object} context @param {OcclusionCount} query
+         */
+        beginQuery(context, query){
+            activeQueries.set(context, query);
+        },
+
+        /**
+         * Makes the context's draws and clears conditional on `query` from
+         * here (glBeginConditionalRender), or not (null). A query the
+         * recording still open ended is replayed first, so that its count is
+         * known when the draws on it are.
+         *
+         * @param {object} context
+         * @param {(OcclusionCount & { available: boolean }) | null} query
+         * @param {boolean} inverted
+         */
+        condition(context, query, inverted){
+            if (!query)
+            {
+                conditions.delete(context);
+                return;
+            }
+            conditions.set(context, { query, inverted });
+            const surfaces = drawables.get(context);
+            if (!query.available && surfaces && recordings.get(context)?.ending?.includes(query))
+            {
+                void flush(context, surfaces, null);
+            }
+        },
+
+        /**
+         * Replays what the context recorded so far now: a result waited for.
          *
          * @param {object} context
          */
-        flush(context){
+        flushContext(context){
             const surfaces = drawables.get(context);
-            const recording = recordings.get(context);
-            if (!surfaces || !recording)
+            if (surfaces && recordings.has(context))
             {
-                return;
+                void flush(context, surfaces, null);
             }
-            recordings.delete(context);
-            const drawn = { ...surfaces };
-            chain = chain
-                .then(async()=>{
-                    await replay(recording, drawn, null, undefined);
+        },
+
+        /**
+         * Ends the context's count: the query is finished once what was
+         * recorded up to here has been replayed and counted.
+         *
+         * @param {object} context @param {OcclusionCount} query
+         */
+        endQuery(context, query){
+            activeQueries.delete(context);
+            const recording = recordingOf(context);
+            (recording.ending ??= []).push(query);
+        },
+
+        /**
+         * A fence (glFenceSync): signalled once every command the context
+         * recorded before it has been replayed -- what the program gave the
+         * calls before it was copied when they were made, so nothing it holds
+         * is read after that. `flush` replays what the context recorded so
+         * far now rather than at the next swap.
+         *
+         * @param {object} context
+         * @returns {{ signalled: () => boolean, done: Promise<void>, flush: () => void }}
+         */
+        fence(context){
+            const recording = recordings.get(context);
+            let signalled = false;
+            /** @type {Promise<void>} */
+            const done = (recording
+                ? new Promise(resolve=>{
+                    const earlier = recording.replayed;
+                    recording.replayed = ()=>{
+                        earlier?.();
+                        resolve(undefined);
+                    };
                 })
-                .catch(error=>{
-                    unflushed.delete(recording.id);
-                    lose(error instanceof Error ? error.message : String(error));
-                });
+                : chain).then(()=>{
+                signalled = true;
+            });
+            return {
+                signalled: ()=>signalled,
+                done,
+                // Everything the context recorded so far, as glFlush would.
+                flush: ()=>{
+                    const surfaces = drawables.get(context);
+                    if (recordings.has(context) && surfaces)
+                    {
+                        void flush(context, surfaces, null);
+                    }
+                },
+            };
         },
 
         /** Every replay queued so far has run. */

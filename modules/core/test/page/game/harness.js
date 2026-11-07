@@ -952,9 +952,10 @@ export function keepFrames(app, state){
                 exits: frame.notes?.exits ?? 0,
                 // Absent where the heap cannot be read, which the drops say.
                 heapDelta: frame.notes?.heapDelta,
-                // The idle time by what it waited on (drop-repeat --freeze).
+                // The idle time by what it waited on, and what the graphics
+                // worker finished meanwhile (drop-repeat --freeze).
                 ...Object.fromEntries(Object.entries(frame.notes ?? {})
-                    .filter(([name])=>name.startsWith('idle-'))) },
+                    .filter(([name])=>name.startsWith('idle-') || name.startsWith('gfx'))) },
             longest: frame.longest });
     }
 }
