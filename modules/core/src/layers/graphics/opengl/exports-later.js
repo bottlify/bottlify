@@ -917,6 +917,13 @@ export function laterEntryPoints(h){
                 context.uniform(location | 0, count | 0,
                     (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : kind === 'u' ? 'ui' : 'i',
                         address, (count | 0) * n) : [], kind, n));
+            // OpenGL 4.1's forms that name their program.
+            handlers[`glProgramUniform${n}${suffix}`] = args=>answer(current()?.programUniform(
+                args[0] >>> 0, args[1] | 0, 1, args.slice(2, 2 + n).map(decode), kind, n, null));
+            handlers[`glProgramUniform${n}${suffix}v`] = ([program, location, count, address])=>
+                call(context=>context.programUniform(program >>> 0, location | 0, count | 0,
+                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : kind === 'u' ? 'ui' : 'i',
+                        address, (count | 0) * n) : [], kind, n, null));
         }
     }
     for (const cols of [2, 3, 4])
@@ -929,6 +936,12 @@ export function laterEntryPoints(h){
                 context.uniformMatrix(location | 0, count | 0, transpose & 0xff,
                     (count | 0) > 0 ? readTyped('f', address, (count | 0) * cols * rows) : [],
                     cols, rows));
+            handlers[name.replace('glUniform', 'glProgramUniform')] =
+                ([program, location, count, transpose, address])=>call(context=>
+                    context.programUniform(program >>> 0, location | 0, count | 0,
+                        (count | 0) > 0 ? readTyped('f', address, (count | 0) * cols * rows)
+                            : [], 'f', cols * rows,
+                        { cols, rows, transpose: (transpose & 0xff) !== 0 }));
         }
     }
     Object.assign(handlers, storageAndNamedEntryPoints(h));

@@ -360,3 +360,35 @@ test('program parameters are kept, and no program binary format is known (4.1)',
     gl.glProgramBinary(made + 50, 0x1234);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'no such program');
 });
+
+test('a program\'s uniforms are written by name of the program, current or not (4.1)', ()=>{
+    const gl = fixture();
+    const made = program(gl);
+    const tint = gl.glGetUniformLocation(made, 'tint');
+    const skew = gl.glGetUniformLocation(made, 'skew');
+    gl.programUniform(made, tint, 1, [1, 2, 3, 4], 'f', 4, null);
+    assert.equal(gl.glGetError(), GL.NO_ERROR, 'no program is current');
+    assert.deepEqual(gl.getUniform(made, tint).values, [1, 2, 3, 4]);
+    gl.programUniform(made, skew, 1, [1, 2, 3, 4, 5, 6], 'f', 6,
+        { cols: 2, rows: 3, transpose: true });
+    assert.deepEqual(gl.getUniform(made, skew).values, [1, 3, 5, 2, 4, 6], 'given row by row');
+    gl.programUniform(made, tint, 1, [1, 2, 3, 4], 'i', 4, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'the uniform\'s own type');
+    const unlinked = gl.glCreateProgram();
+    gl.programUniform(unlinked, 0, 1, [1], 'f', 1, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a program never linked');
+    gl.programUniform(unlinked + 40, 0, 1, [1], 'f', 1, null);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'no such program');
+    gl.glUseProgram(made);
+    gl.uniform(tint, 1, [9, 9, 9, 9], 'f', 4);
+    assert.deepEqual(gl.getUniform(made, tint).values, [9, 9, 9, 9], 'the bound form still');
+    // A relink that fails leaves the program's executable in use, and the
+    // program not linked: the bound form still writes it, the named one not.
+    gl.glAttachShader(made, shader(gl, GL.FRAGMENT_SHADER, 'void main() { broken }'));
+    gl.glLinkProgram(made);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [0]);
+    gl.uniform(tint, 1, [8, 8, 8, 8], 'f', 4);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    gl.programUniform(made, tint, 1, [7, 7, 7, 7], 'f', 4, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
+});

@@ -337,11 +337,14 @@ export function installShaderCalls(context, kernel){
      * names, or null with the error set.
      *
      * @param {string} call @param {number} location
+     * @param {ProgramObject | null} [program]  glProgramUniform's (4.1), the current
+     *     one's otherwise, whose executable stays in use through a failed relink
      * @returns {{ executable: Executable,
      *     leaf: import('./glsl-link.js').UniformLeaf, element: number } | null}
      */
-    const uniformAt = (call, location)=>{
-        const executable = currentProgram?.executable;
+    const uniformAt = (call, location, program)=>{
+        const executable = program === undefined ? currentProgram?.executable
+            : program?.linked ? program.executable : null;
         if (!executable)
         {
             setError(GL.INVALID_OPERATION);
@@ -372,14 +375,15 @@ export function installShaderCalls(context, kernel){
      * @param {'f' | 'i' | 'u'} kind
      * @param {number} components  per element, or a matrix's columns times rows
      * @param {{ cols: number, rows: number, transpose: boolean } | null} matrix
+     * @param {ProgramObject} [program]  glProgramUniform's (4.1), the current one's otherwise
      */
-    const writeUniform = (call, location, count, values, kind, components, matrix)=>{
+    const writeUniform = (call, location, count, values, kind, components, matrix, program)=>{
         if (count < 0)
         {
             setError(GL.INVALID_VALUE);
             return;
         }
-        const target = uniformAt(call, location);
+        const target = uniformAt(call, location, program);
         if (!target)
         {
             return;
@@ -1566,6 +1570,32 @@ export function installShaderCalls(context, kernel){
         },
 
         /**
+         * glProgramUniform{1234}{f,i,ui}[v] and glProgramUniformMatrix*fv
+         * (4.1): a uniform of `programName`, current or not; `matrix` the
+         * columns, rows and transposition of a matrix's.
+         *
+         * @param {number} programName @param {number} location @param {number} count
+         * @param {ArrayLike<number>} values @param {'f' | 'i' | 'u'} kind
+         * @param {number} components
+         * @param {{ cols: number, rows: number, transpose: boolean } | null} matrix
+         */
+        programUniform(programName, location, count, values, kind, components, matrix){
+            if (!enter('programUniform', [programName, location, count, Array.from(values), kind,
+                components, matrix]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            writeUniform(matrix ? `glProgramUniformMatrix${matrix.cols}x${matrix.rows}fv`
+                : `glProgramUniform${components}${kind}`, location, count, values, kind,
+            components, matrix, program);
+        },
+
+        /**
          * @param {number} programName @param {number} location
          * @returns {{ values: number[], float: boolean, unsigned?: boolean } | null}
          *     the element's values, and whether it holds floats or unsigned integers
@@ -1639,5 +1669,5 @@ export const SHADER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetUniformLocation', 'glGetActiveUniform', 'getUniform', 'bindFragData', 'fragData',
     'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
     'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
-    'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary',
+    'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary', 'programUniform',
 ]);

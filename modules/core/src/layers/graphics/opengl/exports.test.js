@@ -1465,3 +1465,28 @@ test('a debug message reaches the program\'s callback with its text in guest mem
             'a group pushed and popped, each a message');
         assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
     });
+
+test('glProgramUniform reaches a program that is not current', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const text = (/** @type {string} */ s, /** @type {number} */ at)=>{
+        box.bytes.set([...s].map(c=>c.charCodeAt(0)), at);
+        box.bytes[at + s.length] = 0;
+    };
+    const view = new DataView(box.bytes.buffer);
+    text('uniform vec4 tint; void main() { gl_FragColor = tint; }', 0x3000);
+    view.setUint32(0x3800, 0x3000, true);
+    const fs = table.glCreateShader.handler([GL.FRAGMENT_SHADER]);
+    table.glShaderSource.handler([fs, 1, 0x3800, 0]);
+    table.glCompileShader.handler([fs]);
+    const made = table.glCreateProgram.handler([]);
+    table.glAttachShader.handler([made, fs]);
+    table.glLinkProgram.handler([made]);
+    text('tint', 0x3900);
+    const tint = table.glGetUniformLocation.handler([made, 0x3900]);
+    table.glProgramUniform4f.handler([made, tint, floatBits(1), floatBits(2), floatBits(3),
+        floatBits(4)]);
+    table.glGetUniformfv.handler([made, tint, 0x4000]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getFloat32(0x4000 + at, true)), [1, 2, 3, 4]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
