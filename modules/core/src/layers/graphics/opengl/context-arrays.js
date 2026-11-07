@@ -1996,6 +1996,27 @@ export function installArrayCalls(context, kernel){
         },
 
         /**
+         * The bound forms, for the named ones to reach (4.5).
+         *
+         * @param {number} target @param {number} internal @param {number} format
+         * @param {number} type @param {number | Uint8Array} data
+         */
+        glClearBufferData(target, internal, format, type, data){
+            context.clearBufferData('glClearBufferData', target, internal, null, 0, format, type,
+                data);
+        },
+
+        /**
+         * @param {number} target @param {number} internal @param {number} offset
+         * @param {number} size @param {number} format @param {number} type
+         * @param {number | Uint8Array} data
+         */
+        glClearBufferSubData(target, internal, offset, size, format, type, data){
+            context.clearBufferData('glClearBufferSubData', target, internal, offset, size,
+                format, type, data);
+        },
+
+        /**
          * @param {number} target
          * @param {number} offset
          * @param {number} size

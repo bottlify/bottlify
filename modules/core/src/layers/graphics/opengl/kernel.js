@@ -56,6 +56,12 @@
  *           Copies a rectangle of the framebuffer into a texture level on the
  *           device, as a render pass into a view of that level. Null in a build
  *           that draws on the processor, where the copy reads `framebuffer()`.
+ * @property {((from: import('./gpu.js').CopiedImage,
+ *             into: import('./gpu.js').CopiedImage, size: { width: number, height: number,
+ *             depth: number }) => boolean) | null} [copyImage]
+ *           glCopyImageSubData on the device: true when the device copies the
+ *           box itself (both images live there in one format), false when the
+ *           copy is to be made from this side's bytes and uploaded.
  * @property {((texture: import('./objects.js').TextureObject) => void) | null} [generateMipmap]
  *           glGenerateMipmap's levels made on the device from the base level
  * @property {((request: { srcX0: number, srcY0: number, srcX1: number, srcY1: number,

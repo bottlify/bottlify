@@ -247,3 +247,19 @@ test('glClearBufferData\'s errors', ()=>{
     gl.glBindBufferARB(GL.ARRAY_BUFFER, 0);
     refused(GL.RGBA8, 0, 4, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_OPERATION);
 });
+
+test('the named clear (4.5) clears its buffer and leaves the bindings as they were', ()=>{
+    const { gl, bytes } = fixture();
+    const name = filled(gl, 8);
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, 0);
+    new DataView(bytes.buffer).setUint32(0x100, 0x04030201, true);
+    gl.namedBuffer('glClearBufferSubData', name, [GL.RGBA8, 4, 4, GL.RGBA, GL.UNSIGNED_BYTE,
+        0x100]);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetIntegerv(GL.COPY_WRITE_BUFFER), [0]);
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, name);
+    assert.deepEqual([...gl.glGetBufferSubDataARB(GL.ARRAY_BUFFER, 0, 8)],
+        [0, 1, 2, 3, 1, 2, 3, 4]);
+    gl.namedBuffer('glClearBufferData', name, [GL.RGBA8, GL.RGBA, GL.UNSIGNED_BYTE, 0]);
+    assert.deepEqual([...gl.glGetBufferSubDataARB(GL.ARRAY_BUFFER, 0, 8)], new Array(8).fill(0));
+});

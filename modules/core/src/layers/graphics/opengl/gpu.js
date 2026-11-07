@@ -430,6 +430,16 @@ function readsStencilReference(face){
 }
 
 /**
+ * One image of a copy between images (glCopyImageSubData): a texture's level
+ * or a renderbuffer, and the corner of the box in it -- for a cube map, z is
+ * the face; for a 1D array, y is the layer.
+ *
+ * @typedef {{ texture?: import('./objects.js').TextureObject,
+ *     renderbuffer?: import('./objects.js').RenderbufferObject, level: number,
+ *     x: number, y: number, z: number }} CopiedImage
+ */
+
+/**
  * @param {GpuServices} services
  */
 export function createGpuRenderer(services){
@@ -590,7 +600,7 @@ export function createGpuRenderer(services){
         refused: 0, skipped: 0, cut: 0,
         // Texels let go once on the device, in bytes, and levels carried from
         // a texture's old copy to the one that replaced it (`textureFor`).
-        letGo: 0, carried: 0,
+        letGo: 0, carried: 0, imageCopies: 0,
         // Compressed levels a device without their blocks took decoded: the
         // blocks' bytes and the texels' they were uploaded as.
         decoded: { levels: 0, blockBytes: 0, texelBytes: 0 },
@@ -3450,6 +3460,10 @@ export function createGpuRenderer(services){
             || format === GL.RGB16 ? GL.RGB : GL.RGBA;
     };
 
+    /** The renderbuffer formats of depth or stencil `sizedFormatOf` has no entry for. */
+    /** @type {ReadonlySet<number>} */
+    const DEPTH_RENDERBUFFER_FORMATS = new Set([GL.STENCIL_INDEX, 0x8d46, 0x8d47, 0x8d48, 0x8d49]);
+
     /** A renderbuffer's GPU surface, made again when its storage is. */
     /** @type {WeakMap<object, { version: number, surface: any }>} */
     const renderbufferSurfaces = new WeakMap();
@@ -3467,26 +3481,153 @@ export function createGpuRenderer(services){
     const attachmentView = (attachment, recording, depth)=>{
         if (attachment.kind === 'renderbuffer')
         {
-            const rb = attachment.renderbuffer;
-            let made = renderbufferSurfaces.get(rb);
-            if (!made || made.version !== rb.version)
-            {
-                made = {
-                    version: rb.version,
-                    surface: backend.createSurface({
-                        width: Math.max(1, rb.width), height: Math.max(1, rb.height),
-                        format: depth ? DEPTH_FORMAT : TEXTURE_FORMAT,
-                        label: `gl-renderbuffer:${rb.name}`,
-                        usage: depth ? TextureUsage.RENDER_ATTACHMENT
-                            : TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
-                                | TextureUsage.COPY_SRC,
-                    }),
-                };
-                renderbufferSurfaces.set(rb, made);
-            }
-            return made.surface;
+            return renderbufferSurface(attachment.renderbuffer, depth);
         }
         return levelView(attachment.texture, attachment.level, attachment.face, recording);
+    };
+
+    /**
+     * A renderbuffer's surface, made again when its storage is. A colour one
+     * is a copy's source and destination too (glCopyImageSubData).
+     *
+     * @param {import('./objects.js').RenderbufferObject} rb @param {boolean} depth
+     * @returns {any}
+     */
+    const renderbufferSurface = (rb, depth)=>{
+        let made = renderbufferSurfaces.get(rb);
+        if (!made || made.version !== rb.version)
+        {
+            made = {
+                version: rb.version,
+                surface: backend.createSurface({
+                    width: Math.max(1, rb.width), height: Math.max(1, rb.height),
+                    format: depth ? DEPTH_FORMAT : TEXTURE_FORMAT,
+                    label: `gl-renderbuffer:${rb.name}`,
+                    usage: depth ? TextureUsage.RENDER_ATTACHMENT
+                        : TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
+                            | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
+                }),
+            };
+            renderbufferSurfaces.set(rb, made);
+        }
+        return made.surface;
+    };
+
+    /**
+     * One side of a copy between images as the device holds it: the surface,
+     * its format, and where in it the image's box begins; null where the
+     * device does not hold it as plain texels (a depth or stencil image,
+     * whose formats a device copy refuses; a level past the copy's chain).
+     *
+     * @param {CopiedImage} image @param {Recording} recording
+     * @returns {{ texture: any, format: string, internal: number, converted: boolean,
+     *     oneArray: boolean, bytes: number, blocks: boolean } | null}
+     */
+    const copiedSide = (image, recording)=>{
+        if (image.renderbuffer)
+        {
+            const rb = image.renderbuffer;
+            const sized = sizedFormatOf(rb.internalFormat);
+            if (sized?.kind === 'depth' || sized?.kind === 'stencil'
+                || DEPTH_RENDERBUFFER_FORMATS.has(rb.internalFormat))
+            {
+                return null;
+            }
+            return { texture: renderbufferSurface(rb, false).texture, format: TEXTURE_FORMAT,
+                internal: rb.internalFormat,
+                converted: rb.internalFormat !== GL.RGBA8 && rb.internalFormat !== GL.RGBA,
+                oneArray: false, bytes: 4, blocks: false };
+        }
+        const texture = /** @type {import('./objects.js').TextureObject} */ (image.texture);
+        const level = texture.levels.get(levelKey(image.level));
+        const held = textureFor(texture, recording);
+        if (!level || image.level >= held.levels || held.storage?.depth
+            || held.format === DEPTH_FORMAT)
+        {
+            return null;
+        }
+        const blocks = /^(bc|astc|etc)/.test(held.format);
+        return { texture: held.gpu.texture, format: held.format,
+            internal: level.internalFormat,
+            // A legacy level lives as eight-bit RGBA whatever its format, or
+            // as the blocks it was given.
+            converted: held.storage ? held.storage.conversion !== null
+                : !blocks && level.internalFormat !== GL.RGBA8,
+            oneArray: texture.target === TEX.TEXTURE_1D_ARRAY,
+            // A block's bytes, which the format table does not give.
+            bytes: blocks ? (/^bc[14]-/.test(held.format) ? 8 : 16) : held.storage?.bytes ?? 4,
+            blocks };
+    };
+
+    /**
+     * glCopyImageSubData on the device: the box copied between the two
+     * surfaces where both hold their images as their own bits -- neither
+     * converted on its way up (a 16-bit normalised level kept as half floats
+     * holds other bits than its own) -- texel for texel or block for block:
+     * surface to surface in one format, through a buffer across two.
+     * Anything else (blocks into texels, a 1D array's layers into rows) is
+     * the processor's copy, uploaded.
+     *
+     * @param {object} context
+     * @param {CopiedImage} from @param {CopiedImage} into
+     * @param {{ width: number, height: number, depth: number }} size
+     * @returns {boolean} whether the device copies it
+     */
+    const copyImage = (context, from, into, size)=>{
+        if (!drawables.has(context))
+        {
+            return false;
+        }
+        const recording = recordingOf(context);
+        const source = copiedSide(from, recording);
+        const target = source && copiedSide(into, recording);
+        if (!source || !target || source.oneArray !== target.oneArray)
+        {
+            return false;
+        }
+        const same = source.format === target.format;
+        if (((source.converted || target.converted) && source.internal !== target.internal)
+            || source.bytes !== target.bytes || source.blocks !== target.blocks)
+        {
+            return false;
+        }
+        // A compressed surface's levels are whole blocks: a box at a level's
+        // edge reaches the block's edge.
+        const block = /^(bc|astc|etc)/.test(source.format) ? 4 : 1;
+        const round = (/** @type {number} */ extent)=>Math.ceil(extent / block) * block;
+        // A 1D array's layer is its y.
+        const corner = (/** @type {CopiedImage} */ image,
+            /** @type {boolean} */ oneArray)=>(oneArray ? { x: image.x, y: 0, z: image.y }
+            : { x: image.x, y: image.y, z: image.z });
+        recording.commands.push({
+            kind: same ? 'image' : 'reinterpret',
+            bytes: source.bytes,
+            from: { texture: source.texture, mipLevel: from.level,
+                origin: corner(from, source.oneArray) },
+            to: { texture: target.texture, mipLevel: into.level,
+                origin: corner(into, target.oneArray) },
+            size: source.oneArray
+                ? { width: size.width, height: 1, depthOrArrayLayers: size.height }
+                : { width: round(size.width), height: round(size.height),
+                    depthOrArrayLayers: size.depth },
+        });
+        stats.imageCopies++;
+        // What the device holds of the levels written is the device's from
+        // now on: made again in another shape, they are carried over.
+        const written = into.texture;
+        if (written)
+        {
+            const cube = written.target === GL.TEXTURE_CUBE_MAP;
+            for (let face = cube ? into.z : 0; face < (cube ? into.z + size.depth : 1); face++)
+            {
+                const level = written.levels.get(levelKey(into.level, face));
+                if (level)
+                {
+                    releasedLevels.add(level);
+                }
+            }
+        }
+        return true;
     };
 
     /**
@@ -4256,6 +4397,19 @@ export function createGpuRenderer(services){
                     pass = null;
                     continue;
                 }
+                if (command.kind === 'image')
+                {
+                    frame.copyTexture(command.from, command.to, command.size);
+                    pass = null;
+                    continue;
+                }
+                if (command.kind === 'reinterpret')
+                {
+                    frame.copyThroughBuffer(command.from, command.to, command.size,
+                        command.bytes);
+                    pass = null;
+                    continue;
+                }
                 if (command.kind === 'carry')
                 {
                     frame.copyTexture(
@@ -4596,6 +4750,7 @@ export function createGpuRenderer(services){
         },
         draw: drawPacked,
         copyToTexture,
+        copyImage,
 
         /**
          * The frame recorded since the last swap is replayed and shown; the

@@ -1121,6 +1121,37 @@ it under either convention as table 13.2 has it. A polygon keeps its first. *202
 takes is in this renderer's attribute tables; the 4.6 compatibility table names it in no group.
 *2026-11-07.*
 
+**A133. Temporary: the named calls (4.5) and the 4.2 to 4.5 texture image calls run when they
+are reached, even while a display list is compiled.** A named framebuffer call made through a
+bound form a list records (glDrawBuffer(s), glReadBuffer, the clears) says so when a list is
+open. A compatibility-profile program that compiles them into lists gets them made once, at
+compile time. *2026-11-07.*
+
+**A134. glCopyImageSubData asks completeness only past the base level,** as Mesa reads section
+18.3.3, which asks it of the whole texture: a program that copies out of a texture whose chain
+it has not finished copies what the levels hold. *2026-11-07.*
+
+**A135. Temporary: glCreateTextures refuses the targets with no texture kind here** (rectangle,
+buffer, cube map array, multisample) with GL_INVALID_ENUM, and says so. *2026-11-07.*
+
+**A136. glInvalidateNamedFramebufferData and SubData drop nothing:** the contents stay as they
+were, which is what a program may find after an invalidation anyway; the checks are made.
+*2026-11-07.*
+
+**A137. Temporary: glNamedFramebufferTexture of a whole cube map attaches its first face,** and
+says so, until layered rendering exists. *2026-11-07.*
+
+**A138. glClearTexImage reads its one pixel as it lies in the program's memory,** with no
+unpack state and no unpack buffer, as glClearBufferData does by section 6.3.2. *2026-11-07.*
+
+**A139. Temporary: an image copy the device cannot make, of pixels only the device holds, is a
+loss** (a level drawn on the device copied as blocks into texels, a renderbuffer on the
+processor path): said each time, the destination left as it was. *2026-11-07.*
+
+**A140. Temporary: primitives are drawn through the first viewport only.** Viewport arrays
+(4.1) keep every viewport's state, but choosing another is a geometry shader's
+gl_ViewportIndex, which the GLSL front end does not take yet. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

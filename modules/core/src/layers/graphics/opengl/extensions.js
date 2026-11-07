@@ -260,6 +260,12 @@ export const GL_EXTENSIONS = Object.freeze({
         'glGetProgramLocalParameterdvARB', 'glGetProgramLocalParameterfvARB',
         'glGetProgramivARB', 'glGetProgramStringARB',
     ],
+    // Whole levels and images by name (`context-textures.js`): immutable
+    // storage, raw copies between images, fills, and boxes read back.
+    GL_ARB_texture_storage: ['glTexStorage1D', 'glTexStorage2D', 'glTexStorage3D'],
+    GL_ARB_copy_image: ['glCopyImageSubData'],
+    GL_ARB_clear_texture: ['glClearTexImage', 'glClearTexSubImage'],
+    GL_ARB_get_texture_sub_image: ['glGetTextureSubImage', 'glGetCompressedTextureSubImage'],
 });
 
 /** WGL extensions: name -> the functions it defines. */
