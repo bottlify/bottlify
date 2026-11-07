@@ -270,36 +270,44 @@ export function laterEntryPoints(h){
         }
     });
 
+    /**
+     * A shader's source strings, each read to its length or its terminator; null for a negative
+     * count, which the context refuses.
+     * @param {number} count
+     * @param {number} strings
+     * @param {number} lengths 0 when every string ends in a terminator.
+     * @returns {string[] | null}
+     */
+    const readSources = (count, strings, lengths)=>{
+        if ((count | 0) < 0)
+        {
+            return null;
+        }
+        const pointers = readPointers(strings, count | 0);
+        const sizes = (lengths >>> 0) !== 0 ? readTyped('i', lengths, count | 0) : null;
+        return pointers.map((pointer, k)=>{
+            const size = sizes ? sizes[k] : -1;
+            if (size < 0)
+            {
+                return h.readText(pointer);
+            }
+            let text = '';
+            const bytes = h.readMemory(pointer, size);
+            for (let i = 0; i < size; i++)
+            {
+                text += String.fromCharCode(bytes[i]);
+            }
+            return text;
+        });
+    };
+
     /** @type {Record<string, (args: number[]) => number>} */
     const handlers = {
         // --- shaders and programs ---
 
         glCreateShader: ([type])=>current()?.glCreateShader(type >>> 0) ?? 0,
-        glShaderSource: ([shader, count, strings, lengths])=>call(context=>{
-            const n = Math.max(0, count | 0);
-            const pointers = readPointers(strings, n);
-            const sizes = (lengths >>> 0) !== 0 ? readTyped('i', lengths, n) : null;
-            const sources = pointers.map((pointer, k)=>{
-                const size = sizes ? sizes[k] : -1;
-                if (size < 0)
-                {
-                    return h.readText(pointer);
-                }
-                let text = '';
-                const bytes = h.readMemory(pointer, size);
-                for (let i = 0; i < size; i++)
-                {
-                    text += String.fromCharCode(bytes[i]);
-                }
-                return text;
-            });
-            if ((count | 0) < 0)
-            {
-                context.glShaderSource(shader >>> 0, null);
-                return;
-            }
-            context.glShaderSource(shader >>> 0, sources);
-        }),
+        glShaderSource: ([shader, count, strings, lengths])=>call(context=>
+            context.glShaderSource(shader >>> 0, readSources(count, strings, lengths))),
         glCompileShader: ([shader])=>answer(current()?.glCompileShader(shader >>> 0)),
         glDeleteShader: ([shader])=>answer(current()?.glDeleteShader(shader >>> 0)),
         glIsShader: ([name])=>current()?.glIsShader(name >>> 0) ?? GL.FALSE,
@@ -817,6 +825,28 @@ export function laterEntryPoints(h){
                 context.glMultiDrawElementsBaseVertex(mode >>> 0, readTyped('i', counts, n),
                     type >>> 0, readPointers(indices, n), drawcount | 0, readTyped('i', bases, n));
             }),
+        // --- program pipelines ---
+
+        glGenProgramPipelines: generator((context, count)=>context.genProgramPipelines(count,
+            false)),
+        glCreateProgramPipelines: generator((context, count)=>context.genProgramPipelines(count,
+            true)),
+        glDeleteProgramPipelines: deleter((context, names)=>
+            context.glDeleteProgramPipelines(names)),
+        glIsProgramPipeline: ([name])=>current()?.glIsProgramPipeline(name >>> 0) ?? GL.FALSE,
+        glBindProgramPipeline: ([name])=>answer(current()?.glBindProgramPipeline(name >>> 0)),
+        glUseProgramStages: ([name, stages, program])=>answer(current()?.glUseProgramStages(
+            name >>> 0, stages >>> 0, program >>> 0)),
+        glActiveShaderProgram: ([name, program])=>answer(current()?.glActiveShaderProgram(
+            name >>> 0, program >>> 0)),
+        glValidateProgramPipeline: ([name])=>answer(current()?.glValidateProgramPipeline(
+            name >>> 0)),
+        glGetProgramPipelineiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.glGetProgramPipelineiv(name >>> 0, pname >>> 0), 'word')),
+        glGetProgramPipelineInfoLog: ([name, size, length, out])=>call(context=>answerString(
+            context.glGetProgramPipelineInfoLog(name >>> 0), size, length, out)),
+        glCreateShaderProgramv: ([type, count, strings])=>current()?.glCreateShaderProgramv(
+            type >>> 0, readSources(count, strings, 0)) ?? 0,
         glVertexAttribDivisor: ([index, divisor])=>answer(
             current()?.glVertexAttribDivisor(index >>> 0, divisor >>> 0)),
 

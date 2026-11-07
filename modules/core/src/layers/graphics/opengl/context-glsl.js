@@ -115,6 +115,22 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {number} users  the contexts it is current in
  * @property {boolean} [retrievable]  PROGRAM_BINARY_RETRIEVABLE_HINT (4.1)
  * @property {boolean} [separable]  PROGRAM_SEPARABLE (4.1)
+ * @property {{ vertex: ShaderUnit[], geometry: ShaderUnit[], fragment: ShaderUnit[] }}
+ *     [stageUnits]  what the last successful link linked, each stage's, for a
+ *     program pipeline (4.1) to link again with other programs' stages
+ */
+
+/**
+ * A program pipeline (4.1): the program each stage runs, the one glUniform
+ * writes, and the executable its stages make together.
+ *
+ * @typedef {Object} PipelineObject
+ * @property {number} name
+ * @property {Record<'vertex' | 'geometry' | 'fragment', ProgramObject | null>} stages
+ * @property {ProgramObject | null} active
+ * @property {boolean} validated
+ * @property {string} log
+ * @property {{ key: string, executable: Executable | null, versions: number[] } | null} made
  */
 
 /** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment'>} */
@@ -129,6 +145,32 @@ const GEOMETRY_PRIMITIVES = Object.freeze(/** @type {Record<string, number>} */ 
 }));
 
 let executables = 0;
+
+/**
+ * What a link makes runnable: its uniform store, as the link leaves it.
+ *
+ * @param {LinkedProgram} linked @returns {Executable}
+ */
+function executableOf(linked){
+    const store = linked.defaults.slice(0);
+    return {
+        id: ++executables,
+        linked,
+        store,
+        floats: new Float32Array(store),
+        ints: new Int32Array(store),
+        version: 0,
+        blockBindings: Int32Array.from(linked.blocks, block=>block.binding),
+    };
+}
+
+/** glUseProgramStages' bits (4.1 table 7.1), each stage's. */
+const STAGE_BITS = Object.freeze(/** @type {const} */ ([
+    ['vertex', 0x1], ['fragment', 0x2], ['geometry', 0x4],
+]));
+
+/** The bits glUseProgramStages takes: the three above, tessellation's and compute's. */
+const ALL_STAGE_BITS = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20;
 
 /**
  * Compiled shaders by their text, the most recent first to be kept.
@@ -343,7 +385,9 @@ export function installShaderCalls(context, kernel){
      *     leaf: import('./glsl-link.js').UniformLeaf, element: number } | null}
      */
     const uniformAt = (call, location, program)=>{
-        const executable = program === undefined ? currentProgram?.executable
+        // With no program in use, a bound pipeline's active program (4.1).
+        const executable = program === undefined
+            ? (currentProgram ?? boundPipeline?.active ?? null)?.executable
             : program?.linked ? program.executable : null;
         if (!executable)
         {
@@ -504,15 +548,144 @@ export function installShaderCalls(context, kernel){
         return { linked: executable.linked, executable };
     };
 
+    // --- program pipelines (4.1) ---
+
+    /** This context's pipelines: not shared, as vertex array objects are not. */
+    /** @type {Map<number, PipelineObject | null>} */
+    const pipelines = new Map();
+    /** @type {PipelineObject | null} */
+    let boundPipeline = null;
+
+    /** @param {number} name @returns {PipelineObject} */
+    const makePipeline = name=>({ name, stages: { vertex: null, geometry: null, fragment: null },
+        active: null, validated: false, log: '', made: null });
+
+    /**
+     * A pipeline's stages linked together: each program's own units, its
+     * attribute and output locations kept as its link gave them. Linked
+     * again when a stage's program is linked again or changes.
+     *
+     * @param {PipelineObject} pipeline
+     * @returns {{ executable: Executable | null, log: string }}
+     */
+    const pipelineLink = pipeline=>{
+        const { vertex, geometry, fragment } = pipeline.stages;
+        const key = [vertex, geometry, fragment]
+            .map(program=>(program?.executable ? program.executable.id : 0)).join('/');
+        if (pipeline.made?.key === key)
+        {
+            return { executable: pipeline.made.executable, log: pipeline.log };
+        }
+        const vertexLinked = vertex?.executable?.linked;
+        const fragmentLinked = fragment?.executable?.linked;
+        const result = linkProgram({
+            vertex: vertex?.stageUnits?.vertex ?? [],
+            geometry: geometry?.stageUnits?.geometry ?? [],
+            fragment: fragment?.stageUnits?.fragment ?? [],
+            attribBindings: new Map((vertexLinked?.attributes ?? [])
+                .map(attribute=>[attribute.name, attribute.location])),
+            fragDataBindings: new Map((fragmentLinked?.outputs ?? [])
+                .map(output=>[output.name, { location: output.location, index: output.index }])),
+        });
+        pipeline.log = result.log;
+        const executable = result.ok ? executableOf(result.program) : null;
+        pipeline.made = { key, executable, versions: [] };
+        return { executable, log: result.log };
+    };
+
+    /**
+     * A pipeline's executable with each uniform's value from the program of
+     * the stage that declares it, the earliest stage's where two do, and
+     * each block's binding likewise.
+     *
+     * @param {PipelineObject} pipeline @returns {Executable | null}
+     */
+    const pipelineExecutable = pipeline=>{
+        const { executable } = pipelineLink(pipeline);
+        const made = pipeline.made;
+        if (!executable || !made)
+        {
+            kernel.diverge('a program pipeline whose stages do not link together drew with the'
+                + ' fixed pipeline: ' + pipeline.log.trim());
+            return null;
+        }
+        const owners = /** @type {ProgramObject[]} */ ([pipeline.stages.vertex,
+            pipeline.stages.geometry, pipeline.stages.fragment]
+            .filter(program=>program?.executable));
+        const versions = owners.map(program=>/** @type {Executable} */ (program.executable).version);
+        if (versions.join() !== made.versions.join())
+        {
+            made.versions = versions;
+            const into = new Uint8Array(executable.store);
+            for (const leaf of executable.linked.uniforms)
+            {
+                for (const owner of owners)
+                {
+                    const from = /** @type {Executable} */ (owner.executable);
+                    const same = from.linked.uniforms.find(other=>other.name === leaf.name
+                        && other.words === leaf.words && other.size === leaf.size);
+                    if (same)
+                    {
+                        into.set(new Uint8Array(from.store, same.offset * 4,
+                            same.words * same.size * 4), leaf.offset * 4);
+                        break;
+                    }
+                }
+            }
+            executable.version++;
+        }
+        executable.linked.blocks.forEach((block, index)=>{
+            for (const owner of owners)
+            {
+                const from = /** @type {Executable} */ (owner.executable);
+                const at = from.linked.blocks.findIndex(other=>other.name === block.name);
+                if (at >= 0)
+                {
+                    executable.blockBindings[index] = from.blockBindings[at];
+                    break;
+                }
+            }
+        });
+        return executable;
+    };
+
+    kernel.side.queries ??= new Map();
+    kernel.side.queries.set(GL.PROGRAM_PIPELINE_BINDING, ()=>({ kind: 'int',
+        values: [boundPipeline?.name ?? 0] }));
+
     Object.assign(kernel.side, {
         /**
          * The program in use, for a draw: what it runs and the uniform values
-         * it runs with, or null for the fixed pipeline.
+         * it runs with, or null for the fixed pipeline. With none in use, a
+         * bound program pipeline's stages (4.1).
          *
          * @returns {Executable | null}
          */
-        glslExecutable: ()=>currentProgram?.executable ?? null,
+        glslExecutable: ()=>currentProgram?.executable
+            ?? (boundPipeline && Object.values(boundPipeline.stages).some(Boolean)
+                ? pipelineExecutable(boundPipeline) : null),
     });
+
+    /**
+     * A pipeline by name, made on its first use; undefined, with the error
+     * set, for a name glGenProgramPipelines never gave.
+     *
+     * @param {number} name @returns {PipelineObject | undefined}
+     */
+    const pipelineNamed = name=>{
+        if (!pipelines.has(name))
+        {
+            setError(GL.INVALID_OPERATION);
+            return undefined;
+        }
+        let pipeline = pipelines.get(name);
+        if (!pipeline)
+        {
+            pipeline = makePipeline(name);
+            pipelines.set(name, pipeline);
+        }
+        return pipeline;
+    };
 
     Object.assign(context, {
         // --- shader objects ---
@@ -776,16 +949,9 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const store = result.program.defaults.slice(0);
-            program.executable = {
-                id: ++executables,
-                linked: result.program,
-                store,
-                floats: new Float32Array(store),
-                ints: new Int32Array(store),
-                version: 0,
-                blockBindings: Int32Array.from(result.program.blocks, block=>block.binding),
-            };
+            program.stageUnits = { vertex: units(GL.VERTEX_SHADER),
+                geometry: units(GL.GEOMETRY_SHADER), fragment: units(GL.FRAGMENT_SHADER) };
+            program.executable = executableOf(result.program);
         },
 
         /** @param {number} programName */
@@ -818,6 +984,255 @@ export function installShaderCalls(context, kernel){
             {
                 makeCurrent(program);
             }
+        },
+
+        // --- program pipelines (4.1) ---
+
+        /**
+         * What a draw would run now: the program in use, or the bound
+         * pipeline's stages linked together; null for the fixed pipeline.
+         *
+         * @returns {Executable | null}
+         */
+        programInUse(){
+            return kernel.side.glslExecutable();
+        },
+
+        /**
+         * @param {number} count @param {boolean} made  glCreateProgramPipelines'
+         * @returns {number[]}
+         */
+        genProgramPipelines(count, made){
+            if (!enter('genProgramPipelines', [count, made]))
+            {
+                return [];
+            }
+            if (count < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return [];
+            }
+            /** @type {number[]} */
+            const names = [];
+            for (let name = 1; names.length < count; name++)
+            {
+                if (!pipelines.has(name))
+                {
+                    pipelines.set(name, made ? makePipeline(name) : null);
+                    names.push(name);
+                }
+            }
+            return names;
+        },
+
+        /** @param {readonly number[]} names */
+        glDeleteProgramPipelines(names){
+            if (!enter('glDeleteProgramPipelines', [names]))
+            {
+                return;
+            }
+            for (const name of names)
+            {
+                if (boundPipeline && boundPipeline.name === name)
+                {
+                    boundPipeline = null;
+                }
+                pipelines.delete(name);
+            }
+        },
+
+        /** @param {number} name @returns {number} */
+        glIsProgramPipeline(name){
+            if (!enter('glIsProgramPipeline', [name]))
+            {
+                return GL.FALSE;
+            }
+            return pipelines.get(name) ? GL.TRUE : GL.FALSE;
+        },
+
+        /** @param {number} name */
+        glBindProgramPipeline(name){
+            if (!enter('glBindProgramPipeline', [name]))
+            {
+                return;
+            }
+            if (kernel.side.feedbackActive?.())
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (name === 0)
+            {
+                boundPipeline = null;
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (pipeline)
+            {
+                boundPipeline = pipeline;
+            }
+        },
+
+        /**
+         * @param {number} name @param {number} stages  the stage bits
+         * @param {number} programName  zero to take the stages away
+         */
+        glUseProgramStages(name, stages, programName){
+            if (!enter('glUseProgramStages', [name, stages, programName]))
+            {
+                return;
+            }
+            if (stages >>> 0 !== 0xffffffff && (stages & ~ALL_STAGE_BITS) !== 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const program = programName === 0 ? null : objectOf(programName, 'program');
+            if (programName !== 0 && !program)
+            {
+                return;
+            }
+            if (program && (!program.separable || !program.linked))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (!pipeline)
+            {
+                return;
+            }
+            for (const [stage, bit] of STAGE_BITS)
+            {
+                if ((stages & bit) !== 0)
+                {
+                    // A program without the stage takes it away (4.1 section 7.4).
+                    pipeline.stages[stage] = program
+                        && (program.stageUnits?.[stage].length ?? 0) > 0 ? program : null;
+                }
+            }
+            pipeline.validated = false;
+        },
+
+        /** @param {number} name @param {number} programName */
+        glActiveShaderProgram(name, programName){
+            if (!enter('glActiveShaderProgram', [name, programName]))
+            {
+                return;
+            }
+            const program = programName === 0 ? null : objectOf(programName, 'program');
+            if (programName !== 0 && !program)
+            {
+                return;
+            }
+            if (program && !program.linked)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (pipeline)
+            {
+                pipeline.active = program;
+            }
+        },
+
+        /** @param {number} name */
+        glValidateProgramPipeline(name){
+            if (!enter('glValidateProgramPipeline', [name]))
+            {
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (!pipeline)
+            {
+                return;
+            }
+            const linked = Object.values(pipeline.stages).some(Boolean)
+                ? pipelineLink(pipeline).executable : null;
+            pipeline.validated = linked !== null;
+            if (!linked && pipeline.log === '')
+            {
+                pipeline.log = 'ERROR: the pipeline has no stage\n';
+            }
+        },
+
+        /**
+         * @param {number} name @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetProgramPipelineiv(name, pname){
+            if (!enter('glGetProgramPipelineiv', [name, pname]))
+            {
+                return null;
+            }
+            const pipeline = pipelineNamed(name);
+            if (!pipeline)
+            {
+                return null;
+            }
+            switch (pname)
+            {
+                case GL.ACTIVE_PROGRAM: return [pipeline.active?.name ?? 0];
+                case GL.VERTEX_SHADER: return [pipeline.stages.vertex?.name ?? 0];
+                case GL.GEOMETRY_SHADER: return [pipeline.stages.geometry?.name ?? 0];
+                case GL.FRAGMENT_SHADER: return [pipeline.stages.fragment?.name ?? 0];
+                case GL.VALIDATE_STATUS: return [pipeline.validated ? 1 : 0];
+                case GL.INFO_LOG_LENGTH:
+                    return [pipeline.log.length > 0 ? pipeline.log.length + 1 : 0];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+
+        /** @param {number} name @returns {string | null} */
+        glGetProgramPipelineInfoLog(name){
+            if (!enter('glGetProgramPipelineInfoLog', [name]))
+            {
+                return null;
+            }
+            return pipelineNamed(name)?.log ?? null;
+        },
+
+        /**
+         * glCreateShaderProgramv (4.1): a separable program of one shader,
+         * compiled from `strings` and linked, the shader let go of; its
+         * compile log is the program's.
+         *
+         * @param {number} type @param {readonly string[]} strings @returns {number}
+         */
+        glCreateShaderProgramv(type, strings){
+            if (!enter('glCreateShaderProgramv', [type, strings]))
+            {
+                return 0;
+            }
+            if (!strings)
+            {
+                // A negative count.
+                setError(GL.INVALID_VALUE);
+                return 0;
+            }
+            const shader = context.glCreateShader(type);
+            if (shader === 0)
+            {
+                return 0;
+            }
+            context.glShaderSource(shader, strings);
+            context.glCompileShader(shader);
+            const programName = context.glCreateProgram();
+            const program = /** @type {ProgramObject} */ (objectOf(programName, 'program'));
+            program.separable = true;
+            const shaderLog = context.glGetShaderInfoLog(shader) ?? '';
+            if (context.glGetShaderiv(shader, GL.COMPILE_STATUS)?.[0])
+            {
+                context.glAttachShader(programName, shader);
+                context.glLinkProgram(programName);
+                context.glDetachShader(programName, shader);
+            }
+            program.log = shaderLog + program.log;
+            context.glDeleteShader(shader);
+            return programName;
         },
 
         /** @param {number} programName */
@@ -1691,5 +2106,8 @@ export const SHADER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
     'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
     'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary', 'programUniform',
-    'getnUniform',
+    'getnUniform', 'genProgramPipelines', 'glDeleteProgramPipelines', 'glIsProgramPipeline',
+    'glBindProgramPipeline', 'glUseProgramStages', 'glActiveShaderProgram',
+    'glValidateProgramPipeline', 'glGetProgramPipelineiv', 'glGetProgramPipelineInfoLog',
+    'glCreateShaderProgramv',
 ]);
