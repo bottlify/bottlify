@@ -1246,11 +1246,13 @@ no store here, so a shader that steers its writes by it does the same. *2026-11-
 
 **A181. Temporary: some limits answer below OpenGL 4.6's minimums,** the version being reported
 because every entry point of it is here: textures 8192 texels a side (16384 asked), 3D textures
-2048 a side and 256 layers (2048 asked), which are WebGPU's defaults every adapter gives; 8
-texture units for a stage and for all together, 4 draw buffers and colour attachments (8 asked;
-WebGPU's 32 bytes of colour a sample do not hold eight wide targets), 32 varying components;
-with A171 and A173 for compute and images. A program that sizes itself by the queries works; one
-that takes the minimums for granted is refused at the call that goes past them. *2026-11-07.*
+2048 a side and 256 layers (2048 asked), which are WebGPU's defaults every adapter gives; 16
+texture units for every stage and for all of them together (80 asked together), each sampler
+of a program being bound for every stage and WebGPU giving a stage 16 sampled textures and 16
+samplers; 4 draw buffers and colour attachments (8 asked; WebGPU's 32 bytes of colour a sample
+do not hold eight wide targets), 32 varying components; with A171 and A173 for compute and
+images. A program that sizes itself by the queries works; one that takes the minimums for
+granted is refused at the call that goes past them. *2026-11-07.*
 
 **A182. Temporary: a geometry shader's vertex streams past 0 are emitted nowhere,** which is what
 GL makes of them without transform feedback (stream 0 alone is rasterised); a program that

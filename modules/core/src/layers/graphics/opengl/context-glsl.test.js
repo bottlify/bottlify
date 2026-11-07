@@ -225,7 +225,7 @@ test('glUniform* writes the program in use, typed, and the values read back', ()
     assert.equal(gl.glGetError(), GL.NO_ERROR);
     gl.uniform(at('image'), 1, [3], 'f', 1);
     assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
-    gl.uniform(at('image'), 1, [8], 'i', 1);
+    gl.uniform(at('image'), 1, [16], 'i', 1);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
     // A matrix of the uniform's shape, transposed when asked.
     gl.uniformMatrix(at('skew'), 1, 0, [1, 2, 3, 4, 5, 6], 2, 3);
@@ -299,7 +299,7 @@ test('the version, the shading language and the limits are what is implemented',
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VERTEX_ATTRIBS_ARB), [16]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_DRAW_BUFFERS), [4]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VARYING_FLOATS), [32]);
-    assert.deepEqual(gl.glGetIntegerv(GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS), [8]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS), [16]);
 });
 
 test('GL_ARB_shader_objects reads the same objects by handle (Wine\'s test_sharelists)', ()=>{

@@ -90,6 +90,24 @@ export { canonicalAttribName };
  */
 export const VERTEX_PROGRAM_BINDING = 17;
 export const FRAGMENT_PROGRAM_BINDING = 18;
+
+/** Where the sampler bindings past the eighth start: past every other binding of group 0. */
+const SAMPLERS_PAST_EIGHT = 128;
+
+/**
+ * A sampler's texture binding in group 0, its sampler the next one: the
+ * first eight below the stages' uniform blocks (17 on), the rest past the
+ * blocks, storage, counters and images (`glsl-wgsl.js`, 32 to 103).
+ *
+ * @param {number} index  the program's sampler, or the unit an instruction names
+ * @returns {number}
+ */
+export const samplerBinding = index=>(index < 8 ? 1 + index * 2
+    : SAMPLERS_PAST_EIGHT + (index - 8) * 2);
+
+/** @param {number} binding a texture's (`samplerBinding`) @returns {number} its index */
+export const samplerIndex = binding=>(binding < SAMPLERS_PAST_EIGHT ? (binding - 1) / 2
+    : 8 + (binding - SAMPLERS_PAST_EIGHT) / 2);
 export const VERTEX_PROGRAM_GROUP = 0;
 export const FRAGMENT_PROGRAM_GROUP = 1;
 
@@ -1240,8 +1258,9 @@ export function emitFragment(ir, group = FRAGMENT_PROGRAM_GROUP, viewportHeight 
     }
     const textureDeclarations = needs.textures.map(texture=>{
         const type = texture.target === 'CUBE' ? 'texture_cube<f32>' : 'texture_2d<f32>';
-        return `@group(0) @binding(${1 + texture.unit * 2}) var t${texture.unit}Texture: ${type};\n`
-            + `@group(0) @binding(${2 + texture.unit * 2}) var t${texture.unit}Sampler: sampler;`;
+        const at = samplerBinding(texture.unit);
+        return `@group(0) @binding(${at}) var t${texture.unit}Texture: ${type};\n`
+            + `@group(0) @binding(${at + 1}) var t${texture.unit}Sampler: sampler;`;
     }).join('\n');
 
     const paramCount = Math.max(1, analysed.params.length);

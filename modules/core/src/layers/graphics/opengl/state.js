@@ -73,11 +73,13 @@ export const GEOMETRY_LIMITS = [
 ];
 
 /**
- * How many texture units a context has: the larger of the coordinate sets
- * and the image units the specification's minimum requires, which is what
- * the unit selector ranges over.
+ * How many texture units a context has: its image units, more than its
+ * coordinate sets, which is what the unit selector ranges over.
  */
-export const TEXTURE_UNITS = 8;
+export const TEXTURE_UNITS = GLSL_LIMITS.combinedTextureImageUnits;
+
+/** How many texture coordinate sets there are (GL_MAX_TEXTURE_COORDS). */
+export const TEXTURE_COORDS = GLSL_LIMITS.textureCoords;
 
 /**
  * How many units the conventional pipeline combines (GL_MAX_TEXTURE_UNITS):
@@ -751,7 +753,7 @@ export const DEFAULT_STATE = Object.freeze([
     // is the compatible subset of.
     {
         query: GL.MAX_TEXTURE_COORDS_ARB, name: 'GL_MAX_TEXTURE_COORDS_ARB', kind: 'int',
-        value: [TEXTURE_UNITS],
+        value: [TEXTURE_COORDS],
     },
     {
         query: GL.MAX_TEXTURE_IMAGE_UNITS_ARB, name: 'GL_MAX_TEXTURE_IMAGE_UNITS_ARB',

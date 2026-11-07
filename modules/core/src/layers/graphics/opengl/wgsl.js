@@ -34,6 +34,7 @@
 import { GL } from './constants.js';
 import {
     CLIP_REMAP, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf,
+    samplerBinding,
 } from './arb-wgsl.js';
 import {
     blockDeclaration, emitStage, feedbackLeaves, geometryDrawStage, geometryInputRegisters,
@@ -1147,9 +1148,10 @@ const SPHERE_MAP_FN = `fn sphereMap(r: vec3f) -> vec2f {
  */
 function fixedFragment(state){
     const bindings = state.units.map((unit, i)=>
-        `@group(0) @binding(${1 + i * 2}) var t${unit.index}Texture: `
+        `@group(0) @binding(${samplerBinding(i)}) var t${unit.index}Texture: `
         + `${unit.cube ? 'texture_cube<f32>' : 'texture_2d<f32>'};\n`
-        + `@group(0) @binding(${2 + i * 2}) var t${unit.index}Sampler: sampler;`).join('\n');
+        + `@group(0) @binding(${samplerBinding(i) + 1}) var t${unit.index}Sampler: sampler;`)
+        .join('\n');
 
     const fragmentBody = [
         ...(state.clip && !state.clip.distances
@@ -1605,8 +1607,8 @@ function samplerDeclarations(program, used){
         const sampler = program.samplers[index];
         const type = samplerTypeOf(sampler);
         const kind = textureTypeOf(type);
-        return `@group(0) @binding(${1 + index * 2}) var glt${index}: ${kind};
-@group(0) @binding(${2 + index * 2}) var gls${index}: ${samplerVarTypeOf(type)};`;
+        return `@group(0) @binding(${samplerBinding(index)}) var glt${index}: ${kind};
+@group(0) @binding(${samplerBinding(index) + 1}) var gls${index}: ${samplerVarTypeOf(type)};`;
     });
 }
 

@@ -24,7 +24,7 @@ import {
 import { createBufferObject } from './objects.js';
 import { SIZED_FORMATS, TEX } from './formats.js';
 import { clientBytes, transferError, unpackToStorage } from './texture-transfer.js';
-import { TEXTURE_UNITS } from './state.js';
+import { TEXTURE_COORDS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
 import { drawsGeometryInput, expandMode } from './gpu-layout.js';
 import { TESS, tessellationTakes } from './context-tessellation.js';
@@ -33,7 +33,7 @@ import { TESS, tessellationTakes } from './context-tessellation.js';
 const CONVENTIONAL = /** @type {const} */ (['color', 'secondary', 'normal', 'fogCoord']);
 
 /** Each unit's coordinate array by name, asked for on every draw. */
-const TEX_COORD_NAMES = Array.from({ length: TEXTURE_UNITS }, (_, unit)=>`texCoord${unit}`);
+const TEX_COORD_NAMES = Array.from({ length: TEXTURE_COORDS }, (_, unit)=>`texCoord${unit}`);
 
 /**
  * The generic array a program reads under a canonical name, if one is on.
@@ -313,8 +313,8 @@ export function installArrayCalls(context, kernel){
         secondary: createPointer(3, GL.FLOAT),
         fogCoord: createPointer(1, GL.FLOAT),
     };
-    const texCoordPointers = Array.from({ length: TEXTURE_UNITS }, ()=>createPointer(4, GL.FLOAT));
-    const texCoordEnabled = new Array(TEXTURE_UNITS).fill(0);
+    const texCoordPointers = Array.from({ length: TEXTURE_COORDS }, ()=>createPointer(4, GL.FLOAT));
+    const texCoordEnabled = new Array(TEXTURE_COORDS).fill(0);
     // The kinds whose conventional pointer normalises what it reads; a generic
     // write through the aliasing table overwrites the flag either way.
     pointers.normal.normalised = 1;
@@ -541,7 +541,7 @@ export function installArrayCalls(context, kernel){
                 vertex.fogCoord = f[0];
             }
         }
-        for (let unit = 0; unit < TEXTURE_UNITS; unit++)
+        for (let unit = 0; unit < TEXTURE_COORDS; unit++)
         {
             if (texCoordEnabled[unit] === 0)
             {
@@ -600,7 +600,7 @@ export function installArrayCalls(context, kernel){
                 arrays.push({ name, pointer: entry.pointer, normalised: entry.normalised });
             }
         }
-        for (let unit = 0; unit < TEXTURE_UNITS; unit++)
+        for (let unit = 0; unit < TEXTURE_COORDS; unit++)
         {
             const name = TEX_COORD_NAMES[unit];
             if (texCoordEnabled[unit] !== 0)
@@ -847,7 +847,7 @@ export function installArrayCalls(context, kernel){
      * @returns {import('./arrays.js').ArrayPointer | null}
      */
     const aliasRecord = index=>{
-        if (index >= 8 && index < 8 + TEXTURE_UNITS)
+        if (index >= 8 && index < 8 + TEXTURE_COORDS)
         {
             return texCoordPointers[index - 8];
         }
@@ -857,7 +857,7 @@ export function installArrayCalls(context, kernel){
 
     /** @param {number} index @param {number} value */
     const aliasSetEnable = (index, value)=>{
-        if (index >= 8 && index < 8 + TEXTURE_UNITS)
+        if (index >= 8 && index < 8 + TEXTURE_COORDS)
         {
             const unit = index - 8;
             texCoordEnabled[unit] = value;
@@ -871,7 +871,7 @@ export function installArrayCalls(context, kernel){
     };
 
     /** @param {number} index @returns {number} */
-    const aliasEnabled = index=>index >= 8 && index < 8 + TEXTURE_UNITS
+    const aliasEnabled = index=>index >= 8 && index < 8 + TEXTURE_COORDS
         ? texCoordEnabled[index - 8]
         : record(ARRAYS[/** @type {string} */ (conventionalName(index))].enable).values[0];
 
@@ -1621,7 +1621,7 @@ export function installArrayCalls(context, kernel){
             {
                 return;
             }
-            if (unit < GL.TEXTURE0 || unit >= GL.TEXTURE0 + TEXTURE_UNITS)
+            if (unit < GL.TEXTURE0 || unit >= GL.TEXTURE0 + TEXTURE_COORDS)
             {
                 setError(GL.INVALID_ENUM);
                 return;

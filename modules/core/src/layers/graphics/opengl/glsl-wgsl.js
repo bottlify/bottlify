@@ -49,7 +49,7 @@ import {
 import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
-import { CLIP_REMAP } from './arb-wgsl.js';
+import { CLIP_REMAP, samplerBinding } from './arb-wgsl.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
 import { IMAGE_FORMATS } from './glsl-storage.js';
 import { BUFFER_ROW } from './objects.js';
@@ -324,8 +324,6 @@ export function swizzledTexel(value, code, scalar){
         : letter === '1' ? `${scalar}(1)` : `${value}.${letter}`)).join(', ')})`;
 }
 
-/** A sampler's texture binding; its sampler is the next one. @param {number} index */
-export const samplerBinding = index=>1 + index * 2;
 
 /**
  * The WGSL texture a sampler of a type reads: a 1D texture is a 2D one a

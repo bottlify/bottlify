@@ -30,9 +30,11 @@ export const GLSL_LIMITS = Object.freeze({
     vertexAttribs: 16,
     vertexUniformComponents: 1024,
     varyingFloats: 32,
-    vertexTextureImageUnits: 8,
-    combinedTextureImageUnits: 8,
-    textureImageUnits: 8,
+    // WebGPU's sampled textures and samplers a stage, every sampler of a
+    // program being bound for every stage (A181).
+    vertexTextureImageUnits: 16,
+    combinedTextureImageUnits: 16,
+    textureImageUnits: 16,
     fragmentUniformComponents: 1024,
     drawBuffers: 4,
 });

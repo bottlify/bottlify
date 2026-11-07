@@ -330,7 +330,7 @@ test('many bound at once (4.4): textures, samplers and buffers, a refused one le
         assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D), [b], 'the rest still bound');
         gl.glBindTextures(1, 3, null);
         assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D), [0], 'null unbinds each');
-        gl.glBindTextures(7, 2, null);
+        gl.glBindTextures(15, 2, null);
         error(gl, GL.INVALID_OPERATION, 'past the last unit');
 
         const [s] = gl.glGenSamplers(1);

@@ -556,8 +556,8 @@ const CASES = {
     glActiveTextureARB: [
         { label: 'the second unit', args: [GL.TEXTURE1], error: GL.NO_ERROR },
         { label: 'the last unit', args: [GL.TEXTURE0 + 3] },
-        { label: 'the last image unit', args: [GL.TEXTURE0 + 7] },
-        { label: 'past the last image unit', args: [GL.TEXTURE0 + 8], error: GL.INVALID_ENUM },
+        { label: 'the last image unit', args: [GL.TEXTURE0 + 15] },
+        { label: 'past the last image unit', args: [GL.TEXTURE0 + 16], error: GL.INVALID_ENUM },
         { label: 'no unit', args: [0], error: GL.INVALID_ENUM },
     ],
     glClientActiveTextureARB: [
@@ -1209,7 +1209,7 @@ Object.assign(CASES, {
             before: uniforms, error: GL.INVALID_OPERATION }],
     glUniform1i: [...uniformCases(4, [-7], 0),
         { label: 'a sampler\'s unit', args: [28, 3], before: uniforms, error: GL.NO_ERROR },
-        { label: 'a unit past the last', args: [28, 8], before: uniforms,
+        { label: 'a unit past the last', args: [28, 16], before: uniforms,
             error: GL.INVALID_VALUE },
         { label: 'a bool', args: [29, 5], before: uniforms, error: GL.NO_ERROR }],
     glUniform2i: uniformCases(5, [3, -4], 1),

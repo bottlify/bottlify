@@ -70,7 +70,7 @@ import { IMAGE_FORMATS } from './glsl-storage.js';
 const IMAGE_STORAGE = new Set(IMAGE_FORMATS.map(([, , format])=>format));
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
-    VERTEX_PROGRAM_BINDING,
+    VERTEX_PROGRAM_BINDING, samplerBinding, samplerIndex,
 } from './arb-wgsl.js';
 import {
     BLIT_UNIFORM_FLOATS, CLEAR_UNIFORM_FLOATS, CLIP_PLANES, COPY_UNIFORM_FLOATS, UNIFORM, UNITS,
@@ -717,7 +717,7 @@ export function createGpuRenderer(services){
             const program = state.glsl.program;
             const textures = glsl.samplers.map(index=>{
                 const layout = textureLayoutOf(samplerTypeOf(program.samplers[index]));
-                return { binding: 1 + index * 2, cube: layout.viewDimension === 'cube',
+                return { binding: samplerBinding(index), cube: layout.viewDimension === 'cube',
                     unit: -1, sampler: index, layout };
             }).sort((a, b)=>a.binding - b.binding);
             const vertexBlock = glsl.vertex !== null;
@@ -747,7 +747,7 @@ export function createGpuRenderer(services){
             for (const texture of programs.fragment.textures)
             {
                 textures.push({
-                    binding: 1 + texture.unit * 2, cube: texture.target === 'CUBE',
+                    binding: samplerBinding(texture.unit), cube: texture.target === 'CUBE',
                     rectangle: texture.target === 'RECT', unit: texture.unit,
                 });
             }
@@ -755,7 +755,7 @@ export function createGpuRenderer(services){
         else
         {
             state.units.forEach((unit, position)=>textures.push(
-                { binding: 1 + position * 2, cube: unit.cube, unit: unit.index }));
+                { binding: samplerBinding(position), cube: unit.cube, unit: unit.index }));
         }
         textures.sort((a, b)=>a.binding - b.binding);
         const vertexBlock = programs?.vertex != null;
@@ -3133,7 +3133,7 @@ export function createGpuRenderer(services){
             {
                 const textureLayout = textureLayoutOf(samplerTypeOf(
                     running.linked.samplers[index]));
-                const entry = { binding: 1 + index * 2, unit: -1, sampler: index,
+                const entry = { binding: samplerBinding(index), unit: -1, sampler: index,
                     cube: textureLayout.viewDimension === 'cube', layout: textureLayout };
                 const texture = sampledTexture(entry);
                 const copy = textureFor(texture, recording);
@@ -3467,7 +3467,7 @@ export function createGpuRenderer(services){
                 : bound?.twoD;
             return texture ?? incompleteTexture(entry.cube);
         }
-        const position = (entry.binding - 1) / 2;
+        const position = samplerIndex(entry.binding);
         return scene.units[position]?.texture ?? incompleteTexture(entry.cube);
     };
 
@@ -3491,7 +3491,7 @@ export function createGpuRenderer(services){
         {
             return entry.unit ?? 0;
         }
-        return scene.units[(entry.binding - 1) / 2]?.index ?? 0;
+        return scene.units[samplerIndex(entry.binding)]?.index ?? 0;
     };
 
     /**

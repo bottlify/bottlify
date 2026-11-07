@@ -26,6 +26,7 @@ import {
     GLSL_STORAGE_BINDING, samplerTypeOf, textureLayoutOf,
 } from './glsl-wgsl.js';
 import { IMAGE_FORMATS, STORAGE_BUFFER_OFFSET_ALIGNMENT } from './glsl-storage.js';
+import { samplerBinding } from './arb-wgsl.js';
 import { generateGlslCompute } from './wgsl.js';
 
 const COMPUTE_STAGE = 4;
@@ -376,7 +377,7 @@ export function createGlCompute(services){
         for (const index of stage.samplers)
         {
             const textureLayout = textureLayoutOf(samplerTypeOf(executable.linked.samplers[index]));
-            const entry = { binding: 1 + index * 2, unit: -1, sampler: index,
+            const entry = { binding: samplerBinding(index), unit: -1, sampler: index,
                 cube: textureLayout.viewDimension === 'cube', layout: textureLayout };
             const texture = services.textureForSampler(scene, executable, entry);
             const copy = services.textureFor(texture, recording);

@@ -190,7 +190,7 @@ event, an error. Neither stops the program.
   target draws with one sample a pixel. A framebuffer whose attachments differ in size, has
   separate depth and stencil images, or a slice of a 3D texture is
   `GL_FRAMEBUFFER_UNSUPPORTED`; `glBlitFramebuffer` copies colour only. Some limits are below
-  4.6's minimums: 8192 texels a side (2048 for 3D, 256 layers), 8 texture units, 4 draw
+  4.6's minimums: 8192 texels a side (2048 for 3D, 256 layers), 16 texture units, 4 draw
   buffers, 32 varying components, 4 image uniforms a stage, WebGPU's compute limits.
 - OpenGL SPIR-V shaders (`glShaderBinary` with `GL_SHADER_BINARY_FORMAT_SPIR_V`,
   `glSpecializeShader`) are written back as GLSL and compiled as a source shader is, so they take
