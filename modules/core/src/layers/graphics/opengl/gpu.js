@@ -380,6 +380,13 @@ function describeCensus(texture){
  */
 
 /**
+ * An occlusion query as the renderer counts it: the samples its draws passed
+ * so far, and what to tell once the recording that ended it is counted.
+ *
+ * @typedef {{ samples: number, finish: () => void }} OcclusionCount
+ */
+
+/**
  * @typedef {Object} ClearRequest
  * @property {{ fbo: any, width: number, height: number } | null} [target]  the framebuffer
  *     object cleared, or the window
@@ -481,6 +488,23 @@ export function createGpuRenderer(services){
     /** @type {WeakMap<object, DrawableSurfaces>} context -> its drawable's surfaces */
     const drawables = new WeakMap();
     /**
+     * The occlusion query each context counts its draws into (glBeginQuery),
+     * and what counting needs of it: its samples, summed over the draws
+     * recorded while it was active, and `finish`, told once the recording
+     * that ended it has been replayed and counted.
+     *
+     * @type {WeakMap<object, OcclusionCount>}
+     */
+    const activeQueries = new WeakMap();
+    /**
+     * The query each context's rendering is conditional on
+     * (glBeginConditionalRender), and whether the condition is inverted.
+     *
+     * @type {WeakMap<object, { query: { samples: number, available: boolean },
+     *     inverted: boolean }>}
+     */
+    const conditions = new WeakMap();
+    /**
      * The buffers of each window a context was made current on, by its
      * drawable's key: the window's, whichever context draws.
      *
@@ -501,6 +525,8 @@ export function createGpuRenderer(services){
      * @property {{ draws: number, clears: number, copies: number, refused: number,
      *               skipped: number, cut: number, merged: number }} counts
      * @property {(() => void) | null} replayed  told once its replay has run (`fence`)
+     * @property {OcclusionCount[]} [ending]  the occlusion queries it ended, finished
+     *     once it has been replayed and counted
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -2480,6 +2506,7 @@ export function createGpuRenderer(services){
         // joined, the second range of each would come before the first's next.
         if (a.kind !== 'draw' || b.kind !== 'draw' || !a.indices || !b.indices
             || a.instances !== 1 || b.instances !== 1 || !shareEveryDependency(a, b)
+            || a.occluded !== b.occluded || a.conditioned !== b.conditioned
             || b.indices.offset !== a.indices.offset + a.count * indexBytes(a.indices.format))
         {
             return;
@@ -2790,6 +2817,9 @@ export function createGpuRenderer(services){
             blendConstant: blendConstantOf(scene.blend, scene.blendColor ?? [0, 0, 0, 0]),
             probe,
             probeDraw: recording.counts.draws - 1,
+            // The occlusion query counting the samples this draw passes.
+            occluded: activeQueries.get(context) ?? null,
+            conditioned: conditions.get(context) ?? null,
         });
         // A dump or a probe addresses a frame's draws by number to find a
         // specific painter or a specific moment; joining two of them into
@@ -3688,6 +3718,7 @@ export function createGpuRenderer(services){
             stencilReference: request.stencil & 0xff,
             target,
             blendConstant: null,
+            conditioned: conditions.get(context) ?? null,
         });
     };
 
@@ -3736,6 +3767,14 @@ export function createGpuRenderer(services){
             : recording.pipelines);
         /** @type {(() => Promise<any>) | null} */
         let copied = null;
+        // Occlusion queries: a slot of the frame's set around every draw a
+        // query counts, so that a query may span passes, which WebGPU's
+        // cannot; a slot past the set's last is a draw counted as passing.
+        const counting = recording.commands.some(command=>command.occluded);
+        /** @type {[OcclusionCount, number | null][]} */
+        const slots = [];
+        /** @type {(() => Promise<number[]>) | null} */
+        let counted = null;
         const frame = backend.beginFrame({ cut });
         const probing = recording === newest;
         // Which candidates the read-backs go to: the window the probe named,
@@ -3798,6 +3837,7 @@ export function createGpuRenderer(services){
                 pass = frame.beginPass({
                     targets: drawn.colours,
                     clear: false,
+                    occlusion: counting,
                     depthTarget: drawn.depth ?? undefined,
                     depthStencilAttachment: drawn.depth
                         ? {
@@ -3843,6 +3883,13 @@ export function createGpuRenderer(services){
                     continue;
                 }
                 const pipeline = outcome.value;
+                // Rendered on a condition the query it names did not meet.
+                const condition = command.conditioned;
+                if (condition && condition.query.available
+                    && (condition.query.samples > 0) === condition.inverted)
+                {
+                    continue;
+                }
                 if (command.kind === 'depth')
                 {
                     frame.writeDepth(command.surface, command.words, pipeline);
@@ -3926,6 +3973,7 @@ export function createGpuRenderer(services){
                 command.slots.forEach((/** @type {any} */ slot, /** @type {number} */ index)=>{
                     pass.setVertexBuffer(index, slot.gpu, slot.offset);
                 });
+                const slot = command.occluded ? pass.beginOcclusionQuery() : null;
                 if (command.indices)
                 {
                     pass.setIndexBuffer(command.indices.gpu, command.indices.format,
@@ -3937,6 +3985,14 @@ export function createGpuRenderer(services){
                 {
                     pass.draw(command.count, command.instances, command.first);
                 }
+                if (command.occluded)
+                {
+                    if (slot !== null)
+                    {
+                        pass.endOcclusionQuery();
+                    }
+                    slots.push([command.occluded, slot]);
+                }
                 if (probeAt.has(at))
                 {
                     probes[probes.length - 1].after = frame.snapshot(target.colour);
@@ -3946,6 +4002,10 @@ export function createGpuRenderer(services){
             if (read)
             {
                 copied = frame.snapshot(read);
+            }
+            if (counting)
+            {
+                counted = frame.occlusionResults();
             }
             // A frame drawn for a read shows nothing.
             const shownBy = shown ? built[built.length - 1] : null;
@@ -3985,7 +4045,39 @@ export function createGpuRenderer(services){
                     .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
                     .join(' ')}]`;
         }
+        await countQueries(recording, slots, counted);
         return copied ? copied() : null;
+    };
+
+    /**
+     * Adds what each counted draw passed to its query, then finishes the
+     * queries this recording ended; a slot past the frame's set counts the
+     * draw as passing, and a count that never came finishes them all the same.
+     *
+     * @param {Recording} recording @param {[OcclusionCount, number | null][]} slots
+     * @param {(() => Promise<number[]>) | null} counted
+     */
+    const countQueries = async(recording, slots, counted)=>{
+        try
+        {
+            const counts = counted && slots.length > 0 ? await counted() : [];
+            for (const [query, slot] of slots)
+            {
+                if (slot === null)
+                {
+                    diverge('an occlusion query counted past the frame\'s set of slots, and'
+                        + ' those draws were counted as passing');
+                }
+                query.samples += slot === null ? 1 : counts[slot] ?? 0;
+            }
+        }
+        finally
+        {
+            for (const query of recording.ending ?? [])
+            {
+                query.finish();
+            }
+        }
     };
 
     /**
@@ -4222,6 +4314,65 @@ export function createGpuRenderer(services){
                 }
                 return out;
             });
+        },
+
+        /**
+         * Counts the samples the context's draws pass into `query` until
+         * `endQuery` (glBeginQuery of an occlusion target).
+         *
+         * @param {object} context @param {OcclusionCount} query
+         */
+        beginQuery(context, query){
+            activeQueries.set(context, query);
+        },
+
+        /**
+         * Makes the context's draws and clears conditional on `query` from
+         * here (glBeginConditionalRender), or not (null). A query the
+         * recording still open ended is replayed first, so that its count is
+         * known when the draws on it are.
+         *
+         * @param {object} context
+         * @param {(OcclusionCount & { available: boolean }) | null} query
+         * @param {boolean} inverted
+         */
+        condition(context, query, inverted){
+            if (!query)
+            {
+                conditions.delete(context);
+                return;
+            }
+            conditions.set(context, { query, inverted });
+            const surfaces = drawables.get(context);
+            if (!query.available && surfaces && recordings.get(context)?.ending?.includes(query))
+            {
+                void flush(context, surfaces, null);
+            }
+        },
+
+        /**
+         * Replays what the context recorded so far now: a result waited for.
+         *
+         * @param {object} context
+         */
+        flushContext(context){
+            const surfaces = drawables.get(context);
+            if (surfaces && recordings.has(context))
+            {
+                void flush(context, surfaces, null);
+            }
+        },
+
+        /**
+         * Ends the context's count: the query is finished once what was
+         * recorded up to here has been replayed and counted.
+         *
+         * @param {object} context @param {OcclusionCount} query
+         */
+        endQuery(context, query){
+            activeQueries.delete(context);
+            const recording = recordingOf(context);
+            (recording.ending ??= []).push(query);
         },
 
         /**

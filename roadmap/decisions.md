@@ -1061,6 +1061,12 @@ zero; the specification leaves the last two undefined. *2026-11-06.*
 GL_MAX_DUAL_SOURCE_DRAW_BUFFERS is 1, as 3.3 requires, but no blend factor reads the second
 colour yet. *2026-11-06.*
 
+**A119. Temporary: an OpenGL timer query reads the processor's clock.** GL_TIME_ELAPSED is the
+nanoseconds of the page's clock between glBeginQuery and glEndQuery as the calls are made, and
+GL_TIMESTAMP the clock at glQueryCounter; the device's own timestamps (`timestamp-query`) are not
+read. A program timing its passes sees how long it took to issue them, not to draw them.
+*2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

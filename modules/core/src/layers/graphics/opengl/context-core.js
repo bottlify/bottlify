@@ -66,29 +66,17 @@ const BACK = { func: GL.STENCIL_BACK_FUNC, ref: GL.STENCIL_BACK_REF,
 const WINDOW_BUFFERS = new Set([GL.NONE, GL.FRONT_LEFT, GL.FRONT_RIGHT, GL.BACK_LEFT,
     GL.BACK_RIGHT, GL.AUX0]);
 
-/**
- * The calls of this file a display list does not record: the query objects'.
- */
-export const CORE_CALLS_NOT_COMPILED = Object.freeze([
-    'glGenQueries', 'glDeleteQueries', 'glIsQuery', 'glGetQueryiv', 'glGetQueryObject',
-]);
 
 /**
  * @param {any} context
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function installCoreCalls(context, kernel){
-    const { enter, setError, setState, record, diverge } = kernel;
+    const { enter, setError, setState, record } = kernel;
 
     /** @param {number} face @returns {StencilQueries[] | null} */
     const facesOf = face=>(face === GL.FRONT ? [FRONT] : face === GL.BACK ? [BACK]
         : face === GL.FRONT_AND_BACK ? [FRONT, BACK] : null);
-
-    /** The query objects: names, and the one active. */
-    /** @type {Map<number, { result: number } | null>} */
-    const queries = new Map();
-    /** @type {{ name: number } | null} */
-    let activeQuery = null;
 
     /** @param {number} value */
     const clamp01 = value=>(value < 0 ? 0 : value > 1 ? 1 : value);
@@ -318,146 +306,6 @@ export function installCoreCalls(context, kernel){
             setState(GL.CURRENT_RASTER_DISTANCE, [current.fogCoord]);
         },
 
-        // --- occlusion queries ---
-
-        /** @param {number} count @returns {number[]} */
-        glGenQueries(count){
-            if (!enter('glGenQueries', [count]))
-            {
-                return [];
-            }
-            if (count < 0)
-            {
-                setError(GL.INVALID_VALUE);
-                return [];
-            }
-            /** @type {number[]} */
-            const names = [];
-            for (let name = 1; names.length < count; name++)
-            {
-                if (!queries.has(name))
-                {
-                    queries.set(name, null);
-                    names.push(name);
-                }
-            }
-            return names;
-        },
-
-        /** @param {readonly number[]} names */
-        glDeleteQueries(names){
-            if (!enter('glDeleteQueries', [names]))
-            {
-                return;
-            }
-            for (const name of names)
-            {
-                if (activeQuery?.name === name)
-                {
-                    activeQuery = null;
-                }
-                queries.delete(name);
-            }
-        },
-
-        /** @param {number} name @returns {number} */
-        glIsQuery(name){
-            if (!enter('glIsQuery', [name]))
-            {
-                return GL.FALSE;
-            }
-            return queries.get(name) ? GL.TRUE : GL.FALSE;
-        },
-
-        /** @param {number} target @param {number} name */
-        glBeginQuery(target, name){
-            if (!enter('glBeginQuery', [target, name]))
-            {
-                return;
-            }
-            if (target !== GL.SAMPLES_PASSED)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (name === 0 || activeQuery)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            activeQuery = { name };
-            queries.set(name, { result: 0 });
-        },
-
-        /** @param {number} target */
-        glEndQuery(target){
-            if (!enter('glEndQuery', [target]))
-            {
-                return;
-            }
-            if (target !== GL.SAMPLES_PASSED)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (!activeQuery)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            diverge('an occlusion query was answered with the viewport\'s area, not the samples'
-                + ' that passed: a program culling by it draws everything');
-            const [, , width, height] = record(GL.VIEWPORT).values;
-            queries.set(activeQuery.name, { result: Math.max(1, width * height) });
-            activeQuery = null;
-        },
-
-        /** @param {number} target @param {number} pname @returns {number[] | null} */
-        glGetQueryiv(target, pname){
-            if (!enter('glGetQueryiv', [target, pname]))
-            {
-                return null;
-            }
-            if (target !== GL.SAMPLES_PASSED)
-            {
-                setError(GL.INVALID_ENUM);
-                return null;
-            }
-            if (pname === GL.QUERY_COUNTER_BITS)
-            {
-                return [32];
-            }
-            if (pname === GL.CURRENT_QUERY)
-            {
-                return [activeQuery?.name ?? 0];
-            }
-            setError(GL.INVALID_ENUM);
-            return null;
-        },
-
-        /** @param {number} name @param {number} pname @returns {number[] | null} */
-        glGetQueryObject(name, pname){
-            if (!enter('glGetQueryObject', [name, pname]))
-            {
-                return null;
-            }
-            const query = queries.get(name);
-            if (!query || activeQuery?.name === name)
-            {
-                setError(GL.INVALID_OPERATION);
-                return null;
-            }
-            if (pname === GL.QUERY_RESULT_AVAILABLE)
-            {
-                return [1];
-            }
-            if (pname === GL.QUERY_RESULT)
-            {
-                return [query.result];
-            }
-            setError(GL.INVALID_ENUM);
-            return null;
-        },
 
     });
 }

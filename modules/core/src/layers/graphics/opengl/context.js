@@ -46,6 +46,7 @@ import {
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
 import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
 import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
+import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -56,7 +57,7 @@ import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
 import { SHADER_CALLS_NOT_COMPILED, installShaderCalls } from './context-glsl.js';
 import { FRAMEBUFFER_CALLS_NOT_COMPILED, installFramebufferCalls } from './context-framebuffers.js';
-import { BLEND_FACTORS, CORE_CALLS_NOT_COMPILED, installCoreCalls } from './context-core.js';
+import { BLEND_FACTORS, installCoreCalls } from './context-core.js';
 import { VERTEX_ARRAY_CALLS_NOT_COMPILED, installVertexArrayCalls } from './context-vao.js';
 import {
     UNIFORM_BUFFER_CALLS_NOT_COMPILED, installUniformBufferCalls,
@@ -120,9 +121,10 @@ const NOT_COMPILABLE = new Set([
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
     'glVertexAttribIPointer', 'getVertexAttribI',
-    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
+    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
+    ...QUERY_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -469,6 +471,14 @@ export function createGlContext(options = {}){
             : null,
         fence: gpu?.fence
             ? ()=>(attached ? gpu.fence(context) : null)
+            : null,
+        queries: gpu?.beginQuery
+            ? {
+                begin: query=>gpu.beginQuery(context, query),
+                end: query=>gpu.endQuery(context, query),
+                flush: ()=>gpu.flushContext(context),
+                condition: (query, inverted)=>gpu.condition(context, query, inverted),
+            }
             : null,
         readBack: gpu?.readPixels
             ? rect=>(attached
@@ -1750,6 +1760,7 @@ export function createGlContext(options = {}){
     installIndexedCalls(context, kernel);
     installSyncCalls(context, kernel);
     installSamplerCalls(context, kernel);
+    installQueryCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 

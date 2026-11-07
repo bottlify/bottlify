@@ -576,10 +576,11 @@ export function laterEntryPoints(h){
         glEndQuery: ([target])=>answer(current()?.glEndQuery(target >>> 0)),
         glGetQueryiv: ([target, pname, out])=>call(context=>writeQuery(out,
             context.glGetQueryiv(target >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectuiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
+        glQueryCounter: ([name, target])=>answer(current()?.glQueryCounter(name >>> 0,
+            target >>> 0)),
+        glBeginConditionalRender: ([name, mode])=>answer(current()
+            ?.glBeginConditionalRender(name >>> 0, mode >>> 0)),
+        glEndConditionalRender: ()=>answer(current()?.glEndConditionalRender()),
 
         // --- 3D textures and texture arrays ---
 
