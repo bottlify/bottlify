@@ -532,6 +532,61 @@ export function stripWithAdjacency(count){
     return out;
 }
 
+/**
+ * A draw's vertices in an order that puts each primitive's provoking vertex
+ * first, which is the one WebGPU takes a flat value from, where GL takes the
+ * last (OpenGL 3.2 section 2.18, table 2.12, GL_LAST_VERTEX_CONVENTION): each
+ * primitive of the mode's list turned round by one, which keeps a
+ * triangle's winding. A quad's is its fourth vertex, which its two
+ * triangles take only when the diagonal runs to it; a polygon's is its
+ * first, where it is already. Null for a mode with nothing to turn.
+ *
+ * @param {number} mode @param {number} count
+ * @returns {Uint32Array | null}
+ */
+export function lastProvoking(mode, count){
+    if (mode === GL.POINTS || mode === GL.POLYGON)
+    {
+        return null;
+    }
+    /** @type {number[]} */
+    let order = [];
+    let size = topologyOf(mode) === 'line-list' ? 2 : 3;
+    if (mode === GL.QUADS)
+    {
+        for (let i = 0; i + 3 < count; i += 4)
+        {
+            order.push(i, i + 1, i + 3, i + 1, i + 2, i + 3);
+        }
+    }
+    else if (mode === GL.QUAD_STRIP)
+    {
+        for (let i = 0; i + 3 < count; i += 2)
+        {
+            order.push(i, i + 1, i + 3, i + 2, i, i + 3);
+        }
+    }
+    else if (isList(mode))
+    {
+        order = Array.from({ length: count - count % size }, (_, k)=>k);
+    }
+    else
+    {
+        order = [...expandMode(mode, count) ?? []];
+    }
+    size = Math.max(1, size);
+    const out = new Uint32Array(order.length - order.length % size);
+    for (let k = 0; k < out.length; k += size)
+    {
+        out[k] = order[k + size - 1];
+        for (let j = 1; j < size; j++)
+        {
+            out[k + j] = order[k + j - 1];
+        }
+    }
+    return out;
+}
+
 /** The vertices a geometry shader reads a primitive, by the primitive it takes. */
 export const GEOMETRY_INPUT_VERTICES = Object.freeze(/** @type {Record<string, number>} */ ({
     points: 1, lines: 2, lines_adjacency: 4, triangles: 3, triangles_adjacency: 6,

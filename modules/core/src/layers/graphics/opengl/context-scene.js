@@ -392,6 +392,7 @@ export function createSceneBuilder(kernel){
                 : null,
             frontIsCcw: record(GL.FRONT_FACE).values[0] === GL.CCW,
             flat: record(GL.SHADE_MODEL).values[0] === GL.FLAT,
+            lastProvokes: record(GL.PROVOKING_VERTEX).values[0] === GL.LAST_VERTEX_CONVENTION,
             polygonMode: record(GL.POLYGON_MODE).values,
             pointSize: record(GL.POINT_SIZE).values[0],
             alphaTest: on(GL.ALPHA_TEST)

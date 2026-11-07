@@ -333,6 +333,15 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.CULL_FACE_MODE, name: 'GL_CULL_FACE_MODE', kind: 'enum', value: [GL.BACK] },
     { query: GL.FRONT_FACE, name: 'GL_FRONT_FACE', kind: 'enum', value: [GL.CCW] },
     { query: GL.SHADE_MODEL, name: 'GL_SHADE_MODEL', kind: 'enum', value: [GL.SMOOTH] },
+    // OpenGL 3.2: which vertex of a primitive a flat value is taken from.
+    {
+        query: GL.PROVOKING_VERTEX, name: 'GL_PROVOKING_VERTEX', kind: 'enum',
+        value: [GL.LAST_VERTEX_CONVENTION],
+    },
+    {
+        query: GL.QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION,
+        name: 'GL_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION', kind: 'int', value: [0],
+    },
     { query: GL.POLYGON_MODE, name: 'GL_POLYGON_MODE', kind: 'enum', value: [GL.FILL, GL.FILL] },
     { query: GL.POINT_SIZE, name: 'GL_POINT_SIZE', kind: 'float', value: [1] },
     { query: GL.LINE_WIDTH, name: 'GL_LINE_WIDTH', kind: 'float', value: [1] },

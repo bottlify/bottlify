@@ -682,6 +682,8 @@ export function laterEntryPoints(h){
                 length, out)),
         glUniformBlockBinding: ([program, index, binding])=>answer(
             current()?.glUniformBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glProvokingVertex: ([mode])=>answer(current()?.glProvokingVertex(mode >>> 0)),
+
         // --- transform feedback ---
 
         glTransformFeedbackVaryings: ([program, count, names, mode])=>answer(current()

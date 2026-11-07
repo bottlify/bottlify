@@ -998,6 +998,12 @@ export function createGlContext(options = {}){
             setEnum('glShadeModel', GL.SHADE_MODEL, mode, new Set([GL.FLAT, GL.SMOOTH]));
         },
 
+        /** @param {number} mode  glProvokingVertex (3.2, GL_ARB_provoking_vertex) */
+        glProvokingVertex(mode){
+            setEnum('glProvokingVertex', GL.PROVOKING_VERTEX, mode,
+                new Set([GL.FIRST_VERTEX_CONVENTION, GL.LAST_VERTEX_CONVENTION]));
+        },
+
         /** @param {number} opcode */
         glLogicOp(opcode){
             setEnum('glLogicOp', GL.LOGIC_OP_MODE, opcode, LOGIC_OPS);

@@ -165,6 +165,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {{ mode: number, frontIsCcw: boolean } | null} cull
  * @property {boolean} frontIsCcw
  * @property {boolean} flat
+ * @property {boolean} [lastProvokes]  GL_LAST_VERTEX_CONVENTION: a flat value is a
+ *           primitive's last vertex's
  * @property {readonly number[]} polygonMode  front, back
  * @property {number} pointSize
  * @property {{ func: number, reference: number } | null} alphaTest

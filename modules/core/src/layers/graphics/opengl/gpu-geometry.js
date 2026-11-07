@@ -119,6 +119,8 @@ const vertexPassEntries = slots=>[
  * @property {number} positions  the positions of the draw an instance, in the
  *     order the geometry shader reads them
  * @property {number} instances
+ * @property {boolean} [lastProvokes]  a flat value is each primitive's last
+ *     vertex's (`geometryIndexWgsl`'s `last`)
  */
 
 /** @param {GeometryServices} services */
@@ -319,9 +321,10 @@ export function createGlGeometry(services){
             grid: [1, 1, 1],
         });
         recorded.push({
-            pipeline: computeFor(`gs-list:${most}|${vpp}`, geometryIndexWgsl({ streams: 1,
-                maxOut: most, outputVertices: vpp }), 'listGeometry', [INDEX_ENTRIES],
-            'gl:geometry-list'),
+            pipeline: computeFor(`gs-list:${most}|${vpp}|${draw.lastProvokes ? 'l' : 'f'}`,
+                geometryIndexWgsl({ streams: 1, maxOut: most, outputVertices: vpp,
+                    last: draw.lastProvokes }), 'listGeometry', [INDEX_ENTRIES],
+                'gl:geometry-list'),
             label: 'gl:geometry-list',
             groups: [[
                 { binding: GEOMETRY_INDEX_BINDING.starts, resource: whole(starts, startsBytes) },

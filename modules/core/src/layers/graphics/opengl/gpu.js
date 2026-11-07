@@ -56,8 +56,8 @@ import { TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
 import {
     CANONICAL_LAYOUT, clientReads, drawsGeometryInput, expandIndices, geometryOrder,
-    instanceElements, isList, lockedFor, packVertices, planLayout, scanIndices, topologyOf,
-    vertexRange,
+    instanceElements, isList, lastProvoking, lockedFor, packVertices, planLayout, scanIndices,
+    topologyOf, vertexRange,
 } from './gpu-layout.js';
 import { createGlGeometry } from './gpu-geometry.js';
 import {
@@ -2895,6 +2895,9 @@ export function createGpuRenderer(services){
                 indices: indices ? { gpu: indices.gpu, offset: indices.offset,
                     bytes: indices.format === 'uint16' ? 2 : 4 } : null,
                 first, baseVertex, positions: count, instances,
+                lastProvokes: !!scene.lastProvokes && (scene.flat
+                    || executable.linked.varyings.some(v=>v.interpolation === 'flat')
+                    || !!executable.linked.fragment?.uses.has('gl_PrimitiveID')),
             });
             if (!prepared)
             {
@@ -3602,9 +3605,15 @@ export function createGpuRenderer(services){
                 + ` ${geometryLayout.input} drew nothing`);
             return true;
         }
-        const order = geometryLayout ? geometryOrder(request.mode, request.count) : null;
-        const list = geometryLayout ? order === null : isList(request.mode);
-        const expanded = list ? null : geometryLayout
+        // A flat value is the provoking vertex's: GL's last, WebGPU's first,
+        // so where a flat value is drawn each primitive is turned round.
+        const glsl = drawn.programs.glsl?.linked ?? null;
+        const provoking = !geometryLayout && drawn.lastProvokes && (drawn.flat
+            || !!glsl?.varyings.some(varying=>varying.interpolation === 'flat'))
+            ? lastProvoking(request.mode, request.count) : null;
+        const order = geometryLayout ? geometryOrder(request.mode, request.count) : provoking;
+        const list = geometryLayout ? order === null : provoking ? false : isList(request.mode);
+        const expanded = list ? null : geometryLayout || provoking
             ? reordered(/** @type {Uint32Array} */ (order), scanned ? scanned.indices : null)
             : /** @type {Uint32Array} */ (expandIndices(request.mode,
                 scanned ? scanned.indices : null, request.count));
