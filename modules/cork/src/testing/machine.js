@@ -22,7 +22,7 @@ import {
     PAGE, Tables, basesOf, executorBytes, executorLayout, ownLayout, pagesFor, sharedLayout,
     tablesSize,
 } from '../runtime/layout.js';
-import { createPageTable } from '../runtime/pages.js';
+import { PageFlag, createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { SHAPE, isX87 } from '../emit/x87.js';
 import { PRECISION } from '../emit/memory.js';
@@ -35,7 +35,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
- *     processors?: number, shared?: boolean,
+ *     processors?: number, shared?: boolean, growing?: { floor: number, tablesAt: number },
  *     features?: Partial<import('../wasm/features.js').Features> }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
@@ -51,7 +51,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     shared: regions translated for the process's shared layout (`sharedLayout`) and run
  *     here with this executor's bases, as every executor of a process runs them; features:
  *     another host's engine in place of this one's (`features`), the regions translated as
- *     that host's translator makes them -- an arm64 one's default NaN is positive
+ *     that host's translator makes them -- an arm64 one's default NaN is positive; growing:
+ *     a memory that grows (`ownLayout`'s `ramFloor`), its RAM at 0 with the tables inside it
+ *     at `tablesAt`, holding `floor` bytes of it and every page past them closed
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, trapPort, trap, rdtsc, leaveOut = [],
@@ -61,8 +63,10 @@ export function createTestMachine(given = {}){
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
     // A small entry hash: a test's program has few block starts, and a machine
     // per test zeroing the engine's default would be most of the suite's time.
+    const growing = given.growing;
     const first = ownLayout({ ramSize, hashSlots: given.hashSlots ?? 1 << 16,
-        processors: given.processors ?? 1 });
+        processors: given.processors ?? 1, ...growing === undefined ? {}
+            : { ramBase: 0, tablesAt: growing.tablesAt, ramFloor: growing.floor } });
     const firstPages = pagesFor(first, tablesSize(first));
     const layout = executor === 0 ? first
         : executorLayout(first, firstPages * PAGE + (executor - 1) * executorBytes(first),
@@ -74,6 +78,11 @@ export function createTestMachine(given = {}){
     const memory = new WebAssembly.Memory({
         initial: firstPages + executor * executorBytes(first) / PAGE });
     const pages = createPageTable(memory, layout);
+    if (growing !== undefined && first.wrap !== undefined)
+    {
+        new DataView(memory.buffer).setUint32(first.wrap, growing.floor - 1, true);
+        pages.markRange(growing.floor, ramSize - growing.floor, PageFlag.INACCESSIBLE);
+    }
     // The x87 as a fresh processor has it: every register empty, the
     // default control word.
     new DataView(memory.buffer).setUint8(layout.x87Empty, 0xff);

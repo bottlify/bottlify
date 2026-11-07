@@ -219,11 +219,13 @@ export const LOW_STATE = 4096;
 
 /**
  * Where in the first executor's state page a growing layout keeps the mask a
- * read left untested is wrapped by (`ramFloor`, `wrapIntoRam`): past the state
- * block, the block marks and the interrupt word, short of the wasm
- * interpreter's statics. One word, the process's: every executor reads it.
+ * read left untested is wrapped by (`ramFloor`, `wrapIntoRam`): the page's last
+ * word, past the state block, the NaN record, the interrupt word and the call
+ * stack's return addresses (`CallStack`, to 3600 at its deepest), short of the
+ * wasm interpreter's statics (`state-page.test.js` holds them apart). One word,
+ * the process's: every executor reads it.
  */
-export const WRAP_WORD = 3072;
+export const WRAP_WORD = 4092;
 
 /**
  * What a growing memory holds past the RAM the wrap reaches: a read wrapped to
