@@ -125,7 +125,7 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *     anonymous?: (attributes: number, size: number) => { read: number, write: number } | null }}
  *     [pipes]  CreatePipe's pair as the named pipes make it, and PeekNamedPipe of a
  *           named pipe's end
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
  * @property {{ shared: ReturnType<typeof import('./shared-views.js').createSharedViews>,
  *     process: number }} [sharedViews]
  *           The run's agreement between views of one page-file section, and
@@ -836,7 +836,10 @@ export function createMappingFunctions(host){
                     metrics.waited++;
                 }
                 const arriving = /** @type {Promise<Uint8Array>} */ (bytes);
-                return /** @type {any} */ (arriving.then(deliver, ()=>{
+                return /** @type {any} */ (arriving.then(deliver, reason=>{
+                    const why = /** @type {any} */ (reason)?.message ?? String(reason);
+                    host.divergence?.('MapViewOfFile',
+                        `${wanted} bytes at ${offset} of the file did not arrive: ${why}`, 'loss');
                     host.files.close(mapping.node);
                     host.release(address);
                     host.setLastErrorFor?.(owner, ERROR_IO_DEVICE);

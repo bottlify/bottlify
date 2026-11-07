@@ -30,6 +30,13 @@
  * The FILE_NOTIFY_CHANGE_ kinds a change to a name is: its name (a file's or
  * a directory's), its attributes, its size and its last write.
  */
+/**
+ * The most of one read fetched at once: a small share of the smallest place
+ * blocks are kept (64 MiB in the heap), with room for the window a miss
+ * brings in around it.
+ */
+export const FETCHED_PIECE_BYTES = 8 << 20;
+
 const CHANGE_FILE_NAME = 0x001;
 const CHANGE_DIR_NAME = 0x002;
 const CHANGE_ATTRIBUTES = 0x004;
@@ -90,6 +97,64 @@ export function createVolume(fs, fetchBlocks = null){
             }
             return fallback;
         }
+    };
+
+    /**
+     * A read too large to fetch whole, fetched and copied a piece at a time.
+     *
+     * The blocks a read needs must all be resident when it copies them, and
+     * where they are kept in the heap (no origin store) that keeps 64 MiB: a
+     * program mapping a 241 MiB archive whole fetched every block, found the
+     * first ones evicted by the last and was told the map failed. A piece
+     * holds a fraction of that bound, so its fetch cannot evict itself; each
+     * piece keeps the one retry a read has.
+     *
+     * @param {any} node @param {number} offset @param {number} length
+     * @returns {Promise<Uint8Array>}
+     */
+    const readInPieces = async(node, offset, length)=>{
+        const fetch = /** @type {(blocks: any[]) => Promise<void>} */ (fetchBlocks);
+        /** @type {Uint8Array[]} */
+        const pieces = [];
+        let total = 0;
+        while (total < length)
+        {
+            const wanted = Math.min(FETCHED_PIECE_BYTES, length - total);
+            fs.seek(node, offset + total, SeekFrom.BEGIN);
+            let piece;
+            try
+            {
+                piece = fs.read(node, wanted);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS')
+                {
+                    throw miss;
+                }
+                await fetch(miss.blocks);
+                fs.seek(node, offset + total, SeekFrom.BEGIN);
+                piece = fs.read(node, wanted);
+            }
+            pieces.push(piece);
+            total += piece.length;
+            if (piece.length < wanted)
+            {
+                break;
+            }
+        }
+        if (pieces.length === 1)
+        {
+            return pieces[0];
+        }
+        const bytes = new Uint8Array(total);
+        let at = 0;
+        for (const piece of pieces)
+        {
+            bytes.set(piece, at);
+            at += piece.length;
+        }
+        return bytes;
     };
 
     /**
@@ -445,14 +510,17 @@ export function createVolume(fs, fetchBlocks = null){
                 {
                     throw miss;
                 }
-                return (async()=>{
-                    await fetchBlocks(miss.blocks);
-                    fs.seek(node, offset, SeekFrom.BEGIN);
-                    // One retry, not a loop: the miss named every absent block,
-                    // so a second miss means the fetch did not deliver and
-                    // looping would only hide that.
-                    return fs.read(node, length);
-                })();
+                if (length <= FETCHED_PIECE_BYTES)
+                {
+                    return fetchBlocks(miss.blocks).then(()=>{
+                        fs.seek(node, offset, SeekFrom.BEGIN);
+                        // One retry, not a loop: the miss named every absent
+                        // block, so a second miss means the fetch did not
+                        // deliver and looping would only hide that.
+                        return fs.read(node, length);
+                    });
+                }
+                return readInPieces(node, offset, length);
             }
         },
 

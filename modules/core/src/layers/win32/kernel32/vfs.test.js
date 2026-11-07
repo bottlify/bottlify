@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
-import { createVolume } from './vfs.js';
+import { createVolume, FETCHED_PIECE_BYTES } from './vfs.js';
 
 async function volume(){
     const fs = await filesystemModule.create({});
@@ -100,6 +100,70 @@ test('a write into a file whose blocks are not resident waits for them, as a rea
     assert.deepEqual(fetched, absent, 'the blocks the miss named are the ones fetched');
     assert.deepEqual([...vol.read(node, 0, 3)], [1, 2, 3],
         'the bytes written are the ones passed at the call');
+    vol.close(node);
+});
+
+test('a read larger than the blocks kept at once arrives whole, a piece at a time', async()=>{
+    // Where blocks are kept in the heap only a bounded number stay: a program
+    // that maps a 241 MiB archive whole needs more than that, and a read
+    // that fetched every block before copying any found its first ones
+    // evicted by its last.
+    const fs = await filesystemModule.create({});
+    const BLOCK = 1 << 20;
+    const KEPT = 12;
+    const size = 3 * FETCHED_PIECE_BYTES + 12345;
+    const writer = createVolume(fs);
+    const made = writer.open('C:\\archive.ung', { read: true, write: true, create: true });
+    const contents = new Uint8Array(size).map((unused, index)=>(index * 7 + (index >>> 20)) & 0xff);
+    writer.write(made, 0, contents);
+    writer.close(made);
+
+    /** @type {number[]} */
+    const resident = [];
+    let at = 0;
+    const bundled = Object.create(fs);
+    /** @param {any} node @param {number} offset @param {any} from */
+    const seek = (node, offset, from)=>{
+        at = offset;
+        return fs.seek(node, offset, from);
+    };
+    bundled.seek = seek;
+    bundled.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        const end = Math.min(at + length, size);
+        const absent = [];
+        for (let index = Math.floor(at / BLOCK); index * BLOCK < end; index++)
+        {
+            if (!resident.includes(index))
+            {
+                absent.push({ index });
+            }
+        }
+        if (absent.length > 0)
+        {
+            throw Object.assign(new Error('not resident'), { code: 'BLOCK_MISS', blocks: absent });
+        }
+        return fs.read(node, length);
+    };
+    let fetches = 0;
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetches++;
+        for (const { index } of blocks)
+        {
+            resident.push(index);
+            if (resident.length > KEPT)
+            {
+                resident.shift();
+            }
+        }
+    }));
+    const node = vol.open('C:\\archive.ung', { read: true });
+    const read = await vol.read(node, 0, size);
+    assert.equal(read.length, size);
+    assert.ok(read.every((/** @type {number} */ byte, /** @type {number} */ index)=>
+        byte === contents[index]), 'every byte is the file\'s');
+    assert.equal(fetches, Math.ceil(size / FETCHED_PIECE_BYTES), 'one fetch a piece');
+    const tail = await vol.read(node, size - 100, 1000);
+    assert.equal(tail.length, 100, 'a read past the end stops at it');
     vol.close(node);
 });
 
