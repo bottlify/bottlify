@@ -2418,3 +2418,44 @@ test('a rich edit shows a scroll bar only while it has something to scroll', asy
     assert.equal(bars(await make(ES_DISABLENOSCROLL, 'Welcome.')), WS_VSCROLL | WS_HSCROLL,
         'kept, disabled, when the style asks');
 });
+
+test('LB_SELECTSTRING selects by prefix in a sorted list, CB_SELECTSTRING shows it in the field',
+    async()=>{
+        // A setup's "setup type" page adds "Express" then "Custom" to a sorted
+        // list and selects its default by name: the index is where sorting put
+        // the item, not where it was added.
+        const LBS_SORT = 0x0002;
+        const LB_SELECTSTRING = 0x018c;
+        const CB_SELECTSTRING = 0x014d;
+        const CBS_SORT = 0x0100;
+        const context = setup();
+        const dialog = await openDialog(context);
+        /** @param {string} className @param {number} style @param {number} id */
+        const make = (className, style, id)=>{
+            context.memory.putString(TEXT, className);
+            return context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | style,
+                8, 60, 100, 60, dialog, id, HINSTANCE, 0]);
+        };
+        /** @param {number} hwnd @param {number} message @param {number} wParam @param {string} text */
+        const send = (hwnd, message, wParam, text)=>{
+            context.memory.putString(TEXT, text);
+            return context.fns.SendMessageA.handler([hwnd, message, wParam, TEXT]);
+        };
+        const list = make('ListBox', LBS_SORT, 400);
+        assert.equal(send(list, LB_ADDSTRING, 0, 'Express'), 0);
+        assert.equal(send(list, LB_ADDSTRING, 0, 'Custom'), 0);
+        assert.equal(send(list, LB_SELECTSTRING, -1 >>> 0, 'express'), 1, 'by prefix, any case');
+        assert.equal(context.fns.SendMessageA.handler([list, LB_GETCURSEL, 0, 0]), 1);
+        assert.equal(send(list, LB_SELECTSTRING, -1 >>> 0, 'Typical'), -1, 'LB_ERR: none');
+        assert.equal(context.fns.SendMessageA.handler([list, LB_GETCURSEL, 0, 0]), 1,
+            'and the selection kept');
+
+        const combo = make('ComboBox', 0x0003 | CBS_SORT, 500);
+        send(combo, CB_ADDSTRING, 0, 'Express');
+        send(combo, CB_ADDSTRING, 0, 'Custom');
+        assert.equal(send(combo, CB_SELECTSTRING, -1 >>> 0, 'Ex'), 1);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 1);
+        context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+        assert.equal(String.fromCharCode(...context.memory.bytes.subarray(OUT, OUT + 8)),
+            'Express' + String.fromCharCode(0), 'the field shows the item');
+    });
