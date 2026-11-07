@@ -3591,6 +3591,55 @@ test('LoadCursorFromFile loads a .cur or .ani; SetSystemCursor replaces a system
     assert.equal(fns.SetSystemCursor.handler([arrow, 1]), 0, 'not a system cursor id');
 });
 
+test('LoadImage loads an icon out of an .ico file with LR_LOADFROMFILE', async()=>{
+    /** A one-entry icon (type 1) or cursor (type 2) file of a 2x2 32-bit image. */
+    const directory = (/** @type {number} */ type)=>{
+        const image = new Uint8Array(40 + 16 + 8);
+        const imageView = new DataView(image.buffer);
+        imageView.setUint32(0, 40, true);
+        imageView.setInt32(4, 2, true);
+        imageView.setInt32(8, 4, true);
+        imageView.setUint16(14, 32, true);
+        image.set([50, 0, 0, 255], 40);
+        const file = new Uint8Array(22 + image.length);
+        const view = new DataView(file.buffer);
+        view.setUint16(2, type, true);
+        view.setUint16(4, 1, true);
+        file[6] = 2;
+        file[7] = 2;
+        view.setUint16(12, 32, true);
+        view.setUint32(14, image.length, true);
+        view.setUint32(18, 22, true);
+        file.set(image, 22);
+        return file;
+    };
+    /** @type {Map<string, Uint8Array>} */
+    const disk = new Map([['C:\\G\\ROTATE1.ICO', directory(1)],
+        ['C:\\G\\ARROW.CUR', directory(2)]]);
+    const files = {
+        stat: (/** @type {string} */ path)=>(disk.has(path.toUpperCase())
+            ? { exists: true, isDirectory: false, size: disk.get(path.toUpperCase())?.length ?? 0 }
+            : null),
+        open: (/** @type {string} */ path)=>disk.get(path.toUpperCase()) ?? null,
+        read: (/** @type {Uint8Array} */ node, /** @type {number} */ at,
+            /** @type {number} */ length)=>Promise.resolve(node.slice(at, at + length)),
+        close: ()=>{},
+    };
+    const { memory, fns, cursors } = setup({ files });
+    const IMAGE_ICON = 1;
+    const LR_LOADFROMFILE = 0x10;
+    memory.putString(TEXT_BUFFER, 'C:\\G\\Rotate1.ico');
+    const icon = await fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_ICON, 16, 16,
+        LR_LOADFROMFILE]);
+    assert.notEqual(icon, 0, 'the setup engine\'s progress icons load');
+    fns.SetCursor.handler([icon]);
+    assert.deepEqual([cursors.at(-1).width, cursors.at(-1).hotSpot], [2, { x: 1, y: 1 }],
+        'the file\'s picture, its hot spot its middle');
+    memory.putString(TEXT_BUFFER, 'C:\\G\\Arrow.cur');
+    assert.equal(await fns.LoadImageA.handler([0, TEXT_BUFFER, IMAGE_ICON, 16, 16,
+        LR_LOADFROMFILE]), 0, 'a cursor file is no icon');
+});
+
 // --- AnimateWindow, AllowSetForegroundWindow, ghosting and the legacy IME switch ---
 
 const AW_HOR_POSITIVE = 0x00000001;

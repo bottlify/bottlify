@@ -228,9 +228,37 @@ export function cursorFilePicture(bytes, size){
         const frame = firstFrame(bytes, 12, bytes.length, tag, view);
         return frame ? cursorFilePicture(frame, size) : null;
     }
+    return directoryPicture(bytes, size, 2);
+}
+
+/**
+ * The picture of an icon file, as LoadImage loads one with LR_LOADFROMFILE:
+ * the directory of a .cur file with the icon's type, each entry's planes and
+ * bits a pixel where a cursor's hot spot is; of its images the deepest of
+ * the size asked for, else the first. Its hot spot is its middle, as an
+ * icon's is. Null for a file that is no icon or whose image this cannot read.
+ *
+ * @param {Uint8Array} bytes @param {number} size  The icon size asked for.
+ * @returns {CursorPicture | null}
+ */
+export function iconFilePicture(bytes, size){
+    const picture = directoryPicture(bytes, size, 1);
+    return picture ? { ...picture, hotSpot: { x: picture.width >> 1, y: picture.height >> 1 } }
+        : null;
+}
+
+/**
+ * An icon or cursor directory's chosen image (`type` 1 for an icon, 2 for a
+ * cursor), the hot spot its entry gives.
+ *
+ * @param {Uint8Array} bytes @param {number} size @param {number} type
+ * @returns {CursorPicture | null}
+ */
+function directoryPicture(bytes, size, type){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const ENTRY = 16;
     if (bytes.length < GROUP_HEADER_SIZE || view.getUint16(0, true) !== 0
-        || view.getUint16(2, true) !== 2)
+        || view.getUint16(2, true) !== type)
     {
         return null;
     }
