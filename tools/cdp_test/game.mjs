@@ -1260,6 +1260,14 @@ function describe(result, context, calls, symbols){
     }
 
 
+    if ((result.layout ?? []).length > 0)
+    {
+        say('  address space:');
+        for (const entry of result.layout)
+        {
+            say(`    ${entry}`);
+        }
+    }
     for (const layer of result.layers ?? [])
     {
         // A metric that is a structure prints as its own JSON rather than as

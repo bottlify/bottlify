@@ -702,8 +702,10 @@ export function listen(app, collected){
         collected.failures.push({
             reason: payload.reason ?? payload.error?.reason,
             message: payload.error?.message ?? payload.message,
+            // Deep enough to name the host call that faulted, past the memory
+            // layer's own frames.
             stack: String(payload.error?.stack ?? payload.stack ?? '').split('\n')
-                .slice(0, 8).join('\n'),
+                .slice(0, 24).join('\n'),
             trace: payload.traceText ?? payload.text ?? payload.error?.traceText,
         });
     });
@@ -2076,6 +2078,8 @@ export function createHarness(canvas, how = {}){
             ?.metrics?.staleAt ?? [];
         result.staleTrail = layers.find((/** @type {any} */ one)=>one.name === 'audio')
             ?.metrics?.staleTrail ?? [];
+        // The address space as the run left it: a fault's address read against it.
+        result.layout = metrics('memory').layout ?? [];
         result.instructions = metrics('cpu').instructions ?? null;
         // Whether the run had the executors it was given: how many slices ran
         // on the others, the most threads at once, and why none ran if they did not.

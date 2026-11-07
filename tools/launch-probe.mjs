@@ -40,8 +40,6 @@ import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
-import { clientFilesCached } from './steam-client.mjs';
-import { ownershipTickets, steamAppOf, ticketsFromArgv } from './steam-tickets.mjs';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -163,6 +161,8 @@ function parse(argv){
         }),
         // Executors of the program's process, so one title compares on one and
         // on several (`createApp`'s `cpu.cores`).
+        // The whole memory from the start (`cpu.grow` false) rather than one that grows.
+        fixedMemory: argv.includes('--no-grow'),
         executors: argv.includes('--executors')
             ? Number(argv[argv.indexOf('--executors') + 1]) : mode.cores,
         // Guest RAM in megabytes, as the launcher's setting gives it.
@@ -581,7 +581,7 @@ function lastLines(path, count){
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, logLast, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, mode, translationStore, cpuProfile, steam, steamSession, files }
+        memory, fixedMemory, mode, translationStore, cpuProfile, steam, steamSession, files }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -639,6 +639,13 @@ async function main(){
     let dumped = false;
     const network = await relayFromArgv(process.argv.slice(2));
     const roots = rootsFromArgv(process.argv.slice(2));
+    // The Steam tools live with the launcher's extension (bottlify-ui/gamehub),
+    // so a run that names no Steam account needs no launcher checkout beside this one.
+    const gamehub = new URL('../../bottlify-ui/gamehub/tools/', import.meta.url);
+    const { clientFilesCached } = steam
+        ? await import(new URL('steam-client.mjs', gamehub).href) : {};
+    const { ownershipTickets, steamAppOf, ticketsFromArgv } = steam
+        ? await import(new URL('steam-tickets.mjs', gamehub).href) : {};
     const app = await createApp({
         win32: { ...network ? { network } : {},
             ...steam ? { steam: { ...steam, clientFiles: (await clientFilesCached()).files,
@@ -662,7 +669,8 @@ async function main(){
             ...store === null ? {} : { store },
             ...corkConfig } },
         heapSize: heap,
-        ...executors ? { cpu: { cores: executors } } : {},
+        ...executors || fixedMemory ? { cpu: { ...executors ? { cores: executors } : {},
+            ...fixedMemory ? { grow: false } : {} } } : {},
         ...memory ? { memorySize: memory * 1024 * 1024 } : {},
         ...concurrency ? { concurrency } : {},
         ...(raster && draw ? {} : { graphics: { ...raster ? {} : { raster: false },

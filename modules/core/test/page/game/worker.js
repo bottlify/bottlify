@@ -69,7 +69,7 @@ self.onmessage = ({ data })=>{
                     self.postMessage({ type: 'result', result: {
                         ok: false,
                         error: String(error && error.message),
-                        stack: String(error && error.stack).split('\n').slice(0, 8).join('\n'),
+                        stack: String(error && error.stack).split('\n').slice(0, 24).join('\n'),
                     } });
                 });
             break;

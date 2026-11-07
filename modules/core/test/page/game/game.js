@@ -198,7 +198,7 @@ else
         harness.run(request).then(finish, error=>finish({
             ok: false,
             error: String(error && error.message),
-            stack: String(error && error.stack).split('\n').slice(0, 8).join('\n'),
+            stack: String(error && error.stack).split('\n').slice(0, 24).join('\n'),
         }));
     };
     harness.gpu.then(handle=>{
