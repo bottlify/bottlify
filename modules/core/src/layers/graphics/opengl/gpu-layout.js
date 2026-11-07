@@ -120,6 +120,11 @@ function makeVertexFormat(type, size, normalised){
     const bytes = componentBytes(type) * size;
     switch (type)
     {
+        // The one packed format WebGPU reads: unsigned and normalised, all four.
+        case GL.UNSIGNED_INT_2_10_10_10_REV:
+            return normalised && size === 4
+                ? { format: 'unorm10-10-10-2', components: 4, scalar: 'f32', bytes: 4 }
+                : null;
         case GL.FLOAT:
             return { format: size === 1 ? 'float32' : `float32x${size}`,
                 components: size, scalar: 'f32', bytes };

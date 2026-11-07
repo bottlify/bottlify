@@ -69,6 +69,51 @@ export function laterEntryPoints(h){
         ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
 
     /**
+     * The packed attribute forms (3.3), each word given or read from where
+     * the program points.
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const packedAttributes = ()=>{
+        /** @type {Record<string, (args: number[]) => number>} */
+        const forms = {};
+        /**
+         * @param {string} name @param {any} kind @param {number} count
+         * @param {(args: number[]) => [number, number, boolean, number]} parts  index, type,
+         *     normalised and the word's place in the arguments
+         */
+        const both = (name, kind, count, parts)=>{
+            forms[`${name}ui`] = args=>{
+                const [index, type, normalised, at] = parts(args);
+                return answer(current()?.packedAttribute(kind, index, type >>> 0, normalised,
+                    count, args[at]));
+            };
+            forms[`${name}uiv`] = args=>{
+                const [index, type, normalised, at] = parts(args);
+                return answer(current()?.packedAttribute(kind, index, type >>> 0, normalised,
+                    count, readTyped('ui', args[at], 1)[0]));
+            };
+        };
+        for (const count of [1, 2, 3, 4])
+        {
+            both(`glVertexAttribP${count}`, 'attrib', count,
+                a=>[a[0] >>> 0, a[1], (a[2] & 0xff) !== 0, 3]);
+            both(`glTexCoordP${count}`, 'texCoord', count, a=>[GL.TEXTURE0, a[0], false, 1]);
+            both(`glMultiTexCoordP${count}`, 'texCoord', count,
+                a=>[a[0] >>> 0, a[1], false, 2]);
+            if (count > 1)
+            {
+                both(`glVertexP${count}`, 'vertex', count, a=>[0, a[0], false, 1]);
+            }
+        }
+        both('glNormalP3', 'normal', 3, a=>[0, a[0], true, 1]);
+        both('glColorP3', 'color', 3, a=>[0, a[0], true, 1]);
+        both('glColorP4', 'color', 4, a=>[0, a[0], true, 1]);
+        both('glSecondaryColorP3', 'secondary', 3, a=>[0, a[0], true, 1]);
+        return forms;
+    };
+
+    /**
      * glVertexAttribI1i to glVertexAttribI4usv: each form's components, the
      * missing ones (0, 0, 1) as the 4i form fills them.
      *
@@ -342,6 +387,10 @@ export function laterEntryPoints(h){
             }
             writeQuery(out, values, 'word');
         }),
+
+        // --- packed attributes (3.3) ---
+
+        ...packedAttributes(),
 
         // --- integer vertex attributes (3.0) ---
 

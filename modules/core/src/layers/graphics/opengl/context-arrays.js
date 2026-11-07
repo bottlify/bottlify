@@ -18,7 +18,9 @@
  */
 
 import { GL } from './constants.js';
-import { INTERLEAVED_LAYOUTS, componentBytes, readElement, readIndex } from './arrays.js';
+import {
+    INTERLEAVED_LAYOUTS, componentBytes, isPacked, readElement, readIndex,
+} from './arrays.js';
 import { createBufferObject } from './objects.js';
 import { TEXTURE_UNITS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
@@ -96,6 +98,9 @@ const USAGES = new Set([
     GL.STATIC_COPY, GL.DYNAMIC_DRAW, GL.DYNAMIC_READ, GL.DYNAMIC_COPY,
 ]);
 
+/** The packed types (3.3): one word an element, four components in it. */
+const PACKED_TYPES = [GL.INT_2_10_10_10_REV, GL.UNSIGNED_INT_2_10_10_10_REV];
+
 /**
  * Which types each array accepts, and the flat queries that mirror it.
  *
@@ -103,22 +108,23 @@ const USAGES = new Set([
  *        enable: number, size: number | null, type: number, stride: number,
  *        binding: number | null, normalised: boolean }>}
  */
+
 const ARRAYS = {
     vertex: {
-        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: [2, 3, 4],
+        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: [2, 3, 4],
         enable: GL.VERTEX_ARRAY, size: GL.VERTEX_ARRAY_SIZE, type: GL.VERTEX_ARRAY_TYPE,
         stride: GL.VERTEX_ARRAY_STRIDE, binding: GL.VERTEX_ARRAY_BUFFER_BINDING,
         normalised: false,
     },
     normal: {
-        types: [GL.BYTE, GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: null,
+        types: [GL.BYTE, GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: null,
         enable: GL.NORMAL_ARRAY, size: null, type: GL.NORMAL_ARRAY_TYPE,
         stride: GL.NORMAL_ARRAY_STRIDE, binding: GL.NORMAL_ARRAY_BUFFER_BINDING,
         normalised: true,
     },
     color: {
         types: [GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT,
-            GL.UNSIGNED_INT, GL.FLOAT, GL.DOUBLE],
+            GL.UNSIGNED_INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES],
         sizes: [3, 4],
         enable: GL.COLOR_ARRAY, size: GL.COLOR_ARRAY_SIZE, type: GL.COLOR_ARRAY_TYPE,
         stride: GL.COLOR_ARRAY_STRIDE, binding: GL.COLOR_ARRAY_BUFFER_BINDING,
@@ -131,7 +137,7 @@ const ARRAYS = {
         normalised: false,
     },
     texCoord: {
-        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: [1, 2, 3, 4],
+        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: [1, 2, 3, 4],
         enable: GL.TEXTURE_COORD_ARRAY, size: GL.TEXTURE_COORD_ARRAY_SIZE,
         type: GL.TEXTURE_COORD_ARRAY_TYPE, stride: GL.TEXTURE_COORD_ARRAY_STRIDE,
         binding: GL.TEXTURE_COORD_ARRAY_BUFFER_BINDING, normalised: false,
@@ -338,6 +344,12 @@ export function installArrayCalls(context, kernel){
         if (stride < 0 || (sized && spec.sizes && !spec.sizes.includes(size)))
         {
             setError(GL.INVALID_VALUE);
+            return;
+        }
+        // A packed word holds four components, all of which a sized array takes.
+        if (sized && isPacked(type) && size !== 4)
+        {
+            setError(GL.INVALID_OPERATION);
             return;
         }
         const pointer = pointerOf(name);
