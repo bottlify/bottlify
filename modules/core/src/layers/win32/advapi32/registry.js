@@ -28,6 +28,7 @@ import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME, processorCount,
 } from '../kernel32/processor.js';
 import { windowsVersion } from '../kernel32/versions.js';
+import { DOCUMENT_CLASSES } from '../msxml/dom.js';
 
 /** The predefined roots. A guest names these by constant; it never opens them. */
 export const HKEY_CLASSES_ROOT = 0x80000000;
@@ -530,10 +531,11 @@ const machineKeys = (windows, directx, processors)=>{
             path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\InprocServer32`,
             values: { '': library, ThreadingModel: 'Both' },
         })),
-        // The script engines' names, which CLSIDFromProgID reads for a host
-        // that asks for "JScript" by name; the classes themselves are served
-        // by the engine.
-        ...SCRIPT_ENGINES.flatMap(({ clsid, progIds })=>[
+        // The script engines' names and MSXML's documents', which
+        // CLSIDFromProgID reads for a host that asks for "JScript" or
+        // "Msxml2.DOMDocument" by name; the classes themselves are served by
+        // the engine.
+        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES].flatMap(({ clsid, progIds })=>[
             { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
                 values: { '': progIds[0] } },
             ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
