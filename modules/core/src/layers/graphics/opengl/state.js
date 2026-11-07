@@ -32,7 +32,7 @@
  * place any of that is allowed to happen.
  */
 
-import { GL } from './constants.js';
+import { GL, VIEWPORT_COUNT } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
@@ -952,7 +952,7 @@ export const DEFAULT_STATE = Object.freeze([
     },
     // OpenGL 4.1's viewport arrays: sixteen, at whole pixels, the bounds the
     // specification's least.
-    { query: GL.MAX_VIEWPORTS, name: 'GL_MAX_VIEWPORTS', kind: 'int', value: [16] },
+    { query: GL.MAX_VIEWPORTS, name: 'GL_MAX_VIEWPORTS', kind: 'int', value: [VIEWPORT_COUNT] },
     { query: GL.MAX_VERTEX_STREAMS, name: 'GL_MAX_VERTEX_STREAMS', kind: 'int', value: [4] },
     // 4.5's robustness: no reset is ever told. 4.3's largest index: a 32-bit one.
     {

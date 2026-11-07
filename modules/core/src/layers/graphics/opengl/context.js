@@ -2165,28 +2165,37 @@ export function createGlContext(options = {}){
         listNesting--;
     }
 
-    /** @returns {import('./raster.js').Box} what the scissor test leaves */
-    function scissorBox(){
+    /** @returns {readonly number[]} the unindexed scissor box */
+    function scissorRecord(){
+        return record(GL.SCISSOR_BOX).values;
+    }
+
+    /**
+     * @param {number} [test]  the scissor test, the unindexed one's unless given
+     * @param {readonly number[]} [box]  the box, likewise
+     * @returns {import('./raster.js').Box} what the scissor test leaves
+     */
+    function scissorBox(test = record(GL.SCISSOR_TEST).values[0], box = scissorRecord()){
         const target = kernel.side.drawTarget?.();
         if (target)
         {
             // A framebuffer object's rows run up from its first, as GL's
             // window coordinates do: the box is taken as it stands.
-            if (record(GL.SCISSOR_TEST).values[0] === 0)
+            if (test === 0)
             {
                 return { x0: 0, y0: 0, x1: target.width, y1: target.height };
             }
-            const [x, y, width, height] = record(GL.SCISSOR_BOX).values;
+            const [x, y, width, height] = box;
             return { x0: x, y0: y, x1: x + width, y1: y + height };
         }
-        if (record(GL.SCISSOR_TEST).values[0] === 0)
+        if (test === 0)
         {
             return wholeOf(framebuffer);
         }
         // GL measures the box from the bottom-left corner of the drawable and
         // the framebuffer's row zero is its top one, so the two y bounds swap
         // as well as move.
-        const [x, y, width, height] = record(GL.SCISSOR_BOX).values;
+        const [x, y, width, height] = box;
         return {
             x0: x,
             y0: framebuffer.height - (y + height),

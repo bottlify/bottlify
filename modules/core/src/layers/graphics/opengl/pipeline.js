@@ -144,6 +144,9 @@ import { stippleKeeps } from './legacy-state.js';
  *           absent
  * @property {import('./raster.js').Framebuffer} framebuffer
  * @property {import('./raster.js').Box} scissor
+ * @property {(index: number) => { viewport: readonly number[], depthRange: readonly number[],
+ *     scissor: import('./raster.js').Box }} [viewportAt]  each viewport's rectangles
+ *     (4.1), the first being the three above; read while the draw is recorded
  * @property {readonly (readonly number[])[]} clipPlanes  eye space, enabled only
  * @property {SceneLighting | null} lighting
  * @property {SceneFog | null} fog

@@ -43,7 +43,7 @@
  *   holds, except after a copy from the framebuffer, which lives only here.
  */
 
-import { GL } from './constants.js';
+import { GL, VIEWPORT_COUNT } from './constants.js';
 import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
@@ -3377,7 +3377,7 @@ export function createGpuRenderer(services){
             probe = probeSpec !== null && dumpIds.includes(probeSpec.id)
                 ? recording.dump.length - 1 : -1;
         }
-        recording.commands.push({
+        const command = {
             kind: 'draw',
             pipeline: pipelineSlot(recording, pipeline),
             mergeKey: pipelineKey,
@@ -3405,7 +3405,27 @@ export function createGpuRenderer(services){
             // The occlusion query counting the samples this draw passes.
             occluded: activeQueries.get(context) ?? null,
             conditioned: conditions.get(context) ?? null,
-        });
+        };
+        if (geometry && scene.viewportAt
+            && executable?.linked.geometry?.uses.has('gl_ViewportIndex'))
+        {
+            // A geometry shader choosing each primitive's viewport (4.1): the
+            // draw once for every viewport, through that one's rectangles and
+            // with its number in the uniforms, keeping the primitives sent
+            // there (`geometryDrawStage`).
+            const viewportAt = scene.viewportAt;
+            for (let index = 0; index < VIEWPORT_COUNT; index++)
+            {
+                const block = uniforms.slice();
+                block[UNIFORM.misc + 1] = index;
+                recording.commands.push({ ...command, uniforms: block,
+                    ...rectangles({ ...scene, ...viewportAt(index) }, target) });
+            }
+        }
+        else
+        {
+            recording.commands.push(command);
+        }
         // A dump or a probe addresses a frame's draws by number to find a
         // specific painter or a specific moment; joining two of them into
         // one would take away exactly the resolution that mode exists for.

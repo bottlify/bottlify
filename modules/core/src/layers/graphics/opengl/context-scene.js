@@ -330,6 +330,7 @@ export function createSceneBuilder(kernel){
                 zeroToOne: record(GL.CLIP_DEPTH_MODE).values[0] === GL.ZERO_TO_ONE },
             framebuffer: kernel.framebuffer(),
             scissor: kernel.scissorBox(),
+            viewportAt: kernel.side.viewportAt,
             clipPlanes,
             lighting,
             fog,

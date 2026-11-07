@@ -256,6 +256,13 @@ export function fromRegister(code, type){
  * @returns {string}
  */
 export function geometryDrawStage(fields, registers){
+    // A draw repeated for each viewport (`uniforms.misc.y` its own) keeps the
+    // primitives the shader sent there: the others' vertices all land on one
+    // point outside the clip volume, so nothing of them is drawn.
+    const viewport = fields.findIndex(f=>f.viewport);
+    const elsewhere = viewport < 0 ? ''
+        : `    if (bitcast<i32>(gsVertices[base + ${viewport + 1}u].x)`
+            + ' != i32(uniforms.misc.y)) { out.position = vec4f(2.0, 2.0, 2.0, 1.0); }\n';
     return `@group(${GLSL_GEOMETRY_DRAW_GROUP}) @binding(0) var<storage, read> gsVertices:`
         + ` array<vec4u>;
 
@@ -267,7 +274,7 @@ fn vertexMain(@builtin(vertex_index) gsVertex: u32) -> VertexOut {
     out.position = ${CLIP_REMAP};
 ${fields.map((f, k)=>`    out.${f.field} = `
         + `${fromRegister(`gsVertices[base + ${k + 1}u]`, f.type)};`).join('\n')}
-    return out;
+${elsewhere}    return out;
 }`;
 }
 
@@ -441,7 +448,7 @@ export function textureLayoutOf(type){
  * The fields of the struct the two stages pass, each a location of its own.
  *
  * @typedef {{ field: string, type: string, flat: boolean, source: string,
- *     interpolate?: string }[]} Interface
+ *     interpolate?: string, viewport?: boolean }[]} Interface
  */
 
 /**
@@ -3847,6 +3854,14 @@ ${[...used.map(([name])=>`    ${p}${name} = ${name}In;`), ...prologue, ...initia
             fields.push({ field: `i${fields.length}`, type: 'i32', flat: true,
                 source: `${p}gl_PrimitiveID`, interpolate: '@interpolate(flat) ' });
         }
+        // The viewport a primitive is drawn through (4.1), flat too: the draw
+        // of what the shader made is repeated for each viewport, and a vertex
+        // of another one is put out of the clip volume (`geometryDrawStage`).
+        if (geometry && linked.uses.has('gl_ViewportIndex'))
+        {
+            fields.push({ field: `i${fields.length}`, type: 'i32', flat: true, viewport: true,
+                source: `${p}gl_ViewportIndex`, interpolate: '@interpolate(flat) ' });
+        }
         const out = partner === 'glsl'
             ? fields.map(f=>`    out.${f.field} = ${f.source};`)
             : fixedOutputs(linked, p, /** @type {FixedVaryings} */ (options.fixed));
@@ -3966,6 +3981,11 @@ ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
             if (program.geometry && linked.uses.has('gl_PrimitiveID'))
             {
                 take(`${p}gl_PrimitiveID`, INT);
+            }
+            if (program.geometry?.uses.has('gl_ViewportIndex')
+                && linked.uses.has('gl_ViewportIndex'))
+            {
+                take(`${p}gl_ViewportIndex`, INT);
             }
         }
         else

@@ -45,7 +45,8 @@
  * @property {() => ContextMemory | null} memory
  * @property {() => import('./raster.js').Framebuffer} framebuffer
  * @property {() => boolean} inPrimitive
- * @property {() => import('./raster.js').Box} scissorBox
+ * @property {(test?: number, box?: readonly number[]) => import('./raster.js').Box} scissorBox
+ *     what the scissor test leaves, of the unindexed test and box unless given others
  * @property {Record<string, import('./matrix.js').MatrixStack>} stacks
  * @property {(mode: number, vertices: any[], assembled?: string) => void} drawVertices
  * @property {((request: import('./gpu.js').DrawRequest) => boolean) | null} drawArrays

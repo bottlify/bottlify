@@ -186,7 +186,7 @@ event, an error. Neither stops the program.
 - OpenGL goes up to 4.6, compatibility and core profiles (`wglCreateContextAttribsARB`), with
   GLSL 1.10 to 4.60. A feature the shader translator does not write fails the program's link
   with its reason. Doubles are single precision; a geometry shader's streams past 0 are not
-  captured (such a program does not link); `gl_ViewportIndex` and `gl_Layer` route nothing;
+  captured (such a program does not link); `gl_Layer` routes nothing;
   arrays of subroutine uniforms are refused. Every target draws with one sample a pixel. A framebuffer whose attachments differ
   in size, has separate depth and stencil images, or a slice of a 3D texture is
   `GL_FRAMEBUFFER_UNSUPPORTED`; `glBlitFramebuffer` copies colour only. Some limits are below

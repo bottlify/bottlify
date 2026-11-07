@@ -22,6 +22,7 @@ import { geometryOrder, stripWithAdjacency } from './gpu-layout.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { GLSL_GEOMETRY_PASS_BINDING } from './glsl-wgsl.js';
+import { UNIFORM } from './wgsl.js';
 
 function rig(){
     const gpu = createFakeDevice();
@@ -267,4 +268,61 @@ void main() {
     gl.glLinkProgram(capturing);
     assert.deepEqual(gl.glGetProgramiv(capturing, GL.LINK_STATUS), [0]);
     assert.match(gl.glGetProgramInfoLog(capturing), /stream 1 is not supported/);
+});
+
+test('a geometry shader\'s gl_ViewportIndex: the draw goes through every viewport, each keeping '
+    + 'the primitives sent to it', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const chooser = `#version 410
+layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;
+in vec3 tint[]; out vec3 colour;
+void main() {
+    for (int i = 0; i < 3; i++) {
+        colour = tint[i]; gl_Position = gl_in[i].gl_Position; gl_ViewportIndex = 3;
+        EmitVertex();
+    }
+}`;
+    const reader = `#version 430
+in vec3 colour; out vec4 c;
+void main() { c = vec4(colour, float(gl_ViewportIndex)); }`;
+    const made = program(gl, [[GL.VERTEX_SHADER, VS], [GL.GEOMETRY_SHADER, chooser],
+        [GL.FRAGMENT_SHADER, reader]]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [1], gl.glGetProgramInfoLog(made));
+    gl.glUseProgram(made);
+    gl.glViewportArrayv(3, 1, [8, 4, 16, 8]);
+    gl.glDepthRangeArrayv(3, 1, [0.25, 0.5]);
+    r.floats(0x1000, [0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1]);
+    gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    assert.deepEqual(r.divergences, []);
+    assert.equal(r.gpu.of('drawIndexedIndirect').length, 16, 'one draw a viewport');
+    const rects = r.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect.join(','));
+    assert.ok(rects.includes('0,0,64,32,0,1'), 'the first viewport, the whole window');
+    assert.ok(rects.includes('8,20,16,8,0.25,0.5'), `the fourth's rectangle and depths: ${rects}`);
+    const code = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>m.descriptor.code)
+        .find((/** @type {string} */ text)=>/fn vertexMain\(@builtin\(vertex_index\) gsVertex/
+            .test(text));
+    assert.match(code, /if \(bitcast<i32>\(gsVertices\[base \+ 2u\]\.x\) != i32\(uniforms\.misc\.y\)\)/,
+        'a vertex of another viewport is put out of the clip volume');
+    // The uniform blocks lie in a pool at 256-byte steps: each one's viewport number.
+    const numbers = r.gpu.of('writeBuffer').flatMap((/** @type {any} */ call)=>{
+        const floats = new Float32Array(call.bytes.buffer, call.bytes.byteOffset,
+            call.bytes.byteLength >> 2);
+        /** @type {number[]} */
+        const found = [];
+        for (let at = UNIFORM.misc + 1; at < floats.length; at += 64)
+        {
+            found.push(floats[at]);
+        }
+        return found;
+    });
+    for (let index = 0; index < 16; index++)
+    {
+        assert.ok(numbers.includes(index), `viewport ${index}'s number in its uniforms`);
+    }
 });

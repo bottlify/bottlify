@@ -1326,6 +1326,9 @@ export const WGL = Object.freeze({
 /** The largest pbuffer a format makes: WebGPU's least 2D texture size. */
 export const MAX_PBUFFER_SIZE = 8192;
 
+/** How many viewports there are (GL_MAX_VIEWPORTS, 4.1). */
+export const VIEWPORT_COUNT = 16;
+
 /**
  * PIXELFORMATDESCRIPTOR flags. The three DONTCARE bits sit in the top nibble
  * and are requests to ChoosePixelFormat rather than properties a format has,

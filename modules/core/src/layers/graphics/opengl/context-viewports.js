@@ -14,18 +14,18 @@
  *   unindexed queries answer the first's; the indexed calls set one. A
  *   viewport not set apart follows the first, so a program that never
  *   indexes keeps one set of records.
- * - **Primitives are drawn through the first.** Choosing another is a
- *   geometry shader's gl_ViewportIndex, which the GLSL front end does not
- *   take yet: no program here reaches another viewport.
+ * - **A geometry shader that writes gl_ViewportIndex reaches them all**:
+ *   its draw is recorded once for each viewport, with that one's
+ *   rectangles (`viewportAt`, `gpu.js`), and each keeps the primitives sent
+ *   to it. Every other draw goes through the first.
  * - Every viewport's state is saved with its attribute group: the
  *   rectangles and depth ranges with GL_VIEWPORT_BIT, the scissor boxes with
  *   GL_SCISSOR_BIT, the tests with it and with GL_ENABLE_BIT.
  */
 
-import { GL } from './constants.js';
+import { GL, VIEWPORT_COUNT } from './constants.js';
 
-/** How many viewports there are (GL_MAX_VIEWPORTS). */
-const COUNT = 16;
+const COUNT = VIEWPORT_COUNT;
 
 /** Each kind of per-viewport state and its unindexed record. */
 const KINDS = Object.freeze({
@@ -91,6 +91,13 @@ export function installViewportCalls(context, kernel){
         ? { kind: 'int', values: valueOf('scissor', index) } : null));
     indexed.set(GL.SCISSOR_TEST, (/** @type {number} */ index)=>(index < COUNT
         ? { kind: 'bool', values: valueOf('test', index) } : null));
+
+    /** Each viewport's rectangles for a draw that reaches past the first (`Scene`). */
+    kernel.side.viewportAt = (/** @type {number} */ index)=>({
+        viewport: valueOf('viewport', index),
+        depthRange: valueOf('depth', index),
+        scissor: kernel.scissorBox(valueOf('test', index)[0], valueOf('scissor', index)),
+    });
 
     const enables = kernel.side.indexedEnables ??= new Map();
     enables.set(GL.SCISSOR_TEST, {

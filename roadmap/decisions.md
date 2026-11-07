@@ -1148,9 +1148,13 @@ unpack state and no unpack buffer, as glClearBufferData does by section 6.3.2. *
 loss** (a level drawn on the device copied as blocks into texels, a renderbuffer on the
 processor path): said each time, the destination left as it was. *2026-11-07.*
 
-**A140. Temporary: primitives are drawn through the first viewport only.** Viewport arrays
-(4.1) keep every viewport's state, but choosing another is a geometry shader's
-gl_ViewportIndex, which the GLSL front end does not take yet. *2026-11-07.*
+**A140. A geometry shader that writes gl_ViewportIndex has its draw recorded once for each of
+the sixteen viewports,** through that viewport's rectangle, depth range and scissor, and each
+keeps the primitives sent to it: a vertex whose index is another's is put on one point outside
+the clip volume. The index is read at every vertex (GL_VIEWPORT_INDEX_PROVOKING_VERTEX is
+GL_UNDEFINED_VERTEX), and one past the last viewport draws nowhere. WebGPU has one viewport a
+draw; the cost is fifteen draws of nothing, on the GPU. Every other draw goes through the first
+viewport. *2026-11-07.*
 
 **A141. Temporary: a 64-bit attribute (glVertexAttribLFormat) is read at single precision,** as
 a double array of glVertexAttribPointer already is: no shader here takes a double input. It is
