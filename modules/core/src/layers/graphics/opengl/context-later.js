@@ -33,8 +33,11 @@ export const LATER_CALLS_NOT_COMPILED = Object.freeze([
     'glBindSamplers', 'glBindBuffers', 'glBindImageTextures',
 ]);
 
-/** GL_IMAGE_BINDING_FORMAT of a unit nothing is bound to, as the compute calls start it. */
-const IMAGE_UNIT_DEFAULT_FORMAT = 0x8058; // GL_RGBA8
+/**
+ * GL_IMAGE_BINDING_FORMAT of a unit nothing is bound to (4.6 table 23.45,
+ * and glBindImageTextures' unbinding), as the compute calls start it.
+ */
+const IMAGE_UNIT_DEFAULT_FORMAT = 0x8229; // GL_R8
 
 /** Every barrier bit of 4.4 (table 7.4), and GL_ALL_BARRIER_BITS. */
 const BARRIER_BITS = 0xffff;

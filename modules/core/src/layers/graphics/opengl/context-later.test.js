@@ -161,7 +161,8 @@ test('glBindImageTextures binds each texture\'s level 0 whole, refusing one and 
         assert.deepEqual(unit(1), [good, 0, 0, GL.READ_ONLY, R32UI],
             'a format no image takes leaves the unit as it was');
         assert.deepEqual(unit(2)[0], 0, 'a level of no texels, the same');
-        assert.deepEqual(unit(3), [0, 0, 0, GL.READ_ONLY, 0x8058], 'zero unbinds');
+        assert.deepEqual(unit(3), [0, 0, 0, GL.READ_ONLY, 0x8229], 'zero unbinds: GL_R8');
+        assert.deepEqual(unit(5), [0, 0, 0, GL.READ_ONLY, 0x8229], 'a unit never bound');
         gl.glBindImageTextures(0, 1, [999]);
         assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a name that is no texture');
         assert.equal(unit(0)[0], good);

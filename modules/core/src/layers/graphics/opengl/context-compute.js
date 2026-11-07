@@ -122,7 +122,8 @@ export function installComputeCalls(context, kernel, gpu){
      *     format: number }[]}
      */
     const units = Array.from({ length: IMAGE_LIMITS.units }, ()=>({ name: 0, level: 0,
-        layered: false, layer: 0, access: GL.READ_ONLY, format: 0x8058 /* RGBA8 */ }));
+        // GL_R8: an unbound unit's format (4.6 table 23.45).
+        layered: false, layer: 0, access: GL.READ_ONLY, format: 0x8229 }));
     /** @param {number} name */
     const textureNamed = name=>(name === 0 ? undefined
         : kernel.shareGroup().textures.objects.get(name));
