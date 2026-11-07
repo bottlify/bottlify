@@ -49,6 +49,7 @@ import { ES2_CALLS_NOT_COMPILED, installEs2Calls } from './context-es2.js';
 import { installViewportCalls } from './context-viewports.js';
 import { LATER_CALLS_NOT_COMPILED, installLaterCalls } from './context-later.js';
 import { COMPUTE_CALLS_NOT_COMPILED, installComputeCalls } from './context-compute.js';
+import { INTERFACE_CALLS_NOT_COMPILED, installInterfaceCalls } from './context-interface.js';
 import { DEBUG_CALLS_NOT_COMPILED, installDebugCalls } from './context-debug.js';
 import { GL_CORE_REMOVED } from './registry.js';
 import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
@@ -150,7 +151,8 @@ const NOT_COMPILABLE = new Set([
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
     ...ES2_CALLS_NOT_COMPILED, ...LATER_CALLS_NOT_COMPILED, ...DEBUG_CALLS_NOT_COMPILED,
     ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED,
-    ...DSA_CALLS_NOT_COMPILED, ...COMPUTE_CALLS_NOT_COMPILED, ...LEGACY_CALLS_NOT_COMPILED,
+    ...DSA_CALLS_NOT_COMPILED, ...COMPUTE_CALLS_NOT_COMPILED, ...INTERFACE_CALLS_NOT_COMPILED,
+    ...LEGACY_CALLS_NOT_COMPILED,
 ]);
 
 /**
@@ -1936,6 +1938,7 @@ export function createGlContext(options = {}){
     installLaterCalls(context, kernel);
     installTessellationCalls(context, kernel);
     installComputeCalls(context, kernel, gpu);
+    installInterfaceCalls(context, kernel);
     installDebugCalls(context, kernel);
     // A context made for debugging starts with its debug output on (4.3
     // section 20.2).

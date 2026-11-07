@@ -1251,6 +1251,20 @@ again, is a loss,** as their passes are laid out on the processor for a count on
 has; a line loop of it is drawn without its closing line, and GL_PRIMITIVES_GENERATED does not
 count it. Each is said. *2026-11-07.*
 
+**A220. Temporary: a vertex program's inputs (GL_PROGRAM_INPUT) are what glGetActiveAttrib
+lists,** the conventional attributes among them with no location, and each by its name with an
+array size of 1; gl_VertexID and gl_InstanceID are not listed. The two calls answer one list
+(4.6 section 7.3.1.2), and both leave these out alike. *2026-11-07.*
+
+**A221. Temporary: a stage's inputs and outputs declared in an interface block are not listed**
+among a program's inputs and outputs; the stage's other variables and the built-ins it reads or
+writes are. *2026-11-07.*
+
+**A222. Every member of a shader storage block is an active buffer variable,** used or not, as
+every member of a uniform block is an active uniform here, and **an input or output between
+stages with no `layout(location)` answers GL_LOCATION -1:** locations between stages are matched
+by name here and assigned to none. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

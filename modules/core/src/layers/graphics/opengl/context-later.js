@@ -23,13 +23,18 @@
 
 import { GL } from './constants.js';
 import { SIZED_FORMATS } from './formats.js';
+import { levelKey } from './objects.js';
+import { IMAGE_UNIT_FORMATS } from './glsl-storage.js';
 
 /** The calls of this file a display list does not record: all but the sample shading. */
 export const LATER_CALLS_NOT_COMPILED = Object.freeze([
     'glInvalidateFramebuffer', 'glInvalidateBufferData', 'glInvalidateTexImage',
     'glMemoryBarrier', 'glTextureBarrier', 'glGetInternalformativ', 'glGetGraphicsResetStatus',
-    'glBindSamplers', 'glBindBuffers',
+    'glBindSamplers', 'glBindBuffers', 'glBindImageTextures',
 ]);
+
+/** GL_IMAGE_BINDING_FORMAT of a unit nothing is bound to, as the compute calls start it. */
+const IMAGE_UNIT_DEFAULT_FORMAT = 0x8058; // GL_RGBA8
 
 /** Every barrier bit of 4.4 (table 7.4), and GL_ALL_BARRIER_BITS. */
 const BARRIER_BITS = 0xffff;
@@ -209,6 +214,47 @@ export function installLaterCalls(context, kernel){
                     continue;
                 }
                 context.glBindSampler(first + k, name);
+            }
+        },
+
+        /**
+         * glBindImageTextures (4.4): each image unit from `first` its
+         * texture's level 0, every layer, for reading and writing in the
+         * level's own format, or none; a texture refused leaves the rest bound.
+         *
+         * @param {number} first @param {number} count @param {readonly number[] | null} names
+         */
+        glBindImageTextures(first, count, names){
+            if (!enter('glBindImageTextures', [first, count, names]))
+            {
+                return;
+            }
+            if (first < 0 || count < 0
+                || first + count > (context.glGetIntegerv(GL.MAX_IMAGE_UNITS)?.[0] ?? 0))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            for (let k = 0; k < count; k++)
+            {
+                const name = names?.[k] ?? 0;
+                if (name === 0)
+                {
+                    // The unit's first state (4.4 section 8.26).
+                    context.glBindImageTexture(first + k, 0, 0, false, 0, GL.READ_ONLY,
+                        IMAGE_UNIT_DEFAULT_FORMAT);
+                    continue;
+                }
+                const texture = kernel.shareGroup().textures.objects.get(name);
+                const base = texture?.levels?.get(levelKey(0));
+                if (!base || base.width === 0 || base.height === 0
+                    || !IMAGE_UNIT_FORMATS.has(base.internalFormat))
+                {
+                    setError(GL.INVALID_OPERATION);
+                    continue;
+                }
+                context.glBindImageTexture(first + k, name, 0, true, 0, GL.READ_WRITE,
+                    base.internalFormat);
             }
         },
 

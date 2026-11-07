@@ -412,6 +412,38 @@ export function laterEntryPoints(h){
         glGetProgramResourceIndex: ([program, programInterface, name])=>(current()
             ?.glGetProgramResourceIndex(program >>> 0, programInterface >>> 0,
                 h.readName(name)) ?? GL.INVALID_INDEX),
+        // --- program interface queries (4.3) ---
+        glGetProgramInterfaceiv: ([program, programInterface, pname, out])=>call(context=>
+            writeQuery(out, context.glGetProgramInterfaceiv(program >>> 0,
+                programInterface >>> 0, pname >>> 0), 'word')),
+        glGetProgramResourceName: ([program, programInterface, index, size, length, out])=>call(
+            context=>answerString(context.glGetProgramResourceName(program >>> 0,
+                programInterface >>> 0, index >>> 0, size | 0), size, length, out)),
+        glGetProgramResourceiv: ([program, programInterface, index, count, props, size, length,
+            out])=>call(context=>{
+            const asked = (count | 0) > 0 && (props >>> 0) !== 0
+                ? Array.from(readTyped('ui', props, count | 0), v=>v >>> 0) : [];
+            const values = context.glGetProgramResourceiv(program >>> 0, programInterface >>> 0,
+                index >>> 0, asked, size | 0);
+            if (!values)
+            {
+                return;
+            }
+            if (values.length > 0 && (out >>> 0) !== 0)
+            {
+                writeQuery(out, values, 'word');
+            }
+            if ((length >>> 0) !== 0)
+            {
+                writeU32s(length, [values.length]);
+            }
+        }),
+        glGetProgramResourceLocation: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceLocation(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? -1),
+        glGetProgramResourceLocationIndex: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceLocationIndex(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? -1),
         glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
         // Tessellation's (4.0): the inner levels are two values, the outer four.
         glPatchParameteri: ([pname, value])=>answer(current()?.glPatchParameteri(pname >>> 0,
@@ -434,6 +466,9 @@ export function laterEntryPoints(h){
             first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
                 ? readTyped('ui', list, count | 0) : null)),
         glBindSamplers: ([first, count, list])=>call(context=>context.glBindSamplers(
+            first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null)),
+        glBindImageTextures: ([first, count, list])=>call(context=>context.glBindImageTextures(
             first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
                 ? readTyped('ui', list, count | 0) : null)),
         glBindBuffersBase: ([target, first, count, list])=>call(context=>context.glBindBuffers(
