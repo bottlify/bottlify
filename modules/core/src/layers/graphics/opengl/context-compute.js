@@ -36,7 +36,7 @@ import {
 /** The calls of this file a display list does not record (4.6 compatibility 21.4). */
 export const COMPUTE_CALLS_NOT_COMPILED = Object.freeze([
     'glDispatchCompute', 'glDispatchComputeIndirect', 'glShaderStorageBlockBinding',
-    'glGetProgramResourceIndex', 'glBindImageTexture', 'glGetActiveAtomicCounterBufferiv',
+    'glBindImageTexture', 'glGetActiveAtomicCounterBufferiv',
 ]);
 
 /**
@@ -292,36 +292,6 @@ export function installComputeCalls(context, kernel, gpu){
                 return;
             }
             /** @type {Int32Array} */ (executable.storageBindings)[index] = binding;
-        },
-
-        /**
-         * glGetProgramResourceIndex (4.3 section 7.3.1) for the interfaces
-         * whose index a program passes on: a storage block's to
-         * glShaderStorageBlockBinding, a uniform block's to glUniformBlockBinding.
-         *
-         * @param {number} programName @param {number} programInterface @param {string} name
-         * @returns {number}
-         */
-        glGetProgramResourceIndex(programName, programInterface, name){
-            if (!enter('glGetProgramResourceIndex', [programName, programInterface, name]))
-            {
-                return GL.INVALID_INDEX;
-            }
-            if (programInterface === GL.UNIFORM_BLOCK)
-            {
-                return context.glGetUniformBlockIndex(programName, name);
-            }
-            if (programInterface !== GL.SHADER_STORAGE_BLOCK)
-            {
-                kernel.diverge(`glGetProgramResourceIndex of interface 0x${programInterface
-                    .toString(16)} answered no resource: only blocks are listed here`);
-                return GL.INVALID_INDEX;
-            }
-            const program = kernel.side.programObject?.(programName);
-            const blocks = program?.linked ? program.executable?.linked.storageBlocks ?? [] : [];
-            const index = blocks.findIndex((/** @type {any} */ b)=>b.name === name
-                || (b.element === 0 && b.name === `${name}[0]`));
-            return index < 0 ? GL.INVALID_INDEX : index;
         },
 
         /** @param {number} x @param {number} y @param {number} z */

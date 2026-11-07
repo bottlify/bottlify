@@ -318,7 +318,7 @@ const SAMPLER_TYPES = /** @type {Record<string, number>} */ ({
  *     arrayStride: number, matrixStride: number, rowMajor: boolean, counters: number }[]}
  *     `counters` an atomic counter's buffer's index, -1 for every other
  */
-function activeUniforms(linked){
+export function activeUniforms(linked){
     const buffers = counterBuffersOf(linked);
     return [
         ...linked.uniforms.map(u=>({ name: u.name, size: u.size, type: u.type, block: -1,
@@ -2187,7 +2187,7 @@ export function installShaderCalls(context, kernel){
  * @param {LinkedProgram} linked
  * @returns {{ name: string, type: GlslType }[]}
  */
-function activeAttributes(linked){
+export function activeAttributes(linked){
     return [
         ...linked.attributes,
         ...linked.builtinAttributes.map(name=>({ name,

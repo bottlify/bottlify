@@ -131,3 +131,46 @@ test('glBindBuffers reaches the storage points, checked against their limit', ()
     gl.glBindBuffers(GL.ATOMIC_COUNTER_BUFFER, 0, 1, [buffer], null);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
 });
+
+test('glBindImageTextures binds each texture\'s level 0 whole, refusing one and binding the rest',
+    ()=>{
+        const gl = context();
+        /** @param {number} internal @param {number} size */
+        const made = (internal, size)=>{
+            const [name] = gl.glGenTextures(1);
+            gl.glBindTexture(GL.TEXTURE_2D, name);
+            gl.glTexImage2D(GL.TEXTURE_2D, 0, internal, size, size, 0, GL.RGBA, GL.FLOAT, null);
+            return name;
+        };
+        const RGBA32F = 0x8814;
+        const R32UI = 0x8236;
+        const good = made(RGBA32F, 4);
+        const plain = made(0x8051 /* RGB8: no image format */, 4);
+        const empty = made(RGBA32F, 0);
+        gl.glBindImageTexture(1, good, 0, false, 0, GL.READ_ONLY, R32UI);
+        gl.glBindImageTexture(3, good, 0, false, 0, GL.READ_ONLY, R32UI);
+        assert.equal(gl.glGetError(), GL.NO_ERROR);
+        /** @param {number} at */
+        const unit = at=>[GL.IMAGE_BINDING_NAME, GL.IMAGE_BINDING_LEVEL,
+            GL.IMAGE_BINDING_LAYERED, GL.IMAGE_BINDING_ACCESS, GL.IMAGE_BINDING_FORMAT]
+            .map(query=>gl.glGetIntegeri_v(query, at)[0]);
+        gl.glBindImageTextures(0, 4, [good, plain, empty, 0]);
+        assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'one refused');
+        assert.deepEqual(unit(0), [good, 0, 1, GL.READ_WRITE, RGBA32F],
+            'level 0, every layer, read and written in its own format');
+        assert.deepEqual(unit(1), [good, 0, 0, GL.READ_ONLY, R32UI],
+            'a format no image takes leaves the unit as it was');
+        assert.deepEqual(unit(2)[0], 0, 'a level of no texels, the same');
+        assert.deepEqual(unit(3), [0, 0, 0, GL.READ_ONLY, 0x8058], 'zero unbinds');
+        gl.glBindImageTextures(0, 1, [999]);
+        assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a name that is no texture');
+        assert.equal(unit(0)[0], good);
+        const most = gl.glGetIntegerv(GL.MAX_IMAGE_UNITS)[0];
+        gl.glBindImageTextures(most - 1, 2, null);
+        assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'past the last unit');
+        assert.equal(unit(most - 1)[0], 0);
+        assert.equal(unit(0)[0], good, 'nothing done');
+        gl.glBindImageTextures(0, 2, null);
+        assert.equal(gl.glGetError(), GL.NO_ERROR);
+        assert.deepEqual([unit(0)[0], unit(1)[0]], [0, 0], 'no list unbinds them all');
+    });
