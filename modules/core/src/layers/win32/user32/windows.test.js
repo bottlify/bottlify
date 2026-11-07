@@ -261,11 +261,13 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {number} [options.processId] The process this user32 is, beside another on the
  *        same directory.
  * @param {4 | 8} [options.pointerSize] 8: a 64-bit process's user32.
+ * @param {(args: number[], thread: number) => any} [options.waitForObjectsOrInput]
+ * @param {(thread: number) => void} [options.inputArrived]
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
     caller = { current: THREAD }, queueNow, regionBox, setRegion, later, scrolls = [], directory,
-    processId, pointerSize,
+    processId, pointerSize, waitForObjectsOrInput, inputArrived,
 } = {})
 {
     const memory = fakeMemory();
@@ -359,6 +361,8 @@ function setup({
         },
         idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
         waitForObjects,
+        waitForObjectsOrInput,
+        inputArrived,
         now,
         allocate: heap ? (/** @type {number} */ bytes)=>{
             const at = heapNext;
@@ -1868,6 +1872,41 @@ test('MsgWaitForMultipleObjects on an event ends when a message arrives while it
         await tick();
         assert.equal(await third, WAIT_OBJECT_0 + 1);
     });
+
+test('MsgWaitForMultipleObjects on a process waits for the thread\'s input beside it, '
+    + 'which a message of its classes sets', ()=>{
+    // opengl32's test_other_process_parent: the child process sends to the
+    // parent's window while the parent waits for the child to end.
+    const HANDLES = 0x11800;
+    /** @type {any[]} */
+    const held = [];
+    /** @type {number[]} */
+    const woken = [];
+    const { fns, handles, memory, queue } = setup({
+        waitForObjectsOrInput: (/** @type {number[]} */ args, /** @type {number} */ thread)=>{
+            held.push([args, thread]);
+            return PARKED;
+        },
+        inputArrived: (/** @type {number} */ thread)=>woken.push(thread),
+        waitForObjects: ()=>/** @type {any} */ (WAIT_TIMEOUT),
+        caller: { current: { name: 'main', id: 0x104 } },
+    });
+    memory.putU32s(HANDLES, [handles.open('process', {})]);
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, 5000, QS_SENDMESSAGE]),
+        PARKED);
+    assert.deepEqual(held, [[[1, HANDLES, 5000], 0x104]], 'the handles and the wait, by thread');
+    queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+    assert.deepEqual(woken, [], 'a posted message is not one sent');
+    queue.sent(0x108);
+    assert.deepEqual(woken, [], 'another thread\'s');
+    queue.sent(0x104);
+    assert.deepEqual(woken, [0x104], 'a message sent to the thread wakes it');
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, INFINITE, QS_ALLINPUT]),
+        WAIT_OBJECT_0 + 1, 'input already there answers without a wait');
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 1, INFINITE, QS_ALLINPUT]),
+        WAIT_TIMEOUT, 'waiting for all and the input is kernel32\'s whole');
+    assert.equal(held.length, 1);
+});
 
 test('with fWaitAll the handles and the input together end the wait, and neither alone',
     async()=>{
@@ -7579,4 +7618,38 @@ test('a top-level window minimised with the focus in it lets it go before it mov
         || message === WM_WINDOWPOSCHANGING).map(({ message })=>message);
     assert.deepEqual(order.slice(0, 2), [WM_KILLFOCUS, WM_WINDOWPOSCHANGING]);
     assert.equal(fns.GetFocus.handler(), 0);
+});
+
+test('a window goes inside another process\'s window, and both ask the tree across them', ()=>{
+    // opengl32's test_other_process_parent: a program reparents its window
+    // into a child another process made, and back out.
+    const GA_PARENT = 1;
+    const GA_ROOT = 2;
+    const directory = createWindowDirectory();
+    const first = setup({ directory, processId: 0x100,
+        caller: { current: { name: 'main', id: 0x104 } } });
+    const second = setup({ directory, processId: 0x200,
+        caller: { current: { name: 'other', id: 0x204 } } });
+    for (const each of [first, second])
+    {
+        putClass(each.memory);
+        each.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    }
+    const toplevel = createWindow(first.fns, first.memory);
+    const child = createWindow(first.fns, first.memory, { style: WS_CHILD, parent: toplevel });
+    const mine = createWindow(second.fns, second.memory);
+    const desktop = second.fns.GetDesktopWindow.handler();
+    second.fns.SetWindowLongA.handler([mine, -16, WS_CHILD | WS_VISIBLE]);
+    assert.equal(second.fns.SetParent.handler([mine, child]), desktop);
+    assert.equal(second.fns.GetParent.handler([mine]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_PARENT]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), toplevel,
+        'the root is found through the other process\'s windows');
+    assert.equal(second.fns.GetParent.handler([child]), toplevel,
+        'another process\'s window, as it describes itself');
+    assert.equal(second.fns.GetAncestor.handler([child, GA_ROOT]), toplevel);
+    // Nor can another process's window go inside one inside it.
+    assert.equal(first.fns.SetParent.handler([child, mine]), 0);
+    assert.equal(second.fns.SetParent.handler([mine, 0]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), mine);
 });

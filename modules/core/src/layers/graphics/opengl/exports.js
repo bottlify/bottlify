@@ -42,7 +42,7 @@
  * at once, and the count is what says which of them a program actually wanted.
  */
 
-import { GL, WGL } from './constants.js';
+import { GL, PFD, WGL, WIN32_ERROR } from './constants.js';
 import {
     EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, PENDING_VERSION_FUNCTIONS,
     UNANNOUNCED_FUNCTIONS, WGL_EXTENSIONS, registryArguments,
@@ -433,6 +433,10 @@ const LIST_TYPES = new Map([
  * @property {(hdc: number) => import('./wgl-bitmap.js').BitmapSurface | null} [bitmapSurface]
  *           The bitmap a memory DC has selected, which a context made on that DC
  *           draws into (`wgl-bitmap.js`).
+ * @property {(width: number, height: number) => number} [createPbufferDc]
+ *           A GDI DC for a pbuffer of this size (WGL_ARB_pbuffer), which
+ *           `describeDrawable` names; absent, the pbuffers' DCs are WGL's own.
+ * @property {(hdc: number) => void} [deleteDc]  a pbuffer's DC gone with it
  * @property {() => void} [presented]  Told of every frame a program swaps.
  * @property {() => number} [currentThread]
  * @property {4 | 8} [pointerSize]
@@ -586,7 +590,8 @@ export function createOpengl(services){
     let madeContext = false;
 
     const wgl = createWgl({
-        gdi: { describeDrawable, bitmapSurface: services.bitmapSurface },
+        gdi: { describeDrawable, bitmapSurface: services.bitmapSurface,
+            createPbufferDc: services.createPbufferDc, deleteDc: services.deleteDc },
         currentThread: services.currentThread ?? (()=>0),
         setLastError: services.setLastError,
         memory: {
@@ -619,7 +624,20 @@ export function createOpengl(services){
     /** Where a swapped frame is copied to, allocated when one first is. */
     let frameAddress = 0;
     let frameBytes = 0;
-    let swapInterval = 1;
+    /**
+     * Each window's swap interval, by its drawable's key: WGL_EXT_swap_control
+     * sets the current DC's window's, which every context on it reads and no
+     * other window shares (Wine's opengl32 test_swap_control). One is the
+     * default.
+     *
+     * @type {Map<string, number>}
+     */
+    const swapIntervals = new Map();
+    /** @returns {string | null} the current DC's drawable's key */
+    const currentDrawableKey = ()=>{
+        const hdc = wgl.wglGetCurrentDC();
+        return current() && hdc !== 0 ? describeDrawable(hdc)?.key ?? null : null;
+    };
 
     /** @type {Map<string, number>} what a program called that is not implemented */
     const unimplemented = new Map();
@@ -1471,8 +1489,139 @@ export function createOpengl(services){
         return 1;
     };
 
+    /**
+     * wglMakeCurrent, and wglMakeContextCurrentARB with a DC to read from.
+     *
+     * @param {number} draw @param {number} read @param {number} handle
+     * @returns {number}
+     */
+    const makeCurrent = (draw, read, handle)=>{
+        const context = handle === 0 ? null : contexts.get(handle);
+        if (handle !== 0 && !context)
+        {
+            services.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        if (!wgl.wglMakeCurrent(draw, context ?? null, read))
+        {
+            return 0;
+        }
+        pointRoutines(context ?? null);
+        return 1;
+    };
+
+    /**
+     * A WGL attribute list as name and value pairs: it ends at a zero name,
+     * and a null list names nothing.
+     *
+     * @param {number} list @returns {number[]}
+     */
+    const attributeList = list=>{
+        /** @type {number[]} */
+        const attributes = [];
+        for (let at = list >>> 0; at !== 0 && attributes.length < 256; at += 8)
+        {
+            const pair = new DataView(services.readMemory(at, 8).slice().buffer);
+            const name = pair.getUint32(0, true);
+            if (name === 0)
+            {
+                break;
+            }
+            attributes.push(name, pair.getInt32(4, true));
+        }
+        return attributes;
+    };
+
+    /**
+     * Whether WGL_ARB_render_texture names a buffer the pbuffer has: either
+     * front one -- a right one of no stereo format binds an empty image, as
+     * the drivers Wine's test measured do -- and a back one where its format
+     * has one.
+     *
+     * @param {import('./wgl.js').Pbuffer} pbuffer @param {number} buffer
+     */
+    const pbufferHasBuffer = (pbuffer, buffer)=>buffer === WGL.FRONT_LEFT_ARB
+        || buffer === WGL.FRONT_RIGHT_ARB
+        || ((buffer === WGL.BACK_LEFT_ARB || buffer === WGL.BACK_RIGHT_ARB)
+            && (PIXEL_FORMATS[pbuffer.format - 1].dwFlags & PFD.DOUBLEBUFFER) !== 0);
+
+    /**
+     * The texture image a pbuffer bound as one is: on the current context's
+     * texture of its target, level zero (a cube's face), from `texels`, or
+     * empty for none.
+     *
+     * @param {any} context @param {import('./wgl.js').Pbuffer} pbuffer
+     * @param {Uint8Array | null} texels  RGBA, its bottom row first
+     */
+    const pbufferImage = (context, pbuffer, texels)=>{
+        const internal = pbuffer.textureFormat === WGL.TEXTURE_RGBA_ARB ? GL.RGBA : GL.RGB;
+        const width = texels ? pbuffer.width : 0;
+        const height = texels ? pbuffer.height : 0;
+        const pixels = texels ? { stored: texels } : null;
+        if (pbuffer.textureTarget === WGL.TEXTURE_1D_ARB)
+        {
+            context.glTexImage1D(GL.TEXTURE_1D, 0, internal, width, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+                pixels);
+            return;
+        }
+        const target = pbuffer.textureTarget === WGL.TEXTURE_CUBE_MAP_ARB
+            ? GL.TEXTURE_CUBE_MAP_POSITIVE_X + pbuffer.face - WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB
+            : GL.TEXTURE_2D;
+        context.glTexImage2D(target, 0, internal, width, height, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            pixels);
+    };
+
     /** @type {Record<string, (args: number[]) => number>} */
     const handlers = {
+        // --- WGL_ARB_pbuffer ---
+
+        wglCreatePbufferARB: ([hdc, format, width, height, list])=>wgl.wglCreatePbufferARB(
+            hdc >>> 0, format | 0, width | 0, height | 0, attributeList(list)),
+        wglGetPbufferDCARB: ([pbuffer])=>wgl.wglGetPbufferDCARB(pbuffer >>> 0),
+        wglReleasePbufferDCARB: ([pbuffer, hdc])=>(
+            wgl.wglReleasePbufferDCARB(pbuffer >>> 0, hdc >>> 0) ? 1 : 0),
+        wglDestroyPbufferARB: ([pbuffer])=>(wgl.wglDestroyPbufferARB(pbuffer >>> 0) ? 1 : 0),
+        wglQueryPbufferARB: ([pbuffer, attribute, out])=>{
+            const value = wgl.wglQueryPbufferARB(pbuffer >>> 0, attribute >>> 0);
+            if (value === null)
+            {
+                return 0;
+            }
+            if ((out >>> 0) !== 0)
+            {
+                writeWord(out >>> 0, value);
+            }
+            return 1;
+        },
+
+        // --- WGL_ARB_render_texture ---
+
+        wglSetPbufferAttribARB: ([pbuffer, list])=>(
+            wgl.wglSetPbufferAttribARB(pbuffer >>> 0, attributeList(list)) ? 1 : 0),
+        wglReleaseTexImageARB: ([handle, buffer])=>{
+            const pbuffer = wgl.pbufferOf(handle >>> 0);
+            if (!pbuffer)
+            {
+                wgl.fail(WIN32_ERROR.INVALID_HANDLE);
+                return 0;
+            }
+            if (!pbufferHasBuffer(pbuffer, buffer >>> 0))
+            {
+                wgl.fail(WIN32_ERROR.INVALID_DATA);
+                return 0;
+            }
+            // Let go of, the texture's image is none, as the drivers measured leave it.
+            const context = current();
+            if (pbuffer.bound === (buffer >>> 0) && context)
+            {
+                pbufferImage(context, pbuffer, null);
+            }
+            if (pbuffer.bound === (buffer >>> 0))
+            {
+                pbuffer.bound = 0;
+            }
+            return 1;
+        },
         // --- WGL ---
 
         wglCreateContext: ([hdc])=>{
@@ -1481,19 +1630,7 @@ export function createOpengl(services){
         },
 
         wglCreateContextAttribsARB: ([hdc, share, list])=>{
-            // The attributes end at a zero name; a null list asks for nothing.
-            /** @type {number[]} */
-            const attributes = [];
-            for (let at = list >>> 0; at !== 0 && attributes.length < 256; at += 8)
-            {
-                const pair = new DataView(services.readMemory(at, 8).slice().buffer);
-                const name = pair.getUint32(0, true);
-                if (name === 0)
-                {
-                    break;
-                }
-                attributes.push(name, pair.getInt32(4, true));
-            }
+            const attributes = attributeList(list);
             const shared = (share >>> 0) === 0 ? null : contexts.get(share >>> 0);
             const context = wgl.wglCreateContextAttribsARB(hdc >>> 0, shared, attributes);
             return context ? handleFor(context) : 0;
@@ -1521,20 +1658,12 @@ export function createOpengl(services){
             return 1;
         },
 
-        wglMakeCurrent: ([hdc, handle])=>{
-            const context = (handle >>> 0) === 0 ? null : contexts.get(handle >>> 0);
-            if ((handle >>> 0) !== 0 && !context)
-            {
-                services.setLastError?.(ERROR_INVALID_HANDLE);
-                return 0;
-            }
-            if (!wgl.wglMakeCurrent(hdc >>> 0, context ?? null))
-            {
-                return 0;
-            }
-            pointRoutines(context ?? null);
-            return 1;
-        },
+        wglMakeCurrent: ([hdc, handle])=>makeCurrent(hdc >>> 0, hdc >>> 0, handle >>> 0),
+
+        wglMakeContextCurrentARB: ([draw, read, handle])=>
+            makeCurrent(draw >>> 0, read >>> 0, handle >>> 0),
+
+        wglGetCurrentReadDCARB: ()=>wgl.wglGetCurrentReadDCARB(),
 
         wglGetCurrentContext: ()=>{
             const context = current();
@@ -1589,13 +1718,23 @@ export function createOpengl(services){
             // presenter's, which paces to the display already.
             if ((interval | 0) < 0)
             {
+                // ERROR_INVALID_DATA, as the extension says.
+                services.setLastError?.(13);
                 return 0;
             }
-            swapInterval = interval | 0;
+            const key = currentDrawableKey();
+            if (key === null)
+            {
+                return 0;
+            }
+            swapIntervals.set(key, interval | 0);
             return 1;
         },
 
-        wglGetSwapIntervalEXT: ()=>swapInterval,
+        wglGetSwapIntervalEXT: ()=>{
+            const key = currentDrawableKey();
+            return key === null ? 1 : swapIntervals.get(key) ?? 1;
+        },
 
         wglGetPixelFormatAttribivARB: args=>pixelFormatAttributes(args, 'word'),
 
@@ -2176,6 +2315,49 @@ export function createOpengl(services){
      * @type {Record<string, (args: number[]) => number | Promise<number>>}
      */
     const swaps = {
+        /**
+         * WGL_ARB_render_texture: the pbuffer's buffer is the image of the
+         * current context's texture of its target until it is let go of,
+         * read from the device as it is now.
+         */
+        wglBindTexImageARB: ([handle, buffer])=>{
+            const pbuffer = wgl.pbufferOf(handle >>> 0);
+            if (!pbuffer)
+            {
+                wgl.fail(WIN32_ERROR.INVALID_HANDLE);
+                return 0;
+            }
+            const context = current();
+            if (!pbufferHasBuffer(pbuffer, buffer >>> 0) || pbuffer.bound !== 0
+                || pbuffer.textureFormat === WGL.NO_TEXTURE_ARB || !context)
+            {
+                wgl.fail(WIN32_ERROR.INVALID_DATA);
+                return 0;
+            }
+            pbuffer.bound = buffer >>> 0;
+            const drawable = wgl.pbufferDrawable(pbuffer);
+            const right = (buffer >>> 0) === WGL.FRONT_RIGHT_ARB
+                || (buffer >>> 0) === WGL.BACK_RIGHT_ARB;
+            const blank = new Uint8Array(pbuffer.width * pbuffer.height * 4);
+            const reading = right ? null
+                : drawable ? context.readDrawable?.(drawable) ?? null : null;
+            if (right)
+            {
+                // No stereo format here: the right buffer is none.
+                pbufferImage(context, pbuffer, null);
+                return 1;
+            }
+            if (!reading)
+            {
+                pbufferImage(context, pbuffer, blank);
+                return 1;
+            }
+            return reading.then((/** @type {Uint8Array | null} */ texels)=>{
+                pbufferImage(context, pbuffer, texels ?? blank);
+                return 1;
+            });
+        },
+
         ...queryResults(),
         // A wait on a fence the device has not reached waits for it, up to
         // the timeout.

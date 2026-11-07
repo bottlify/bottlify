@@ -18,7 +18,9 @@
  */
 
 import { GL } from './constants.js';
-import { INTERLEAVED_LAYOUTS, componentBytes, readElement, readIndex } from './arrays.js';
+import {
+    INTERLEAVED_LAYOUTS, componentBytes, isPacked, readElement, readIndex,
+} from './arrays.js';
 import { createBufferObject } from './objects.js';
 import { TEXTURE_UNITS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
@@ -54,6 +56,9 @@ const PRIMITIVE_MODES = new Set([
     GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON, GL.LINES_ADJACENCY,
     GL.LINE_STRIP_ADJACENCY, GL.TRIANGLES_ADJACENCY, GL.TRIANGLE_STRIP_ADJACENCY,
 ]);
+
+/** GL_MIN_MAP_BUFFER_ALIGNMENT: a map starts on a boundary of it, past the range's offset. */
+const MAP_ALIGNMENT = 64;
 
 /**
  * What an adjacency mode draws without a geometry shader: its own
@@ -108,6 +113,9 @@ const USAGES = new Set([
     GL.STATIC_COPY, GL.DYNAMIC_DRAW, GL.DYNAMIC_READ, GL.DYNAMIC_COPY,
 ]);
 
+/** The packed types (3.3): one word an element, four components in it. */
+const PACKED_TYPES = [GL.INT_2_10_10_10_REV, GL.UNSIGNED_INT_2_10_10_10_REV];
+
 /**
  * Which types each array accepts, and the flat queries that mirror it.
  *
@@ -115,22 +123,23 @@ const USAGES = new Set([
  *        enable: number, size: number | null, type: number, stride: number,
  *        binding: number | null, normalised: boolean }>}
  */
+
 const ARRAYS = {
     vertex: {
-        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: [2, 3, 4],
+        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: [2, 3, 4],
         enable: GL.VERTEX_ARRAY, size: GL.VERTEX_ARRAY_SIZE, type: GL.VERTEX_ARRAY_TYPE,
         stride: GL.VERTEX_ARRAY_STRIDE, binding: GL.VERTEX_ARRAY_BUFFER_BINDING,
         normalised: false,
     },
     normal: {
-        types: [GL.BYTE, GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: null,
+        types: [GL.BYTE, GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: null,
         enable: GL.NORMAL_ARRAY, size: null, type: GL.NORMAL_ARRAY_TYPE,
         stride: GL.NORMAL_ARRAY_STRIDE, binding: GL.NORMAL_ARRAY_BUFFER_BINDING,
         normalised: true,
     },
     color: {
         types: [GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT,
-            GL.UNSIGNED_INT, GL.FLOAT, GL.DOUBLE],
+            GL.UNSIGNED_INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES],
         sizes: [3, 4],
         enable: GL.COLOR_ARRAY, size: GL.COLOR_ARRAY_SIZE, type: GL.COLOR_ARRAY_TYPE,
         stride: GL.COLOR_ARRAY_STRIDE, binding: GL.COLOR_ARRAY_BUFFER_BINDING,
@@ -143,7 +152,7 @@ const ARRAYS = {
         normalised: false,
     },
     texCoord: {
-        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: [1, 2, 3, 4],
+        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: [1, 2, 3, 4],
         enable: GL.TEXTURE_COORD_ARRAY, size: GL.TEXTURE_COORD_ARRAY_SIZE,
         type: GL.TEXTURE_COORD_ARRAY_TYPE, stride: GL.TEXTURE_COORD_ARRAY_STRIDE,
         binding: GL.TEXTURE_COORD_ARRAY_BUFFER_BINDING, normalised: false,
@@ -350,6 +359,12 @@ export function installArrayCalls(context, kernel){
         if (stride < 0 || (sized && spec.sizes && !spec.sizes.includes(size)))
         {
             setError(GL.INVALID_VALUE);
+            return;
+        }
+        // A packed word holds four components, all of which a sized array takes.
+        if (sized && isPacked(type) && size !== 4)
+        {
+            setError(GL.INVALID_OPERATION);
             return;
         }
         const pointer = pointerOf(name);
@@ -802,7 +817,15 @@ export function installArrayCalls(context, kernel){
      */
     const mapRange = (buffer, offset, length, bits, call)=>{
         const memory = kernel.memory();
-        const address = memory?.allocate ? memory.allocate(Math.max(1, length)) : 0;
+        // A map starts where the store's byte would on a boundary of
+        // GL_MIN_MAP_BUFFER_ALIGNMENT: a range from byte 3 is at 3 past one
+        // (Wine's opengl32 test_memory_map), and SSE copies into a whole map
+        // find it aligned.
+        const skew = offset % MAP_ALIGNMENT;
+        const block = memory?.allocate
+            ? memory.allocate(Math.max(1, length) + skew + MAP_ALIGNMENT - 1) : 0;
+        const address = block === 0 ? 0
+            : (((block + MAP_ALIGNMENT - 1) & -MAP_ALIGNMENT) >>> 0) + skew;
         if (address === 0)
         {
             lose(`${call} could not map a buffer into guest memory: a program that`
@@ -818,6 +841,7 @@ export function installArrayCalls(context, kernel){
                 buffer.data.subarray(offset, offset + length));
         }
         buffer.mapped = address;
+        buffer.mapBlock = block;
         buffer.access = accessOfBits(bits);
         buffer.accessFlags = bits;
         buffer.mapOffset = offset;
@@ -844,8 +868,9 @@ export function installArrayCalls(context, kernel){
     /** The map ended: its memory given back and its state the unmapped one. */
     /** @param {import('./objects.js').BufferObject} buffer */
     const unmap = buffer=>{
-        kernel.memory()?.free?.(buffer.mapped);
+        kernel.memory()?.free?.(buffer.mapBlock);
         buffer.mapped = 0;
+        buffer.mapBlock = 0;
         buffer.accessFlags = 0;
         buffer.mapOffset = 0;
         buffer.mapLength = 0;
@@ -1016,6 +1041,10 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
+        if (restarting(name, mode, count, type, indices, baseVertex, instancing))
+        {
+            return;
+        }
         if (!hasVertexSource()
             || drawFromArrays(mode, 0, count, { type, indices, baseVertex }, instancing))
         {
@@ -1031,7 +1060,66 @@ export function installArrayCalls(context, kernel){
             refusal, instancing);
     }
 
+    /**
+     * Primitive restart (OpenGL 3.1 section 2.8.1, 4.3's fixed index): with it
+     * on, an index equal to the restart index ends the primitive and starts
+     * the next, so the draw is made as the draws of the runs between them,
+     * each its own strip, fan, loop or list, as the specification describes
+     * it. False when it is off or no index is the restart index, for the
+     * draw to go on as one.
+     *
+     * @param {string} name @param {number} mode @param {number} count @param {number} type
+     * @param {number | Uint8Array} indices @param {number} baseVertex
+     * @param {Instancing} instancing
+     * @returns {boolean} whether the draw was made here
+     */
+    function restarting(name, mode, count, type, indices, baseVertex, instancing){
+        const fixed = record(GL.PRIMITIVE_RESTART_FIXED_INDEX).values[0] !== 0;
+        if (!fixed && record(GL.PRIMITIVE_RESTART).values[0] === 0)
+        {
+            return false;
+        }
+        const size = componentBytes(type);
+        const restart = fixed ? 2 ** (size * 8) - 1
+            : record(GL.PRIMITIVE_RESTART_INDEX).values[0] >>> 0;
+        const list = readIndices(count, type, indices);
+        if (!list || !list.includes(restart))
+        {
+            return false;
+        }
+        let start = 0;
+        for (let at = 0; at <= list.length; at++)
+        {
+            if (at === list.length || list[at] === restart)
+            {
+                if (at > start)
+                {
+                    const from = typeof indices === 'number' ? indices + start * size
+                        : indices.subarray(start * size);
+                    // A run holds no restart index, and draws as one.
+                    drawElementsWith(name, mode, at - start, type, from, baseVertex,
+                        instancing);
+                }
+                start = at + 1;
+            }
+        }
+        return true;
+    }
+
     Object.assign(context, {
+        /**
+         * glPrimitiveRestartIndex (3.1): the index that restarts while
+         * GL_PRIMITIVE_RESTART is on.
+         *
+         * @param {number} index
+         */
+        glPrimitiveRestartIndex(index){
+            if (enter('glPrimitiveRestartIndex', [index]))
+            {
+                setState(GL.PRIMITIVE_RESTART_INDEX, [index >>> 0]);
+            }
+        },
+
         /**
          * @param {number} size
          * @param {number} type

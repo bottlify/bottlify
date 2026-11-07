@@ -32,7 +32,7 @@
  * when set and says nothing when clear.
  */
 
-import { PFD, WGL } from './constants.js';
+import { MAX_PBUFFER_SIZE, PFD, WGL } from './constants.js';
 
 /**
  * PIXELFORMATDESCRIPTOR. Twenty consecutive BYTEs sit between the header and
@@ -272,6 +272,16 @@ export const PIXEL_FORMATS = Object.freeze([
     })),
 ]);
 
+/**
+ * Whether a format draws a pbuffer (WGL_ARB_pbuffer): every one the generic
+ * renderer is no part of, which is to say every one drawn on the device.
+ *
+ * @param {PixelFormat} format
+ */
+export function drawsToPbuffer(format){
+    return (format.dwFlags & PFD.GENERIC_FORMAT) === 0;
+}
+
 /** The display's depth: the window formats'. */
 const DISPLAY_COLOR_BITS = 32;
 
@@ -386,6 +396,17 @@ export function formatAttribute(format, attribute){
             return (format.dwFlags & PFD.DRAW_TO_WINDOW) ? 1 : 0;
         case WGL.DRAW_TO_BITMAP_ARB:
             return (format.dwFlags & PFD.DRAW_TO_BITMAP) ? 1 : 0;
+        // A pbuffer is drawn on the device, by the formats the generic
+        // renderer has no part in; and bound as a texture by them too.
+        case WGL.DRAW_TO_PBUFFER_ARB:
+        case WGL.BIND_TO_TEXTURE_RGB_ARB:
+        case WGL.BIND_TO_TEXTURE_RGBA_ARB:
+            return drawsToPbuffer(format) ? 1 : 0;
+        case WGL.MAX_PBUFFER_WIDTH_ARB:
+        case WGL.MAX_PBUFFER_HEIGHT_ARB:
+            return drawsToPbuffer(format) ? MAX_PBUFFER_SIZE : 0;
+        case WGL.MAX_PBUFFER_PIXELS_ARB:
+            return drawsToPbuffer(format) ? MAX_PBUFFER_SIZE * MAX_PBUFFER_SIZE : 0;
         case WGL.ACCELERATION_ARB:
             return (format.dwFlags & PFD.GENERIC_ACCELERATED) ? WGL.FULL_ACCELERATION_ARB
                 : (format.dwFlags & PFD.GENERIC_FORMAT) ? WGL.NO_ACCELERATION_ARB
@@ -466,6 +487,12 @@ export function formatAttribute(format, attribute){
 const ARB_MATCH = new Map([
     [WGL.DRAW_TO_WINDOW_ARB, 'exact'],
     [WGL.DRAW_TO_BITMAP_ARB, 'exact'],
+    [WGL.DRAW_TO_PBUFFER_ARB, 'exact'],
+    [WGL.BIND_TO_TEXTURE_RGB_ARB, 'exact'],
+    [WGL.BIND_TO_TEXTURE_RGBA_ARB, 'exact'],
+    [WGL.MAX_PBUFFER_PIXELS_ARB, 'ignored'],
+    [WGL.MAX_PBUFFER_WIDTH_ARB, 'ignored'],
+    [WGL.MAX_PBUFFER_HEIGHT_ARB, 'ignored'],
     [WGL.ACCELERATION_ARB, 'exact'],
     [WGL.NEED_PALETTE_ARB, 'exact'],
     [WGL.NEED_SYSTEM_PALETTE_ARB, 'exact'],

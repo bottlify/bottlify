@@ -33,6 +33,7 @@
  * save them under those bits.
  */
 
+import { unpackWord } from './arrays.js';
 import { GL } from './constants.js';
 import { PROGRAM_LIMITS, canonicalAttribName, parseProgram } from './arb-program.js';
 import { createProgramObject } from './objects.js';
@@ -50,7 +51,7 @@ const TARGETS = new Map([
 /** @type {Set<number>} */
 const ATTRIB_TYPES = new Set([
     GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT, GL.FLOAT,
-    GL.DOUBLE,
+    GL.DOUBLE, GL.INT_2_10_10_10_REV, GL.UNSIGNED_INT_2_10_10_10_REV,
 ]);
 
 /**
@@ -681,6 +682,13 @@ export function installProgramCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
+            // A packed word holds four components (3.3), all of which the array takes.
+            if ((type === GL.INT_2_10_10_10_REV || type === GL.UNSIGNED_INT_2_10_10_10_REV)
+                && size !== 4)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             // An aliased index is the conventional array: the generic write
             // is another way of writing the same pointer record.
             const array = /**
@@ -742,6 +750,41 @@ export function installProgramCalls(context, kernel){
             {
                 attribValues[index] = kind === 'uint' ? [x >>> 0, y >>> 0, z >>> 0, w >>> 0]
                     : [x | 0, y | 0, z | 0, w | 0];
+            }
+        },
+
+        /**
+         * The packed attribute forms (3.3, GL_ARB_vertex_type_2_10_10_10_rev):
+         * glVertexAttribP*, glVertexP*, glTexCoordP*, glMultiTexCoordP*,
+         * glNormalP3ui, glColorP* and glSecondaryColorP3ui. The word's first
+         * `count` components are what the unpacked form takes; the rest are
+         * (0, 0, 1) for an attribute or vertex and its texture coordinates.
+         *
+         * @param {'attrib' | 'vertex' | 'texCoord' | 'normal' | 'color' | 'secondary'} kind
+         * @param {number} index  the generic attribute, or the texture unit's enum
+         * @param {number} type @param {boolean} normalised
+         * @param {number} count @param {number} word
+         */
+        packedAttribute(kind, index, type, normalised, count, word){
+            if (type !== GL.INT_2_10_10_10_REV && type !== GL.UNSIGNED_INT_2_10_10_10_REV)
+            {
+                // The error is the context's own, as the unpacked call's would be.
+                if (enter('packedAttribute', [kind, index, type, normalised, count, word]))
+                {
+                    setError(GL.INVALID_ENUM);
+                }
+                return;
+            }
+            const all = unpackWord(word >>> 0, type, normalised);
+            const [x, y, z, w] = [0, 1, 2, 3].map(k=>(k < count ? all[k] : k === 3 ? 1 : 0));
+            switch (kind)
+            {
+                case 'attrib': context.glVertexAttrib4fARB(index, x, y, z, w); break;
+                case 'vertex': context.glVertex4f(x, y, z, w); break;
+                case 'texCoord': context.glMultiTexCoord4fARB(index, x, y, z, w); break;
+                case 'normal': context.glNormal3f(x, y, z); break;
+                case 'color': context.glColor4f(x, y, z, w); break;
+                default: context.glSecondaryColor3fEXT(x, y, z);
             }
         },
 

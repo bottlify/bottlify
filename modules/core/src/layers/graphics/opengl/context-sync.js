@@ -101,6 +101,9 @@ export function installSyncCalls(context, kernel){
                 return 0;
             }
             const table = syncs();
+            // A sync is the group's object like any other: a group that has
+            // held one may no longer be given up (wglShareLists).
+            kernel.shareGroup().used = true;
             const name = table.next++;
             table.objects.set(name, kernel.fence?.() ?? SIGNALLED);
             return name;

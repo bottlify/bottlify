@@ -515,8 +515,12 @@ test('a texture\'s sampler is rebuilt only when its filter or wrap parameters ch
     };
     draw();
     await r.swap();
-    const samplerOf = ()=>r.gpu.of('createBindGroup').at(-1).descriptor.entries
-        .find((/** @type {any} */ e)=>e.binding === 2).resource;
+    // The draw's group: the frame's show pass binds a sampler there too.
+    const samplerOf = ()=>r.gpu.of('createBindGroup')
+        .map((/** @type {any} */ call)=>call.descriptor.entries
+            .find((/** @type {any} */ e)=>e.binding === 2)?.resource)
+        .filter((/** @type {any} */ sampler)=>sampler?.descriptor?.label !== 'gl-show')
+        .at(-1);
     const first = samplerOf();
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
     draw();
@@ -2223,8 +2227,10 @@ test('a divisor past one copies each instance\'s element out, and a draw of no i
 
 /** @param {ReturnType<typeof rig>} r @param {RegExp} label */
 function textureLabelled(r, label){
+    // The window's back buffer is the one labelled exactly so.
+    const whole = new RegExp(`${label.source}$`);
     return r.gpu.of('createTexture').map((/** @type {any} */ call)=>call.texture)
-        .reverse().find((/** @type {any} */ texture)=>label.test(texture.descriptor.label ?? ''));
+        .reverse().find((/** @type {any} */ texture)=>whole.test(texture.descriptor.label ?? ''));
 }
 
 test('glReadPixels on the device draws what was recorded first, then copies the back buffer',
@@ -2303,12 +2309,92 @@ test('a window\'s buffers are the window\'s: another context on it reads what th
         assert.deepEqual([...await r.context.glReadPixels(0, 3, 1, 1, GL.RGBA,
             GL.UNSIGNED_BYTE)], [255, 0, 0, 255], 'and the first context moved onto it');
         assert.equal(r.gpu.of('createTexture').filter((/** @type {any} */ call)=>
-            /gl-colour/.test(call.texture.descriptor.label)).length, 2,
+            /gl-colour$/.test(call.texture.descriptor.label)).length, 2,
         'the rig\'s own drawable, and the window\'s once');
         // Another size is other buffers.
         second.attach({ ...window, width: 16 });
         assert.notEqual(textureLabelled(r, /gl-colour/), colour);
     });
+
+test('a swap exchanges the buffers: the back one is the old front one after it', async()=>{
+    const r = rig();
+    const back = textureLabelled(r, /gl-colour/);
+    const front = textureLabelled(r, /gl-colour-front/);
+    back.bytes.fill(0x40);
+    const read = async()=>[...await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA,
+        GL.UNSIGNED_BYTE)];
+    assert.deepEqual(await read(), [0x40, 0x40, 0x40, 0x40]);
+    await r.swap();
+    assert.deepEqual(await read(), [0, 0, 0, 0], 'the front one, never drawn');
+    assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, front);
+    // What is drawn now lands in it.
+    r.context.glClear(GL.COLOR_BUFFER_BIT);
+    await read();
+    assert.equal(r.gpu.of('beginRenderPass').at(-1).descriptor.colorAttachments[0].view.texture,
+        front);
+    await r.swap();
+    assert.deepEqual(await read(), [0x40, 0x40, 0x40, 0x40], 'and back again');
+    // The frame shown is the one drawn before its swap, whatever is back now.
+    const shows = r.gpu.of('createBindGroup').filter((/** @type {any} */ call)=>call.descriptor
+        .entries.some((/** @type {any} */ e)=>e.resource?.descriptor?.label === 'gl-show'));
+    const shownFrom = shows.map((/** @type {any} */ call)=>call.descriptor.entries
+        .find((/** @type {any} */ e)=>e.binding === 1).resource.texture);
+    assert.deepEqual(shownFrom.slice(-2), [back, front]);
+});
+
+test('a context made current with a read DC reads that window\'s buffers, and draws into its own',
+    async()=>{
+        const r = rig();
+        r.context.attach({ width: 4, height: 4, doubleBuffered: true, key: 'read' });
+        const readBack = textureLabelled(r, /gl-colour/);
+        readBack.bytes.fill(0x40);
+        r.context.attach({ width: 8, height: 8, doubleBuffered: true, key: 'draw',
+            read: { width: 4, height: 4, key: 'read' } });
+        const drawBack = textureLabelled(r, /gl-colour/);
+        assert.notEqual(drawBack, readBack);
+        assert.deepEqual([...await r.context.glReadPixels(3, 3, 1, 1, GL.RGBA,
+            GL.UNSIGNED_BYTE)], [0x40, 0x40, 0x40, 0x40]);
+        r.context.glClear(GL.COLOR_BUFFER_BIT);
+        await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE);
+        assert.equal(r.gpu.of('beginRenderPass').at(-1).descriptor.colorAttachments[0].view
+            .texture, drawBack);
+        assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, readBack);
+    });
+
+test('a context left draws what it recorded, and another reads that drawable as it is',
+    async()=>{
+        const r = rig();
+        const pbuffer = { width: 16, height: 8, doubleBuffered: false, key: 'pbuffer:1' };
+        /** @type {any} */
+        const drawer = createGlContext({ gpu: r.renderer });
+        drawer.attach(pbuffer);
+        const colour = textureLabelled(r, /gl-colour/);
+        colour.bytes.fill(0x30);
+        drawer.glClear(GL.COLOR_BUFFER_BIT);
+        const passes = ()=>r.gpu.of('beginRenderPass').filter((/** @type {any} */ call)=>
+            call.descriptor.colorAttachments[0]?.view.texture === colour).length;
+        await r.renderer.settled();
+        assert.equal(passes(), 0, 'recorded, not drawn yet');
+        drawer.flushDevice();
+        await r.renderer.settled();
+        assert.equal(passes(), 1, 'drawn once it is left');
+        drawer.flushDevice();
+        await r.renderer.settled();
+        assert.equal(passes(), 1, 'and nothing twice');
+        assert.deepEqual([...(await r.context.readDrawable(pbuffer) ?? [])].slice(0, 4),
+            [0x30, 0x30, 0x30, 0x30], 'the other drawable\'s colour, the whole of it');
+        assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, colour);
+    });
+
+test('a single-buffered window keeps its one buffer across a swap', async()=>{
+    const r = rig();
+    r.context.attach({ width: 4, height: 4, doubleBuffered: false, key: 'single' });
+    const only = textureLabelled(r, /gl-colour/);
+    only.bytes.fill(0x40);
+    await r.swap();
+    assert.deepEqual([...await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE)],
+        [0x40, 0x40, 0x40, 0x40]);
+});
 
 test('blending and colour masks set apart per draw buffer reach each target\'s pipeline state, '
     + 'and glClearBuffer clears one target', async()=>{
