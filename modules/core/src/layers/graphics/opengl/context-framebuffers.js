@@ -428,8 +428,11 @@ export function installFramebufferCalls(context, kernel){
         }
         const face = CUBE_FACES.indexOf(textarget);
         const wanted = face >= 0 ? GL.TEXTURE_CUBE_MAP : textarget;
+        // A rectangle (3.1) and a multisample texture (3.2) are attached as
+        // the one level they have.
+        const single = wanted === GL.TEXTURE_RECTANGLE || wanted === GL.TEXTURE_2D_MULTISAMPLE;
         if (wanted !== GL.TEXTURE_2D && wanted !== GL.TEXTURE_CUBE_MAP
-            && wanted !== GL.TEXTURE_1D)
+            && wanted !== GL.TEXTURE_1D && !single)
         {
             setError(textarget === GL.TEXTURE_3D ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
             return;
@@ -439,7 +442,7 @@ export function installFramebufferCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        const maxLevel = Math.log2(record(GL.MAX_TEXTURE_SIZE).values[0]);
+        const maxLevel = single ? 0 : Math.log2(record(GL.MAX_TEXTURE_SIZE).values[0]);
         if (level < 0 || level > maxLevel)
         {
             setError(GL.INVALID_VALUE);

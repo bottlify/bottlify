@@ -282,6 +282,10 @@ export function createSceneBuilder(kernel){
                 cube: side.textureBoundAt(index, GL.TEXTURE_CUBE_MAP),
                 rectangle: side.textureBoundAt(index, GL.TEXTURE_RECTANGLE),
                 buffer: side.bufferTextureAt(index),
+                // 3.2's multisample textures, each kept with one sample a texel.
+                twoDMultisample: side.textureBoundAt(index, GL.TEXTURE_2D_MULTISAMPLE),
+                twoDMultisampleArray: side.textureBoundAt(index,
+                    GL.TEXTURE_2D_MULTISAMPLE_ARRAY),
                 oneD: side.textureBoundAt(index, GL.TEXTURE_1D),
                 // GLSL 1.30's samplers of 3D textures and arrays.
                 threeD: side.textureBoundAt(index, GL.TEXTURE_3D),

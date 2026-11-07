@@ -102,6 +102,8 @@ const MIPMAP_FILTERS = new Set([
  *     version: number }} [store]  a buffer texture's (3.1): the buffer object its texels
  *           are, in which format, over which range (null: to its end), and the
  *           buffer's version the level was last made from
+ * @property {{ samples: number, fixed: boolean }} [multisample]  a multisample texture's
+ *           (3.2): the samples asked and whether their locations are fixed
  * @property {Map<number, DirtyRect | null>} dirty   the level keys written
  *           since a copy kept elsewhere last read them, each with the
  *           rectangle written or `null` for the whole level
@@ -235,9 +237,9 @@ const RECTANGLE_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name
             ? GL.CLAMP_TO_EDGE : value])));
 
 /**
- * What a buffer texture (3.1) holds of sampling state: none a program can
- * set; its one level is read texel by texel, which these filters keep
- * complete.
+ * What a buffer texture (3.1) or a multisample one (3.2) holds of sampling
+ * state: none a program can set; its one level is read texel by texel,
+ * which these filters keep complete.
  *
  * @type {ReadonlyArray<readonly [number, number]>}
  */
@@ -296,7 +298,9 @@ export function createTextureObject(name, target){
         name,
         target,
         parameters: new Map(target === GL.TEXTURE_RECTANGLE ? RECTANGLE_PARAMETERS
-            : target === GL.TEXTURE_BUFFER ? BUFFER_PARAMETERS : DEFAULT_TEXTURE_PARAMETERS),
+            : target === GL.TEXTURE_BUFFER || target === GL.TEXTURE_2D_MULTISAMPLE
+                || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY ? BUFFER_PARAMETERS
+                : DEFAULT_TEXTURE_PARAMETERS),
         parametersVersion: 0,
         borderColour: [0, 0, 0, 0],
         levels: new Map(),

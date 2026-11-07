@@ -68,6 +68,7 @@ export const TEXTURE_CALLS_NOT_COMPILED = Object.freeze([
     'glTexStorage1D', 'glTexStorage2D', 'glTexStorage3D', 'glCopyImageSubData',
     'glClearTexImage', 'glClearTexSubImage', 'glGetTextureSubImage',
     'glGetCompressedTextureSubImage', 'glTexBuffer', 'glTexBufferRange',
+    'glTexImageMultisample', 'glTexStorageMultisample', 'glGetMultisamplefv',
 ]);
 
 
@@ -131,7 +132,10 @@ const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
  * program samples -- 3D textures and the arrays of OpenGL 3.0.
  */
 const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY,
-    GL.TEXTURE_BUFFER];
+    GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE_ARRAY];
+
+/** The multisample targets (3.2), whose one level holds the samples. @type {ReadonlySet<number>} */
+const MULTISAMPLE = new Set([GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE_ARRAY]);
 
 /**
  * The formats a buffer texture's texels are in (3.1 table 3.15, 4.3 table
@@ -166,6 +170,8 @@ const BINDING_QUERY = Object.freeze({
     [TEX.TEXTURE_1D_ARRAY]: TEX.TEXTURE_BINDING_1D_ARRAY,
     [TEX.TEXTURE_2D_ARRAY]: TEX.TEXTURE_BINDING_2D_ARRAY,
     [GL.TEXTURE_BUFFER]: GL.TEXTURE_BINDING_BUFFER,
+    [GL.TEXTURE_2D_MULTISAMPLE]: GL.TEXTURE_BINDING_2D_MULTISAMPLE,
+    [GL.TEXTURE_2D_MULTISAMPLE_ARRAY]: GL.TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY,
 });
 
 /**
@@ -184,7 +190,8 @@ const IMAGE_TARGETS = {
 /** @type {ReadonlySet<number>} */
 const PROXIES = new Set([GL.PROXY_TEXTURE_1D, GL.PROXY_TEXTURE_2D, GL.PROXY_TEXTURE_3D,
     GL.PROXY_TEXTURE_CUBE_MAP, TEX.PROXY_TEXTURE_1D_ARRAY, TEX.PROXY_TEXTURE_2D_ARRAY,
-    GL.PROXY_TEXTURE_RECTANGLE]);
+    GL.PROXY_TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_2D_MULTISAMPLE,
+    GL.PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY]);
 
 /** The rectangle targets (3.1), whose one level is level zero. @type {ReadonlySet<number>} */
 const RECTANGLES = new Set([GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]);
@@ -378,6 +385,8 @@ const PROXY_TARGETS = new Map([
     [TEX.PROXY_TEXTURE_1D_ARRAY, TEX.TEXTURE_1D_ARRAY],
     [TEX.PROXY_TEXTURE_2D_ARRAY, TEX.TEXTURE_2D_ARRAY],
     [GL.PROXY_TEXTURE_RECTANGLE, GL.TEXTURE_RECTANGLE],
+    [GL.PROXY_TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE],
+    [GL.PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY, GL.TEXTURE_2D_MULTISAMPLE_ARRAY],
 ]);
 
 /**
@@ -754,6 +763,78 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * glTexImage2DMultisample and 3DMultisample (3.2), and their glTexStorage
+     * forms (4.3): one level of `samples` samples a texel, kept as one sample
+     * a texel here -- every framebuffer is drawn single-sampled -- and a
+     * texel fetch of any sample reads it.
+     *
+     * @param {string} name @param {number} target @param {number} samples
+     * @param {number} internal @param {number} width @param {number} height
+     * @param {number} depth  the layers of an array, one otherwise
+     * @param {boolean} fixed @param {boolean} storage  made immutable (4.3)
+     */
+    function texImageMultisample(name, target, samples, internal, width, height, depth, fixed,
+        storage)
+    {
+        if (!enter(name, [target, samples, internal, width, height, depth, fixed]))
+        {
+            return;
+        }
+        const array = target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY
+            || target === GL.PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY;
+        const real = PROXY_TARGETS.get(target) ?? target;
+        if (!MULTISAMPLE.has(real) || (storage && real !== target)
+            || (depth > 1 || name.includes('3D')) !== array)
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const sized = SIZED_FORMATS.get(internal);
+        if ((sized ? sized.compressed : baseFormatOf(internal) === null)
+            || S3TC_BLOCK_BYTES.has(internal))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const max = record(GL.MAX_TEXTURE_SIZE).values[0];
+        if (samples <= 0 || width <= 0 || height <= 0 || depth <= 0 || width > max
+            || height > max || depth > record(TEX.MAX_ARRAY_TEXTURE_LAYERS).values[0])
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        const limit = record(sized && (sized.kind === 'int' || sized.kind === 'uint')
+            ? GL.MAX_INTEGER_SAMPLES : sized && sized.kind === 'depth'
+                ? GL.MAX_DEPTH_TEXTURE_SAMPLES : GL.MAX_COLOR_TEXTURE_SAMPLES).values[0];
+        if (samples > limit)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (PROXIES.has(target))
+        {
+            return;
+        }
+        const texture = /** @type {import('./objects.js').TextureObject} */ (
+            textureBound(active, target));
+        if (immutable(texture))
+        {
+            return;
+        }
+        texture.levels.clear();
+        texture.dirty.clear();
+        texture.levels.set(levelKey(0), blankLevel(internal,
+            array ? TEX.TEXTURE_2D_ARRAY : GL.TEXTURE_2D, width, height, depth));
+        markDirty(texture, levelKey(0), null);
+        texture.multisample = { samples, fixed };
+        if (storage)
+        {
+            immutableLevels.set(texture, 1);
+        }
+        kernel.shareGroup().used = true;
+    }
+
+    /**
      * glTexBuffer and glTexBufferRange (3.1, 4.3): the buffer object whose
      * bytes the bound buffer texture's texels are, in `internal`, over a
      * range or to the end; zero detaches it.
@@ -883,7 +964,7 @@ export function installTextureCalls(context, kernel){
             return texture ? { texture, face, cube: true } : null;
         }
         if (target === GL.TEXTURE_2D || target === GL.TEXTURE_1D || target === GL.TEXTURE_3D
-            || target === GL.TEXTURE_RECTANGLE || ARRAYS.has(target))
+            || target === GL.TEXTURE_RECTANGLE || ARRAYS.has(target) || MULTISAMPLE.has(target))
         {
             const texture = textureBound(active, target);
             return texture ? { texture, face: 0, cube: false } : null;
@@ -1694,9 +1775,10 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (texture.target === GL.TEXTURE_BUFFER)
+        if (texture.target === GL.TEXTURE_BUFFER || MULTISAMPLE.has(texture.target))
         {
-            // A buffer texture has no sampling state (3.1 section 3.8.5).
+            // A buffer texture has no sampling state (3.1 section 3.8.5), nor
+            // a multisample one (3.2 section 3.8.4).
             setError(GL.INVALID_ENUM);
             return;
         }
@@ -2935,6 +3017,14 @@ export function installTextureCalls(context, kernel){
         const stored = image.texture.levels.get(levelKey(level, image.face));
         const width = stored?.width ?? 0;
         const height = stored?.height ?? 0;
+        if (parameter === GL.TEXTURE_SAMPLES)
+        {
+            return [stored ? image.texture.multisample?.samples ?? 0 : 0];
+        }
+        if (parameter === GL.TEXTURE_FIXED_SAMPLE_LOCATIONS)
+        {
+            return [image.texture.multisample?.fixed === false ? GL.FALSE : GL.TRUE];
+        }
         if (parameter === TEX.TEXTURE_DEPTH)
         {
             return [stored ? stored.depth ?? 1 : 0];
@@ -3268,6 +3358,84 @@ export function installTextureCalls(context, kernel){
     });
 
     Object.assign(context, {
+        /**
+         * glTexImage2DMultisample and glTexImage3DMultisample; `depth` is one
+         * for the 2D form.
+         *
+         * @param {number} target @param {number} samples @param {number} internal
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} fixed
+         */
+        glTexImageMultisample(target, samples, internal, width, height, depth, fixed){
+            texImageMultisample(depth > 1 || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY
+                || target === GL.PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY
+                ? 'glTexImage3DMultisample' : 'glTexImage2DMultisample', target, samples,
+            internal, width, height, depth, fixed !== 0, false);
+        },
+
+        /**
+         * glSampleMaski (3.2): the samples a fragment may cover, by word.
+         * One word: four samples at most. With one sample a pixel, a mask
+         * without the first bit draws nothing where WebGPU draws anyway, and
+         * that is said.
+         *
+         * @param {number} index @param {number} mask
+         */
+        glSampleMaski(index, mask){
+            if (!enter('glSampleMaski', [index, mask]))
+            {
+                return;
+            }
+            if (index < 0 || index >= record(GL.MAX_SAMPLE_MASK_WORDS).values[0])
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            setState(GL.SAMPLE_MASK_VALUE, [mask | 0]);
+            if ((mask & 1) === 0)
+            {
+                diverge('a sample mask (glSampleMaski) left out the first sample: every'
+                    + ' framebuffer here is drawn with one sample, which the mask does not stop');
+            }
+        },
+
+        /**
+         * glGetMultisamplefv (3.2): where a sample lies in its pixel; the one
+         * sample of a pixel here lies at its centre.
+         *
+         * @param {number} pname @param {number} index @returns {number[] | null}
+         */
+        glGetMultisamplefv(pname, index){
+            if (!enter('glGetMultisamplefv', [pname, index]))
+            {
+                return null;
+            }
+            if (pname !== GL.SAMPLE_POSITION)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (index < 0 || index >= Math.max(1, record(GL.SAMPLES).values[0]))
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return [0.5, 0.5];
+        },
+
+        /**
+         * glTexStorage2DMultisample and glTexStorage3DMultisample (4.3).
+         *
+         * @param {number} target @param {number} samples @param {number} internal
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} fixed
+         */
+        glTexStorageMultisample(target, samples, internal, width, height, depth, fixed){
+            texImageMultisample(target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY
+                ? 'glTexStorage3DMultisample' : 'glTexStorage2DMultisample', target, samples,
+            internal, width, height, depth, fixed !== 0, true);
+        },
+
         /**
          * @param {number} target @param {number} internal @param {number} buffer
          */

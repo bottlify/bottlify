@@ -300,10 +300,8 @@ export function textureTypeOf(type){
             : 'texture_depth_cube' : type.array ? 'texture_depth_2d_array' : 'texture_depth_2d';
     }
     const scalar = SCALARS[type.sampled ?? 'float'];
-    if (type.ms)
-    {
-        return `texture_multisampled_2d<${scalar}>`;
-    }
+    // A multisample texture is kept with one sample a texel (3.2): a plain
+    // one, its every sample that texel.
     switch (type.dim)
     {
         case '3D':
@@ -338,7 +336,7 @@ export function textureLayoutOf(type){
         : type.sampled === 'int' ? 'sint' : 'uint';
     const viewDimension = type.dim === '3D' ? '3d' : type.dim === 'Cube'
         ? type.array ? 'cube-array' : 'cube' : type.array ? '2d-array' : '2d';
-    return { viewDimension, sampleType, multisampled: !!type.ms };
+    return { viewDimension, sampleType, multisampled: false };
 }
 
 /**
@@ -2166,7 +2164,7 @@ export function emitStage(program, which, options, given, partner){
         if (name === 'textureSize')
         {
             const lod = rest[0] ? `, u32(${expr(rest[0], out)})` : '';
-            const d = temp(out, `textureDimensions(${tex}${type.ms ? '' : lod})`,
+            const d = temp(out, `textureDimensions(${tex}${lod})`,
                 dim === '3D' ? 'vec3u' : 'vec2u');
             const layers = `i32(textureNumLayers(${tex}))`;
             if (oneD)
@@ -2197,7 +2195,12 @@ export function emitStage(program, which, options, given, partner){
             const coords = oneD ? `vec2i(${moved(part(0))}, 0)`
                 : moved(pSize === c ? P : `${P}.${XYZW.slice(0, c)}`);
             const layer = type.array ? `, ${part(c)}` : '';
-            const level = dim === '2DRect' ? ', 0' : `, ${expr(rest[1], out)}`;
+            if (type.ms)
+            {
+                // The sample asked of a texel kept as one sample.
+                discardValue(expr(rest[1], out), out);
+            }
+            const level = dim === '2DRect' || type.ms ? ', 0' : `, ${expr(rest[1], out)}`;
             return `textureLoad(${tex}, ${coords}${layer}${level})`;
         }
         const proj = name.includes('Proj');

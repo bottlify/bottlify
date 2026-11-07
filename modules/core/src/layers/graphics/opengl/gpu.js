@@ -1311,7 +1311,8 @@ export function createGpuRenderer(services){
         const cube = target === GL.TEXTURE_CUBE_MAP;
         const solid = target === GL.TEXTURE_3D;
         const oneArray = target === TEX.TEXTURE_1D_ARRAY;
-        const twoArray = target === TEX.TEXTURE_2D_ARRAY;
+        const twoArray = target === TEX.TEXTURE_2D_ARRAY
+            || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY;
         const baseDepth = base.depth ?? 1;
         const layers = cube ? 6 : twoArray ? baseDepth : oneArray ? base.height : 1;
         const height = oneArray ? 1 : base.height;

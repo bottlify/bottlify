@@ -187,7 +187,10 @@ import { swizzleTexel } from './objects.js';
  *             cube: import('./objects.js').TextureObject | null,
  *             oneD?: import('./objects.js').TextureObject | null,
  *             rectangle?: import('./objects.js').TextureObject | null,
- *             buffer?: import('./objects.js').TextureObject | null }[]} boundTextures
+ *             buffer?: import('./objects.js').TextureObject | null,
+ *             twoDMultisample?: import('./objects.js').TextureObject | null,
+ *             twoDMultisampleArray?: import('./objects.js').TextureObject | null }[]}
+ *           boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
  * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,

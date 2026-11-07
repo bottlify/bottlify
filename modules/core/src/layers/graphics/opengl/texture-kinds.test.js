@@ -392,3 +392,96 @@ void main() { c = texelFetch(table, 1) + vec4(float(textureSize(table))); }`);
         'a write to the buffer reaches the texture');
     assert.deepEqual(r.divergences, []);
 });
+
+// --- multisample textures (3.2) ---
+
+test('a multisample texture is one level of samples, its count kept, its state none', ()=>{
+    const gl = /** @type {any} */ (createGlContext({}));
+    gl.attach({ width: 4, height: 4, doubleBuffered: true });
+    const [name, layered] = gl.glGenTextures(2);
+    gl.glBindTexture(GL.TEXTURE_2D_MULTISAMPLE, name);
+    assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D_MULTISAMPLE), [name]);
+    gl.glTexImageMultisample(GL.TEXTURE_2D_MULTISAMPLE, 4, GL.RGBA8, 8, 4, 1, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    /** @param {number} target @param {number} q */
+    const level = (target, q)=>gl.glGetTexLevelParameteriv(target, 0, q)[0];
+    assert.deepEqual([GL.TEXTURE_WIDTH, GL.TEXTURE_HEIGHT, GL.TEXTURE_SAMPLES,
+        GL.TEXTURE_FIXED_SAMPLE_LOCATIONS].map(q=>level(GL.TEXTURE_2D_MULTISAMPLE, q)),
+    [8, 4, 4, GL.TRUE]);
+    gl.glTexParameteri(GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'no sampling state');
+    gl.glTexImageMultisample(GL.TEXTURE_2D_MULTISAMPLE, 8, GL.RGBA8, 8, 4, 1, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'more samples than there are');
+    gl.glTexImageMultisample(GL.TEXTURE_2D_MULTISAMPLE, 0, GL.RGBA8, 8, 4, 1, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'no samples');
+    gl.glTexImageMultisample(GL.TEXTURE_2D_MULTISAMPLE, 2, 0x83f1, 8, 4, 1, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'a compressed format');
+    gl.glTexImageMultisample(GL.TEXTURE_2D, 2, GL.RGBA8, 8, 4, 1, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glTexImageMultisample(GL.PROXY_TEXTURE_2D_MULTISAMPLE, 2, GL.RGBA8, 8, 4, 1, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.NO_ERROR, 'its proxy');
+
+    gl.glBindTexture(GL.TEXTURE_2D_MULTISAMPLE_ARRAY, layered);
+    gl.glTexStorageMultisample(GL.TEXTURE_2D_MULTISAMPLE_ARRAY, 2, 0x8d82 /* RGBA32I */, 4, 4,
+        3, GL.FALSE);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual([TEX_DEPTH, GL.TEXTURE_SAMPLES, GL.TEXTURE_FIXED_SAMPLE_LOCATIONS]
+        .map(q=>level(GL.TEXTURE_2D_MULTISAMPLE_ARRAY, q)), [3, 2, GL.FALSE]);
+    gl.glTexImageMultisample(GL.TEXTURE_2D_MULTISAMPLE_ARRAY, 2, 0x8d82, 4, 4, 3, GL.FALSE);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'immutable');
+
+    assert.deepEqual([GL.MAX_COLOR_TEXTURE_SAMPLES, GL.MAX_DEPTH_TEXTURE_SAMPLES,
+        GL.MAX_INTEGER_SAMPLES, GL.MAX_SAMPLE_MASK_WORDS].map(q=>gl.glGetIntegerv(q)[0]),
+    [4, 4, 4, 1]);
+    assert.deepEqual(gl.glGetMultisamplefv(GL.SAMPLE_POSITION, 0), [0.5, 0.5]);
+    gl.glGetMultisamplefv(GL.SAMPLE_POSITION, 1);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'one sample a pixel');
+    gl.glGetMultisamplefv(GL.SAMPLES, 0);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glSampleMaski(0, 0xfffffff1);
+    assert.deepEqual(gl.glGetIntegerv(GL.SAMPLE_MASK_VALUE), [0xfffffff1 | 0]);
+    gl.glSampleMaski(1, 0);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'one mask word');
+    gl.glEnable(GL.SAMPLE_MASK);
+    assert.equal(gl.glIsEnabled(GL.SAMPLE_MASK), GL.TRUE);
+});
+
+/** GL_TEXTURE_DEPTH, an array level's layers. */
+const TEX_DEPTH = 0x8071;
+
+test('a GLSL sampler2DMS fetches the one sample a multisample texture keeps of a texel',
+    async()=>{
+        const r = rig();
+        const { gl } = r;
+        const [name] = gl.glGenTextures(1);
+        gl.glBindTexture(GL.TEXTURE_2D_MULTISAMPLE, name);
+        gl.glTexImageMultisample(GL.TEXTURE_2D_MULTISAMPLE, 4, GL.RGBA8, 4, 4, 1, GL.TRUE);
+        const [fbo] = gl.glGenFramebuffers(1);
+        gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+        gl.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D_MULTISAMPLE,
+            name, 0);
+        assert.equal(gl.glGetError(), GL.NO_ERROR, 'drawn into');
+        gl.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D_MULTISAMPLE,
+            name, 1);
+        assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'its one level');
+        gl.bindFramebuffer(GL.FRAMEBUFFER, 0, false);
+        use(gl, `#version 150
+in vec4 position;
+void main() { gl_Position = position; }`, `#version 150
+uniform sampler2DMS image;
+out vec4 c;
+void main() { c = texelFetch(image, ivec2(1, 2), 3) + vec4(textureSize(image), 0, 0); }`);
+        gl.glBegin(GL.TRIANGLES);
+        gl.glVertex2f(0, 0);
+        gl.glVertex2f(1, 0);
+        gl.glVertex2f(0, 1);
+        gl.glEnd();
+        await r.swap();
+        const code = r.modules().join('\n');
+        assert.match(code, /var glt0: texture_2d<f32>;/, 'a plain texture');
+        assert.match(code, /textureLoad\(glt0, \w+, 0\)/, 'level zero, whatever the sample');
+        assert.doesNotMatch(code, /texture_multisampled/);
+        const labels = r.gpu.of('createTexture').map((/** @type {any} */ c)=>c.descriptor.label);
+        assert.ok(labels.includes(`gl-texture:${name}`), 'the texture bound');
+        assert.deepEqual(r.divergences, []);
+    });

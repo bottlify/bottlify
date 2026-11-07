@@ -1007,6 +1007,19 @@ function storageAndNamedEntryPoints(h){
         ...Object.fromEntries(['glTexBuffer', 'glTexBufferARB', 'glTexBufferEXT'].map(name=>[
             name, (/** @type {number[]} */ [target, internal, buffer])=>answer(
                 current()?.glTexBuffer(target >>> 0, internal >>> 0, buffer >>> 0))])),
+        glTexImage2DMultisample: ([target, samples, internal, width, height, fixed])=>answer(
+            current()?.glTexImageMultisample(target >>> 0, samples | 0, internal >>> 0,
+                width | 0, height | 0, 1, fixed & 0xff)),
+        glTexImage3DMultisample: a=>answer(current()?.glTexImageMultisample(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glTexStorage2DMultisample: ([target, samples, internal, width, height, fixed])=>answer(
+            current()?.glTexStorageMultisample(target >>> 0, samples | 0, internal >>> 0,
+                width | 0, height | 0, 1, fixed & 0xff)),
+        glTexStorage3DMultisample: a=>answer(current()?.glTexStorageMultisample(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glSampleMaski: ([index, mask])=>answer(current()?.glSampleMaski(index >>> 0, mask >>> 0)),
+        glGetMultisamplefv: ([pname, index, out])=>call(context=>writeQuery(out,
+            context.glGetMultisamplefv(pname >>> 0, index >>> 0), 'float')),
         glTexBufferRange: ([target, internal, buffer, offset, size])=>answer(
             current()?.glTexBufferRange(target >>> 0, internal >>> 0, buffer >>> 0, offset | 0,
                 size | 0)),

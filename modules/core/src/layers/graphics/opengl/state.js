@@ -117,6 +117,7 @@ export const DEFAULT_ENABLES = Object.freeze([
     // OpenGL 3.2: depth clamped rather than clipped, and cube maps filtered
     // across their faces' edges.
     { query: GL.DEPTH_CLAMP, name: 'GL_DEPTH_CLAMP', kind: 'bool', value: [0] },
+    { query: GL.SAMPLE_MASK, name: 'GL_SAMPLE_MASK', kind: 'bool', value: [0] },
     // OpenGL 4.0's sample shading.
     { query: GL.SAMPLE_SHADING, name: 'GL_SAMPLE_SHADING', kind: 'bool', value: [0] },
     {
@@ -483,6 +484,16 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.TEXTURE_BINDING_BUFFER, name: 'GL_TEXTURE_BINDING_BUFFER', kind: 'int',
         value: [0],
     },
+    {
+        query: GL.TEXTURE_BINDING_2D_MULTISAMPLE, name: 'GL_TEXTURE_BINDING_2D_MULTISAMPLE',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY,
+        name: 'GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY', kind: 'int', value: [0],
+    },
+    // OpenGL 3.2's sample mask: one word, every sample in it.
+    { query: GL.SAMPLE_MASK_VALUE, name: 'GL_SAMPLE_MASK_VALUE', kind: 'int', value: [-1] },
     // The buffer bound to GL_TEXTURE_BUFFER as a buffer object target (3.1).
     { query: GL.TEXTURE_BUFFER, name: 'GL_TEXTURE_BUFFER', kind: 'int', value: [0] },
     { query: 0x8c1c, name: 'GL_TEXTURE_BINDING_1D_ARRAY', kind: 'int', value: [0] },
@@ -942,6 +953,21 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.TEXTURE_BUFFER_OFFSET_ALIGNMENT, name: 'GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT',
         kind: 'int', value: [4],
+    },
+    // A multisample texture (3.2) takes as many samples as a renderbuffer;
+    // a sample mask is one word of them.
+    {
+        query: GL.MAX_COLOR_TEXTURE_SAMPLES, name: 'GL_MAX_COLOR_TEXTURE_SAMPLES', kind: 'int',
+        value: [4],
+    },
+    {
+        query: GL.MAX_DEPTH_TEXTURE_SAMPLES, name: 'GL_MAX_DEPTH_TEXTURE_SAMPLES', kind: 'int',
+        value: [4],
+    },
+    { query: GL.MAX_INTEGER_SAMPLES, name: 'GL_MAX_INTEGER_SAMPLES', kind: 'int', value: [4] },
+    {
+        query: GL.MAX_SAMPLE_MASK_WORDS, name: 'GL_MAX_SAMPLE_MASK_WORDS', kind: 'int',
+        value: [1],
     },
     // A rectangle (3.1) is as large as any 2D texture here.
     {
