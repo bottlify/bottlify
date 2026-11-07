@@ -89,7 +89,7 @@ export function createProcessTable(ids = { process: FIRST_ID }){
          * @param {boolean} [options.completed]
          *        The child has already run and exited 0. Used for a
          *        redistributable installer the engine answers for: a title
-         *        starting `vcredist_x86.exe` gets a process that is over, not a
+         *        starting `dotnetfx35.exe` gets a process that is over, not a
          *        replacement.
          * @returns {ProcessRecord}
          */

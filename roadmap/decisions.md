@@ -1355,6 +1355,11 @@ and puts the `d3dx`/`d3dcompiler` libraries in `system32`, where the loader alre
 engine's `d3dx9_*` stub tables answer a program whose installer never ran. The Visual C++ and
 .NET redistributables are still answered as already run, since the engine carries the C runtime
 itself. *2026-09-26.*
+Reconsidered for Visual C++: the engine carries only the older C runtimes (`msvcrt`, `MSVCR71`,
+`MSVCR80`, `ucrtbase`), so an installer that started `vcredist_x86.exe` for the 2010 runtime got
+an answer of "installed" and left a program whose `MSVCR100`/`MSVCP100` imports nothing could
+bind. The Visual C++ redistributable now runs as the child it is and installs its libraries into
+`system32`; .NET and OpenAL's installer are still answered as already run. *2026-11-07.*
 
 **A constant table entry whose name another entry in a different register set shares is set
 with it.** fxc compiles a model 3 loop over an `int` uniform to `rep i#` and lists the uniform
