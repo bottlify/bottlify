@@ -47,6 +47,10 @@ const STRUCT_OIDS = new Map([
     ['2.5.29.37', STRUCT.ENHANCED_KEY_USAGE],
 ]);
 const CRYPT_DECODE_ALLOC_FLAG = 0x8000;
+/** The ALG_IDs CryptHashPublicKeyInfo hashes with, SHA-1 the default. */
+const CALG_SHA1 = 0x8004;
+const HASH_ALGORITHMS = new Map([[0x8003, createMd5], [CALG_SHA1, createSha1],
+    [0x800c, createSha256]]);
 const CRYPT_ENCODE_ALLOC_FLAG = 0x8000;
 
 /** CERT_ALT_NAME_ENTRY's choices that hold a wide string, and the blob ones. */
@@ -557,7 +561,7 @@ export function createEncodingFunctions(host){
         },
     });
 
-    return {
+    const functions = {
         /**
          * BOOL CryptStringToBinaryA(LPCSTR pszString, DWORD cchString, DWORD dwFlags,
          *     BYTE *pbBinary, DWORD *pcbBinary, DWORD *pdwSkip, DWORD *pdwFlags)
@@ -717,5 +721,60 @@ export function createEncodingFunctions(host){
          */
         CertStrToNameA: strToName(false),
         CertStrToNameW: strToName(true),
+    };
+
+    return {
+        ...functions,
+
+        /**
+         * BOOL CryptDecodeObject(DWORD dwCertEncodingType, LPCSTR lpszStructType,
+         *     const BYTE *pbEncoded, DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo,
+         *     DWORD *pcbStructInfo)
+         *
+         * CryptDecodeObjectEx into the caller's buffer, never allocating.
+         */
+        CryptDecodeObject: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([encoding, structType, pointer, length, flags, out, size])=>
+                functions.CryptDecodeObjectEx.handler([encoding, structType, pointer, length,
+                    (flags >>> 0) & ~CRYPT_DECODE_ALLOC_FLAG, 0, out, size]),
+        },
+
+        /**
+         * BOOL CryptHashPublicKeyInfo(HCRYPTPROV_LEGACY hCryptProv, ALG_ID Algid,
+         *     DWORD dwFlags, DWORD dwCertEncodingType, PCERT_PUBLIC_KEY_INFO pInfo,
+         *     BYTE *pbComputedHash, DWORD *pcbComputedHash)
+         *
+         * The digest of the key's DER encoding, SubjectPublicKeyInfo: SHA-1
+         * when no algorithm is named, MD5 or SHA-256 when one is.
+         */
+        CryptHashPublicKeyInfo: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([, algorithm, , , info, out, size])=>{
+                if ((info >>> 0) === 0 || (size >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const make = HASH_ALGORITHMS.get((algorithm >>> 0) || CALG_SHA1);
+                if (!make)
+                {
+                    return fail(NTE_BAD_ALGID);
+                }
+                const at = info >>> 0;
+                const oid = host.readCString(dword(at), 128);
+                const parameters = dword(at + 4) === 0 ? derElement(TAG.NULL)
+                    : host.readMemory(dword(at + 8), dword(at + 4)).slice();
+                const key = dword(at + 12) === 0 ? new Uint8Array(0)
+                    : host.readMemory(dword(at + 16), dword(at + 12)).slice();
+                const encoded = derElement(TAG.SEQUENCE,
+                    derElement(TAG.SEQUENCE, derElement(TAG.OID, oidContents(oid)), parameters),
+                    derElement(TAG.BIT_STRING, Uint8Array.of(dword(at + 20) & 7), key));
+                const digest = make();
+                digest.update(encoded);
+                return answerBytes(digest.digest(), out >>> 0, size >>> 0);
+            },
+        },
     };
 }

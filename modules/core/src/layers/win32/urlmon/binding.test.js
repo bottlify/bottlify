@@ -100,6 +100,8 @@ function harness({ files = {}, asynchronous = false } = {}){
     };
     /** @type {{ pointer: number, references: () => number }[]} */
     const opened = [];
+    /** @type {[string, string][]} */
+    const copies = [];
 
     const host = {
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
@@ -130,7 +132,12 @@ function harness({ files = {}, asynchronous = false } = {}){
             /** @type {any} */ (m.entries.get(entry))(args.slice(1)),
         callerThread: ()=>'main',
         /** @param {string} library @param {string} name @param {number[]} args */
-        system: (library, name, [pathAt, , out])=>{
+        system: (library, name, [pathAt, second, out])=>{
+            if (`${library}!${name}` === 'KERNEL32.dll!CopyFileW')
+            {
+                copies.push([m.wideAt(pathAt), m.wideAt(second)]);
+                return files[m.wideAt(pathAt)] === undefined ? 0 : 1;
+            }
             assert.equal(`${library}!${name}`, 'SHLWAPI.dll!SHCreateStreamOnFileW');
             const size = files[m.wideAt(pathAt)];
             if (size === undefined)
@@ -203,7 +210,7 @@ function harness({ files = {}, asynchronous = false } = {}){
             await /** @type {() => any} */ (posted.shift())();
         }
     };
-    return { m, urlmon, context, callback, told, bind, pump, opened, params };
+    return { m, urlmon, context, callback, told, bind, pump, opened, params, copies };
 }
 
 test('an asynchronous bind starts in the call and delivers the file from the message loop',
@@ -252,3 +259,14 @@ test('a callback registered over another hands the other back, and revoking take
         assert.equal(await h.urlmon.RegisterBindStatusCallback.handler([0, h.callback, 0, 0]),
             0x80070057 | 0);
     });
+
+test('URLDownloadToFileW copies a file URL and fetches nothing else', async()=>{
+    const h = harness({ files: { 'C:\\dir\\a.cab': 10 } });
+    const target = h.m.putWide('C:\\TEMP\\a.cab');
+    const source = h.m.putWide('file:///C:/dir/a.cab');
+    assert.equal(await h.urlmon.URLDownloadToFileW.handler([0, source, target, 0, 0]), 0);
+    assert.deepEqual(h.copies, [['C:\\dir\\a.cab', 'C:\\TEMP\\a.cab']]);
+    assert.equal(await h.urlmon.URLDownloadToFileW.handler([0,
+        h.m.putWide('http://example.com/a.cab'), target, 0, 0]), 0x800c0008 | 0);
+    assert.equal(h.copies.length, 1, 'no copy for another scheme');
+});

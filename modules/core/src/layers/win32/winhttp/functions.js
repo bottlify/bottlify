@@ -49,6 +49,11 @@ const URL = Object.freeze({ SIZE: 60, scheme: 4, schemeLength: 8, nScheme: 12, h
     path: 44, pathLength: 48, extra: 52, extraLength: 56 });
 const SCHEMES = Object.freeze({ http: 1, https: 2 });
 
+/** The names an HTTP date gives the days of the week (SYSTEMTIME's 0 Sunday) and months. */
+const HTTP_DAYS = Object.freeze(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+const HTTP_MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep',
+    'Oct', 'Nov', 'Dec']);
+
 /** Where handles are numbered from: opaque and never a pointer. */
 const HANDLE_BASE = 0x5e000000;
 
@@ -251,6 +256,99 @@ export function createWinhttpFunctions(host){
                 }
                 const { error } = handleOf(handle, ['session', 'connect', 'request']);
                 return error ? fail(error) : 1;
+            },
+        },
+
+        /**
+         * BOOL WinHttpSetOption(HINTERNET hInternet, DWORD dwOption, LPVOID lpBuffer,
+         *     DWORD dwBufferLength)
+         *
+         * Taken on any open handle, and on none for the options that are the
+         * process's: nothing is ever sent for one to change.
+         */
+        WinHttpSetOption: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if ((handle >>> 0) === 0)
+                {
+                    return 1;
+                }
+                const { error } = handleOf(handle, ['session', 'connect', 'request']);
+                return error ? fail(error) : 1;
+            },
+        },
+
+        /**
+         * BOOL WinHttpSetCredentials(HINTERNET hRequest, DWORD AuthTargets,
+         *     DWORD AuthScheme, LPCWSTR pwszUserName, LPCWSTR pwszPassword, LPVOID pAuthParams)
+         *
+         * Kept for a request that is never sent.
+         */
+        WinHttpSetCredentials: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const { error } = handleOf(handle, ['request']);
+                return error ? fail(error) : 1;
+            },
+        },
+
+        /** BOOL WinHttpQueryDataAvailable(HINTERNET hRequest, LPDWORD lpdwNumberOfBytesAvailable) */
+        WinHttpQueryDataAvailable: notSent(8),
+
+        /**
+         * BOOL WinHttpQueryAuthSchemes(HINTERNET hRequest, LPDWORD lpdwSupportedSchemes,
+         *     LPDWORD lpdwFirstScheme, LPDWORD pdwAuthTarget)
+         */
+        WinHttpQueryAuthSchemes: notSent(16),
+
+        /**
+         * BOOL WinHttpDetectAutoProxyConfigUrl(DWORD dwAutoDetectFlags,
+         *     LPWSTR *ppwszAutoConfigUrl)
+         *
+         * No network announces a configuration script: detection fails.
+         */
+        WinHttpDetectAutoProxyConfigUrl: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([flags, out])=>{
+                if ((flags >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+                return fail(ERROR_WINHTTP_AUTODETECTION_FAILED);
+            },
+        },
+
+        /**
+         * BOOL WinHttpTimeFromSystemTime(const SYSTEMTIME *pst, LPWSTR pwszTime)
+         *
+         * The time as HTTP writes one (RFC 1123, "Sun, 06 Nov 1994 08:49:37 GMT"),
+         * into a buffer of WINHTTP_TIME_FORMAT_BUFSIZE bytes.
+         */
+        WinHttpTimeFromSystemTime: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([time, out])=>{
+                if ((time >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const words = new DataView(host.readMemory(time >>> 0, 16).slice().buffer);
+                const word = (/** @type {number} */ at)=>words.getUint16(at * 2, true);
+                const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
+                const date = `${HTTP_DAYS[word(2) % 7]}, ${two(word(3))}`
+                    + ` ${HTTP_MONTHS[(word(1) + 11) % 12]} ${String(word(0)).padStart(4, '0')}`;
+                const text = `${date} ${two(word(4))}:${two(word(5))}:${two(word(6))} GMT`;
+                const bytes = new Uint8Array(text.length * 2 + 2);
+                for (let i = 0; i < text.length; i++)
+                {
+                    bytes[i * 2] = text.charCodeAt(i);
+                }
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
             },
         },
 

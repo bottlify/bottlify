@@ -547,3 +547,28 @@ test('PathUnExpandEnvStrings puts the longest variable back, or leaves the buffe
         [m.put('C:\\WINDOWSX', false), out, 0x80]), 1, 'not at a separator: the drive');
     assert.equal(m.read(out, false), '%SystemDrive%\\WINDOWSX');
 });
+
+test('PathQuoteSpaces quotes a path with a space; PathCompactPathEx cuts one to a length', ()=>{
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const quoted = m.put('C:\\Program Files\\a.exe', wide);
+        assert.equal(m.fns[`PathQuoteSpaces${suffix}`].handler([quoted]), 1);
+        assert.equal(m.read(quoted, wide), '"C:\\Program Files\\a.exe"');
+        const plain = m.put('C:\\dir\\a.exe', wide);
+        assert.equal(m.fns[`PathQuoteSpaces${suffix}`].handler([plain]), 0, 'no space');
+        assert.equal(m.read(plain, wide), 'C:\\dir\\a.exe');
+
+        const source = m.put('C:\\Program Files\\Futuremark\\setup.exe', wide);
+        const out = m.put(' '.repeat(64), wide);
+        assert.equal(m.fns[`PathCompactPathEx${suffix}`].handler([out, source, 20, 0]), 1);
+        const cut = m.read(out, wide);
+        assert.equal(cut.length, 19, 'in the characters given, its terminator among them');
+        assert.ok(cut.endsWith('...\\setup.exe'), cut);
+        assert.equal(m.fns[`PathCompactPathEx${suffix}`].handler([out, source, 64, 0]), 1);
+        assert.equal(m.read(out, wide), 'C:\\Program Files\\Futuremark\\setup.exe',
+            'it fits whole');
+        assert.equal(m.fns[`PathCompactPathEx${suffix}`].handler([out, source, 20, 1]), 0,
+            'no flags are defined');
+    }
+});

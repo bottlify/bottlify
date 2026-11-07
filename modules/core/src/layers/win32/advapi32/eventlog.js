@@ -1153,6 +1153,26 @@ export function createEventLogFunctions(host){
         ControlTraceW: controlTrace(true),
 
         /**
+         * ULONG EnumerateTraceGuids(PTRACE_GUID_PROPERTIES *GuidPropertiesArray,
+         *   ULONG PropertyArrayCount, PULONG GuidCount)
+         *
+         * The providers registered on the machine: none outside the process
+         * names one to a session here, so the count is zero.
+         */
+        EnumerateTraceGuids: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , count])=>{
+                if ((count >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                writeDword(count, 0);
+                return 0;
+            },
+        },
+
+        /**
          * ULONG EventRegister(LPCGUID ProviderId, PENABLECALLBACK, PVOID CallbackContext,
          *   PREGHANDLE RegHandle)
          */
