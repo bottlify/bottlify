@@ -126,7 +126,7 @@ import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
 import { createCombaseFunctions } from './combase/functions.js';
 import { createDwmapiFunctions, createDwriteFunctions, createSessionInformationFunctions,
-    createShcoreFunctions } from './display/functions.js';
+    createShcoreFunctions, DWMAPI_ORDINALS } from './display/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
@@ -4885,6 +4885,7 @@ export function createWin32Module(){
                     'SHLWAPI.dll': { ...SHLWAPI_ORDINALS, ...UNKNOWN_ORDINALS },
                     'SHELL32.dll': SHELL32_ORDINALS,
                     'DPLAYX.dll': DPLAYX_ORDINALS,
+                    'dwmapi.dll': DWMAPI_ORDINALS,
                 }),
 
                 /**

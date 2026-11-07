@@ -333,6 +333,7 @@ const LB_GETTEXTLEN = 0x018a;
 const LB_GETCOUNT = 0x018b;
 const LB_DIR = 0x018d;
 const LB_GETTOPINDEX = 0x018e;
+const LB_SELECTSTRING = 0x018c;
 const LB_FINDSTRING = 0x018f;
 const LB_GETSELCOUNT = 0x0190;
 const LB_GETSELITEMS = 0x0191;
@@ -384,6 +385,7 @@ const CB_SETEXTENDEDUI = 0x0155;
 const CB_GETEXTENDEDUI = 0x0156;
 const CB_GETDROPPEDSTATE = 0x0157;
 const CB_FINDSTRINGEXACT = 0x0158;
+const CB_SELECTSTRING = 0x014d;
 const CB_SETDROPPEDWIDTH = 0x0160;
 const CB_ERR = -1;
 const CBN_SELCHANGE = 1;
@@ -2642,9 +2644,15 @@ export function createControlProcedures(host){
                 return items.length;
             case LB_GETCURSEL:
                 return state.current;
-            case LB_SETCURSEL: {
-                const at = message.wParam | 0;
-                if (at !== -1 && (at < 0 || at >= items.length))
+            case LB_SETCURSEL:
+            case LB_SELECTSTRING: {
+                // LB_SELECTSTRING: the first item after wParam whose text
+                // begins with the string, as LB_FINDSTRING finds it, selected.
+                const at = message.message === LB_SETCURSEL ? message.wParam | 0
+                    : strings ? findItem(record, message.wParam | 0, false, text())
+                        : findData(record, message.wParam | 0, message.lParam);
+                if (at < -1 || at >= items.length
+                    || (at === -1 && message.message === LB_SELECTSTRING))
                 {
                     return LB_ERR;
                 }
@@ -3088,6 +3096,7 @@ export function createControlProcedures(host){
             case CB_SETITEMDATA: return LB_SETITEMDATA;
             case CB_FINDSTRING: return LB_FINDSTRING;
             case CB_FINDSTRINGEXACT: return LB_FINDSTRINGEXACT;
+            case CB_SELECTSTRING: return LB_SELECTSTRING;
             default: return null;
         }
     };
@@ -3490,7 +3499,7 @@ export function createControlProcedures(host){
             const answer = listMessage(record, sorted, { ...message, message: asList });
             // A selection set by the program shows in the field; a text a
             // program reads back is that item's text.
-            if (asList === LB_SETCURSEL && answer !== LB_ERR)
+            if ((asList === LB_SETCURSEL || asList === LB_SELECTSTRING) && answer !== LB_ERR)
             {
                 record.title = state.items[state.current]?.text ?? '';
             }

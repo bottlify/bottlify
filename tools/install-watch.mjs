@@ -665,7 +665,7 @@ const printJournal = ()=>{
     // (`WS2_32|WSA|GetQueuedCompletion`) across a run far longer than the lines kept.
     const match = argv.includes('--trace-match')
         ? new RegExp(argv[argv.indexOf('--trace-match') + 1]) : null;
-    const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>(whole
+    const trail = app.log.recent(Math.max(100000, number('--trace-lines', 0))).filter((/** @type {any} */ entry)=>(whole
         || entry.category === 'call.com' || crossing.test(entry.text))
         && (!match || match.test(entry.text)));
     for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))

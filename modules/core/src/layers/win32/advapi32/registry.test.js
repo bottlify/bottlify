@@ -102,6 +102,19 @@ test('the keys every machine carries are there before any program writes', ()=>{
     {
         assert.ok(hive.open(classes, name), name);
     }
+    // A package opened through the shell is msiexec's: Windows Installer's file types.
+    /** @param {string} path */
+    const classDefault = path=>{
+        const key = hive.open(classes, path);
+        assert.ok(key, path);
+        const found = hive.getValue(key, '');
+        return found && String.fromCharCode(...found.data).replace(/\0+$/, '');
+    };
+    assert.equal(classDefault('.msi'), 'Msi.Package');
+    assert.equal(classDefault('Msi.Package\\shell\\Open\\command'),
+        '"C:\\WINDOWS\\system32\\msiexec.exe" /i "%1" %*');
+    assert.equal(classDefault('Msi.Patch\\shell\\Open\\command'),
+        '"C:\\WINDOWS\\system32\\msiexec.exe" /p "%1" %*');
 
     // A restore keeps what a program wrote and puts back what it deleted.
     hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');
