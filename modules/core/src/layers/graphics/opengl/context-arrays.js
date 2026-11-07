@@ -975,6 +975,10 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
+        if (restarting(name, mode, count, type, indices, baseVertex, instancing))
+        {
+            return;
+        }
         if (!hasVertexSource()
             || drawFromArrays(mode, 0, count, { type, indices, baseVertex }, instancing))
         {
@@ -990,7 +994,66 @@ export function installArrayCalls(context, kernel){
             refusal, instancing);
     }
 
+    /**
+     * Primitive restart (OpenGL 3.1 section 2.8.1, 4.3's fixed index): with it
+     * on, an index equal to the restart index ends the primitive and starts
+     * the next, so the draw is made as the draws of the runs between them,
+     * each its own strip, fan, loop or list, as the specification describes
+     * it. False when it is off or no index is the restart index, for the
+     * draw to go on as one.
+     *
+     * @param {string} name @param {number} mode @param {number} count @param {number} type
+     * @param {number | Uint8Array} indices @param {number} baseVertex
+     * @param {Instancing} instancing
+     * @returns {boolean} whether the draw was made here
+     */
+    function restarting(name, mode, count, type, indices, baseVertex, instancing){
+        const fixed = record(GL.PRIMITIVE_RESTART_FIXED_INDEX).values[0] !== 0;
+        if (!fixed && record(GL.PRIMITIVE_RESTART).values[0] === 0)
+        {
+            return false;
+        }
+        const size = componentBytes(type);
+        const restart = fixed ? 2 ** (size * 8) - 1
+            : record(GL.PRIMITIVE_RESTART_INDEX).values[0] >>> 0;
+        const list = readIndices(count, type, indices);
+        if (!list || !list.includes(restart))
+        {
+            return false;
+        }
+        let start = 0;
+        for (let at = 0; at <= list.length; at++)
+        {
+            if (at === list.length || list[at] === restart)
+            {
+                if (at > start)
+                {
+                    const from = typeof indices === 'number' ? indices + start * size
+                        : indices.subarray(start * size);
+                    // A run holds no restart index, and draws as one.
+                    drawElementsWith(name, mode, at - start, type, from, baseVertex,
+                        instancing);
+                }
+                start = at + 1;
+            }
+        }
+        return true;
+    }
+
     Object.assign(context, {
+        /**
+         * glPrimitiveRestartIndex (3.1): the index that restarts while
+         * GL_PRIMITIVE_RESTART is on.
+         *
+         * @param {number} index
+         */
+        glPrimitiveRestartIndex(index){
+            if (enter('glPrimitiveRestartIndex', [index]))
+            {
+                setState(GL.PRIMITIVE_RESTART_INDEX, [index >>> 0]);
+            }
+        },
+
         /**
          * @param {number} size
          * @param {number} type

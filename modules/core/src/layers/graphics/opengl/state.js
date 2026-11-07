@@ -84,6 +84,12 @@ export const CONVENTIONAL_UNITS = 4;
  */
 export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.DITHER, name: 'GL_DITHER', kind: 'bool', value: [1] },
+    // OpenGL 3.1 and 4.3: an index that ends one primitive and starts the next.
+    { query: GL.PRIMITIVE_RESTART, name: 'GL_PRIMITIVE_RESTART', kind: 'bool', value: [0] },
+    {
+        query: GL.PRIMITIVE_RESTART_FIXED_INDEX, name: 'GL_PRIMITIVE_RESTART_FIXED_INDEX',
+        kind: 'bool', value: [0],
+    },
     { query: GL.ALPHA_TEST, name: 'GL_ALPHA_TEST', kind: 'bool', value: [0] },
     { query: GL.BLEND, name: 'GL_BLEND', kind: 'bool', value: [0] },
     { query: GL.COLOR_MATERIAL, name: 'GL_COLOR_MATERIAL', kind: 'bool', value: [0] },
@@ -825,6 +831,10 @@ export const DEFAULT_STATE = Object.freeze([
     },
     { query: GL.RENDERBUFFER_BINDING, name: 'GL_RENDERBUFFER_BINDING', kind: 'int', value: [0] },
     { query: GL.VERTEX_ARRAY_BINDING, name: 'GL_VERTEX_ARRAY_BINDING', kind: 'int', value: [0] },
+    {
+        query: GL.PRIMITIVE_RESTART_INDEX, name: 'GL_PRIMITIVE_RESTART_INDEX', kind: 'int',
+        value: [0],
+    },
     // A copy's two bindings answer under the target's own name (OpenGL 3.1).
     { query: GL.COPY_READ_BUFFER, name: 'GL_COPY_READ_BUFFER_BINDING', kind: 'int', value: [0] },
     { query: GL.COPY_WRITE_BUFFER, name: 'GL_COPY_WRITE_BUFFER_BINDING', kind: 'int', value: [0] },

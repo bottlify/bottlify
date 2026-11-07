@@ -291,6 +291,9 @@ export function laterEntryPoints(h){
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
 
+        glPrimitiveRestartIndex: ([index])=>answer(current()?.glPrimitiveRestartIndex(
+            index >>> 0)),
+
         // --- sampler objects (3.3) ---
 
         glGenSamplers: generator((context, count)=>context.glGenSamplers(count)),
