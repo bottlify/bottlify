@@ -48,9 +48,8 @@ import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import {
-    FACE_STRIDE, attachedLevelKey, attachmentImage, createTextureObject, isTextureComplete,
-    levelKey,
-    swizzleCode,
+    FACE_STRIDE, attachedLevelKey, attachmentImage, attachmentLayers, createTextureObject,
+    isTextureComplete, levelKey, swizzleCode,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
@@ -3173,11 +3172,6 @@ export function createGpuRenderer(services){
         {
             const vertexGroup = computeGroup(passes.vertex, GLSL_VERTEX_BINDING, idBias);
             const geometryGroup = computeGroup(passes.geometry, GLSL_GEOMETRY_BINDING);
-            if (executable.linked.geometry?.uses.has('gl_Layer'))
-            {
-                diverge('a geometry shader wrote gl_Layer, and every primitive was drawn into'
-                    + ' layer 0');
-            }
             const prepared = geometryPasses.prepare({
                 key: `${key}|${vertexGroup.signature}|${geometryGroup.signature}`,
                 passes, vertexGroup, geometryGroup,
@@ -3406,25 +3400,35 @@ export function createGpuRenderer(services){
             occluded: activeQueries.get(context) ?? null,
             conditioned: conditions.get(context) ?? null,
         };
-        if (geometry && scene.viewportAt
-            && executable?.linked.geometry?.uses.has('gl_ViewportIndex'))
+        // A geometry shader choosing each primitive's viewport (4.1) or layer
+        // (3.2): the draw once for every viewport, through that one's
+        // rectangles, and for every layer of a layered framebuffer, into that
+        // one, each with its numbers in the uniforms, keeping the primitives
+        // sent there (`geometryDrawStage`). Without layers to choose from,
+        // gl_Layer is not read.
+        const routes = geometry ? executable?.linked.geometry?.uses : null;
+        const viewportAt = routes?.has('gl_ViewportIndex') ? scene.viewportAt ?? null : null;
+        const layers = routes?.has('gl_Layer') ? layersOf(scene.target ?? null) : 0;
+        if (!viewportAt && layers === 0)
         {
-            // A geometry shader choosing each primitive's viewport (4.1): the
-            // draw once for every viewport, through that one's rectangles and
-            // with its number in the uniforms, keeping the primitives sent
-            // there (`geometryDrawStage`).
-            const viewportAt = scene.viewportAt;
-            for (let index = 0; index < VIEWPORT_COUNT; index++)
-            {
-                const block = uniforms.slice();
-                block[UNIFORM.misc + 1] = index;
-                recording.commands.push({ ...command, uniforms: block,
-                    ...rectangles({ ...scene, ...viewportAt(index) }, target) });
-            }
+            recording.commands.push(command);
         }
         else
         {
-            recording.commands.push(command);
+            for (let index = 0; index < (viewportAt ? VIEWPORT_COUNT : 1); index++)
+            {
+                const routed = viewportAt
+                    ? rectangles({ ...scene, ...viewportAt(index) }, target) : null;
+                for (let layer = 0; layer < Math.max(1, layers); layer++)
+                {
+                    const block = uniforms.slice();
+                    block[UNIFORM.route] = viewportAt ? index : -1;
+                    block[UNIFORM.route + 1] = layers > 0 ? layer : -1;
+                    recording.commands.push({ ...command, uniforms: block, ...routed,
+                        target: layer > 0 ? targetOf(surfaces, scene.target ?? null,
+                            recordingOf(context), layer) ?? target : target });
+                }
+            }
         }
         // A dump or a probe addresses a frame's draws by number to find a
         // specific painter or a specific moment; joining two of them into
@@ -3703,36 +3707,71 @@ export function createGpuRenderer(services){
     /**
      * The views a framebuffer object draws into, as a target: one for each
      * draw buffer and its depth-stencil attachment, kept while the object
-     * and the GPU copies of what it holds stay the same.
+     * and the GPU copies of what it holds stay the same; one target a layer
+     * of a layered framebuffer (3.2).
      *
-     * @type {WeakMap<object, { version: number, records: any[], target: DrawTarget }>}
+     * @type {WeakMap<object, Map<number, { version: number, records: any[],
+     *     target: DrawTarget }>>}
      */
     const fboTargets = new WeakMap();
+
+    /**
+     * How many layers a framebuffer draws into: the fewest of its layered
+     * attachments', or none when it is not layered (or is the window).
+     *
+     * @param {{ fbo: any } | null} bound
+     * @returns {number}
+     */
+    const layersOf = bound=>{
+        if (!bound)
+        {
+            return 0;
+        }
+        /** @type {number[]} */
+        const counts = [];
+        for (const attachment of bound.fbo.attachments.values())
+        {
+            if (attachment.kind === 'texture' && attachment.layered)
+            {
+                counts.push(attachmentLayers(attachment));
+            }
+        }
+        return counts.length > 0 ? Math.max(1, Math.min(...counts)) : 0;
+    };
+
     /**
      * @param {DrawableSurfaces} surfaces
      * @param {{ fbo: any, width: number, height: number } | null} bound
      * @param {Recording} recording
+     * @param {number} [layer]  of a layered framebuffer, the one drawn into
      * @returns {DrawTarget | null}
      */
-    const targetOf = (surfaces, bound, recording)=>{
+    const targetOf = (surfaces, bound, recording, layer = 0)=>{
         if (!bound)
         {
             return surfaces.target;
         }
         const fbo = bound.fbo;
+        /** @param {any} attachment @param {boolean} depth */
+        const viewOf = (attachment, depth)=>attachmentView(attachment.layered && layer > 0
+            ? { ...attachment, face: layer } : attachment, recording, depth);
         /** @type {any[]} */
         const records = [];
         const views = fbo.drawBuffers.map((/** @type {number} */ buffer)=>{
             const attachment = buffer === GL.NONE ? undefined : fbo.attachments.get(buffer);
-            const view = attachment ? attachmentView(attachment, recording, false) : null;
+            const view = attachment ? viewOf(attachment, false) : null;
             records.push(view);
             return view;
         });
         const depthAttachment = fbo.attachments.get(GL.DEPTH_ATTACHMENT)
             ?? fbo.attachments.get(GL.STENCIL_ATTACHMENT);
-        const depth = depthAttachment ? attachmentView(depthAttachment, recording, true) : null;
+        const depth = depthAttachment ? viewOf(depthAttachment, true) : null;
         records.push(depth);
-        const cached = fboTargets.get(fbo);
+        const layers = fboTargets.get(fbo)
+            ?? /** @type {Map<number, { version: number, records: any[], target: DrawTarget }>} */ (
+                new Map());
+        fboTargets.set(fbo, layers);
+        const cached = layers.get(layer);
         if (cached && cached.version === fbo.version
             && cached.records.every((held, k)=>held === records[k]))
         {
@@ -3757,7 +3796,7 @@ export function createGpuRenderer(services){
         }
         /** @type {DrawTarget} */
         const target = {
-            key: `fbo${fbo.name}.${fbo.version}`,
+            key: `fbo${fbo.name}.${fbo.version}${layer > 0 ? `.l${layer}` : ''}`,
             width: bound.width, height: bound.height, flipped: true,
             colours: views,
             formats: views.map((/** @type {any} */ v)=>(v ? v.format ?? TEXTURE_FORMAT : '')),
@@ -3769,7 +3808,7 @@ export function createGpuRenderer(services){
             }),
             depth, depthFormat: depth ? depth.format ?? DEPTH_FORMAT : '', attached,
         };
-        fboTargets.set(fbo, { version: fbo.version, records, target });
+        layers.set(layer, { version: fbo.version, records, target });
         return target;
     };
 
@@ -4596,7 +4635,7 @@ export function createGpuRenderer(services){
                     { x: box.x0, y: box.y0, width: box.x1 - box.x0, height: box.y1 - box.y0 },
                     target))}`);
         }
-        recording.commands.push({
+        const command = {
             kind: 'draw',
             pipeline: pipelineSlot(recording, pipeline),
             uniforms,
@@ -4617,7 +4656,15 @@ export function createGpuRenderer(services){
             target,
             blendConstant: null,
             conditioned: conditions.get(context) ?? null,
-        });
+        };
+        // A layered framebuffer (3.2) is cleared in every layer.
+        const layers = layersOf(request.target ?? null);
+        recording.commands.push(command);
+        for (let layer = 1; layer < layers; layer++)
+        {
+            recording.commands.push({ ...command,
+                target: targetOf(surfaces, request.target ?? null, recording, layer) ?? target });
+        }
     };
 
     /** @type {Promise<void>} replays run one after another, in swap order */

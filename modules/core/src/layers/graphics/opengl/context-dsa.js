@@ -704,9 +704,9 @@ export function installDirectStateCalls(context, kernel){
         /**
          * glNamedFramebufferTexture and glNamedFramebufferTextureLayer: a
          * level of the texture named, its target the texture's. A cube map
-         * attached whole is drawn into its first face: a draw here reaches
-         * one layer of a layered attachment, the first, as it does without a
-         * geometry shader choosing another.
+         * or an array attached whole is layered (`side.layerWhole`): a draw
+         * reaches its first face or layer unless a geometry shader chooses
+         * another, and a clear reaches every one.
          *
          * @param {number} name @param {number} attachment @param {number} texture
          * @param {number} level @param {number | null} layer  null: the whole texture
@@ -730,11 +730,7 @@ export function installDirectStateCalls(context, kernel){
             let textarget = object?.target === GL.TEXTURE_1D ? GL.TEXTURE_1D : GL.TEXTURE_2D;
             if (object?.target === GL.TEXTURE_CUBE_MAP)
             {
-                if (layer === null)
-                {
-                    diverge('a cube map attached whole is drawn into its first face alone');
-                }
-                else if (layer < 0 || layer > 5)
+                if (layer !== null && (layer < 0 || layer > 5))
                 {
                     setError(GL.INVALID_VALUE);
                     return;
@@ -754,12 +750,14 @@ export function installDirectStateCalls(context, kernel){
             }
             else if (object && LAYERED_TARGETS.has(object.target))
             {
-                if (layer === null)
-                {
-                    diverge('an array attached whole is drawn into its first layer alone');
-                }
-                boundFramebuffers({ draw: name }, ()=>context.glFramebufferTextureLayer(
-                    GL.DRAW_FRAMEBUFFER, attachment, texture, level, layer ?? 0));
+                boundFramebuffers({ draw: name }, ()=>{
+                    context.glFramebufferTextureLayer(GL.DRAW_FRAMEBUFFER, attachment, texture,
+                        level, layer ?? 0);
+                    if (layer === null)
+                    {
+                        kernel.side.layerWhole(attachment, object);
+                    }
+                });
                 return;
             }
             else if (object && object.target !== GL.TEXTURE_1D && object.target !== GL.TEXTURE_2D)
@@ -772,8 +770,14 @@ export function installDirectStateCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            boundFramebuffers({ draw: name }, ()=>context.framebufferTexture(GL.DRAW_FRAMEBUFFER,
-                attachment, textarget, texture, level));
+            boundFramebuffers({ draw: name }, ()=>{
+                context.framebufferTexture(GL.DRAW_FRAMEBUFFER, attachment, textarget, texture,
+                    level);
+                if (layer === null && object?.target === GL.TEXTURE_CUBE_MAP)
+                {
+                    kernel.side.layerWhole(attachment, object);
+                }
+            });
         },
 
         /**

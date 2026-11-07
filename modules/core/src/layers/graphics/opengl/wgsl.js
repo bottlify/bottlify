@@ -165,8 +165,7 @@ export const UNIFORM = Object.freeze({
     envColor: 48 + UNITS * 32 + 12 + VARYING_TEXCOORDS * 4,   // UNITS vec4f
     fogColor: 48 + UNITS * 36 + 12 + VARYING_TEXCOORDS * 4,
     fogParams: 48 + UNITS * 36 + 16 + VARYING_TEXCOORDS * 4,  // density, start, end, coordinate
-    // alpha reference, the viewport of a draw repeated for each (`geometryDrawStage`),
-    // the target's row order, its height
+    // alpha reference, -, the target's row order, its height
     misc: 48 + UNITS * 36 + 20 + VARYING_TEXCOORDS * 4,
     lightModelAmbient: 48 + UNITS * 36 + 24 + VARYING_TEXCOORDS * 4,
     // emission, ambient, diffuse, specular, then shininess
@@ -177,7 +176,9 @@ export const UNIFORM = Object.freeze({
     // CLIP_REMAP's: y's sign, then z's scale and w's into z
     clipControl: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS
         + CLIP_PLANES * 4,
-    floats: 48 + UNITS * 36 + 52 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS + CLIP_PLANES * 4,
+    // the viewport and the layer of a draw repeated for each (`geometryDrawStage`)
+    route: 48 + UNITS * 36 + 52 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS + CLIP_PLANES * 4,
+    floats: 48 + UNITS * 36 + 56 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS + CLIP_PLANES * 4,
 });
 
 export const UNIFORM_STRUCT = `struct GlLight {
@@ -207,6 +208,7 @@ struct Uniforms {
     lights: array<GlLight, ${LIGHTS}>,
     clipPlanes: array<vec4f, ${CLIP_PLANES}>,
     clipControl: vec4f,
+    route: vec4f,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 `;

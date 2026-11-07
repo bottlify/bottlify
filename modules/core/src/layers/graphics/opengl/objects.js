@@ -563,9 +563,33 @@ export function attachedLevelKey(attachment){
 }
 
 /**
+ * A texture attachment is layered (3.2) when a cube map or an array was
+ * attached whole: a geometry shader's gl_Layer chooses which face or layer a
+ * primitive is drawn into, the first by default.
+ *
  * @typedef {{ kind: 'texture', texture: TextureObject, level: number,
- *     face: number } | { kind: 'renderbuffer', renderbuffer: RenderbufferObject }} Attachment
+ *     face: number, layered?: boolean } | { kind: 'renderbuffer',
+ *     renderbuffer: RenderbufferObject }} Attachment
  */
+
+/**
+ * How many layers an attachment is drawn into: a layered one's cube faces or
+ * array layers, one for any other.
+ *
+ * @param {Attachment} attachment
+ * @returns {number}
+ */
+export function attachmentLayers(attachment){
+    if (attachment.kind !== 'texture' || !attachment.layered)
+    {
+        return 1;
+    }
+    if (attachment.texture.target === GL.TEXTURE_CUBE_MAP)
+    {
+        return 6;
+    }
+    return attachment.texture.levels.get(attachedLevelKey(attachment))?.depth ?? 1;
+}
 
 /**
  * A sampler object (3.3): its parameters as a texture keeps its own, so

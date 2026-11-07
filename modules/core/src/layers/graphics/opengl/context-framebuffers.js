@@ -112,6 +112,12 @@ export function framebufferStatus(fbo){
     {
         return GL.FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
     }
+    // Layered attachments (3.2 section 9.4.2) are all or none of them.
+    const layered = [...fbo.attachments.values()].map(a=>a.kind === 'texture' && !!a.layered);
+    if (layered.some(on=>on !== layered[0]))
+    {
+        return GL.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+    }
     if (sizes.some(size=>size.width !== sizes[0].width || size.height !== sizes[0].height))
     {
         return GL.FRAMEBUFFER_UNSUPPORTED;
@@ -209,6 +215,35 @@ export function installFramebufferCalls(context, kernel){
             return drawFbo;
         }
         return target === GL.READ_FRAMEBUFFER ? readFbo : undefined;
+    };
+
+    /**
+     * Marks what the draw framebuffer has at `point` layered, when it is
+     * `texture` (glFramebufferTexture of a cube map or an array, 3.2): told
+     * after the texture was attached at its first face or layer.
+     *
+     * @param {number} point @param {object} texture
+     */
+    kernel.side.layerWhole = (point, texture)=>{
+        const fbo = drawFbo;
+        if (!fbo)
+        {
+            return;
+        }
+        /** @type {Map<Attachment, Attachment>} one layered copy a shared attachment */
+        const made = new Map();
+        for (const at of point === GL.DEPTH_STENCIL_ATTACHMENT
+            ? [GL.DEPTH_ATTACHMENT, GL.STENCIL_ATTACHMENT] : [point])
+        {
+            const held = fbo.attachments.get(at);
+            if (held?.kind === 'texture' && held.texture === texture)
+            {
+                const layered = made.get(held) ?? { ...held, layered: true };
+                made.set(held, layered);
+                fbo.attachments.set(at, layered);
+            }
+        }
+        fbo.version++;
     };
 
     /** @param {number} attachment */
@@ -707,6 +742,9 @@ export function installFramebufferCalls(context, kernel){
                     return attached.kind === 'texture'
                         ? [attached.texture.target === GL.TEXTURE_CUBE_MAP
                             ? CUBE_FACES[attached.face] : 0]
+                        : (setError(GL.INVALID_ENUM), null);
+                case GL.FRAMEBUFFER_ATTACHMENT_LAYERED:
+                    return attached.kind === 'texture' ? [attached.layered ? GL.TRUE : GL.FALSE]
                         : (setError(GL.INVALID_ENUM), null);
                 case GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
                     return attached.kind === 'texture'

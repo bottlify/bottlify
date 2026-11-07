@@ -23,6 +23,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { GLSL_GEOMETRY_PASS_BINDING } from './glsl-wgsl.js';
 import { UNIFORM } from './wgsl.js';
+import { TEX } from './formats.js';
 
 function rig(){
     const gpu = createFakeDevice();
@@ -307,15 +308,16 @@ void main() { c = vec4(colour, float(gl_ViewportIndex)); }`;
     const code = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>m.descriptor.code)
         .find((/** @type {string} */ text)=>/fn vertexMain\(@builtin\(vertex_index\) gsVertex/
             .test(text));
-    assert.match(code, /if \(bitcast<i32>\(gsVertices\[base \+ 2u\]\.x\) != i32\(uniforms\.misc\.y\)\)/,
-        'a vertex of another viewport is put out of the clip volume');
+    const cull = new RegExp('if \\(uniforms\\.route\\.x >= 0\\.0 && bitcast<i32>'
+        + '\\(gsVertices\\[base \\+ 2u\\]\\.x\\) != i32\\(uniforms\\.route\\.x\\)\\)');
+    assert.match(code, cull, 'a vertex of another viewport is put out of the clip volume');
     // The uniform blocks lie in a pool at 256-byte steps: each one's viewport number.
     const numbers = r.gpu.of('writeBuffer').flatMap((/** @type {any} */ call)=>{
         const floats = new Float32Array(call.bytes.buffer, call.bytes.byteOffset,
             call.bytes.byteLength >> 2);
         /** @type {number[]} */
         const found = [];
-        for (let at = UNIFORM.misc + 1; at < floats.length; at += 64)
+        for (let at = UNIFORM.route; at < floats.length; at += 64)
         {
             found.push(floats[at]);
         }
@@ -325,4 +327,132 @@ void main() { c = vec4(colour, float(gl_ViewportIndex)); }`;
     {
         assert.ok(numbers.includes(index), `viewport ${index}'s number in its uniforms`);
     }
+});
+
+test('a layered framebuffer: gl_Layer draws into the layer chosen, a clear reaches every layer, '
+    + 'and without layers gl_Layer is not read', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const [array] = gl.glGenTextures(1);
+    gl.glBindTexture(TEX.TEXTURE_2D_ARRAY, array);
+    gl.glTexImage3D(TEX.TEXTURE_2D_ARRAY, 0, GL.RGBA8, 8, 8, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
+    const [fbo] = gl.glGenFramebuffers(1);
+    gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    gl.glFramebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, array, 0);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetFramebufferAttachmentParameteriv(GL.FRAMEBUFFER,
+        GL.COLOR_ATTACHMENT0, GL.FRAMEBUFFER_ATTACHMENT_LAYERED), [GL.TRUE]);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    const [rb] = gl.glGenRenderbuffers(1);
+    gl.bindRenderbuffer(GL.RENDERBUFFER, rb, false);
+    gl.glRenderbufferStorageMultisample(GL.RENDERBUFFER, 0, GL.DEPTH_COMPONENT24, 8, 8);
+    gl.glFramebufferRenderbuffer(GL.FRAMEBUFFER, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER, rb);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER),
+        GL.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS, 'a layered attachment beside one that is not');
+    gl.glFramebufferRenderbuffer(GL.FRAMEBUFFER, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER, 0);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+
+    const chooser = `#version 410
+layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;
+in vec3 tint[]; out vec3 colour;
+void main() {
+    for (int i = 0; i < 3; i++) {
+        colour = tint[i]; gl_Position = gl_in[i].gl_Position; gl_Layer = 2; gl_ViewportIndex = 0;
+        EmitVertex();
+    }
+}`;
+    const reader = `#version 430
+in vec3 colour; out vec4 c;
+void main() { c = vec4(colour, float(gl_Layer)); }`;
+    const made = program(gl, [[GL.VERTEX_SHADER, VS], [GL.GEOMETRY_SHADER, chooser],
+        [GL.FRAGMENT_SHADER, reader]]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [1], gl.glGetProgramInfoLog(made));
+    gl.glUseProgram(made);
+    r.floats(0x1000, [0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1]);
+    gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0x1000);
+    gl.glEnableVertexAttribArrayARB(0);
+    /** @param {number} from @returns {number[]} the array's layers passes drew into */
+    const passLayers = from=>[...new Set(r.gpu.of('beginRenderPass').slice(from)
+        .flatMap((/** @type {any} */ call)=>call.descriptor.colorAttachments.filter(
+            (/** @type {any} */ a)=>a?.view?.viewDescriptor?.label
+                ?.startsWith(`gl-texture:${array}:`))
+            .map((/** @type {any} */ a)=>a.view.viewDescriptor.baseArrayLayer)))].sort();
+    gl.glClear(GL.COLOR_BUFFER_BIT);
+    await r.swap();
+    assert.deepEqual(passLayers(0), [0, 1, 2, 3], 'a clear reaches every layer');
+    const passes = r.gpu.of('beginRenderPass').length;
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    await r.swap();
+    assert.deepEqual(r.renderer.diagnostics().failures, []);
+    assert.deepEqual(r.divergences, []);
+    assert.deepEqual(passLayers(passes), [0, 1, 2, 3], 'the draw goes into every layer');
+    assert.equal(r.gpu.of('drawIndexedIndirect').length, 16 * 4,
+        'once a viewport and a layer');
+    const code = r.gpu.of('createShaderModule').map((/** @type {any} */ m)=>m.descriptor.code)
+        .find((/** @type {string} */ text)=>/gsVertex/.test(text));
+    assert.match(code, /uniforms\.route\.y >= 0\.0 && bitcast<i32>\(gsVertices\[base \+ 3u\]\.x\)/,
+        'the layer, after the viewport');
+    assert.match(code, /fgl_Layer = input\.i2;/, 'the fragment reads the layer\'s field');
+    const routes = r.gpu.of('writeBuffer').flatMap((/** @type {any} */ call)=>{
+        const floats = new Float32Array(call.bytes.buffer, call.bytes.byteOffset,
+            call.bytes.byteLength >> 2);
+        /** @type {string[]} */
+        const found = [];
+        for (let at = UNIFORM.route; at + 1 < floats.length; at += 64)
+        {
+            found.push(`${floats[at]},${floats[at + 1]}`);
+        }
+        return found;
+    });
+    for (let layer = 0; layer < 4; layer++)
+    {
+        assert.ok(routes.includes(`5,${layer}`), `viewport 5 into layer ${layer}`);
+    }
+
+    // The same program into the window, which has no layers: gl_Layer unread.
+    gl.bindFramebuffer(GL.FRAMEBUFFER, 0, false);
+    const before = r.gpu.of('drawIndexedIndirect').length;
+    const written = r.gpu.of('writeBuffer').length;
+    gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+    assert.equal(r.gpu.of('drawIndexedIndirect').length - before, 16, 'once a viewport');
+    const unrouted = r.gpu.of('writeBuffer').slice(written).flatMap((/** @type {any} */ call)=>{
+        const floats = new Float32Array(call.bytes.buffer, call.bytes.byteOffset,
+            call.bytes.byteLength >> 2);
+        /** @type {number[]} */
+        const found = [];
+        for (let at = UNIFORM.route + 1; at < floats.length; at += 64)
+        {
+            found.push(floats[at]);
+        }
+        return found;
+    });
+    assert.ok(unrouted.includes(-1), 'no layer to keep to');
+});
+
+test('a cube map attached whole is layered: a clear reaches its six faces', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const [cube] = gl.glGenTextures(1);
+    gl.glBindTexture(GL.TEXTURE_CUBE_MAP, cube);
+    for (let face = 0; face < 6; face++)
+    {
+        gl.glTexImage2D(0x8515 + face, 0, GL.RGBA8, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    }
+    const [fbo] = gl.glGenFramebuffers(1);
+    gl.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    gl.glFramebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, cube, 0);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetFramebufferAttachmentParameteriv(GL.FRAMEBUFFER,
+        GL.COLOR_ATTACHMENT0, GL.FRAMEBUFFER_ATTACHMENT_LAYERED), [GL.TRUE]);
+    assert.equal(gl.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    gl.glClear(GL.COLOR_BUFFER_BIT);
+    await r.swap();
+    assert.deepEqual(r.divergences, []);
+    const faces = new Set(r.gpu.of('beginRenderPass').flatMap((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments.filter((/** @type {any} */ a)=>
+            a?.view?.viewDescriptor?.label?.startsWith(`gl-texture:${cube}:`))
+            .map((/** @type {any} */ a)=>a.view.viewDescriptor.baseArrayLayer)));
+    assert.deepEqual([...faces].sort(), [0, 1, 2, 3, 4, 5]);
 });

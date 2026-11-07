@@ -291,7 +291,8 @@ test('the uniform block layout the shader declares is the one the renderer fills
     assert.equal(UNIFORM.clipPlanes, UNIFORM.lights + LIGHTS * 24,
         'a light is six vectors: three colours, position, spot, attenuation');
     assert.equal(UNIFORM.clipControl, UNIFORM.clipPlanes + CLIP_PLANES * 4);
-    assert.equal(UNIFORM.floats, UNIFORM.clipControl + 4);
+    assert.equal(UNIFORM.route, UNIFORM.clipControl + 4);
+    assert.equal(UNIFORM.floats, UNIFORM.route + 4);
     assert.equal(UNIFORM.floats % 4, 0);
 });
 

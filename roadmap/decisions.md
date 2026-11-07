@@ -1109,8 +1109,12 @@ buffers it bound last. *2026-11-07.*
 into draws as captured, and a read of it on the processor (glGetBufferSubData, a map) answers
 the bytes the program last gave it, said as a loss each time. *2026-11-07.*
 
-**A130. Temporary: a geometry shader's gl_Layer draws into the first layer,** and says so: layered
-attachments are not routed yet. *2026-11-07.*
+**A130. A geometry shader that writes gl_Layer, drawing into a layered framebuffer, has its draw
+recorded once for each layer,** into that face or array layer, keeping the primitives sent to it
+as A140 does for viewports (the two together are a draw for each pair); the layers are the fewest
+any layered attachment has. Into a framebuffer that is not layered gl_Layer is not read. A clear
+of a layered framebuffer is recorded once a layer. A 3D texture attached whole stays
+GL_FRAMEBUFFER_UNSUPPORTED, as its slices are. *2026-11-07.*
 
 **A131. The last vertex provokes by turning the primitive round,** not by a pass of its own: a
 draw with a flat value under GL_LAST_VERTEX_CONVENTION lists each primitive from its last
