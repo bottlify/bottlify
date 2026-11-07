@@ -389,6 +389,12 @@ export function laterEntryPoints(h){
             z >>> 0)),
         glDispatchComputeIndirect: ([offset])=>answer(current()?.glDispatchComputeIndirect(
             offset | 0)),
+        // --- shader storage blocks (4.3) ---
+        glShaderStorageBlockBinding: ([program, index, binding])=>answer(
+            current()?.glShaderStorageBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glGetProgramResourceIndex: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceIndex(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? GL.INVALID_INDEX),
         glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
         glGetInternalformativ: ([target, internal, pname, size, out])=>call(context=>{
             const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,
@@ -1266,8 +1272,7 @@ function storageAndNamedEntryPoints(h){
             context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, false), 'word')),
         glGetVertexArrayIndexed64iv: ([vao, index, pname, out])=>call(context=>writeInt64s(out,
             context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, true))),
-        glGetNamedBufferSubData: ([buffer, offset, size, out])=>call(context=>deliver(out,
-            context.namedBuffer('glGetBufferSubDataARB', buffer >>> 0, [offset | 0, size | 0]))),
+        // glGetNamedBufferSubData is `exports.js`'s: it may wait for the device.
         glMapNamedBuffer: ([buffer, access])=>current()?.namedBuffer('glMapBufferARB',
             buffer >>> 0, [access >>> 0]) ?? 0,
         glMapNamedBufferRange: ([buffer, offset, length, access])=>current()?.namedBuffer(

@@ -32,6 +32,8 @@
 import { GL } from './constants.js';
 import { createBufferObject } from './objects.js';
 import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
+import { COUNTER_LIMITS, STORAGE_BUFFER_OFFSET_ALIGNMENT, STORAGE_LIMITS }
+    from './glsl-storage.js';
 
 /** UNIFORM_BUFFER_OFFSET_ALIGNMENT: WebGPU's alignment of a uniform binding's offset. */
 export const UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256;
@@ -58,6 +60,14 @@ const TARGETS = new Map([
         general: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING,
         binding: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING, start: GL.TRANSFORM_FEEDBACK_BUFFER_START,
         size: GL.TRANSFORM_FEEDBACK_BUFFER_SIZE }],
+    [GL.SHADER_STORAGE_BUFFER, { points: STORAGE_LIMITS.bindings,
+        alignment: STORAGE_BUFFER_OFFSET_ALIGNMENT, general: GL.SHADER_STORAGE_BUFFER_BINDING,
+        binding: GL.SHADER_STORAGE_BUFFER_BINDING, start: GL.SHADER_STORAGE_BUFFER_START,
+        size: GL.SHADER_STORAGE_BUFFER_SIZE }],
+    // GL holds a counter range's offset to words (4.2 section 6.7.1).
+    [GL.ATOMIC_COUNTER_BUFFER, { points: COUNTER_LIMITS.bindings, alignment: 4,
+        general: GL.ATOMIC_COUNTER_BUFFER_BINDING, binding: GL.ATOMIC_COUNTER_BUFFER_BINDING,
+        start: GL.ATOMIC_COUNTER_BUFFER_START, size: GL.ATOMIC_COUNTER_BUFFER_SIZE }],
 ]);
 
 /**
@@ -173,6 +183,10 @@ export function installUniformBufferCalls(context, kernel){
     Object.assign(kernel.side, {
         /** What each transform feedback point holds: what a capture writes into. */
         feedbackBuffers: ()=>ranges(GL.TRANSFORM_FEEDBACK_BUFFER),
+        /** What each shader storage point holds (4.3). */
+        storageBuffers: ()=>ranges(GL.SHADER_STORAGE_BUFFER),
+        /** What each atomic counter buffer point holds (4.2). */
+        counterBuffers: ()=>ranges(GL.ATOMIC_COUNTER_BUFFER),
         /**
          * What each uniform buffer point holds for a draw: the buffer, and
          * the range a block reads from (a whole buffer from 0).

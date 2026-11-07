@@ -519,6 +519,13 @@ export function installShaderCalls(context, kernel){
          * @returns {Executable | null}
          */
         glslExecutable: ()=>currentProgram?.executable ?? null,
+        /**
+         * A program object by its name, as the program calls check it:
+         * INVALID_VALUE for no object, INVALID_OPERATION for a shader.
+         *
+         * @param {number} name @returns {ProgramObject | null}
+         */
+        programObject: name=>objectOf(name, 'program'),
     });
 
     Object.assign(context, {
@@ -793,6 +800,8 @@ export function installShaderCalls(context, kernel){
                 ints: new Int32Array(store),
                 version: 0,
                 blockBindings: Int32Array.from(result.program.blocks, block=>block.binding),
+                storageBindings: Int32Array.from(result.program.storageBlocks ?? [],
+                    block=>block.binding),
             };
         },
 

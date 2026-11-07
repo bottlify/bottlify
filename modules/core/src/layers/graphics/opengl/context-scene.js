@@ -436,6 +436,8 @@ export function createSceneBuilder(kernel){
             textureMatrices,
             boundTextures,
             uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
+            storageBuffers: glsl ? side.storageBuffers?.() ?? [] : [],
+            counterBuffers: glsl ? side.counterBuffers?.() ?? [] : [],
             feedback: glsl ? side.feedbackSession?.() ?? null : null,
             discard: on(GL.RASTERIZER_DISCARD),
 

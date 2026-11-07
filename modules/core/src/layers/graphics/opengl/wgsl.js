@@ -1323,6 +1323,9 @@ ${stage.code}
             stages.fragment = fragment.plan;
             stages.samplers = fragment.usedSamplers;
             stages.blocks = fragment.usedBlocks;
+            stages.storage = fragment.usedStorage;
+            stages.written = fragment.writtenStorage;
+            stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
             stages.geometry = {
                 vertex: { code: module(vertex, state.attributes.length > 0
@@ -1347,6 +1350,9 @@ ${stage.code}
             stages.fragment = fragment.plan;
             stages.samplers = [...new Set([...vertex.usedSamplers, ...fragment.usedSamplers])];
             stages.blocks = [...new Set([...vertex.usedBlocks, ...fragment.usedBlocks])];
+            stages.storage = fragment.usedStorage;
+            stages.written = fragment.writtenStorage;
+            stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
         else if (program.vertex)
@@ -1376,6 +1382,9 @@ ${stage.code}
             stages.fragment = fragment.plan;
             stages.samplers = fragment.usedSamplers;
             stages.blocks = fragment.usedBlocks;
+            stages.storage = fragment.usedStorage;
+            stages.written = fragment.writtenStorage;
+            stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
     }
@@ -1418,10 +1427,12 @@ ${[...stage.usedBlocks].sort((a, b)=>a - b).map(index=>blockDeclaration(program,
 ${samplerDeclarations(program, stage.usedSamplers).join('\n')}
 ${stage.code}
 `;
-        return { code, plan: stage.plan, samplers: stage.usedSamplers, blocks: stage.usedBlocks };
+        return { code, plan: stage.plan, samplers: stage.usedSamplers, blocks: stage.usedBlocks,
+            storage: stage.usedStorage, written: stage.writtenStorage,
+            counters: stage.usedCounters };
     }
     catch (e){
-        return { code: '', plan: null, samplers: [], blocks: [],
+        return { code: '', plan: null, samplers: [], blocks: [], storage: [], counters: [],
             error: e instanceof Error ? e.message : String(e) };
     }
 }
@@ -1441,6 +1452,9 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  * @property {import('./glsl-wgsl.js').BlockPlan | null} fragment
  * @property {number[]} samplers  the program's samplers the stages sample, by index
  * @property {number[]} blocks  the program's uniform blocks the stages read, by index
+ * @property {number[]} [storage]  the storage blocks its fragment stage reads or writes
+ * @property {number[]} [written]  those it writes
+ * @property {number[]} [counters]  the atomic counter buffers its fragment stage changes
  * @property {GeometryPasses} [geometry]  the passes before the draw, for a program
  *     with a geometry shader: the draw's vertex stage then reads what they made
  * @property {{ vertex: ComputeStage, inputs: number }} [capture]  the vertex stage as a
@@ -1466,6 +1480,9 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  * @property {import('./glsl-wgsl.js').BlockPlan | null} plan  its uniform block, if it has one
  * @property {number[]} samplers
  * @property {number[]} blocks
+ * @property {number[]} [storage]  the shader storage blocks it reads or writes, by index
+ * @property {number[]} [written]  those it writes
+ * @property {number[]} [counters]  the atomic counter buffers it changes, by binding
  */
 
 /**

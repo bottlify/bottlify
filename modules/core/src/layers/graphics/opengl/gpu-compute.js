@@ -10,16 +10,146 @@
  * recorded in the context's recording among its draws, so that it runs
  * after the draws before it and before the ones after it, as GL orders them.
  *
- * Group 0 of the pass is what a draw's stages read: the fixed block, the
- * stage's own uniforms, its samplers and its uniform blocks. Group 1 is what
- * the stage writes: its storage blocks, images and atomic counters.
+ * Its one group is what a draw's stages bind: the fixed block, the stage's
+ * own uniforms, its samplers and its uniform blocks, and what it writes: its
+ * storage blocks and atomic counter buffers (`createGlMemory`).
+ *
+ * **What the device writes is the device's**: a pass or a draw that writes a
+ * buffer object ends the recording it is in (the caller replays it at once),
+ * so that bytes the program stores into the buffer later reach the device
+ * after it, in a frame of their own; the buffer is marked `captured`, and a
+ * read of it on this side waits for the device's copy (`readBuffer`).
  */
 
-import { GLSL_BLOCK_BINDING, GLSL_COMPUTE_BINDING, samplerTypeOf, textureLayoutOf }
-    from './glsl-wgsl.js';
+import {
+    GLSL_BLOCK_BINDING, GLSL_COMPUTE_BINDING, GLSL_COUNTER_BINDING, GLSL_STORAGE_BINDING,
+    samplerTypeOf, textureLayoutOf,
+} from './glsl-wgsl.js';
+import { STORAGE_BUFFER_OFFSET_ALIGNMENT } from './glsl-storage.js';
 import { generateGlslCompute } from './wgsl.js';
 
 const COMPUTE_STAGE = 4;
+
+/**
+ * @typedef {Object} MemoryServices
+ * @property {any} backend
+ * @property {(buffer: any) => any} bufferFor  a buffer object's GPU copy
+ * @property {(detail: string) => void} lose
+ */
+
+/**
+ * @typedef {Object} MemoryBinding
+ * @property {object[]} layout  the bind group layout's entries
+ * @property {object[]} entries  the bind group's
+ * @property {string} key  what the layout's shape adds to a pipeline's key
+ * @property {boolean} writes  whether the stage writes a buffer object
+ */
+
+/**
+ * The buffer objects a stage's storage blocks and atomic counters reach, at
+ * the ranges bound to their binding points.
+ *
+ * @param {MemoryServices} services
+ */
+export function createGlMemory(services){
+    /** Storage a block with nothing bound reads and writes, by size. @type {any} */
+    let spare = null;
+    /** @param {number} size */
+    const spareOf = size=>{
+        if (!spare || spare.size < size)
+        {
+            spare = services.backend.createDynamicBuffer({ size: Math.max(size, 256),
+                usage: 0x80 | 0x8, label: 'gl-spare-storage' });
+        }
+        return spare.gpu;
+    };
+
+    /**
+     * @param {{ buffer: any, offset: number, size: number } | null | undefined} bound
+     * @param {number} least  the bytes the stage reaches at the least
+     * @param {number} recording  the recording's id, which reads the range
+     * @param {string} what  for a divergence
+     * @returns {{ buffer: any, offset: number, size: number } | null}
+     */
+    const rangeOf = (bound, least, recording, what)=>{
+        if (!bound)
+        {
+            services.lose(`${what} has no buffer bound: what it read was zero and what it`
+                + ' wrote was dropped');
+            return null;
+        }
+        if (bound.offset % STORAGE_BUFFER_OFFSET_ALIGNMENT !== 0)
+        {
+            services.lose(`${what} is bound at offset ${bound.offset}, which WebGPU does not`
+                + ` bind storage at (a multiple of ${STORAGE_BUFFER_OFFSET_ALIGNMENT}): it read`
+                + ' zero and wrote nothing');
+            return null;
+        }
+        const size = Math.min(bound.size, bound.buffer.size - bound.offset) & ~3;
+        if (size < Math.max(4, least))
+        {
+            services.lose(`${what} is bound to ${size} bytes, fewer than the ${least} it`
+                + ' holds: it read zero and wrote nothing');
+            return null;
+        }
+        const backing = services.bufferFor(bound.buffer);
+        backing.reads.note(recording, bound.offset, bound.offset + size);
+        return { buffer: backing.gpu.gpu, offset: bound.offset, size };
+    };
+
+    /**
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @param {{ storage?: number[], written?: number[], counters?: number[] }} stage
+     * @param {number} recording @param {number} visibility
+     * @returns {MemoryBinding}
+     */
+    const bind = (scene, executable, stage, recording, visibility)=>{
+        /** @type {MemoryBinding} */
+        const out = { layout: [], entries: [], key: '', writes: false };
+        const linked = executable.linked;
+        for (const index of stage.storage ?? [])
+        {
+            const block = linked.storageBlocks[index];
+            const point = executable.storageBindings?.[index] ?? block.binding;
+            const bound = scene.storageBuffers?.[point];
+            const written = (stage.written ?? []).includes(index);
+            const least = block.size + block.runtimeStride;
+            const range = rangeOf(bound, least, recording,
+                `shader storage block '${block.name}' (binding ${point})`);
+            if (range && written && bound)
+            {
+                bound.buffer.captured = true;
+                out.writes = true;
+            }
+            const binding = GLSL_STORAGE_BINDING + index;
+            out.layout.push({ binding, visibility, buffer: { type: 'storage' } });
+            out.entries.push({ binding, resource: range
+                ?? { buffer: spareOf(least), offset: 0, size: Math.max(4, least) } });
+            out.key += `s${index}`;
+        }
+        for (const binding of stage.counters ?? [])
+        {
+            const reach = Math.max(...linked.counters.filter((/** @type {any} */ c)=>
+                c.binding === binding).map((/** @type {any} */ c)=>c.offset + 4 * c.count));
+            const bound = scene.counterBuffers?.[binding];
+            const range = rangeOf(bound, reach, recording,
+                `the atomic counter buffer at binding ${binding}`);
+            if (range && bound)
+            {
+                bound.buffer.captured = true;
+                out.writes = true;
+            }
+            out.layout.push({ binding: GLSL_COUNTER_BINDING + binding, visibility,
+                buffer: { type: 'storage' } });
+            out.entries.push({ binding: GLSL_COUNTER_BINDING + binding, resource: range
+                ?? { buffer: spareOf(reach), offset: 0, size: Math.max(4, reach) } });
+            out.key += `c${binding}`;
+        }
+        return out;
+    };
+
+    return { bind };
+}
 
 /**
  * @typedef {Object} ComputeServices
@@ -40,6 +170,9 @@ const COMPUTE_STAGE = 4;
  * @property {(buffer: any) => any} bufferFor  a buffer object's GPU copy
  * @property {(recording: any, work: object[]) => void} dispatchAll
  * @property {(detail: string, severity?: 'loss') => void} diverge
+ * @property {ReturnType<typeof createGlMemory>} memory
+ * @property {(context: object) => void} wrote  the context's recording ends now: a
+ *     pass in it wrote buffer objects
  */
 
 /**
@@ -114,10 +247,9 @@ export function createGlCompute(services){
      * @param {{ grid: [number, number, number] }
      *     | { indirect: { buffer: any, offset: number } }} request
      * @param {any} scene
-     * @param {object[]} [writes]  group 1's layout and entries: what the stage writes
      * @returns {boolean} whether it was recorded
      */
-    const dispatch = (context, request, scene, writes)=>{
+    const dispatch = (context, request, scene)=>{
         if (!services.attached(context))
         {
             return false;
@@ -187,14 +319,13 @@ export function createGlCompute(services){
                 buffer: { type: 'uniform' } });
             entries.push(...services.uniformBlocksFor(scene, executable, [index], recording));
         }
+        const memory = services.memory.bind(scene, executable, stage, recording.id,
+            COMPUTE_STAGE);
+        layout.push(...memory.layout);
+        entries.push(...memory.entries);
+        signature += `|${memory.key}`;
         const groups = [layout];
         const given = [entries];
-        if (writes && writes.length > 0)
-        {
-            groups.push(writes.map((/** @type {any} */ w)=>w.layout));
-            given.push(writes.map((/** @type {any} */ w)=>w.entry));
-            signature += `|${writes.map((/** @type {any} */ w)=>w.key).join(',')}`;
-        }
         /** @type {[number, number, number] | { buffer: any, offset: number }} */
         let grid;
         if ('indirect' in request)
@@ -212,6 +343,10 @@ export function createGlCompute(services){
             pipeline: pipelineFor(`${moduleIds.get(stage)}|${signature}`, stage.code, groups),
             label: 'gl:compute', groups: given, grid,
         }]);
+        if (memory.writes)
+        {
+            services.wrote(context);
+        }
         return true;
     };
 

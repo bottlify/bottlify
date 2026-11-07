@@ -2109,13 +2109,6 @@ export function createOpengl(services){
             current()?.glBufferDataARB(target >>> 0, size | 0, (data >>> 0) || null, usage >>> 0)),
         glBufferSubDataARB: ([target, offset, size, data])=>answer(
             current()?.glBufferSubDataARB(target >>> 0, offset | 0, size | 0, data >>> 0)),
-        glGetBufferSubDataARB: ([target, offset, size, out])=>call(context=>{
-            const bytes = context.glGetBufferSubDataARB(target >>> 0, offset | 0, size | 0);
-            if (bytes && (out >>> 0) !== 0)
-            {
-                services.writeMemory(out >>> 0, bytes);
-            }
-        }),
         glMapBufferARB: ([target, access])=>
             answer(current()?.glMapBufferARB(target >>> 0, access >>> 0)),
         glUnmapBufferARB: ([target])=>answer(current()?.glUnmapBufferARB(target >>> 0)),
@@ -2455,6 +2448,38 @@ export function createOpengl(services){
     };
 
     Object.assign(swaps, debug.waiting);
+
+    /**
+     * Bytes a read of a buffer object answers into guest memory: at once, or
+     * once the device has given back a buffer a shader wrote.
+     *
+     * @param {number} out @param {Uint8Array | Promise<Uint8Array | null> | null} bytes
+     * @returns {number | Promise<number>}
+     */
+    const deliverBuffer = (out, bytes)=>{
+        /** @param {Uint8Array | null} got */
+        const write = got=>{
+            if (got && (out >>> 0) !== 0)
+            {
+                services.writeMemory(out >>> 0, got);
+            }
+            return 0;
+        };
+        return bytes instanceof Promise ? bytes.then(write) : write(bytes);
+    };
+    Object.assign(swaps, {
+        glGetBufferSubDataARB: (/** @type {number[]} */ [target, offset, size, out])=>{
+            const context = current();
+            return context ? deliverBuffer(out, context.glGetBufferSubDataARB(target >>> 0,
+                offset | 0, size | 0)) : 0;
+        },
+        glGetNamedBufferSubData: (/** @type {number[]} */ [buffer, offset, size, out])=>{
+            const context = current();
+            return context ? deliverBuffer(out, context.namedBuffer('glGetBufferSubDataARB',
+                buffer >>> 0, [offset | 0, size | 0])) : 0;
+        },
+    });
+    swaps.glGetBufferSubData = swaps.glGetBufferSubDataARB;
 
     /** @param {number} address @returns {import('./pixelformat.js').PixelFormat} */
     function readDescriptor(address){

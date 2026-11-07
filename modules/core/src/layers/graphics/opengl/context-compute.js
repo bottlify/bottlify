@@ -7,7 +7,9 @@
 /**
  * Compute dispatches (OpenGL 4.3 chapter 19, GL_ARB_compute_shader):
  * glDispatchCompute and glDispatchComputeIndirect run the current program's
- * compute stage over a grid of work groups, and the limits that bound them.
+ * compute stage over a grid of work groups, and the limits that bound them;
+ * and what a shader writes to memory: shader storage blocks (4.3 section
+ * 7.8, glShaderStorageBlockBinding) and atomic counters (4.2 section 7.7).
  *
  * - **A dispatch is recorded among the draws** (`gpu-compute.js`): the
  *   device runs it after the draws made before it and before those made
@@ -17,22 +19,29 @@
  *   GL leaves them undefined past the limit.
  * - **The limits are WebGPU's** where they are under GL's minimums
  *   (`glsl-link.js` COMPUTE_LIMITS).
+ * - **A buffer a shader wrote is read back from the device**: glGetBufferSubData
+ *   on one waits, as glReadPixels does, for every command recorded before it
+ *   and then for the device's bytes (`gpu.js` readBuffer).
  */
 
 import { GL } from './constants.js';
 import { BLOCK_LIMITS, COMPUTE_LIMITS } from './glsl-link.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
+import { COUNTER_LIMITS, STORAGE_BUFFER_OFFSET_ALIGNMENT, STORAGE_LIMITS }
+    from './glsl-storage.js';
 
 /** The calls of this file a display list does not record (4.6 compatibility 21.4). */
 export const COMPUTE_CALLS_NOT_COMPILED = Object.freeze([
-    'glDispatchCompute', 'glDispatchComputeIndirect',
+    'glDispatchCompute', 'glDispatchComputeIndirect', 'glShaderStorageBlockBinding',
+    'glGetProgramResourceIndex',
 ]);
 
 /**
  * @param {any} context
  * @param {import('./kernel.js').ContextKernel} kernel
  * @param {{ dispatchCompute?: (context: object, request: any, sceneOf: () => any)
- *     => boolean } | null} gpu  the device that runs the dispatches
+ *     => boolean, readBuffer?: (context: object, buffer: any)
+ *     => Promise<Uint8Array | null> | null } | null} gpu  the device that runs them
  */
 export function installComputeCalls(context, kernel, gpu){
     const { enter, setError, record } = kernel;
@@ -47,6 +56,48 @@ export function installComputeCalls(context, kernel, gpu){
     answer(GL.MAX_COMPUTE_UNIFORM_COMPONENTS, GLSL_LIMITS.fragmentUniformComponents);
     answer(GL.MAX_COMBINED_COMPUTE_UNIFORM_COMPONENTS, GLSL_LIMITS.fragmentUniformComponents
         + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4);
+    // Storage and counters in the fragment and compute stages alone (`glsl-storage.js`).
+    for (const query of [GL.MAX_VERTEX_SHADER_STORAGE_BLOCKS, GL.MAX_GEOMETRY_SHADER_STORAGE_BLOCKS,
+        GL.MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS, GL.MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS,
+        GL.MAX_VERTEX_ATOMIC_COUNTER_BUFFERS, GL.MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS,
+        GL.MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS, GL.MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS,
+        GL.MAX_VERTEX_ATOMIC_COUNTERS, GL.MAX_GEOMETRY_ATOMIC_COUNTERS,
+        GL.MAX_TESS_CONTROL_ATOMIC_COUNTERS, GL.MAX_TESS_EVALUATION_ATOMIC_COUNTERS])
+    {
+        answer(query, 0);
+    }
+    for (const query of [GL.MAX_FRAGMENT_SHADER_STORAGE_BLOCKS,
+        GL.MAX_COMPUTE_SHADER_STORAGE_BLOCKS])
+    {
+        answer(query, STORAGE_LIMITS.perStage);
+    }
+    answer(GL.MAX_COMBINED_SHADER_STORAGE_BLOCKS, STORAGE_LIMITS.combined);
+    answer(GL.MAX_SHADER_STORAGE_BUFFER_BINDINGS, STORAGE_LIMITS.bindings);
+    answer(GL.MAX_SHADER_STORAGE_BLOCK_SIZE, STORAGE_LIMITS.size);
+    answer(GL.SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, STORAGE_BUFFER_OFFSET_ALIGNMENT);
+    answer(GL.MAX_COMBINED_SHADER_OUTPUT_RESOURCES, STORAGE_LIMITS.combined
+        + GLSL_LIMITS.drawBuffers);
+    for (const query of [GL.MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS,
+        GL.MAX_COMPUTE_ATOMIC_COUNTER_BUFFERS, GL.MAX_COMBINED_ATOMIC_COUNTER_BUFFERS])
+    {
+        answer(query, COUNTER_LIMITS.buffersPerStage);
+    }
+    for (const query of [GL.MAX_FRAGMENT_ATOMIC_COUNTERS, GL.MAX_COMPUTE_ATOMIC_COUNTERS,
+        GL.MAX_COMBINED_ATOMIC_COUNTERS])
+    {
+        answer(query, COUNTER_LIMITS.perStage);
+    }
+    answer(GL.MAX_ATOMIC_COUNTER_BUFFER_BINDINGS, COUNTER_LIMITS.bindings);
+    answer(GL.MAX_ATOMIC_COUNTER_BUFFER_SIZE, COUNTER_LIMITS.bufferBytes);
+    // What glBindBuffersBase and glBindBuffersRange check a first point and a
+    // count against (`context-later.js`).
+    (kernel.side.bufferBindingLimits ??= new Map())
+        .set(GL.SHADER_STORAGE_BUFFER, GL.MAX_SHADER_STORAGE_BUFFER_BINDINGS)
+        .set(GL.ATOMIC_COUNTER_BUFFER, GL.MAX_ATOMIC_COUNTER_BUFFER_BINDINGS);
+
+    // A buffer a shader wrote, read on this side (`context-arrays.js`).
+    kernel.side.readDeviceBuffer = (/** @type {any} */ buffer)=>gpu?.readBuffer?.(context,
+        buffer) ?? null;
 
     // The two indexed limits, by axis (glGetIntegeri_v); neither has a
     // plain form.
@@ -85,6 +136,60 @@ export function installComputeCalls(context, kernel, gpu){
     };
 
     Object.assign(context, {
+        /**
+         * @param {number} programName @param {number} index @param {number} binding
+         */
+        glShaderStorageBlockBinding(programName, index, binding){
+            if (!enter('glShaderStorageBlockBinding', [programName, index, binding]))
+            {
+                return;
+            }
+            const program = kernel.side.programObject?.(programName);
+            if (!program)
+            {
+                return;
+            }
+            const executable = program.executable;
+            const blocks = executable?.linked.storageBlocks ?? [];
+            if (!executable || index < 0 || index >= blocks.length
+                || binding < 0 || binding >= STORAGE_LIMITS.bindings)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            /** @type {Int32Array} */ (executable.storageBindings)[index] = binding;
+        },
+
+        /**
+         * glGetProgramResourceIndex (4.3 section 7.3.1) for the interfaces
+         * whose index a program passes on: a storage block's to
+         * glShaderStorageBlockBinding, a uniform block's to glUniformBlockBinding.
+         *
+         * @param {number} programName @param {number} programInterface @param {string} name
+         * @returns {number}
+         */
+        glGetProgramResourceIndex(programName, programInterface, name){
+            if (!enter('glGetProgramResourceIndex', [programName, programInterface, name]))
+            {
+                return GL.INVALID_INDEX;
+            }
+            if (programInterface === GL.UNIFORM_BLOCK)
+            {
+                return context.glGetUniformBlockIndex(programName, name);
+            }
+            if (programInterface !== GL.SHADER_STORAGE_BLOCK)
+            {
+                kernel.diverge(`glGetProgramResourceIndex of interface 0x${programInterface
+                    .toString(16)} answered no resource: only blocks are listed here`);
+                return GL.INVALID_INDEX;
+            }
+            const program = kernel.side.programObject?.(programName);
+            const blocks = program?.linked ? program.executable?.linked.storageBlocks ?? [] : [];
+            const index = blocks.findIndex((/** @type {any} */ b)=>b.name === name
+                || (b.element === 0 && b.name === `${name}[0]`));
+            return index < 0 ? GL.INVALID_INDEX : index;
+        },
+
         /** @param {number} x @param {number} y @param {number} z */
         glDispatchCompute(x, y, z){
             if (!enter('glDispatchCompute', [x, y, z]) || !computing())

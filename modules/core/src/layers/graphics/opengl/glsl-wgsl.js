@@ -258,6 +258,22 @@ ${fields.map((f, k)=>`    out.${f.field} = `
 export const GLSL_BLOCK_BINDING = 32;
 
 /**
+ * Where what a stage writes is bound, in group 0 as well: its shader storage
+ * blocks by index, its atomic counter buffers by binding, its images by unit
+ * (4.2, 4.3).
+ */
+export const GLSL_STORAGE_BINDING = 64;
+export const GLSL_COUNTER_BINDING = 80;
+export const GLSL_IMAGE_BINDING = 96;
+
+/** The atomic functions of 4.30 (section 8.11), by name. */
+const ATOMIC_OPS = /** @type {Readonly<Record<string, string>>} */ (Object.freeze({
+    atomicAdd: 'atomicAdd', atomicMin: 'atomicMin', atomicMax: 'atomicMax',
+    atomicAnd: 'atomicAnd', atomicOr: 'atomicOr', atomicXor: 'atomicXor',
+    atomicExchange: 'atomicExchange', atomicCompSwap: '',
+}));
+
+/**
  * The declaration of a uniform block a stage reads: its bytes as words, read
  * where the layout puts each value (`readBlock`).
  *
@@ -588,6 +604,29 @@ const BARRIERS = Object.freeze({
     memoryBarrierBuffer: 'storageBarrier', memoryBarrierImage: 'storageBarrier',
     memoryBarrierAtomicCounter: 'storageBarrier',
 });
+
+/**
+ * The variable a chain of members, indices and swizzles starts from.
+ *
+ * @param {any} node @returns {any}
+ */
+const rootOf = node=>{
+    let at = node;
+    while (at && (at.node === 'field' || at.node === 'index' || at.node === 'swizzle'))
+    {
+        at = at.object;
+    }
+    return at?.node === 'name' ? at.symbol : null;
+};
+
+/**
+ * A shared integer, or an array of them, as WGSL's atomic type.
+ *
+ * @param {any} type @returns {string}
+ */
+const atomicTypeOf = type=>(type.kind === 'array'
+    ? `array<${atomicTypeOf(type.element)}, ${type.length}>`
+    : `atomic<${type.base === 'int' ? 'i32' : 'u32'}>`);
 
 /** The WGSL scalar of each GLSL one. */
 const SCALARS = /** @type {Record<string, string>} */ ({ float: 'f32', int: 'i32', uint: 'u32',
@@ -932,6 +971,51 @@ export function emitStage(program, which, options, given, partner){
         }
     }
 
+    // --- what the stage changes atomically: found before anything is declared ---
+
+    /** The storage blocks, by block name, an atomic function names a member of. */
+    const atomicStorage = new Set();
+    /** The shared variables an atomic function names. */
+    const atomicShared = new Set();
+    {
+        /** @type {Set<object>} */
+        const seen = new Set();
+        /** @param {any} node */
+        const visit = node=>{
+            if (!node || typeof node !== 'object' || seen.has(node))
+            {
+                return;
+            }
+            seen.add(node);
+            if (Array.isArray(node))
+            {
+                node.forEach(visit);
+                return;
+            }
+            if (node.node === 'call' && !node.user && node.name in ATOMIC_OPS)
+            {
+                const root = rootOf(node.args[0]);
+                if (root?.storage === 'buffer' && root.block)
+                {
+                    atomicStorage.add(root.block.name);
+                }
+                else if (root?.storage === 'shared')
+                {
+                    atomicShared.add(root.name);
+                }
+            }
+            for (const key of Object.keys(node))
+            {
+                if (key !== 'type' && key !== 'symbol' && key !== 'at' && key !== 'constant'
+                    && key !== 'fn')
+                {
+                    visit(node[key]);
+                }
+            }
+        };
+        linked.functions.forEach(fn=>visit(/** @type {any} */ (fn).body));
+    }
+
     // --- private variables: globals, built-ins, and the interface ---
 
     for (const symbol of linked.globals)
@@ -941,9 +1025,11 @@ export function emitStage(program, which, options, given, partner){
             continue;
         }
         declareStructs(symbol.type);
-        // A compute shader's shared variables are its work group's (4.3).
+        // A compute shader's shared variables are its work group's (4.3);
+        // one an atomic function names is WGSL's atomic type throughout.
         privates.push(`var<${symbol.storage === 'shared' ? 'workgroup' : 'private'}>`
-            + ` ${p}g_${symbol.name}: ${typeOf(symbol.type)};`);
+            + ` ${p}g_${symbol.name}: ${atomicShared.has(symbol.name)
+                ? atomicTypeOf(symbol.type) : typeOf(symbol.type)};`);
     }
     for (const name of linked.uses)
     {
@@ -1049,6 +1135,12 @@ export function emitStage(program, which, options, given, partner){
 
     /** The blocks the stage reads, by index. @type {Set<number>} */
     const usedBlocks = new Set();
+    /** The storage blocks it reads or writes, by index. @type {Set<number>} */
+    const usedStorage = new Set();
+    /** The atomic counter buffers it changes, by binding. @type {Set<number>} */
+    const usedCounters = new Set();
+    /** The storage blocks it writes, by index. @type {Set<number>} */
+    const writtenStorage = new Set();
     /** The blocks a dynamic offset reads, which need a word reader. @type {Set<number>} */
     const dynamicBlocks = new Set();
 
@@ -1078,13 +1170,36 @@ export function emitStage(program, which, options, given, partner){
      * @returns {number}
      */
     const blockIndex = (info, element)=>{
-        const index = (program.blocks ?? []).findIndex(b=>b.blockName === info.name
-            && b.element === element);
+        // A storage block's index is told from a uniform block's by its
+        // sign: -1 the first (`storageOf`).
+        const storage = info.storage === 'buffer';
+        const index = ((storage ? program.storageBlocks : program.blocks) ?? []).findIndex(b=>
+            b.blockName === info.name && b.element === element);
         if (index < 0)
         {
-            throw new Error(`glsl: the uniform block '${info.name}' is not active`);
+            throw new Error(`glsl: the block '${info.name}' is not active`);
         }
-        return index;
+        return storage ? -index - 1 : index;
+    };
+
+    /** @param {number} block @returns {number} a storage block's own index */
+    const storageOf = block=>-block - 1;
+
+    /**
+     * A block by the index `blockIndex` gives it, marked read.
+     *
+     * @param {number} block
+     * @returns {{ members: import('./glsl-layout.js').MemberLayout[],
+     *     packing: 'std140' | 'std430' }}
+     */
+    const useBlock = block=>{
+        if (block < 0)
+        {
+            usedStorage.add(storageOf(block));
+            return /** @type {any} */ (program.storageBlocks)[storageOf(block)];
+        }
+        usedBlocks.add(block);
+        return /** @type {any} */ (program.blocks)[block];
     };
 
     /**
@@ -1113,7 +1228,7 @@ export function emitStage(program, which, options, given, partner){
         {
             const symbol = /** @type {VariableSymbol} */ (node.symbol);
             const info = symbol.block;
-            if (symbol.storage !== 'uniform' || !info)
+            if ((symbol.storage !== 'uniform' && symbol.storage !== 'buffer') || !info)
             {
                 return null;
             }
@@ -1122,16 +1237,14 @@ export function emitStage(program, which, options, given, partner){
                 return { instance: info, element: 0, type: symbol.type };
             }
             const index = blockIndex(info, 0);
-            const blocks = /** @type {import('./glsl-link.js').UniformBlock[]} */ (
-                program.blocks);
-            const member = blocks[index].members.find(m=>m.name === symbol.name);
+            const block = useBlock(index);
+            const member = block.members.find(m=>m.name === symbol.name);
             if (!member)
             {
                 throw new Error(`glsl: '${symbol.name}' is not in its block's layout`);
             }
-            usedBlocks.add(index);
             return placeOf(index, member.offset, null, member.type, !!member.rowMajor,
-                program.blocks[index].packing);
+                block.packing);
         }
         if (node.node === 'field' && node.member)
         {
@@ -1143,14 +1256,14 @@ export function emitStage(program, which, options, given, partner){
             if ('instance' in inner)
             {
                 const index = blockIndex(inner.instance, inner.element);
-                const member = program.blocks[index].members.find(m=>m.name === node.member);
+                const block = useBlock(index);
+                const member = block.members.find(m=>m.name === node.member);
                 if (!member)
                 {
                     throw new Error(`glsl: '${node.member}' is not in its block's layout`);
                 }
-                usedBlocks.add(index);
                 return placeOf(index, member.offset, null, member.type, !!member.rowMajor,
-                    program.blocks[index].packing);
+                    block.packing);
             }
             const struct = /** @type {StructType} */ (inner.type);
             const laid = membersLayout(struct.fields.map(f=>({ name: f.name, type: f.type,
@@ -1211,12 +1324,146 @@ export function emitStage(program, which, options, given, partner){
      * @param {number} block @param {number} at @param {string | null} plus
      */
     const blockWord = (block, at, plus)=>{
+        if (block < 0)
+        {
+            const ref = storageWord(block, at, plus);
+            return atomicStorage.has(storageName(block)) ? `atomicLoad(&${ref})` : ref;
+        }
         if (plus === null)
         {
             return `glb${block}[${at >> 4}].${XYZW[(at >> 2) & 3]}`;
         }
         dynamicBlocks.add(block);
         return `${p}ubw${block}(${plus}${at === 0 ? '' : ` + ${at}u`})`;
+    };
+
+    /** @param {number} block @returns {string} a storage block's block name */
+    const storageName = block=>/** @type {any} */ (program.storageBlocks)[storageOf(block)]
+        .blockName;
+
+    /**
+     * A storage block's word at a byte offset, as a reference.
+     *
+     * @param {number} block @param {number} at @param {string | null} plus
+     */
+    const storageWord = (block, at, plus)=>{
+        const index = storageOf(block);
+        usedStorage.add(index);
+        return plus === null ? `gss${index}[${at >> 2}u]`
+            : `gss${index}[(${plus}${at === 0 ? '' : ` + ${at}u`}) >> 2u]`;
+    };
+
+    /**
+     * A value as the word a storage block holds it in.
+     *
+     * @param {string} code @param {GlslType} type  a scalar
+     */
+    const asWord = (code, type)=>{
+        const base = baseOf(type);
+        return base === 'uint' ? code : base === 'bool' ? `select(0u, 1u, ${code})`
+            : `bitcast<u32>(${code})`;
+    };
+
+    /**
+     * Writes a value into a storage block at a place, word by word, as the
+     * layout puts each (`readBlock` read backwards).
+     *
+     * @param {BlockPlace} place @param {string} value @param {Emit} out
+     */
+    function writeBlock(place, value, out){
+        const { block, at, plus, type } = place;
+        switch (type.kind)
+        {
+            case 'scalar': {
+                const ref = storageWord(block, at, plus);
+                writtenStorage.add(storageOf(block));
+                const word = asWord(value, type);
+                out.pre.push(atomicStorage.has(storageName(block))
+                    ? `atomicStore(&${ref}, ${word});` : `${ref} = ${word};`);
+                return;
+            }
+            case 'vector': {
+                const from = once(out, value, type);
+                for (let k = 0; k < type.size; k++)
+                {
+                    writeBlock({ ...place, at: at + k * place.step,
+                        type: vectorOf(/** @type {any} */ (type).base, 1) },
+                    `${from}.${XYZW[k]}`, out);
+                }
+                return;
+            }
+            case 'matrix': {
+                const from = once(out, value, type);
+                for (let c = 0; c < type.cols; c++)
+                {
+                    writeBlock({ ...place, type: vectorOf('float', type.rows),
+                        at: at + c * (place.rowMajor ? 4 : place.matrixStride),
+                        step: place.rowMajor ? place.matrixStride : 4 }, `${from}[${c}]`, out);
+                }
+                return;
+            }
+            case 'array': {
+                const from = once(out, value, type);
+                for (let k = 0; k < type.length; k++)
+                {
+                    writeBlock(placeOf(block, at + k * place.arrayStride, plus, type.element,
+                        place.rowMajor, place.packing), `${from}[${k}]`, out);
+                }
+                return;
+            }
+            case 'struct': {
+                const from = once(out, value, type);
+                const laid = membersLayout(type.fields.map(f=>({ name: f.name, type: f.type,
+                    rowMajor: place.rowMajor })), place.packing);
+                for (const m of laid)
+                {
+                    writeBlock(placeOf(block, at + m.offset, plus, m.type, place.rowMajor,
+                        place.packing), `${from}.m_${m.name}`, out);
+                }
+                return;
+            }
+            default:
+                throw new Error(`glsl: a ${glslName(type)} cannot be written to a block`);
+        }
+    }
+
+    /**
+     * The shared variable an expression starts from, by name, or null.
+     *
+     * @param {any} node @returns {string | null}
+     */
+    const sharedRoot = node=>{
+        const root = rootOf(node);
+        return root?.storage === 'shared' ? root.name : null;
+    };
+
+    /**
+     * Whether a written expression lies in a storage block or in a shared
+     * atomic: written through `store`, never as a WGSL reference.
+     *
+     * @param {any} node @returns {boolean}
+     */
+    const inMemory = node=>rootOf(node)?.storage === 'buffer'
+        || atomicShared.has(sharedRoot(node));
+
+    /**
+     * The place an expression writes in a storage block, or null for one
+     * outside every storage block.
+     *
+     * @param {any} node @param {Emit} out @returns {BlockPlace | null}
+     */
+    const storagePlace = (node, out)=>{
+        if (rootOf(node)?.storage !== 'buffer')
+        {
+            return null;
+        }
+        const place = blockPlace(node, out);
+        if (!place || 'instance' in place)
+        {
+            throw new Error('a storage block instance is written whole, which GLSL does not'
+                + ' let a program do');
+        }
+        return place;
     };
 
     /**
@@ -1237,8 +1484,8 @@ export function emitStage(program, which, options, given, partner){
             case 'vector': {
                 const n = type.size;
                 const first = (at >> 2) & 3;
-                const words = plus === null && place.step === 4 && first + n <= 4
-                    ? `glb${block}[${at >> 4}].${XYZW.slice(first, first + n)}`
+                const words = block >= 0 && plus === null && place.step === 4
+                    && first + n <= 4 ? `glb${block}[${at >> 4}].${XYZW.slice(first, first + n)}`
                     : `vec${n}u(${Array.from({ length: n }, (_, k)=>blockWord(block,
                         at + k * place.step, plus)).join(', ')})`;
                 return type.base === 'uint' ? words : type.base === 'bool'
@@ -1407,6 +1654,11 @@ export function emitStage(program, which, options, given, partner){
         {
             return constantCode(node.constant, node.type);
         }
+        if ((node.node === 'name' || node.node === 'index') && node.type.kind === 'scalar'
+            && atomicShared.has(sharedRoot(node)))
+        {
+            return `atomicLoad(&${lvalue(node, out)})`;
+        }
         switch (node.node)
         {
             case 'name': {
@@ -1477,17 +1729,38 @@ export function emitStage(program, which, options, given, partner){
             case 'unary':
                 return unary(node, out);
             case 'postfix': {
+                if (inMemory(node.operand))
+                {
+                    const old = temp(out, expr(node.operand, out), typeOf(node.type));
+                    store(node.operand, `(${old} ${node.op === '++' ? '+' : '-'}`
+                        + ` ${one(node.type)})`, out);
+                    return old;
+                }
                 const target = lvalue(node.operand, out);
                 const old = temp(out, target, typeOf(node.type));
                 out.pre.push(`${target} = ${old} ${node.op === '++' ? '+' : '-'}`
                     + ` ${one(node.type)};`);
                 return old;
             }
+            case 'length': {
+                // A storage block's last member sized at run time: what the
+                // buffer bound to it holds past the members before it.
+                const place = blockPlace(node.object, out);
+                if (!place || 'instance' in place || place.block >= 0)
+                {
+                    throw new Error('glsl: length() of an array sized at run time outside a'
+                        + ' storage block');
+                }
+                const index = storageOf(place.block);
+                usedStorage.add(index);
+                return `i32((arrayLength(&gss${index}) * 4u - ${place.at}u)`
+                    + ` / ${place.arrayStride}u)`;
+            }
             case 'binary':
                 return binary(node, out);
             case 'assign':
                 assign(node, out);
-                return lvalue(node.target, out);
+                return inMemory(node.target) ? expr(node.target, out) : lvalue(node.target, out);
             case 'conditional':
                 return conditional(node, out);
             case 'sequence': {
@@ -1568,6 +1841,27 @@ export function emitStage(program, which, options, given, partner){
      * @param {any} target @param {string} value @param {Emit} out
      */
     function store(target, value, out){
+        const place = storagePlace(target.node === 'swizzle' ? target.object : target, out);
+        if (place)
+        {
+            if (target.node !== 'swizzle')
+            {
+                writeBlock(place, value, out);
+                return;
+            }
+            const from = once(out, value, target.type);
+            const scalar = vectorOf(/** @type {any} */ (baseOf(target.type)), 1);
+            target.indices.forEach((/** @type {number} */ index, /** @type {number} */ k)=>{
+                writeBlock({ ...place, at: place.at + index * place.step, type: scalar },
+                    target.indices.length === 1 ? from : `${from}.${XYZW[k]}`, out);
+            });
+            return;
+        }
+        if (target.type.kind === 'scalar' && atomicShared.has(sharedRoot(target)))
+        {
+            out.pre.push(`atomicStore(&${lvalue(target, out)}, ${value});`);
+            return;
+        }
         if (target.node === 'swizzle' && target.indices.length > 1)
         {
             const from = once(out, value, target.type);
@@ -1619,6 +1913,13 @@ export function emitStage(program, which, options, given, partner){
             case '!':
                 return `(!${expr(node.operand, out)})`;
             default: {
+                if (inMemory(node.operand))
+                {
+                    const value = temp(out, `(${expr(node.operand, out)}`
+                        + ` ${node.op === '++' ? '+' : '-'} ${one(node.type)})`, typeOf(node.type));
+                    store(node.operand, value, out);
+                    return value;
+                }
                 const target = lvalue(node.operand, out);
                 out.pre.push(`${target} = ${target} ${node.op === '++' ? '+' : '-'}`
                     + ` ${one(node.type)};`);
@@ -1967,6 +2268,102 @@ export function emitStage(program, which, options, given, partner){
         });
     };
 
+    /**
+     * An atomic function of 4.30 on a storage block's member or a shared
+     * variable. A storage block's words are atomic<u32>, so a signed
+     * minimum or maximum there is a compare-and-swap loop; GLSL's
+     * atomicCompSwap is strong and WGSL's exchange weak, so it loops until
+     * it either swaps or sees another value.
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function atomicCall(node, out){
+        const [memory, ...rest] = node.args;
+        const root = rootOf(memory);
+        const signed = baseOf(memory.type) === 'int';
+        const scalar = signed ? 'i32' : 'u32';
+        let ref;
+        let words = false;
+        if (root?.storage === 'buffer')
+        {
+            const place = /** @type {BlockPlace} */ (blockPlace(memory, out));
+            ref = storageWord(place.block, place.at, place.plus);
+            writtenStorage.add(storageOf(place.block));
+            words = true;
+        }
+        else if (root?.storage === 'shared')
+        {
+            ref = lvalue(memory, out);
+        }
+        else
+        {
+            throw new Error(`glsl: '${node.name}' changes neither a storage block's member nor a`
+                + ' shared variable');
+        }
+        /** @param {string} code */
+        const toStored = code=>(words && signed ? `bitcast<u32>(${code})` : code);
+        /** @param {string} code */
+        const fromStored = code=>(words && signed ? `bitcast<i32>(${code})` : code);
+        const values = rest.map((/** @type {any} */ a)=>temp(out, expr(a, out), scalar));
+        const stored = words ? 'u32' : scalar;
+        if (node.name === 'atomicCompSwap')
+        {
+            const result = `t${temps++}`;
+            out.pre.push(`var ${result}: ${stored};`, 'loop {',
+                `    let ${result}r = atomicCompareExchangeWeak(&${ref}, ${toStored(values[0])},`
+                + ` ${toStored(values[1])});`,
+                `    if (${result}r.exchanged || ${result}r.old_value != ${toStored(values[0])})`
+                + ` { ${result} = ${result}r.old_value; break; }`, '}');
+            return fromStored(result);
+        }
+        if ((node.name === 'atomicMin' || node.name === 'atomicMax') && signed && words)
+        {
+            const result = `t${temps++}`;
+            out.pre.push(`var ${result}: u32;`, 'loop {',
+                `    let ${result}o = atomicLoad(&${ref});`,
+                `    let ${result}r = atomicCompareExchangeWeak(&${ref}, ${result}o, bitcast<u32>(`
+                + `${node.name === 'atomicMin' ? 'min' : 'max'}(bitcast<i32>(${result}o),`
+                + ` ${values[0]})));`,
+                `    if (${result}r.exchanged) { ${result} = ${result}o; break; }`, '}');
+            return `bitcast<i32>(${result})`;
+        }
+        return fromStored(temp(out, `${ATOMIC_OPS[node.name]}(&${ref}, ${toStored(values[0])})`,
+            stored));
+    }
+
+    /**
+     * An atomic counter's function (4.20 section 8.10): an atomic on the
+     * counter's word of the buffer at its binding.
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function counterCall(node, out){
+        const counter = node.args[0];
+        const root = rootOf(counter);
+        const known = (program.counters ?? []).find(c=>c.name === root?.name);
+        if (!known)
+        {
+            throw new Error(`glsl: '${node.name}' names no active atomic counter`);
+        }
+        const word = known.offset >> 2;
+        const index = counter.node !== 'index' ? `${word}u`
+            : counter.index.constant ? `${word + counter.index.constant[0]}u`
+                : `(${word}u + u32(${expr(counter.index, out)}))`;
+        usedCounters.add(known.binding);
+        const ref = `gac${known.binding}[${index}]`;
+        switch (node.name)
+        {
+            case 'atomicCounterIncrement':
+                return temp(out, `atomicAdd(&${ref}, 1u)`, 'u32');
+            case 'atomicCounterDecrement':
+                return temp(out, `atomicSub(&${ref}, 1u) - 1u`, 'u32');
+            case 'atomicCounter':
+                return temp(out, `atomicLoad(&${ref})`, 'u32');
+            default:
+                throw new Error(`glsl: the built-in '${node.name}' has no translation`);
+        }
+    }
+
     /** @param {any} node @param {Emit} out @returns {string} */
     function builtinCall(node, out){
         const name = node.name;
@@ -1975,6 +2372,14 @@ export function emitStage(program, which, options, given, partner){
             || name.startsWith('texelFetch'))
         {
             return textureCall(node, out);
+        }
+        if (name in ATOMIC_OPS)
+        {
+            return atomicCall(node, out);
+        }
+        if (name.startsWith('atomicCounter'))
+        {
+            return counterCall(node, out);
         }
         /** @type {Record<string, string>} */
         const renamed = {
@@ -2532,7 +2937,7 @@ export function emitStage(program, which, options, given, partner){
                 return;
             case 'postfix':
             case 'unary':
-                if (node.op === '++' || node.op === '--')
+                if ((node.op === '++' || node.op === '--') && !inMemory(node.operand))
                 {
                     const target = lvalue(node.operand, out);
                     out.pre.push(`${target} = ${target} ${node.op === '++' ? '+' : '-'}`
@@ -2554,9 +2959,14 @@ export function emitStage(program, which, options, given, partner){
                     out.pre.push(node.name === 'EmitVertex' ? `${p}emit();` : `${p}cut();`);
                     return;
                 }
+                // Outside a compute stage an invocation's own accesses are in
+                // its order already, and WGSL has these barriers in compute alone.
                 if (!node.user && BARRIERS[node.name])
                 {
-                    out.pre.push(`${BARRIERS[node.name]}();`);
+                    if (computing)
+                    {
+                        out.pre.push(`${BARRIERS[node.name]}();`);
+                    }
                     return;
                 }
                 if (node.user)
@@ -3195,8 +3605,17 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
             + ` ${samplerVarTypeOf(samplerTypeOf(sampler))};`;
     });
 
+    const memoryDeclarations = [
+        ...[...usedStorage].sort((a, b)=>a - b).map(index=>`@group(0) @binding(`
+            + `${GLSL_STORAGE_BINDING + index}) var<storage, read_write> gss${index}: array<`
+            + `${atomicStorage.has(/** @type {any} */ (program.storageBlocks)[index].blockName)
+                ? 'atomic<u32>' : 'u32'}>;`),
+        ...[...usedCounters].sort((a, b)=>a - b).map(point=>`@group(0) @binding(`
+            + `${GLSL_COUNTER_BINDING + point}) var<storage, read_write> gac${point}:`
+            + ' array<atomic<u32>>;'),
+    ];
     return {
-        code: [...declarations, blockCode, ...privates, ...loaders,
+        code: [...memoryDeclarations, ...declarations, blockCode, ...privates, ...loaders,
             ...[...usedInverses].sort().map(n=>inverseFunction(p, n)),
             ...[...dynamicBlocks].sort((a, b)=>a - b).map(b=>`fn ${p}ubw${b}(o: u32) -> u32 {
     return glb${b}[o >> 4u][(o >> 2u) & 3u];
@@ -3205,6 +3624,9 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
         samplers: samplerDeclarations,
         usedSamplers: [...usedSamplers],
         usedBlocks: [...usedBlocks],
+        usedStorage: [...usedStorage],
+        writtenStorage: [...writtenStorage],
+        usedCounters: [...usedCounters],
         plan: blockMembers.length > 0 ? plan : null,
         fields,
     };

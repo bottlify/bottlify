@@ -31,6 +31,7 @@
  *   out of it by the plan made here.
  */
 
+import { atomicCountersOf, storageBlocksOf } from './glsl-storage.js';
 import { BUILTIN_ATTRIBUTES, GLSL_LIMITS } from './glsl-builtins.js';
 import { baseOf, componentsOf, glslName, innermost } from './glsl-types.js';
 import { blockLayout, blockVariables } from './glsl-layout.js';
@@ -212,6 +213,10 @@ export const FEEDBACK_LIMITS = Object.freeze({
  * @property {FragmentOutput[]} outputs  the fragment shader's own outputs
  * @property {UniformBlock[]} blocks  the active uniform blocks, by index
  * @property {BlockUniform[]} blockUniforms  their active uniforms
+ * @property {import('./glsl-storage.js').StorageBlock[]} [storageBlocks]  the active
+ *     shader storage blocks, by index (4.3)
+ * @property {import('./glsl-storage.js').AtomicCounter[]} [counters]  the active atomic
+ *     counters (4.2), which are not among `uniforms`
  * @property {LinkedStage | null} [compute]  a compute program's one stage (4.3)
  * @property {[number, number, number]} [localSize]  its work group's size
  */
@@ -664,7 +669,10 @@ export function linkProgram(given){
     {
         for (const symbol of usedOf(stage, 'uniform'))
         {
-            if (symbol.block)
+            // An atomic counter is a place in a buffer, not a value in the
+            // store (`glsl-storage.js`).
+            if (symbol.block || (symbol.type.kind === 'array' ? symbol.type.element
+                : symbol.type).kind === 'atomic')
             {
                 continue;
             }
@@ -775,6 +783,9 @@ export function linkProgram(given){
 
     // --- uniform blocks ---
     const { blocks, blockUniforms } = uniformBlocksOf(vs, gs, fs, error, cs);
+    const linkedStages = { vertex: vs, geometry: gs, fragment: fs, compute: cs };
+    const storageBlocks = storageBlocksOf(linkedStages, error);
+    const counters = atomicCountersOf(linkedStages, error);
 
     if (errors.length > 0)
     {
@@ -787,7 +798,7 @@ export function linkProgram(given){
             vertex: vs, geometry: gs, geometryInputs, geometryLayout, feedback, fragment: fs,
             attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
-            blocks, blockUniforms,
+            blocks, blockUniforms, storageBlocks, counters,
             ...cs ? { compute: cs, localSize: /** @type {[number, number, number]} */ (
                 localSize) } : {},
         },
@@ -1265,4 +1276,6 @@ function describe(struct){
  * @property {number} version  raised on every glUniform* that changes a value
  * @property {Int32Array} blockBindings  the binding point each uniform block
  *     reads (glUniformBlockBinding), by block index
+ * @property {Int32Array} [storageBindings]  the binding point each shader storage
+ *     block reads and writes (glShaderStorageBlockBinding), by block index
  */

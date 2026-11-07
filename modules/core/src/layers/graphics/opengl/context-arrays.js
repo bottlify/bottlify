@@ -89,6 +89,8 @@ const BINDING_QUERIES = new Map([
     [GL.UNIFORM_BUFFER, GL.UNIFORM_BUFFER_BINDING],
     [GL.DRAW_INDIRECT_BUFFER, GL.DRAW_INDIRECT_BUFFER_BINDING],
     [GL.DISPATCH_INDIRECT_BUFFER, GL.DISPATCH_INDIRECT_BUFFER_BINDING],
+    [GL.SHADER_STORAGE_BUFFER, GL.SHADER_STORAGE_BUFFER_BINDING],
+    [GL.ATOMIC_COUNTER_BUFFER, GL.ATOMIC_COUNTER_BUFFER_BINDING],
     [GL.PARAMETER_BUFFER, GL.PARAMETER_BUFFER_BINDING],
     [GL.QUERY_BUFFER, GL.QUERY_BUFFER_BINDING],
     [GL.TEXTURE_BUFFER, GL.TEXTURE_BUFFER],
@@ -2263,6 +2265,24 @@ export function installArrayCalls(context, kernel){
                 return null;
             }
             refreshMapped();
+            // What a shader or transform feedback wrote is the device's: read
+            // back, every command before this one done first (4.3 section 7.13).
+            const device = buffer.captured ? kernel.side.readDeviceBuffer?.(buffer) : null;
+            if (device)
+            {
+                return device.then((/** @type {Uint8Array | null} */ bytes)=>{
+                    if (bytes)
+                    {
+                        buffer.data.set(bytes.subarray(0, buffer.data.length));
+                        buffer.captured = false;
+                    }
+                    else
+                    {
+                        readsCaptured('glGetBufferSubDataARB', buffer);
+                    }
+                    return buffer.data.slice(offset, offset + size);
+                });
+            }
             readsCaptured('glGetBufferSubDataARB', buffer);
             return buffer.data.slice(offset, offset + size);
         },
