@@ -511,6 +511,20 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
+/** GetScrollBarInfo's objects: a window's own bars, and a scroll bar control's client area. */
+const OBJID_HSCROLL = -6;
+const OBJID_VSCROLL = -5;
+/** SCROLLBARINFO: cbSize, rcScrollBar, dxyLineButton, xyThumbTop, xyThumbBottom, reserved, rgstate[6]. */
+const SCROLLBARINFO_SIZE = 60;
+const STATE_SYSTEM_UNAVAILABLE = 0x1;
+const STATE_SYSTEM_INVISIBLE = 0x8000;
+/** EnableScrollBar's arrows: the left or up one, the right or down one, both. */
+const ESB_DISABLE_LTUP = 1;
+const ESB_DISABLE_RTDN = 2;
+const ESB_DISABLE_BOTH = 3;
+const SBS_VERT_STYLE = 0x0001;
+const WS_HSCROLL_STYLE = 0x00100000;
+const WS_VSCROLL_STYLE = 0x00200000;
 /** FLASHWINFO.dwFlags: the caption is what flashes here. */
 const FLASHW_CAPTION = 0x1;
 /** A pointer the call was to write through, and could not. */
@@ -5107,9 +5121,10 @@ export function createWindowFunctions(host){
         painted();
     };
 
-    /** SetScrollInfo's bars for a window's own. */
+    /** SetScrollInfo's bars for a window's own, and a scroll bar control's. */
     const SB_HORZ = 0;
     const SB_VERT = 1;
+    const SB_CONTROL = 2;
     /** @param {any} record @param {number} bar */
     const scrollOf = (record, bar)=>{
         record.scroll ??= new Map();
@@ -8207,6 +8222,62 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 writeRect(host, out, geometry.windowRect(record));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetScrollBarInfo(HWND hwnd, LONG idObject, PSCROLLBARINFO psbi)
+         *
+         * A window's own vertical or horizontal bar (OBJID_VSCROLL,
+         * OBJID_HSCROLL), or the bar a scroll bar control is (OBJID_CLIENT):
+         * where it is on the screen, its arrows' length, where its thumb runs
+         * along it, and the states of the bar, its arrows, its two page areas
+         * and its thumb. A window without the style shows no bar, a range the
+         * page covers no thumb.
+         */
+        GetScrollBarInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, object, out])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const id = object | 0;
+                const control = id === OBJID_CLIENT;
+                if ((out >>> 0) === 0 || readU32(host, out) !== SCROLLBARINFO_SIZE
+                    || (!control && id !== OBJID_VSCROLL && id !== OBJID_HSCROLL)
+                    || (control && String(record.className).toLowerCase() !== 'scrollbar'))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const window = geometry.windowRect(record);
+                const vertical = control ? (record.style & SBS_VERT_STYLE) !== 0
+                    : id === OBJID_VSCROLL;
+                const local = control
+                    ? { left: 0, top: 0, right: record.width, bottom: record.height }
+                    : scrollBarRect(record, vertical);
+                const barShown = control
+                    || (record.style & (vertical ? WS_VSCROLL_STYLE : WS_HSCROLL_STYLE)) !== 0;
+                const held = scrollOf(record, control ? SB_CONTROL : vertical ? SB_VERT : SB_HORZ);
+                const { arrow, thumb } = thumbOf(local, vertical, held);
+                const arrows = held.arrows ?? 0;
+                const off = (record.style & WS_DISABLED) !== 0 || arrows === ESB_DISABLE_BOTH;
+                const states = [
+                    (barShown ? 0 : STATE_SYSTEM_INVISIBLE) | (off ? STATE_SYSTEM_UNAVAILABLE : 0),
+                    (arrows & ESB_DISABLE_LTUP) !== 0 ? STATE_SYSTEM_UNAVAILABLE : 0,
+                    0,
+                    thumb ? 0 : STATE_SYSTEM_INVISIBLE,
+                    0,
+                    (arrows & ESB_DISABLE_RTDN) !== 0 ? STATE_SYSTEM_UNAVAILABLE : 0,
+                ];
+                writeU32s(host, out + 4, [window.left + local.left, window.top + local.top,
+                    window.left + local.right, window.top + local.bottom, arrow,
+                    thumb?.start ?? 0, thumb ? thumb.start + thumb.length : 0, 0, ...states]);
                 return 1;
             },
         },

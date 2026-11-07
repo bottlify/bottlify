@@ -2182,6 +2182,15 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         },
 
         /**
+         * BOOL EndMenu(void)
+         *
+         * Ends the menu the thread is tracking. A popup menu here is dismissed
+         * as soon as it is tracked (`TrackPopupMenu`), so none is ever open to
+         * end, and the call succeeds as it does on Windows when none is.
+         */
+        EndMenu: { argBytes: 0, handler: ()=>1 },
+
+        /**
          * BOOL SetMenuDefaultItem(HMENU hMenu, UINT uItem, UINT fByPos)
          *
          * One item of a menu is its default, drawn bold and chosen by a

@@ -156,6 +156,7 @@ import { createNetworkFunctions } from './mpr/functions.js';
 import { createNetbiosFunctions, createSensFunctions, createSessionNotificationFunctions,
     createTelephonyFunctions } from './offline/functions.js';
 import { createAcmFunctions } from './msacm32/functions.js';
+import { createWorkstationFunctions } from './netapi32/workstation.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
@@ -3887,7 +3888,11 @@ export function createWin32Module(){
 
                 // Network adapters, modems and connectivity a game asks about
                 // for its online modes: none of them on this machine.
-                'NETAPI32.dll': createNetbiosFunctions({ readMemory, writeMemory }),
+                'NETAPI32.dll': { ...createNetbiosFunctions({ readMemory, writeMemory }),
+                    // The workstation's name, workgroup and the system's own version.
+                    ...createWorkstationFunctions({ readMemory, writeMemory,
+                        allocate: bytes=>heap.allocate(bytes), release: address=>heap.free(address),
+                        computerName: COMPUTER_NAME, version: windows }) },
                 'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
                 'WTSAPI32.dll': { ...createSessionNotificationFunctions(),
                     ...createSessionInformationFunctions({ ...displayHost,

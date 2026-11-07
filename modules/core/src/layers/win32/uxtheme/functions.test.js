@@ -171,6 +171,8 @@ const WIN7_EXPORTS = {
     GetBufferedPaintBits: 12, BufferedPaintClear: 8, BufferedPaintSetAlpha: 12,
     IsCompositionActive: 0, OpenThemeDataEx: 12, DrawThemeTextEx: 36, GetThemeBitmap: 24,
     GetThemeStream: 28, GetThemeTransitionDuration: 24, SetWindowThemeAttribute: 16,
+    BeginBufferedAnimation: 32, EndBufferedAnimation: 8, BufferedPaintRenderAnimation: 8,
+    BufferedPaintStopAllAnimations: 4,
 };
 
 test('a Windows 7 machine exports 7\'s functions beside XP\'s, BufferedPaintInit among them', ()=>{
@@ -739,4 +741,58 @@ test('a real child\'s parent is asked to paint itself under it', async()=>{
     assert.equal(await fns.SetWindowTheme.handler([child, 0, 0]), S_OK);
     assert.deepEqual(dispatched.map(({ hwnd, message })=>[hwnd, message]),
         [[child, WM_THEMECHANGED]], 'to the window, not its parent or its children');
+});
+
+test('Windows 10 adds OpenThemeDataForDpi, which opens no theme as OpenThemeData does', ()=>{
+    const { fns, errors } = setup({ windows: 10 });
+    assert.deepEqual(Object.keys(fns).sort(),
+        Object.keys({ ...XP_EXPORTS, ...WIN7_EXPORTS, OpenThemeDataForDpi: 12 }).sort());
+    assert.equal(fns.OpenThemeDataForDpi.argBytes, 12);
+    assert.equal(fns.OpenThemeDataForDpi.handler([0, RECT_IN, 96]), 0);
+    assert.equal(fns.OpenThemeDataForDpi.handler([0, 0, 96]), 0);
+    assert.deepEqual(errors, [E_PROP_ID_UNSUPPORTED, E_POINTER]);
+    assert.equal(setup({ windows: 6 }).fns.OpenThemeDataForDpi, undefined, 'not 7\'s');
+});
+
+test('a buffered animation paints its final state at once: no DC to paint the start in, one'
+    + ' for the end that is copied over', ()=>{
+    const BITS = 0x9000;
+    const TARGET = 0x30;
+    const MEMORY_DC = 0x40;
+    const FROM = 0x1100;
+    /** @type {string[]} */
+    const calls = [];
+    /** @type {ReturnType<typeof fakeMemory>} */
+    let memory;
+    const gdi32 = {
+        CreateCompatibleDC: ()=>(calls.push('CreateCompatibleDC'), MEMORY_DC),
+        /** @param {number[]} args */
+        CreateDIBSection: ([, , , bitsOut])=>(memory.putI32s(bitsOut, [BITS]), 0x50),
+        SelectObject: ()=>0x60,
+        SetViewportOrgEx: ()=>1,
+        BitBlt: ()=>(calls.push('BitBlt'), 1),
+        DeleteObject: ()=>1,
+        DeleteDC: ()=>1,
+    };
+    const IsWindow = ()=>1;
+    const made = setup({ windows: 6, gdi32, user32: { IsWindow } });
+    memory = made.memory;
+    const { fns, held } = made;
+    memory.putI32s(RECT_IN, [0, 0, 8, 8]);
+    // BP_ANIMATIONPARAMS: cbSize, dwFlags, BPAS_LINEAR, 250 ms.
+    memory.putI32s(RECT_IN + 0x40, [16, 0, 1, 250]);
+    memory.putI32s(FROM, [0x7777]);
+    const animation = fns.BeginBufferedAnimation.handler([0x10010, TARGET, RECT_IN, 0, 0,
+        RECT_IN + 0x40, FROM, OUT]);
+    assert.notEqual(animation, 0);
+    assert.equal(memory.i32(FROM), 0, 'no start state to paint');
+    assert.equal(memory.i32(OUT), MEMORY_DC, 'the final state is painted here');
+    assert.equal(fns.BufferedPaintRenderAnimation.handler([0x10010, TARGET]), 0,
+        'no transition is under way: the window paints itself');
+    assert.equal(fns.EndBufferedAnimation.handler([animation, 1]), S_OK);
+    assert.deepEqual(calls, ['CreateCompatibleDC', 'BitBlt'], 'copied to the target');
+    assert.equal(held.size, 0);
+    assert.equal(fns.BufferedPaintStopAllAnimations.handler([0x10010]), S_OK);
+    assert.equal(fns.BeginBufferedAnimation.handler([0x10010, TARGET, RECT_IN, 0, 0, 0, FROM, 0]),
+        0, 'nowhere to put the DC');
 });

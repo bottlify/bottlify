@@ -138,3 +138,56 @@ test('ScrollWindowEx goes over children it takes along, and around those it leav
     expectRegion([[88, 0, 98, 20], [20, 20, 98, 30], [20, 30, 30, 88], [0, 88, 30, 98]],
         'clipping children, leaving them');
 });
+
+test('GetScrollBarInfo: where a window\'s bar is on the screen, its arrows and thumb, and the'
+    + ' states a bar the window lacks or a scroll bar control answers with', async()=>{
+    const WS_VSCROLL = 0x00200000;
+    const SBS_VERT = 0x1;
+    const OBJID_HSCROLL = -6;
+    const OBJID_VSCROLL = -5;
+    const OBJID_CLIENT = -4;
+    const SB_VERT = 1;
+    const STATE_SYSTEM_INVISIBLE = 0x8000;
+    const INFO = OUT + 0x300;
+    const context = setupBars({ createGdiDrawing, createScreen, ...surfaces });
+    await context.makeParent(300, 250);
+    const { fns, memory } = context;
+    const listing = await context.control('static', WS_VSCROLL, [10, 20, 100, 80]);
+    fns.SetScrollRange.handler([listing, SB_VERT, 0, 99, 0]);
+    memory.put32s(INFO, [28, 0x2, 0, 0, 10, 0, 0]);
+    fns.SetScrollInfo.handler([listing, SB_VERT, INFO, 0]);
+    fns.SetScrollPos.handler([listing, SB_VERT, 45, 0]);
+    /** @param {number} hwnd @param {number} object */
+    const info = (hwnd, object)=>{
+        memory.put32s(INFO, [60]);
+        const answer = fns.GetScrollBarInfo.handler([hwnd, object, INFO]);
+        const words = Array.from({ length: 14 }, (_, index)=>memory.i32(INFO + 4 + index * 4));
+        return { answer, words };
+    };
+    const window = context.windowRect(listing);
+    const vertical = info(listing, OBJID_VSCROLL);
+    assert.equal(vertical.answer, 1);
+    assert.deepEqual(vertical.words.slice(0, 4),
+        [window.right - 16, window.top, window.right, window.bottom],
+        'the right edge, on the screen');
+    assert.equal(vertical.words[4], 16, 'the arrows');
+    // A track of 80 less two arrows; a page of 10 in 100 is under the 8 a thumb keeps,
+    // which travels the 40 left by 45 of the 90 positions it may take.
+    assert.deepEqual(vertical.words.slice(5, 7), [16 + 20, 16 + 28]);
+    assert.deepEqual(vertical.words.slice(8), [0, 0, 0, 0, 0, 0]);
+    const horizontal = info(listing, OBJID_HSCROLL);
+    assert.equal(horizontal.answer, 1);
+    assert.equal(horizontal.words[8], STATE_SYSTEM_INVISIBLE, 'a bar the window has not');
+
+    const bar = await context.control('scrollbar', SBS_VERT, [150, 20, 16, 120]);
+    const control = info(bar, OBJID_CLIENT);
+    const placed = context.windowRect(bar);
+    assert.equal(control.answer, 1);
+    assert.deepEqual(control.words.slice(0, 4),
+        [placed.left, placed.top, placed.right, placed.bottom]);
+    assert.equal(info(listing, OBJID_CLIENT).answer, 0, 'not a scroll bar control');
+    memory.put32s(INFO, [56]);
+    assert.equal(fns.GetScrollBarInfo.handler([listing, OBJID_VSCROLL, INFO]), 0,
+        'a structure of another size');
+    assert.equal(fns.EndMenu.handler([]), 1, 'no menu open to end');
+});

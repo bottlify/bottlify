@@ -62,6 +62,8 @@ const BPBF_COMPATIBLEBITMAP = 0;
 const BPBF_TOPDOWNDIB = 2;
 const BPBF_TOPDOWNMONODIB = 3;
 const SRCCOPY = 0x00cc0020;
+/** BP_ANIMATIONSTYLE's none: a change shown at once. */
+const BPAS_NONE = 0;
 
 /** LOGFONTW, and NONCLIENTMETRICSW as XP lays it out: no iPaddedBorderWidth on the end. */
 const LOGFONTW_SIZE = 92;
@@ -736,8 +738,22 @@ export function createThemeFunctions(host){
             },
         },
     };
-    return (host.windows?.major ?? 5) >= 6
-        ? { ...xp, ...win7Functions(host, gdi32, isWindow) } : xp;
+    const major = host.windows?.major ?? 5;
+    return {
+        ...xp,
+        ...major >= 6 ? win7Functions(host, gdi32, isWindow) : {},
+        ...major >= 10 ? {
+            /**
+             * HTHEME OpenThemeDataForDpi(HWND, LPCWSTR pszClassList, UINT dpi), Windows 10
+             * 1703's: no style, no theme, as OpenThemeData.
+             */
+            OpenThemeDataForDpi: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([hwnd, classList])=>xp.OpenThemeData.handler([hwnd, classList]),
+            },
+        } : {},
+    };
 }
 
 /**
@@ -802,7 +818,7 @@ function win7Functions(host, gdi32, isWindow){
         return S_OK;
     };
 
-    return {
+    const paint = {
         /** HRESULT BufferedPaintInit(void): a thread's buffers need no setting up. */
         BufferedPaintInit: { argBytes: 0, handler: ()=>S_OK },
 
@@ -997,6 +1013,63 @@ function win7Functions(host, gdi32, isWindow){
             },
         },
 
+        /**
+         * HANIMATIONBUFFER BeginBufferedAnimation(HWND hwnd, HDC hdcTarget, const RECT *prcTarget,
+         *     BP_BUFFERFORMAT dwFormat, BP_PAINTPARAMS *pPaintParams,
+         *     BP_ANIMATIONPARAMS *pAnimationParams, HDC *phdcFrom, HDC *phdcTo)
+         *
+         * No transition is played: *phdcFrom is NULL, which tells the caller to
+         * paint only the final state, into *phdcTo, a buffered paint of the
+         * target that EndBufferedAnimation puts there -- what Windows does for
+         * an animation of no duration. One asked to last is shown at its end
+         * at once, said once.
+         */
+        BeginBufferedAnimation: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([hwnd, target, rect, format, params, animation, fromOut, toOut])=>{
+                if (!isWindow(hwnd) || (toOut >>> 0) === 0)
+                {
+                    return 0;
+                }
+                // BP_ANIMATIONPARAMS: cbSize, dwFlags, style, dwDuration.
+                const [, , style = 0, duration = 0] = (animation >>> 0) === 0 ? []
+                    : read(animation, 4);
+                if (style !== BPAS_NONE && duration !== 0)
+                {
+                    host.divergence?.('BeginBufferedAnimation',
+                        'a transition is shown at its final state at once, not played');
+                }
+                const handle = paint.BeginBufferedPaint.handler([target, rect, format, params,
+                    toOut]);
+                if ((fromOut >>> 0) !== 0)
+                {
+                    write(fromOut, [0]);
+                }
+                return handle;
+            },
+        },
+
+        /** HRESULT EndBufferedAnimation(HANIMATIONBUFFER hbpAnimation, BOOL fUpdateTarget) */
+        EndBufferedAnimation: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, update])=>paint.EndBufferedPaint.handler([handle, update]),
+        },
+
+        /**
+         * BOOL BufferedPaintRenderAnimation(HWND hwnd, HDC hdcTarget): FALSE, no
+         * transition being under way, so the window paints itself as usual.
+         */
+        BufferedPaintRenderAnimation: { argBytes: 8, handler: ()=>0 },
+
+        /** HRESULT BufferedPaintStopAllAnimations(HWND hwnd): none runs to stop. */
+        BufferedPaintStopAllAnimations: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(isWindow(hwnd) ? S_OK : E_HANDLE),
+        },
+
         /** BOOL IsCompositionActive(void): the desktop is composed, as DWM says. */
         IsCompositionActive: { argBytes: 0, handler: ()=>1 },
 
@@ -1022,4 +1095,5 @@ function win7Functions(host, gdi32, isWindow){
             handler: ([hwnd])=>(isWindow(hwnd) ? S_OK : E_HANDLE),
         },
     };
+    return paint;
 }
