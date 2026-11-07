@@ -354,6 +354,8 @@ export function laterEntryPoints(h){
             target >>> 0, offset | 0, length | 0, access >>> 0) ?? 0,
         glFlushMappedBufferRange: ([target, offset, length])=>answer(
             current()?.glFlushMappedBufferRange(target >>> 0, offset | 0, length | 0)),
+        glBufferStorage: ([target, size, data, flags])=>answer(current()?.glBufferStorage(
+            target >>> 0, size | 0, (data >>> 0) || null, flags >>> 0)),
         glClearBufferData: ([target, internal, format, type, data])=>answer(
             current()?.clearBufferData('glClearBufferData', target >>> 0, internal >>> 0, null, 0,
                 format >>> 0, type >>> 0, data >>> 0)),
@@ -1070,6 +1072,8 @@ function storageAndNamedEntryPoints(h){
             'glBufferDataARB', buffer >>> 0, [size | 0, (data >>> 0) || null, usage >>> 0])),
         glNamedBufferSubData: ([buffer, offset, size, data])=>answer(current()?.namedBuffer(
             'glBufferSubDataARB', buffer >>> 0, [offset | 0, size | 0, data >>> 0])),
+        glNamedBufferStorage: ([buffer, size, data, flags])=>answer(current()?.namedBuffer(
+            'glBufferStorage', buffer >>> 0, [size | 0, (data >>> 0) || null, flags >>> 0])),
         glClearNamedBufferData: ([buffer, internal, format, type, data])=>answer(
             current()?.namedBuffer('glClearBufferData', buffer >>> 0, [internal >>> 0,
                 format >>> 0, type >>> 0, data >>> 0])),

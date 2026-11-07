@@ -120,7 +120,19 @@ const PLAIN_UNPACK = Object.freeze({ alignment: 1, rowLength: 0, skipRows: 0,
 
 /** The access bits glMapBufferRange takes (OpenGL 3.0 section 2.9.3). */
 const MAP_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_RANGE_BIT
-    | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_FLUSH_EXPLICIT_BIT | GL.MAP_UNSYNCHRONIZED_BIT;
+    | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_FLUSH_EXPLICIT_BIT | GL.MAP_UNSYNCHRONIZED_BIT
+    | GL.MAP_PERSISTENT_BIT | GL.MAP_COHERENT_BIT;
+
+/** The flags glBufferStorage takes (OpenGL 4.4 section 6.2). */
+const STORAGE_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_PERSISTENT_BIT
+    | GL.MAP_COHERENT_BIT | GL.DYNAMIC_STORAGE_BIT | GL.CLIENT_STORAGE_BIT;
+
+/** What a store glBufferData made may do (4.4 table 6.3). */
+const MUTABLE_STORAGE = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.DYNAMIC_STORAGE_BIT;
+
+/** The bits of a map a store's flags must hold. */
+const MAP_NEEDS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_PERSISTENT_BIT
+    | GL.MAP_COHERENT_BIT;
 
 /** BUFFER_ACCESS for a map's bits: what glMapBuffer's enum would have said. @param {number} bits */
 const accessOfBits = bits=>((bits & GL.MAP_READ_BIT) === 0 ? GL.WRITE_ONLY
@@ -839,6 +851,91 @@ export function installArrayCalls(context, kernel){
     };
 
     /**
+     * Whether a map keeps GL from the store: one made persistent (4.4)
+     * does not.
+     *
+     * @param {import('./objects.js').BufferObject} buffer
+     */
+    const mappedApart = buffer=>buffer.mapped !== 0
+        && (buffer.accessFlags & GL.MAP_PERSISTENT_BIT) === 0;
+
+    /** @returns {Set<import('./objects.js').BufferObject>} the share group's persistent maps */
+    const persistentMaps = ()=>{
+        const group = /** @type {any} */ (kernel.shareGroup());
+        return group.persistentMaps ??= new Set();
+    };
+
+    /**
+     * What the program wrote through its persistent maps, into the stores,
+     * before GL reads them: the map is a copy in guest memory, which every
+     * draw and buffer read looks at first, coherent or not -- a write seen
+     * early is one the program may not count on missing.
+     */
+    const refreshMapped = ()=>{
+        const held = persistentMaps();
+        const memory = kernel.memory();
+        if (held.size === 0 || !memory)
+        {
+            return;
+        }
+        for (const buffer of held)
+        {
+            if ((buffer.accessFlags & GL.MAP_WRITE_BIT) === 0)
+            {
+                continue;
+            }
+            const now = memory.read(buffer.mapped, buffer.mapLength);
+            const store = buffer.data.subarray(buffer.mapOffset,
+                buffer.mapOffset + buffer.mapLength);
+            let first = 0;
+            while (first < now.length && now[first] === store[first])
+            {
+                first++;
+            }
+            if (first === now.length)
+            {
+                continue;
+            }
+            let last = now.length;
+            while (last > first && now[last - 1] === store[last - 1])
+            {
+                last--;
+            }
+            store.set(now.subarray(first, last), first);
+            noteWritten(buffer, buffer.mapOffset + first, last - first);
+        }
+    };
+
+    /**
+     * What GL wrote into a store, into the program's persistent map of it.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {number} size
+     */
+    const mirrorToMap = (buffer, offset, size)=>{
+        if (buffer.mapped === 0 || (buffer.accessFlags & GL.MAP_PERSISTENT_BIT) === 0)
+        {
+            return;
+        }
+        const start = Math.max(offset, buffer.mapOffset);
+        const end = Math.min(offset + size, buffer.mapOffset + buffer.mapLength);
+        if (end > start)
+        {
+            kernel.memory()?.write(buffer.mapped + start - buffer.mapOffset,
+                buffer.data.slice(start, end));
+        }
+    };
+
+    /**
+     * Whether a map of `bits` is refused for the store's flags (4.4): what
+     * it reads, writes, keeps or keeps coherent must be the store's to give.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} bits
+     */
+    const mapRefused = (buffer, bits)=>(bits & MAP_NEEDS
+        & ~(buffer.immutable ? buffer.storageFlags : MUTABLE_STORAGE)) !== 0;
+
+    /**
      * Maps part of a store into guest memory: a copy of the bytes there, as
      * the range's own allocation, unless the map discards them anyway.
      *
@@ -877,6 +974,10 @@ export function installArrayCalls(context, kernel){
         buffer.accessFlags = bits;
         buffer.mapOffset = offset;
         buffer.mapLength = length;
+        if ((bits & GL.MAP_PERSISTENT_BIT) !== 0)
+        {
+            persistentMaps().add(buffer);
+        }
         return address;
     };
 
@@ -899,6 +1000,7 @@ export function installArrayCalls(context, kernel){
     /** The map ended: its memory given back and its state the unmapped one. */
     /** @param {import('./objects.js').BufferObject} buffer */
     const unmap = buffer=>{
+        persistentMaps().delete(buffer);
         kernel.memory()?.free?.(buffer.mapBlock);
         buffer.mapped = 0;
         buffer.mapBlock = 0;
@@ -1040,6 +1142,7 @@ export function installArrayCalls(context, kernel){
      * @param {Instancing} instancing
      */
     function drawArraysWith(name, mode, first, count, instancing){
+        refreshMapped();
         if (count < 0 || first < 0 || instancing.instances < 0)
         {
             setError(GL.INVALID_VALUE);
@@ -1073,6 +1176,7 @@ export function installArrayCalls(context, kernel){
      * @param {number} baseVertex @param {Instancing} instancing
      */
     function drawElementsWith(name, mode, count, type, indices, baseVertex, instancing){
+        refreshMapped();
         if (count < 0 || instancing.instances < 0)
         {
             setError(GL.INVALID_VALUE);
@@ -1172,7 +1276,8 @@ export function installArrayCalls(context, kernel){
         const step = stride || words * 4;
         const bound = record(GL.DRAW_INDIRECT_BUFFER_BINDING).values[0];
         const buffer = bound === 0 ? null : kernel.shareGroup().buffers.objects.get(bound);
-        if (buffer && (buffer.mapped || (count > 0
+        refreshMapped();
+        if (buffer && (mappedApart(buffer) || (count > 0
             && offset + (count - 1) * step + words * 4 > buffer.data.length)))
         {
             // A command past the store's end, or one mapped, is refused.
@@ -1207,7 +1312,8 @@ export function installArrayCalls(context, kernel){
         }
         const bound = record(GL.PARAMETER_BUFFER_BINDING).values[0];
         const buffer = bound === 0 ? null : kernel.shareGroup().buffers.objects.get(bound);
-        if (!buffer || buffer.mapped || offset + 4 > buffer.data.length)
+        refreshMapped();
+        if (!buffer || mappedApart(buffer) || offset + 4 > buffer.data.length)
         {
             setError(GL.INVALID_OPERATION);
             return null;
@@ -1796,6 +1902,10 @@ export function installArrayCalls(context, kernel){
                 {
                     continue;
                 }
+                if (object.mapped !== 0)
+                {
+                    unmap(object);
+                }
                 kernel.bufferDeleted?.(object);
                 group.buffers.remove(name);
                 for (const query of BINDING_QUERIES.values())
@@ -1854,11 +1964,12 @@ export function installArrayCalls(context, kernel){
             {
                 return;
             }
-            if (buffer.mapped !== 0)
+            if (buffer.mapped !== 0 || buffer.immutable)
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            buffer.storageFlags = MUTABLE_STORAGE;
             buffer.data = new Uint8Array(size);
             buffer.size = size;
             buffer.captured = false;
@@ -1876,6 +1987,55 @@ export function installArrayCalls(context, kernel){
                 {
                     buffer.data.set((memory.window ?? memory.read)(data, size));
                 }
+            }
+        },
+
+        /**
+         * glBufferStorage (4.4): a store of `size` bytes that is never
+         * redefined, holding `flags`: what it may be mapped for, whether
+         * glBufferSubData may write it.
+         *
+         * @param {number} target @param {number} size
+         * @param {number | Uint8Array | null} data @param {number} flags
+         */
+        glBufferStorage(target, size, data, flags){
+            if (!enter('glBufferStorage', [target, size, data, flags]))
+            {
+                return;
+            }
+            if (size <= 0 || (flags & ~STORAGE_BITS) !== 0
+                || ((flags & GL.MAP_PERSISTENT_BIT) !== 0
+                    && (flags & (GL.MAP_READ_BIT | GL.MAP_WRITE_BIT)) === 0)
+                || ((flags & GL.MAP_COHERENT_BIT) !== 0
+                    && (flags & GL.MAP_PERSISTENT_BIT) === 0))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const buffer = boundBuffer(target);
+            if (!buffer)
+            {
+                return;
+            }
+            if (buffer.immutable || buffer.mapped !== 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            buffer.immutable = true;
+            buffer.storageFlags = flags;
+            buffer.data = new Uint8Array(size);
+            buffer.size = size;
+            buffer.captured = false;
+            buffer.usage = GL.DYNAMIC_DRAW;
+            buffer.written = { start: 0, end: size };
+            buffer.version++;
+            const memory = kernel.memory();
+            const given = data instanceof Uint8Array ? data.subarray(0, size)
+                : data && memory ? (memory.window ?? memory.read)(data, size) : null;
+            if (given)
+            {
+                buffer.data.set(given);
             }
         },
 
@@ -1900,22 +2060,21 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
-            if (buffer.mapped !== 0)
+            if (mappedApart(buffer)
+                || (buffer.immutable && (buffer.storageFlags & GL.DYNAMIC_STORAGE_BIT) === 0))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            refreshMapped();
             const memory = kernel.memory();
             const bytes = data instanceof Uint8Array ? data.subarray(0, size)
                 : memory ? (memory.window ?? memory.read)(data, size) : null;
             if (bytes && size > 0)
             {
                 buffer.data.set(bytes, offset);
-                buffer.written = buffer.written
-                    ? { start: Math.min(buffer.written.start, offset),
-                        end: Math.max(buffer.written.end, offset + size) }
-                    : { start: offset, end: offset + size };
-                buffer.version++;
+                noteWritten(buffer, offset, size);
+                mirrorToMap(buffer, offset, size);
             }
         },
 
@@ -1955,7 +2114,7 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
-            if (buffer.mapped !== 0)
+            if (mappedApart(buffer))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
@@ -1981,10 +2140,12 @@ export function installArrayCalls(context, kernel){
                 lose(`${name} could not read the value it clears with, and cleared nothing`);
                 return;
             }
+            refreshMapped();
             for (let at = start; at < start + length; at += element)
             {
                 buffer.data.set(value, at);
             }
+            mirrorToMap(buffer, start, length);
             if (length > 0)
             {
                 buffer.written = buffer.written
@@ -2037,11 +2198,12 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return null;
             }
-            if (buffer.mapped !== 0)
+            if (mappedApart(buffer))
             {
                 setError(GL.INVALID_OPERATION);
                 return null;
             }
+            refreshMapped();
             readsCaptured('glGetBufferSubDataARB', buffer);
             return buffer.data.slice(offset, offset + size);
         },
@@ -2067,7 +2229,9 @@ export function installArrayCalls(context, kernel){
                 return 0;
             }
             readsCaptured('glMapBufferARB', buffer);
-            if (buffer.mapped !== 0)
+            if (buffer.mapped !== 0 || mapRefused(buffer, access === GL.READ_ONLY
+                ? GL.MAP_READ_BIT : access === GL.WRITE_ONLY ? GL.MAP_WRITE_BIT
+                    : GL.MAP_READ_BIT | GL.MAP_WRITE_BIT))
             {
                 setError(GL.INVALID_OPERATION);
                 return 0;
@@ -2108,7 +2272,8 @@ export function installArrayCalls(context, kernel){
             if (length === 0 || buffer.mapped !== 0 || (!reads && !writes)
                 || (reads && (access & (GL.MAP_INVALIDATE_RANGE_BIT
                     | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_UNSYNCHRONIZED_BIT)) !== 0)
-                || ((access & GL.MAP_FLUSH_EXPLICIT_BIT) !== 0 && !writes))
+                || ((access & GL.MAP_FLUSH_EXPLICIT_BIT) !== 0 && !writes)
+                || mapRefused(buffer, access))
             {
                 setError(GL.INVALID_OPERATION);
                 return 0;
@@ -2198,16 +2363,18 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
-            if (source.mapped !== 0 || destination.mapped !== 0)
+            if (mappedApart(source) || mappedApart(destination))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            refreshMapped();
             if (size > 0)
             {
                 destination.data.set(source.data.subarray(readOffset, readOffset + size),
                     writeOffset);
                 noteWritten(destination, writeOffset, size);
+                mirrorToMap(destination, writeOffset, size);
             }
         },
 
@@ -2242,6 +2409,10 @@ export function installArrayCalls(context, kernel){
                     return [buffer.mapOffset];
                 case GL.BUFFER_MAP_LENGTH:
                     return [buffer.mapLength];
+                case GL.BUFFER_IMMUTABLE_STORAGE:
+                    return [buffer.immutable ? 1 : 0];
+                case GL.BUFFER_STORAGE_FLAGS:
+                    return [buffer.storageFlags];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

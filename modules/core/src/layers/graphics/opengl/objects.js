@@ -111,6 +111,9 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} access
  * @property {Uint8Array} data
  * @property {boolean} [captured]  transform feedback has written it on the device
+ * @property {boolean} immutable  its store was made by glBufferStorage (4.4)
+ * @property {number} storageFlags  GL_BUFFER_STORAGE_FLAGS: what the store may be
+ *           mapped for and whether glBufferSubData may write it
  * @property {number} mapped  the guest address it is mapped at, or zero
  * @property {number} mapBlock  the guest memory the map was given, to give back
  * @property {number} accessFlags  the MAP_*_BIT a map asked for, zero when not mapped
@@ -273,8 +276,8 @@ export function markDirty(texture, key, rect){
  */
 export function createBufferObject(name){
     return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
-        mapped: 0, mapBlock: 0, accessFlags: 0, mapOffset: 0, mapLength: 0, flushed: [],
-        written: null,
+        immutable: false, storageFlags: 0, mapped: 0, mapBlock: 0, accessFlags: 0, mapOffset: 0,
+        mapLength: 0, flushed: [], written: null,
         version: 1 };
 }
 
