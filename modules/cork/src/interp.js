@@ -221,6 +221,8 @@ export function interpret(state, maxInstructions = 1, options = {}){
     const before = state.retired;
     const end = before + maxInstructions;
     const { memory } = state;
+    // A growing memory may have grown since the last run (`fit`).
+    /** @type {any} */ (memory).fit?.();
     // Where falling through from the last instruction lands.
     let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
@@ -340,15 +342,21 @@ export class BlockMemory {
      * @param {{ faultEip: number }} owner  the state whose instruction a fault names
      */
     constructor(memory, layout, onCodeWrite, owner){
-        this.view = new DataView(memory.buffer);
+        this.memory = memory;
+        this.layout = layout;
         this.ramBase = layout.ramBase;
-        // The decoder reads code a byte at a time, so the byte path skips the
-        // DataView call and its bounds check; wider accesses keep the DataView.
-        this.ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
-        // The page flags as bytes: every access tests one or two, and a typed
-        // array is cheaper than a DataView call.
-        this.pageFlags = new Uint8Array(memory.buffer, pageFlagsAt(layout),
-            Tables.PAGE_FLAGS_SIZE);
+        // A growing layout's wrap word (`ramFloor`), -1 for the constant wrap.
+        this.wrapAt = layout.wrap ?? -1;
+        // The views, empty until `fit` takes them over the memory.
+        this.view = new DataView(new ArrayBuffer(0));
+        this.ramBytes = new Uint8Array(0);
+        this.pageFlags = new Uint8Array(0);
+        this.bytes8 = new Uint8Array(0);
+        this.words16 = new Uint16Array(0);
+        this.words32 = new Uint32Array(0);
+        this.words64 = new BigUint64Array(0);
+        this.fittedMask = 0;
+        this.fit();
         this.codeRanges = codeRangesAt(layout);
         this.onCodeWrite = onCodeWrite;
         this.owner = owner;
@@ -368,10 +376,50 @@ export class BlockMemory {
         // The locked instructions as one indivisible access each (`lockedStep`),
         // as the atomic variant's translated code makes them.
         this.atomic = false;
-        this.bytes8 = new Uint8Array(memory.buffer);
-        this.words16 = new Uint16Array(memory.buffer, 0, memory.buffer.byteLength >>> 1);
-        this.words32 = new Uint32Array(memory.buffer, 0, memory.buffer.byteLength >>> 2);
-        this.words64 = new BigUint64Array(memory.buffer, 0, memory.buffer.byteLength >>> 3);
+    }
+
+    /**
+     * The views over the memory as it is now: taken at the start and again
+     * once a growing memory (`ramFloor`) has grown, whose old buffer stays
+     * whole but ends where the memory ended then. The RAM's view holds what of
+     * the RAM the memory holds; a page past it is closed in the page flags, so
+     * nothing reads there through it.
+     */
+    fit(){
+        // Asked of the views and the wrap word rather than of `memory.buffer`,
+        // whose getter is a crossing into the engine: a memory that grew says
+        // so in its word, and an unshared one detaches the old buffer.
+        if (this.bytes8.byteLength !== 0
+            && (this.wrapAt < 0 || this.view.getUint32(this.wrapAt, true) === this.fittedMask))
+        {
+            return;
+        }
+        const buffer = this.memory.buffer;
+        const layout = this.layout;
+        this.view = new DataView(buffer);
+        // The decoder reads code a byte at a time, so the byte path skips the
+        // DataView call and its bounds check; wider accesses keep the DataView.
+        this.ramBytes = new Uint8Array(buffer, layout.ramBase,
+            Math.min(layout.ramSize, buffer.byteLength - layout.ramBase));
+        // The page flags as bytes: every access tests one or two, and a typed
+        // array is cheaper than a DataView call.
+        this.pageFlags = new Uint8Array(buffer, pageFlagsAt(layout), Tables.PAGE_FLAGS_SIZE);
+        this.bytes8 = new Uint8Array(buffer);
+        this.words16 = new Uint16Array(buffer, 0, buffer.byteLength >>> 1);
+        this.words32 = new Uint32Array(buffer, 0, buffer.byteLength >>> 2);
+        this.words64 = new BigUint64Array(buffer, 0, buffer.byteLength >>> 3);
+        this.fittedMask = this.wrapAt < 0 ? 0 : this.view.getUint32(this.wrapAt, true);
+    }
+
+    /**
+     * Where an untested translated read finds `address` (`wrappedAddress`): by
+     * the growing layout's mask as it is now, or the RAM's own size.
+     *
+     * @param {number} address
+     */
+    wrapped(address){
+        return this.wrapAt >= 0 ? (address & this.view.getUint32(this.wrapAt, true)) >>> 0
+            : wrappedAddress(address, this.ramSize);
     }
 
     /**
@@ -596,7 +644,7 @@ export class BlockMemory {
             }
             else if (this.readThrough.some(([from, to])=>at >= from && at < to))
             {
-                byte = this.ramBytes[wrappedAddress(at, this.ramSize)];
+                byte = this.ramBytes[this.wrapped(at)];
             }
             else if (at >= this.zeroReadsBelow)
             {
@@ -814,6 +862,7 @@ class BlockState {
      */
     constructor(memory, layout, onCodeWrite, rdtsc, ports){
         const view = new DataView(memory.buffer);
+        this.wasmMemory = memory;
         this.reg = new Uint32Array(memory.buffer, layout.regs, 8);
         // eip and the flags word are the state's own between `syncIn` and
         // `syncOut`: every step writes eip and most read and write the flags,
@@ -938,6 +987,13 @@ class BlockState {
     /** Takes the block's flags word into the state, and its x87 and XMM
      * registers into the arrays on their first use. */
     syncIn(){
+        // An unshared memory that grew detached the buffer these views are on.
+        if (this.view.buffer.byteLength === 0)
+        {
+            this.view = new DataView(this.wasmMemory.buffer);
+            this.reg = new Uint32Array(this.wasmMemory.buffer, this.layout.regs, 8);
+        }
+        this.memory.fit();
         this.x87In = false;
         this.xmmIn = false;
         // The quadwords a `fild` left exact, as the block keeps them for every

@@ -21,7 +21,8 @@
 
 import { blockState, interpret } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
-import { Tables, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { PAGE, Tables, WRAP_SLACK, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { PageFlag } from './runtime/pages.js';
 import { createCorkRuntime } from './runtime/runtime.js';
 import { eflagsOf, setEflags } from './emit/flags.js';
 import { TRAP_END_TURN } from './emit/integer.js';
@@ -62,21 +63,26 @@ const PROGRAM_MS = 1e-6;
 /**
  * @param {{ ramSize?: number, config?: import('../../core/src/layers/cpu/engine.js').EngineConfig,
  *     trapPort?: number, features?: import('./wasm/features.js').Features,
- *     now?: () => number }} [options]
+ *     now?: () => number, growing?: { floor: number, tablesAt: number } }} [options]
  *     `ramSize`: guest memory in bytes, a multiple of 64 KiB (default 16 MiB); `config`: the
  *     translator's (`EngineConfig`); `trapPort`: an I/O port whose `out` stops the run as a
  *     `trap` (default none: every `out` is one); `features`: the host the translator makes
  *     code for, another than this one (an arm64 one's, `armHost`), this one's by default;
  *     `now`: the clock in milliseconds the translator times a page's rewrites by, the
- *     program's own by default (`PROGRAM_MS`)
+ *     program's own by default (`PROGRAM_MS`); `growing`: a memory that starts with `floor`
+ *     bytes of RAM and grows to `ramSize` (`grow`), RAM at 0 and the tables inside it at
+ *     `tablesAt` (`ownLayout`'s `ramFloor`)
  */
 export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, features,
-    now = undefined } = {})
+    now = undefined, growing = undefined } = {})
 {
     const layout = ownLayout({ ramSize,
-        ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }) });
+        ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }),
+        ...(growing === undefined ? {}
+            : { ramBase: 0, tablesAt: growing.tablesAt, ramFloor: growing.floor }) });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
-        tablesSize(layout) + (config.blockProfile === true ? Tables.BLOCK_PROFILE_SIZE : 0)) });
+        tablesSize(layout) + (config.blockProfile === true ? Tables.BLOCK_PROFILE_SIZE : 0)),
+    ...(growing === undefined ? {} : { maximum: (ramSize + WRAP_SLACK) / PAGE }) });
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     // A processor as it comes out of reset: every x87 register empty, the
@@ -85,6 +91,12 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
     view().setUint16(layout.x87Control, 0x37f, true);
     view().setUint32(layout.mxcsr, 0x1f80, true);
     setEflags(view(), layout, 0x2);
+    // A growing memory's RAM is its floor's until it grows: the wrap's mask says so.
+    let ramNow = growing?.floor ?? ramSize;
+    if (layout.wrap !== undefined)
+    {
+        view().setUint32(layout.wrap, ramNow - 1, true);
+    }
     const started = performance.now();
     const rdtsc = ()=>BigInt(Math.round((performance.now() - started) * 1e6));
     /** @type {number[]} */
@@ -107,6 +119,11 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
             rdtsc,
         },
     });
+    // Past the RAM a growing memory holds, every page is closed until it grows.
+    if (ramNow < ramSize)
+    {
+        runtime.pages.markRange(ramNow, ramSize - ramNow, PageFlag.INACCESSIBLE);
+    }
     const state = blockState({
         memory, layout, rdtsc,
         // An interpreted store into translated code drops the regions there,
@@ -321,6 +338,22 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
             view().setUint32(layout.regs + index * 4, value >>> 0, true);
         },
         diagnostics: ()=>runtime.diagnostics(),
+        /**
+         * A growing memory grown to hold `ram` bytes of RAM, a power of two: the
+         * memory's pages added, the wrap's mask set, the new pages opened.
+         *
+         * @param {number} ram
+         */
+        grow(ram){
+            if (layout.wrap === undefined || ram <= ramNow)
+            {
+                return;
+            }
+            memory.grow((ram + WRAP_SLACK - memory.buffer.byteLength) / PAGE);
+            runtime.pages.clearRange(ramNow, ram - ramNow, PageFlag.INACCESSIBLE);
+            ramNow = ram;
+            view().setUint32(layout.wrap, ram - 1, true);
+        },
         /** Ends the translation workers the runtime opened. */
         dispose: ()=>runtime.flush(),
     };

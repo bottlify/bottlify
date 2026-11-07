@@ -54,7 +54,10 @@ export function engineContractProblem(engineModule, url){
  * @typedef {Object} StateLayout
  * @property {32 | 64} bits        The register width.
  * @property {number} ramBase      Wasm address of guest address 0.
- * @property {number} ramSize
+ * @property {number} ramSize      The RAM's whole size: a growing layout's ceiling.
+ * @property {number} [ramFloor]   A growing memory's (cork's `ownLayout`): the RAM it always
+ *     holds; translated code wraps an untested read by the mask in its `wrap` word.
+ * @property {number} [wrap]       Where that mask lies: the RAM the memory holds now, less one.
  * @property {number} [hashShift]  The entry hash's slot is `(eip * 0x9e3779b1) >>> hashShift`
  *     (16, a hash of 2^16 slots, when absent).
  * @property {number} regs         8 × i32 (eax ecx edx ebx esp ebp esi edi); 16 × i64 at 64.
