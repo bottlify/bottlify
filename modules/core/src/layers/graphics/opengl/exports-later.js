@@ -349,6 +349,12 @@ export function laterEntryPoints(h){
             target >>> 0, offset | 0, length | 0, access >>> 0) ?? 0,
         glFlushMappedBufferRange: ([target, offset, length])=>answer(
             current()?.glFlushMappedBufferRange(target >>> 0, offset | 0, length | 0)),
+        glClearBufferData: ([target, internal, format, type, data])=>answer(
+            current()?.clearBufferData('glClearBufferData', target >>> 0, internal >>> 0, null, 0,
+                format >>> 0, type >>> 0, data >>> 0)),
+        glClearBufferSubData: ([target, internal, offset, size, format, type, data])=>answer(
+            current()?.clearBufferData('glClearBufferSubData', target >>> 0, internal >>> 0,
+                offset | 0, size | 0, format >>> 0, type >>> 0, data >>> 0)),
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),

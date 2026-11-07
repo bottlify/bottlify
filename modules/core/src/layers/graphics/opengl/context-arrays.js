@@ -22,6 +22,8 @@ import {
     INTERLEAVED_LAYOUTS, componentBytes, isPacked, readElement, readIndex,
 } from './arrays.js';
 import { createBufferObject } from './objects.js';
+import { SIZED_FORMATS, TEX } from './formats.js';
+import { clientBytes, transferError, unpackToStorage } from './texture-transfer.js';
 import { TEXTURE_UNITS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
 import { drawsGeometryInput, expandMode } from './gpu-layout.js';
@@ -97,6 +99,24 @@ const BINDING_QUERIES = new Map([
  */
 const ARRAYS_COMMAND_WORDS = 4;
 const ELEMENTS_COMMAND_WORDS = 5;
+
+/**
+ * The formats a buffer is cleared in (OpenGL 4.6 table 8.22, the buffer
+ * textures'), each element as many components as its base names.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const CLEAR_FORMATS = new Set([
+    TEX.R8, TEX.R16, TEX.R16F, TEX.R32F, TEX.R8I, TEX.R16I, TEX.R32I, TEX.R8UI, TEX.R16UI,
+    TEX.R32UI, TEX.RG8, TEX.RG16, TEX.RG16F, TEX.RG32F, TEX.RG8I, TEX.RG16I, TEX.RG32I,
+    TEX.RG8UI, TEX.RG16UI, TEX.RG32UI, TEX.RGB32F, TEX.RGB32I, TEX.RGB32UI, GL.RGBA8,
+    GL.RGBA16, TEX.RGBA16F, TEX.RGBA32F, TEX.RGBA8I, TEX.RGBA16I, TEX.RGBA32I, TEX.RGBA8UI,
+    TEX.RGBA16UI, TEX.RGBA32UI,
+]);
+
+/** A clear's one pixel is read as it lies: no pixel store state applies (4.6 section 6.3.2). */
+const PLAIN_UNPACK = Object.freeze({ alignment: 1, rowLength: 0, skipRows: 0,
+    skipPixels: 0, swapBytes: false });
 
 /** The access bits glMapBufferRange takes (OpenGL 3.0 section 2.9.3). */
 const MAP_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_RANGE_BIT
@@ -1895,6 +1915,82 @@ export function installArrayCalls(context, kernel){
                     ? { start: Math.min(buffer.written.start, offset),
                         end: Math.max(buffer.written.end, offset + size) }
                     : { start: offset, end: offset + size };
+                buffer.version++;
+            }
+        },
+
+        /**
+         * glClearBufferData and glClearBufferSubData (4.3): one element in
+         * `internal`, made of a pixel as glTexImage reads one, repeated over
+         * the range; zeros when the program gives none.
+         *
+         * @param {string} name @param {number} target @param {number} internal
+         * @param {number | null} offset  null for the whole store
+         * @param {number} size @param {number} format @param {number} type
+         * @param {number | Uint8Array} data  an address, zero for none, or the bytes
+         */
+        clearBufferData(name, target, internal, offset, size, format, type, data){
+            if (!enter(name, [target, internal, offset, size, format, type, data]))
+            {
+                return;
+            }
+            const buffer = boundBuffer(target);
+            if (!buffer)
+            {
+                return;
+            }
+            const sized = CLEAR_FORMATS.has(internal) ? SIZED_FORMATS.get(internal) : undefined;
+            if (!sized)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const components = { [GL.RED]: 1, [TEX.RG]: 2, [GL.RGB]: 3 }[sized.base] ?? 4;
+            const element = components * sized.bits[0] / 8;
+            const start = offset ?? 0;
+            const length = offset === null ? buffer.size : size;
+            if (start < 0 || length < 0 || start + length > buffer.size
+                || start % element !== 0 || length % element !== 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (buffer.mapped !== 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const transfer = transferError(sized, format, type);
+            if (transfer)
+            {
+                // ARB_clear_buffer_object answers a format or type it does
+                // not know with INVALID_VALUE, where glTexImage's is INVALID_ENUM.
+                setError(transfer === GL.INVALID_ENUM ? GL.INVALID_VALUE : transfer);
+                return;
+            }
+            const pixel = clientBytes(1, 1, 1, format, type, PLAIN_UNPACK);
+            const memory = kernel.memory();
+            const given = data instanceof Uint8Array ? data.subarray(0, pixel)
+                : data === 0 ? null : memory ? (memory.window ?? memory.read)(data, pixel) : null;
+            const value = given
+                ? unpackToStorage(given, 1, 1, 1, format, type, PLAIN_UNPACK, sized)
+                    ?.subarray(0, element) ?? null
+                : new Uint8Array(element);
+            if (!value)
+            {
+                lose(`${name} could not read the value it clears with, and cleared nothing`);
+                return;
+            }
+            for (let at = start; at < start + length; at += element)
+            {
+                buffer.data.set(value, at);
+            }
+            if (length > 0)
+            {
+                buffer.written = buffer.written
+                    ? { start: Math.min(buffer.written.start, start),
+                        end: Math.max(buffer.written.end, start + length) }
+                    : { start, end: start + length };
                 buffer.version++;
             }
         },

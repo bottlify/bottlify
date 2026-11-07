@@ -117,7 +117,7 @@ const NOT_COMPILABLE = new Set([
     'glPopClientAttrib', 'glGenBuffersARB', 'glBindBufferARB', 'glDeleteBuffersARB',
     'glIsBufferARB', 'glBufferDataARB', 'glBufferSubDataARB', 'glGetBufferSubDataARB',
     'glMapBufferARB', 'glUnmapBufferARB', 'glGetBufferParameterivARB',
-    'glGetBufferPointervARB', 'glLockArraysEXT', 'glUnlockArraysEXT',
+    'glGetBufferPointervARB', 'glLockArraysEXT', 'glUnlockArraysEXT', 'clearBufferData',
     'glGetCompressedTexImageARB',
     'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
     'glProgramStringARB', 'glGetProgramivARB', 'glGetProgramStringARB',

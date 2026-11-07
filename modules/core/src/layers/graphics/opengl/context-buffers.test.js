@@ -186,3 +186,64 @@ test('a map starts on a 64-byte boundary past its range\'s offset, and gives its
     assert.equal(whole % 64, 0);
     assert.equal(bytes[whole + 7], 7);
 });
+
+test('glClearBufferData repeats one element made from a pixel, a range or the whole store', ()=>{
+    const { gl, bytes } = fixture();
+    filled(gl, 32);
+    const view = new DataView(bytes.buffer);
+    // A float RGBA pixel cleared into RGBA8: normalised and rounded.
+    [0, 1, 0.5, 1].forEach((v, i)=>view.setFloat32(0x100 + i * 4, v, true));
+    gl.clearBufferData('glClearBufferData', GL.ARRAY_BUFFER, GL.RGBA8, null, 0, GL.RGBA,
+        GL.FLOAT, 0x100);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual([...gl.glGetBufferSubDataARB(GL.ARRAY_BUFFER, 0, 32)],
+        Array.from({ length: 8 }, ()=>[0, 255, 128, 255]).flat());
+
+    // Two RG16UI elements from the middle, from an integer pixel.
+    view.setUint16(0x200, 0x1234, true);
+    view.setUint16(0x202, 7, true);
+    gl.clearBufferData('glClearBufferSubData', GL.ARRAY_BUFFER, 0x823a /* RG16UI */, 8, 8,
+        0x8228 /* RG_INTEGER */, GL.UNSIGNED_SHORT, 0x200);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual([...gl.glGetBufferSubDataARB(GL.ARRAY_BUFFER, 4, 16)],
+        [0, 255, 128, 255, 0x34, 0x12, 7, 0, 0x34, 0x12, 7, 0, 0, 255, 128, 255]);
+
+    // RGB32F's element is three floats, not the four a texture keeps.
+    gl.clearBufferData('glClearBufferSubData', GL.ARRAY_BUFFER, 0x8815 /* RGB32F */, 0, 12,
+        GL.RGB, GL.FLOAT, 0x100);
+    const floats = gl.glGetBufferSubDataARB(GL.ARRAY_BUFFER, 0, 16);
+    const read = new DataView(floats.buffer, floats.byteOffset);
+    assert.deepEqual([0, 4, 8].map(at=>read.getFloat32(at, true)), [0, 1, 0.5]);
+    assert.deepEqual([...floats.subarray(12)], [0x34, 0x12, 7, 0], 'the next left alone');
+
+    // Address zero is no data, whatever lies there.
+    view.setFloat32(0, 9, true);
+    gl.clearBufferData('glClearBufferData', GL.ARRAY_BUFFER, 0x822e /* R32F */, null, 0, GL.RED,
+        GL.FLOAT, 0);
+    assert.deepEqual([...gl.glGetBufferSubDataARB(GL.ARRAY_BUFFER, 0, 32)], new Array(32).fill(0),
+        'no data is zeros');
+});
+
+test('glClearBufferData\'s errors', ()=>{
+    const { gl } = fixture();
+    filled(gl, 32);
+    /** @param {number} internal @param {number | null} offset @param {number} size
+     *  @param {number} format @param {number} type @param {number} error */
+    const refused = (internal, offset, size, format, type, error)=>{
+        gl.clearBufferData('glClearBufferSubData', GL.ARRAY_BUFFER, internal, offset, size,
+            format, type, 0);
+        assert.equal(gl.glGetError(), error, `0x${internal.toString(16)} ${offset} ${size}`);
+    };
+    refused(GL.RGB8, 0, 4, GL.RGB, GL.UNSIGNED_BYTE, GL.INVALID_ENUM);
+    refused(GL.RGBA8, 2, 4, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_VALUE);
+    refused(GL.RGBA8, 0, 6, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_VALUE);
+    refused(GL.RGBA8, 28, 8, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_VALUE);
+    refused(GL.RGBA8, -4, 4, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_VALUE);
+    refused(GL.RGBA8, 0, 4, GL.RGBA, 0x1234, GL.INVALID_VALUE);
+    refused(GL.RGBA8, 0, 4, 0x8d99 /* RGBA_INTEGER */, GL.UNSIGNED_BYTE, GL.INVALID_OPERATION);
+    gl.glMapBufferARB(GL.ARRAY_BUFFER, GL.WRITE_ONLY);
+    refused(GL.RGBA8, 0, 4, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_OPERATION);
+    gl.glUnmapBufferARB(GL.ARRAY_BUFFER);
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, 0);
+    refused(GL.RGBA8, 0, 4, GL.RGBA, GL.UNSIGNED_BYTE, GL.INVALID_OPERATION);
+});
