@@ -15,7 +15,8 @@ import {
     CLIP_PLANES, LIGHTS, UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey,
     generateClear,
     sameKeyInputs,
-    generateCopy, generateDraw, generateShow, lightingStateOf, showDescriptor, writeLighting,
+    generateCopy, generateDraw, generateShow, lightingStateOf, showDescriptor, stippled,
+    writeLighting,
 } from './wgsl.js';
 
 /**
@@ -98,7 +99,8 @@ test('every field the descriptor or the shader reads changes the key', ()=>{
         { cull: 'back' },
         { frontIsCcw: false },
         { colourMask: 0x8 },
-        { polygonOffset: { factor: 0, units: -600 } },
+        { polygonOffset: { factor: 0, units: -600, clamp: 0 } },
+        { stipple: '5'.repeat(256) },
     ];
     const keys = new Set([base]);
     for (const variant of variants)
@@ -157,14 +159,17 @@ test('two states are the same to sameKeyInputs exactly when their keys are equal
         { cull: 'back' },
         { frontIsCcw: false },
         { colourMask: 0x8 },
-        { polygonOffset: { factor: 0, units: -600 } },
-        { polygonOffset: { factor: 1, units: -600 } },
+        { polygonOffset: { factor: 0, units: -600, clamp: 0 } },
+        { polygonOffset: { factor: 1, units: -600, clamp: 0 } },
+        { polygonOffset: { factor: 1, units: -600, clamp: -0.25 } },
         { viewportHeight: 480 },
         { vertexProgram: vertex },
         { vertexProgram: { ...vertex, version: 2 } },
         { fragmentProgram: fragment },
         { fragmentProgram: fragment, viewportHeight: 480 },
         { fragmentProgram: { ...fragment, name: 5 } },
+        { stipple: '5'.repeat(256) },
+        { stipple: 'a'.repeat(256) },
     ];
     const states = variants.flatMap(variant=>[state(variant), structuredClone(state(variant))]);
     for (const a of states)
@@ -234,8 +239,8 @@ test('the clip depth is remapped, and an absent attribute is the current value',
     const { code } = generateDraw(state({
         attributes: CANONICAL_LAYOUT.attributes.filter(a=>a.name === 'position'),
     }));
-    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
-        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)'));
+    assert.ok(code.includes('out.position = vec4f(clip.x, clip.y * uniforms.clipControl.x,'
+        + ' clip.z * uniforms.clipControl.y + clip.w * uniforms.clipControl.z, clip.w)'));
     assert.match(code, /out\.color = uniforms\.color;/);
     assert.match(code, /out\.secondary = uniforms\.secondary;/);
 });
@@ -285,7 +290,9 @@ test('the uniform block layout the shader declares is the one the renderer fills
     assert.equal(UNIFORM.lights, UNIFORM.material + 5 * 4);
     assert.equal(UNIFORM.clipPlanes, UNIFORM.lights + LIGHTS * 24,
         'a light is six vectors: three colours, position, spot, attenuation');
-    assert.equal(UNIFORM.floats, UNIFORM.clipPlanes + CLIP_PLANES * 4);
+    assert.equal(UNIFORM.clipControl, UNIFORM.clipPlanes + CLIP_PLANES * 4);
+    assert.equal(UNIFORM.route, UNIFORM.clipControl + 4);
+    assert.equal(UNIFORM.floats, UNIFORM.route + 4);
     assert.equal(UNIFORM.floats % 4, 0);
 });
 
@@ -298,7 +305,7 @@ test('the descriptor maps GL state onto WebGPU\'s, with the stencil on both face
         cull: 'front',
         frontIsCcw: false,
         colourMask: 0x8,
-        polygonOffset: { factor: 0, units: -600 },
+        polygonOffset: { factor: 0, units: -600, clamp: 0 },
     }));
     assert.deepEqual(descriptor.target.blend.color,
         { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' });
@@ -370,7 +377,7 @@ test('a stencil-shadowed light\'s three passes get the descriptor their state na
             readMask: 0xff, writeMask: 0xff },
         cull: 'front',
         colourMask: 0x0,
-        polygonOffset: { factor: 0, units: 1 },
+        polygonOffset: { factor: 0, units: 1, clamp: 0 },
     });
     const counted = drawDescriptor(volume).depthStencil;
     assert.equal(counted.depthCompare, 'less-equal');
@@ -385,6 +392,9 @@ test('a stencil-shadowed light\'s three passes get the descriptor their state na
     assert.equal(counted.stencilWriteMask, 0xff);
     assert.equal(counted.depthBias, 1);
     assert.equal(counted.depthBiasSlopeScale, 0);
+    assert.equal(counted.depthBiasClamp, 0);
+    assert.equal(drawDescriptor({ ...volume, polygonOffset: { factor: 2, units: 1, clamp: 0.5 } })
+        .depthStencil.depthBiasClamp, 0.5, 'the clamp (4.6) is WebGPU\'s');
     const otherFace = drawDescriptor({ ...volume, cull: 'back',
         stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.DECR,
             readMask: 0xff, writeMask: 0xff } });
@@ -432,8 +442,8 @@ test('a position-invariant program emits the fixed stage\'s position lines', ()=
             offset: 0, format: 'float32x3' }],
         strides: [12],
     })).code;
-    const remap = '    out.position = vec4f(clip.x, clip.y * uniforms.misc.z,'
-        + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w);';
+    const remap = '    out.position = vec4f(clip.x, clip.y * uniforms.clipControl.x,'
+        + ' clip.z * uniforms.clipControl.y + clip.w * uniforms.clipControl.z, clip.w);';
     assert.ok(fixed.includes(remap), 'the fixed stage remaps the depth the way GL does');
     assert.ok(emitted.code.includes(remap), 'the invariant position is the fixed one');
     assert.ok(emitted.code.includes(
@@ -647,4 +657,19 @@ test('user clip planes: distances the device clips by, or ones the fragment disc
     assert.match(byFragment, /any\(input\.clipLow < vec4f\(0\.0\)\)/);
     assert.notEqual(drawKey(state({ clip: { count: 5, distances: false } })), drawKey(state()));
     assert.equal(sameKeyInputs(state({ clip: { count: 2, distances: true } }), state()), false);
+});
+
+test('the polygon stipple cuts every kind of fragment stage before it runs', ()=>{
+    const pattern = '0000ffff'.repeat(32);
+    const glsl = stippled('@fragment\nfn fragmentMain(input: VertexOut, @builtin(front_facing)'
+        + ' facing: bool) -> FragmentOut {\n    var out: FragmentOut;\n', pattern);
+    assert.match(glsl, /-> FragmentOut \{\n {4}let glStippleX[^]*discard;[^]*var out/,
+        'a GLSL stage: the test first');
+    assert.match(glsl, /array<u32, 32>\(0x0000ffffu(, 0x0000ffffu){31}\)/);
+
+    const target = { format: 'bgra8unorm', mask: 0xf };
+    const { code } = generateDraw(state({ stipple: pattern, targets: [target, target] }));
+    assert.match(code, /fn fragmentColour\(input: VertexOut\) -> vec4f \{\n {4}let glStippleX/,
+        'several draw buffers: the colour every one is written is the cut one');
+    assert.doesNotMatch(generateDraw(state()).code, /glStipple/);
 });

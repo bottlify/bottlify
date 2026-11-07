@@ -29,6 +29,8 @@ import {
     BOOL, FLOAT, INT, UINT, arrayOf, basicType, typeSince, vectorOf,
 } from './glsl-types.js';
 
+const VEC4_TYPE = vectorOf('float', 4);
+
 /**
  * @typedef {import('./glsl-types.js').GlslType} GlslType
  * @typedef {import('./glsl-types.js').StructType} StructType
@@ -44,6 +46,11 @@ import {
  * @property {('in' | 'out' | 'inout')[]} directions
  * @property {GlslType} returns
  * @property {number} since
+ * @property {number} [own]  the version its name and parameter kinds came with,
+ *     its types aside: an extension that brings the name or the types brings it
+ * @property {readonly string[]} [types]  the types it names, its return's among them
+ * @property {string} [canonical]  the name the core function has, where an
+ *     extension spells it otherwise (textureQueryLOD)
  * @property {boolean} compatibility  the compatibility profile's alone
  * @property {ReadonlySet<Stage> | null} stages  the stages that have it, or null for all
  * @property {null} stage  the 1.x tables' field, never set here
@@ -165,11 +172,12 @@ for (const [section, name, returnName, paramNames, outs, bias] of GLSL_CATALOG)
     /** @type {('in' | 'out' | 'inout')[]} */
     const directions = typed.map((_, k)=>(outs.includes(k * 2) ? 'out'
         : outs.includes(k * 2 + 1) ? 'inout' : 'in'));
-    const since = Math.max(SINCE[name] ?? 110, overloadSince(name, typed),
-        ...[returnName, ...paramNames].map(n=>typeSince(n.replace(/\[\]$/, '')) ?? 110));
+    const own = Math.max(SINCE[name] ?? 110, overloadSince(name, typed));
+    const types = [...new Set([returnName, ...paramNames].map(n=>n.replace(/\[\]$/, '')))];
+    const since = Math.max(own, ...types.map(n=>typeSince(n) ?? 110));
     /** @type {ModernOverload} */
     const overload = Object.freeze({
-        name, params: typed, directions, returns, since,
+        name, params: typed, directions, returns, since, own, types,
         compatibility: COMPATIBILITY_SECTIONS.has(section),
         // A lookup with an explicit bias computes a level of detail from
         // derivatives, which only fragments have.
@@ -194,8 +202,70 @@ for (const [section, name, returnName, paramNames, outs, bias] of GLSL_CATALOG)
  * @returns {ModernOverload[]}
  */
 export function modernOverloads(name, language){
-    return (MODERN.get(name) ?? []).filter(o=>o.since <= language.version
-        && (!o.compatibility || language.compatibility));
+    const brought = language.functions.has(name);
+    // An overload is there when its name is (by the version or an extension
+    // that brought it) and every type it names is: a type an extension made a
+    // keyword brings the overloads of the functions the version has.
+    const typed = (/** @type {ModernOverload} */ o)=>(o.types ?? []).every(type=>
+        (typeSince(type) ?? 110) <= language.version || language.keywords.has(type));
+    return [...(MODERN.get(name) ?? []).filter(o=>((o.own ?? o.since) <= language.version
+        || brought) && typed(o) && (!o.compatibility || language.compatibility)),
+    ...extensionOverloads(name, language)];
+}
+
+/** @param {string} name @param {GlslType[]} params @returns {ModernOverload} */
+const extensionLookup = (name, params)=>Object.freeze({
+    name, params, directions: params.map(()=>/** @type {'in'} */ ('in')),
+    returns: VEC4_TYPE, since: 110, compatibility: false, stages: null, stage: null,
+});
+
+/**
+ * A core function's overloads under the name an extension gave it, each
+ * calling the core one (`canonical`), whatever version a shader has: the
+ * extension's own types it still needs as keywords.
+ *
+ * @param {string} name @param {string} spelled
+ * @returns {ModernOverload[]}
+ */
+function renamed(name, spelled){
+    return (MODERN.get(name) ?? []).map(o=>Object.freeze({ ...o, name: spelled, since: 110,
+        own: 110, canonical: name }));
+}
+
+/**
+ * The functions extensions define themselves, by extension: GL_ARB_texture_rectangle's
+ * lookups, which have no bias or level forms.
+ *
+ * @type {Readonly<Record<string, readonly ModernOverload[]>>}
+ */
+const EXTENSION_FUNCTIONS = Object.freeze({
+    GL_ARB_texture_query_lod: renamed('textureQueryLod', 'textureQueryLOD'),
+    GL_ARB_shader_group_vote: [...renamed('anyInvocation', 'anyInvocationARB'),
+        ...renamed('allInvocations', 'allInvocationsARB'),
+        ...renamed('allInvocationsEqual', 'allInvocationsEqualARB')],
+    GL_ARB_texture_rectangle: (()=>{
+        const rect = /** @type {GlslType} */ (basicType('sampler2DRect'));
+        const shadow = /** @type {GlslType} */ (basicType('sampler2DRectShadow'));
+        const vec = /** @param {number} n */ n=>vectorOf('float', n);
+        return [extensionLookup('texture2DRect', [rect, vec(2)]),
+            extensionLookup('texture2DRectProj', [rect, vec(3)]),
+            extensionLookup('texture2DRectProj', [rect, vec(4)]),
+            extensionLookup('shadow2DRect', [shadow, vec(3)]),
+            extensionLookup('shadow2DRectProj', [shadow, vec(4)])];
+    })(),
+});
+
+/**
+ * The overloads of `name` the extensions a shader enabled define, in every
+ * version (1.x's lookups included).
+ *
+ * @param {string} name @param {Language} language
+ * @returns {ModernOverload[]}
+ */
+export function extensionOverloads(name, language){
+    return [...language.extensions].flatMap(extension=>(EXTENSION_FUNCTIONS[extension] ?? [])
+        .filter(o=>o.name === name && (o.types ?? []).every(type=>
+            (typeSince(type) ?? 110) <= language.version || language.keywords.has(type))));
 }
 
 // --- constants ---
@@ -253,10 +323,17 @@ const CONSTANT_SINCE = /** @type {Record<string, number>} */ ({
     gl_MaxTransformFeedbackBuffers: 400, gl_MaxTransformFeedbackInterleavedComponents: 400,
 });
 
+/** The constants an extension's feature brings with it, where a version alone does not. */
+const CONSTANT_FEATURES = /** @type {Record<string, import('./glsl-versions.js').Feature>} */ ({
+    gl_MaxCullDistances: 'cullDistance', gl_MaxCombinedClipAndCullDistances: 'cullDistance',
+    gl_MaxViewports: 'viewportArray',
+});
+
 /**
- * Whether a constant belongs to a version: the tessellation ones from 4.00,
- * the geometry ones from 1.50, the images', atomic counters' and compute's
- * with theirs, the compatibility profile's in that profile alone.
+ * Whether a constant belongs to a language: the tessellation ones with
+ * tessellation, the geometry ones from 1.50, the images', atomic counters'
+ * and compute's with theirs (by version or extension), the compatibility
+ * profile's in that profile alone.
  *
  * @param {string} name @param {Language} language
  */
@@ -264,7 +341,8 @@ function constantHas(name, language){
     const v = language.version;
     if (CONSTANT_SINCE[name])
     {
-        return CONSTANT_SINCE[name] <= v;
+        const feature = CONSTANT_FEATURES[name];
+        return CONSTANT_SINCE[name] <= v || (feature !== undefined && language.has(feature));
     }
     if (/^gl_Max(TextureUnits|TextureCoords|ClipPlanes|VaryingFloats|Lights)$/.test(name))
     {
@@ -272,23 +350,23 @@ function constantHas(name, language){
     }
     if (/Tess|PatchVertices/.test(name))
     {
-        return v >= 400;
+        return language.has('tessellation');
     }
     if (/Geometry/.test(name))
     {
-        return v >= 150;
+        return language.has('geometry');
     }
     if (/Compute/.test(name))
     {
-        return v >= 430;
+        return language.has('compute');
     }
     if (/Image|ShaderOutputResources/.test(name))
     {
-        return v >= 420;
+        return language.has('images');
     }
     if (/AtomicCounter/.test(name))
     {
-        return v >= 420;
+        return language.has('atomicCounters');
     }
     return true;
 }
@@ -320,7 +398,8 @@ const PER_VERTEX = new Map();
  */
 export function perVertexOf(language, constants){
     const key = `${language.version}:${language.compatibility}:${constants.gl_MaxClipDistances}`
-        + `:${constants.gl_MaxCullDistances}:${constants.gl_MaxTextureCoords}`;
+        + `:${constants.gl_MaxCullDistances}:${constants.gl_MaxTextureCoords}`
+        + `:${language.has('cullDistance')}`;
     const known = PER_VERTEX.get(key);
     if (known)
     {
@@ -329,7 +408,7 @@ export function perVertexOf(language, constants){
     /** @type {[string, GlslType][]} */
     const fields = [['gl_Position', VEC4], ['gl_PointSize', FLOAT],
         ['gl_ClipDistance', arrayOf(FLOAT, Number(constants.gl_MaxClipDistances))]];
-    if (language.version >= 450)
+    if (language.has('cullDistance'))
     {
         fields.push(['gl_CullDistance', arrayOf(FLOAT, Number(constants.gl_MaxCullDistances))]);
     }
@@ -359,11 +438,43 @@ const VARIABLES = new Map();
  * @returns {Record<string, BuiltinVariable>}
  */
 export function builtinVariablesFor(stage, language, constants = GLSL_CONSTANTS){
+    const vars = versionVariables(stage, language, constants);
+    if (stage !== 'vertex' || language.extensions.size === 0)
+    {
+        return vars;
+    }
+    const more = { ...vars };
+    if (language.extensions.has('GL_EXT_gpu_shader4'))
+    {
+        more.gl_VertexID ??= { type: INT, role: 'in' };
+        more.gl_InstanceID ??= { type: INT, role: 'in' };
+    }
+    if (language.extensions.has('GL_ARB_draw_instanced'))
+    {
+        more.gl_InstanceIDARB = { type: INT, role: 'in', alias: 'gl_InstanceID' };
+    }
+    // 4.60's draw parameters under the extension's names, read as 4.60's.
+    if (language.extensions.has('GL_ARB_shader_draw_parameters'))
+    {
+        more.gl_BaseVertexARB = { type: INT, role: 'in', alias: 'gl_BaseVertex' };
+        more.gl_BaseInstanceARB = { type: INT, role: 'in', alias: 'gl_BaseInstance' };
+        more.gl_DrawIDARB = { type: INT, role: 'in', alias: 'gl_DrawID' };
+    }
+    return more;
+}
+
+/**
+ * @param {Stage} stage @param {Language} language @param {GlslConstants} constants
+ * @returns {Record<string, BuiltinVariable>}
+ */
+function versionVariables(stage, language, constants){
     if (language.version < 130 && (stage === 'vertex' || stage === 'fragment'))
     {
         return BUILTIN_VARIABLES[stage];
     }
-    const key = `${stage}:${language.version}:${language.compatibility}`;
+    // The extensions a shader enabled bring variables of later versions.
+    const key = `${stage}:${language.version}:${language.compatibility}`
+        + `:${[...language.extensions].sort().join(',')}`;
     if (constants === GLSL_CONSTANTS)
     {
         const known = VARIABLES.get(key);
@@ -457,14 +568,14 @@ export function builtinVariablesFor(stage, language, constants = GLSL_CONSTANTS)
         case 'geometry':
             vars.gl_in = { type: arrayOf(perVertex, 0), role: 'in' };
             vars.gl_PrimitiveIDIn = { type: INT, role: 'in' };
-            if (v >= 400)
+            if (language.has('gpuShader5'))
             {
                 vars.gl_InvocationID = { type: INT, role: 'in' };
             }
             perVertexFields(vars, 'out');
             vars.gl_PrimitiveID = { type: INT, role: 'out' };
             vars.gl_Layer = { type: INT, role: 'out' };
-            if (v >= 410)
+            if (language.has('viewportArray'))
             {
                 vars.gl_ViewportIndex = { type: INT, role: 'out' };
             }
@@ -474,10 +585,13 @@ export function builtinVariablesFor(stage, language, constants = GLSL_CONSTANTS)
             vars.gl_FrontFacing = { type: BOOL, role: 'in' };
             vars.gl_ClipDistance = { type: arrayOf(FLOAT, Number(constants.gl_MaxClipDistances)),
                 role: 'in' };
-            if (v >= 450)
+            if (language.has('cullDistance'))
             {
                 vars.gl_CullDistance = { type: arrayOf(FLOAT,
                     Number(constants.gl_MaxCullDistances)), role: 'in' };
+            }
+            if (v >= 450)
+            {
                 vars.gl_HelperInvocation = { type: BOOL, role: 'in' };
             }
             vars.gl_PointCoord = { type: VEC2, role: 'in' };
@@ -485,14 +599,17 @@ export function builtinVariablesFor(stage, language, constants = GLSL_CONSTANTS)
             {
                 vars.gl_PrimitiveID = { type: INT, role: 'in' };
             }
-            if (v >= 400)
+            if (language.has('sampleShading'))
             {
                 vars.gl_SampleID = { type: INT, role: 'in' };
                 vars.gl_SamplePosition = { type: VEC2, role: 'in' };
-                vars.gl_SampleMaskIn = { type: arrayOf(INT, 1), role: 'in' };
                 vars.gl_SampleMask = { type: arrayOf(INT, 1), role: 'out' };
             }
-            if (v >= 430)
+            if (language.has('gpuShader5'))
+            {
+                vars.gl_SampleMaskIn = { type: arrayOf(INT, 1), role: 'in' };
+            }
+            if (language.has('fragmentLayerViewport'))
             {
                 vars.gl_Layer = { type: INT, role: 'in' };
                 vars.gl_ViewportIndex = { type: INT, role: 'in' };

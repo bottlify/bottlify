@@ -962,6 +962,442 @@ shader written against one uses them. Here 1.40 compiles as compatibility; from 
 front end accepted them in 1.10 before 1.30 and later were added, and a program that relies on
 it compiled here then. Nothing else of 1.20 is taken into 1.10. *2026-11-06.*
 
+**A98. A context drawing into a bitmap of another depth writes nothing past the bitmap's bits.**
+A context made on a memory DC draws on the processor into the bitmap selected there, as Windows'
+generic renderer does. Given a bitmap whose depth is not the pixel format's, Windows writes the
+format's rows over it and past its end; here the rows are converted to the bitmap's depth and
+nothing beyond its bits is written. *2026-11-06.*
+
+**A99. A DC from D3DKMTCreateDCFromMemory is read from the context's own buffer.** Windows reads
+the memory the DC was made over live, so a GL context on it sees bytes written there afterwards
+(Wine's test_d3dkmt_rendering expects 0xa5a5a5 and marks it todo); here what the context drew
+is read back from its buffer. *2026-11-06.*
+
+**A100. Framebuffer objects are shared between contexts wglShareLists joins.** GL 3.0 core keeps
+framebuffer objects per context; GL_EXT_framebuffer_object, which predates it, shares them with
+the other objects, and Windows drivers share both kinds. Here every framebuffer object is in the
+share group. A core-profile context may need the specification's rule; revisit when they exist.
+*2026-11-06.*
+
+**A101. wglChoosePixelFormatARB's best format comes first in the format list's own order.** The
+extension leaves "best" to the implementation; the formats are listed accelerated before
+generic, and among equals the smaller depth first, and that order is the answer's.
+*2026-11-06.*
+
+**A102. An attribute wglChoosePixelFormatARB does not know matches every format.** The
+specification says the call fails with ERROR_INVALID_DATA; programs pass attributes of extensions
+they found in another driver's string, and refusing them leaves such a program without a format.
+The attribute is reported once as a divergence. *2026-11-06.*
+
+**A103. An OpenGL depth or stencil texture is kept with both aspects.** It lives as
+`depth24plus-stencil8`, or `depth32float-stencil8` where the device has that feature; a float
+depth on a device without it keeps 24 bits. The draw pipelines carry a stencil state, which
+WebGPU refuses over a depth-only format. *2026-11-06.*
+
+**A104. glTexImage of a compressed internal format keeps an uncompressed twin.** Section 8.5
+allows any format at least as precise as the one asked for; the internal-format query answers the
+one asked for, and glGetCompressedTexImage the blocks. *2026-11-06.*
+
+**A105. Temporary: a 16-bit normalised OpenGL texture on a device without
+`texture-formats-tier1` lives as half floats,** 11 bits of precision instead of 16. A program
+that relies on the full 16 bits (a height map, a depth stored in colour) reads it coarser.
+*2026-11-06.*
+
+**A106. A texture WebGPU does not filter is read nearest:** a 32-bit float one on a device
+without `float32-filterable`, and a depth one sampled as a value. The dropped filter is reported
+once as a divergence. *2026-11-06.*
+
+**A107. Integer client values written into a narrower integer internal format are clamped to its
+range.** The specification leaves the result undefined. *2026-11-06.*
+
+**A108. Out-of-range values written into R11F_G11F_B10F follow section 2.3.4.3's rule for the
+small floats:** negatives become 0, finite values past the largest become the largest finite
+value (65024 for the 11-bit channels, 64512 for the 10-bit one), and +Inf stays infinite.
+*2026-11-06.*
+
+**A109. The images OpenGL 3.0 added refuse a border.** A 3D, array or sized-format image with a
+border other than 0 is GL_INVALID_VALUE, as the core profile has it; borders came out of use with
+the compatibility formats they are still kept for. *2026-11-06.*
+
+**A110. Temporary: a framebuffer attachment this renderer cannot draw into answers
+GL_FRAMEBUFFER_UNSUPPORTED:** RGB9_E5, compressed formats and 3D slices. The specification
+allows the answer for any combination an implementation cannot draw. Integer formats are drawn
+into by GLSL programs; a draw without one into an integer buffer draws nothing and says so.
+*2026-11-06.*
+
+**A111. wglGetProcAddress hands out every function implemented, whatever reports it.** A
+function of a version past the context's, or of an extension the string does not name, is
+obtainable once it is implemented here, as Windows drivers hand out every function they have:
+the version and extension strings are the promise a program reads, the pointer is not. Wine's
+opengl32 test calls 4.3 and 4.5 framebuffer queries and EXT_direct_state_access forms through
+pointers it never checks. A function not implemented is still null. *2026-11-06.*
+
+**A112. A GLSL uniform block declared shared or packed is laid out as std140.** Both leave the
+layout to the implementation, which a program reads back through glGetActiveUniformsiv; std140
+is one such layout, and the one the block reader already writes. *2026-11-06.*
+
+**A113. Temporary: ten uniform blocks a stage and twenty combined,** below OpenGL 3.1's minimum
+of twelve a stage. WebGPU binds twelve uniform buffers a stage and the fixed-function and program
+blocks take two of them. A program that uses more blocks fails to link and says why.
+*2026-11-06.*
+
+**A114. A uniform block whose binding point holds nothing, or a range past its buffer, reads
+zeros** and the draw reports it once as a divergence; the specification leaves the result
+undefined. *2026-11-06.*
+
+**A115. Temporary: a shadow lookup with an explicit level or gradients reads the base level, and
+a bias is dropped.** WGSL compares depth only at the base level outside an implicit-level lookup
+in a fragment stage. *2026-11-06.*
+
+**A116. An integer texture read through texture() loads the nearest texel, clamped, whatever its
+filter and wrap modes.** Integer textures are not filterable; GL makes a filtered integer texture
+incomplete, while programs that sample one with the default filter expect a value. *2026-11-06.*
+
+**A117. A fragment output narrower than its colour buffer is written as (x, y, 0, 1),** an output
+of another type than its buffer's is converted to it, and a buffer no output covers is written
+zero; the specification leaves the last two undefined. *2026-11-06.*
+
+**A118. Temporary: a second-source fragment output (index 1) is accepted and not written.**
+GL_MAX_DUAL_SOURCE_DRAW_BUFFERS is 1, as 3.3 requires, but no blend factor reads the second
+colour yet. *2026-11-06.*
+
+**A119. Temporary: an OpenGL timer query reads the processor's clock.** GL_TIME_ELAPSED is the
+nanoseconds of the page's clock between glBeginQuery and glEndQuery as the calls are made, and
+GL_TIMESTAMP the clock at glQueryCounter; the device's own timestamps (`timestamp-query`) are not
+read. A program timing its passes sees how long it took to issue them, not to draw them.
+*2026-11-07.*
+
+**A120. Temporary: wglSetPbufferAttribARB takes only the values a pbuffer already has.** A
+render-texture pbuffer's mipmap level or cube face is fixed when it is made; asked to change,
+the call fails. Rendering into another level or face of a bound pbuffer texture is the case it
+leaves out. *2026-11-07.*
+
+**A121. Temporary: a pbuffer's DC is a memory DC that draws nowhere.** GDI drawing into it is
+accepted and not shown through GL, which reads only what a context drew there. Releasing the DC
+keeps it alive until the pbuffer is destroyed, as the pbuffer's own DC is not the caller's to
+end. *2026-11-07.*
+
+**A122. A pbuffer is at most 8192 by 8192,** WebGPU's least 2D texture size, and every pixel
+format but the generic renderer's draws to one. *2026-11-07.*
+
+**A123. A context's commands are replayed on the device when it stops being current or is
+deleted;** glFlush and glFinish leave them recorded until a swap or a read needs them. Another
+context reading the drawable then sees what was drawn, as the specification promises after a
+flush, without a replay at every glFlush a program issues each frame. *2026-11-07.*
+
+**A124. The swap interval belongs to the window,** as Windows drivers keep it, not to the context
+that set it; a window starts at 1. *2026-11-07.*
+
+**A125. Every double-buffered pixel format exchanges its buffers on a swap**
+(PFD_SWAP_EXCHANGE): after a swap the back buffer holds what the front held. *2026-11-07.*
+
+**A126. A mapped buffer's pointer is on a 64-byte boundary,** offset by the mapped range's own
+offset within one (`address % 64 == offset % 64`), as drivers give, which programs writing it
+with aligned SIMD stores rely on. *2026-11-07.*
+
+**A127. An OpenGL cube map is always filtered across its faces' edges,** as
+GL_TEXTURE_CUBE_MAP_SEAMLESS asks: WebGPU's cube sampling knows no other way. A program that
+leaves the switch off, as its default is, gets the seamless filtering every driver of a 3.2
+card gives anyway. *2026-11-07.*
+
+**A128. Temporary: transform feedback's buffer binding points belong to the context,** not to each
+transform feedback object as OpenGL 4.0 has it: binding another object keeps the buffers bound.
+A program that keeps one object a stream and switches between them mid-frame captures into the
+buffers it bound last. *2026-11-07.*
+
+**A129. Temporary: what transform feedback writes stays on the device.** A buffer it captured
+into draws as captured, and a read of it on the processor (glGetBufferSubData, a map) answers
+the bytes the program last gave it, said as a loss each time. *2026-11-07.*
+
+**A130. A geometry shader that writes gl_Layer, drawing into a layered framebuffer, has its draw
+recorded once for each layer,** into that face or array layer, keeping the primitives sent to it
+as A140 does for viewports (the two together are a draw for each pair); the layers are the fewest
+any layered attachment has. Into a framebuffer that is not layered gl_Layer is not read. A clear
+of a layered framebuffer is recorded once a layer. A 3D texture attached whole stays
+GL_FRAMEBUFFER_UNSUPPORTED, as its slices are. *2026-11-07.*
+
+**A131. The last vertex provokes by turning the primitive round,** not by a pass of its own: a
+draw with a flat value under GL_LAST_VERTEX_CONVENTION lists each primitive from its last
+vertex, its winding kept, and a quad splits on the diagonal to its fourth vertex, which provokes
+it under either convention as table 13.2 has it. A polygon keeps its first. *2026-11-07.*
+
+**A132. GL_RASTERIZER_DISCARD is saved with the enable group,** as every capability glEnable
+takes is in this renderer's attribute tables; the 4.6 compatibility table names it in no group.
+*2026-11-07.*
+
+**A133. Temporary: the named calls (4.5) and the 4.2 to 4.5 texture image calls run when they
+are reached, even while a display list is compiled.** A named framebuffer call made through a
+bound form a list records (glDrawBuffer(s), glReadBuffer, the clears) says so when a list is
+open. A compatibility-profile program that compiles them into lists gets them made once, at
+compile time. *2026-11-07.*
+
+**A134. glCopyImageSubData asks completeness only past the base level,** as Mesa reads section
+18.3.3, which asks it of the whole texture: a program that copies out of a texture whose chain
+it has not finished copies what the levels hold. *2026-11-07.*
+
+**A135. Temporary: glCreateTextures refuses the targets with no texture kind here** (rectangle,
+buffer, cube map array, multisample) with GL_INVALID_ENUM, and says so. *2026-11-07.*
+
+**A136. glInvalidateNamedFramebufferData and SubData drop nothing:** the contents stay as they
+were, which is what a program may find after an invalidation anyway; the checks are made.
+*2026-11-07.*
+
+**A137. glNamedFramebufferTexture of a whole cube map or array attaches it layered** (A130): a
+draw reaches the first face or layer unless a geometry shader chooses another. *2026-11-07.*
+
+**A138. glClearTexImage reads its one pixel as it lies in the program's memory,** with no
+unpack state and no unpack buffer, as glClearBufferData does by section 6.3.2. *2026-11-07.*
+
+**A139. Temporary: an image copy the device cannot make, of pixels only the device holds, is a
+loss** (a level drawn on the device copied as blocks into texels, a renderbuffer on the
+processor path): said each time, the destination left as it was. *2026-11-07.*
+
+**A140. A geometry shader that writes gl_ViewportIndex has its draw recorded once for each of
+the sixteen viewports,** through that viewport's rectangle, depth range and scissor, and each
+keeps the primitives sent to it: a vertex whose index is another's is put on one point outside
+the clip volume. The index is read at every vertex (GL_VIEWPORT_INDEX_PROVOKING_VERTEX is
+GL_UNDEFINED_VERTEX), and one past the last viewport draws nowhere. WebGPU has one viewport a
+draw; the cost is fifteen draws of nothing, on the GPU. Every other draw goes through the first
+viewport. *2026-11-07.*
+
+**A141. Temporary: a 64-bit attribute (glVertexAttribLFormat) is read at single precision,** as
+a double array of glVertexAttribPointer already is: no shader here takes a double input. It is
+said once. *2026-11-07.*
+
+**A142. A binding point's stride of zero reaches the device as a per-instance slot one element
+wide,** read at element zero by every instance: the pixels of a stride of zero, through the
+gather path every other per-instance array takes. *2026-11-07.*
+
+**A143. Temporary: after a binding call, GL_VERTEX_ATTRIB_ARRAY_POINTER answers where the
+attribute reads** (the point's offset and the relative offset), not the last
+glVertexAttribPointer's argument. *2026-11-07.*
+
+**A150. Temporary: a multisample texture is kept with one sample a texel,** as every framebuffer
+here is drawn single-sampled (A85 for Direct3D): a fetch of any sample reads that texel, sample
+positions answer the pixel's centre, and a sample mask without its first bit is said and still
+draws. *2026-11-07.*
+
+**A151. Temporary: a buffer texture is a 2D texture 8192 texels a row,** rebuilt from the
+buffer's bytes when they change: textureSize is exact up to 8192 texels and counts whole rows
+past them, and what transform feedback wrote on the device is not seen (A129). *2026-11-07.*
+
+**A152. Temporary: an assembly program reads a swizzled texture unswizzled,** and says so each
+time. *2026-11-07.*
+
+**A153. GL_MAX_RECTANGLE_TEXTURE_SIZE is GL_MAX_TEXTURE_SIZE (2048), and
+GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT is 4:** nothing here needs a coarser boundary. *2026-11-07.*
+
+**A154. glTexBuffer and glTexBufferRange run when they are reached, a list open or not,** as the
+buffer object calls do. *2026-11-07.*
+
+**A170. Every GLSL version from 1.10 to 4.60 is taken;** a feature the WGSL emitter does not
+write fails the program's link with its reason rather than the shader's compile, so a shader of
+the version compiles as the specification's grammar and rules say. *2026-11-07.*
+
+**A171. Temporary: the compute limits are WebGPU's defaults,** below GL's minimums: 256
+invocations a work group against 1024, 256 by 256 by 64 against 1024 by 1024 by 64, and 16 KiB of
+shared memory against 32 KiB. *2026-11-07.*
+
+**A172. The vertex, tessellation and geometry stages have no storage blocks, atomic counters or
+images:** their GL_MAX_* answer 0, which the specification allows; WebGPU writes no storage from a
+vertex stage. *2026-11-07.*
+
+**A173. Temporary: a stage has at most 4 image uniforms** (WebGPU's storage textures) against
+GL's 8, **storage buffer offsets are multiples of 256**, a counter range off 256 being a loss
+though glBindBufferRange takes word offsets as GL does, and **a stage binds 8 storage blocks and
+counter buffers together.** *2026-11-07.*
+
+**A174. imageAtomic* is refused, a loss at the dispatch or draw:** WGSL has no atomics on
+textures. The image formats WebGPU cannot store to (rg16f, r11f_g11f_b10f, the 16-bit normalised
+ones and others) are taken by glBindImageTexture and refused where a shader uses them. *2026-11-07.*
+
+**A175. Shared and packed storage blocks are laid out as std140;** a block an atomic function
+touches is atomic words throughout; signed min and max on block words and every atomicCompSwap
+are compare-and-swap loops; memoryBarrier*() outside a compute shader emits nothing, an
+invocation's own accesses being in its order already. *2026-11-07.*
+
+**A176. textureQueryLod is worked out from the coordinates' derivatives** (the specification's
+lambda over the base level's size, a cube map's on its major axis' face), x clamped to the
+texture's levels: WGSL has no query of the level the device takes, and the sampler's minimum and
+maximum level and its filter are not weighed. *2026-11-07.*
+
+**A177. interpolateAtCentroid and interpolateAtSample answer the input at the pixel's centre,
+interpolateAtOffset the input moved along its derivatives:** every target here is drawn with one
+sample a pixel (A85, A150), so its centroid and its samples are its centre; WGSL has no
+interpolation at an offset, and a linear step along dFdx and dFdy is exact for an input linear in
+window space and close for a perspective one. *2026-11-07.*
+
+**A178. Temporary: a double is carried as an f32** (WGSL has no 64-bit float): its arithmetic,
+its uniforms (glUniform*d keep what an f32 holds, and glGetUniformdv answers it), its vertex
+inputs (glVertexAttribLPointer, said once), and its varyings are single precision. A double in a
+uniform or storage block keeps its eight bytes and layout: it is read into the f32 rounded to
+nearest, and written back as the double that f32 is; packDouble2x32 and unpackDouble2x32 go
+through the same conversion. A dvec3 or dvec4 input takes its two locations. *2026-11-07.*
+
+**A179. Temporary: an array of subroutine uniforms is refused** where a call indexes it (a
+syntax error at the call): a subroutine uniform is one function's name. A draw is made with the
+program's module written for the functions the program chose (glUniformSubroutinesuiv), each
+choice its own module. *2026-11-07.*
+
+**A180. Temporary: gl_CullDistance culls nothing,** said once a draw: WebGPU clips a primitive by
+distances (clip_distances) and has no culling by them, which GL makes of the whole primitive when
+one distance is negative at every vertex. gl_HelperInvocation is false: a helper invocation runs
+no store here, so a shader that steers its writes by it does the same. *2026-11-07.*
+
+**A181. Temporary: some limits answer below OpenGL 4.6's minimums,** the version being reported
+because every entry point of it is here: textures 8192 texels a side (16384 asked), 3D textures
+2048 a side and 256 layers (2048 asked), which are WebGPU's defaults every adapter gives; 16
+texture units for every stage and for all of them together (80 asked together), each sampler
+of a program being bound for every stage and WebGPU giving a stage 16 sampled textures and 16
+samplers; 4 draw buffers and colour attachments (8 asked; WebGPU's 32 bytes of colour a sample
+do not hold eight wide targets), 32 varying components; with A171 and A173 for compute and
+images. A program that sizes itself by the queries works; one that takes the minimums for
+granted is refused at the call that goes past them. *2026-11-07.*
+
+**A182. Temporary: a geometry shader's vertex streams past 0 are emitted nowhere,** which is what
+GL makes of them without transform feedback (stream 0 alone is rasterised); a program that
+captures while its geometry shader emits to another stream does not link, and the primitive
+queries of those streams count nothing. *2026-11-07.*
+
+**A183. Every context reports the same extensions, whatever version and profile it was asked
+for:** a 2.1 context names GL_ARB_compute_shader, a core 4.6 context GL_ARB_window_pos, as a
+Windows driver's compatibility contexts do. An extension is reported when every command it
+defines answers here and what it adds works; one that 4.x made core is reported with that
+version's decisions (A178 for GL_ARB_gpu_shader_fp64, A180 for GL_ARB_cull_distance, A182 and
+A195 for GL_ARB_transform_feedback3's streams), and a shader of an earlier version that enables
+it compiles what the version has of it (`glsl-versions.js`). *2026-11-07.*
+
+**A184. An extension's own spelling of a later version's GLSL name is that name:**
+textureQueryLOD (GL_ARB_texture_query_lod) is 4.00's textureQueryLod, anyInvocationARB and its
+kin (GL_ARB_shader_group_vote) 4.60's votes, gl_BaseVertexARB, gl_BaseInstanceARB and
+gl_DrawIDARB (GL_ARB_shader_draw_parameters) 4.60's variables, as gl_InstanceIDARB is
+gl_InstanceID. The extensions' wording differs from the versions' in places (the vote
+functions' result where invocations are inactive); the version's behaviour is the one run.
+*2026-11-07.*
+
+**A185. Dual-source blending (3.3, GL_ARB_blend_func_extended) needs the device's
+dual-source-blending;** without it, with more than one draw buffer (GL_MAX_DUAL_SOURCE_DRAW_BUFFERS
+is 1), or without a GLSL fragment shader to give a second output, a draw blending by GL_SRC1_* is
+a loss, said. The factors are taken by glBlendFunc* whatever the device, as the specification
+has them, so the refusal is at the draw. *2026-11-07.*
+
+**A186. Temporary: GL_CLAMP_TO_BORDER clamps to the edge,** said when such a texture is
+sampled: WebGPU has no border address mode, so outside the texture its edge's texels are read
+where GL reads the border colour (a shadow map whose border marks "lit" is the visible case).
+Emulating it is a coordinate test in every shader that samples the texture. *2026-11-07.*
+
+**A190. A geometry shader after tessellation runs over the most the tessellator may make:** the
+evaluation shader as a compute pass over every index the tessellator's room holds and the
+geometry shader's passes over as many primitives, both reading how many indices it wrote from
+its arguments on the GPU, an invocation past them making nothing (Direct3D 11's way, whose
+passes these are). The work is sized by the room, not by what was made. *2026-11-07.*
+
+**A191. Temporary: transform feedback of tessellated output without a geometry shader is refused,
+as a loss:** the evaluation shader is the draw's vertex stage there, and no pass keeps what it
+makes. Through a geometry shader it is captured (A190). *2026-11-07.*
+
+**A192. Default tessellation levels are kept as glPatchParameterfv gives them;** clamping and
+rounding by the spacing happen in the tessellator when a draw reads them, so a query answers what
+was set. *2026-11-07.*
+
+**A193. GL_ARB_tessellation_shader is reported,** a shader of 1.50 to 3.30 enabling it compiling
+both stages, `patch`, barrier() and the tessellation constants as 4.00 has them; what tessellation
+draws is A190 to A192's. *2026-11-07.*
+
+**A194. Patches reaching the immediate drawing path are a loss:** that path has no tessellator.
+
+**A200. Temporary: pixel transfer reaches colour only, at 8 bits a component.** Scale, bias and
+GL_MAP_COLOR's maps apply where an image is RGBA bytes: what glDrawPixels and the byte path of a
+texture upload unpack, and what glReadPixels reads before it packs it. A luminance image is
+expanded to RGBA before its transfer and each channel transferred, rather than the luminance
+alone. GL_MAP_STENCIL, the index shift and offset and the depth scale and bias are kept and
+answered and change nothing, which setting one says once: nothing here carries indices,
+stencil or depth through a transfer. *2026-11-07.*
+
+**A201. The imaging subset is absent:** GL_ARB_imaging is not reported, so its 1.2 getters
+(glGetColorTable, glGetConvolutionFilter, glGetSeparableFilter, glGetHistogram, glGetMinmax)
+are not obtainable, and 4.5's glGetn forms of them refuse every target with GL_INVALID_ENUM, as
+a context without the subset does; glPixelTransfer refuses the subset's names. *2026-11-07.*
+
+**A202. GL_MAX_PIXEL_MAP_TABLE is 256** (the minimum is 32), and GL_MAX_EVAL_ORDER stays at
+the minimum, 8. *2026-11-07.*
+*2026-11-07.*
+
+**A195. Temporary: a draw of a capture (glDrawTransformFeedback) draws what its first buffer's
+last capture wrote,** counted on the device by the buffer's counter as Direct3D's DrawAuto is: a
+capture into the same buffer by another object since is the one drawn. Only stream 0 is ever
+captured into, so a draw of another stream draws nothing. *2026-11-07.*
+
+**A196. Temporary: a draw of a capture through a geometry shader or tessellation, or captured
+again, is a loss,** as their passes are laid out on the processor for a count only the device
+has; a line loop of it is drawn without its closing line, and GL_PRIMITIVES_GENERATED does not
+count it. Each is said. *2026-11-07.*
+
+**A210. GL_ARB_texture_cube_map_array is reported,** a shader of 1.30 or later enabling it naming
+the cube map array samplers and taking every overload of the functions its version has over them.
+*2026-11-07.*
+
+**A211. Temporary: a texture view in another format of its original's class reads the
+original's texels in the original's format on the device,** said as a loss: WebGPU views a
+surface only in the format it was made in. On the processor a view reads and writes its
+original's bytes where the original keeps its own format's bits (a legacy RGBA8 level's RGBA
+among them); where it keeps another's (a legacy format's RGBA8 in an array) the view holds no
+level, said when it is made. *2026-11-07.*
+
+**A212. Temporary: a view gathering a cube map's faces into an array** (a 2D array or cube map
+array view of a GL_TEXTURE_CUBE_MAP) **holds no levels and samples as incomplete,** said when it
+is made: a cube map's faces are separate images here, which no one level reads. A view of one
+face, of all six as a cube, and every view of a 2D array or cube map array's layers read their
+original. *2026-11-07.*
+
+**A213. Temporary: GL_ARB_texture_view is not reported** while A211 and A212 stand;
+glTextureView is 4.3's, handed out with the version and answering. *2026-11-07.*
+
+**A214. A layer of an array (a cube map array's layer-face among them) attached by
+glFramebufferTextureLayer is drawn into as a 2D image;** a whole array or cube map is layered
+(A130). A 3D texture's slice is not attached: GL_INVALID_OPERATION, as no draw here reaches one.
+*2026-11-07.*
+
+**A215. Temporary: an image kept in a sized format's own bytes and a copy the device makes skip
+the pixel transfer** (A200), and say so once while the transfer changes anything: the transfer
+runs on 8-bit RGBA, which these never are here. An integer format's image and a compressed one
+take no transfer, as the specification says. *2026-11-07.*
+
+**A220. Temporary: a vertex program's inputs (GL_PROGRAM_INPUT) are what glGetActiveAttrib
+lists,** the conventional attributes among them with no location, and each by its name with an
+array size of 1; gl_VertexID and gl_InstanceID are not listed. The two calls answer one list
+(4.6 section 7.3.1.2), and both leave these out alike. *2026-11-07.*
+
+**A221. Temporary: a stage's inputs and outputs declared in an interface block are not listed**
+among a program's inputs and outputs; the stage's other variables and the built-ins it reads or
+writes are. *2026-11-07.*
+
+**A222. Every member of a shader storage block is an active buffer variable,** used or not, as
+every member of a uniform block is an active uniform here, and **an input or output between
+stages with no `layout(location)` answers GL_LOCATION -1:** locations between stages are matched
+by name here and assigned to none. *2026-11-07.*
+
+**A230. A SPIR-V program's resources answer the names its GLSL was written with,** not the
+module's OpName strings and not the empty string: the attribute at location 0 is `_a0`, the
+uniform at location 4 `_l4`, the sampler at binding 2 `_t2`, the uniform block at binding 1 `_U1`
+and its members `m0`, `m1`, the storage block at binding 0 `_B0`, a fragment output `_f0i0`
+(location, index). GL_ARB_gl_spirv leaves name reflection to the implementation; these names
+are what the GLSL front end links by, and two stages naming one resource alike is what makes a
+binding or a location one resource across them. Between stages a variable is the member `v` of
+a block named by its location and component, so A221 leaves it out of the program's lists.
+*2026-11-07.*
+
+**A231. Temporary: GL_ARB_gl_spirv is not reported,** while a SPIR-V shader is written back as
+GLSL and takes what the GLSL path takes and no more: a program that finds it may prefer its
+SPIR-V path, and one that does not keeps its GLSL one, which is drawn right.
+`glSpecializeShaderARB` is obtainable, as 4.6's `glSpecializeShader` is (A111), and
+GL_SHADER_BINARY_FORMATS lists SPIR-V's format. *2026-11-07.*
+
+**A232. A specialization that fails leaves its shader unspecialized:** glSpecializeShader may be
+called on it again, with other constants or another entry point. The extension forbids
+specializing a shader specialized already and says nothing of one whose specialization failed.
+*2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

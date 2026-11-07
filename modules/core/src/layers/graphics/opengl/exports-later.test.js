@@ -149,3 +149,53 @@ test('in a 64-bit process the strings\' pointers are eight bytes apart', ()=>{
     gl('glGetShaderSource', shader, 64, length, source);
     assert.equal(read(source, word(length)), 'void main() { gl_FragColor = vec4(0.5); }');
 });
+
+test('glPatchParameterfv reads four outer levels or two inner ones', ()=>{
+    const { gl, put, bytes } = library();
+    /** @param {number[]} values */
+    const floats = values=>put(new Uint8Array(Float32Array.from(values).buffer));
+    /** @param {number} at @param {number} count */
+    const readFloats = (at, count)=>[...new Float32Array(bytes.slice(at, at + count * 4).buffer)];
+    gl('glPatchParameteri', 0x8e72, 5);
+    gl('glPatchParameterfv', 0x8e74, floats([2, 3, 4, 5]));
+    gl('glPatchParameterfv', 0x8e73, floats([6, 7]));
+    const out = put(new Array(8).fill(0));
+    gl('glGetFloatv', 0x8e74, out);
+    assert.deepEqual(readFloats(out, 4), [2, 3, 4, 5]);
+    gl('glGetFloatv', 0x8e73, out);
+    assert.deepEqual(readFloats(out, 2), [6, 7]);
+    gl('glGetIntegerv', 0x8e72, out);
+    assert.equal(new DataView(bytes.buffer).getInt32(out, true), 5);
+    assert.equal(gl('glGetError'), GL.NO_ERROR);
+});
+
+test('a program\'s resources: a name to the size given, properties to the buffer, their count',
+    ()=>{
+        const { gl, put, string, read, word } = library();
+        const shader = gl('glCreateShader', GL.FRAGMENT_SHADER);
+        gl('glShaderSource', shader, 1, put([string('uniform vec3 tints[4];\n'
+            + 'void main() { gl_FragColor = vec4(tints[3], 1.0); }')]), 0);
+        gl('glCompileShader', shader);
+        const program = gl('glCreateProgram');
+        gl('glAttachShader', program, shader);
+        gl('glLinkProgram', program);
+        const UNIFORM = 0x92e1;
+        const [ACTIVE_RESOURCES, TYPE, ARRAY_SIZE, LOCATION] = [0x92f5, 0x92fa, 0x92fb, 0x930e];
+        const count = put([0]);
+        gl('glGetProgramInterfaceiv', program, UNIFORM, ACTIVE_RESOURCES, count);
+        assert.equal(word(count), 1);
+        const index = gl('glGetProgramResourceIndex', program, UNIFORM, string('tints'));
+        assert.equal(index, 0);
+        const [length, name] = [put([0]), put(new Array(8).fill(0))];
+        gl('glGetProgramResourceName', program, UNIFORM, index, 6, length, name);
+        assert.deepEqual([read(name, word(length)), word(length)], ['tints', 5],
+            'cut to the size given, terminated within it');
+        const [written, values] = [put([0]), put([9, 9, 9, 9])];
+        gl('glGetProgramResourceiv', program, UNIFORM, index, 3, put([TYPE, ARRAY_SIZE, LOCATION]),
+            2, written, values);
+        assert.deepEqual([word(written), word(values), word(values + 4), word(values + 8)],
+            [2, GL.FLOAT_VEC3, 4, 9], 'as many values as the buffer takes, the rest untouched');
+        assert.equal(gl('glGetProgramResourceLocation', program, UNIFORM, string('tints[2]')), 2);
+        assert.equal(gl('glGetProgramResourceLocationIndex', program, 0x92e4 /* PROGRAM_OUTPUT */,
+            string('gl_FragColor')), -1);
+    });

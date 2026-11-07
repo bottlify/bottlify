@@ -118,8 +118,14 @@ test('the extension string reports exactly what wglGetProcAddress can hand out',
         }
         assert.ok(!extensions.includes(version), `${version} is not an extension's name`);
     }
-    assert.equal(table.wglGetProcAddress.handler([cstring('glGetStringi')]), 0,
-        'a function of a version past the one claimed is not');
+    // A later version's function, or an unreported extension's, is obtained
+    // when it is implemented, as a driver hands out what it has (A111).
+    assert.notEqual(table.wglGetProcAddress.handler([cstring('glGetStringi')]), 0,
+        'implemented, of a version past the one claimed');
+    assert.notEqual(table.wglGetProcAddress.handler([cstring('glGetFramebufferParameterivEXT')]),
+        0, 'implemented, of an extension not reported');
+    assert.equal(table.wglGetProcAddress.handler([cstring('glTexPageCommitmentARB')]), 0,
+        'of an extension not reported and not implemented');
     assert.equal(table.wglGetProcAddress.handler([cstring('glFrobnicateXYZ')]), 0);
     assert.equal(table.wglGetProcAddress.handler([0]), 0);
 
@@ -147,8 +153,8 @@ test('without a way to hand out addresses, nothing is advertised and nothing is 
 
 test('the version string claims only what the entry points implement', ()=>{
     const { table, readString } = library();
-    assert.equal(readString(table.glGetString.handler([GL.VERSION])), '2.1');
-    assert.equal(readString(table.glGetString.handler([GL.SHADING_LANGUAGE_VERSION])), '1.20');
+    assert.equal(readString(table.glGetString.handler([GL.VERSION])), '4.6');
+    assert.equal(readString(table.glGetString.handler([GL.SHADING_LANGUAGE_VERSION])), '4.60');
 });
 
 test('every state in the default table is in an attribute group or deliberately not saved', ()=>{

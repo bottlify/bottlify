@@ -44,7 +44,7 @@ import {
 } from './glsl-types.js';
 import { BUILTIN_FUNCTIONS, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import {
-    GLSL_CONSTANTS, builtinVariablesFor, modernOverloads, perVertexOf,
+    GLSL_CONSTANTS, builtinVariablesFor, extensionOverloads, modernOverloads, perVertexOf,
 } from './glsl-library.js';
 import { blockLayout } from './glsl-layout.js';
 import { hasStage, languageOf } from './glsl-versions.js';
@@ -121,6 +121,8 @@ import { hasStage, languageOf } from './glsl-versions.js';
  * @property {Set<VariableSymbol>} uses  the global and built-in variables it names
  * @property {Token} at
  * @property {string[]} [subroutines]  the subroutine types it may be called as
+ * @property {number} [subroutineIndex]  its `layout(index)`, where it has one (4.30)
+ * @property {Set<number>} [streams]  the vertex streams past 0 it emits to (4.00)
  */
 
 /**
@@ -207,11 +209,11 @@ function conversionRank(from, to, language){
     {
         return from === 'int' || (from === 'uint' && v >= 130) ? 2 : null;
     }
-    if (to === 'double' && v >= 400)
+    if (to === 'double' && (v >= 400 || language?.has('double')))
     {
         return from === 'float' ? 1 : from === 'int' || from === 'uint' ? 3 : null;
     }
-    if (to === 'uint' && from === 'int' && v >= 400)
+    if (to === 'uint' && from === 'int' && language?.has('implicitUint'))
     {
         return 4;
     }
@@ -427,7 +429,8 @@ export function checkShader(ast, options){
 
     /** @param {string} name @returns {VariableSymbol | null} */
     const builtinSymbol = name=>{
-        const existing = unit.builtins.get(name);
+        const named = builtinTable[name]?.alias ?? name;
+        const existing = unit.builtins.get(named);
         if (existing)
         {
             return existing;
@@ -437,6 +440,7 @@ export function checkShader(ast, options){
         {
             return null;
         }
+
         let constant = builtin.role === 'const' ? builtin.value ?? null : null;
         if (name === 'gl_WorkGroupSize')
         {
@@ -446,10 +450,10 @@ export function checkShader(ast, options){
         }
         /** @type {VariableSymbol} */
         const symbol = {
-            kind: 'variable', name, type: builtinType(name, builtin), storage: 'builtin',
+            kind: 'variable', name: named, type: builtinType(name, builtin), storage: 'builtin',
             id: nextId++, global: true, at: /** @type {any} */ (null), builtin, constant,
         };
-        unit.builtins.set(name, symbol);
+        unit.builtins.set(named, symbol);
         return symbol;
     };
 
@@ -677,7 +681,7 @@ export function checkShader(ast, options){
         // An array of samplers is indexed by a constant before 4.00
         // (section 4.1.7 of 1.30 to 3.30).
         if (type.kind === 'array' && holdsOpaque(type.element) && !index.constant
-            && version < 400 && version >= 130)
+            && !language.has('gpuShader5') && version >= 130)
         {
             fail(node.at, "'[]' : an array of samplers is indexed by a constant expression only"
                 + ' before version 400');
@@ -1450,7 +1454,8 @@ export function checkShader(ast, options){
             candidates = modern
                 ? modernOverloads(node.name, language).map(o=>({ params: o.params,
                     directions: o.directions, target: o }))
-                : (BUILTIN_FUNCTIONS.get(node.name) ?? []).map(b=>({ params: b.params,
+                : [...BUILTIN_FUNCTIONS.get(node.name) ?? [],
+                    ...extensionOverloads(node.name, language)].map(b=>({ params: b.params,
                     directions: b.params.map(()=>'in'), target: b }));
         }
         if (candidates.length === 0)
@@ -1501,8 +1506,10 @@ export function checkShader(ast, options){
         {
             builtinCallRules(node, converted);
         }
-        return { node: 'call', at: node.at, name: node.name, builtin: target, args: converted,
-            type: target.returns, constant: foldBuiltin(node.name, converted, target.returns) };
+        // An extension's spelling of a core function is the core one's call.
+        const name = target.canonical ?? node.name;
+        return { node: 'call', at: node.at, name, builtin: target, args: converted,
+            type: target.returns, constant: foldBuiltin(name, converted, target.returns) };
     }
 
     /**
@@ -1532,7 +1539,7 @@ export function checkShader(ast, options){
                 // An out parameter converts back to the argument; before 4.00
                 // it had to match exactly.
                 const rank = direction === 'in' ? typeRank(a, p, language)
-                    : direction === 'out' && version >= 400 ? typeRank(p, a, language)
+                    : direction === 'out' && language.has('gpuShader5') ? typeRank(p, a, language)
                         : p === a ? 0 : null;
                 if (rank === null)
                 {
@@ -1553,7 +1560,7 @@ export function checkShader(ast, options){
         {
             return loose[0].c;
         }
-        if (version < 400)
+        if (!language.has('gpuShader5'))
         {
             fail(node.at, `'${node.name}' : ambiguous overloaded function call`);
         }
@@ -1681,6 +1688,10 @@ export function checkShader(ast, options){
             if (!args[0].constant)
             {
                 fail(args[0].at, `'${name}' : the stream must be a constant expression`);
+            }
+            else if (args[0].constant[0] !== 0 && current)
+            {
+                (current.streams ??= new Set()).add(args[0].constant[0]);
             }
         }
         if (name === 'barrier' && stage === 'tessControl')
@@ -1815,11 +1826,81 @@ export function checkShader(ast, options){
             {
                 fail(at, `'${name}' : layout qualifier not allowed here`);
             }
-            if (since > version)
+            // An extension brings its qualifiers to an earlier version:
+            // GL_ARB_uniform_buffer_object a block's packing and matrix
+            // order, GL_ARB_explicit_attrib_location the locations of 3.30,
+            // and each 4.x one its own (`layoutFeature`).
+            const brought = (since === 140 && (PACKINGS.has(name) || MATRIX_ORDERS.has(name))
+                && language.has('uniformBlocks'))
+                || (since === 330 && name === 'location' && language.has('explicitLocation'))
+                || layoutFeature(name, since, what, type).some(feature=>language.has(feature));
+            if (since > version && !brought)
             {
                 fail(at, `'${name}' : layout qualifier needs version ${since}`);
             }
         }
+    }
+
+    /**
+     * The features that bring a layout qualifier of a later version to an
+     * earlier one, an extension having enabled them: each 4.x extension's
+     * qualifiers where its specification adds them.
+     *
+     * @param {string} name @param {number | null} since @param {string} what
+     * @param {GlslType} [type]
+     * @returns {import('./glsl-versions.js').Feature[]}
+     */
+    function layoutFeature(name, since, what, type){
+        const opaque = type ? innermost(type) : null;
+        if (name === 'std430')
+        {
+            return ['shaderStorage'];
+        }
+        switch (name)
+        {
+            case 'binding':
+                return opaque?.kind === 'atomic' ? ['binding', 'atomicCounters']
+                    : what === 'blockBuffer' ? ['binding', 'shaderStorage']
+                        : opaque?.kind === 'image' ? ['binding', 'images'] : ['binding'];
+            case 'offset':
+                return since === 420 ? ['atomicCounters'] : ['enhancedLayouts'];
+            case 'align':
+            case 'component':
+            case 'xfb_buffer':
+            case 'xfb_offset':
+            case 'xfb_stride':
+                return ['enhancedLayouts'];
+            case 'location':
+                return since === 410 ? ['separateShaders'] : since === 430
+                    ? ['explicitUniformLocation'] : ['enhancedLayouts'];
+            case 'index':
+                return since === 430 ? ['explicitUniformLocation'] : ['dualSource'];
+            case 'stream':
+            case 'invocations':
+                return ['gpuShader5'];
+            case 'vertices':
+            case 'point_mode':
+            case 'cw':
+            case 'ccw':
+                return ['tessellation'];
+            case 'local_size_x':
+            case 'local_size_y':
+            case 'local_size_z':
+                return ['compute'];
+            case 'early_fragment_tests':
+                return ['images'];
+            default:
+                break;
+        }
+        if (DEPTH_LAYOUTS.has(name))
+        {
+            return ['conservativeDepth'];
+        }
+        if (TES_MODES.has(name) || TES_SPACING.has(name))
+        {
+            return ['tessellation'];
+        }
+        return IMAGE_FORMATS.has(name) ? ['images'] : [];
     }
 
     /**
@@ -2056,7 +2137,8 @@ export function checkShader(ast, options){
                     fail(declarator.at, `'${declarator.name}' : a const variable at global scope`
                         + ' needs a constant initializer');
                 }
-                if (storage === 'const' && !global && modern && version < 420
+                if (storage === 'const' && !global && modern
+                    && !language.has('shadingLanguage420pack')
                     && !initializer.constant && !isConstantTree(initializer))
                 {
                     fail(declarator.at, `'${declarator.name}' : a const variable needs a constant`
@@ -2979,7 +3061,8 @@ export function checkShader(ast, options){
             fail(decl.at, `'${decl.name}' : identifiers starting with "gl_" are reserved`);
         }
         const builtin = modern ? modernOverloads(decl.name, language).length > 0
-            : BUILTIN_FUNCTIONS.has(decl.name);
+            : BUILTIN_FUNCTIONS.has(decl.name)
+                || extensionOverloads(decl.name, language).length > 0;
         if (version >= 120 && version < 400 && builtin)
         {
             fail(decl.at, `'${decl.name}' : a built-in function cannot be redefined or`
@@ -3098,6 +3181,12 @@ export function checkShader(ast, options){
                 fail(decl.at, `'${decl.name}' : a subroutine function cannot be overloaded`);
             }
             fn.subroutines = q.subroutine.map(t=>t.text);
+            // 4.30's explicit index of a subroutine function (section 4.4.4).
+            const index = /** @type {Record<string, any>} */ (layoutOf(q)).index;
+            if (typeof index === 'number')
+            {
+                fn.subroutineIndex = index;
+            }
         }
         if (!decl.body)
         {

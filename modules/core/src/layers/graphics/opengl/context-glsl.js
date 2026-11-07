@@ -33,12 +33,63 @@
  */
 
 import { GL } from './constants.js';
-import { preprocess } from './glsl-preprocess.js';
-import { GlslSyntaxError, parse } from './glsl-parse.js';
-import { GlslCompileError, checkShader } from './glsl-check.js';
-import { linkProgram } from './glsl-link.js';
+import { compileFront } from './glsl-front.js';
+import { GLSL_EXTENSIONS } from './glsl-versions.js';
+import { GLSL_CONSTANTS } from './glsl-library.js';
+import { BLOCK_LIMITS, COMPUTE_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
+import { IMAGE_LIMITS } from './glsl-storage.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
-import { componentsOf } from './glsl-types.js';
+import { ATOMIC_UINT, componentsOf } from './glsl-types.js';
+import { TESS, tessellationProgramAnswer } from './context-tessellation.js';
+
+/**
+ * The GLSL versions a shader may name: every one from 1.10 to 4.60. A
+ * feature of one the emitter does not write (`glsl-wgsl.js`) fails the link
+ * with its reason (decision A170); a later version fails to compile with the
+ * specification's message for a version the implementation does not
+ * support.
+ */
+export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 400, 410, 420,
+    430, 440, 450, 460]);
+
+/**
+ * The versions a tessellation shader may name: the language has the stages
+ * from 4.00 (`glsl-versions.js`), and the emitter writes what a control or
+ * evaluation shader of any of them may say (`glsl-wgsl-tess.js`).
+ */
+const TESSELLATION_VERSIONS = Object.freeze([400, 410, 420, 430, 440, 450, 460]);
+
+/**
+ * @typedef {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'
+ *     | 'compute'} ShaderStage
+ */
+
+/**
+ * The built-in constants of 1.30 and later as this implementation answers
+ * them: the limits 1.10 and 1.20 already report (`GLSL_LIMITS`) and the
+ * specification's minimums for the rest, so that a shader sizing an array by
+ * gl_MaxDrawBuffers and a program asking GL_MAX_DRAW_BUFFERS agree.
+ */
+export const CONTEXT_CONSTANTS = Object.freeze({
+    ...GLSL_CONSTANTS,
+    gl_MaxVertexAttribs: GLSL_LIMITS.vertexAttribs,
+    gl_MaxVertexUniformComponents: GLSL_LIMITS.vertexUniformComponents,
+    gl_MaxFragmentUniformComponents: GLSL_LIMITS.fragmentUniformComponents,
+    gl_MaxVaryingFloats: GLSL_LIMITS.varyingFloats,
+    gl_MaxVaryingComponents: GLSL_LIMITS.varyingFloats,
+    gl_MaxVertexTextureImageUnits: GLSL_LIMITS.vertexTextureImageUnits,
+    gl_MaxCombinedTextureImageUnits: GLSL_LIMITS.combinedTextureImageUnits,
+    gl_MaxTextureImageUnits: GLSL_LIMITS.textureImageUnits,
+    gl_MaxGeometryTextureImageUnits: GLSL_LIMITS.textureImageUnits,
+    gl_MaxDrawBuffers: GLSL_LIMITS.drawBuffers,
+    gl_MaxTextureUnits: GLSL_LIMITS.textureUnits,
+    gl_MaxTextureCoords: GLSL_LIMITS.textureCoords,
+    gl_MaxClipPlanes: GLSL_LIMITS.clipPlanes,
+    gl_MaxLights: GLSL_LIMITS.lights,
+    gl_MaxComputeWorkGroupSize: [...COMPUTE_LIMITS.size],
+    gl_MaxComputeWorkGroupCount: [...COMPUTE_LIMITS.count],
+    gl_MaxComputeTextureImageUnits: GLSL_LIMITS.textureImageUnits,
+});
 
 // GL_ARB_shader_objects' own enums; its other queries are the 2.0 ones.
 const PROGRAM_OBJECT_ARB = 0x8b40;
@@ -62,6 +113,9 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {ShaderUnit | null} unit
  * @property {boolean} deleted
  * @property {number} attachments  how many programs hold it
+ * @property {import('./spirv-module.js').SpirvModule | null} [spirv]  the SPIR-V module
+ *     glShaderBinary associated (SPIR_V_BINARY, `context-spirv.js`)
+ * @property {boolean} [specialized]  glSpecializeShader done since
  */
 
 /** @typedef {import('./glsl-link.js').Executable} Executable */
@@ -76,14 +130,72 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {boolean} validated
  * @property {string} log
  * @property {Map<string, number>} bindings  glBindAttribLocation's, for the next link
+ * @property {Map<string, { location: number, index: number }>} fragData
+ *     glBindFragDataLocation's, for the next link
+ * @property {{ names: string[], mode: 'interleaved' | 'separate' } | null} feedback
+ *     glTransformFeedbackVaryings', for the next link
  * @property {Executable | null} executable
  * @property {number} users  the contexts it is current in
+ * @property {boolean} [retrievable]  PROGRAM_BINARY_RETRIEVABLE_HINT (4.1)
+ * @property {boolean} [separable]  PROGRAM_SEPARABLE (4.1)
+ * @property {{ vertex: ShaderUnit[], geometry: ShaderUnit[], fragment: ShaderUnit[] }}
+ *     [stageUnits]  what the last successful link linked, each stage's, for a
+ *     program pipeline (4.1) to link again with other programs' stages
  */
 
-/** The shader types. @type {Map<number, 'vertex' | 'fragment'>} */
-const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.FRAGMENT_SHADER, 'fragment']]);
+/**
+ * A program pipeline (4.1): the program each stage runs, the one glUniform
+ * writes, and the executable its stages make together.
+ *
+ * @typedef {Object} PipelineObject
+ * @property {number} name
+ * @property {Record<'vertex' | 'geometry' | 'fragment', ProgramObject | null>} stages
+ * @property {ProgramObject | null} active
+ * @property {boolean} validated
+ * @property {string} log
+ * @property {{ key: string, executable: Executable | null, versions: number[] } | null} made
+ */
+
+/** The shader types. @type {Map<number, ShaderStage>} */
+const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.GEOMETRY_SHADER, 'geometry'],
+    [TESS.TESS_CONTROL_SHADER, 'tessControl'], [TESS.TESS_EVALUATION_SHADER, 'tessEvaluation'],
+    [GL.FRAGMENT_SHADER, 'fragment'], [GL.COMPUTE_SHADER, 'compute']]);
+
+/** What GEOMETRY_INPUT_TYPE and GEOMETRY_OUTPUT_TYPE answer, by the layout's word. */
+const GEOMETRY_PRIMITIVES = Object.freeze(/** @type {Record<string, number>} */ ({
+    points: GL.POINTS, lines: GL.LINES, lines_adjacency: GL.LINES_ADJACENCY,
+    triangles: GL.TRIANGLES, triangles_adjacency: GL.TRIANGLES_ADJACENCY,
+    line_strip: GL.LINE_STRIP, triangle_strip: GL.TRIANGLE_STRIP,
+}));
 
 let executables = 0;
+
+/**
+ * What a link makes runnable: its uniform store, as the link leaves it.
+ *
+ * @param {LinkedProgram} linked @returns {Executable}
+ */
+function executableOf(linked){
+    const store = linked.defaults.slice(0);
+    return {
+        id: ++executables,
+        linked,
+        store,
+        floats: new Float32Array(store),
+        ints: new Int32Array(store),
+        version: 0,
+        blockBindings: Int32Array.from(linked.blocks, block=>block.binding),
+        storageBindings: Int32Array.from(linked.storageBlocks ?? [], block=>block.binding),
+    };
+}
+
+/** glUseProgramStages' bits (4.1 table 7.1), each stage's. */
+const STAGE_BITS = Object.freeze(/** @type {const} */ ([
+    ['vertex', 0x1], ['fragment', 0x2], ['geometry', 0x4],
+]));
+
+/** The bits glUseProgramStages takes: the three above, tessellation's and compute's. */
+const ALL_STAGE_BITS = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20;
 
 /**
  * Compiled shaders by their text, the most recent first to be kept.
@@ -92,9 +204,11 @@ let executables = 0;
  */
 const COMPILED = new Map();
 const COMPILED_KEPT = 256;
+/** The extensions a shader's #extension may enable: what the front end has of each. */
+const SHADER_EXTENSIONS = Object.keys(GLSL_EXTENSIONS);
 
 /**
- * @param {readonly string[]} sources @param {'vertex' | 'fragment'} stage
+ * @param {readonly string[]} sources @param {ShaderStage} stage
  * @returns {{ ok: boolean, log: string, unit: ShaderUnit | null }}
  */
 export function compileShader(sources, stage){
@@ -106,32 +220,11 @@ export function compileShader(sources, stage){
         COMPILED.set(key, known);
         return known;
     }
-    const pre = preprocess(sources);
-    const lines = pre.diagnostics.map(d=>`${d.severity === 'error' ? 'ERROR' : 'WARNING'}:`
-        + ` ${d.string}:${d.line}: ${d.message}`);
-    /** @type {{ ok: boolean, log: string, unit: ShaderUnit | null }} */
-    let result;
-    if (pre.diagnostics.some(d=>d.severity === 'error'))
-    {
-        result = { ok: false, log: `${lines.join('\n')}\n`, unit: null };
-    }
-    else
-    {
-        try
-        {
-            const unit = checkShader(parse(pre.tokens), { stage, version: pre.version });
-            result = { ok: true, log: lines.length > 0 ? `${lines.join('\n')}\n` : '', unit };
-        }
-        catch (e){
-            if (!(e instanceof GlslSyntaxError) && !(e instanceof GlslCompileError))
-            {
-                throw e;
-            }
-            const at = e.at;
-            lines.push(`ERROR: ${at.string}:${at.line}: ${e.message}`);
-            result = { ok: false, log: `${lines.join('\n')}\n`, unit: null };
-        }
-    }
+    const tessellation = stage === 'tessControl' || stage === 'tessEvaluation';
+    const versions = tessellation ? [...EMITTED_VERSIONS, ...TESSELLATION_VERSIONS]
+        : EMITTED_VERSIONS;
+    const result = compileFront(sources, stage, { versions,
+        constants: CONTEXT_CONSTANTS, extensions: SHADER_EXTENSIONS });
     COMPILED.set(key, result);
     if (COMPILED.size > COMPILED_KEPT)
     {
@@ -151,13 +244,25 @@ export function glTypeOf(type){
     switch (type.kind)
     {
         case 'scalar':
-            return type.base === 'float' ? GL.FLOAT : type.base === 'int' ? GL.INT : GL.BOOL;
+            return type.base === 'float' ? GL.FLOAT : type.base === 'int' ? GL.INT
+                : type.base === 'uint' ? GL.UNSIGNED_INT : type.base === 'double' ? GL.DOUBLE
+                    : GL.BOOL;
         case 'vector': {
             const at = type.size - 2;
             return type.base === 'float' ? GL.FLOAT_VEC2 + at
-                : type.base === 'int' ? GL.INT_VEC2 + at : GL.BOOL_VEC2 + at;
+                : type.base === 'int' ? GL.INT_VEC2 + at
+                    : type.base === 'uint' ? GL.UNSIGNED_INT_VEC2 + at
+                        // GL_DOUBLE_VEC2 on (4.0 table 7.3).
+                        : type.base === 'double' ? 0x8ffc + at : GL.BOOL_VEC2 + at;
         }
         case 'matrix':
+            if (type.base === 'double')
+            {
+                // GL_DOUBLE_MAT2 on: the square ones, then 2x3, 2x4, 3x2, 3x4, 4x2, 4x3.
+                return 0x8f46 + (type.cols === type.rows ? type.cols - 2
+                    : 3 + ['2x3', '2x4', '3x2', '3x4', '4x2', '4x3'].indexOf(
+                        `${type.cols}x${type.rows}`));
+            }
             if (type.cols === type.rows)
             {
                 return GL.FLOAT_MAT2 + type.cols - 2;
@@ -167,12 +272,78 @@ export function glTypeOf(type){
                 '3x4': GL.FLOAT_MAT3x4, '4x2': GL.FLOAT_MAT4x2, '4x3': GL.FLOAT_MAT4x3,
             })[`${type.cols}x${type.rows}`];
         case 'sampler':
-            return type.shadow ? (type.dim === '1D' ? GL.SAMPLER_1D_SHADOW : GL.SAMPLER_2D_SHADOW)
-                : /** @type {Record<string, number>} */ ({ '1D': GL.SAMPLER_1D,
-                    '2D': GL.SAMPLER_2D, '3D': GL.SAMPLER_3D, Cube: GL.SAMPLER_CUBE })[type.dim];
+            return SAMPLER_TYPES[`${type.sampled === 'float' ? '' : type.sampled}${type.dim}`
+                + `${type.ms ? 'MS' : ''}${type.array ? 'Array' : ''}`
+                + `${type.shadow ? 'Shadow' : ''}`] ?? 0;
+        case 'atomic':
+            return 0x92db; // GL_UNSIGNED_INT_ATOMIC_COUNTER
+        case 'image': {
+            // GL_IMAGE_1D on, eleven shapes a kind of value (4.2 table 7.3).
+            const shape = ['1D', '2D', '3D', '2DRect', 'Cube', 'Buffer', '1DArray', '2DArray',
+                'CubeArray', '2DMS', '2DMSArray'].indexOf(`${type.dim}${type.ms ? 'MS' : ''}`
+                + `${type.array ? 'Array' : ''}`);
+            return shape < 0 ? 0 : 0x904c + shape
+                + (type.sampled === 'int' ? 11 : type.sampled === 'uint' ? 22 : 0);
+        }
         default:
             return 0;
     }
+}
+
+/** The GL type of each shape of sampler, by its GLSL name past `sampler`. */
+const SAMPLER_TYPES = /** @type {Record<string, number>} */ ({
+    '1D': GL.SAMPLER_1D, '2D': GL.SAMPLER_2D, '3D': GL.SAMPLER_3D, Cube: GL.SAMPLER_CUBE,
+    '1DShadow': GL.SAMPLER_1D_SHADOW, '2DShadow': GL.SAMPLER_2D_SHADOW,
+    '1DArray': GL.SAMPLER_1D_ARRAY, '2DArray': GL.SAMPLER_2D_ARRAY,
+    '1DArrayShadow': GL.SAMPLER_1D_ARRAY_SHADOW, '2DArrayShadow': GL.SAMPLER_2D_ARRAY_SHADOW,
+    CubeShadow: GL.SAMPLER_CUBE_SHADOW, '2DRect': GL.SAMPLER_2D_RECT,
+    '2DRectShadow': GL.SAMPLER_2D_RECT_SHADOW, Buffer: GL.SAMPLER_BUFFER,
+    '2DMS': GL.SAMPLER_2D_MULTISAMPLE, '2DMSArray': GL.SAMPLER_2D_MULTISAMPLE_ARRAY,
+    int1D: GL.INT_SAMPLER_1D, int2D: GL.INT_SAMPLER_2D, int3D: GL.INT_SAMPLER_3D,
+    intCube: GL.INT_SAMPLER_CUBE, int2DRect: GL.INT_SAMPLER_2D_RECT,
+    int1DArray: GL.INT_SAMPLER_1D_ARRAY, int2DArray: GL.INT_SAMPLER_2D_ARRAY,
+    intBuffer: GL.INT_SAMPLER_BUFFER, int2DMS: GL.INT_SAMPLER_2D_MULTISAMPLE,
+    int2DMSArray: GL.INT_SAMPLER_2D_MULTISAMPLE_ARRAY,
+    uint1D: GL.UNSIGNED_INT_SAMPLER_1D, uint2D: GL.UNSIGNED_INT_SAMPLER_2D,
+    uint3D: GL.UNSIGNED_INT_SAMPLER_3D, uintCube: GL.UNSIGNED_INT_SAMPLER_CUBE,
+    uint2DRect: GL.UNSIGNED_INT_SAMPLER_2D_RECT, uint1DArray: GL.UNSIGNED_INT_SAMPLER_1D_ARRAY,
+    uint2DArray: GL.UNSIGNED_INT_SAMPLER_2D_ARRAY, uintBuffer: GL.UNSIGNED_INT_SAMPLER_BUFFER,
+    uint2DMS: GL.UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE,
+    uint2DMSArray: GL.UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY,
+});
+
+/**
+ * The uniforms a program lists (section 2.11.4 of 3.1): its default block's
+ * leaves, then its named blocks' variables, then its atomic counters.
+ *
+ * @param {LinkedProgram} linked
+ * @returns {{ name: string, size: number, type: GlslType, block: number, offset: number,
+ *     arrayStride: number, matrixStride: number, rowMajor: boolean, counters: number }[]}
+ *     `counters` an atomic counter's buffer's index, -1 for every other
+ */
+export function activeUniforms(linked){
+    const buffers = counterBuffersOf(linked);
+    return [
+        ...linked.uniforms.map(u=>({ name: u.name, size: u.size, type: u.type, block: -1,
+            offset: -1, arrayStride: -1, matrixStride: -1, rowMajor: false, counters: -1 })),
+        ...(linked.blockUniforms ?? []).map(u=>({ ...u, counters: -1 })),
+        // An atomic counter is a uniform with no location (4.2 section 7.3.1),
+        // in the buffer of its binding.
+        ...(linked.counters ?? []).map(c=>({ name: c.count > 1 ? `${c.name}[0]` : c.name,
+            size: c.count, type: ATOMIC_UINT, block: -1, offset: c.offset,
+            arrayStride: c.count > 1 ? 4 : 0, matrixStride: 0, rowMajor: false,
+            counters: buffers.indexOf(c.binding) })),
+    ];
+}
+
+/**
+ * The atomic counter buffers a program reads (4.2 section 7.3.1): its
+ * counters' bindings, each once, in order.
+ *
+ * @param {LinkedProgram} linked @returns {number[]}
+ */
+export function counterBuffersOf(linked){
+    return [...new Set((linked.counters ?? []).map(c=>c.binding))].sort((a, b)=>a - b);
 }
 
 /**
@@ -274,11 +445,16 @@ export function installShaderCalls(context, kernel){
      * names, or null with the error set.
      *
      * @param {string} call @param {number} location
+     * @param {ProgramObject | null} [program]  glProgramUniform's (4.1), the current
+     *     one's otherwise, whose executable stays in use through a failed relink
      * @returns {{ executable: Executable,
      *     leaf: import('./glsl-link.js').UniformLeaf, element: number } | null}
      */
-    const uniformAt = (call, location)=>{
-        const executable = currentProgram?.executable;
+    const uniformAt = (call, location, program)=>{
+        // With no program in use, a bound pipeline's active program (4.1).
+        const executable = program === undefined
+            ? (currentProgram ?? boundPipeline?.active ?? null)?.executable
+            : program?.linked ? program.executable : null;
         if (!executable)
         {
             setError(GL.INVALID_OPERATION);
@@ -306,24 +482,27 @@ export function installShaderCalls(context, kernel){
      * @param {number} location
      * @param {number} count
      * @param {ArrayLike<number>} values
-     * @param {'f' | 'i'} kind
+     * @param {'f' | 'i' | 'u' | 'd'} kind  glUniform*d's for a double (4.0)
      * @param {number} components  per element, or a matrix's columns times rows
      * @param {{ cols: number, rows: number, transpose: boolean } | null} matrix
+     * @param {ProgramObject} [program]  glProgramUniform's (4.1), the current one's otherwise
      */
-    const writeUniform = (call, location, count, values, kind, components, matrix)=>{
+    const writeUniform = (call, location, count, values, kind, components, matrix, program)=>{
         if (count < 0)
         {
             setError(GL.INVALID_VALUE);
             return;
         }
-        const target = uniformAt(call, location);
+        const target = uniformAt(call, location, program);
         if (!target)
         {
             return;
         }
         const { executable, leaf, element } = target;
         const type = leaf.type;
-        if (type.kind === 'sampler')
+        // An image's value is its unit, as a sampler's is (4.2 section 7.6).
+        const opaque = type.kind === 'sampler' || type.kind === 'image';
+        if (opaque)
         {
             if (kind !== 'i' || components !== 1 || matrix)
             {
@@ -333,7 +512,8 @@ export function installShaderCalls(context, kernel){
         }
         else if (matrix)
         {
-            if (type.kind !== 'matrix' || type.cols !== matrix.cols || type.rows !== matrix.rows)
+            if (type.kind !== 'matrix' || type.cols !== matrix.cols || type.rows !== matrix.rows
+                || (type.base === 'double') !== (kind === 'd'))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
@@ -343,7 +523,9 @@ export function installShaderCalls(context, kernel){
         {
             const base = type.kind === 'scalar' || type.kind === 'vector' ? type.base : null;
             if (base === null || componentsOf(type) !== components
-                || (base === 'float' && kind !== 'f') || (base === 'int' && kind !== 'i'))
+                || (base === 'float' && kind !== 'f') || (base === 'int' && kind !== 'i')
+                || (base === 'uint' && kind !== 'u') || (base === 'double' && kind !== 'd')
+                || (base === 'bool' && kind === 'd'))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
@@ -354,12 +536,14 @@ export function installShaderCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        if (type.kind === 'sampler')
+        if (opaque)
         {
+            const units = type.kind === 'image' ? IMAGE_LIMITS.units
+                : GLSL_LIMITS.combinedTextureImageUnits;
             for (let k = 0; k < count; k++)
             {
                 const unit = values[k];
-                if (unit < 0 || unit >= GLSL_LIMITS.combinedTextureImageUnits)
+                if (unit < 0 || unit >= units)
                 {
                     setError(GL.INVALID_VALUE);
                     return;
@@ -367,8 +551,9 @@ export function installShaderCalls(context, kernel){
             }
         }
         const elements = Math.min(count, leaf.size - element);
-        const stored = type.kind === 'scalar' || type.kind === 'vector' ? type.base
-            : type.kind === 'sampler' ? 'int' : 'float';
+        // A double is kept as the f32 a shader carries it as (decision A178).
+        const stored = type.kind === 'scalar' || type.kind === 'vector'
+            ? type.base === 'double' ? 'float' : type.base : opaque ? 'int' : 'float';
         const { floats, ints } = executable;
         let changed = false;
         for (let e = 0; e < elements; e++)
@@ -414,15 +599,179 @@ export function installShaderCalls(context, kernel){
         }
     };
 
+    /**
+     * A program's linked block of an index, or null with the error set:
+     * GL_INVALID_VALUE for an index past its blocks.
+     *
+     * @param {number} programName @param {number} index
+     * @returns {{ linked: LinkedProgram, executable: Executable } | null}
+     */
+    const blockOf = (programName, index)=>{
+        const program = objectOf(programName, 'program');
+        if (!program)
+        {
+            return null;
+        }
+        const executable = program.executable;
+        if (!executable || index < 0 || index >= executable.linked.blocks.length)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        return { linked: executable.linked, executable };
+    };
+
+    // --- program pipelines (4.1) ---
+
+    /** This context's pipelines: not shared, as vertex array objects are not. */
+    /** @type {Map<number, PipelineObject | null>} */
+    const pipelines = new Map();
+    /** @type {PipelineObject | null} */
+    let boundPipeline = null;
+
+    /** @param {number} name @returns {PipelineObject} */
+    const makePipeline = name=>({ name, stages: { vertex: null, geometry: null, fragment: null },
+        active: null, validated: false, log: '', made: null });
+
+    /**
+     * A pipeline's stages linked together: each program's own units, its
+     * attribute and output locations kept as its link gave them. Linked
+     * again when a stage's program is linked again or changes.
+     *
+     * @param {PipelineObject} pipeline
+     * @returns {{ executable: Executable | null, log: string }}
+     */
+    const pipelineLink = pipeline=>{
+        const { vertex, geometry, fragment } = pipeline.stages;
+        const key = [vertex, geometry, fragment]
+            .map(program=>(program?.executable ? program.executable.id : 0)).join('/');
+        if (pipeline.made?.key === key)
+        {
+            return { executable: pipeline.made.executable, log: pipeline.log };
+        }
+        const vertexLinked = vertex?.executable?.linked;
+        const fragmentLinked = fragment?.executable?.linked;
+        const result = linkProgram({
+            vertex: vertex?.stageUnits?.vertex ?? [],
+            geometry: geometry?.stageUnits?.geometry ?? [],
+            fragment: fragment?.stageUnits?.fragment ?? [],
+            attribBindings: new Map((vertexLinked?.attributes ?? [])
+                .map(attribute=>[attribute.name, attribute.location])),
+            fragDataBindings: new Map((fragmentLinked?.outputs ?? [])
+                .map(output=>[output.name, { location: output.location, index: output.index }])),
+        });
+        pipeline.log = result.log;
+        const executable = result.ok ? executableOf(result.program) : null;
+        pipeline.made = { key, executable, versions: [] };
+        return { executable, log: result.log };
+    };
+
+    /**
+     * A pipeline's executable with each uniform's value from the program of
+     * the stage that declares it, the earliest stage's where two do, and
+     * each block's binding likewise.
+     *
+     * @param {PipelineObject} pipeline @returns {Executable | null}
+     */
+    const pipelineExecutable = pipeline=>{
+        const { executable } = pipelineLink(pipeline);
+        const made = pipeline.made;
+        if (!executable || !made)
+        {
+            kernel.diverge('a program pipeline whose stages do not link together drew with the'
+                + ' fixed pipeline: ' + pipeline.log.trim());
+            return null;
+        }
+        const owners = /** @type {ProgramObject[]} */ ([pipeline.stages.vertex,
+            pipeline.stages.geometry, pipeline.stages.fragment]
+            .filter(program=>program?.executable));
+        const versions = owners.map(program=>/** @type {Executable} */ (program.executable).version);
+        if (versions.join() !== made.versions.join())
+        {
+            made.versions = versions;
+            const into = new Uint8Array(executable.store);
+            for (const leaf of executable.linked.uniforms)
+            {
+                for (const owner of owners)
+                {
+                    const from = /** @type {Executable} */ (owner.executable);
+                    const same = from.linked.uniforms.find(other=>other.name === leaf.name
+                        && other.words === leaf.words && other.size === leaf.size);
+                    if (same)
+                    {
+                        into.set(new Uint8Array(from.store, same.offset * 4,
+                            same.words * same.size * 4), leaf.offset * 4);
+                        break;
+                    }
+                }
+            }
+            executable.version++;
+        }
+        executable.linked.blocks.forEach((block, index)=>{
+            for (const owner of owners)
+            {
+                const from = /** @type {Executable} */ (owner.executable);
+                const at = from.linked.blocks.findIndex(other=>other.name === block.name);
+                if (at >= 0)
+                {
+                    executable.blockBindings[index] = from.blockBindings[at];
+                    break;
+                }
+            }
+        });
+        return executable;
+    };
+
+    kernel.side.queries ??= new Map();
+    kernel.side.queries.set(GL.PROGRAM_PIPELINE_BINDING, ()=>({ kind: 'int',
+        values: [boundPipeline?.name ?? 0] }));
+
     Object.assign(kernel.side, {
         /**
          * The program in use, for a draw: what it runs and the uniform values
-         * it runs with, or null for the fixed pipeline.
+         * it runs with, or null for the fixed pipeline. With none in use, a
+         * bound program pipeline's stages (4.1).
          *
          * @returns {Executable | null}
          */
-        glslExecutable: ()=>currentProgram?.executable ?? null,
+        glslExecutable: ()=>currentProgram?.executable
+            ?? (boundPipeline && Object.values(boundPipeline.stages).some(Boolean)
+                ? pipelineExecutable(boundPipeline) : null),
+        /**
+         * A program object by its name, as the program calls check it:
+         * INVALID_VALUE for no object, INVALID_OPERATION for a shader.
+         *
+         * @param {number} name @returns {ProgramObject | null}
+         */
+        programObject: name=>objectOf(name, 'program'),
+        /**
+         * A shader object by its name, checked as programObject is.
+         *
+         * @param {number} name @returns {ShaderObject | null}
+         */
+        shaderObject: name=>objectOf(name, 'shader'),
     });
+
+    /**
+     * A pipeline by name, made on its first use; undefined, with the error
+     * set, for a name glGenProgramPipelines never gave.
+     *
+     * @param {number} name @returns {PipelineObject | undefined}
+     */
+    const pipelineNamed = name=>{
+        if (!pipelines.has(name))
+        {
+            setError(GL.INVALID_OPERATION);
+            return undefined;
+        }
+        let pipeline = pipelines.get(name);
+        if (!pipeline)
+        {
+            pipeline = makePipeline(name);
+            pipelines.set(name, pipeline);
+        }
+        return pipeline;
+    };
 
     Object.assign(context, {
         // --- shader objects ---
@@ -462,6 +811,8 @@ export function installShaderCalls(context, kernel){
             if (shader)
             {
                 shader.sources = [...sources];
+                // A source breaks a SPIR-V module's association (GL_ARB_gl_spirv).
+                shader.spirv = null;
             }
         },
 
@@ -476,7 +827,13 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const stage = /** @type {'vertex' | 'fragment'} */ (SHADER_TYPES.get(shader.type));
+            if (shader.spirv)
+            {
+                // A SPIR-V shader is specialized, never compiled (4.6 section 7.1).
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const stage = /** @type {ShaderStage} */ (SHADER_TYPES.get(shader.type));
             const result = compileShader(shader.sources ?? [], stage);
             shader.compiled = result.ok;
             shader.log = result.log;
@@ -525,6 +882,8 @@ export function installShaderCalls(context, kernel){
                     return [shader.deleted ? 1 : 0];
                 case GL.COMPILE_STATUS:
                     return [shader.compiled ? 1 : 0];
+                case GL.SPIR_V_BINARY:
+                    return [shader.spirv ? 1 : 0];
                 case GL.INFO_LOG_LENGTH:
                     return [shader.log.length > 0 ? shader.log.length + 1 : 0];
                 case GL.SHADER_SOURCE_LENGTH: {
@@ -567,7 +926,8 @@ export function installShaderCalls(context, kernel){
             const [name] = namespace().reserve(1);
             /** @type {ProgramObject} */
             const program = { kind: 'program', name, shaders: [], deleted: false, linked: false,
-                validated: false, log: '', bindings: new Map(), executable: null, users: 0 };
+                validated: false, log: '', bindings: new Map(), fragData: new Map(),
+                feedback: null, executable: null, users: 0 };
             namespace().define(name, program);
             kernel.shareGroup().used = true;
             return name;
@@ -652,7 +1012,21 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
+            if (kernel.side.feedbackActive?.() && program === currentProgram)
+            {
+                // Transform feedback is capturing what it runs (section 2.15).
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             program.validated = false;
+            if (new Set(program.shaders.map(shader=>!!shader.spirv)).size > 1)
+            {
+                // GL_ARB_gl_spirv: SPIR-V shaders and source ones are not linked together.
+                program.linked = false;
+                program.log = 'ERROR: SPIR-V shaders and shaders from source are attached'
+                    + ' together\n';
+                return;
+            }
             const notCompiled = program.shaders.filter(shader=>!shader.compiled);
             if (notCompiled.length > 0)
             {
@@ -666,8 +1040,14 @@ export function installShaderCalls(context, kernel){
                 .map(shader=>/** @type {ShaderUnit} */ (shader.unit));
             const result = linkProgram({
                 vertex: units(GL.VERTEX_SHADER),
+                geometry: units(GL.GEOMETRY_SHADER),
+                tessControl: units(TESS.TESS_CONTROL_SHADER),
+                tessEvaluation: units(TESS.TESS_EVALUATION_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
+                compute: units(GL.COMPUTE_SHADER),
+                feedback: program.feedback ?? undefined,
                 attribBindings: program.bindings,
+                fragDataBindings: program.fragData,
             });
             program.linked = result.ok;
             program.log = result.log;
@@ -675,21 +1055,20 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const store = result.program.defaults.slice(0);
-            program.executable = {
-                id: ++executables,
-                linked: result.program,
-                store,
-                floats: new Float32Array(store),
-                ints: new Int32Array(store),
-                version: 0,
-            };
+            program.stageUnits = { vertex: units(GL.VERTEX_SHADER),
+                geometry: units(GL.GEOMETRY_SHADER), fragment: units(GL.FRAGMENT_SHADER) };
+            program.executable = executableOf(result.program);
         },
 
         /** @param {number} programName */
         glUseProgram(programName){
             if (!enter('glUseProgram', [programName]))
             {
+                return;
+            }
+            if (kernel.side.feedbackActive?.())
+            {
+                setError(GL.INVALID_OPERATION);
                 return;
             }
             if (programName === 0)
@@ -711,6 +1090,255 @@ export function installShaderCalls(context, kernel){
             {
                 makeCurrent(program);
             }
+        },
+
+        // --- program pipelines (4.1) ---
+
+        /**
+         * What a draw would run now: the program in use, or the bound
+         * pipeline's stages linked together; null for the fixed pipeline.
+         *
+         * @returns {Executable | null}
+         */
+        programInUse(){
+            return kernel.side.glslExecutable();
+        },
+
+        /**
+         * @param {number} count @param {boolean} made  glCreateProgramPipelines'
+         * @returns {number[]}
+         */
+        genProgramPipelines(count, made){
+            if (!enter('genProgramPipelines', [count, made]))
+            {
+                return [];
+            }
+            if (count < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return [];
+            }
+            /** @type {number[]} */
+            const names = [];
+            for (let name = 1; names.length < count; name++)
+            {
+                if (!pipelines.has(name))
+                {
+                    pipelines.set(name, made ? makePipeline(name) : null);
+                    names.push(name);
+                }
+            }
+            return names;
+        },
+
+        /** @param {readonly number[]} names */
+        glDeleteProgramPipelines(names){
+            if (!enter('glDeleteProgramPipelines', [names]))
+            {
+                return;
+            }
+            for (const name of names)
+            {
+                if (boundPipeline && boundPipeline.name === name)
+                {
+                    boundPipeline = null;
+                }
+                pipelines.delete(name);
+            }
+        },
+
+        /** @param {number} name @returns {number} */
+        glIsProgramPipeline(name){
+            if (!enter('glIsProgramPipeline', [name]))
+            {
+                return GL.FALSE;
+            }
+            return pipelines.get(name) ? GL.TRUE : GL.FALSE;
+        },
+
+        /** @param {number} name */
+        glBindProgramPipeline(name){
+            if (!enter('glBindProgramPipeline', [name]))
+            {
+                return;
+            }
+            if (kernel.side.feedbackActive?.())
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (name === 0)
+            {
+                boundPipeline = null;
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (pipeline)
+            {
+                boundPipeline = pipeline;
+            }
+        },
+
+        /**
+         * @param {number} name @param {number} stages  the stage bits
+         * @param {number} programName  zero to take the stages away
+         */
+        glUseProgramStages(name, stages, programName){
+            if (!enter('glUseProgramStages', [name, stages, programName]))
+            {
+                return;
+            }
+            if (stages >>> 0 !== 0xffffffff && (stages & ~ALL_STAGE_BITS) !== 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const program = programName === 0 ? null : objectOf(programName, 'program');
+            if (programName !== 0 && !program)
+            {
+                return;
+            }
+            if (program && (!program.separable || !program.linked))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (!pipeline)
+            {
+                return;
+            }
+            for (const [stage, bit] of STAGE_BITS)
+            {
+                if ((stages & bit) !== 0)
+                {
+                    // A program without the stage takes it away (4.1 section 7.4).
+                    pipeline.stages[stage] = program
+                        && (program.stageUnits?.[stage].length ?? 0) > 0 ? program : null;
+                }
+            }
+            pipeline.validated = false;
+        },
+
+        /** @param {number} name @param {number} programName */
+        glActiveShaderProgram(name, programName){
+            if (!enter('glActiveShaderProgram', [name, programName]))
+            {
+                return;
+            }
+            const program = programName === 0 ? null : objectOf(programName, 'program');
+            if (programName !== 0 && !program)
+            {
+                return;
+            }
+            if (program && !program.linked)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (pipeline)
+            {
+                pipeline.active = program;
+            }
+        },
+
+        /** @param {number} name */
+        glValidateProgramPipeline(name){
+            if (!enter('glValidateProgramPipeline', [name]))
+            {
+                return;
+            }
+            const pipeline = pipelineNamed(name);
+            if (!pipeline)
+            {
+                return;
+            }
+            const linked = Object.values(pipeline.stages).some(Boolean)
+                ? pipelineLink(pipeline).executable : null;
+            pipeline.validated = linked !== null;
+            if (!linked && pipeline.log === '')
+            {
+                pipeline.log = 'ERROR: the pipeline has no stage\n';
+            }
+        },
+
+        /**
+         * @param {number} name @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetProgramPipelineiv(name, pname){
+            if (!enter('glGetProgramPipelineiv', [name, pname]))
+            {
+                return null;
+            }
+            const pipeline = pipelineNamed(name);
+            if (!pipeline)
+            {
+                return null;
+            }
+            switch (pname)
+            {
+                case GL.ACTIVE_PROGRAM: return [pipeline.active?.name ?? 0];
+                case GL.VERTEX_SHADER: return [pipeline.stages.vertex?.name ?? 0];
+                case GL.GEOMETRY_SHADER: return [pipeline.stages.geometry?.name ?? 0];
+                case GL.FRAGMENT_SHADER: return [pipeline.stages.fragment?.name ?? 0];
+                case GL.VALIDATE_STATUS: return [pipeline.validated ? 1 : 0];
+                case GL.INFO_LOG_LENGTH:
+                    return [pipeline.log.length > 0 ? pipeline.log.length + 1 : 0];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+
+        /** @param {number} name @returns {string | null} */
+        glGetProgramPipelineInfoLog(name){
+            if (!enter('glGetProgramPipelineInfoLog', [name]))
+            {
+                return null;
+            }
+            return pipelineNamed(name)?.log ?? null;
+        },
+
+        /**
+         * glCreateShaderProgramv (4.1): a separable program of one shader,
+         * compiled from `strings` and linked, the shader let go of; its
+         * compile log is the program's.
+         *
+         * @param {number} type @param {readonly string[]} strings @returns {number}
+         */
+        glCreateShaderProgramv(type, strings){
+            if (!enter('glCreateShaderProgramv', [type, strings]))
+            {
+                return 0;
+            }
+            if (!strings)
+            {
+                // A negative count.
+                setError(GL.INVALID_VALUE);
+                return 0;
+            }
+            const shader = context.glCreateShader(type);
+            if (shader === 0)
+            {
+                return 0;
+            }
+            context.glShaderSource(shader, strings);
+            context.glCompileShader(shader);
+            const programName = context.glCreateProgram();
+            const program = /** @type {ProgramObject} */ (objectOf(programName, 'program'));
+            program.separable = true;
+            const shaderLog = context.glGetShaderInfoLog(shader) ?? '';
+            if (context.glGetShaderiv(shader, GL.COMPILE_STATUS)?.[0])
+            {
+                context.glAttachShader(programName, shader);
+                context.glLinkProgram(programName);
+                context.glDetachShader(programName, shader);
+            }
+            program.log = shaderLog + program.log;
+            context.glDeleteShader(shader);
+            return programName;
         },
 
         /** @param {number} programName */
@@ -804,13 +1432,135 @@ export function installShaderCalls(context, kernel){
                     return [linked ? Math.max(0, ...activeAttributes(linked)
                         .map(a=>a.name.length + 1)) : 0];
                 case GL.ACTIVE_UNIFORMS:
-                    return [linked ? linked.uniforms.length : 0];
+                    return [linked ? activeUniforms(linked).length : 0];
                 case GL.ACTIVE_UNIFORM_MAX_LENGTH:
-                    return [linked ? Math.max(0, ...linked.uniforms
+                    return [linked ? Math.max(0, ...activeUniforms(linked)
                         .map(u=>u.name.length + 1)) : 0];
-                default:
+                case GL.ACTIVE_UNIFORM_BLOCKS:
+                    return [linked ? linked.blocks.length : 0];
+                case GL.ACTIVE_ATOMIC_COUNTER_BUFFERS:
+                    return [linked ? counterBuffersOf(linked).length : 0];
+                case GL.ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
+                    return [linked ? Math.max(0, ...linked.blocks
+                        .map(b=>b.name.length + 1)) : 0];
+                case GL.TRANSFORM_FEEDBACK_BUFFER_MODE:
+                    return [linked?.feedback?.mode === 'separate' ? GL.SEPARATE_ATTRIBS
+                        : GL.INTERLEAVED_ATTRIBS];
+                case GL.TRANSFORM_FEEDBACK_VARYINGS:
+                    return [linked?.feedback?.varyings.length ?? 0];
+                case GL.TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH:
+                    return [Math.max(0, ...(linked?.feedback?.varyings ?? [])
+                        .map(v=>v.name.length + 1))];
+                // A program linked with a geometry shader answers these, any
+                // other INVALID_OPERATION (OpenGL 3.2 section 6.1.16).
+                case GL.GEOMETRY_VERTICES_OUT:
+                case GL.GEOMETRY_INPUT_TYPE:
+                case GL.GEOMETRY_OUTPUT_TYPE: {
+                    const layout = program.linked ? linked?.geometryLayout : null;
+                    if (!layout)
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    return [pname === GL.GEOMETRY_VERTICES_OUT ? layout.maxVertices
+                        : GEOMETRY_PRIMITIVES[pname === GL.GEOMETRY_INPUT_TYPE ? layout.input
+                            : layout.output]];
+                }
+                // A compute program's work group (4.3), INVALID_OPERATION for
+                // any other (section 7.13).
+                case GL.COMPUTE_WORK_GROUP_SIZE:
+                    if (!program.linked || !linked?.localSize)
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    return [...linked.localSize];
+                // OpenGL 4.1's program binaries, of which no format is known.
+                case GL.PROGRAM_BINARY_LENGTH:
+                    return [0];
+                case GL.PROGRAM_BINARY_RETRIEVABLE_HINT:
+                    return [program.retrievable ? 1 : 0];
+                case GL.PROGRAM_SEPARABLE:
+                    return [program.separable ? 1 : 0];
+                default: {
+                    const answer = tessellationProgramAnswer(pname,
+                        program.linked ? linked ?? null : null);
+                    if (answer === 'invalid')
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    if (answer)
+                    {
+                        return answer;
+                    }
                     setError(GL.INVALID_ENUM);
                     return null;
+                }
+            }
+        },
+
+        /**
+         * glProgramParameteri (4.1): the hint that a binary will be asked
+         * for, and whether the program may be bound to a pipeline stage.
+         *
+         * @param {number} programName @param {number} pname @param {number} value
+         */
+        glProgramParameteri(programName, pname, value){
+            if (!enter('glProgramParameteri', [programName, pname, value]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            if (pname !== GL.PROGRAM_BINARY_RETRIEVABLE_HINT && pname !== GL.PROGRAM_SEPARABLE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (value !== GL.TRUE && value !== GL.FALSE)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            program[pname === GL.PROGRAM_SEPARABLE ? 'separable' : 'retrievable'] =
+                value === GL.TRUE;
+        },
+
+        /**
+         * glGetProgramBinary (4.1): no binary format is known
+         * (GL_NUM_PROGRAM_BINARY_FORMATS is zero), so none is written.
+         *
+         * @param {number} programName
+         */
+        glGetProgramBinary(programName){
+            if (!enter('glGetProgramBinary', [programName]))
+            {
+                return;
+            }
+            if (objectOf(programName, 'program'))
+            {
+                setError(GL.INVALID_OPERATION);
+            }
+        },
+
+        /**
+         * glProgramBinary (4.1): every format is one this renderer does
+         * not know, and the program is left as it was.
+         *
+         * @param {number} programName @param {number} format
+         */
+        glProgramBinary(programName, format){
+            if (!enter('glProgramBinary', [programName, format]))
+            {
+                return;
+            }
+            if (objectOf(programName, 'program'))
+            {
+                setError(GL.INVALID_ENUM);
             }
         },
 
@@ -965,6 +1715,60 @@ export function installShaderCalls(context, kernel){
             return { name: entry.name, size: 1, type: glTypeOf(entry.type) };
         },
 
+        /**
+         * glTransformFeedbackVaryings: what the next link captures.
+         *
+         * @param {number} programName @param {readonly string[]} names @param {number} mode
+         */
+        glTransformFeedbackVaryings(programName, names, mode){
+            if (!enter('glTransformFeedbackVaryings', [programName, names, mode]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            if (mode !== GL.INTERLEAVED_ATTRIBS && mode !== GL.SEPARATE_ATTRIBS)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (mode === GL.SEPARATE_ATTRIBS && names.length > FEEDBACK_LIMITS.separateAttribs)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            program.feedback = { names: [...names],
+                mode: mode === GL.SEPARATE_ATTRIBS ? 'separate' : 'interleaved' };
+        },
+
+        /**
+         * @param {number} programName @param {number} index
+         * @returns {{ name: string, size: number, type: number } | null}
+         */
+        glGetTransformFeedbackVarying(programName, index){
+            if (!enter('glGetTransformFeedbackVarying', [programName, index]))
+            {
+                return null;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return null;
+            }
+            const varying = program.executable?.linked.feedback?.varyings[index];
+            if (!varying)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const type = varying.type?.kind === 'array' ? varying.type.element : varying.type;
+            // A gap answers GL_NONE and the components it skips (4.0).
+            return { name: varying.name, size: varying.size, type: type ? glTypeOf(type) : 0 };
+        },
+
         // --- uniforms ---
 
         /** @param {number} programName @param {string} name @returns {number} */
@@ -1015,7 +1819,8 @@ export function installShaderCalls(context, kernel){
             {
                 return null;
             }
-            const leaf = program.executable?.linked.uniforms[index];
+            const linked = program.executable?.linked;
+            const leaf = linked ? activeUniforms(linked)[index] : undefined;
             if (!leaf)
             {
                 setError(GL.INVALID_VALUE);
@@ -1024,12 +1829,273 @@ export function installShaderCalls(context, kernel){
             return { name: leaf.name, size: leaf.size, type: glTypeOf(leaf.type) };
         },
 
+        // --- fragment outputs (OpenGL 3.0 section 3.9.2, 3.3's dual source) ---
+
         /**
-         * glUniform{1234}{fi}[v]: `components` values an element, `count`
+         * glBindFragDataLocation and its indexed form, for the next link.
+         *
+         * @param {number} programName @param {number} location @param {number} index
+         * @param {string} name
+         */
+        bindFragData(programName, location, index, name){
+            if (!enter('bindFragData', [programName, location, index, name]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            if (location < 0 || location >= GLSL_LIMITS.drawBuffers || index < 0 || index > 1
+                || (index === 1 && location >= MAX_DUAL_SOURCE_DRAW_BUFFERS))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (name.startsWith('gl_'))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            program.fragData.set(name, { location, index });
+        },
+
+        /**
+         * glGetFragDataLocation and glGetFragDataIndex: what the last link
+         * gave an output, -1 for a name that is none.
+         *
+         * @param {number} programName @param {string} name @param {'location' | 'index'} what
+         * @returns {number}
+         */
+        fragData(programName, name, what){
+            if (!enter('fragData', [programName, name, what]))
+            {
+                return -1;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return -1;
+            }
+            if (!program.linked || !program.executable)
+            {
+                setError(GL.INVALID_OPERATION);
+                return -1;
+            }
+            const parsed = parseUniformName(name);
+            const output = parsed ? program.executable.linked.outputs.find(o=>o.name
+                === parsed.base) : undefined;
+            if (!output || !parsed)
+            {
+                return -1;
+            }
+            const length = output.type.kind === 'array' ? output.type.length : 0;
+            if ((parsed.indexed && length === 0) || parsed.element >= Math.max(length, 1))
+            {
+                return -1;
+            }
+            return what === 'index' ? output.index : output.location + parsed.element;
+        },
+
+        // --- uniform blocks (OpenGL 3.1 section 2.11.4) ---
+
+        /** @param {number} programName @param {string} name @returns {number} */
+        glGetUniformBlockIndex(programName, name){
+            if (!enter('glGetUniformBlockIndex', [programName, name]))
+            {
+                return GL.INVALID_INDEX;
+            }
+            const program = objectOf(programName, 'program');
+            const blocks = program?.executable?.linked.blocks;
+            if (!blocks || !program?.linked)
+            {
+                return GL.INVALID_INDEX;
+            }
+            const index = blocks.findIndex(b=>b.name === name
+                || (b.element === 0 && b.name === `${name}[0]`));
+            return index < 0 ? GL.INVALID_INDEX : index;
+        },
+
+        /**
+         * @param {number} programName @param {number} index @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetActiveUniformBlockiv(programName, index, pname){
+            if (!enter('glGetActiveUniformBlockiv', [programName, index, pname]))
+            {
+                return null;
+            }
+            const block = blockOf(programName, index);
+            if (!block)
+            {
+                return null;
+            }
+            const { linked, executable } = block;
+            const own = linked.blocks[index];
+            /** @type {number[]} */
+            const members = [];
+            activeUniforms(linked).forEach((u, k)=>{
+                if (u.block === index || (u.block >= 0
+                    && linked.blocks[u.block].blockName === own.blockName))
+                {
+                    members.push(k);
+                }
+            });
+            switch (pname)
+            {
+                case GL.UNIFORM_BLOCK_BINDING:
+                    return [executable.blockBindings[index]];
+                case GL.UNIFORM_BLOCK_DATA_SIZE:
+                    return [own.size];
+                case GL.UNIFORM_BLOCK_NAME_LENGTH:
+                    return [own.name.length + 1];
+                case GL.UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+                    return [members.length];
+                case GL.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES:
+                    return members;
+                case GL.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+                    return [own.stages.vertex ? 1 : 0];
+                case GL.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+                    return [own.stages.fragment ? 1 : 0];
+                case GL.UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
+                    return [own.stages.geometry ? 1 : 0];
+                case TESS.UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
+                    return [own.stages.tessControl ? 1 : 0];
+                case TESS.UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
+                    return [own.stages.tessEvaluation ? 1 : 0];
+                case GL.UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
+                    return [own.stages.compute ? 1 : 0];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+
+        /** @param {number} programName @param {number} index @returns {string | null} */
+        glGetActiveUniformBlockName(programName, index){
+            if (!enter('glGetActiveUniformBlockName', [programName, index]))
+            {
+                return null;
+            }
+            return blockOf(programName, index)?.linked.blocks[index].name ?? null;
+        },
+
+        /**
+         * @param {number} programName @param {number} index @param {number} binding
+         */
+        glUniformBlockBinding(programName, index, binding){
+            if (!enter('glUniformBlockBinding', [programName, index, binding]))
+            {
+                return;
+            }
+            const block = blockOf(programName, index);
+            if (!block)
+            {
+                return;
+            }
+            if (binding < 0 || binding >= BLOCK_LIMITS.bindings)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            block.executable.blockBindings[index] = binding;
+        },
+
+        /**
+         * @param {number} programName @param {readonly string[]} names
+         * @returns {number[] | null}  each name's index in the active uniforms, or
+         *     INVALID_INDEX
+         */
+        glGetUniformIndices(programName, names){
+            if (!enter('glGetUniformIndices', [programName, names]))
+            {
+                return null;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return null;
+            }
+            const linked = program.linked ? program.executable?.linked : undefined;
+            const list = linked ? activeUniforms(linked) : [];
+            return names.map(name=>{
+                const at = list.findIndex(u=>u.name === name || u.name === `${name}[0]`);
+                return at < 0 ? GL.INVALID_INDEX : at;
+            });
+        },
+
+        /**
+         * @param {number} programName @param {readonly number[]} indices @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetActiveUniformsiv(programName, indices, pname){
+            if (!enter('glGetActiveUniformsiv', [programName, indices, pname]))
+            {
+                return null;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return null;
+            }
+            const linked = program.executable?.linked;
+            const list = linked ? activeUniforms(linked) : [];
+            if (indices.some(index=>index < 0 || index >= list.length))
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            /** @type {Record<number, (u: (typeof list)[number]) => number>} */
+            const read = {
+                [GL.UNIFORM_TYPE]: u=>glTypeOf(u.type),
+                [GL.UNIFORM_SIZE]: u=>u.size,
+                [GL.UNIFORM_NAME_LENGTH]: u=>u.name.length + 1,
+                [GL.UNIFORM_BLOCK_INDEX]: u=>u.block,
+                [GL.UNIFORM_OFFSET]: u=>u.offset,
+                // An atomic counter's stride is its buffer's (4.2 section 7.3.1).
+                [GL.UNIFORM_ARRAY_STRIDE]: u=>(u.block < 0 && u.counters < 0 ? -1
+                    : u.size > 1 || u.arrayStride > 0 ? u.arrayStride : 0),
+                [GL.UNIFORM_MATRIX_STRIDE]: u=>(u.block < 0 ? -1 : u.matrixStride),
+                [GL.UNIFORM_IS_ROW_MAJOR]: u=>(u.rowMajor ? 1 : 0),
+                [GL.UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX]: u=>u.counters,
+            };
+            const answer = read[pname];
+            if (!answer)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            return indices.map(index=>answer(list[index]));
+        },
+
+        /** @param {number} programName @param {number} index @returns {string | null} */
+        glGetActiveUniformName(programName, index){
+            if (!enter('glGetActiveUniformName', [programName, index]))
+            {
+                return null;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return null;
+            }
+            const linked = program.executable?.linked;
+            const uniform = linked ? activeUniforms(linked)[index] : undefined;
+            if (!uniform)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return uniform.name;
+        },
+
+        /**
+         * glUniform{1234}{f,i,ui}[v]: `components` values an element, `count`
          * elements.
          *
          * @param {number} location @param {number} count @param {ArrayLike<number>} values
-         * @param {'f' | 'i'} kind @param {number} components
+         * @param {'f' | 'i' | 'u' | 'd'} kind @param {number} components
          */
         uniform(location, count, values, kind, components){
             // A list replays the values, not the program's memory they came from.
@@ -1041,24 +2107,72 @@ export function installShaderCalls(context, kernel){
         },
 
         /**
-         * glUniformMatrix{234}[x{234}]fv.
+         * glUniformMatrix{234}[x{234}]fv, and dv (4.0).
          *
          * @param {number} location @param {number} count @param {number} transpose
          * @param {ArrayLike<number>} values @param {number} cols @param {number} rows
+         * @param {'f' | 'd'} [kind]
          */
-        uniformMatrix(location, count, transpose, values, cols, rows){
+        uniformMatrix(location, count, transpose, values, cols, rows, kind = 'f'){
             if (enter('uniformMatrix', [location, count, transpose, Array.from(values), cols,
-                rows]))
+                rows, kind]))
             {
-                writeUniform(`glUniformMatrix${cols}x${rows}fv`, location, count, values, 'f',
-                    cols * rows, { cols, rows, transpose: transpose !== 0 });
+                writeUniform(`glUniformMatrix${cols}x${rows}${kind}v`, location, count, values,
+                    kind, cols * rows, { cols, rows, transpose: transpose !== 0 });
             }
         },
 
         /**
+         * glProgramUniform{1234}{f,i,ui}[v] and glProgramUniformMatrix*fv
+         * (4.1): a uniform of `programName`, current or not; `matrix` the
+         * columns, rows and transposition of a matrix's.
+         *
+         * @param {number} programName @param {number} location @param {number} count
+         * @param {ArrayLike<number>} values @param {'f' | 'i' | 'u' | 'd'} kind
+         * @param {number} components
+         * @param {{ cols: number, rows: number, transpose: boolean } | null} matrix
+         */
+        programUniform(programName, location, count, values, kind, components, matrix){
+            if (!enter('programUniform', [programName, location, count, Array.from(values), kind,
+                components, matrix]))
+            {
+                return;
+            }
+            const program = objectOf(programName, 'program');
+            if (!program)
+            {
+                return;
+            }
+            writeUniform(matrix ? `glProgramUniformMatrix${matrix.cols}x${matrix.rows}${kind}v`
+                : `glProgramUniform${components}${kind}`, location, count, values, kind,
+            components, matrix, program);
+        },
+
+        /**
+         * glGetnUniform{f,i,ui}v (4.5, KHR_robustness): getUniform's answer,
+         * refused when its values would not fit `size` bytes.
+         *
+         * @param {number} programName @param {number} location @param {number} size
+         * @returns {{ values: number[], float: boolean, unsigned?: boolean } | null}
+         */
+        getnUniform(programName, location, size){
+            if (!enter('getnUniform', [programName, location, size]))
+            {
+                return null;
+            }
+            const answered = context.getUniform(programName, location);
+            if (answered && answered.values.length * 4 > size)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            return answered;
+        },
+
+        /**
          * @param {number} programName @param {number} location
-         * @returns {{ values: number[], float: boolean } | null}  the element's
-         *     values, and whether it holds floats
+         * @returns {{ values: number[], float: boolean, unsigned?: boolean } | null}
+         *     the element's values, and whether it holds floats or unsigned integers
          */
         getUniform(programName, location){
             if (!enter('getUniform', [programName, location]))
@@ -1081,11 +2195,362 @@ export function installShaderCalls(context, kernel){
             const at = leaf.offset + element * leaf.words;
             const type = leaf.type;
             const float = type.kind === 'matrix'
-                || ((type.kind === 'scalar' || type.kind === 'vector') && type.base === 'float');
+                || ((type.kind === 'scalar' || type.kind === 'vector')
+                    && (type.base === 'float' || type.base === 'double'));
             const source = float ? executable.floats : executable.ints;
-            return { values: Array.from(source.subarray(at, at + leaf.words)), float };
+            const values = Array.from(source.subarray(at, at + leaf.words));
+            const unsigned = (type.kind === 'scalar' || type.kind === 'vector')
+                && type.base === 'uint';
+            return unsigned ? { values: values.map(v=>v >>> 0), float, unsigned }
+                : { values, float };
         },
     });
+    installSubroutineCalls(context, kernel, objectOf, ()=>currentProgram?.executable
+        ?? (boundPipeline && Object.values(boundPipeline.stages).some(Boolean)
+            ? pipelineExecutable(boundPipeline) : null));
+}
+
+/** The subroutine stages, by their shader type (4.0 section 7.9). @type {Map<number, string>} */
+const SUBROUTINE_STAGES = new Map(/** @type {[number, string][]} */ ([[GL.VERTEX_SHADER, 'vertex'],
+    [TESS.TESS_CONTROL_SHADER, 'tessControl'], [TESS.TESS_EVALUATION_SHADER, 'tessEvaluation'],
+    [GL.GEOMETRY_SHADER, 'geometry'], [GL.FRAGMENT_SHADER, 'fragment'],
+    [GL.COMPUTE_SHADER, 'compute']]));
+
+/** The subroutine queries' names (4.0 tables 6.47 and 6.48). */
+const SUB = Object.freeze({
+    ACTIVE_SUBROUTINES: 0x8de5, ACTIVE_SUBROUTINE_UNIFORMS: 0x8de6,
+    ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS: 0x8e47, ACTIVE_SUBROUTINE_MAX_LENGTH: 0x8e48,
+    ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH: 0x8e49, NUM_COMPATIBLE_SUBROUTINES: 0x8e4a,
+    COMPATIBLE_SUBROUTINES: 0x8e4b, UNIFORM_SIZE: 0x8a38, UNIFORM_NAME_LENGTH: 0x8a39,
+});
+
+/**
+ * Subroutines (OpenGL 4.0 section 7.9): which function each subroutine
+ * uniform of the program in use names, a stage at a time; the queries of a
+ * program's subroutine tables (`glsl-link.js` StageSubroutines). What a
+ * draw is made with is the program's module made for the functions chosen
+ * (`subroutineChoice`): a choice is per draw, as the specification's
+ * uniforms are the context's, lost when another program comes into use.
+ *
+ * @param {any} context @param {import('./kernel.js').ContextKernel} kernel
+ * @param {(name: number, kind: 'program') => ProgramObject | null} objectOf
+ * @param {() => Executable | null} running  the executable draws run
+ */
+function installSubroutineCalls(context, kernel, objectOf, running){
+    const { enter, setError } = kernel;
+    /** @type {Map<string, number[]>} the index chosen at each location, by stage */
+    let choices = new Map();
+    /** @type {Executable | null} what the choices were made for */
+    let chosenFor = null;
+
+    /** The choices of the executable in use: none where it changed since they were made. */
+    const current = ()=>{
+        const executable = running();
+        if (executable !== chosenFor)
+        {
+            choices = new Map();
+            chosenFor = executable;
+        }
+        return executable;
+    };
+
+    /**
+     * A shader type's stage, or null with GL_INVALID_ENUM.
+     *
+     * @param {number} type @returns {string | null}
+     */
+    const stageOf = type=>{
+        const stage = SUBROUTINE_STAGES.get(type);
+        if (!stage)
+        {
+            setError(GL.INVALID_ENUM);
+            return null;
+        }
+        return stage;
+    };
+
+    /**
+     * A program's subroutine table for a stage, an empty one where the stage
+     * has none, or null with the error set.
+     *
+     * @param {number} programName @param {number} type
+     * @returns {import('./glsl-link.js').StageSubroutines | null}
+     */
+    const tableOf = (programName, type)=>{
+        const stage = stageOf(type);
+        const program = stage ? objectOf(programName, 'program') : null;
+        if (!stage || !program)
+        {
+            return null;
+        }
+        return (program.linked ? program.executable?.linked.subroutines?.[stage] : null)
+            ?? { functions: [], uniforms: [], locations: 0 };
+    };
+
+    Object.assign(kernel.side, {
+        /**
+         * What the program in use's module is made for: the function each
+         * chosen subroutine uniform names, by stage, and a key of it; null
+         * where nothing was chosen.
+         *
+         * @returns {{ key: string, chosen: Map<string, Map<string, string>> } | null}
+         */
+        subroutineChoice: ()=>{
+            const executable = current();
+            const tables = executable?.linked.subroutines;
+            if (!tables || choices.size === 0)
+            {
+                return null;
+            }
+            /** @type {Map<string, Map<string, string>>} */
+            const chosen = new Map();
+            const parts = [];
+            for (const [stage, indices] of choices)
+            {
+                const table = tables[stage];
+                /** @type {Map<string, string>} */
+                const named = new Map();
+                for (const uniform of table?.uniforms ?? [])
+                {
+                    const fn = table?.functions.find(f=>f.index === indices[uniform.location]);
+                    if (fn)
+                    {
+                        named.set(uniform.name, fn.key);
+                    }
+                }
+                chosen.set(stage, named);
+                parts.push(`${stage}:${indices.join(',')}`);
+            }
+            return { key: parts.join(';'), chosen };
+        },
+    });
+
+    Object.assign(context, {
+        /** @param {number} programName @param {number} type @param {string} name */
+        glGetSubroutineUniformLocation(programName, type, name){
+            if (!enter('glGetSubroutineUniformLocation', [programName, type, name]))
+            {
+                return -1;
+            }
+            const table = tableOf(programName, type);
+            return table?.uniforms.find(u=>u.name === name)?.location ?? -1;
+        },
+
+        /** @param {number} programName @param {number} type @param {string} name */
+        glGetSubroutineIndex(programName, type, name){
+            if (!enter('glGetSubroutineIndex', [programName, type, name]))
+            {
+                return GL.INVALID_INDEX;
+            }
+            const table = tableOf(programName, type);
+            return table?.functions.find(f=>f.name === name)?.index ?? GL.INVALID_INDEX;
+        },
+
+        /**
+         * glGetActiveSubroutineUniformiv: an active subroutine uniform's
+         * compatible functions, its size and its name's length.
+         *
+         * @param {number} programName @param {number} type @param {number} index
+         * @param {number} pname @returns {number[] | null}
+         */
+        glGetActiveSubroutineUniformiv(programName, type, index, pname){
+            if (!enter('glGetActiveSubroutineUniformiv', [programName, type, index, pname]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            const uniform = table.uniforms[index];
+            if (!uniform)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            switch (pname)
+            {
+                case SUB.NUM_COMPATIBLE_SUBROUTINES:
+                    return [uniform.compatible.length];
+                case SUB.COMPATIBLE_SUBROUTINES:
+                    return [...uniform.compatible];
+                case SUB.UNIFORM_SIZE:
+                    return [1];
+                case SUB.UNIFORM_NAME_LENGTH:
+                    return [uniform.name.length + 1];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+
+        /**
+         * @param {number} programName @param {number} type @param {number} index
+         * @returns {string | null}
+         */
+        glGetActiveSubroutineUniformName(programName, type, index){
+            if (!enter('glGetActiveSubroutineUniformName', [programName, type, index]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            const uniform = table.uniforms[index];
+            if (!uniform)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return uniform.name;
+        },
+
+        /**
+         * @param {number} programName @param {number} type @param {number} index
+         * @returns {string | null}
+         */
+        glGetActiveSubroutineName(programName, type, index){
+            if (!enter('glGetActiveSubroutineName', [programName, type, index]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            const fn = table.functions.find(f=>f.index === index);
+            if (!fn)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return fn.name;
+        },
+
+        /**
+         * glUniformSubroutinesuiv: the function every location of a stage's
+         * subroutine uniforms names, all at once.
+         *
+         * @param {number} type @param {readonly number[]} indices
+         */
+        glUniformSubroutinesuiv(type, indices){
+            if (!enter('glUniformSubroutinesuiv', [type, [...indices]]))
+            {
+                return;
+            }
+            const stage = stageOf(type);
+            if (!stage)
+            {
+                return;
+            }
+            const executable = current();
+            if (!executable)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const table = executable.linked.subroutines?.[stage]
+                ?? { functions: [], uniforms: [], locations: 0 };
+            if (indices.length !== table.locations
+                || indices.some(index=>!table.functions.some(f=>f.index === index)))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (table.uniforms.some(u=>!u.compatible.includes(indices[u.location])))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            choices.set(stage, [...indices]);
+        },
+
+        /**
+         * @param {number} type @param {number} location
+         * @returns {number[] | null}
+         */
+        glGetUniformSubroutineuiv(type, location){
+            if (!enter('glGetUniformSubroutineuiv', [type, location]))
+            {
+                return null;
+            }
+            const stage = stageOf(type);
+            if (!stage)
+            {
+                return null;
+            }
+            const executable = current();
+            if (!executable)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            const table = executable.linked.subroutines?.[stage];
+            if (!table || location < 0 || location >= table.locations)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            const chosen = choices.get(stage)?.[location];
+            // Never chosen: the function a draw calls, its type's first.
+            const uniform = table.uniforms.find(u=>u.location === location);
+            return [chosen ?? uniform?.compatible[0] ?? 0];
+        },
+
+        /**
+         * glGetProgramStageiv: a stage's subroutine counts and longest names.
+         *
+         * @param {number} programName @param {number} type @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetProgramStageiv(programName, type, pname){
+            if (!enter('glGetProgramStageiv', [programName, type, pname]))
+            {
+                return null;
+            }
+            const table = tableOf(programName, type);
+            if (!table)
+            {
+                return null;
+            }
+            /** @param {{ name: string }[]} list */
+            const longest = list=>list.reduce((most, item)=>Math.max(most, item.name.length + 1),
+                0);
+            switch (pname)
+            {
+                case SUB.ACTIVE_SUBROUTINES:
+                    return [table.functions.length];
+                case SUB.ACTIVE_SUBROUTINE_UNIFORMS:
+                    return [table.uniforms.length];
+                case SUB.ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS:
+                    return [table.locations];
+                case SUB.ACTIVE_SUBROUTINE_MAX_LENGTH:
+                    return [longest(table.functions)];
+                case SUB.ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH:
+                    return [longest(table.uniforms)];
+                default:
+                    setError(GL.INVALID_ENUM);
+                    return null;
+            }
+        },
+    });
+
+    // glUseProgram, even of the program in use, and a pipeline's change lose
+    // the choices (4.0 section 7.9).
+    for (const name of ['glUseProgram', 'glBindProgramPipeline', 'glUseProgramStages',
+        'glLinkProgram'])
+    {
+        const plain = context[name];
+        context[name] = (/** @type {any[]} */ ...args)=>{
+            const answer = plain.apply(context, args);
+            choices = new Map();
+            return answer;
+        };
+    }
 }
 
 /**
@@ -1095,7 +2560,7 @@ export function installShaderCalls(context, kernel){
  * @param {LinkedProgram} linked
  * @returns {{ name: string, type: GlslType }[]}
  */
-function activeAttributes(linked){
+export function activeAttributes(linked){
     return [
         ...linked.attributes,
         ...linked.builtinAttributes.map(name=>({ name,
@@ -1108,6 +2573,9 @@ const BUILTIN_ATTRIBUTE_TYPES = new Map(Object.entries(BUILTIN_VARIABLES.vertex)
     .filter(([, builtin])=>builtin.role === 'attribute')
     .map(([name, builtin])=>[name, builtin.type]));
 
+/** MAX_DUAL_SOURCE_DRAW_BUFFERS (OpenGL 3.3): the outputs of index 1 there may be. */
+export const MAX_DUAL_SOURCE_DRAW_BUFFERS = 1;
+
 /**
  * The calls of this file a display list does not record (section 5.4): the
  * object calls and the queries. glUseProgram and the uniform calls are
@@ -1119,5 +2587,15 @@ export const SHADER_CALLS_NOT_COMPILED = Object.freeze([
     'glAttachShader', 'glDetachShader', 'glBindAttribLocation', 'glLinkProgram',
     'glValidateProgram', 'glDeleteProgram', 'glIsProgram', 'glGetProgramiv',
     'glGetProgramInfoLog', 'glGetAttachedShaders', 'glGetAttribLocation', 'glGetActiveAttrib',
-    'glGetUniformLocation', 'glGetActiveUniform', 'getUniform',
+    'glGetUniformLocation', 'glGetActiveUniform', 'getUniform', 'bindFragData', 'fragData',
+    'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
+    'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
+    'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary', 'programUniform',
+    'getnUniform', 'genProgramPipelines', 'glDeleteProgramPipelines', 'glIsProgramPipeline',
+    'glGetSubroutineUniformLocation', 'glGetSubroutineIndex', 'glGetActiveSubroutineUniformiv',
+    'glGetActiveSubroutineUniformName', 'glGetActiveSubroutineName', 'glGetUniformSubroutineuiv',
+    'glGetProgramStageiv',
+    'glBindProgramPipeline', 'glUseProgramStages', 'glActiveShaderProgram',
+    'glValidateProgramPipeline', 'glGetProgramPipelineiv', 'glGetProgramPipelineInfoLog',
+    'glCreateShaderProgramv',
 ]);

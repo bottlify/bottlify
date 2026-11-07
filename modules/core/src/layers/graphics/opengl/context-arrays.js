@@ -18,16 +18,22 @@
  */
 
 import { GL } from './constants.js';
-import { INTERLEAVED_LAYOUTS, componentBytes, readElement, readIndex } from './arrays.js';
+import {
+    INTERLEAVED_LAYOUTS, componentBytes, isPacked, readElement, readIndex,
+} from './arrays.js';
 import { createBufferObject } from './objects.js';
-import { TEXTURE_UNITS } from './state.js';
+import { SIZED_FORMATS, TEX } from './formats.js';
+import { clientBytes, transferError, unpackToStorage } from './texture-transfer.js';
+import { TEXTURE_COORDS } from './state.js';
 import { CLIENT_BITS, queriesSavedBy } from './attributes.js';
+import { drawsGeometryInput, expandMode } from './gpu-layout.js';
+import { TESS, tessellationTakes } from './context-tessellation.js';
 
 /** The conventional arrays after the position, in the order a draw reads them. */
 const CONVENTIONAL = /** @type {const} */ (['color', 'secondary', 'normal', 'fogCoord']);
 
 /** Each unit's coordinate array by name, asked for on every draw. */
-const TEX_COORD_NAMES = Array.from({ length: TEXTURE_UNITS }, (_, unit)=>`texCoord${unit}`);
+const TEX_COORD_NAMES = Array.from({ length: TEXTURE_COORDS }, (_, unit)=>`texCoord${unit}`);
 
 /**
  * The generic array a program reads under a canonical name, if one is on.
@@ -50,8 +56,27 @@ function genericNamed(generic, name){
 /** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([
     GL.POINTS, GL.LINES, GL.LINE_LOOP, GL.LINE_STRIP, GL.TRIANGLES, GL.TRIANGLE_STRIP,
-    GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON,
+    GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON, GL.LINES_ADJACENCY,
+    GL.LINE_STRIP_ADJACENCY, GL.TRIANGLES_ADJACENCY, GL.TRIANGLE_STRIP_ADJACENCY,
+    TESS.PATCHES,
 ]);
+
+/** The primitives the tessellator makes, as a geometry shader after it takes them. */
+const TESSELLATED = Object.freeze({ triangles: GL.TRIANGLES, quads: GL.TRIANGLES,
+    isolines: GL.LINES });
+
+/** GL_MIN_MAP_BUFFER_ALIGNMENT: a map starts on a boundary of it, past the range's offset. */
+const MAP_ALIGNMENT = 64;
+
+/**
+ * What an adjacency mode draws without a geometry shader: its own
+ * primitives, the adjacent vertices passed over.
+ *
+ * @type {Map<number, number>}
+ */
+const WITHOUT_ADJACENCY = new Map([[GL.LINES_ADJACENCY, GL.LINES],
+    [GL.LINE_STRIP_ADJACENCY, GL.LINES], [GL.TRIANGLES_ADJACENCY, GL.TRIANGLES],
+    [GL.TRIANGLE_STRIP_ADJACENCY, GL.TRIANGLES]]);
 
 /**
  * The targets a buffer object binds to, and the query each binding answers:
@@ -67,11 +92,62 @@ const BINDING_QUERIES = new Map([
     [GL.PIXEL_UNPACK_BUFFER, GL.PIXEL_UNPACK_BUFFER_BINDING],
     [GL.COPY_READ_BUFFER, GL.COPY_READ_BUFFER],
     [GL.COPY_WRITE_BUFFER, GL.COPY_WRITE_BUFFER],
+    [GL.UNIFORM_BUFFER, GL.UNIFORM_BUFFER_BINDING],
+    [GL.DRAW_INDIRECT_BUFFER, GL.DRAW_INDIRECT_BUFFER_BINDING],
+    [GL.DISPATCH_INDIRECT_BUFFER, GL.DISPATCH_INDIRECT_BUFFER_BINDING],
+    [GL.SHADER_STORAGE_BUFFER, GL.SHADER_STORAGE_BUFFER_BINDING],
+    [GL.ATOMIC_COUNTER_BUFFER, GL.ATOMIC_COUNTER_BUFFER_BINDING],
+    [GL.PARAMETER_BUFFER, GL.PARAMETER_BUFFER_BINDING],
+    [GL.QUERY_BUFFER, GL.QUERY_BUFFER_BINDING],
+    [GL.TEXTURE_BUFFER, GL.TEXTURE_BUFFER],
+    [GL.TRANSFORM_FEEDBACK_BUFFER, GL.TRANSFORM_FEEDBACK_BUFFER_BINDING],
 ]);
+
+/**
+ * The words of one indirect command (OpenGL 4.6 section 10.4): an arrays
+ * draw's count, instances, first and base instance; an elements draw's
+ * count, instances, first index, base vertex and base instance.
+ */
+/** The primitives a core profile does not draw (3.2 appendix E.2). */
+/** @type {ReadonlySet<number>} */
+const CORE_REMOVED_MODES = new Set([GL.QUADS, GL.QUAD_STRIP, GL.POLYGON]);
+
+const ARRAYS_COMMAND_WORDS = 4;
+const ELEMENTS_COMMAND_WORDS = 5;
+
+/**
+ * The formats a buffer is cleared in (OpenGL 4.6 table 8.22, the buffer
+ * textures'), each element as many components as its base names.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const CLEAR_FORMATS = new Set([
+    TEX.R8, TEX.R16, TEX.R16F, TEX.R32F, TEX.R8I, TEX.R16I, TEX.R32I, TEX.R8UI, TEX.R16UI,
+    TEX.R32UI, TEX.RG8, TEX.RG16, TEX.RG16F, TEX.RG32F, TEX.RG8I, TEX.RG16I, TEX.RG32I,
+    TEX.RG8UI, TEX.RG16UI, TEX.RG32UI, TEX.RGB32F, TEX.RGB32I, TEX.RGB32UI, GL.RGBA8,
+    GL.RGBA16, TEX.RGBA16F, TEX.RGBA32F, TEX.RGBA8I, TEX.RGBA16I, TEX.RGBA32I, TEX.RGBA8UI,
+    TEX.RGBA16UI, TEX.RGBA32UI,
+]);
+
+/** A clear's one pixel is read as it lies: no pixel store state applies (4.6 section 6.3.2). */
+const PLAIN_UNPACK = Object.freeze({ alignment: 1, rowLength: 0, skipRows: 0,
+    skipPixels: 0, swapBytes: false });
 
 /** The access bits glMapBufferRange takes (OpenGL 3.0 section 2.9.3). */
 const MAP_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_INVALIDATE_RANGE_BIT
-    | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_FLUSH_EXPLICIT_BIT | GL.MAP_UNSYNCHRONIZED_BIT;
+    | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_FLUSH_EXPLICIT_BIT | GL.MAP_UNSYNCHRONIZED_BIT
+    | GL.MAP_PERSISTENT_BIT | GL.MAP_COHERENT_BIT;
+
+/** The flags glBufferStorage takes (OpenGL 4.4 section 6.2). */
+const STORAGE_BITS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_PERSISTENT_BIT
+    | GL.MAP_COHERENT_BIT | GL.DYNAMIC_STORAGE_BIT | GL.CLIENT_STORAGE_BIT;
+
+/** What a store glBufferData made may do (4.4 table 6.3). */
+const MUTABLE_STORAGE = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.DYNAMIC_STORAGE_BIT;
+
+/** The bits of a map a store's flags must hold. */
+const MAP_NEEDS = GL.MAP_READ_BIT | GL.MAP_WRITE_BIT | GL.MAP_PERSISTENT_BIT
+    | GL.MAP_COHERENT_BIT;
 
 /** BUFFER_ACCESS for a map's bits: what glMapBuffer's enum would have said. @param {number} bits */
 const accessOfBits = bits=>((bits & GL.MAP_READ_BIT) === 0 ? GL.WRITE_ONLY
@@ -82,6 +158,14 @@ const accessOfBits = bits=>((bits & GL.MAP_READ_BIT) === 0 ? GL.WRITE_ONLY
  *
  * @typedef {{ instances: number, baseInstance: number }} Instancing
  */
+
+/**
+ * The generic attribute index each conventional array is (the aliasing of
+ * `conventionalName`); the texture coordinates are 8 on, by unit.
+ *
+ * @type {Readonly<Record<string, number>>}
+ */
+const GENERIC_OF = Object.freeze({ vertex: 0, normal: 2, color: 3, secondary: 4, fogCoord: 5 });
 
 /** @type {Instancing} */
 const ONE_INSTANCE = Object.freeze({ instances: 1, baseInstance: 0 });
@@ -95,6 +179,9 @@ const USAGES = new Set([
     GL.STATIC_COPY, GL.DYNAMIC_DRAW, GL.DYNAMIC_READ, GL.DYNAMIC_COPY,
 ]);
 
+/** The packed types (3.3): one word an element, four components in it. */
+const PACKED_TYPES = [GL.INT_2_10_10_10_REV, GL.UNSIGNED_INT_2_10_10_10_REV];
+
 /**
  * Which types each array accepts, and the flat queries that mirror it.
  *
@@ -102,22 +189,23 @@ const USAGES = new Set([
  *        enable: number, size: number | null, type: number, stride: number,
  *        binding: number | null, normalised: boolean }>}
  */
+
 const ARRAYS = {
     vertex: {
-        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: [2, 3, 4],
+        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: [2, 3, 4],
         enable: GL.VERTEX_ARRAY, size: GL.VERTEX_ARRAY_SIZE, type: GL.VERTEX_ARRAY_TYPE,
         stride: GL.VERTEX_ARRAY_STRIDE, binding: GL.VERTEX_ARRAY_BUFFER_BINDING,
         normalised: false,
     },
     normal: {
-        types: [GL.BYTE, GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: null,
+        types: [GL.BYTE, GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: null,
         enable: GL.NORMAL_ARRAY, size: null, type: GL.NORMAL_ARRAY_TYPE,
         stride: GL.NORMAL_ARRAY_STRIDE, binding: GL.NORMAL_ARRAY_BUFFER_BINDING,
         normalised: true,
     },
     color: {
         types: [GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT,
-            GL.UNSIGNED_INT, GL.FLOAT, GL.DOUBLE],
+            GL.UNSIGNED_INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES],
         sizes: [3, 4],
         enable: GL.COLOR_ARRAY, size: GL.COLOR_ARRAY_SIZE, type: GL.COLOR_ARRAY_TYPE,
         stride: GL.COLOR_ARRAY_STRIDE, binding: GL.COLOR_ARRAY_BUFFER_BINDING,
@@ -130,7 +218,7 @@ const ARRAYS = {
         normalised: false,
     },
     texCoord: {
-        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE], sizes: [1, 2, 3, 4],
+        types: [GL.SHORT, GL.INT, GL.FLOAT, GL.DOUBLE, ...PACKED_TYPES], sizes: [1, 2, 3, 4],
         enable: GL.TEXTURE_COORD_ARRAY, size: GL.TEXTURE_COORD_ARRAY_SIZE,
         type: GL.TEXTURE_COORD_ARRAY_TYPE, stride: GL.TEXTURE_COORD_ARRAY_STRIDE,
         binding: GL.TEXTURE_COORD_ARRAY_BUFFER_BINDING, normalised: false,
@@ -225,8 +313,8 @@ export function installArrayCalls(context, kernel){
         secondary: createPointer(3, GL.FLOAT),
         fogCoord: createPointer(1, GL.FLOAT),
     };
-    const texCoordPointers = Array.from({ length: TEXTURE_UNITS }, ()=>createPointer(4, GL.FLOAT));
-    const texCoordEnabled = new Array(TEXTURE_UNITS).fill(0);
+    const texCoordPointers = Array.from({ length: TEXTURE_COORDS }, ()=>createPointer(4, GL.FLOAT));
+    const texCoordEnabled = new Array(TEXTURE_COORDS).fill(0);
     // The kinds whose conventional pointer normalises what it reads; a generic
     // write through the aliasing table overwrites the flag either way.
     pointers.normal.normalised = 1;
@@ -339,6 +427,12 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_VALUE);
             return;
         }
+        // A packed word holds four components, all of which a sized array takes.
+        if (sized && isPacked(type) && size !== 4)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
         const pointer = pointerOf(name);
         pointer.size = spec.sizes ? size : pointer.size;
         pointer.type = type;
@@ -347,6 +441,12 @@ export function installArrayCalls(context, kernel){
         pointer.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
         pointer.normalised = spec.normalised ? 1 : 0;
         mirror(name);
+        // The generic attribute this array is: its binding point follows (4.3).
+        const generic = GENERIC_OF[name] ?? (name === 'texCoord' ? 8 + clientActive : null);
+        if (generic !== null)
+        {
+            kernel.side.attribBinding?.fromPointer(generic);
+        }
     }
 
     /**
@@ -441,7 +541,7 @@ export function installArrayCalls(context, kernel){
                 vertex.fogCoord = f[0];
             }
         }
-        for (let unit = 0; unit < TEXTURE_UNITS; unit++)
+        for (let unit = 0; unit < TEXTURE_COORDS; unit++)
         {
             if (texCoordEnabled[unit] === 0)
             {
@@ -500,7 +600,7 @@ export function installArrayCalls(context, kernel){
                 arrays.push({ name, pointer: entry.pointer, normalised: entry.normalised });
             }
         }
-        for (let unit = 0; unit < TEXTURE_UNITS; unit++)
+        for (let unit = 0; unit < TEXTURE_COORDS; unit++)
         {
             const name = TEX_COORD_NAMES[unit];
             if (texCoordEnabled[unit] !== 0)
@@ -546,9 +646,11 @@ export function installArrayCalls(context, kernel){
      * @param {number} count
      * @param {{ type: number, indices: number | Uint8Array, baseVertex?: number } | null} indexed
      * @param {Instancing} [instancing]
+     * @param {import('./context-transform-feedback.js').Captured} [captured]  a draw of
+     *     what transform feedback captured, `count` the most it may draw
      * @returns {boolean}
      */
-    function drawFromArrays(mode, first, count, indexed, instancing = ONE_INSTANCE){
+    function drawFromArrays(mode, first, count, indexed, instancing = ONE_INSTANCE, captured){
         if (!kernel.drawArrays)
         {
             refusal = 'no device';
@@ -602,6 +704,8 @@ export function installArrayCalls(context, kernel){
             baseVertex: indexed?.baseVertex ?? 0,
             instances: instancing.instances,
             baseInstance: instancing.baseInstance,
+            drawID,
+            captured,
             lock: locked,
             read: view ? (at, n)=>view(at, n) : ()=>new Uint8Array(0),
             bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
@@ -632,6 +736,25 @@ export function installArrayCalls(context, kernel){
         {
             setError(GL.INVALID_ENUM);
             return;
+        }
+        if (geometryLayout())
+        {
+            lose(`${name} ran a geometry shader where the draw could not reach the device,`
+                + ' and drew nothing');
+            return;
+        }
+        if (mode === TESS.PATCHES)
+        {
+            lose(`${name} drew patches where the draw could not reach the device, and drew`
+                + ' nothing');
+            return;
+        }
+        const plain = WITHOUT_ADJACENCY.get(mode);
+        if (plain !== undefined)
+        {
+            const order = /** @type {Uint32Array} */ (expandMode(mode, indices.length));
+            indices = Array.from(order, k=>indices[k]);
+            mode = plain;
         }
         if (record(GL.VERTEX_ARRAY).values[0] === 0)
         {
@@ -724,7 +847,7 @@ export function installArrayCalls(context, kernel){
      * @returns {import('./arrays.js').ArrayPointer | null}
      */
     const aliasRecord = index=>{
-        if (index >= 8 && index < 8 + TEXTURE_UNITS)
+        if (index >= 8 && index < 8 + TEXTURE_COORDS)
         {
             return texCoordPointers[index - 8];
         }
@@ -734,7 +857,7 @@ export function installArrayCalls(context, kernel){
 
     /** @param {number} index @param {number} value */
     const aliasSetEnable = (index, value)=>{
-        if (index >= 8 && index < 8 + TEXTURE_UNITS)
+        if (index >= 8 && index < 8 + TEXTURE_COORDS)
         {
             const unit = index - 8;
             texCoordEnabled[unit] = value;
@@ -748,7 +871,7 @@ export function installArrayCalls(context, kernel){
     };
 
     /** @param {number} index @returns {number} */
-    const aliasEnabled = index=>index >= 8 && index < 8 + TEXTURE_UNITS
+    const aliasEnabled = index=>index >= 8 && index < 8 + TEXTURE_COORDS
         ? texCoordEnabled[index - 8]
         : record(ARRAYS[/** @type {string} */ (conventionalName(index))].enable).values[0];
 
@@ -767,6 +890,105 @@ export function installArrayCalls(context, kernel){
     };
 
     /**
+     * Whether a map keeps GL from the store: one made persistent (4.4)
+     * does not.
+     *
+     * @param {import('./objects.js').BufferObject} buffer
+     */
+    const mappedApart = buffer=>buffer.mapped !== 0
+        && (buffer.accessFlags & GL.MAP_PERSISTENT_BIT) === 0;
+
+    /** @returns {Set<import('./objects.js').BufferObject>} the share group's persistent maps */
+    const persistentMaps = ()=>{
+        const group = /** @type {any} */ (kernel.shareGroup());
+        return group.persistentMaps ??= new Set();
+    };
+
+    /**
+     * What the program wrote through its persistent maps, into the stores,
+     * before GL reads them: the map is a copy in guest memory, which every
+     * draw and buffer read looks at first, coherent or not -- a write seen
+     * early is one the program may not count on missing.
+     */
+    const refreshMapped = ()=>{
+        const held = persistentMaps();
+        const memory = kernel.memory();
+        if (held.size === 0 || !memory)
+        {
+            return;
+        }
+        for (const buffer of held)
+        {
+            if ((buffer.accessFlags & GL.MAP_WRITE_BIT) === 0)
+            {
+                continue;
+            }
+            const now = memory.read(buffer.mapped, buffer.mapLength);
+            const store = buffer.data.subarray(buffer.mapOffset,
+                buffer.mapOffset + buffer.mapLength);
+            let first = 0;
+            while (first < now.length && now[first] === store[first])
+            {
+                first++;
+            }
+            if (first === now.length)
+            {
+                continue;
+            }
+            let last = now.length;
+            while (last > first && now[last - 1] === store[last - 1])
+            {
+                last--;
+            }
+            store.set(now.subarray(first, last), first);
+            noteWritten(buffer, buffer.mapOffset + first, last - first);
+        }
+    };
+
+    /**
+     * What GL wrote into a store, into the program's persistent map of it.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {number} size
+     */
+    const mirrorToMap = (buffer, offset, size)=>{
+        if (buffer.mapped === 0 || (buffer.accessFlags & GL.MAP_PERSISTENT_BIT) === 0)
+        {
+            return;
+        }
+        const start = Math.max(offset, buffer.mapOffset);
+        const end = Math.min(offset + size, buffer.mapOffset + buffer.mapLength);
+        if (end > start)
+        {
+            kernel.memory()?.write(buffer.mapped + start - buffer.mapOffset,
+                buffer.data.slice(start, end));
+        }
+    };
+
+    /**
+     * Bytes GL itself writes into a store (a getter packing into the bound
+     * pixel pack buffer), noted as the program's writes are.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} offset
+     * @param {Uint8Array} bytes
+     */
+    function storeIntoBuffer(buffer, offset, bytes){
+        buffer.data.set(bytes, offset);
+        noteWritten(buffer, offset, bytes.length);
+        mirrorToMap(buffer, offset, bytes.length);
+    }
+    kernel.side.storeIntoBuffer = storeIntoBuffer;
+
+    /**
+     * Whether a map of `bits` is refused for the store's flags (4.4): what
+     * it reads, writes, keeps or keeps coherent must be the store's to give.
+     *
+     * @param {import('./objects.js').BufferObject} buffer @param {number} bits
+     */
+    const mapRefused = (buffer, bits)=>(bits & MAP_NEEDS
+        & ~(buffer.immutable ? buffer.storageFlags : MUTABLE_STORAGE)) !== 0;
+
+    /**
      * Maps part of a store into guest memory: a copy of the bytes there, as
      * the range's own allocation, unless the map discards them anyway.
      *
@@ -776,7 +998,15 @@ export function installArrayCalls(context, kernel){
      */
     const mapRange = (buffer, offset, length, bits, call)=>{
         const memory = kernel.memory();
-        const address = memory?.allocate ? memory.allocate(Math.max(1, length)) : 0;
+        // A map starts where the store's byte would on a boundary of
+        // GL_MIN_MAP_BUFFER_ALIGNMENT: a range from byte 3 is at 3 past one
+        // (Wine's opengl32 test_memory_map), and SSE copies into a whole map
+        // find it aligned.
+        const skew = offset % MAP_ALIGNMENT;
+        const block = memory?.allocate
+            ? memory.allocate(Math.max(1, length) + skew + MAP_ALIGNMENT - 1) : 0;
+        const address = block === 0 ? 0
+            : (((block + MAP_ALIGNMENT - 1) & -MAP_ALIGNMENT) >>> 0) + skew;
         if (address === 0)
         {
             lose(`${call} could not map a buffer into guest memory: a program that`
@@ -792,10 +1022,15 @@ export function installArrayCalls(context, kernel){
                 buffer.data.subarray(offset, offset + length));
         }
         buffer.mapped = address;
+        buffer.mapBlock = block;
         buffer.access = accessOfBits(bits);
         buffer.accessFlags = bits;
         buffer.mapOffset = offset;
         buffer.mapLength = length;
+        if ((bits & GL.MAP_PERSISTENT_BIT) !== 0)
+        {
+            persistentMaps().add(buffer);
+        }
         return address;
     };
 
@@ -818,8 +1053,10 @@ export function installArrayCalls(context, kernel){
     /** The map ended: its memory given back and its state the unmapped one. */
     /** @param {import('./objects.js').BufferObject} buffer */
     const unmap = buffer=>{
-        kernel.memory()?.free?.(buffer.mapped);
+        persistentMaps().delete(buffer);
+        kernel.memory()?.free?.(buffer.mapBlock);
         buffer.mapped = 0;
+        buffer.mapBlock = 0;
         buffer.accessFlags = 0;
         buffer.mapOffset = 0;
         buffer.mapLength = 0;
@@ -920,12 +1157,83 @@ export function installArrayCalls(context, kernel){
     });
 
     /**
+     * What transform feedback wrote is on the device, and a read here is of
+     * the program's own bytes: said, as what it reads is not what was captured.
+     *
+     * @param {string} name @param {import('./objects.js').BufferObject} buffer
+     */
+    function readsCaptured(name, buffer){
+        if (buffer.captured)
+        {
+            lose(`${name} read a buffer transform feedback wrote on the device: it read what`
+                + ' the program last stored there, not what was captured');
+        }
+    }
+
+    /** The geometry shader of the program in use, if it has one. */
+    function geometryLayout(){
+        return kernel.side.glslExecutable?.()?.linked.geometryLayout ?? null;
+    }
+
+    /**
+     * Whether the program in use draws a mode: one with a geometry shader
+     * only the modes of its input primitive (OpenGL 3.2 section 2.12.1),
+     * and while transform feedback captures only the modes of its primitive.
+     *
+     * @param {number} mode
+     */
+    function takesMode(mode){
+        const layout = geometryLayout();
+        const linked = /** @type {import('./glsl-link.js').LinkedProgram | undefined} */ (
+            kernel.side.glslExecutable?.()?.linked);
+        if (!tessellationTakes(mode, linked))
+        {
+            return false;
+        }
+        // After tessellation a geometry shader takes the tessellator's
+        // primitives (OpenGL 4.0 section 2.13.1).
+        const tessellated = linked?.tessLayout ? linked.tessLayout.pointMode ? GL.POINTS
+            : TESSELLATED[linked.tessLayout.mode] : mode;
+        return (!layout || drawsGeometryInput(tessellated, layout.input))
+            && (kernel.side.feedbackTakes?.(tessellated, layout) ?? true);
+    }
+
+    /**
+     * Whether a core profile lets a draw be made: it draws only from a
+     * vertex array object, and no quads or polygons (3.2 appendix E.2).
+     *
+     * @param {number} mode @returns {boolean}
+     */
+    function coreAllows(mode){
+        if (!kernel.core)
+        {
+            return true;
+        }
+        if (CORE_REMOVED_MODES.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return false;
+        }
+        if (record(GL.VERTEX_ARRAY_BINDING).values[0] === 0)
+        {
+            setError(GL.INVALID_OPERATION);
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * A draw by a range of the arrays, as many times as there are instances.
      *
      * @param {string} name @param {number} mode @param {number} first @param {number} count
      * @param {Instancing} instancing
      */
     function drawArraysWith(name, mode, first, count, instancing){
+        refreshMapped();
+        if (!coreAllows(mode))
+        {
+            return;
+        }
         if (count < 0 || first < 0 || instancing.instances < 0)
         {
             setError(GL.INVALID_VALUE);
@@ -936,7 +1244,7 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (kernel.inPrimitive())
+        if (kernel.inPrimitive() || !takesMode(mode))
         {
             setError(GL.INVALID_OPERATION);
             return;
@@ -950,6 +1258,53 @@ export function installArrayCalls(context, kernel){
     }
 
     /**
+     * A draw of what a transform feedback object's last capture wrote
+     * (OpenGL 4.0 and 4.2 glDrawTransformFeedback and its forms): as many
+     * vertices as it wrote into its first buffer, counted by the device.
+     *
+     * @param {string} name @param {number} mode @param {number} object
+     * @param {number} stream @param {number} instances
+     */
+    function drawCaptured(name, mode, object, stream, instances){
+        refreshMapped();
+        if (!coreAllows(mode))
+        {
+            return;
+        }
+        if (!PRIMITIVE_MODES.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const found = kernel.side.feedbackCaptured?.(object, stream)
+            ?? { error: GL.INVALID_VALUE };
+        if ('error' in found)
+        {
+            setError(found.error);
+            return;
+        }
+        if (instances < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (kernel.inPrimitive() || !takesMode(mode))
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const captured = found.captured;
+        if (!captured || captured.most === 0 || instances === 0 || !hasVertexSource()
+            || drawFromArrays(mode, 0, captured.most, null, { instances, baseInstance: 0 },
+                captured))
+        {
+            return;
+        }
+        lose(`${name} drew nothing: how many vertices it draws is counted on the device,`
+            + ` and the draw could not be made there (${refusal})`);
+    }
+
+    /**
      * A draw by an index list, each index moved by the base vertex (OpenGL 3.2)
      * before the arrays are read, as many times as there are instances.
      *
@@ -959,6 +1314,11 @@ export function installArrayCalls(context, kernel){
      * @param {number} baseVertex @param {Instancing} instancing
      */
     function drawElementsWith(name, mode, count, type, indices, baseVertex, instancing){
+        refreshMapped();
+        if (!coreAllows(mode))
+        {
+            return;
+        }
         if (count < 0 || instancing.instances < 0)
         {
             setError(GL.INVALID_VALUE);
@@ -969,9 +1329,13 @@ export function installArrayCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (kernel.inPrimitive())
+        if (kernel.inPrimitive() || !takesMode(mode))
         {
             setError(GL.INVALID_OPERATION);
+            return;
+        }
+        if (restarting(name, mode, count, type, indices, baseVertex, instancing))
+        {
             return;
         }
         if (!hasVertexSource()
@@ -989,7 +1353,198 @@ export function installArrayCalls(context, kernel){
             refusal, instancing);
     }
 
+    /**
+     * Primitive restart (OpenGL 3.1 section 2.8.1, 4.3's fixed index): with it
+     * on, an index equal to the restart index ends the primitive and starts
+     * the next, so the draw is made as the draws of the runs between them,
+     * each its own strip, fan, loop or list, as the specification describes
+     * it. False when it is off or no index is the restart index, for the
+     * draw to go on as one.
+     *
+     * @param {string} name @param {number} mode @param {number} count @param {number} type
+     * @param {number | Uint8Array} indices @param {number} baseVertex
+     * @param {Instancing} instancing
+     * @returns {boolean} whether the draw was made here
+     */
+    function restarting(name, mode, count, type, indices, baseVertex, instancing){
+        const fixed = record(GL.PRIMITIVE_RESTART_FIXED_INDEX).values[0] !== 0;
+        if (!fixed && record(GL.PRIMITIVE_RESTART).values[0] === 0)
+        {
+            return false;
+        }
+        const size = componentBytes(type);
+        const restart = fixed ? 2 ** (size * 8) - 1
+            : record(GL.PRIMITIVE_RESTART_INDEX).values[0] >>> 0;
+        const list = readIndices(count, type, indices);
+        if (!list || !list.includes(restart))
+        {
+            return false;
+        }
+        let start = 0;
+        for (let at = 0; at <= list.length; at++)
+        {
+            if (at === list.length || list[at] === restart)
+            {
+                if (at > start)
+                {
+                    const from = typeof indices === 'number' ? indices + start * size
+                        : indices.subarray(start * size);
+                    // A run holds no restart index, and draws as one.
+                    drawElementsWith(name, mode, at - start, type, from, baseVertex,
+                        instancing);
+                }
+                start = at + 1;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The words of indirect commands (4.0, 4.3): `count` commands of `words`
+     * each, `stride` bytes apart, from the bound DRAW_INDIRECT_BUFFER or,
+     * with none bound, from the program's memory, which the compatibility
+     * profile allows. Null, and the error raised, when they cannot be read.
+     *
+     * @param {number} offset @param {number} count @param {number} stride
+     * @param {number} words
+     * @returns {number[][] | null}
+     */
+    function indirectCommands(offset, count, stride, words){
+        if (offset % 4 !== 0 || stride % 4 !== 0 || count < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const step = stride || words * 4;
+        const bound = record(GL.DRAW_INDIRECT_BUFFER_BINDING).values[0];
+        const buffer = bound === 0 ? null : kernel.shareGroup().buffers.objects.get(bound);
+        refreshMapped();
+        if (buffer && (mappedApart(buffer) || (count > 0
+            && offset + (count - 1) * step + words * 4 > buffer.data.length)))
+        {
+            // A command past the store's end, or one mapped, is refused.
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const read = readerFor({ size: 1, type: GL.UNSIGNED_INT, stride: 0, pointer: 0,
+            buffer: bound });
+        if (!read)
+        {
+            lose('an indirect draw read its commands from memory there is no way to read,'
+                + ' and drew nothing');
+            return null;
+        }
+        return Array.from({ length: count }, (unused, k)=>Array.from({ length: words },
+            (none, w)=>readIndex(read, offset + k * step, GL.UNSIGNED_INT, w)));
+    }
+
+    /**
+     * How many indirect draws a counted call (4.6) makes: the word at
+     * `offset` of the bound PARAMETER_BUFFER, no more than `most`. Null, and
+     * the error raised, when there is none to read.
+     *
+     * @param {number} offset @param {number} most
+     * @returns {number | null}
+     */
+    function drawCountAt(offset, most){
+        if (offset % 4 !== 0 || most < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const bound = record(GL.PARAMETER_BUFFER_BINDING).values[0];
+        const buffer = bound === 0 ? null : kernel.shareGroup().buffers.objects.get(bound);
+        refreshMapped();
+        if (!buffer || mappedApart(buffer) || offset + 4 > buffer.data.length)
+        {
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const read = /** @type {NonNullable<ReturnType<typeof readerFor>>} */ (readerFor(
+            { size: 1, type: GL.UNSIGNED_INT, stride: 0, pointer: 0, buffer: bound }));
+        return Math.min(most, readIndex(read, offset, GL.UNSIGNED_INT, 0));
+    }
+
+    /**
+     * Which draw of a multi-draw the draw being made is (gl_DrawID, 4.6
+     * section 11.1.3.9): 0 for a draw of its own.
+     */
+    let drawID = 0;
+
+    /**
+     * Makes `draw` the `index`-th draw of a multi-draw.
+     *
+     * @param {number} index @param {() => void} draw
+     */
+    function numbered(index, draw){
+        drawID = index;
+        try
+        {
+            draw();
+        }
+        finally
+        {
+            drawID = 0;
+        }
+    }
+
+    /**
+     * Arrays draws by indirect commands, made now even while a list is
+     * compiled: a list does not hold them (4.6 compatibility section 21.4).
+     *
+     * @param {string} name @param {number} mode @param {number[][] | null} commands
+     */
+    function drawArraysIndirectly(name, mode, commands){
+        kernel.executed(()=>{
+            (commands ?? []).forEach(([count, instances, first, baseInstance], k)=>{
+                numbered(k, ()=>drawArraysWith(name, mode, first, count,
+                    { instances, baseInstance }));
+            });
+        });
+    }
+
+    /**
+     * Elements draws by indirect commands, which read their indices from the
+     * bound element buffer, never from the program's memory.
+     *
+     * @param {string} name @param {number} mode @param {number} type
+     * @param {() => number[][] | null} commands
+     */
+    function drawElementsIndirectly(name, mode, type, commands){
+        if (!INDEX_TYPES.has(type))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (record(GL.ELEMENT_ARRAY_BUFFER_BINDING).values[0] === 0)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const size = componentBytes(type);
+        kernel.executed(()=>{
+            (commands() ?? []).forEach((command, k)=>{
+                const [count, instances, firstIndex, baseVertex, baseInstance] = command;
+                numbered(k, ()=>drawElementsWith(name, mode, count, type, firstIndex * size,
+                    baseVertex | 0, { instances, baseInstance }));
+            });
+        });
+    }
+
     Object.assign(context, {
+        /**
+         * glPrimitiveRestartIndex (3.1): the index that restarts while
+         * GL_PRIMITIVE_RESTART is on.
+         *
+         * @param {number} index
+         */
+        glPrimitiveRestartIndex(index){
+            if (enter('glPrimitiveRestartIndex', [index]))
+            {
+                setState(GL.PRIMITIVE_RESTART_INDEX, [index >>> 0]);
+            }
+        },
+
         /**
          * @param {number} size
          * @param {number} type
@@ -1066,7 +1621,7 @@ export function installArrayCalls(context, kernel){
             {
                 return;
             }
-            if (unit < GL.TEXTURE0 || unit >= GL.TEXTURE0 + TEXTURE_UNITS)
+            if (unit < GL.TEXTURE0 || unit >= GL.TEXTURE0 + TEXTURE_COORDS)
             {
                 setError(GL.INVALID_ENUM);
                 return;
@@ -1086,6 +1641,12 @@ export function installArrayCalls(context, kernel){
                 return null;
             }
             const name = /** @type {any} */ (POINTER_QUERIES)[query];
+            // Another installer's pointers (the debug callback, 4.3).
+            const other = kernel.side.pointerQueries?.get(query);
+            if (other)
+            {
+                return [other()];
+            }
             if (!name)
             {
                 setError(GL.INVALID_ENUM);
@@ -1233,6 +1794,31 @@ export function installArrayCalls(context, kernel){
         // --- instances and base vertices (OpenGL 3.1, 3.2, 4.2) ---
 
         /**
+         * A draw call made as the `index`-th of a multi-draw
+         * (glMultiDrawArrays and glMultiDrawElements, `exports-later.js`).
+         *
+         * @param {number} index @param {() => void} draw
+         */
+        numberedDraw(index, draw){
+            numbered(index, draw);
+        },
+
+        /**
+         * glDrawTransformFeedback, its stream form (4.0) and their instanced
+         * forms (4.2).
+         *
+         * @param {number} mode @param {number} object @param {number} stream
+         * @param {number} instances
+         */
+        drawTransformFeedback(mode, object, stream, instances){
+            if (!enter('drawTransformFeedback', [mode, object, stream, instances]))
+            {
+                return;
+            }
+            drawCaptured('glDrawTransformFeedback', mode, object, stream, instances);
+        },
+
+        /**
          * @param {number} mode @param {number} first @param {number} count
          * @param {number} instances
          */
@@ -1332,8 +1918,89 @@ export function installArrayCalls(context, kernel){
                 return;
             }
             counts.forEach((count, k)=>{
-                drawElementsWith('glMultiDrawElementsBaseVertex', mode, count, type, indices[k],
-                    baseVertices[k] ?? 0, ONE_INSTANCE);
+                numbered(k, ()=>drawElementsWith('glMultiDrawElementsBaseVertex', mode, count,
+                    type, indices[k], baseVertices[k] ?? 0, ONE_INSTANCE));
+            });
+        },
+
+        // --- indirect draws (4.0, 4.3, 4.6) ---
+
+        /** @param {number} mode @param {number} indirect */
+        glDrawArraysIndirect(mode, indirect){
+            if (enter('glDrawArraysIndirect', [mode, indirect]))
+            {
+                drawArraysIndirectly('glDrawArraysIndirect', mode,
+                    indirectCommands(indirect, 1, 0, ARRAYS_COMMAND_WORDS));
+            }
+        },
+
+        /** @param {number} mode @param {number} type @param {number} indirect */
+        glDrawElementsIndirect(mode, type, indirect){
+            if (enter('glDrawElementsIndirect', [mode, type, indirect]))
+            {
+                drawElementsIndirectly('glDrawElementsIndirect', mode, type,
+                    ()=>indirectCommands(indirect, 1, 0, ELEMENTS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} indirect @param {number} drawcount
+         * @param {number} stride
+         */
+        glMultiDrawArraysIndirect(mode, indirect, drawcount, stride){
+            if (enter('glMultiDrawArraysIndirect', [mode, indirect, drawcount, stride]))
+            {
+                drawArraysIndirectly('glMultiDrawArraysIndirect', mode,
+                    indirectCommands(indirect, drawcount, stride, ARRAYS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} type @param {number} indirect
+         * @param {number} drawcount @param {number} stride
+         */
+        glMultiDrawElementsIndirect(mode, type, indirect, drawcount, stride){
+            if (enter('glMultiDrawElementsIndirect', [mode, type, indirect, drawcount, stride]))
+            {
+                drawElementsIndirectly('glMultiDrawElementsIndirect', mode, type,
+                    ()=>indirectCommands(indirect, drawcount, stride, ELEMENTS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} indirect @param {number} drawcount  the
+         *     count's offset in the parameter buffer
+         * @param {number} most @param {number} stride
+         */
+        glMultiDrawArraysIndirectCount(mode, indirect, drawcount, most, stride){
+            if (!enter('glMultiDrawArraysIndirectCount', [mode, indirect, drawcount, most,
+                stride]))
+            {
+                return;
+            }
+            const count = drawCountAt(drawcount, most);
+            if (count !== null)
+            {
+                drawArraysIndirectly('glMultiDrawArraysIndirectCount', mode,
+                    indirectCommands(indirect, count, stride, ARRAYS_COMMAND_WORDS));
+            }
+        },
+
+        /**
+         * @param {number} mode @param {number} type @param {number} indirect
+         * @param {number} drawcount  the count's offset in the parameter buffer
+         * @param {number} most @param {number} stride
+         */
+        glMultiDrawElementsIndirectCount(mode, type, indirect, drawcount, most, stride){
+            if (!enter('glMultiDrawElementsIndirectCount', [mode, type, indirect, drawcount,
+                most, stride]))
+            {
+                return;
+            }
+            drawElementsIndirectly('glMultiDrawElementsIndirectCount', mode, type, ()=>{
+                const count = drawCountAt(drawcount, most);
+                return count === null ? null
+                    : indirectCommands(indirect, count, stride, ELEMENTS_COMMAND_WORDS);
             });
         },
 
@@ -1410,6 +2077,13 @@ export function installArrayCalls(context, kernel){
             const group = kernel.shareGroup();
             if (name !== 0 && !group.buffers.objects.has(name))
             {
+                if (kernel.core && !group.buffers.reserved.has(name))
+                {
+                    // A core profile makes no object of a name glGenBuffers
+                    // did not give (3.1 appendix E.2.2).
+                    setError(GL.INVALID_OPERATION);
+                    return;
+                }
                 group.buffers.define(name, createBufferObject(name));
                 group.used = true;
             }
@@ -1429,6 +2103,10 @@ export function installArrayCalls(context, kernel){
                 if (!object)
                 {
                     continue;
+                }
+                if (object.mapped !== 0)
+                {
+                    unmap(object);
                 }
                 kernel.bufferDeleted?.(object);
                 group.buffers.remove(name);
@@ -1488,13 +2166,15 @@ export function installArrayCalls(context, kernel){
             {
                 return;
             }
-            if (buffer.mapped !== 0)
+            if (buffer.mapped !== 0 || buffer.immutable)
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            buffer.storageFlags = MUTABLE_STORAGE;
             buffer.data = new Uint8Array(size);
             buffer.size = size;
+            buffer.captured = false;
             buffer.usage = usage;
             buffer.written = size > 0 ? { start: 0, end: size } : null;
             buffer.version++;
@@ -1509,6 +2189,55 @@ export function installArrayCalls(context, kernel){
                 {
                     buffer.data.set((memory.window ?? memory.read)(data, size));
                 }
+            }
+        },
+
+        /**
+         * glBufferStorage (4.4): a store of `size` bytes that is never
+         * redefined, holding `flags`: what it may be mapped for, whether
+         * glBufferSubData may write it.
+         *
+         * @param {number} target @param {number} size
+         * @param {number | Uint8Array | null} data @param {number} flags
+         */
+        glBufferStorage(target, size, data, flags){
+            if (!enter('glBufferStorage', [target, size, data, flags]))
+            {
+                return;
+            }
+            if (size <= 0 || (flags & ~STORAGE_BITS) !== 0
+                || ((flags & GL.MAP_PERSISTENT_BIT) !== 0
+                    && (flags & (GL.MAP_READ_BIT | GL.MAP_WRITE_BIT)) === 0)
+                || ((flags & GL.MAP_COHERENT_BIT) !== 0
+                    && (flags & GL.MAP_PERSISTENT_BIT) === 0))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const buffer = boundBuffer(target);
+            if (!buffer)
+            {
+                return;
+            }
+            if (buffer.immutable || buffer.mapped !== 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            buffer.immutable = true;
+            buffer.storageFlags = flags;
+            buffer.data = new Uint8Array(size);
+            buffer.size = size;
+            buffer.captured = false;
+            buffer.usage = GL.DYNAMIC_DRAW;
+            buffer.written = { start: 0, end: size };
+            buffer.version++;
+            const memory = kernel.memory();
+            const given = data instanceof Uint8Array ? data.subarray(0, size)
+                : data && memory ? (memory.window ?? memory.read)(data, size) : null;
+            if (given)
+            {
+                buffer.data.set(given);
             }
         },
 
@@ -1533,23 +2262,121 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
-            if (buffer.mapped !== 0)
+            if (mappedApart(buffer)
+                || (buffer.immutable && (buffer.storageFlags & GL.DYNAMIC_STORAGE_BIT) === 0))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            refreshMapped();
             const memory = kernel.memory();
             const bytes = data instanceof Uint8Array ? data.subarray(0, size)
                 : memory ? (memory.window ?? memory.read)(data, size) : null;
             if (bytes && size > 0)
             {
                 buffer.data.set(bytes, offset);
+                noteWritten(buffer, offset, size);
+                mirrorToMap(buffer, offset, size);
+            }
+        },
+
+        /**
+         * glClearBufferData and glClearBufferSubData (4.3): one element in
+         * `internal`, made of a pixel as glTexImage reads one, repeated over
+         * the range; zeros when the program gives none.
+         *
+         * @param {string} name @param {number} target @param {number} internal
+         * @param {number | null} offset  null for the whole store
+         * @param {number} size @param {number} format @param {number} type
+         * @param {number | Uint8Array} data  an address, zero for none, or the bytes
+         */
+        clearBufferData(name, target, internal, offset, size, format, type, data){
+            if (!enter(name, [target, internal, offset, size, format, type, data]))
+            {
+                return;
+            }
+            const buffer = boundBuffer(target);
+            if (!buffer)
+            {
+                return;
+            }
+            const sized = CLEAR_FORMATS.has(internal) ? SIZED_FORMATS.get(internal) : undefined;
+            if (!sized)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const components = { [GL.RED]: 1, [TEX.RG]: 2, [GL.RGB]: 3 }[sized.base] ?? 4;
+            const element = components * sized.bits[0] / 8;
+            const start = offset ?? 0;
+            const length = offset === null ? buffer.size : size;
+            if (start < 0 || length < 0 || start + length > buffer.size
+                || start % element !== 0 || length % element !== 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (mappedApart(buffer))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const transfer = transferError(sized, format, type);
+            if (transfer)
+            {
+                // ARB_clear_buffer_object answers a format or type it does
+                // not know with INVALID_VALUE, where glTexImage's is INVALID_ENUM.
+                setError(transfer === GL.INVALID_ENUM ? GL.INVALID_VALUE : transfer);
+                return;
+            }
+            const pixel = clientBytes(1, 1, 1, format, type, PLAIN_UNPACK);
+            const memory = kernel.memory();
+            const given = data instanceof Uint8Array ? data.subarray(0, pixel)
+                : data === 0 ? null : memory ? (memory.window ?? memory.read)(data, pixel) : null;
+            const value = given
+                ? unpackToStorage(given, 1, 1, 1, format, type, PLAIN_UNPACK, sized)
+                    ?.subarray(0, element) ?? null
+                : new Uint8Array(element);
+            if (!value)
+            {
+                lose(`${name} could not read the value it clears with, and cleared nothing`);
+                return;
+            }
+            refreshMapped();
+            for (let at = start; at < start + length; at += element)
+            {
+                buffer.data.set(value, at);
+            }
+            mirrorToMap(buffer, start, length);
+            if (length > 0)
+            {
                 buffer.written = buffer.written
-                    ? { start: Math.min(buffer.written.start, offset),
-                        end: Math.max(buffer.written.end, offset + size) }
-                    : { start: offset, end: offset + size };
+                    ? { start: Math.min(buffer.written.start, start),
+                        end: Math.max(buffer.written.end, start + length) }
+                    : { start, end: start + length };
                 buffer.version++;
             }
+        },
+
+        /**
+         * The bound forms, for the named ones to reach (4.5).
+         *
+         * @param {number} target @param {number} internal @param {number} format
+         * @param {number} type @param {number | Uint8Array} data
+         */
+        glClearBufferData(target, internal, format, type, data){
+            context.clearBufferData('glClearBufferData', target, internal, null, 0, format, type,
+                data);
+        },
+
+        /**
+         * @param {number} target @param {number} internal @param {number} offset
+         * @param {number} size @param {number} format @param {number} type
+         * @param {number | Uint8Array} data
+         */
+        glClearBufferSubData(target, internal, offset, size, format, type, data){
+            context.clearBufferData('glClearBufferSubData', target, internal, offset, size,
+                format, type, data);
         },
 
         /**
@@ -1573,11 +2400,31 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return null;
             }
-            if (buffer.mapped !== 0)
+            if (mappedApart(buffer))
             {
                 setError(GL.INVALID_OPERATION);
                 return null;
             }
+            refreshMapped();
+            // What a shader or transform feedback wrote is the device's: read
+            // back, every command before this one done first (4.3 section 7.13).
+            const device = buffer.captured ? kernel.side.readDeviceBuffer?.(buffer) : null;
+            if (device)
+            {
+                return device.then((/** @type {Uint8Array | null} */ bytes)=>{
+                    if (bytes)
+                    {
+                        buffer.data.set(bytes.subarray(0, buffer.data.length));
+                        buffer.captured = false;
+                    }
+                    else
+                    {
+                        readsCaptured('glGetBufferSubDataARB', buffer);
+                    }
+                    return buffer.data.slice(offset, offset + size);
+                });
+            }
+            readsCaptured('glGetBufferSubDataARB', buffer);
             return buffer.data.slice(offset, offset + size);
         },
 
@@ -1601,7 +2448,10 @@ export function installArrayCalls(context, kernel){
             {
                 return 0;
             }
-            if (buffer.mapped !== 0)
+            readsCaptured('glMapBufferARB', buffer);
+            if (buffer.mapped !== 0 || mapRefused(buffer, access === GL.READ_ONLY
+                ? GL.MAP_READ_BIT : access === GL.WRITE_ONLY ? GL.MAP_WRITE_BIT
+                    : GL.MAP_READ_BIT | GL.MAP_WRITE_BIT))
             {
                 setError(GL.INVALID_OPERATION);
                 return 0;
@@ -1630,6 +2480,7 @@ export function installArrayCalls(context, kernel){
             {
                 return 0;
             }
+            readsCaptured('glMapBufferRange', buffer);
             if (offset < 0 || length < 0 || offset + length > buffer.size
                 || (access & ~MAP_BITS) !== 0)
             {
@@ -1641,7 +2492,8 @@ export function installArrayCalls(context, kernel){
             if (length === 0 || buffer.mapped !== 0 || (!reads && !writes)
                 || (reads && (access & (GL.MAP_INVALIDATE_RANGE_BIT
                     | GL.MAP_INVALIDATE_BUFFER_BIT | GL.MAP_UNSYNCHRONIZED_BIT)) !== 0)
-                || ((access & GL.MAP_FLUSH_EXPLICIT_BIT) !== 0 && !writes))
+                || ((access & GL.MAP_FLUSH_EXPLICIT_BIT) !== 0 && !writes)
+                || mapRefused(buffer, access))
             {
                 setError(GL.INVALID_OPERATION);
                 return 0;
@@ -1731,16 +2583,18 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
-            if (source.mapped !== 0 || destination.mapped !== 0)
+            if (mappedApart(source) || mappedApart(destination))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            refreshMapped();
             if (size > 0)
             {
                 destination.data.set(source.data.subarray(readOffset, readOffset + size),
                     writeOffset);
                 noteWritten(destination, writeOffset, size);
+                mirrorToMap(destination, writeOffset, size);
             }
         },
 
@@ -1775,6 +2629,10 @@ export function installArrayCalls(context, kernel){
                     return [buffer.mapOffset];
                 case GL.BUFFER_MAP_LENGTH:
                     return [buffer.mapLength];
+                case GL.BUFFER_IMMUTABLE_STORAGE:
+                    return [buffer.immutable ? 1 : 0];
+                case GL.BUFFER_STORAGE_FLAGS:
+                    return [buffer.storageFlags];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

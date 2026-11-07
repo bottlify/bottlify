@@ -619,7 +619,8 @@ const SW_SHOWNA = 8;
  * @param {Map<number, any>} options.windows
  * @param {Map<string, any>} options.classes  Registered classes, by name.
  * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
- *     title: string } | null)} [options.elsewhere]
+ *     title: string, parent?: number, owner?: number, style?: number } | null)}
+ *     [options.elsewhere]
  *     A window of another process, as that process describes it.
  * @param {{ register: (name: string) => number, registeredName: (id: number) => string | null }}
  *     [options.names]  The run's registered messages and clipboard formats.
@@ -1192,6 +1193,24 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      */
     const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed
         && !record.unlinked);
+
+    /**
+     * A window of this process, or another's as that process describes it,
+     * with its handle: what the calls that walk the tree of windows read.
+     *
+     * @param {number} hwnd
+     * @returns {any}
+     */
+    const anyWindow = hwnd=>{
+        const own = live(hwnd);
+        if (own || (hwnd >>> 0) === 0)
+        {
+            return own;
+        }
+        const other = elsewhere(hwnd);
+        return other ? { ...other, hwnd: hwnd >>> 0, parent: other.parent ?? 0,
+            owner: other.owner ?? 0, style: other.style ?? 0 } : null;
+    };
 
     /**
      * What GetParent answers for a window: its owner when it is a popup, its
@@ -3043,7 +3062,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const record = live(hwnd);
+                const record = anyWindow(hwnd);
                 if (!record)
                 {
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
@@ -3066,7 +3085,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, flags])=>{
-                const record = live(hwnd);
+                const record = anyWindow(hwnd);
                 if (!record || host.isDesktop(record))
                 {
                     return 0;
@@ -3074,25 +3093,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 /** @param {any} from */
                 const rootOf = from=>{
                     let at = from;
-                    for (let depth = 0; live(at.parent) && depth < 256; depth++)
+                    for (let depth = 0, up = anyWindow(at.parent); up && depth < 256;
+                        depth++, up = anyWindow(at.parent))
                     {
-                        at = live(at.parent);
+                        at = up;
                     }
                     return at;
                 };
                 switch (flags >>> 0){
                     case GA_PARENT:
-                        return live(record.parent)?.hwnd ?? host.desktop().hwnd;
+                        return anyWindow(record.parent)?.hwnd ?? host.desktop().hwnd;
                     case GA_ROOT:
                         return rootOf(record).hwnd;
                     case GA_ROOTOWNER: {
                         let at = record;
-                        const seen = new Set([at]);
-                        for (let next = live(parentOf(at)); next && !seen.has(next);
-                            next = live(parentOf(at)))
+                        const seen = new Set([at.hwnd]);
+                        for (let next = anyWindow(parentOf(at)); next && !seen.has(next.hwnd);
+                            next = anyWindow(parentOf(at)))
                         {
                             at = next;
-                            seen.add(at);
+                            seen.add(at.hwnd);
                         }
                         return at.hwnd;
                     }
@@ -3145,15 +3165,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 const target = (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0;
-                const inside = target === 0 ? null : live(target);
+                // Another process's window takes a child of this one's, as
+                // it does on Windows: the two share the desktop's tree.
+                const inside = target === 0 ? null : anyWindow(target);
                 if (target !== 0 && !inside)
                 {
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                for (let at = inside, depth = 0; at && depth < 256; at = live(at.parent), depth++)
+                for (let at = inside, depth = 0; at && depth < 256;
+                    at = anyWindow(at.parent), depth++)
                 {
-                    if (at === record)
+                    if (at.hwnd === record.hwnd)
                     {
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;

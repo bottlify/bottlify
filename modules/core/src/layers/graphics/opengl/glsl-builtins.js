@@ -30,9 +30,11 @@ export const GLSL_LIMITS = Object.freeze({
     vertexAttribs: 16,
     vertexUniformComponents: 1024,
     varyingFloats: 32,
-    vertexTextureImageUnits: 8,
-    combinedTextureImageUnits: 8,
-    textureImageUnits: 8,
+    // WebGPU's sampled textures and samplers a stage, every sampler of a
+    // program being bound for every stage (A181).
+    vertexTextureImageUnits: 16,
+    combinedTextureImageUnits: 16,
+    textureImageUnits: 16,
     fragmentUniformComponents: 1024,
     drawBuffers: 4,
 });
@@ -214,6 +216,8 @@ export const BUILTIN_STRUCTS = Object.freeze({
  *     input, its output (which the stage may read back), or a constant
  * @property {number[]} [value]  a constant's
  * @property {boolean} [patch]  a tessellation stage's per-patch variable
+ * @property {string} [alias]  the built-in this is another name of: an
+ *     extension's name for what a later version named otherwise
  */
 
 const MAT2 = matrixOf(2, 2);

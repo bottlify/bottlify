@@ -22,7 +22,8 @@ import { GL } from './constants.js';
 import { transpose } from './matrix.js';
 
 /**
- * The blend factors OpenGL 1.4 takes, constant colours among them.
+ * The blend factors OpenGL 1.4 takes, constant colours among them, and 3.3's
+ * that blend by the fragment shader's second output.
  *
  * @type {Set<number>}
  */
@@ -30,7 +31,8 @@ export const BLEND_FACTORS = new Set([
     GL.ZERO, GL.ONE, GL.SRC_COLOR, GL.ONE_MINUS_SRC_COLOR, GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA,
     GL.DST_ALPHA, GL.ONE_MINUS_DST_ALPHA, GL.DST_COLOR, GL.ONE_MINUS_DST_COLOR,
     GL.SRC_ALPHA_SATURATE, GL.CONSTANT_COLOR, GL.ONE_MINUS_CONSTANT_COLOR, GL.CONSTANT_ALPHA,
-    GL.ONE_MINUS_CONSTANT_ALPHA,
+    GL.ONE_MINUS_CONSTANT_ALPHA, GL.SRC1_COLOR, GL.SRC1_ALPHA, GL.ONE_MINUS_SRC1_COLOR,
+    GL.ONE_MINUS_SRC1_ALPHA,
 ]);
 
 /** @type {Set<number>} */
@@ -39,7 +41,7 @@ const COMPARE_FUNCTIONS = new Set([
 ]);
 
 /** The blend equations. @type {Set<number>} */
-const EQUATIONS = new Set([GL.FUNC_ADD, GL.FUNC_SUBTRACT, GL.FUNC_REVERSE_SUBTRACT, GL.MIN,
+export const EQUATIONS = new Set([GL.FUNC_ADD, GL.FUNC_SUBTRACT, GL.FUNC_REVERSE_SUBTRACT, GL.MIN,
     GL.MAX]);
 
 /** @type {Set<number>} */
@@ -66,29 +68,17 @@ const BACK = { func: GL.STENCIL_BACK_FUNC, ref: GL.STENCIL_BACK_REF,
 const WINDOW_BUFFERS = new Set([GL.NONE, GL.FRONT_LEFT, GL.FRONT_RIGHT, GL.BACK_LEFT,
     GL.BACK_RIGHT, GL.AUX0]);
 
-/**
- * The calls of this file a display list does not record: the query objects'.
- */
-export const CORE_CALLS_NOT_COMPILED = Object.freeze([
-    'glGenQueries', 'glDeleteQueries', 'glIsQuery', 'glGetQueryiv', 'glGetQueryObject',
-]);
 
 /**
  * @param {any} context
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function installCoreCalls(context, kernel){
-    const { enter, setError, setState, record, diverge } = kernel;
+    const { enter, setError, setState, record } = kernel;
 
     /** @param {number} face @returns {StencilQueries[] | null} */
     const facesOf = face=>(face === GL.FRONT ? [FRONT] : face === GL.BACK ? [BACK]
         : face === GL.FRONT_AND_BACK ? [FRONT, BACK] : null);
-
-    /** The query objects: names, and the one active. */
-    /** @type {Map<number, { result: number } | null>} */
-    const queries = new Map();
-    /** @type {{ name: number } | null} */
-    let activeQuery = null;
 
     /** @param {number} value */
     const clamp01 = value=>(value < 0 ? 0 : value > 1 ? 1 : value);
@@ -122,6 +112,7 @@ export function installCoreCalls(context, kernel){
             }
             setState(GL.BLEND_EQUATION_RGB, [rgb]);
             setState(GL.BLEND_EQUATION_ALPHA, [alpha]);
+            kernel.side.allBuffers?.(GL.BLEND_EQUATION_RGB, [rgb, alpha]);
         },
 
         /**
@@ -145,6 +136,7 @@ export function installCoreCalls(context, kernel){
             setState(GL.BLEND_DST_RGB, [dstRgb]);
             setState(GL.BLEND_SRC_ALPHA, [srcAlpha]);
             setState(GL.BLEND_DST_ALPHA, [dstAlpha]);
+            kernel.side.allBuffers?.(GL.BLEND_SRC_RGB, [srcRgb, dstRgb, srcAlpha, dstAlpha]);
         },
 
         // --- stencil, face by face ---
@@ -208,6 +200,43 @@ export function installCoreCalls(context, kernel){
             {
                 setState(q.write, [mask >>> 0]);
             }
+        },
+
+        // --- colour clamping (3.0) ---
+
+        /**
+         * glClampColor: whether vertex colours, fragment colours and the
+         * colours glReadPixels reads are clamped to [0, 1]. What the device
+         * does is GL_FIXED_ONLY for fragments and reads -- a float buffer
+         * keeps its values, a normalised one clamps -- and clamped vertex
+         * colours; another setting is kept and said once.
+         *
+         * @param {number} target @param {number} clamp
+         */
+        glClampColor(target, clamp){
+            if (!enter('glClampColor', [target, clamp]))
+            {
+                return;
+            }
+            if (target !== GL.CLAMP_VERTEX_COLOR && target !== GL.CLAMP_FRAGMENT_COLOR
+                && target !== GL.CLAMP_READ_COLOR)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (clamp !== GL.TRUE && clamp !== GL.FALSE && clamp !== GL.FIXED_ONLY)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const done = target === GL.CLAMP_VERTEX_COLOR ? GL.TRUE : GL.FIXED_ONLY;
+            if (clamp !== done)
+            {
+                kernel.diverge(`glClampColor(0x${target.toString(16)}) was set to`
+                    + ` 0x${clamp.toString(16)}, kept and not done: colours are clamped as by`
+                    + ` default`);
+            }
+            setState(target, [clamp]);
         },
 
         // --- draw buffers ---
@@ -318,178 +347,6 @@ export function installCoreCalls(context, kernel){
             setState(GL.CURRENT_RASTER_DISTANCE, [current.fogCoord]);
         },
 
-        // --- occlusion queries ---
 
-        /** @param {number} count @returns {number[]} */
-        glGenQueries(count){
-            if (!enter('glGenQueries', [count]))
-            {
-                return [];
-            }
-            if (count < 0)
-            {
-                setError(GL.INVALID_VALUE);
-                return [];
-            }
-            /** @type {number[]} */
-            const names = [];
-            for (let name = 1; names.length < count; name++)
-            {
-                if (!queries.has(name))
-                {
-                    queries.set(name, null);
-                    names.push(name);
-                }
-            }
-            return names;
-        },
-
-        /** @param {readonly number[]} names */
-        glDeleteQueries(names){
-            if (!enter('glDeleteQueries', [names]))
-            {
-                return;
-            }
-            for (const name of names)
-            {
-                if (activeQuery?.name === name)
-                {
-                    activeQuery = null;
-                }
-                queries.delete(name);
-            }
-        },
-
-        /** @param {number} name @returns {number} */
-        glIsQuery(name){
-            if (!enter('glIsQuery', [name]))
-            {
-                return GL.FALSE;
-            }
-            return queries.get(name) ? GL.TRUE : GL.FALSE;
-        },
-
-        /** @param {number} target @param {number} name */
-        glBeginQuery(target, name){
-            if (!enter('glBeginQuery', [target, name]))
-            {
-                return;
-            }
-            if (target !== GL.SAMPLES_PASSED)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (name === 0 || activeQuery)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            activeQuery = { name };
-            queries.set(name, { result: 0 });
-        },
-
-        /** @param {number} target */
-        glEndQuery(target){
-            if (!enter('glEndQuery', [target]))
-            {
-                return;
-            }
-            if (target !== GL.SAMPLES_PASSED)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (!activeQuery)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            diverge('an occlusion query was answered with the viewport\'s area, not the samples'
-                + ' that passed: a program culling by it draws everything');
-            const [, , width, height] = record(GL.VIEWPORT).values;
-            queries.set(activeQuery.name, { result: Math.max(1, width * height) });
-            activeQuery = null;
-        },
-
-        /** @param {number} target @param {number} pname @returns {number[] | null} */
-        glGetQueryiv(target, pname){
-            if (!enter('glGetQueryiv', [target, pname]))
-            {
-                return null;
-            }
-            if (target !== GL.SAMPLES_PASSED)
-            {
-                setError(GL.INVALID_ENUM);
-                return null;
-            }
-            if (pname === GL.QUERY_COUNTER_BITS)
-            {
-                return [32];
-            }
-            if (pname === GL.CURRENT_QUERY)
-            {
-                return [activeQuery?.name ?? 0];
-            }
-            setError(GL.INVALID_ENUM);
-            return null;
-        },
-
-        /** @param {number} name @param {number} pname @returns {number[] | null} */
-        glGetQueryObject(name, pname){
-            if (!enter('glGetQueryObject', [name, pname]))
-            {
-                return null;
-            }
-            const query = queries.get(name);
-            if (!query || activeQuery?.name === name)
-            {
-                setError(GL.INVALID_OPERATION);
-                return null;
-            }
-            if (pname === GL.QUERY_RESULT_AVAILABLE)
-            {
-                return [1];
-            }
-            if (pname === GL.QUERY_RESULT)
-            {
-                return [query.result];
-            }
-            setError(GL.INVALID_ENUM);
-            return null;
-        },
-
-        // --- 3D textures ---
-
-        /**
-         * glTexImage3D and glTexSubImage3D, by their target and size alone:
-         * GL_MAX_3D_TEXTURE_SIZE is the specification's minimum of 16, and
-         * what fits is accepted and not kept.
-         *
-         * @param {string} call @param {number} target @param {number} level
-         * @param {number} width @param {number} height @param {number} depth
-         */
-        texImage3D(call, target, level, width, height, depth){
-            if (!enter('texImage3D', [call, target, level, width, height, depth]))
-            {
-                return;
-            }
-            if (target !== GL.TEXTURE_3D && target !== GL.PROXY_TEXTURE_3D)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            const max = record(GL.MAX_3D_TEXTURE_SIZE).values[0];
-            if (level < 0 || width < 0 || height < 0 || depth < 0 || width > max || height > max
-                || depth > max)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            if (target === GL.TEXTURE_3D)
-            {
-                diverge(`${call} was accepted and kept nothing: there are no 3D textures here`);
-            }
-        },
     });
 }

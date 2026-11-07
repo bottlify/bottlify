@@ -40,7 +40,8 @@ export function compileFront(sources, stage, options = {}){
     {
         return { ok: false, log: `${lines.join('\n')}\n`, unit: null };
     }
-    const language = languageOf(pre.version, pre.profile, [...pre.extensions.keys()]);
+    const language = languageOf(pre.version, pre.profile, [...pre.extensions]
+        .filter(([, behaviour])=>behaviour !== 'disable').map(([name])=>name));
     try
     {
         const unit = checkShader(parse(pre.tokens, language), { stage, version: pre.version,

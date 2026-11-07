@@ -210,6 +210,21 @@ export function baseOf(type){
 }
 
 /**
+ * The vertex attribute locations a column of a type takes (4.1 section
+ * 11.1.1): a dvec3's and a dvec4's two, every other column one.
+ *
+ * @param {GlslType} type @returns {number}
+ */
+export function columnSlots(type){
+    if (!('base' in type) || type.base !== 'double')
+    {
+        return 1;
+    }
+    const rows = type.kind === 'matrix' ? type.rows : type.kind === 'vector' ? type.size : 1;
+    return rows > 2 ? 2 : 1;
+}
+
+/**
  * How many scalars a scalar, vector or matrix holds; zero for anything else.
  *
  * @param {GlslType} type

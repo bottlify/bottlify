@@ -285,6 +285,26 @@ const offered = ask=>{
 };
 
 /** The graphics layer's module for one graph; see `defaultModules`. */
+/**
+ * The drawable OpenGL sees for a device context: a window's is its client
+ * area, whichever of its DCs names it, as one from GetWindowDC spans the frame
+ * too (Wine's opengl32 test_window_dc). Anything else is as gdi32 describes it.
+ *
+ * @template {{ window: number, width: number, height: number }} T
+ * @param {T | null} drawable
+ * @param {ReadonlyArray<{ hwnd: unknown, client?: { left: number, top: number,
+ *     right: number, bottom: number } }>} windows
+ * @returns {T | null}
+ */
+export function clientDrawable(drawable, windows){
+    const client = drawable && drawable.window !== 0
+        ? windows.find(each=>Number(each.hwnd) === drawable.window)?.client ?? null
+        : null;
+    return drawable && client
+        ? { ...drawable, width: client.right - client.left, height: client.bottom - client.top }
+        : drawable;
+}
+
 export function createGraphicsModule(){
     /**
      * The instance this module object made last, for `diagnostics()` and
@@ -786,13 +806,30 @@ export function createGraphicsModule(){
                     // would be a drawable of its own and a format set on one
                     // would be lost to the next.
                     /** @param {number} hdc */
-                    describeDrawable: hdc=>win32.gdi().describeDrawable(hdc),
+                    describeDrawable: hdc=>clientDrawable(win32.gdi().describeDrawable(hdc),
+                        win32.windows?.() ?? []),
+                    // A context on a memory DC draws into the bitmap selected
+                    // there (`wgl-bitmap.js`).
+                    /** @param {number} hdc */
+                    bitmapSurface: hdc=>win32.gdi().bitmapSurface?.(hdc) ?? null,
+                    // A pbuffer's DC is GDI's, so GetPixelFormat and every other
+                    // call naming it finds one (WGL_ARB_pbuffer).
+                    /** @param {number} width @param {number} height */
+                    createPbufferDc: (width, height)=>win32.gdi().createPbufferDc?.(width, height)
+                        ?? 0,
+                    /** @param {number} hdc */
+                    deleteDc: hdc=>win32.gdi().deleteSurfaceDc?.(hdc),
                     // WGL's refusals are read with GetLastError.
                     /** @param {number} code */
                     setLastError: code=>win32.setLastError?.(code),
                     // A context is current on one thread at a time, and another
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
                     currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
+                    // The debug callback (4.3) runs on the thread whose call
+                    // made the message.
+                    /** @param {{ entry: number, args: number[] }} guestCall */
+                    callGuest: guestCall=>bridge.callGuest({ ...guestCall,
+                        thread: bridge.callerThread() }),
                     // Where the routines of a context's command ring find its
                     // block: the calling thread's TEB. A 64-bit process has no
                     // such routines (they are i386 code), and every call traps.

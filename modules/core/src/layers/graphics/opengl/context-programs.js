@@ -33,6 +33,7 @@
  * save them under those bits.
  */
 
+import { unpackWord } from './arrays.js';
 import { GL } from './constants.js';
 import { PROGRAM_LIMITS, canonicalAttribName, parseProgram } from './arb-program.js';
 import { createProgramObject } from './objects.js';
@@ -50,7 +51,7 @@ const TARGETS = new Map([
 /** @type {Set<number>} */
 const ATTRIB_TYPES = new Set([
     GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT, GL.FLOAT,
-    GL.DOUBLE,
+    GL.DOUBLE, GL.INT_2_10_10_10_REV, GL.UNSIGNED_INT_2_10_10_10_REV, GL.FIXED,
 ]);
 
 /**
@@ -63,20 +64,28 @@ const ATTRIB_TYPES = new Set([
  * @property {number} pointer
  * @property {number} buffer  the ARRAY_BUFFER bound when the pointer was set
  * @property {number} divisor  zero for an element a vertex, n for one every n instances
+ * @property {number} [integer]  1 when glVertexAttribIPointer set it: read as integers
+ * @property {number} [literalStride]  a binding point's stride (4.3, `context-attrib-binding.js`)
  */
 
 /** @returns {GenericAttribArray} */
 const createAttribArray = ()=>({
     enabled: 0, size: 4, type: GL.FLOAT, normalised: 0, stride: 0, pointer: 0, buffer: 0,
-    divisor: 0,
+    divisor: 0, integer: 0,
 });
+
+/** The types glVertexAttribIPointer takes: the integers (OpenGL 3.0 section 2.8). */
+/** @type {Set<number>} */
+const INTEGER_ATTRIB_TYPES = new Set([
+    GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT,
+]);
 
 /**
  * @param {any} context
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function installProgramCalls(context, kernel){
-    const { enter, setError, record, setState } = kernel;
+    const { enter, setError, record, setState, diverge } = kernel;
 
     /** @type {Map<number, number>} target -> the bound program's name */
     const bindings = new Map([[GL.VERTEX_PROGRAM_ARB, 0], [GL.FRAGMENT_PROGRAM_ARB, 0]]);
@@ -164,6 +173,7 @@ export function installProgramCalls(context, kernel){
                         pointer: {
                             size: array.size, type: array.type, stride: array.stride,
                             pointer: array.pointer, buffer: array.buffer, divisor: array.divisor,
+                            literalStride: array.literalStride,
                         },
                     });
                 });
@@ -203,7 +213,8 @@ export function installProgramCalls(context, kernel){
         saveClientPrograms(mask){
             return (mask & GL.CLIENT_VERTEX_ARRAY_BIT) === 0
                 ? null
-                : attribArrays.map(array=>({ ...array }));
+                : { arrays: attribArrays.map(array=>({ ...array })),
+                    binding: kernel.side.attribBinding?.save() ?? null };
         },
 
         /** @param {any} saved */
@@ -212,9 +223,14 @@ export function installProgramCalls(context, kernel){
             {
                 return;
             }
-            saved.forEach((/** @type {GenericAttribArray} */ array, /** @type {number} */ i)=>{
+            /** @type {GenericAttribArray[]} */ (saved.arrays).forEach((array, i)=>{
                 Object.assign(attribArrays[i], array);
             });
+            // After the arrays: the model writes the records it is the source of.
+            if (saved.binding)
+            {
+                kernel.side.attribBinding?.restore(saved.binding);
+            }
         },
     });
 
@@ -674,6 +690,13 @@ export function installProgramCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
+            // A packed word holds four components (3.3), all of which the array takes.
+            if ((type === GL.INT_2_10_10_10_REV || type === GL.UNSIGNED_INT_2_10_10_10_REV)
+                && size !== 4)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             // An aliased index is the conventional array: the generic write
             // is another way of writing the same pointer record.
             const array = /**
@@ -685,6 +708,146 @@ export function installProgramCalls(context, kernel){
             array.stride = stride;
             array.pointer = pointer;
             array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+            array.integer = 0;
+            kernel.side.attribBinding?.fromPointer(index);
+        },
+
+        /**
+         * glVertexAttribIPointer (OpenGL 3.0): an array of integers a shader's
+         * integer input reads as they are.
+         *
+         * @param {number} index @param {number} size @param {number} type
+         * @param {number} stride @param {number} pointer
+         */
+        glVertexAttribIPointer(index, size, type, stride, pointer){
+            if (!enter('glVertexAttribIPointer', [index, size, type, stride, pointer]))
+            {
+                return;
+            }
+            if (!(index >= 0) || index >= GENERIC_ATTRIBS || size < 1 || size > 4 || stride < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (!INTEGER_ATTRIB_TYPES.has(type))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
+            array.size = size;
+            array.type = type;
+            array.normalised = 0;
+            array.stride = stride;
+            array.pointer = pointer;
+            array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+            array.integer = 1;
+            kernel.side.attribBinding?.fromPointer(index);
+        },
+
+        /**
+         * glVertexAttribLPointer (4.1): an array of doubles a shader's double
+         * input reads, carried at single precision as the shader carries a
+         * double (decision A178).
+         *
+         * @param {number} index @param {number} size @param {number} type
+         * @param {number} stride @param {number} pointer
+         */
+        glVertexAttribLPointer(index, size, type, stride, pointer){
+            if (!enter('glVertexAttribLPointer', [index, size, type, stride, pointer]))
+            {
+                return;
+            }
+            if (!(index >= 0) || index >= GENERIC_ATTRIBS || size < 1 || size > 4 || stride < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (type !== GL.DOUBLE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            diverge('a 64-bit vertex attribute (glVertexAttribLPointer) is read at single'
+                + ' precision');
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
+            array.size = size;
+            array.type = type;
+            array.normalised = 0;
+            array.stride = stride;
+            array.pointer = pointer;
+            array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+            array.integer = 0;
+            kernel.side.attribBinding?.fromPointer(index);
+        },
+
+        /**
+         * glVertexAttribI4i and glVertexAttribI4ui, and every shorter and
+         * vector form, which `exports-later.js` widens to four with (0, 0, 1):
+         * a current value an integer input reads as it was given.
+         *
+         * @param {number} index @param {'int' | 'uint'} kind
+         * @param {number} x @param {number} y @param {number} z @param {number} w
+         */
+        vertexAttribI(index, kind, x, y, z, w){
+            if (checkAttrib('vertexAttribI', [index, kind, x, y, z, w], index))
+            {
+                attribValues[index] = kind === 'uint' ? [x >>> 0, y >>> 0, z >>> 0, w >>> 0]
+                    : [x | 0, y | 0, z | 0, w | 0];
+            }
+        },
+
+        /**
+         * The packed attribute forms (3.3, GL_ARB_vertex_type_2_10_10_10_rev):
+         * glVertexAttribP*, glVertexP*, glTexCoordP*, glMultiTexCoordP*,
+         * glNormalP3ui, glColorP* and glSecondaryColorP3ui. The word's first
+         * `count` components are what the unpacked form takes; the rest are
+         * (0, 0, 1) for an attribute or vertex and its texture coordinates.
+         *
+         * @param {'attrib' | 'vertex' | 'texCoord' | 'normal' | 'color' | 'secondary'} kind
+         * @param {number} index  the generic attribute, or the texture unit's enum
+         * @param {number} type @param {boolean} normalised
+         * @param {number} count @param {number} word
+         */
+        packedAttribute(kind, index, type, normalised, count, word){
+            if (type !== GL.INT_2_10_10_10_REV && type !== GL.UNSIGNED_INT_2_10_10_10_REV)
+            {
+                // The error is the context's own, as the unpacked call's would be.
+                if (enter('packedAttribute', [kind, index, type, normalised, count, word]))
+                {
+                    setError(GL.INVALID_ENUM);
+                }
+                return;
+            }
+            const all = unpackWord(word >>> 0, type, normalised);
+            const [x, y, z, w] = [0, 1, 2, 3].map(k=>(k < count ? all[k] : k === 3 ? 1 : 0));
+            switch (kind)
+            {
+                case 'attrib': context.glVertexAttrib4fARB(index, x, y, z, w); break;
+                case 'vertex': context.glVertex4f(x, y, z, w); break;
+                case 'texCoord': context.glMultiTexCoord4fARB(index, x, y, z, w); break;
+                case 'normal': context.glNormal3f(x, y, z); break;
+                case 'color': context.glColor4f(x, y, z, w); break;
+                default: context.glSecondaryColor3fEXT(x, y, z);
+            }
+        },
+
+        /**
+         * glGetVertexAttribIiv and glGetVertexAttribIuiv: what the float form
+         * answers, the current value as the integers it holds.
+         *
+         * @param {number} index @param {number} pname @param {'int' | 'uint'} kind
+         * @returns {number[] | null}
+         */
+        getVertexAttribI(index, pname, kind){
+            const values = context.glGetVertexAttribfvARB(index, pname);
+            return values && pname === GL.CURRENT_VERTEX_ATTRIB_ARB
+                ? values.map((/** @type {number} */ v)=>(kind === 'uint' ? v >>> 0 : v | 0))
+                : values;
         },
 
         /**
@@ -708,6 +871,7 @@ export function installProgramCalls(context, kernel){
              * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
              */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
             array.divisor = divisor >>> 0;
+            kernel.side.attribBinding?.divisor(index, divisor >>> 0);
         },
 
         /** @param {number} index */
@@ -755,6 +919,14 @@ export function installProgramCalls(context, kernel){
                     return [array.normalised ?? 0];
                 case GL.VERTEX_ATTRIB_ARRAY_DIVISOR:
                     return [array.divisor ?? 0];
+                case GL.VERTEX_ATTRIB_ARRAY_INTEGER:
+                    return [array.integer ?? 0];
+                case GL.VERTEX_ATTRIB_ARRAY_LONG:
+                    return [kernel.side.attribBinding?.placeOf(index).long ?? 0];
+                case GL.VERTEX_ATTRIB_BINDING:
+                    return [kernel.side.attribBinding?.placeOf(index).binding ?? index];
+                case GL.VERTEX_ATTRIB_RELATIVE_OFFSET:
+                    return [kernel.side.attribBinding?.placeOf(index).relative ?? 0];
                 case GL.CURRENT_VERTEX_ATTRIB_ARB:
                     return [...attribValues[index]];
                 default:

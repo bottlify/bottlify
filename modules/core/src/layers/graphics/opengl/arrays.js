@@ -38,12 +38,17 @@ import { GL } from './constants.js';
  *                                  read; absent reads as no
  * @property {number} [divisor]  glVertexAttribDivisor's: zero or absent for an
  *                               element a vertex, n for one every n instances
+ * @property {number} [integer]  set by glVertexAttribIPointer: read as the
+ *                               integers it holds, never converted to floats
+ * @property {number} [literalStride]  a binding point's stride (4.3), read
+ *                               as it is: zero reads one element for every
+ *                               vertex. Absent for the pointer calls' arrays
  */
 
 /** @type {Map<number, number>} */
 const TYPE_BYTES = new Map([
     [GL.BYTE, 1], [GL.UNSIGNED_BYTE, 1], [GL.SHORT, 2], [GL.UNSIGNED_SHORT, 2],
-    [GL.INT, 4], [GL.UNSIGNED_INT, 4], [GL.FLOAT, 4], [GL.DOUBLE, 8],
+    [GL.INT, 4], [GL.UNSIGNED_INT, 4], [GL.FLOAT, 4], [GL.DOUBLE, 8], [GL.FIXED, 4],
 ]);
 
 /**
@@ -55,11 +60,45 @@ export function componentBytes(type){
 }
 
 /**
+ * The packed types (OpenGL 3.3, GL_ARB_vertex_type_2_10_10_10_rev): every
+ * element one 32-bit word, x, y and z in ten bits each from the low end and w
+ * in the top two.
+ *
+ * @param {number} type
+ */
+export function isPacked(type){
+    return type === GL.UNSIGNED_INT_2_10_10_10_REV || type === GL.INT_2_10_10_10_REV;
+}
+
+/**
+ * A packed word's four components, signed or not, normalised as the other
+ * integer types are when asked.
+ *
+ * @param {number} word @param {number} type @param {boolean} normalised
+ * @returns {number[]}
+ */
+export function unpackWord(word, type, normalised){
+    const signed = type === GL.INT_2_10_10_10_REV;
+    return [0, 10, 20, 30].map(shift=>{
+        const bits = shift === 30 ? 2 : 10;
+        const raw = (word >>> shift) & ((1 << bits) - 1);
+        const value = signed && raw >= 1 << (bits - 1) ? raw - (1 << bits) : raw;
+        const top = (1 << bits) - 1;
+        return !normalised ? value : signed ? (2 * value + 1) / top : value / top;
+    });
+}
+
+/**
  * @param {ArrayPointer} pointer
  * @returns {number} the bytes between one element and the next
  */
 export function effectiveStride(pointer){
-    return pointer.stride > 0 ? pointer.stride : pointer.size * componentBytes(pointer.type);
+    if (pointer.literalStride !== undefined)
+    {
+        return pointer.literalStride;
+    }
+    return pointer.stride > 0 ? pointer.stride
+        : isPacked(pointer.type) ? 4 : pointer.size * componentBytes(pointer.type);
 }
 
 /**
@@ -106,6 +145,9 @@ function readComponent(view, at, type, normalised){
             return view.getFloat32(at, true);
         case GL.DOUBLE:
             return view.getFloat64(at, true);
+        case GL.FIXED:
+            // 16.16 (4.1's ES 2.0 compatibility), never normalised.
+            return view.getInt32(at, true) / 65536;
         default:
             return 0;
     }
@@ -122,6 +164,13 @@ function readComponent(view, at, type, normalised){
  * @returns {number[]} `pointer.size` components
  */
 export function readElement(read, pointer, index, normalised){
+    if (isPacked(pointer.type))
+    {
+        const word = read(pointer.pointer + index * effectiveStride(pointer), 4);
+        const view = new DataView(word.buffer, word.byteOffset, 4);
+        return unpackWord(view.getUint32(0, true), pointer.type, normalised)
+            .slice(0, pointer.size);
+    }
     const width = componentBytes(pointer.type);
     const bytes = read(pointer.pointer + index * effectiveStride(pointer), pointer.size * width);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

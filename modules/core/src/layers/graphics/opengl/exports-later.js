@@ -20,6 +20,8 @@
  */
 
 import { GL } from './constants.js';
+import { TIMEOUT_IGNORED } from './context-sync.js';
+import { TESS } from './context-tessellation.js';
 
 /**
  * What `exports.js` lends: the current context, and its readers and writers
@@ -47,6 +49,11 @@ const asFloat = word=>{
     return bits.getFloat32(0, true);
 };
 /** @param {number} low @param {number} high */
+const asDouble = (low, high)=>{
+    bits.setUint32(0, low >>> 0, true);
+    bits.setUint32(4, high >>> 0, true);
+    return bits.getFloat64(0, true);
+};
 
 /**
  * @param {LaterHelpers} h
@@ -54,6 +61,148 @@ const asFloat = word=>{
  */
 export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
+
+    /** How many values a sampler parameter's vector form reads. @param {number} pname */
+    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        || (pname >>> 0) === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1);
+
+    /**
+     * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
+     * as the context names it.
+     *
+     * @param {number} low @param {number} high
+     */
+    const timeoutOf = (low, high)=>((low >>> 0) === 0xffffffff && (high >>> 0) === 0xffffffff
+        ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
+
+    /**
+     * glSpecializeShader and its ARB spelling (4.6 section 7.2.1): the entry
+     * point's name, and the constants' SpecIds and values, two arrays of
+     * GLuint.
+     *
+     * @param {number[]} args
+     */
+    const specializeShader = ([shader, entry, count, indices, values])=>call(context=>{
+        const n = Math.max(0, count >>> 0);
+        context.glSpecializeShader(shader >>> 0, (entry >>> 0) !== 0 ? h.readName(entry >>> 0) : '',
+            readTyped('ui', indices, n), readTyped('ui', values, n));
+    });
+
+    /**
+     * glBlendFunci, glBlendFuncSeparatei, glBlendEquationi and
+     * glBlendEquationSeparatei (4.0).
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const blendsApart = ()=>({
+        glBlendFunci: ([buffer, src, dst])=>answer(current()?.glBlendFuncSeparatei(buffer >>> 0,
+            src >>> 0, dst >>> 0, src >>> 0, dst >>> 0)),
+        glBlendFuncSeparatei: ([buffer, sr, dr, sa, da])=>answer(current()
+            ?.glBlendFuncSeparatei(buffer >>> 0, sr >>> 0, dr >>> 0, sa >>> 0, da >>> 0)),
+        glBlendEquationi: ([buffer, mode])=>answer(current()?.glBlendEquationSeparatei(
+            buffer >>> 0, mode >>> 0, mode >>> 0)),
+        glBlendEquationSeparatei: ([buffer, rgb, alpha])=>answer(current()
+            ?.glBlendEquationSeparatei(buffer >>> 0, rgb >>> 0, alpha >>> 0)),
+    });
+
+    /**
+     * The packed attribute forms (3.3), each word given or read from where
+     * the program points.
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const packedAttributes = ()=>{
+        /** @type {Record<string, (args: number[]) => number>} */
+        const forms = {};
+        /**
+         * @param {string} name @param {any} kind @param {number} count
+         * @param {(args: number[]) => [number, number, boolean, number]} parts  index, type,
+         *     normalised and the word's place in the arguments
+         */
+        const both = (name, kind, count, parts)=>{
+            forms[`${name}ui`] = args=>{
+                const [index, type, normalised, at] = parts(args);
+                return answer(current()?.packedAttribute(kind, index, type >>> 0, normalised,
+                    count, args[at]));
+            };
+            forms[`${name}uiv`] = args=>{
+                const [index, type, normalised, at] = parts(args);
+                return answer(current()?.packedAttribute(kind, index, type >>> 0, normalised,
+                    count, readTyped('ui', args[at], 1)[0]));
+            };
+        };
+        for (const count of [1, 2, 3, 4])
+        {
+            both(`glVertexAttribP${count}`, 'attrib', count,
+                a=>[a[0] >>> 0, a[1], (a[2] & 0xff) !== 0, 3]);
+            both(`glTexCoordP${count}`, 'texCoord', count, a=>[GL.TEXTURE0, a[0], false, 1]);
+            both(`glMultiTexCoordP${count}`, 'texCoord', count,
+                a=>[a[0] >>> 0, a[1], false, 2]);
+            if (count > 1)
+            {
+                both(`glVertexP${count}`, 'vertex', count, a=>[0, a[0], false, 1]);
+            }
+        }
+        both('glNormalP3', 'normal', 3, a=>[0, a[0], true, 1]);
+        both('glColorP3', 'color', 3, a=>[0, a[0], true, 1]);
+        both('glColorP4', 'color', 4, a=>[0, a[0], true, 1]);
+        both('glSecondaryColorP3', 'secondary', 3, a=>[0, a[0], true, 1]);
+        return forms;
+    };
+
+    /**
+     * glVertexAttribI1i to glVertexAttribI4usv: each form's components, the
+     * missing ones (0, 0, 1) as the 4i form fills them.
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const integerAttributes = ()=>{
+        /** @type {Record<string, (args: number[]) => number>} */
+        const forms = {};
+        /** @param {number} index @param {'int' | 'uint'} kind @param {number[]} given */
+        const set = (index, kind, given)=>{
+            const [x = 0, y = 0, z = 0, w = 1] = given;
+            return answer(current()?.vertexAttribI(index >>> 0, kind, x, y, z, w));
+        };
+        for (const count of [1, 2, 3, 4])
+        {
+            forms[`glVertexAttribI${count}i`] = ([index, ...rest])=>
+                set(index, 'int', rest.slice(0, count).map(v=>v | 0));
+            forms[`glVertexAttribI${count}ui`] = ([index, ...rest])=>
+                set(index, 'uint', rest.slice(0, count).map(v=>v >>> 0));
+            forms[`glVertexAttribI${count}iv`] = ([index, v])=>
+                set(index, 'int', readTyped('i', v, count));
+            forms[`glVertexAttribI${count}uiv`] = ([index, v])=>
+                set(index, 'uint', readTyped('ui', v, count));
+        }
+        for (const [suffix, type, kind] of /** @type {[string, string, 'int' | 'uint'][]} */ ([
+            ['bv', 'b', 'int'], ['sv', 's', 'int'], ['ubv', 'ub', 'uint'], ['usv', 'us', 'uint'],
+        ]))
+        {
+            forms[`glVertexAttribI4${suffix}`] = ([index, v])=>
+                set(index, kind, readTyped(type, v, 4));
+        }
+        return forms;
+    };
+
+    /**
+     * 64-bit answers, as GLint64s: what glGetInteger64v writes.
+     *
+     * @param {number} address @param {number[] | null} values
+     */
+    const writeInt64s = (address, values)=>{
+        if (!values || (address >>> 0) === 0)
+        {
+            return;
+        }
+        const bytes = new Uint8Array(values.length * 8);
+        const view = new DataView(bytes.buffer);
+        values.forEach((value, k)=>view.setBigInt64(k * 8, BigInt(Math.trunc(value)), true));
+        h.writeMemory(address >>> 0, bytes);
+    };
+
+    /** How many values glClearBuffer reads: four for a colour, one otherwise. @param {number} buffer */
+    const clearCount = buffer=>((buffer >>> 0) === GL.COLOR ? 4 : 1);
 
     /**
      * An array of pointers the program hands over, each a pointer's width.
@@ -135,36 +284,44 @@ export function laterEntryPoints(h){
         }
     });
 
+    /**
+     * A shader's source strings, each read to its length or its terminator; null for a negative
+     * count, which the context refuses.
+     * @param {number} count
+     * @param {number} strings
+     * @param {number} lengths 0 when every string ends in a terminator.
+     * @returns {string[] | null}
+     */
+    const readSources = (count, strings, lengths)=>{
+        if ((count | 0) < 0)
+        {
+            return null;
+        }
+        const pointers = readPointers(strings, count | 0);
+        const sizes = (lengths >>> 0) !== 0 ? readTyped('i', lengths, count | 0) : null;
+        return pointers.map((pointer, k)=>{
+            const size = sizes ? sizes[k] : -1;
+            if (size < 0)
+            {
+                return h.readText(pointer);
+            }
+            let text = '';
+            const bytes = h.readMemory(pointer, size);
+            for (let i = 0; i < size; i++)
+            {
+                text += String.fromCharCode(bytes[i]);
+            }
+            return text;
+        });
+    };
+
     /** @type {Record<string, (args: number[]) => number>} */
     const handlers = {
         // --- shaders and programs ---
 
         glCreateShader: ([type])=>current()?.glCreateShader(type >>> 0) ?? 0,
-        glShaderSource: ([shader, count, strings, lengths])=>call(context=>{
-            const n = Math.max(0, count | 0);
-            const pointers = readPointers(strings, n);
-            const sizes = (lengths >>> 0) !== 0 ? readTyped('i', lengths, n) : null;
-            const sources = pointers.map((pointer, k)=>{
-                const size = sizes ? sizes[k] : -1;
-                if (size < 0)
-                {
-                    return h.readText(pointer);
-                }
-                let text = '';
-                const bytes = h.readMemory(pointer, size);
-                for (let i = 0; i < size; i++)
-                {
-                    text += String.fromCharCode(bytes[i]);
-                }
-                return text;
-            });
-            if ((count | 0) < 0)
-            {
-                context.glShaderSource(shader >>> 0, null);
-                return;
-            }
-            context.glShaderSource(shader >>> 0, sources);
-        }),
+        glShaderSource: ([shader, count, strings, lengths])=>call(context=>
+            context.glShaderSource(shader >>> 0, readSources(count, strings, lengths))),
         glCompileShader: ([shader])=>answer(current()?.glCompileShader(shader >>> 0)),
         glDeleteShader: ([shader])=>answer(current()?.glDeleteShader(shader >>> 0)),
         glIsShader: ([name])=>current()?.glIsShader(name >>> 0) ?? GL.FALSE,
@@ -186,6 +343,13 @@ export function laterEntryPoints(h){
         glValidateProgram: ([program])=>answer(current()?.glValidateProgram(program >>> 0)),
         glDeleteProgram: ([program])=>answer(current()?.glDeleteProgram(program >>> 0)),
         glIsProgram: ([name])=>current()?.glIsProgram(name >>> 0) ?? GL.FALSE,
+        glProgramParameteri: ([program, pname, value])=>answer(current()?.glProgramParameteri(
+            program >>> 0, pname >>> 0, value | 0)),
+        // Refused for every program, so nothing is written back.
+        glGetProgramBinary: ([program])=>answer(current()?.glGetProgramBinary(program >>> 0)),
+        // The binary is never read: no format is known.
+        glProgramBinary: ([program, format])=>answer(current()?.glProgramBinary(program >>> 0,
+            format >>> 0)),
         glGetProgramiv: ([program, pname, out])=>call(context=>writeQuery(out,
             context.glGetProgramiv(program >>> 0, pname >>> 0), 'word')),
         glGetProgramInfoLog: ([program, size, length, out])=>call(context=>answerString(
@@ -205,6 +369,20 @@ export function laterEntryPoints(h){
                 writeQuery(out, answered.values, 'float');
             }
         }),
+        glGetUniformdv: ([program, location, out])=>call(context=>{
+            const answered = context.getUniform(program >>> 0, location | 0);
+            if (answered)
+            {
+                writeQuery(out, answered.values, 'double');
+            }
+        }),
+        glGetnUniformdv: ([program, location, size, out])=>call(context=>{
+            const answered = context.getnUniform(program >>> 0, location | 0, (size | 0) / 2);
+            if (answered)
+            {
+                writeQuery(out, answered.values, 'double');
+            }
+        }),
         glGetUniformiv: ([program, location, out])=>call(context=>{
             const answered = context.getUniform(program >>> 0, location | 0);
             if (answered)
@@ -220,9 +398,321 @@ export function laterEntryPoints(h){
             target >>> 0, offset | 0, length | 0, access >>> 0) ?? 0,
         glFlushMappedBufferRange: ([target, offset, length])=>answer(
             current()?.glFlushMappedBufferRange(target >>> 0, offset | 0, length | 0)),
+        // --- invalidation, barriers, sample shading, format queries (4.0 to 4.5) ---
+
+        glInvalidateFramebuffer: ([target, count, list])=>call(context=>
+            context.glInvalidateFramebuffer(target >>> 0, count | 0, (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : [], null)),
+        glInvalidateSubFramebuffer: a=>call(context=>
+            context.glInvalidateFramebuffer(a[0] >>> 0, a[1] | 0, (a[1] | 0) > 0
+                ? readTyped('ui', a[2], a[1] | 0) : [], { width: a[5] | 0, height: a[6] | 0 })),
+        glInvalidateBufferData: ([buffer])=>answer(current()?.glInvalidateBufferData(
+            buffer >>> 0, null, 0)),
+        glInvalidateBufferSubData: ([buffer, offset, length])=>answer(
+            current()?.glInvalidateBufferData(buffer >>> 0, offset | 0, length | 0)),
+        glInvalidateTexImage: ([texture, level])=>answer(current()?.glInvalidateTexImage(
+            texture >>> 0, level | 0, null)),
+        glInvalidateTexSubImage: a=>answer(current()?.glInvalidateTexImage(a[0] >>> 0,
+            a[1] | 0, { x: a[2] | 0, y: a[3] | 0, z: a[4] | 0, width: a[5] | 0,
+                height: a[6] | 0, depth: a[7] | 0 })),
+        glMemoryBarrier: ([barriers])=>answer(current()?.glMemoryBarrier(barriers >>> 0, false)),
+        glMemoryBarrierByRegion: ([barriers])=>answer(current()?.glMemoryBarrier(barriers >>> 0,
+            true)),
+        glTextureBarrier: ()=>answer(current()?.glTextureBarrier()),
+
+        // --- compute (4.3) ---
+        glDispatchCompute: ([x, y, z])=>answer(current()?.glDispatchCompute(x >>> 0, y >>> 0,
+            z >>> 0)),
+        glDispatchComputeIndirect: ([offset])=>answer(current()?.glDispatchComputeIndirect(
+            offset | 0)),
+        // --- image load and store (4.2) ---
+        glBindImageTexture: ([unit, texture, level, layered, layer, access, format])=>answer(
+            current()?.glBindImageTexture(unit >>> 0, texture >>> 0, level | 0,
+                (layered & 0xff) !== 0, layer | 0, access >>> 0, format >>> 0)),
+        // --- atomic counters (4.2) ---
+        glGetActiveAtomicCounterBufferiv: ([program, index, pname, out])=>call(context=>
+            writeQuery(out, context.glGetActiveAtomicCounterBufferiv(program >>> 0, index >>> 0,
+                pname >>> 0), 'word')),
+        // --- shader storage blocks (4.3) ---
+        glShaderStorageBlockBinding: ([program, index, binding])=>answer(
+            current()?.glShaderStorageBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glGetProgramResourceIndex: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceIndex(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? GL.INVALID_INDEX),
+        // --- program interface queries (4.3) ---
+        glGetProgramInterfaceiv: ([program, programInterface, pname, out])=>call(context=>
+            writeQuery(out, context.glGetProgramInterfaceiv(program >>> 0,
+                programInterface >>> 0, pname >>> 0), 'word')),
+        glGetProgramResourceName: ([program, programInterface, index, size, length, out])=>call(
+            context=>answerString(context.glGetProgramResourceName(program >>> 0,
+                programInterface >>> 0, index >>> 0, size | 0), size, length, out)),
+        glGetProgramResourceiv: ([program, programInterface, index, count, props, size, length,
+            out])=>call(context=>{
+            const asked = (count | 0) > 0 && (props >>> 0) !== 0
+                ? Array.from(readTyped('ui', props, count | 0), v=>v >>> 0) : [];
+            const values = context.glGetProgramResourceiv(program >>> 0, programInterface >>> 0,
+                index >>> 0, asked, size | 0);
+            if (!values)
+            {
+                return;
+            }
+            if (values.length > 0 && (out >>> 0) !== 0)
+            {
+                writeQuery(out, values, 'word');
+            }
+            if ((length >>> 0) !== 0)
+            {
+                writeU32s(length, [values.length]);
+            }
+        }),
+        glGetProgramResourceLocation: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceLocation(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? -1),
+        glGetProgramResourceLocationIndex: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceLocationIndex(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? -1),
+        glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
+        // Tessellation's (4.0): the inner levels are two values, the outer four.
+        glPatchParameteri: ([pname, value])=>answer(current()?.glPatchParameteri(pname >>> 0,
+            value | 0)),
+        glPatchParameterfv: ([pname, values])=>answer(current()?.glPatchParameterfv(pname >>> 0,
+            (values >>> 0) === 0 ? [] : readTyped('f', values,
+                (pname >>> 0) === TESS.PATCH_DEFAULT_INNER_LEVEL ? 2 : 4))),
+        glGetInternalformativ: ([target, internal, pname, size, out])=>call(context=>{
+            const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,
+                pname >>> 0);
+            if (values && (size | 0) > 0)
+            {
+                writeQuery(out, values.slice(0, size | 0), 'word');
+            }
+        }),
+
+        // --- 4.4's binding of many at once, 4.5's named and sized forms ---
+
+        glBindTextures: ([first, count, list])=>call(context=>context.glBindTextures(
+            first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null)),
+        glBindSamplers: ([first, count, list])=>call(context=>context.glBindSamplers(
+            first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null)),
+        glBindImageTextures: ([first, count, list])=>call(context=>context.glBindImageTextures(
+            first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null)),
+        glBindBuffersBase: ([target, first, count, list])=>call(context=>context.glBindBuffers(
+            target >>> 0, first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null, null)),
+        glBindBuffersRange: ([target, first, count, list, offsets, sizes])=>call(context=>{
+            const n = Math.max(0, count | 0);
+            // GLintptr and GLsizeiptr: a pointer wide each.
+            const readPointerWords = (/** @type {number} */ address, /** @type {number} */ k)=>{
+                const words = readTyped('i', address, k * (h.pointerSize === 8 ? 2 : 1));
+                return h.pointerSize === 8 ? Array.from({ length: k }, (_, j)=>words[j * 2])
+                    : words;
+            };
+            context.glBindBuffers(target >>> 0, first >>> 0, count | 0,
+                (list >>> 0) !== 0 && n > 0 ? readTyped('ui', list, n) : null,
+                (list >>> 0) !== 0 && n > 0 ? { offsets: readPointerWords(offsets, n),
+                    sizes: readPointerWords(sizes, n) } : null);
+        }),
+        glTextureBuffer: ([texture, internal, buffer])=>answer(current()?.glTextureBuffer(
+            texture >>> 0, internal >>> 0, buffer >>> 0, null)),
+        glTextureBufferRange: ([texture, internal, buffer, offset, size])=>answer(
+            current()?.glTextureBuffer(texture >>> 0, internal >>> 0, buffer >>> 0,
+                { offset: offset | 0, size: size | 0 })),
+        glTextureStorage2DMultisample: ([texture, samples, internal, width, height, fixed])=>
+            answer(current()?.glTextureStorageMultisample(texture >>> 0, samples | 0,
+                internal >>> 0, width | 0, height | 0, 1, fixed & 0xff)),
+        glTextureStorage3DMultisample: a=>answer(current()?.glTextureStorageMultisample(
+            a[0] >>> 0, a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glGetnTexImage: ([target, level, format, type, size, out])=>call(context=>{
+            const bytes = context.getnTexImage(false, target >>> 0, level | 0, format >>> 0,
+                type >>> 0, size | 0);
+            if (bytes && (out >>> 0) !== 0)
+            {
+                h.writeMemory(out >>> 0, bytes);
+            }
+        }),
+        glGetnCompressedTexImage: ([target, level, size, out])=>call(context=>{
+            const bytes = context.getnTexImage(true, target >>> 0, level | 0, 0, 0, size | 0);
+            if (bytes && (out >>> 0) !== 0)
+            {
+                h.writeMemory(out >>> 0, bytes);
+            }
+        }),
+        glGetInternalformati64v: ([target, internal, pname, size, out])=>call(context=>{
+            const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,
+                pname >>> 0);
+            if (values && (size | 0) > 0)
+            {
+                writeInt64s(out, values.slice(0, size | 0));
+            }
+        }),
+
+        glBufferStorage: ([target, size, data, flags])=>answer(current()?.glBufferStorage(
+            target >>> 0, size | 0, (data >>> 0) || null, flags >>> 0)),
+        glClearBufferData: ([target, internal, format, type, data])=>answer(
+            current()?.clearBufferData('glClearBufferData', target >>> 0, internal >>> 0, null, 0,
+                format >>> 0, type >>> 0, data >>> 0)),
+        glClearBufferSubData: ([target, internal, offset, size, format, type, data])=>answer(
+            current()?.clearBufferData('glClearBufferSubData', target >>> 0, internal >>> 0,
+                offset | 0, size | 0, format >>> 0, type >>> 0, data >>> 0)),
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- OpenGL ES 2.0's calls (4.1) ---
+
+        glDepthRangef: ([near, far])=>answer(current()?.glDepthRange(asFloat(near),
+            asFloat(far))),
+        glClearDepthf: ([depth])=>answer(current()?.glClearDepth(asFloat(depth))),
+        glReleaseShaderCompiler: ()=>answer(current()?.glReleaseShaderCompiler()),
+        // The binary is read only in a format that has one: SPIR-V's.
+        glShaderBinary: ([count, shaders, format, binary, length])=>call(context=>
+            context.glShaderBinary(readTyped('ui', shaders, Math.max(0, count | 0)),
+                format >>> 0, length | 0,
+                (format >>> 0) === GL.SHADER_BINARY_FORMAT_SPIR_V && (length | 0) > 0
+                    && (binary >>> 0) !== 0 ? h.readMemory(binary >>> 0, length | 0) : null)),
+        glSpecializeShader: args=>specializeShader(args),
+        glSpecializeShaderARB: args=>specializeShader(args),
+        glGetShaderPrecisionFormat: ([shaderType, precisionType, range, precision])=>
+            call(context=>{
+                const format = context.glGetShaderPrecisionFormat(shaderType >>> 0,
+                    precisionType >>> 0);
+                if (format)
+                {
+                    writeQuery(range, format.range, 'word');
+                    writeQuery(precision, [format.precision], 'word');
+                }
+            }),
+
+        glClampColor: ([target, clamp])=>answer(current()?.glClampColor(target >>> 0,
+            clamp >>> 0)),
+        glTexParameterIiv: ([target, pname, values])=>answer(current()?.texParameterI(
+            target >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname)))),
+        glTexParameterIuiv: ([target, pname, values])=>answer(current()?.texParameterI(
+            target >>> 0, pname >>> 0, readTyped('ui', values, samplerCount(pname)))),
+        glGetTexParameterIiv: ([target, pname, out])=>call(context=>writeQuery(out,
+            context.glGetTexParameteriv(target >>> 0, pname >>> 0), 'word')),
+        glGetTexParameterIuiv: ([target, pname, out])=>call(context=>writeQuery(out,
+            context.glGetTexParameteriv(target >>> 0, pname >>> 0), 'word')),
+        glGetBufferParameteri64v: ([target, pname, out])=>call(context=>writeInt64s(out,
+            context.glGetBufferParameterivARB(target >>> 0, pname >>> 0))),
+        glPrimitiveRestartIndex: ([index])=>answer(current()?.glPrimitiveRestartIndex(
+            index >>> 0)),
+        ...Object.fromEntries(['glPolygonOffsetClamp', 'glPolygonOffsetClampEXT'].map(name=>[name,
+            (/** @type {number[]} */ [factor, units, clamp])=>answer(current()
+                ?.glPolygonOffsetClamp(asFloat(factor), asFloat(units), asFloat(clamp)))])),
+
+        // --- sampler objects (3.3) ---
+
+        glGenSamplers: generator((context, count)=>context.glGenSamplers(count)),
+        glDeleteSamplers: deleter((context, names)=>context.glDeleteSamplers(names)),
+        glIsSampler: ([name])=>current()?.glIsSampler(name >>> 0) ?? GL.FALSE,
+        glBindSampler: ([unit, name])=>answer(current()?.glBindSampler(unit >>> 0, name >>> 0)),
+        glSamplerParameteri: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [value | 0])),
+        glSamplerParameterf: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [asFloat(value)])),
+        glSamplerParameteriv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname))
+                .map(v=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? v / 0x7fffffff : v)))),
+        glSamplerParameterfv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('f', values, samplerCount(pname)))),
+        glSamplerParameterIiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname)))),
+        glSamplerParameterIuiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('ui', values, samplerCount(pname)))),
+        glGetSamplerParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0)?.map((/** @type {number} */ v)=>
+                ((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+                    ? Math.round(Math.max(-1, Math.min(1, v)) * 0x7fffffff) : Math.round(v)))
+                ?? null, 'word')),
+        glGetSamplerParameterfv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'float')),
+        glGetSamplerParameterIiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+        glGetSamplerParameterIuiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+
+        // --- sync objects (3.2) ---
+
+        glFenceSync: ([condition, flags])=>current()?.glFenceSync(condition >>> 0, flags >>> 0)
+            ?? 0,
+        glIsSync: ([sync])=>current()?.glIsSync(sync >>> 0) ?? GL.FALSE,
+        glDeleteSync: ([sync])=>answer(current()?.glDeleteSync(sync >>> 0)),
+        glWaitSync: ([sync, flags, low, high])=>answer(current()?.glWaitSync(sync >>> 0,
+            flags >>> 0, timeoutOf(low, high))),
+        glGetSynciv: ([sync, pname, size, length, out])=>call(context=>{
+            const values = (context.glGetSynciv(sync >>> 0, pname >>> 0) ?? [])
+                .slice(0, Math.max(0, size | 0));
+            if ((length >>> 0) !== 0)
+            {
+                writeU32s(length, [values.length]);
+            }
+            writeQuery(out, values, 'word');
+        }),
+
+        // --- packed attributes (3.3) ---
+
+        ...packedAttributes(),
+
+        // --- integer vertex attributes (3.0) ---
+
+        ...integerAttributes(),
+        glVertexAttribIPointer: ([index, size, type, stride, pointer])=>answer(current()
+            ?.glVertexAttribIPointer(index >>> 0, size | 0, type >>> 0, stride | 0,
+                pointer >>> 0)),
+        glGetVertexAttribIiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'int'), 'word')),
+        glGetVertexAttribIuiv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexAttribI(index >>> 0, pname >>> 0, 'uint'), 'word')),
+
+        // --- indexed state, 64-bit queries and one buffer's clears (3.0, 3.2) ---
+
+        glEnablei: ([cap, index])=>answer(current()?.glEnablei(cap >>> 0, index >>> 0)),
+        glDisablei: ([cap, index])=>answer(current()?.glDisablei(cap >>> 0, index >>> 0)),
+        glIsEnabledi: ([cap, index])=>current()?.glIsEnabledi(cap >>> 0, index >>> 0)
+            ?? GL.FALSE,
+        glColorMaski: ([index, r, g, b, a])=>answer(current()?.glColorMaski(index >>> 0,
+            r & 0xff, g & 0xff, b & 0xff, a & 0xff)),
+        ...blendsApart(),
+        glGetIntegeri_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetIntegeri_v(target >>> 0, index >>> 0), 'word')),
+        glGetFloati_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetFloati_v(target >>> 0, index >>> 0), 'float')),
+        glGetDoublei_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetFloati_v(target >>> 0, index >>> 0), 'double')),
+        glViewportArrayv: ([first, count, values])=>call(context=>context.glViewportArrayv(
+            first >>> 0, count | 0, readTyped('f', values, 4 * Math.max(0, count | 0)))),
+        glViewportIndexedf: ([index, x, y, width, height])=>answer(current()?.glViewportArrayv(
+            index >>> 0, 1, [x, y, width, height].map(asFloat))),
+        glViewportIndexedfv: ([index, values])=>call(context=>context.glViewportArrayv(
+            index >>> 0, 1, readTyped('f', values, 4))),
+        glScissorArrayv: ([first, count, values])=>call(context=>context.glScissorArrayv(
+            first >>> 0, count | 0, readTyped('i', values, 4 * Math.max(0, count | 0)))),
+        glScissorIndexed: ([index, x, y, width, height])=>answer(current()?.glScissorArrayv(
+            index >>> 0, 1, [x | 0, y | 0, width | 0, height | 0])),
+        glScissorIndexedv: ([index, values])=>call(context=>context.glScissorArrayv(
+            index >>> 0, 1, readTyped('i', values, 4))),
+        glDepthRangeArrayv: ([first, count, values])=>call(context=>context.glDepthRangeArrayv(
+            first >>> 0, count | 0, readTyped('d', values, 2 * Math.max(0, count | 0)))),
+        glDepthRangeIndexed: ([index, nearLow, nearHigh, farLow, farHigh])=>answer(
+            current()?.glDepthRangeArrayv(index >>> 0, 1, [asDouble(nearLow, nearHigh),
+                asDouble(farLow, farHigh)])),
+        glGetBooleani_v: ([target, index, out])=>call(context=>writeQuery(out,
+            context.glGetBooleani_v(target >>> 0, index >>> 0), 'byte')),
+        glGetInteger64i_v: ([target, index, out])=>call(context=>writeInt64s(out,
+            context.glGetInteger64i_v(target >>> 0, index >>> 0))),
+        glGetInteger64v: ([query, out])=>call(context=>writeInt64s(out,
+            context.glGetInteger64v(query >>> 0))),
+        glClearBufferiv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('i', value, clearCount(buffer)), 'int')),
+        glClearBufferuiv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('ui', value, clearCount(buffer)), 'uint')),
+        glClearBufferfv: ([buffer, drawBuffer, value])=>call(context=>context.clearBuffer(
+            buffer >>> 0, drawBuffer | 0, readTyped('f', value, clearCount(buffer)), 'float')),
+        glClearBufferfi: ([buffer, drawBuffer, depth, stencil])=>answer(current()
+            ?.glClearBufferfi(buffer >>> 0, drawBuffer | 0, asFloat(depth), stencil | 0)),
 
         // --- vertex array objects ---
 
@@ -266,16 +756,36 @@ export function laterEntryPoints(h){
             a[2] >>> 0, a[3] >>> 0, a[4] | 0)),
         glFramebufferTexture3D: a=>answer(current()?.framebufferTexture(a[0] >>> 0, a[1] >>> 0,
             a[2] >>> 0, a[3] >>> 0, a[4] | 0)),
-        // A layer of a 3D or array texture, of which there are none: only a
-        // detach is not an error.
-        glFramebufferTextureLayer: a=>answer(current()?.framebufferTexture(a[0] >>> 0,
-            a[1] >>> 0, (a[2] >>> 0) === 0 ? GL.TEXTURE_2D : GL.TEXTURE_3D, a[2] >>> 0,
-            a[3] | 0)),
+        glFramebufferTextureLayer: a=>answer(current()?.glFramebufferTextureLayer(a[0] >>> 0,
+            a[1] >>> 0, a[2] >>> 0, a[3] | 0, a[4] | 0)),
         glFramebufferRenderbuffer: a=>answer(current()?.glFramebufferRenderbuffer(a[0] >>> 0,
             a[1] >>> 0, a[2] >>> 0, a[3] >>> 0)),
         glGetFramebufferAttachmentParameteriv: ([target, attachment, pname, out])=>call(
             context=>writeQuery(out, context.glGetFramebufferAttachmentParameteriv(
                 target >>> 0, attachment >>> 0, pname >>> 0), 'word')),
+        // GL_ARB_framebuffer_no_attachments, its 4.5 and EXT_direct_state_access forms.
+        glFramebufferParameteri: ([target, pname, param])=>call(context=>context
+            .framebufferParameter('glFramebufferParameteri',
+                context.framebufferBoundTo(target >>> 0), pname >>> 0, param | 0)),
+        glNamedFramebufferParameteri: ([name, pname, param])=>call(context=>context
+            .framebufferParameter('glNamedFramebufferParameteri',
+                context.framebufferNamed(name >>> 0), pname >>> 0, param | 0)),
+        glNamedFramebufferParameteriEXT: ([name, pname, param])=>call(context=>context
+            .framebufferParameter('glNamedFramebufferParameteri',
+                context.framebufferNamed(name >>> 0), pname >>> 0, param | 0)),
+        glGetFramebufferParameteriv: ([target, pname, out])=>call(context=>writeQuery(out,
+            context.getFramebufferParameter('glGetFramebufferParameteriv',
+                context.framebufferBoundTo(target >>> 0), pname >>> 0), 'word')),
+        glGetNamedFramebufferParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getFramebufferParameter('glGetNamedFramebufferParameteriv',
+                context.framebufferNamed(name >>> 0), pname >>> 0), 'word')),
+        glGetNamedFramebufferParameterivEXT: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getFramebufferParameter('glGetNamedFramebufferParameteriv',
+                context.framebufferNamed(name >>> 0), pname >>> 0), 'word')),
+        glGetFramebufferParameterivEXT: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.glGetFramebufferParameterivEXT(name >>> 0, pname >>> 0), 'word')),
+        glCreateFramebuffers: generator((context, count)=>context.glCreateFramebuffers(count)),
+        glCreateRenderbuffers: generator((context, count)=>context.glCreateRenderbuffers(count)),
         glGenRenderbuffers: generator((context, count)=>context.glGenRenderbuffers(count)),
         glDeleteRenderbuffers: deleter((context, names)=>context.glDeleteRenderbuffers(names)),
         glIsRenderbuffer: ([name])=>current()?.glIsRenderbuffer(name >>> 0) ?? GL.FALSE,
@@ -345,7 +855,7 @@ export function laterEntryPoints(h){
             const count = readTyped('i', counts, n);
             for (let k = 0; k < n; k++)
             {
-                context.glDrawArrays(mode >>> 0, first[k], count[k]);
+                context.numberedDraw(k, ()=>context.glDrawArrays(mode >>> 0, first[k], count[k]));
             }
         }),
         glMultiDrawElements: ([mode, counts, type, indices, primcount])=>call(context=>{
@@ -354,7 +864,8 @@ export function laterEntryPoints(h){
             const pointers = readPointers(indices, n);
             for (let k = 0; k < n; k++)
             {
-                context.glDrawElements(mode >>> 0, count[k], type >>> 0, pointers[k]);
+                context.numberedDraw(k, ()=>context.glDrawElements(mode >>> 0, count[k],
+                    type >>> 0, pointers[k]));
             }
         }),
 
@@ -383,12 +894,78 @@ export function laterEntryPoints(h){
         glDrawElementsInstancedBaseVertexBaseInstance: a=>answer(
             current()?.glDrawElementsInstancedBaseVertexBaseInstance(a[0] >>> 0, a[1] | 0,
                 a[2] >>> 0, a[3] >>> 0, a[4] | 0, a[5] | 0, a[6] >>> 0)),
+        glDrawArraysIndirect: ([mode, indirect])=>answer(
+            current()?.glDrawArraysIndirect(mode >>> 0, indirect >>> 0)),
+        glDrawElementsIndirect: ([mode, type, indirect])=>answer(
+            current()?.glDrawElementsIndirect(mode >>> 0, type >>> 0, indirect >>> 0)),
+        glMultiDrawArraysIndirect: ([mode, indirect, drawcount, stride])=>answer(
+            current()?.glMultiDrawArraysIndirect(mode >>> 0, indirect >>> 0, drawcount | 0,
+                stride | 0)),
+        glMultiDrawElementsIndirect: ([mode, type, indirect, drawcount, stride])=>answer(
+            current()?.glMultiDrawElementsIndirect(mode >>> 0, type >>> 0, indirect >>> 0,
+                drawcount | 0, stride | 0)),
+        glMultiDrawArraysIndirectCount: ([mode, indirect, drawcount, most, stride])=>answer(
+            current()?.glMultiDrawArraysIndirectCount(mode >>> 0, indirect >>> 0,
+                drawcount >>> 0, most | 0, stride | 0)),
+        glMultiDrawElementsIndirectCount: ([mode, type, indirect, drawcount, most, stride])=>
+            answer(current()?.glMultiDrawElementsIndirectCount(mode >>> 0, type >>> 0,
+                indirect >>> 0, drawcount >>> 0, most | 0, stride | 0)),
         glMultiDrawElementsBaseVertex: ([mode, counts, type, indices, drawcount, bases])=>
             call(context=>{
                 const n = Math.max(0, drawcount | 0);
                 context.glMultiDrawElementsBaseVertex(mode >>> 0, readTyped('i', counts, n),
                     type >>> 0, readPointers(indices, n), drawcount | 0, readTyped('i', bases, n));
             }),
+        glClipControl: ([origin, depth])=>answer(current()?.glClipControl(origin >>> 0,
+            depth >>> 0)),
+        glTextureView: args=>answer(current()?.glTextureView(...args.slice(0, 8)
+            .map(value=>value >>> 0))),
+
+        // --- subroutines (4.0) ---
+
+        glGetSubroutineUniformLocation: ([program, type, name])=>current()
+            ?.glGetSubroutineUniformLocation(program >>> 0, type >>> 0, h.readName(name)) ?? -1,
+        glGetSubroutineIndex: ([program, type, name])=>current()
+            ?.glGetSubroutineIndex(program >>> 0, type >>> 0, h.readName(name)) ?? GL.INVALID_INDEX,
+        glGetActiveSubroutineUniformiv: ([program, type, index, pname, out])=>call(context=>
+            writeQuery(out, context.glGetActiveSubroutineUniformiv(program >>> 0, type >>> 0,
+                index >>> 0, pname >>> 0), 'word')),
+        glGetActiveSubroutineUniformName: ([program, type, index, size, length, out])=>call(
+            context=>answerString(context.glGetActiveSubroutineUniformName(program >>> 0,
+                type >>> 0, index >>> 0), size, length, out)),
+        glGetActiveSubroutineName: ([program, type, index, size, length, out])=>call(
+            context=>answerString(context.glGetActiveSubroutineName(program >>> 0, type >>> 0,
+                index >>> 0), size, length, out)),
+        glUniformSubroutinesuiv: ([type, count, indices])=>call(context=>
+            context.glUniformSubroutinesuiv(type >>> 0, (count | 0) > 0
+                ? readTyped('ui', indices, count | 0).map(v=>v >>> 0) : [])),
+        glGetUniformSubroutineuiv: ([type, location, out])=>call(context=>writeQuery(out,
+            context.glGetUniformSubroutineuiv(type >>> 0, location | 0), 'word')),
+        glGetProgramStageiv: ([program, type, pname, out])=>call(context=>writeQuery(out,
+            context.glGetProgramStageiv(program >>> 0, type >>> 0, pname >>> 0), 'word')),
+
+        // --- program pipelines ---
+
+        glGenProgramPipelines: generator((context, count)=>context.genProgramPipelines(count,
+            false)),
+        glCreateProgramPipelines: generator((context, count)=>context.genProgramPipelines(count,
+            true)),
+        glDeleteProgramPipelines: deleter((context, names)=>
+            context.glDeleteProgramPipelines(names)),
+        glIsProgramPipeline: ([name])=>current()?.glIsProgramPipeline(name >>> 0) ?? GL.FALSE,
+        glBindProgramPipeline: ([name])=>answer(current()?.glBindProgramPipeline(name >>> 0)),
+        glUseProgramStages: ([name, stages, program])=>answer(current()?.glUseProgramStages(
+            name >>> 0, stages >>> 0, program >>> 0)),
+        glActiveShaderProgram: ([name, program])=>answer(current()?.glActiveShaderProgram(
+            name >>> 0, program >>> 0)),
+        glValidateProgramPipeline: ([name])=>answer(current()?.glValidateProgramPipeline(
+            name >>> 0)),
+        glGetProgramPipelineiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.glGetProgramPipelineiv(name >>> 0, pname >>> 0), 'word')),
+        glGetProgramPipelineInfoLog: ([name, size, length, out])=>call(context=>answerString(
+            context.glGetProgramPipelineInfoLog(name >>> 0), size, length, out)),
+        glCreateShaderProgramv: ([type, count, strings])=>current()?.glCreateShaderProgramv(
+            type >>> 0, readSources(count, strings, 0)) ?? 0,
         glVertexAttribDivisor: ([index, divisor])=>answer(
             current()?.glVertexAttribDivisor(index >>> 0, divisor >>> 0)),
 
@@ -401,25 +978,167 @@ export function laterEntryPoints(h){
         glEndQuery: ([target])=>answer(current()?.glEndQuery(target >>> 0)),
         glGetQueryiv: ([target, pname, out])=>call(context=>writeQuery(out,
             context.glGetQueryiv(target >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
-        glGetQueryObjectuiv: ([name, pname, out])=>call(context=>writeQuery(out,
-            context.glGetQueryObject(name >>> 0, pname >>> 0), 'word')),
+        glBeginQueryIndexed: ([target, index, name])=>answer(current()?.glBeginQueryIndexed(
+            target >>> 0, index >>> 0, name >>> 0)),
+        glEndQueryIndexed: ([target, index])=>answer(current()?.glEndQueryIndexed(target >>> 0,
+            index >>> 0)),
+        glGetQueryIndexediv: ([target, index, pname, out])=>call(context=>writeQuery(out,
+            context.glGetQueryIndexediv(target >>> 0, index >>> 0, pname >>> 0), 'word')),
+        glCreateQueries: ([target, count, out])=>call(context=>{
+            const names = context.glCreateQueries(target >>> 0, count | 0);
+            if (names.length > 0)
+            {
+                writeU32s(out, names);
+            }
+        }),
+        glQueryCounter: ([name, target])=>answer(current()?.glQueryCounter(name >>> 0,
+            target >>> 0)),
+        glBeginConditionalRender: ([name, mode])=>answer(current()
+            ?.glBeginConditionalRender(name >>> 0, mode >>> 0)),
+        glEndConditionalRender: ()=>answer(current()?.glEndConditionalRender()),
 
-        // --- 3D textures, by their target and size ---
+        // --- 3D textures and texture arrays ---
 
-        glTexImage3D: a=>answer(current()?.texImage3D('glTexImage3D', a[0] >>> 0, a[1] | 0,
-            a[3] | 0, a[4] | 0, a[5] | 0)),
-        glTexSubImage3D: a=>answer(current()?.texImage3D('glTexSubImage3D', a[0] >>> 0,
-            a[1] | 0, a[5] | 0, a[6] | 0, a[7] | 0)),
-        glCopyTexSubImage3D: a=>answer(current()?.texImage3D('glCopyTexSubImage3D', a[0] >>> 0,
-            a[1] | 0, a[7] | 0, a[8] | 0, 1)),
+        glTexImage3D: a=>answer(current()?.glTexImage3D(a[0] >>> 0, a[1] | 0, a[2] | 0,
+            a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] >>> 0, a[8] >>> 0, a[9] >>> 0)),
+        glTexSubImage3D: a=>answer(current()?.glTexSubImage3D(a[0] >>> 0, a[1] | 0, a[2] | 0,
+            a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] >>> 0, a[9] >>> 0,
+            a[10] >>> 0)),
+        glCopyTexSubImage3D: a=>answer(current()?.glCopyTexSubImage3D(a[0] >>> 0, a[1] | 0,
+            a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] | 0)),
+
+        // --- 3.0's unsigned uniforms and fragment outputs ---
+
+        glGetUniformuiv: ([program, location, out])=>call(context=>{
+            const answered = context.getUniform(program >>> 0, location | 0);
+            if (answered)
+            {
+                /** @param {number} v */
+                const unsigned = v=>Math.trunc(v) >>> 0;
+                writeQuery(out, answered.float ? answered.values.map(unsigned) : answered.values,
+                    'word');
+            }
+        }),
+        // 4.5's robustness: the same answers, into a buffer of a size.
+        ...Object.fromEntries(['f', 'i', 'ui'].flatMap(kind=>{
+            /** @param {number[]} args */
+            const handler = ([program, location, size, out])=>call(context=>{
+                const answered = context.getnUniform(program >>> 0, location | 0, size | 0);
+                if (answered)
+                {
+                    const values = kind === 'f' || !answered.float ? answered.values
+                        : answered.values.map((/** @type {number} */ v)=>(kind === 'ui'
+                            ? Math.trunc(v) >>> 0
+                            : Math.trunc(v)));
+                    writeQuery(out, values, kind === 'f' ? 'float' : 'word');
+                }
+            });
+            return [[`glGetnUniform${kind}v`, handler]];
+        })),
+        glGetGraphicsResetStatus: ()=>current()?.glGetGraphicsResetStatus() ?? GL.NO_ERROR,
+        glBindFragDataLocation: ([program, colour, name])=>call(context=>
+            context.bindFragData(program >>> 0, colour >>> 0, 0, h.readName(name))),
+        glBindFragDataLocationIndexed: ([program, colour, index, name])=>call(context=>
+            context.bindFragData(program >>> 0, colour >>> 0, index >>> 0, h.readName(name))),
+        glGetFragDataLocation: ([program, name])=>(current()?.fragData(program >>> 0,
+            h.readName(name), 'location') ?? -1),
+        glGetFragDataIndex: ([program, name])=>(current()?.fragData(program >>> 0,
+            h.readName(name), 'index') ?? -1),
+
+        // --- 3.1's uniform buffers and blocks ---
+
+        glBindBufferBase: ([target, index, buffer])=>answer(current()?.glBindBufferBase(
+            target >>> 0, index >>> 0, buffer >>> 0)),
+        glBindBufferRange: ([target, index, buffer, offset, size])=>answer(
+            current()?.glBindBufferRange(target >>> 0, index >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+        glGetUniformBlockIndex: ([program, name])=>(current()?.glGetUniformBlockIndex(
+            program >>> 0, h.readName(name)) ?? GL.INVALID_INDEX),
+        glGetActiveUniformBlockiv: ([program, index, pname, out])=>call(context=>writeQuery(
+            out, context.glGetActiveUniformBlockiv(program >>> 0, index >>> 0, pname >>> 0),
+            'word')),
+        glGetActiveUniformBlockName: ([program, index, size, length, out])=>call(context=>
+            answerString(context.glGetActiveUniformBlockName(program >>> 0, index >>> 0), size,
+                length, out)),
+        glUniformBlockBinding: ([program, index, binding])=>answer(
+            current()?.glUniformBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glProvokingVertex: ([mode])=>answer(current()?.glProvokingVertex(mode >>> 0)),
+
+        // --- transform feedback ---
+
+        glTransformFeedbackVaryings: ([program, count, names, mode])=>answer(current()
+            ?.glTransformFeedbackVaryings(program >>> 0, readPointers(names, Math.max(0,
+                count | 0)).map(pointer=>h.readName(pointer)), mode >>> 0)),
+        glGetTransformFeedbackVarying: args=>active(args, 'glGetTransformFeedbackVarying'),
+        glBeginTransformFeedback: ([primitive])=>answer(current()
+            ?.glBeginTransformFeedback(primitive >>> 0)),
+        glEndTransformFeedback: ()=>answer(current()?.glEndTransformFeedback()),
+        glPauseTransformFeedback: ()=>answer(current()?.glPauseTransformFeedback()),
+        glResumeTransformFeedback: ()=>answer(current()?.glResumeTransformFeedback()),
+        glGenTransformFeedbacks: generator((context, count)=>
+            context.glGenTransformFeedbacks(count)),
+        glDeleteTransformFeedbacks: deleter((context, names)=>
+            context.glDeleteTransformFeedbacks(names)),
+        glIsTransformFeedback: ([name])=>current()?.glIsTransformFeedback(name >>> 0) ?? GL.FALSE,
+        glBindTransformFeedback: ([target, name])=>answer(current()
+            ?.glBindTransformFeedback(target >>> 0, name >>> 0)),
+        glDrawTransformFeedback: ([mode, name])=>answer(current()?.drawTransformFeedback(
+            mode >>> 0, name >>> 0, 0, 1)),
+        glDrawTransformFeedbackStream: ([mode, name, stream])=>answer(current()
+            ?.drawTransformFeedback(mode >>> 0, name >>> 0, stream >>> 0, 1)),
+        glDrawTransformFeedbackInstanced: ([mode, name, instances])=>answer(current()
+            ?.drawTransformFeedback(mode >>> 0, name >>> 0, 0, instances | 0)),
+        glDrawTransformFeedbackStreamInstanced: ([mode, name, stream, instances])=>answer(
+            current()?.drawTransformFeedback(mode >>> 0, name >>> 0, stream >>> 0,
+                instances | 0)),
+        glCreateTransformFeedbacks: generator((context, count)=>
+            context.glCreateTransformFeedbacks(count)),
+        glTransformFeedbackBufferBase: ([name, index, buffer])=>answer(current()
+            ?.transformFeedbackBuffer(name >>> 0, index >>> 0, buffer >>> 0, 0, null)),
+        glTransformFeedbackBufferRange: ([name, index, buffer, offset, size])=>answer(current()
+            ?.transformFeedbackBuffer(name >>> 0, index >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+        glGetTransformFeedbackiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.glGetTransformFeedbackiv(name >>> 0, pname >>> 0), 'word')),
+        glGetTransformFeedbacki_v: ([name, pname, index, out])=>call(context=>writeQuery(out,
+            context.transformFeedbackIndexed(name >>> 0, pname >>> 0, index >>> 0, false),
+            'word')),
+        glGetTransformFeedbacki64_v: ([name, pname, index, out])=>call(context=>{
+            const values = context.transformFeedbackIndexed(name >>> 0, pname >>> 0,
+                index >>> 0, true);
+            if (values)
+            {
+                writeInt64s(out, values);
+            }
+        }),
+
+        glGetUniformIndices: ([program, count, names, out])=>call(context=>{
+            const indices = context.glGetUniformIndices(program >>> 0,
+                readPointers(names, count | 0).map(pointer=>h.readName(pointer)));
+            if (indices && indices.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, indices);
+            }
+        }),
+        glGetActiveUniformsiv: ([program, count, indices, pname, out])=>call(context=>{
+            const list = (count | 0) > 0 && (indices >>> 0) !== 0
+                ? readTyped('ui', indices, count | 0).map(v=>v >>> 0) : [];
+            const values = context.glGetActiveUniformsiv(program >>> 0, list, pname >>> 0);
+            if (values && values.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, values);
+            }
+        }),
+        glGetActiveUniformName: ([program, index, size, length, out])=>call(context=>
+            answerString(context.glGetActiveUniformName(program >>> 0, index >>> 0), size,
+                length, out)),
     };
 
     /**
      * glGetActiveAttrib and glGetActiveUniform: a name, a size and a type.
      *
-     * @param {number[]} args @param {'glGetActiveAttrib' | 'glGetActiveUniform'} which
+     * @param {number[]} args
+     * @param {'glGetActiveAttrib' | 'glGetActiveUniform' | 'glGetTransformFeedbackVarying'} which
      */
     function active([program, index, size, lengthOut, sizeOut, typeOut, out], which){
         return call(context=>{
@@ -440,13 +1159,15 @@ export function laterEntryPoints(h){
         });
     }
 
-    // glUniform{1234}{fi} and their vector forms, and the matrices.
+    // glUniform{1234}{f,i,ui} and their vector forms, and the matrices.
     for (const n of [1, 2, 3, 4])
     {
-        for (const kind of /** @type {const} */ (['f', 'i']))
+        for (const kind of /** @type {const} */ (['f', 'i', 'u']))
         {
-            const decode = kind === 'f' ? asFloat : (/** @type {number} */ w)=>w | 0;
-            handlers[`glUniform${n}${kind}`] = args=>{
+            const decode = kind === 'f' ? asFloat : kind === 'u'
+                ? (/** @type {number} */ w)=>w >>> 0 : (/** @type {number} */ w)=>w | 0;
+            const suffix = kind === 'u' ? 'ui' : kind;
+            handlers[`glUniform${n}${suffix}`] = args=>{
                 const context = current();
                 if (context)
                 {
@@ -459,10 +1180,52 @@ export function laterEntryPoints(h){
                 }
                 return 0;
             };
-            handlers[`glUniform${n}${kind}v`] = ([location, count, address])=>call(context=>
+            handlers[`glUniform${n}${suffix}v`] = ([location, count, address])=>call(context=>
                 context.uniform(location | 0, count | 0,
-                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : 'i', address,
-                        (count | 0) * n) : [], kind, n));
+                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : kind === 'u' ? 'ui' : 'i',
+                        address, (count | 0) * n) : [], kind, n));
+            // OpenGL 4.1's forms that name their program.
+            handlers[`glProgramUniform${n}${suffix}`] = args=>answer(current()?.programUniform(
+                args[0] >>> 0, args[1] | 0, 1, args.slice(2, 2 + n).map(decode), kind, n, null));
+            handlers[`glProgramUniform${n}${suffix}v`] = ([program, location, count, address])=>
+                call(context=>context.programUniform(program >>> 0, location | 0, count | 0,
+                    (count | 0) > 0 ? readTyped(kind === 'f' ? 'f' : kind === 'u' ? 'ui' : 'i',
+                        address, (count | 0) * n) : [], kind, n, null));
+        }
+    }
+    // OpenGL 4.0's doubles, each two words on the stack.
+    for (const n of [1, 2, 3, 4])
+    {
+        /** @param {number[]} args @param {number} at */
+        const doubles = (args, at)=>Array.from({ length: n }, (_, k)=>
+            asDouble(args[at + 2 * k], args[at + 2 * k + 1]));
+        handlers[`glUniform${n}d`] = args=>answer(current()?.uniform(args[0] | 0, 1,
+            doubles(args, 1), 'd', n));
+        handlers[`glUniform${n}dv`] = ([location, count, address])=>call(context=>
+            context.uniform(location | 0, count | 0, (count | 0) > 0
+                ? readTyped('d', address, (count | 0) * n) : [], 'd', n));
+        handlers[`glProgramUniform${n}d`] = args=>answer(current()?.programUniform(
+            args[0] >>> 0, args[1] | 0, 1, doubles(args, 2), 'd', n, null));
+        handlers[`glProgramUniform${n}dv`] = ([program, location, count, address])=>
+            call(context=>context.programUniform(program >>> 0, location | 0, count | 0,
+                (count | 0) > 0 ? readTyped('d', address, (count | 0) * n) : [], 'd', n, null));
+    }
+    for (const cols of [2, 3, 4])
+    {
+        for (const rows of [2, 3, 4])
+        {
+            const doubleName = cols === rows ? `glUniformMatrix${cols}dv`
+                : `glUniformMatrix${cols}x${rows}dv`;
+            handlers[doubleName] = ([location, count, transpose, address])=>call(context=>
+                context.uniformMatrix(location | 0, count | 0, transpose & 0xff,
+                    (count | 0) > 0 ? readTyped('d', address, (count | 0) * cols * rows) : [],
+                    cols, rows, 'd'));
+            handlers[doubleName.replace('glUniform', 'glProgramUniform')] =
+                ([program, location, count, transpose, address])=>call(context=>
+                    context.programUniform(program >>> 0, location | 0, count | 0,
+                        (count | 0) > 0 ? readTyped('d', address, (count | 0) * cols * rows)
+                            : [], 'd', cols * rows,
+                        { cols, rows, transpose: (transpose & 0xff) !== 0 }));
         }
     }
     for (const cols of [2, 3, 4])
@@ -475,8 +1238,401 @@ export function laterEntryPoints(h){
                 context.uniformMatrix(location | 0, count | 0, transpose & 0xff,
                     (count | 0) > 0 ? readTyped('f', address, (count | 0) * cols * rows) : [],
                     cols, rows));
+            handlers[name.replace('glUniform', 'glProgramUniform')] =
+                ([program, location, count, transpose, address])=>call(context=>
+                    context.programUniform(program >>> 0, location | 0, count | 0,
+                        (count | 0) > 0 ? readTyped('f', address, (count | 0) * cols * rows)
+                            : [], 'f', cols * rows,
+                        { cols, rows, transpose: (transpose & 0xff) !== 0 }));
         }
     }
+    Object.assign(handlers, storageAndNamedEntryPoints(h));
     return handlers;
 }
 
+/**
+ * The texture storage, copy, clear and read-back calls of 4.2 to 4.5, and
+ * the named calls of direct state access (`context-textures.js`,
+ * `context-dsa.js`): each word converted as its bound form's handler
+ * converts it, a box given as the six words it is, and what a getter answers
+ * written where the program said.
+ *
+ * @param {LaterHelpers} h
+ * @returns {Record<string, (args: number[]) => number>}
+ */
+function storageAndNamedEntryPoints(h){
+    const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
+
+    /** @param {number[]} a @param {number} at @returns {import('./texture-levels.js').Box} */
+    const boxAt = (a, at)=>({ x: a[at] | 0, y: a[at + 1] | 0, z: a[at + 2] | 0,
+        width: a[at + 3] | 0, height: a[at + 4] | 0, depth: a[at + 5] | 0 });
+
+    /** @param {number} address @param {Uint8Array | null} bytes */
+    const deliver = (address, bytes)=>{
+        if (bytes && (address >>> 0) !== 0)
+        {
+            h.writeMemory(address >>> 0, bytes);
+        }
+    };
+
+    /**
+     * GLintptr offsets, a pointer wide each (4.4's multiple vertex buffers).
+     *
+     * @param {number} address @param {number} count @returns {number[]}
+     */
+    const readOffsets = (address, count)=>{
+        if (count <= 0 || (address >>> 0) === 0)
+        {
+            return [];
+        }
+        const words = readTyped('i', address, count * (h.pointerSize === 8 ? 2 : 1));
+        return h.pointerSize === 8 ? Array.from({ length: count }, (_, k)=>words[k * 2])
+            : words;
+    };
+
+    /** @param {(context: any, count: number) => number[]} make */
+    const creator = make=>(/** @type {number[]} */ [count, out])=>call(context=>{
+        const names = make(context, count | 0);
+        if (names.length > 0 && (out >>> 0) !== 0)
+        {
+            writeU32s(out, names);
+        }
+    });
+
+    /** How many values a texture parameter's vector form reads. @param {number} pname */
+    const parameterCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        || (pname >>> 0) === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1);
+    /** A signed integer as the normalised float an integer form's colour is (2.3.2). */
+    const fromInt = (/** @type {number} */ value)=>(2 * value + 1) / 4294967295;
+
+    /**
+     * An integer answer of a normalised colour, as glGetTexParameteriv maps one.
+     *
+     * @param {number} pname @param {number[] | null} values
+     */
+    const toInts = (pname, values)=>(values && (pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+        ? values.map(value=>Math.round(Math.min(1, Math.max(0, value)) * 0x7fffffff))
+        : values?.map(Math.round) ?? null);
+
+    /** How many values glClearNamedFramebuffer reads: four for a colour, one otherwise. */
+    const clearCount = (/** @type {number} */ buffer)=>((buffer >>> 0) === GL.COLOR ? 4 : 1);
+
+    /**
+     * A 64-bit answer, as GLint64s.
+     *
+     * @param {number} address @param {number[] | null} values
+     */
+    const writeInt64s = (address, values)=>{
+        if (!values || (address >>> 0) === 0)
+        {
+            return;
+        }
+        const bytes = new Uint8Array(values.length * 8);
+        const view = new DataView(bytes.buffer);
+        values.forEach((value, k)=>view.setBigInt64(k * 8, BigInt(Math.trunc(value)), true));
+        h.writeMemory(address >>> 0, bytes);
+    };
+
+    return {
+        // --- GL_ARB_texture_storage, GL_ARB_copy_image, GL_ARB_clear_texture (4.2-4.4) ---
+
+        glTexStorage1D: a=>answer(current()?.glTexStorage1D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
+            a[3] | 0)),
+        // --- the texture kinds of 3.1 to 3.3: buffer and multisample textures ---
+
+        ...Object.fromEntries(['glTexBuffer', 'glTexBufferARB', 'glTexBufferEXT'].map(name=>[
+            name, (/** @type {number[]} */ [target, internal, buffer])=>answer(
+                current()?.glTexBuffer(target >>> 0, internal >>> 0, buffer >>> 0))])),
+        glTexImage2DMultisample: ([target, samples, internal, width, height, fixed])=>answer(
+            current()?.glTexImageMultisample(target >>> 0, samples | 0, internal >>> 0,
+                width | 0, height | 0, 1, fixed & 0xff)),
+        glTexImage3DMultisample: a=>answer(current()?.glTexImageMultisample(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glTexStorage2DMultisample: ([target, samples, internal, width, height, fixed])=>answer(
+            current()?.glTexStorageMultisample(target >>> 0, samples | 0, internal >>> 0,
+                width | 0, height | 0, 1, fixed & 0xff)),
+        glTexStorage3DMultisample: a=>answer(current()?.glTexStorageMultisample(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glSampleMaski: ([index, mask])=>answer(current()?.glSampleMaski(index >>> 0, mask >>> 0)),
+        glGetMultisamplefv: ([pname, index, out])=>call(context=>writeQuery(out,
+            context.glGetMultisamplefv(pname >>> 0, index >>> 0), 'float')),
+        glTexBufferRange: ([target, internal, buffer, offset, size])=>answer(
+            current()?.glTexBufferRange(target >>> 0, internal >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+
+        glTexStorage2D: a=>answer(current()?.glTexStorage2D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
+            a[3] | 0, a[4] | 0)),
+        glTexStorage3D: a=>answer(current()?.glTexStorage3D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
+            a[3] | 0, a[4] | 0, a[5] | 0)),
+        glCopyImageSubData: a=>answer(current()?.glCopyImageSubData(a[0] >>> 0, a[1] >>> 0,
+            a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] >>> 0, a[7] >>> 0, a[8] | 0, a[9] | 0,
+            a[10] | 0, a[11] | 0, a[12] | 0, a[13] | 0, a[14] | 0)),
+        glClearTexImage: ([texture, level, format, type, data])=>answer(current()?.clearTexImage(
+            'glClearTexImage', texture >>> 0, level | 0, null, format >>> 0, type >>> 0,
+            (data >>> 0) || null)),
+        glClearTexSubImage: a=>answer(current()?.clearTexImage('glClearTexSubImage', a[0] >>> 0,
+            a[1] | 0, boxAt(a, 2), a[8] >>> 0, a[9] >>> 0, (a[10] >>> 0) || null)),
+
+        // --- GL_ARB_get_texture_sub_image (4.5) ---
+
+        glGetTextureSubImage: a=>call(context=>deliver(a[11], context.glGetTextureSubImage(
+            a[0] >>> 0, a[1] | 0, boxAt(a, 2), a[8] >>> 0, a[9] >>> 0, a[10] | 0))),
+        glGetCompressedTextureSubImage: a=>call(context=>deliver(a[9],
+            context.glGetCompressedTextureSubImage(a[0] >>> 0, a[1] | 0, boxAt(a, 2), a[8] | 0))),
+
+        // --- direct state access (4.5): textures ---
+
+        glCreateTextures: ([target, count, out])=>call(context=>{
+            const names = context.glCreateTextures(target >>> 0, count | 0);
+            if (names.length > 0 && (out >>> 0) !== 0)
+            {
+                writeU32s(out, names);
+            }
+        }),
+        glTextureStorage1D: a=>answer(current()?.textureStorage(1, a[0] >>> 0, a[1] | 0,
+            a[2] >>> 0, a[3] | 0, 1, 1)),
+        glTextureStorage2D: a=>answer(current()?.textureStorage(2, a[0] >>> 0, a[1] | 0,
+            a[2] >>> 0, a[3] | 0, a[4] | 0, 1)),
+        glTextureStorage3D: a=>answer(current()?.textureStorage(3, a[0] >>> 0, a[1] | 0,
+            a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0)),
+        glTextureSubImage1D: a=>answer(current()?.textureSubImage(1, a[0] >>> 0, a[1] | 0,
+            { x: a[2] | 0, y: 0, z: 0, width: a[3] | 0, height: 1, depth: 1 }, a[4] >>> 0,
+            a[5] >>> 0, a[6] >>> 0)),
+        glTextureSubImage2D: a=>answer(current()?.textureSubImage(2, a[0] >>> 0, a[1] | 0,
+            { x: a[2] | 0, y: a[3] | 0, z: 0, width: a[4] | 0, height: a[5] | 0, depth: 1 },
+            a[6] >>> 0, a[7] >>> 0, a[8] >>> 0)),
+        glTextureSubImage3D: a=>answer(current()?.textureSubImage(3, a[0] >>> 0, a[1] | 0,
+            boxAt(a, 2), a[8] >>> 0, a[9] >>> 0, a[10] >>> 0)),
+        glCompressedTextureSubImage1D: a=>answer(current()?.compressedTextureSubImage(1,
+            a[0] >>> 0, a[1] | 0, { x: a[2] | 0, y: 0, z: 0, width: a[3] | 0, height: 1,
+                depth: 1 }, a[4] >>> 0, a[5] | 0, a[6] >>> 0)),
+        glCompressedTextureSubImage2D: a=>answer(current()?.compressedTextureSubImage(2,
+            a[0] >>> 0, a[1] | 0, { x: a[2] | 0, y: a[3] | 0, z: 0, width: a[4] | 0,
+                height: a[5] | 0, depth: 1 }, a[6] >>> 0, a[7] | 0, a[8] >>> 0)),
+        glCompressedTextureSubImage3D: a=>answer(current()?.compressedTextureSubImage(3,
+            a[0] >>> 0, a[1] | 0, boxAt(a, 2), a[8] >>> 0, a[9] | 0, a[10] >>> 0)),
+        glCopyTextureSubImage1D: a=>answer(current()?.copyTextureSubImage(1, a[0] >>> 0,
+            a[1] | 0, a[2] | 0, 0, 0, a[3] | 0, a[4] | 0, a[5] | 0, 1)),
+        glCopyTextureSubImage2D: a=>answer(current()?.copyTextureSubImage(2, a[0] >>> 0,
+            a[1] | 0, a[2] | 0, a[3] | 0, 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0)),
+        glCopyTextureSubImage3D: a=>answer(current()?.copyTextureSubImage(3, a[0] >>> 0,
+            a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] | 0)),
+        glTextureParameterf: ([texture, pname, value])=>answer(current()?.textureParameter(
+            texture >>> 0, pname >>> 0, [asFloat(value)])),
+        glTextureParameteri: ([texture, pname, value])=>answer(current()?.textureParameter(
+            texture >>> 0, pname >>> 0, [value | 0])),
+        glTextureParameterfv: ([texture, pname, values])=>answer(current()?.textureParameter(
+            texture >>> 0, pname >>> 0, readTyped('f', values, parameterCount(pname)))),
+        glTextureParameteriv: ([texture, pname, values])=>{
+            const read = readTyped('i', values, parameterCount(pname));
+            return answer(current()?.textureParameter(texture >>> 0, pname >>> 0,
+                (pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? read.map(fromInt) : read));
+        },
+        glTextureParameterIiv: ([texture, pname, values])=>answer(current()?.textureParameterI(
+            texture >>> 0, pname >>> 0, readTyped('i', values, parameterCount(pname)))),
+        glTextureParameterIuiv: ([texture, pname, values])=>answer(current()?.textureParameterI(
+            texture >>> 0, pname >>> 0, readTyped('ui', values, parameterCount(pname)))),
+        glGetTextureParameterfv: ([texture, pname, out])=>call(context=>writeQuery(out,
+            context.getTextureParameter(texture >>> 0, pname >>> 0), 'float')),
+        glGetTextureParameteriv: ([texture, pname, out])=>call(context=>writeQuery(out,
+            toInts(pname, context.getTextureParameter(texture >>> 0, pname >>> 0)), 'word')),
+        glGetTextureParameterIiv: ([texture, pname, out])=>call(context=>writeQuery(out,
+            context.getTextureParameter(texture >>> 0, pname >>> 0), 'word')),
+        glGetTextureParameterIuiv: ([texture, pname, out])=>call(context=>writeQuery(out,
+            context.getTextureParameter(texture >>> 0, pname >>> 0), 'word')),
+        glGetTextureLevelParameterfv: ([texture, level, pname, out])=>call(context=>writeQuery(
+            out, context.glGetTextureLevelParameter(texture >>> 0, level | 0, pname >>> 0),
+            'float')),
+        glGetTextureLevelParameteriv: ([texture, level, pname, out])=>call(context=>writeQuery(
+            out, context.glGetTextureLevelParameter(texture >>> 0, level | 0, pname >>> 0),
+            'word')),
+        glGenerateTextureMipmap: ([texture])=>answer(
+            current()?.glGenerateTextureMipmap(texture >>> 0)),
+        glBindTextureUnit: ([unit, texture])=>answer(
+            current()?.glBindTextureUnit(unit >>> 0, texture >>> 0)),
+        glGetTextureImage: ([texture, level, format, type, size, out])=>call(context=>deliver(
+            out, context.glGetTextureImage(texture >>> 0, level | 0, format >>> 0, type >>> 0,
+                size | 0))),
+        glGetCompressedTextureImage: ([texture, level, size, out])=>call(context=>deliver(out,
+            context.glGetCompressedTextureImage(texture >>> 0, level | 0, size | 0))),
+
+        // --- direct state access: buffers ---
+
+        glCreateBuffers: creator((context, count)=>context.glCreateBuffers(count)),
+        glNamedBufferData: ([buffer, size, data, usage])=>answer(current()?.namedBuffer(
+            'glBufferDataARB', buffer >>> 0, [size | 0, (data >>> 0) || null, usage >>> 0])),
+        glNamedBufferSubData: ([buffer, offset, size, data])=>answer(current()?.namedBuffer(
+            'glBufferSubDataARB', buffer >>> 0, [offset | 0, size | 0, data >>> 0])),
+        glNamedBufferStorage: ([buffer, size, data, flags])=>answer(current()?.namedBuffer(
+            'glBufferStorage', buffer >>> 0, [size | 0, (data >>> 0) || null, flags >>> 0])),
+        glClearNamedBufferData: ([buffer, internal, format, type, data])=>answer(
+            current()?.namedBuffer('glClearBufferData', buffer >>> 0, [internal >>> 0,
+                format >>> 0, type >>> 0, data >>> 0])),
+        glClearNamedBufferSubData: ([buffer, internal, offset, size, format, type, data])=>
+            answer(current()?.namedBuffer('glClearBufferSubData', buffer >>> 0, [internal >>> 0,
+                offset | 0, size | 0, format >>> 0, type >>> 0, data >>> 0])),
+        // --- vertex attribute bindings (4.3, 4.4) and vertex array objects by name (4.5) ---
+
+        glBindVertexBuffer: ([point, buffer, offset, stride])=>answer(current()
+            ?.glBindVertexBuffer(point >>> 0, buffer >>> 0, offset | 0, stride | 0)),
+        glBindVertexBuffers: ([first, count, buffers, offsets, strides])=>call(context=>{
+            const n = Math.max(0, count | 0);
+            const given = (buffers >>> 0) !== 0;
+            context.glBindVertexBuffers(first >>> 0, count | 0,
+                given ? readTyped('ui', buffers, n) : null,
+                given ? readOffsets(offsets, n) : [], given ? readTyped('i', strides, n) : []);
+        }),
+        glVertexAttribFormat: ([index, size, type, normalised, relative])=>answer(current()
+            ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, normalised & 0xff,
+                relative >>> 0, 'float')),
+        glVertexAttribIFormat: ([index, size, type, relative])=>answer(current()
+            ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, 0, relative >>> 0, 'int')),
+        glVertexAttribLPointer: ([index, size, type, stride, pointer])=>answer(current()
+            ?.glVertexAttribLPointer(index >>> 0, size | 0, type >>> 0, stride | 0,
+                pointer >>> 0)),
+        glGetVertexAttribLdv: ([index, pname, out])=>call(context=>writeQuery(out,
+            context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'double')),
+        // The current value of a double input (4.1), as the shader carries it
+        // (decision A178); the components not given are (0, 0, 1).
+        glVertexAttribL1d: ([index, xl, xh])=>answer(current()?.glVertexAttrib4fARB(
+            index >>> 0, asDouble(xl, xh), 0, 0, 1)),
+        glVertexAttribL2d: ([index, xl, xh, yl, yh])=>answer(current()?.glVertexAttrib4fARB(
+            index >>> 0, asDouble(xl, xh), asDouble(yl, yh), 0, 1)),
+        glVertexAttribL3d: ([index, xl, xh, yl, yh, zl, zh])=>answer(current()
+            ?.glVertexAttrib4fARB(index >>> 0, asDouble(xl, xh), asDouble(yl, yh),
+                asDouble(zl, zh), 1)),
+        glVertexAttribL4d: ([index, xl, xh, yl, yh, zl, zh, wl, wh])=>answer(current()
+            ?.glVertexAttrib4fARB(index >>> 0, asDouble(xl, xh), asDouble(yl, yh),
+                asDouble(zl, zh), asDouble(wl, wh))),
+        ...Object.fromEntries([1, 2, 3, 4].map(n=>[`glVertexAttribL${n}dv`,
+            (/** @type {number[]} */ [index, address])=>call(context=>{
+                const v = readTyped('d', address, n);
+                context.glVertexAttrib4fARB(index >>> 0, v[0], n > 1 ? v[1] : 0, n > 2 ? v[2] : 0,
+                    n > 3 ? v[3] : 1);
+            })])),
+        glVertexAttribLFormat: ([index, size, type, relative])=>answer(current()
+            ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, 0, relative >>> 0, 'long')),
+        glVertexAttribBinding: ([index, point])=>answer(current()
+            ?.glVertexAttribBinding(index >>> 0, point >>> 0)),
+        glVertexBindingDivisor: ([point, divisor])=>answer(current()
+            ?.glVertexBindingDivisor(point >>> 0, divisor >>> 0)),
+        glCreateVertexArrays: creator((context, count)=>context.glCreateVertexArrays(count)),
+        glVertexArrayVertexBuffer: ([vao, point, buffer, offset, stride])=>answer(current()
+            ?.namedVertexArray('glBindVertexBuffer', vao >>> 0, [point >>> 0, buffer >>> 0,
+                offset | 0, stride | 0])),
+        glVertexArrayVertexBuffers: ([vao, first, count, buffers, offsets, strides])=>
+            call(context=>{
+                const n = Math.max(0, count | 0);
+                const given = (buffers >>> 0) !== 0;
+                context.namedVertexArray('glBindVertexBuffers', vao >>> 0, [first >>> 0,
+                    count | 0, given ? readTyped('ui', buffers, n) : null,
+                    given ? readOffsets(offsets, n) : [],
+                    given ? readTyped('i', strides, n) : []]);
+            }),
+        glVertexArrayAttribFormat: ([vao, index, size, type, normalised, relative])=>answer(
+            current()?.namedVertexArray('vertexAttribFormat', vao >>> 0, [index >>> 0, size | 0,
+                type >>> 0, normalised & 0xff, relative >>> 0, 'float'])),
+        glVertexArrayAttribIFormat: ([vao, index, size, type, relative])=>answer(current()
+            ?.namedVertexArray('vertexAttribFormat', vao >>> 0, [index >>> 0, size | 0,
+                type >>> 0, 0, relative >>> 0, 'int'])),
+        glVertexArrayAttribLFormat: ([vao, index, size, type, relative])=>answer(current()
+            ?.namedVertexArray('vertexAttribFormat', vao >>> 0, [index >>> 0, size | 0,
+                type >>> 0, 0, relative >>> 0, 'long'])),
+        glVertexArrayAttribBinding: ([vao, index, point])=>answer(current()?.namedVertexArray(
+            'glVertexAttribBinding', vao >>> 0, [index >>> 0, point >>> 0])),
+        glVertexArrayBindingDivisor: ([vao, point, divisor])=>answer(current()?.namedVertexArray(
+            'glVertexBindingDivisor', vao >>> 0, [point >>> 0, divisor >>> 0])),
+        glEnableVertexArrayAttrib: ([vao, index])=>answer(current()?.namedVertexArray(
+            'glEnableVertexAttribArrayARB', vao >>> 0, [index >>> 0])),
+        glDisableVertexArrayAttrib: ([vao, index])=>answer(current()?.namedVertexArray(
+            'glDisableVertexAttribArrayARB', vao >>> 0, [index >>> 0])),
+        glVertexArrayElementBuffer: ([vao, buffer])=>answer(current()
+            ?.glVertexArrayElementBuffer(vao >>> 0, buffer >>> 0)),
+        glGetVertexArrayiv: ([vao, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexArray(vao >>> 0, pname >>> 0), 'word')),
+        glGetVertexArrayIndexediv: ([vao, index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, false), 'word')),
+        glGetVertexArrayIndexed64iv: ([vao, index, pname, out])=>call(context=>writeInt64s(out,
+            context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, true))),
+        // glGetNamedBufferSubData is `exports.js`'s: it may wait for the device.
+        glMapNamedBuffer: ([buffer, access])=>current()?.namedBuffer('glMapBufferARB',
+            buffer >>> 0, [access >>> 0]) ?? 0,
+        glMapNamedBufferRange: ([buffer, offset, length, access])=>current()?.namedBuffer(
+            'glMapBufferRange', buffer >>> 0, [offset | 0, length | 0, access >>> 0]) ?? 0,
+        glUnmapNamedBuffer: ([buffer])=>current()?.namedBuffer('glUnmapBufferARB', buffer >>> 0,
+            []) ?? GL.FALSE,
+        glFlushMappedNamedBufferRange: ([buffer, offset, length])=>answer(current()?.namedBuffer(
+            'glFlushMappedBufferRange', buffer >>> 0, [offset | 0, length | 0])),
+        glGetNamedBufferParameteriv: ([buffer, pname, out])=>call(context=>writeQuery(out,
+            context.namedBuffer('glGetBufferParameterivARB', buffer >>> 0, [pname >>> 0]),
+            'word')),
+        glGetNamedBufferParameteri64v: ([buffer, pname, out])=>call(context=>writeInt64s(out,
+            context.namedBuffer('glGetBufferParameterivARB', buffer >>> 0, [pname >>> 0]))),
+        glGetNamedBufferPointerv: ([buffer, pname, out])=>call(context=>writeQuery(out,
+            context.namedBuffer('glGetBufferPointervARB', buffer >>> 0, [pname >>> 0]),
+            'pointer')),
+        glCopyNamedBufferSubData: a=>answer(current()?.glCopyNamedBufferSubData(a[0] >>> 0,
+            a[1] >>> 0, a[2] | 0, a[3] | 0, a[4] | 0)),
+
+        // --- direct state access: framebuffers and renderbuffers ---
+
+        glNamedFramebufferRenderbuffer: a=>answer(current()?.namedFramebuffer(
+            'glFramebufferRenderbuffer', a[0] >>> 0, false, true, [a[1] >>> 0, a[2] >>> 0,
+                a[3] >>> 0])),
+        glFramebufferTexture: ([target, attachment, texture, level])=>answer(
+            current()?.glFramebufferTexture(target >>> 0, attachment >>> 0, texture >>> 0,
+                level | 0)),
+        glNamedFramebufferTexture: a=>answer(current()?.namedFramebufferTexture(a[0] >>> 0,
+            a[1] >>> 0, a[2] >>> 0, a[3] | 0, null)),
+        glNamedFramebufferTextureLayer: a=>answer(current()?.namedFramebufferTexture(
+            a[0] >>> 0, a[1] >>> 0, a[2] >>> 0, a[3] | 0, a[4] | 0)),
+        glNamedFramebufferDrawBuffer: ([name, mode])=>answer(current()?.namedFramebuffer(
+            'glDrawBuffer', name >>> 0, false, false, [mode >>> 0])),
+        glNamedFramebufferDrawBuffers: ([name, count, list])=>call(context=>
+            context.namedFramebuffer('glDrawBuffers', name >>> 0, false, false, [(count | 0) > 0
+                && (list >>> 0) !== 0 ? readTyped('ui', list, count | 0)
+                : new Array(Math.max(0, count | 0)).fill(GL.NONE)])),
+        glNamedFramebufferReadBuffer: ([name, mode])=>answer(current()?.namedFramebuffer(
+            'glReadBuffer', name >>> 0, true, false, [mode >>> 0])),
+        glInvalidateNamedFramebufferData: ([name, count, list])=>call(context=>
+            context.glInvalidateNamedFramebuffer(name >>> 0, count | 0, (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : [], null)),
+        glInvalidateNamedFramebufferSubData: a=>call(context=>
+            context.glInvalidateNamedFramebuffer(a[0] >>> 0, a[1] | 0, (a[1] | 0) > 0
+                ? readTyped('ui', a[2], a[1] | 0) : [], { width: a[5] | 0, height: a[6] | 0 })),
+        glClearNamedFramebufferiv: ([name, buffer, drawBuffer, value])=>call(context=>
+            context.namedFramebuffer('clearBuffer', name >>> 0, false, false, [buffer >>> 0,
+                drawBuffer | 0, readTyped('i', value, clearCount(buffer)), 'int'])),
+        glClearNamedFramebufferuiv: ([name, buffer, drawBuffer, value])=>call(context=>
+            context.namedFramebuffer('clearBuffer', name >>> 0, false, false, [buffer >>> 0,
+                drawBuffer | 0, readTyped('ui', value, clearCount(buffer)), 'uint'])),
+        glClearNamedFramebufferfv: ([name, buffer, drawBuffer, value])=>call(context=>
+            context.namedFramebuffer('clearBuffer', name >>> 0, false, false, [buffer >>> 0,
+                drawBuffer | 0, readTyped('f', value, clearCount(buffer)), 'float'])),
+        glClearNamedFramebufferfi: ([name, buffer, drawBuffer, depth, stencil])=>answer(
+            current()?.namedFramebuffer('glClearBufferfi', name >>> 0, false, false,
+                [buffer >>> 0, drawBuffer | 0, asFloat(depth), stencil | 0])),
+        glBlitNamedFramebuffer: a=>answer(current()?.glBlitNamedFramebuffer(a[0] >>> 0,
+            a[1] >>> 0, [a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] | 0,
+                a[9] | 0, a[10] >>> 0, a[11] >>> 0])),
+        glCheckNamedFramebufferStatus: ([name, target])=>current()
+            ?.glCheckNamedFramebufferStatus(name >>> 0, target >>> 0) ?? 0,
+        glGetNamedFramebufferAttachmentParameteriv: ([name, attachment, pname, out])=>call(
+            context=>writeQuery(out, context.namedFramebuffer(
+                'glGetFramebufferAttachmentParameteriv', name >>> 0, false, true,
+                [attachment >>> 0, pname >>> 0]), 'word')),
+        glNamedRenderbufferStorage: ([name, format, width, height])=>answer(current()
+            ?.namedRenderbuffer('glRenderbufferStorageMultisample', name >>> 0,
+                [0, format >>> 0, width | 0, height | 0])),
+        glNamedRenderbufferStorageMultisample: ([name, samples, format, width, height])=>
+            answer(current()?.namedRenderbuffer('glRenderbufferStorageMultisample', name >>> 0,
+                [samples | 0, format >>> 0, width | 0, height | 0])),
+        glGetNamedRenderbufferParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.namedRenderbuffer('glGetRenderbufferParameteriv', name >>> 0,
+                [pname >>> 0]), 'word')),
+
+        // --- direct state access: samplers ---
+
+        glCreateSamplers: creator((context, count)=>context.glCreateSamplers(count)),
+    };
+}

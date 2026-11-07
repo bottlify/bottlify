@@ -28,6 +28,7 @@
     "cdp:gs": "node tools/cdp_test/gs-gate.mjs",
     "cdp:pull": "node tools/cdp_test/vertex-pull-gate.mjs",
     "cdp:lighting": "node tools/cdp_test/gl-lighting-gate.mjs",
+    "cdp:spirv": "node tools/cdp_test/spirv-gate.mjs",
     "cdp:game": "node tools/cdp_test/game.mjs",
     "cdp:frames": "node tools/cdp_test/frames.mjs",
     "ui": "npm --prefix ../bottlify-ui start"

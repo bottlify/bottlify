@@ -12,12 +12,15 @@
  *
  * The object rules:
  *
- * - **Renderbuffers live in the share group, framebuffers in the context.**
- *   A framebuffer is a container of attachments and the specification does
- *   not share containers.
+ * - **Renderbuffers and framebuffers live in the share group.** OpenGL 3.0
+ *   shares no containers, but GL_EXT_framebuffer_object shares framebuffers
+ *   and Windows' drivers go on sharing them between the contexts
+ *   wglShareLists joins, under either spelling (Wine's opengl32
+ *   test_sharelists).
  * - **A name glGenFramebuffers did not hand out cannot be bound** under the
  *   ARB names (GL_INVALID_OPERATION); the EXT names make the object on the
- *   first bind, as that extension does.
+ *   first bind, as that extension does, to the draw and read targets as well
+ *   (GL_EXT_framebuffer_blit).
  * - **Deleting what is bound unbinds it**, and deleting a renderbuffer or a
  *   texture detaches it from the framebuffer bound for drawing or reading.
  * - **The draw and read buffers belong to the framebuffer**: binding another
@@ -32,7 +35,11 @@
  */
 
 import { GL } from './constants.js';
-import { RENDERBUFFER_FORMATS, attachmentImage, levelKey } from './objects.js';
+import {
+    LAYERED_TARGETS, RENDERBUFFER_FORMATS, attachedLevelKey, attachmentImage, levelKey,
+} from './objects.js';
+import { TEX, componentTypeOf } from './formats.js';
+import { rgbaOf } from './texture-levels.js';
 
 /**
  * @typedef {import('./objects.js').RenderbufferObject} RenderbufferObject
@@ -60,7 +67,9 @@ const isColour = point=>point >= GL.COLOR_ATTACHMENT0
 export function framebufferStatus(fbo){
     if (fbo.attachments.size === 0)
     {
-        return GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        // Without attachments, its default size makes it one.
+        return fbo.defaults.width > 0 && fbo.defaults.height > 0 ? GL.FRAMEBUFFER_COMPLETE
+            : GL.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
     }
     /** @type {{ width: number, height: number }[]} */
     const sizes = [];
@@ -79,10 +88,14 @@ export function framebufferStatus(fbo){
         {
             return GL.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
-        if (point === GL.DEPTH_ATTACHMENT && image.holds === 'depth'
-            && attachment.kind === 'texture')
+        const sized = attachment.kind === 'texture'
+            ? attachment.texture.levels.get(attachedLevelKey(attachment))?.sized
+            : null;
+        if (sized && (sized.compressed || sized.packing === 'rgb9e5'
+            || (attachment.kind === 'texture' && attachment.texture.target === GL.TEXTURE_3D)))
         {
-            // A depth texture this renderer cannot sample after drawing it.
+            // What this renderer cannot draw into: a shared exponent (WebGPU
+            // renders none), a slice of a 3D texture.
             return GL.FRAMEBUFFER_UNSUPPORTED;
         }
         sizes.push(image);
@@ -98,6 +111,12 @@ export function framebufferStatus(fbo){
         && [...fbo.attachments.keys()].some(isColour))
     {
         return GL.FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
+    }
+    // Layered attachments (3.2 section 9.4.2) are all or none of them.
+    const layered = [...fbo.attachments.values()].map(a=>a.kind === 'texture' && !!a.layered);
+    if (layered.some(on=>on !== layered[0]))
+    {
+        return GL.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
     }
     if (sizes.some(size=>size.width !== sizes[0].width || size.height !== sizes[0].height))
     {
@@ -126,7 +145,24 @@ function sameImage(a, b){
 const createFramebufferObject = (/** @type {number} */ name)=>({
     name, attachments: new Map(), drawBuffers: [GL.COLOR_ATTACHMENT0, GL.NONE, GL.NONE, GL.NONE],
     readBuffer: GL.COLOR_ATTACHMENT0, version: 0,
+    defaults: { width: 0, height: 0, layers: 0, samples: 0, fixed: GL.FALSE },
 });
+
+/**
+ * The largest default size, layer count and sample count a framebuffer
+ * without attachments takes: WebGPU's least 2D texture size and layer count,
+ * and the samples a renderbuffer takes.
+ */
+const DEFAULT_LIMITS = Object.freeze({ width: 8192, height: 8192, layers: 256, samples: 4 });
+
+/** The defaults' parameters, by name, and the limit of each. */
+const DEFAULT_PARAMETERS = new Map(/** @type {[number, [string, number]][]} */ ([
+    [GL.FRAMEBUFFER_DEFAULT_WIDTH, ['width', DEFAULT_LIMITS.width]],
+    [GL.FRAMEBUFFER_DEFAULT_HEIGHT, ['height', DEFAULT_LIMITS.height]],
+    [GL.FRAMEBUFFER_DEFAULT_LAYERS, ['layers', DEFAULT_LIMITS.layers]],
+    [GL.FRAMEBUFFER_DEFAULT_SAMPLES, ['samples', DEFAULT_LIMITS.samples]],
+    [GL.FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS, ['fixed', 1]],
+]));
 
 /**
  * The calls of this file a display list does not record: all of them, as
@@ -138,6 +174,8 @@ export const FRAMEBUFFER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetFramebufferAttachmentParameteriv', 'glGenRenderbuffers', 'glDeleteRenderbuffers',
     'glIsRenderbuffer', 'bindRenderbuffer', 'glRenderbufferStorageMultisample',
     'glGetRenderbufferParameteriv', 'glGenerateMipmap', 'glBlitFramebuffer',
+    'glCreateFramebuffers', 'glCreateRenderbuffers', 'framebufferParameter',
+    'getFramebufferParameter', 'glGetFramebufferParameterivEXT',
 ]);
 
 /**
@@ -147,9 +185,13 @@ export const FRAMEBUFFER_CALLS_NOT_COMPILED = Object.freeze([
 export function installFramebufferCalls(context, kernel){
     const { enter, setError, setState, diverge } = kernel;
 
-    /** The context's framebuffers, by name; generated names hold null until bound. */
-    /** @type {Map<number, FramebufferObject | null>} */
-    const framebuffers = new Map();
+    /**
+     * The share group's framebuffers, by name; generated names hold null
+     * until bound.
+     *
+     * @returns {Map<number, FramebufferObject | null>}
+     */
+    const framebuffers = ()=>kernel.shareGroup().framebuffers;
     /** @type {FramebufferObject | null} */
     let drawFbo = null;
     /** @type {FramebufferObject | null} */
@@ -173,6 +215,35 @@ export function installFramebufferCalls(context, kernel){
             return drawFbo;
         }
         return target === GL.READ_FRAMEBUFFER ? readFbo : undefined;
+    };
+
+    /**
+     * Marks what the draw framebuffer has at `point` layered, when it is
+     * `texture` (glFramebufferTexture of a cube map or an array, 3.2): told
+     * after the texture was attached at its first face or layer.
+     *
+     * @param {number} point @param {object} texture
+     */
+    kernel.side.layerWhole = (point, texture)=>{
+        const fbo = drawFbo;
+        if (!fbo)
+        {
+            return;
+        }
+        /** @type {Map<Attachment, Attachment>} one layered copy a shared attachment */
+        const made = new Map();
+        for (const at of point === GL.DEPTH_STENCIL_ATTACHMENT
+            ? [GL.DEPTH_ATTACHMENT, GL.STENCIL_ATTACHMENT] : [point])
+        {
+            const held = fbo.attachments.get(at);
+            if (held?.kind === 'texture' && held.texture === texture)
+            {
+                const layered = made.get(held) ?? { ...held, layered: true };
+                made.set(held, layered);
+                fbo.attachments.set(at, layered);
+            }
+        }
+        fbo.version++;
     };
 
     /** @param {number} attachment */
@@ -237,7 +308,7 @@ export function installFramebufferCalls(context, kernel){
                     return { fbo: drawFbo, width: image.width, height: image.height };
                 }
             }
-            return { fbo: drawFbo, width: 0, height: 0 };
+            return { fbo: drawFbo, width: drawFbo.defaults.width, height: drawFbo.defaults.height };
         },
         /** @returns {FramebufferObject | null} */
         readFramebuffer: ()=>readFbo,
@@ -318,7 +389,7 @@ export function installFramebufferCalls(context, kernel){
      */
     const bindFramebuffer = (call, target, name, ext)=>{
         const which = targetsOf(target);
-        if (!which || (ext && target !== GL.FRAMEBUFFER))
+        if (!which)
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -327,17 +398,12 @@ export function installFramebufferCalls(context, kernel){
         let fbo = null;
         if (name !== 0)
         {
-            if (!framebuffers.has(name) && !ext)
+            if (!framebuffers().has(name) && !ext)
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            fbo = framebuffers.get(name) ?? null;
-            if (!fbo)
-            {
-                fbo = createFramebufferObject(name);
-                framebuffers.set(name, fbo);
-            }
+            fbo = objectNamed(name);
         }
         if (which.includes('draw'))
         {
@@ -354,6 +420,22 @@ export function installFramebufferCalls(context, kernel){
         publish();
     };
     const record = kernel.record;
+
+    /**
+     * A framebuffer name's object, made if the name was only generated.
+     *
+     * @param {number} name @returns {FramebufferObject}
+     */
+    const objectNamed = name=>{
+        let fbo = framebuffers().get(name);
+        if (!fbo)
+        {
+            fbo = createFramebufferObject(name);
+            framebuffers().set(name, fbo);
+            kernel.shareGroup().used = true;
+        }
+        return fbo;
+    };
 
     /**
      * @param {number} target @param {number} attachment @param {number} textarget
@@ -384,8 +466,11 @@ export function installFramebufferCalls(context, kernel){
         }
         const face = CUBE_FACES.indexOf(textarget);
         const wanted = face >= 0 ? GL.TEXTURE_CUBE_MAP : textarget;
+        // A rectangle (3.1) and a multisample texture (3.2) are attached as
+        // the one level they have.
+        const single = wanted === GL.TEXTURE_RECTANGLE || wanted === GL.TEXTURE_2D_MULTISAMPLE;
         if (wanted !== GL.TEXTURE_2D && wanted !== GL.TEXTURE_CUBE_MAP
-            && wanted !== GL.TEXTURE_1D)
+            && wanted !== GL.TEXTURE_1D && !single)
         {
             setError(textarget === GL.TEXTURE_3D ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
             return;
@@ -395,7 +480,7 @@ export function installFramebufferCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        const maxLevel = Math.log2(record(GL.MAX_TEXTURE_SIZE).values[0]);
+        const maxLevel = single ? 0 : Math.log2(record(GL.MAX_TEXTURE_SIZE).values[0]);
         if (level < 0 || level > maxLevel)
         {
             setError(GL.INVALID_VALUE);
@@ -421,9 +506,10 @@ export function installFramebufferCalls(context, kernel){
             let next = 1;
             while (names.length < count)
             {
-                if (!framebuffers.has(next))
+                if (!framebuffers().has(next))
                 {
-                    framebuffers.set(next, null);
+                    framebuffers().set(next, null);
+                    kernel.shareGroup().used = true;
                     names.push(next);
                 }
                 next++;
@@ -439,11 +525,11 @@ export function installFramebufferCalls(context, kernel){
             }
             for (const name of names)
             {
-                if (name === 0 || !framebuffers.has(name))
+                if (name === 0 || !framebuffers().has(name))
                 {
                     continue;
                 }
-                const fbo = framebuffers.get(name);
+                const fbo = framebuffers().get(name);
                 if (fbo && fbo === drawFbo)
                 {
                     drawFbo = null;
@@ -452,7 +538,7 @@ export function installFramebufferCalls(context, kernel){
                 {
                     readFbo = null;
                 }
-                framebuffers.delete(name);
+                framebuffers().delete(name);
             }
             publish();
         },
@@ -463,7 +549,7 @@ export function installFramebufferCalls(context, kernel){
             {
                 return GL.FALSE;
             }
-            return framebuffers.get(name) ? GL.TRUE : GL.FALSE;
+            return framebuffers().get(name) ? GL.TRUE : GL.FALSE;
         },
 
         /** @param {number} target @param {number} name @param {boolean} ext */
@@ -500,6 +586,58 @@ export function installFramebufferCalls(context, kernel){
             {
                 framebufferTexture(target, attachment, textarget, name, level);
             }
+        },
+
+        /**
+         * glFramebufferTextureLayer (3.0): a layer of an array's level, a
+         * cube map array's layer-face among them (4.0), drawn into as a 2D
+         * image. A 3D texture's slice is not taken: GL_INVALID_OPERATION, as
+         * a draw here reaches no slice of one.
+         *
+         * @param {number} target @param {number} attachment @param {number} name
+         * @param {number} level @param {number} layer
+         */
+        glFramebufferTextureLayer(target, attachment, name, level, layer){
+            if (!enter('glFramebufferTextureLayer', [target, attachment, name, level, layer]))
+            {
+                return;
+            }
+            const texture = name === 0 ? null : kernel.shareGroup().textures.objects.get(name);
+            if (!texture)
+            {
+                // A detach, or a name that is no texture.
+                framebufferTexture(target, attachment, name === 0 ? GL.TEXTURE_2D : GL.TEXTURE_3D,
+                    name, level);
+                return;
+            }
+            if (!LAYERED_TARGETS.has(texture.target))
+            {
+                const fbo = boundTo(target);
+                setError(fbo === undefined || !validAttachment(attachment) ? GL.INVALID_ENUM
+                    : GL.INVALID_OPERATION);
+                return;
+            }
+            const maxLevel = Math.log2(record(GL.MAX_TEXTURE_SIZE).values[0]);
+            // A layer past the texture's own makes the framebuffer incomplete;
+            // past MAX_ARRAY_TEXTURE_LAYERS it is no layer at all.
+            if (layer < 0 || layer >= record(TEX.MAX_ARRAY_TEXTURE_LAYERS).values[0]
+                || level < 0 || level > maxLevel)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const fbo = boundTo(target);
+            if (fbo === undefined || !validAttachment(attachment))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (!fbo)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            attach(fbo, attachment, { kind: 'texture', texture, level, face: layer });
         },
 
         /**
@@ -581,6 +719,17 @@ export function installFramebufferCalls(context, kernel){
             }
             const image = attachmentImage(attached);
             const colour = image?.holds === 'colour';
+            // A texture kept as a sized format answers from its format.
+            const sized = attached.kind === 'texture'
+                ? attached.texture.levels.get(attachedLevelKey(attached))?.sized
+                : null;
+            const bits = /** @type {number[]} */ ([GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE,
+                GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE]).indexOf(pname);
+            if (sized && bits >= 0)
+            {
+                return [sized.bits[bits]];
+            }
             switch (pname)
             {
                 case GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
@@ -594,30 +743,223 @@ export function installFramebufferCalls(context, kernel){
                         ? [attached.texture.target === GL.TEXTURE_CUBE_MAP
                             ? CUBE_FACES[attached.face] : 0]
                         : (setError(GL.INVALID_ENUM), null);
+                case GL.FRAMEBUFFER_ATTACHMENT_LAYERED:
+                    return attached.kind === 'texture' ? [attached.layered ? GL.TRUE : GL.FALSE]
+                        : (setError(GL.INVALID_ENUM), null);
                 case GL.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
-                    return attached.kind === 'texture' ? [0] : (setError(GL.INVALID_ENUM), null);
+                    return attached.kind === 'texture'
+                        ? [LAYERED_TARGETS.has(attached.texture.target) ? attached.face : 0]
+                        : (setError(GL.INVALID_ENUM), null);
                 case GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
                 case GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
                 case GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
                 case GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
                     return [colour ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-                    return [image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
-                        : 0];
+                    return [sized ? sized.depth
+                        : image && image.holds !== 'colour' && image.holds !== 'stencil' ? 24
+                            : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-                    return [image && (image.holds === 'stencil' || image.holds === 'depthStencil')
-                        ? 8 : 0];
+                    return [sized ? sized.stencil
+                        : image && (image.holds === 'stencil' || image.holds === 'depthStencil')
+                            ? 8 : 0];
                 case GL.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-                    return [GL.UNSIGNED_NORMALIZED];
+                    return [sized ? componentTypeOf(sized, colour ? 'colour' : 'depth')
+                        : GL.UNSIGNED_NORMALIZED];
                 case GL.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-                    return [GL.LINEAR_COLOR];
+                    return [sized?.srgb ? GL.SRGB : GL.LINEAR_COLOR];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
             }
         },
 
+        // --- parameters (GL_ARB_framebuffer_no_attachments, 4.5, EXT_direct_state_access) ---
+
+        /**
+         * glFramebufferParameteri and glNamedFramebufferParameteri: a
+         * framebuffer object's size, layers and samples without attachments.
+         *
+         * @param {string} call
+         * @param {FramebufferObject | null | undefined} fbo  undefined: no such target or name
+         * @param {number} pname @param {number} param
+         */
+        framebufferParameter(call, fbo, pname, param){
+            if (!enter('framebufferParameter', [call, fbo, pname, param]))
+            {
+                return;
+            }
+            const parameter = DEFAULT_PARAMETERS.get(pname);
+            if (!parameter || (fbo === undefined && call === 'glFramebufferParameteri'))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (!fbo)
+            {
+                // No object by that name; or the default framebuffer, which
+                // has no defaults to set.
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const [field, limit] = parameter;
+            // Fixed sample locations is a boolean: any value is one.
+            if (field !== 'fixed' && (param < 0 || param > limit))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            /** @type {Record<string, number>} */ (fbo.defaults)[field] = field === 'fixed'
+                ? (param !== 0 ? GL.TRUE : GL.FALSE) : param;
+            fbo.version++;
+        },
+
+        /**
+         * glGetFramebufferParameteriv and glGetNamedFramebufferParameteriv: a
+         * framebuffer's defaults, and since 4.5 what any framebuffer, the
+         * default one included, says of itself.
+         *
+         * @param {string} call
+         * @param {FramebufferObject | null | undefined} fbo  undefined: no such target or name
+         * @param {number} pname
+         * @returns {number[] | null}
+         */
+        getFramebufferParameter(call, fbo, pname){
+            if (!enter('getFramebufferParameter', [call, fbo, pname]))
+            {
+                return null;
+            }
+            const parameter = DEFAULT_PARAMETERS.get(pname);
+            const own = pname === GL.DOUBLEBUFFER || pname === GL.STEREO
+                || pname === GL.SAMPLES || pname === GL.SAMPLE_BUFFERS
+                || pname === GL.IMPLEMENTATION_COLOR_READ_FORMAT
+                || pname === GL.IMPLEMENTATION_COLOR_READ_TYPE;
+            if (!parameter && !own)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (fbo === undefined)
+            {
+                setError(call === 'glGetFramebufferParameteriv' ? GL.INVALID_ENUM
+                    : GL.INVALID_OPERATION);
+                return null;
+            }
+            if (parameter)
+            {
+                if (!fbo)
+                {
+                    setError(GL.INVALID_OPERATION);
+                    return null;
+                }
+                const defaults = /** @type {Record<string, number>} */ (fbo.defaults);
+                return [defaults[parameter[0]]];
+            }
+            switch (pname)
+            {
+                case GL.DOUBLEBUFFER:
+                    return [fbo ? GL.FALSE : record(GL.DOUBLEBUFFER).values[0]];
+                case GL.STEREO:
+                    return [GL.FALSE];
+                case GL.IMPLEMENTATION_COLOR_READ_FORMAT:
+                    return [GL.RGBA];
+                case GL.IMPLEMENTATION_COLOR_READ_TYPE:
+                    return [GL.UNSIGNED_BYTE];
+                default:
+                    // Drawn single-sampled, every framebuffer here.
+                    return [0];
+            }
+        },
+
+        /**
+         * EXT_direct_state_access' glGetFramebufferParameterivEXT: a
+         * framebuffer's draw and read buffers, as the queries would answer
+         * with it bound.
+         *
+         * @param {number} name @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetFramebufferParameterivEXT(name, pname){
+            if (!enter('glGetFramebufferParameterivEXT', [name, pname]))
+            {
+                return null;
+            }
+            const drawn = pname === GL.DRAW_BUFFER ? 0 : pname - GL.DRAW_BUFFER0;
+            if (pname !== GL.READ_BUFFER && (drawn < 0 || drawn >= COLOR_ATTACHMENTS))
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (name === 0)
+            {
+                if (pname === GL.READ_BUFFER)
+                {
+                    return [readFbo ? (record(GL.DOUBLEBUFFER).values[0] ? GL.BACK : GL.FRONT)
+                        : record(GL.READ_BUFFER).values[0]];
+                }
+                return [defaultDrawBuffers[drawn]];
+            }
+            if (!framebuffers().has(name))
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            const fbo = objectNamed(name);
+            return [pname === GL.READ_BUFFER ? fbo.readBuffer : fbo.drawBuffers[drawn]];
+        },
+
+        /**
+         * The framebuffer a named call reaches: undefined for a name that is
+         * no object (4.5 section 9.2.1), null for zero, the default one.
+         *
+         * @param {number} name @returns {FramebufferObject | null | undefined}
+         */
+        framebufferNamed(name){
+            return name === 0 ? null : framebuffers().get(name) ?? undefined;
+        },
+
+        /** @param {number} target @returns {FramebufferObject | null | undefined} */
+        framebufferBoundTo(target){
+            return boundTo(target);
+        },
+
+        /** glCreateFramebuffers (4.5): names that are objects at once. @param {number} count */
+        glCreateFramebuffers(count){
+            if (!enter('glCreateFramebuffers', [count]))
+            {
+                return [];
+            }
+            const names = context.glGenFramebuffers(count);
+            for (const name of names)
+            {
+                objectNamed(name);
+            }
+            return names;
+        },
+
         // --- renderbuffers ---
+
+        /** glCreateRenderbuffers (4.5): names that are objects at once. @param {number} count */
+        glCreateRenderbuffers(count){
+            if (!enter('glCreateRenderbuffers', [count]))
+            {
+                return [];
+            }
+            if (count < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return [];
+            }
+            const group = renderbuffers();
+            const names = group.reserve(count);
+            for (const name of names)
+            {
+                group.define(name, { name, width: 0, height: 0, internalFormat: GL.RGBA,
+                    samples: 0, version: 0 });
+            }
+            kernel.shareGroup().used = true;
+            return names;
+        },
 
         /** @param {number} count @returns {number[]} */
         glGenRenderbuffers(count){
@@ -749,7 +1091,7 @@ export function installFramebufferCalls(context, kernel){
             }
             Object.assign(boundRenderbuffer, { width, height, internalFormat, samples,
                 version: boundRenderbuffer.version + 1 });
-            for (const fbo of framebuffers.values())
+            for (const fbo of framebuffers().values())
             {
                 if (fbo && [...fbo.attachments.values()].some(a=>a.kind === 'renderbuffer'
                     && a.renderbuffer === boundRenderbuffer))
@@ -816,7 +1158,9 @@ export function installFramebufferCalls(context, kernel){
             {
                 return;
             }
-            if (target !== GL.TEXTURE_2D && target !== GL.TEXTURE_CUBE_MAP)
+            const layered = target === TEX.TEXTURE_2D_ARRAY
+                || target === TEX.TEXTURE_CUBE_MAP_ARRAY;
+            if (target !== GL.TEXTURE_2D && target !== GL.TEXTURE_CUBE_MAP && !layered)
             {
                 setError(GL.INVALID_ENUM);
                 return;
@@ -836,7 +1180,29 @@ export function installFramebufferCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
+            if (target === TEX.TEXTURE_CUBE_MAP_ARRAY && base.width !== base.height)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
             const levels = Math.floor(Math.log2(Math.max(base.width, base.height))) + 1;
+            if (layered)
+            {
+                // An array's levels keep its layers; each layer is its own image.
+                for (let level = 1; level < levels; level++)
+                {
+                    const made = layeredLevel(base, level, kernel.gpuBacked());
+                    if (made.lost)
+                    {
+                        kernel.lose(`glGenerateMipmap of an array of ${base.sized?.name ?? 'a'}`
+                            + ' format made no texels on the processor: only 8-bit components'
+                            + ' are averaged here');
+                    }
+                    texture.levels.set(levelKey(level), made.level);
+                }
+                kernel.generateMipmap?.(texture);
+                return;
+            }
             for (let face = 0; face < faces; face++)
             {
                 const top = texture.levels.get(levelKey(0, face));
@@ -907,6 +1273,44 @@ export function installFramebufferCalls(context, kernel){
 }
 
 /**
+ * A mipmap level of an array (2D or of cube maps) made from its base level:
+ * the base's layers each averaged down, where the context keeps the base's
+ * bytes and they are 8-bit components; on a device the level is made there
+ * and holds none here. `lost` says the processor's could not be made.
+ *
+ * @param {import('./objects.js').TextureLevel} base @param {number} level
+ * @param {boolean} device
+ * @returns {{ level: import('./objects.js').TextureLevel, lost: boolean }}
+ */
+function layeredLevel(base, level, device){
+    const width = Math.max(1, base.width >> level);
+    const height = Math.max(1, base.height >> level);
+    const layers = base.depth ?? 1;
+    const sized = base.sized ?? null;
+    const channels = sized && !sized.compressed && sized.packing === null
+        && sized.bits.every(bits=>bits === 0 || bits === 8) && sized.depth === 0
+        && sized.stencil === 0 ? sized.bits.filter(bits=>bits > 0).length : 0;
+    /** @type {Uint8Array | null} */
+    let data = null;
+    if (!device && base.data && channels > 0)
+    {
+        const slice = base.width * base.height * channels;
+        const made = width * height * channels;
+        data = new Uint8Array(made * layers);
+        for (let layer = 0; layer < layers; layer++)
+        {
+            data.set(downsampleBytes(base.data.subarray(layer * slice, (layer + 1) * slice),
+                base.width, base.height, level, channels), layer * made);
+        }
+    }
+    /** @type {import('./objects.js').TextureLevel} */
+    const made = { width, height, depth: layers, internalFormat: base.internalFormat,
+        border: 0, baseFormat: base.baseFormat, sized, data, compressed: null,
+        texels: data && sized ? rgbaOf(data, sized, width, height, layers) : null };
+    return { level: made, lost: !device && !!base.data && !data };
+}
+
+/**
  * A mipmap level's texels made from the base level's by averaging, where
  * the context keeps the base level's: the processor's half of
  * glGenerateMipmap. A level rendered on the device has none here, and is
@@ -917,19 +1321,26 @@ export function installFramebufferCalls(context, kernel){
  * @returns {Uint8Array | null}
  */
 function downsample(texels, width, height, level){
-    if (!texels)
-    {
-        return null;
-    }
+    return texels ? downsampleBytes(texels, width, height, level, 4) : null;
+}
+
+/**
+ * An image of `channels` bytes a texel, averaged down to `level`.
+ *
+ * @param {Uint8Array} texels @param {number} width @param {number} height
+ * @param {number} level @param {number} channels
+ * @returns {Uint8Array}
+ */
+function downsampleBytes(texels, width, height, level, channels){
     const w = Math.max(1, width >> level);
     const h = Math.max(1, height >> level);
     const step = 1 << level;
-    const out = new Uint8Array(w * h * 4);
+    const out = new Uint8Array(w * h * channels);
     for (let y = 0; y < h; y++)
     {
         for (let x = 0; x < w; x++)
         {
-            for (let c = 0; c < 4; c++)
+            for (let c = 0; c < channels; c++)
             {
                 let sum = 0;
                 let count = 0;
@@ -937,11 +1348,11 @@ function downsample(texels, width, height, level){
                 {
                     for (let dx = 0; dx < step && x * step + dx < width; dx++)
                     {
-                        sum += texels[((y * step + dy) * width + x * step + dx) * 4 + c];
+                        sum += texels[((y * step + dy) * width + x * step + dx) * channels + c];
                         count++;
                     }
                 }
-                out[(y * w + x) * 4 + c] = Math.round(sum / Math.max(1, count));
+                out[(y * w + x) * channels + c] = Math.round(sum / Math.max(1, count));
             }
         }
     }

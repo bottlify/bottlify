@@ -39,32 +39,61 @@ import {
     translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
-import { createDefaultState, readState } from './state.js';
+import { createDefaultState, readState, settleDrawableState } from './state.js';
+import {
+    DEFAULT_VERSION, shadingLanguageVersion, versionState, versionString,
+} from './version.js';
+import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
+import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
+import { ES2_CALLS_NOT_COMPILED, installEs2Calls } from './context-es2.js';
+import { SPIRV_CALLS_NOT_COMPILED, installSpirvCalls } from './context-spirv.js';
+import { installViewportCalls } from './context-viewports.js';
+import { LATER_CALLS_NOT_COMPILED, installLaterCalls } from './context-later.js';
+import { COMPUTE_CALLS_NOT_COMPILED, installComputeCalls } from './context-compute.js';
+import { INTERFACE_CALLS_NOT_COMPILED, installInterfaceCalls } from './context-interface.js';
+import { DEBUG_CALLS_NOT_COMPILED, installDebugCalls } from './context-debug.js';
+import { GL_CORE_REMOVED } from './registry.js';
+import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
+import { QUERY_CALLS_NOT_COMPILED, installQueryCalls } from './context-queries.js';
+import {
+    FEEDBACK_CALLS_NOT_COMPILED, installTransformFeedbackCalls,
+} from './context-transform-feedback.js';
+import { DSA_CALLS_NOT_COMPILED, installDirectStateCalls } from './context-dsa.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
-import { installTextureCalls } from './context-textures.js';
+import { TEXTURE_CALLS_NOT_COMPILED, installTextureCalls } from './context-textures.js';
 import { installLightingCalls } from './context-lighting.js';
 import { installArrayCalls } from './context-arrays.js';
+import { installTessellationCalls } from './context-tessellation.js';
 import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
+import {
+    ATTRIB_BINDING_CALLS_NOT_COMPILED, installAttribBindingCalls,
+} from './context-attrib-binding.js';
 import { SHADER_CALLS_NOT_COMPILED, installShaderCalls } from './context-glsl.js';
 import { FRAMEBUFFER_CALLS_NOT_COMPILED, installFramebufferCalls } from './context-framebuffers.js';
-import { BLEND_FACTORS, CORE_CALLS_NOT_COMPILED, installCoreCalls } from './context-core.js';
+import { BLEND_FACTORS, installCoreCalls } from './context-core.js';
 import { VERTEX_ARRAY_CALLS_NOT_COMPILED, installVertexArrayCalls } from './context-vao.js';
+import {
+    UNIFORM_BUFFER_CALLS_NOT_COMPILED, installUniformBufferCalls,
+} from './context-uniform-buffers.js';
 import { createSceneBuilder } from './context-scene.js';
+import {
+    LEGACY_CALLS_IN_BEGIN, LEGACY_CALLS_NOT_COMPILED, installLegacyCalls,
+} from './context-legacy.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
 
-/** What this implementation answers glGetString with. */
+/**
+ * What this implementation answers glGetString with, but for the versions,
+ * which are the context's (`version.js`): what its core entry points
+ * implement, every one of them through wglGetProcAddress past 1.1; everything
+ * past it is reported as an extension.
+ */
 const STRINGS = Object.freeze({
     [GL.VENDOR]: 'Bottlify Project',
     [GL.RENDERER]: VIDEO_ADAPTER_NAME,
-    // The version is what the core entry points implement, every one of
-    // them through wglGetProcAddress past 1.1; everything past it is
-    // reported as an extension.
-    [GL.VERSION]: '2.1',
-    [GL.SHADING_LANGUAGE_VERSION]: '1.20',
 });
 
 /**
@@ -76,7 +105,8 @@ const ALLOWED_IN_BEGIN = new Set([
     'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glColor3ub',
     'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
     'glIndexi', 'glMultiTexCoord4fARB', 'glSecondaryColor3fEXT', 'glFogCoordfEXT',
-    'glVertexAttrib4fARB', 'glMaterialfv', 'glMaterialf', 'glCallList', 'glCallLists', 'glEnd',
+    'glVertexAttrib4fARB', 'vertexAttribI', 'glMaterialfv', 'glMaterialf', 'glCallList',
+    'glCallLists', 'glEnd', ...LEGACY_CALLS_IN_BEGIN,
 ]);
 
 /** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
@@ -89,29 +119,53 @@ const CLEAR_BITS = GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT | GL.STENCIL_BUFFER
  * would be meaningless later.
  */
 const NOT_COMPILABLE = new Set([
-    'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString',
+    'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString', 'glGetStringi',
     'glGetPointerv', 'glGetTexParameteriv', 'glGetTexParameterfv', 'glGetTexLevelParameteriv',
     'glGetTexEnviv', 'glGetTexEnvfv', 'glGetTexGenfv', 'glGetTexImage', 'glGetLightfv',
     'glGetMaterialfv', 'glGetClipPlane', 'glIsEnabled', 'glIsTexture', 'glIsList',
     'glGenTextures', 'glGenLists', 'glDeleteTextures', 'glDeleteLists', 'glNewList',
-    'glEndList', 'glPixelStorei', 'glFlush', 'glFinish', 'glReadPixels', 'glRenderMode',
+    'glEndList', 'glPixelStorei', 'glFlush', 'glFinish', 'glReadPixels', 'glReadnPixels',
+    'glRenderMode',
     'glAreTexturesResident', 'glVertexPointer', 'glNormalPointer', 'glColorPointer',
     'glTexCoordPointer', 'glIndexPointer', 'glEdgeFlagPointer', 'glSecondaryColorPointerEXT',
     'glFogCoordPointerEXT', 'glInterleavedArrays', 'glEnableClientState',
     'glDisableClientState', 'glClientActiveTextureARB', 'glPushClientAttrib',
     'glPopClientAttrib', 'glGenBuffersARB', 'glBindBufferARB', 'glDeleteBuffersARB',
-    'glIsBufferARB', 'glBufferDataARB', 'glBufferSubDataARB', 'glGetBufferSubDataARB',
+    'glIsBufferARB', 'glBufferDataARB', 'glBufferStorage', 'glBufferSubDataARB',
+    'glGetBufferSubDataARB',
     'glMapBufferARB', 'glUnmapBufferARB', 'glGetBufferParameterivARB',
-    'glGetBufferPointervARB', 'glLockArraysEXT', 'glUnlockArraysEXT',
+    'glGetBufferPointervARB', 'glLockArraysEXT', 'glUnlockArraysEXT', 'clearBufferData',
     'glGetCompressedTexImageARB',
     'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
     'glProgramStringARB', 'glGetProgramivARB', 'glGetProgramStringARB',
     'glGetProgramEnvParameterfvARB', 'glGetProgramLocalParameterfvARB',
     'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
     'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
-    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
-    ...VERTEX_ARRAY_CALLS_NOT_COMPILED,
+    'glVertexAttribIPointer', 'glVertexAttribLPointer', 'getVertexAttribI',
+    // Draws whose commands a buffer object holds (4.6 compatibility 21.4).
+    'glDrawArraysIndirect', 'glDrawElementsIndirect', 'glMultiDrawArraysIndirect',
+    'glMultiDrawElementsIndirect', 'glMultiDrawArraysIndirectCount',
+    'glMultiDrawElementsIndirectCount',
+    ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
+    ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...ATTRIB_BINDING_CALLS_NOT_COMPILED,
+    ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
+    ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
+    ...ES2_CALLS_NOT_COMPILED, ...SPIRV_CALLS_NOT_COMPILED, ...LATER_CALLS_NOT_COMPILED,
+    ...DEBUG_CALLS_NOT_COMPILED,
+    ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED,
+    ...DSA_CALLS_NOT_COMPILED, ...COMPUTE_CALLS_NOT_COMPILED, ...INTERFACE_CALLS_NOT_COMPILED,
+    ...LEGACY_CALLS_NOT_COMPILED,
 ]);
+
+/**
+ * The calls a core profile does not have (3.2 and later, and a
+ * forward-compatible context's deprecated ones): the registry's list, under
+ * the names the context calls them by, their ARB and EXT spellings too.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const CORE_REMOVED = new Set(GL_CORE_REMOVED.split(' ')
+    .flatMap(name=>[name, `${name}ARB`, `${name}EXT`]));
 
 /** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([
@@ -201,6 +255,8 @@ const PIXEL_STORE_PARAMETERS = new Set([
     GL.UNPACK_ALIGNMENT, GL.UNPACK_ROW_LENGTH, GL.UNPACK_SKIP_ROWS, GL.UNPACK_SKIP_PIXELS,
     GL.UNPACK_SWAP_BYTES, GL.UNPACK_LSB_FIRST, GL.PACK_ALIGNMENT, GL.PACK_ROW_LENGTH,
     GL.PACK_SKIP_ROWS, GL.PACK_SKIP_PIXELS, GL.PACK_SWAP_BYTES, GL.PACK_LSB_FIRST,
+    // The image height and skipped images of 3D transfers (OpenGL 1.2).
+    0x806b, 0x806c, 0x806d, 0x806e,
 ]);
 
 /** How many pushes the attribute stacks take. */
@@ -215,6 +271,11 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {number} height
  * @property {boolean} doubleBuffered
  * @property {number} [depthBits]
+ * @property {string} [key]  the window it is: every context made current on it shares
+ *           its buffers on a device
+ * @property {{ width: number, height: number, key?: string } | null} [read]  the drawable
+ *           the default framebuffer is read from, where it is another
+ *           (WGL_ARB_make_current_read)
  */
 
 /** @typedef {import('./kernel.js').ContextMemory} ContextMemory */
@@ -223,6 +284,8 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @typedef {Object} GlContextOptions
  * @property {ReturnType<typeof createShareGroup>} [shareGroup]
  * @property {readonly string[]} [extensions]  what glGetString(GL_EXTENSIONS) reports
+ * @property {import('./version.js').ContextVersion} [version]  the version, profile and
+ *           flags the context was made for; `DEFAULT_VERSION` unless asked
  * @property {ContextMemory} [memory]
  * @property {(detail: string, severity?: 'loss') => void} [divergence]
  *           Told, once per distinct message, when a call was accepted but
@@ -264,7 +327,27 @@ export function createGlContext(options = {}){
     const raster = options.raster !== false;
 
     let attached = false;
+    const version = options.version ?? DEFAULT_VERSION;
+    // A core profile, or a forward-compatible context of 3.0 or 3.1, which
+    // has none of what 3.0 deprecated either.
+    const core = (version.profile & GL.CONTEXT_CORE_PROFILE_BIT) !== 0
+        || (version.flags & GL.CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) !== 0;
+    // GL_ARB_compatibility is what a 3.1 or later context keeps of the
+    // deprecated features (3.1 section 1.3.1): a core profile has none of
+    // them, and an earlier version has them without the name.
+    if (core || version.major < 3 || (version.major === 3 && version.minor < 1))
+    {
+        const at = extensions.indexOf('GL_ARB_compatibility');
+        if (at >= 0)
+        {
+            extensions.splice(at, 1);
+        }
+    }
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
+    for (const { query, ...entry } of versionState(version, extensions.length))
+    {
+        state.set(query, entry);
+    }
     let framebuffer = createFramebuffer(0, 0);
 
     /** @type {number} */
@@ -332,6 +415,13 @@ export function createGlContext(options = {}){
      * @returns {boolean} whether the caller should do its work
      */
     const enter = (name, args)=>{
+        if (core && CORE_REMOVED.has(name))
+        {
+            // What a core profile removed is still a function a program can
+            // obtain, and calling it is an error (OpenGL 3.2 appendix E.2).
+            setError(GL.INVALID_OPERATION);
+            return false;
+        }
         if (primitive && !ALLOWED_IN_BEGIN.has(name))
         {
             setError(GL.INVALID_OPERATION);
@@ -356,9 +446,63 @@ export function createGlContext(options = {}){
         return true;
     };
 
+    /**
+     * Clears what `request.mask` names within the scissor box, under the
+     * write masks: the colour draw buffers each under its own (`masks`, red 1
+     * to alpha 8, a zero leaving one alone) or, without them, under
+     * GL_COLOR_WRITEMASK.
+     *
+     * @param {{ mask: number, colour: readonly number[], depth: number, stencil: number,
+     *     masks?: readonly number[] }} request
+     */
+    const clearWith = request=>{
+        const box = scissorBox();
+        const colourMask = record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0);
+        if (gpu && attached)
+        {
+            gpu.clear(context, {
+                target: kernel.side.drawTarget(),
+                mask: request.mask,
+                colour: request.colour,
+                depth: request.depth,
+                stencil: request.stencil,
+                colourMask,
+                masks: request.masks,
+                depthMask: record(GL.DEPTH_WRITEMASK).values[0] !== 0,
+                stencilMask: record(GL.STENCIL_WRITEMASK).values[0],
+                scissor: box,
+            });
+            return;
+        }
+        if (request.mask & GL.COLOR_BUFFER_BIT)
+        {
+            const first = request.masks?.[0];
+            fillBox(framebuffer, request.colour.map(toByte), box, first === undefined
+                ? colourMask : [1, 2, 4, 8].map(bit=>(first & bit) !== 0));
+        }
+        if ((request.mask & GL.DEPTH_BUFFER_BIT) && record(GL.DEPTH_WRITEMASK).values[0] !== 0)
+        {
+            fillDepth(framebuffer, request.depth, box);
+        }
+    };
+
     /** @type {ContextKernel} */
     const kernel = {
+        core,
+        clearWith,
         enter,
+        executed: work=>{
+            const held = compiling;
+            compiling = null;
+            try
+            {
+                work();
+            }
+            finally
+            {
+                compiling = held;
+            }
+        },
         setError,
         record,
         setState,
@@ -403,6 +547,32 @@ export function createGlContext(options = {}){
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
                     width, height, kernel.side.readFramebuffer?.() ?? null)
             : null,
+        copyImage: gpu?.copyImage
+            ? (from, into, size)=>attached && gpu.copyImage(context, from, into, size)
+            : null,
+        fence: gpu?.fence
+            ? ()=>(attached ? gpu.fence(context) : null)
+            : null,
+        feedback: gpu?.beginFeedback
+            ? {
+                begin: session=>gpu.beginFeedback(context, session),
+                count: (target, query)=>gpu.countFeedback(context, target, query),
+                ended: query=>gpu.endCount(context, query),
+            }
+            : null,
+        queries: gpu?.beginQuery
+            ? {
+                begin: query=>gpu.beginQuery(context, query),
+                end: query=>gpu.endQuery(context, query),
+                flush: ()=>gpu.flushContext(context),
+                condition: (query, inverted)=>gpu.condition(context, query, inverted),
+            }
+            : null,
+        readBack: gpu?.readPixels
+            ? rect=>(attached
+                ? gpu.readPixels(context, rect, kernel.side.readFramebuffer?.() ?? null)
+                : null)
+            : null,
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
@@ -442,17 +612,27 @@ export function createGlContext(options = {}){
          * the drawable's dimensions **at the first attachment** and are not
          * touched by a later one -- a program that makes a context current on
          * a second, differently sized window keeps the viewport it had.
+         * Anything else already set stays: wglCopyContext may have filled a
+         * context current nowhere yet (Wine's opengl32 test_copy_context).
          *
          * @param {Drawable} drawable
          */
         attach(drawable){
             if (attached)
             {
+                if (gpu && drawable.key !== undefined)
+                {
+                    // Made current on a window: its buffers, whichever they are.
+                    gpu.attach(context, drawable);
+                    framebuffer = { ...framebuffer, width: drawable.width,
+                        height: drawable.height };
+                    return;
+                }
                 context.resize(drawable.width, drawable.height);
                 return;
             }
             attached = true;
-            state = createDefaultState(drawable);
+            settleDrawableState(state, drawable);
             if (gpu)
             {
                 gpu.attach(context, drawable);
@@ -612,6 +792,12 @@ export function createGlContext(options = {}){
             {
                 return readState({ kind: 'int', values: [stacks[depth].saved.length + 1] }, as);
             }
+            // State an installer answers itself (`kernel.side.queries`).
+            const answered = kernel.side.queries?.get(query);
+            if (answered)
+            {
+                return readState(answered(), as);
+            }
             const entry = state.get(query);
             if (!entry)
             {
@@ -637,19 +823,85 @@ export function createGlContext(options = {}){
             }
             if (name === GL.EXTENSIONS)
             {
+                if (core)
+                {
+                    // A core profile reads them one by one (glGetStringi).
+                    setError(GL.INVALID_ENUM);
+                    return null;
+                }
                 return extensions.join(' ');
             }
             if (name === GL.PROGRAM_ERROR_STRING_ARB)
             {
                 return kernel.side.programErrorString();
             }
-            const value = /** @type {any} */ (STRINGS)[name];
+            const value = name === GL.VERSION ? versionString(version)
+                : name === GL.SHADING_LANGUAGE_VERSION ? shadingLanguageVersion(version)
+                    : /** @type {any} */ (STRINGS)[name];
             if (value === undefined)
             {
                 setError(GL.INVALID_ENUM);
                 return null;
             }
             return value;
+        },
+
+        /**
+         * One extension's name by its index (OpenGL 3.0): a context of an
+         * earlier version has no such call to make.
+         *
+         * @param {number} name @param {number} index
+         * @returns {string | null}
+         */
+        glGetStringi(name, index){
+            if (!enter('glGetStringi', [name, index]))
+            {
+                return null;
+            }
+            if (name !== GL.EXTENSIONS && name !== GL.SPIR_V_EXTENSIONS)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            // No SPIR-V extension is taken, so no index names one.
+            const listed = name === GL.EXTENSIONS ? extensions.length : 0;
+            if (index < 0 || index >= listed)
+            {
+                setError(GL.INVALID_VALUE);
+                return null;
+            }
+            return extensions[index];
+        },
+
+        /**
+         * Another drawable's colour as RGBA, its bottom row first, read on the
+         * device: a pbuffer bound as a texture (WGL_ARB_render_texture). Null
+         * on the processor or for a context with no drawable.
+         *
+         * @param {{ width: number, height: number, key?: string }} drawable
+         * @returns {Promise<Uint8Array | null> | null}
+         */
+        readDrawable(drawable){
+            return gpu?.readPixels && attached
+                ? gpu.readPixels(context, { x: 0, y: 0, width: drawable.width,
+                    height: drawable.height }, null, drawable)
+                : null;
+        },
+
+        /**
+         * What was recorded for the device is drawn now: the context is
+         * current no longer, or is going (`gpu.js` flushContext).
+         */
+        flushDevice(){
+            if (attached)
+            {
+                gpu?.flushContext?.(context);
+            }
+        },
+
+        /** The version, profile and flags the context was made for. */
+        get version(){
+            return version;
         },
 
         /** @param {number} target @param {number} mode */
@@ -733,31 +985,13 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_FRAMEBUFFER_OPERATION);
                 return;
             }
-            const box = scissorBox();
-            if (gpu && attached)
-            {
-                gpu.clear(context, {
-                    target: kernel.side.drawTarget(),
-                    mask,
-                    colour: record(GL.COLOR_CLEAR_VALUE).values,
-                    depth: record(GL.DEPTH_CLEAR_VALUE).values[0],
-                    stencil: record(GL.STENCIL_CLEAR_VALUE).values[0],
-                    colourMask: record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0),
-                    depthMask: record(GL.DEPTH_WRITEMASK).values[0] !== 0,
-                    stencilMask: record(GL.STENCIL_WRITEMASK).values[0],
-                    scissor: box,
-                });
-                return;
-            }
-            if (mask & GL.COLOR_BUFFER_BIT)
-            {
-                fillBox(framebuffer, record(GL.COLOR_CLEAR_VALUE).values.map(toByte), box,
-                    record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0));
-            }
-            if ((mask & GL.DEPTH_BUFFER_BIT) && record(GL.DEPTH_WRITEMASK).values[0] !== 0)
-            {
-                fillDepth(framebuffer, record(GL.DEPTH_CLEAR_VALUE).values[0], box);
-            }
+            clearWith({
+                mask,
+                colour: record(GL.COLOR_CLEAR_VALUE).values,
+                depth: record(GL.DEPTH_CLEAR_VALUE).values[0],
+                stencil: record(GL.STENCIL_CLEAR_VALUE).values[0],
+                masks: kernel.side.perBuffer?.()?.masks,
+            });
         },
 
         /**
@@ -794,6 +1028,7 @@ export function createGlContext(options = {}){
             setState(GL.BLEND_DST_RGB, [destination]);
             setState(GL.BLEND_SRC_ALPHA, [source]);
             setState(GL.BLEND_DST_ALPHA, [destination]);
+            kernel.side.allBuffers?.(GL.BLEND_SRC_RGB, [source, destination, source, destination]);
         },
 
         /** @param {number} func */
@@ -814,6 +1049,7 @@ export function createGlContext(options = {}){
             if (enter('glDepthRange', [near, far]))
             {
                 setState(GL.DEPTH_RANGE, [clamp01(near), clamp01(far)]);
+                kernel.side.allViewports?.(GL.DEPTH_RANGE);
             }
         },
 
@@ -828,6 +1064,7 @@ export function createGlContext(options = {}){
             {
                 setState(GL.COLOR_WRITEMASK,
                     [red ? 1 : 0, green ? 1 : 0, blue ? 1 : 0, alpha ? 1 : 0]);
+                kernel.side.allBuffers?.(GL.COLOR_WRITEMASK, record(GL.COLOR_WRITEMASK).values);
             }
         },
 
@@ -844,6 +1081,12 @@ export function createGlContext(options = {}){
         /** @param {number} mode */
         glShadeModel(mode){
             setEnum('glShadeModel', GL.SHADE_MODEL, mode, new Set([GL.FLAT, GL.SMOOTH]));
+        },
+
+        /** @param {number} mode  glProvokingVertex (3.2, GL_ARB_provoking_vertex) */
+        glProvokingVertex(mode){
+            setEnum('glProvokingVertex', GL.PROVOKING_VERTEX, mode,
+                new Set([GL.FIRST_VERTEX_CONVENTION, GL.LAST_VERTEX_CONVENTION]));
         },
 
         /** @param {number} opcode */
@@ -952,6 +1195,41 @@ export function createGlContext(options = {}){
             }
         },
 
+        /**
+         * glPolygonOffsetClamp (4.6): the offset, no greater in magnitude
+         * than `clamp` when that is not zero.
+         *
+         * @param {number} factor @param {number} units @param {number} clamp
+         */
+        glPolygonOffsetClamp(factor, units, clamp){
+            if (enter('glPolygonOffsetClamp', [factor, units, clamp]))
+            {
+                setState(GL.POLYGON_OFFSET_FACTOR, [factor]);
+                setState(GL.POLYGON_OFFSET_UNITS, [units]);
+                setState(GL.POLYGON_OFFSET_CLAMP, [clamp]);
+            }
+        },
+
+        /**
+         * glClipControl (4.5): where window y starts, and clip z's range.
+         *
+         * @param {number} origin @param {number} depth
+         */
+        glClipControl(origin, depth){
+            if (!enter('glClipControl', [origin, depth]))
+            {
+                return;
+            }
+            if ((origin !== GL.LOWER_LEFT && origin !== GL.UPPER_LEFT)
+                || (depth !== GL.NEGATIVE_ONE_TO_ONE && depth !== GL.ZERO_TO_ONE))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.CLIP_ORIGIN, [origin]);
+            setState(GL.CLIP_DEPTH_MODE, [depth]);
+        },
+
         /** @param {number} width */
         glLineWidth(width){
             setPositive('glLineWidth', GL.LINE_WIDTH, width);
@@ -1006,7 +1284,10 @@ export function createGlContext(options = {}){
          * @param {number} height
          */
         glViewport(x, y, width, height){
-            setBox('glViewport', GL.VIEWPORT, x, y, width, height);
+            if (setBox('glViewport', GL.VIEWPORT, x, y, width, height))
+            {
+                kernel.side.allViewports?.(GL.VIEWPORT);
+            }
         },
 
         /**
@@ -1016,7 +1297,10 @@ export function createGlContext(options = {}){
          * @param {number} height
          */
         glScissor(x, y, width, height){
-            setBox('glScissor', GL.SCISSOR_BOX, x, y, width, height);
+            if (setBox('glScissor', GL.SCISSOR_BOX, x, y, width, height))
+            {
+                kernel.side.allViewports?.(GL.SCISSOR_BOX);
+            }
         },
 
         /** @param {number} mode */
@@ -1539,6 +1823,9 @@ export function createGlContext(options = {}){
                 textures: kernel.side.saveServerTextures(mask),
                 lighting: kernel.side.saveServerLighting(mask),
                 programs: kernel.side.saveServerPrograms(mask),
+                // State an installer keeps past the records: indexed state.
+                others: (kernel.side.attribSavers ?? []).map(
+                    (/** @type {{ save: (mask: number) => any }} */ saver)=>saver.save(mask)),
             });
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
         },
@@ -1558,7 +1845,40 @@ export function createGlContext(options = {}){
             kernel.side.restoreServerTextures(saved.mask, saved.textures);
             kernel.side.restoreServerLighting(saved.lighting);
             kernel.side.restoreServerPrograms(saved.programs);
+            (kernel.side.attribSavers ?? []).forEach(
+                (/** @type {{ restore: (kept: any) => void }} */ saver, /** @type {number} */ k)=>
+                    saver.restore(saved.others[k]));
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
+        },
+
+        /**
+         * wglCopyContext's first half: the server attribute groups of `mask`
+         * as glPushAttrib saves them, for `pasteAttribs` of another context.
+         *
+         * @param {number} mask
+         */
+        copyAttribs(mask){
+            return {
+                mask,
+                values: snapshot(queriesSavedBy(SERVER_BITS, mask)),
+                textures: kernel.side.saveServerTextures(mask),
+                lighting: kernel.side.saveServerLighting(mask),
+                programs: kernel.side.saveServerPrograms(mask),
+            };
+        },
+
+        /**
+         * And its second: what `copyAttribs` took, laid onto this context
+         * as glPopAttrib restores it.
+         *
+         * @param {{ mask: number, values: any, textures: any, lighting: any,
+         *     programs: any }} saved
+         */
+        pasteAttribs(saved){
+            restore(saved.values);
+            kernel.side.restoreServerTextures(saved.mask, saved.textures);
+            kernel.side.restoreServerLighting(saved.lighting);
+            kernel.side.restoreServerPrograms(saved.programs);
         },
 
         /** @param {number} mask */
@@ -1607,12 +1927,37 @@ export function createGlContext(options = {}){
     installLightingCalls(context, kernel);
     installArrayCalls(context, kernel);
     installPixelCalls(context, kernel);
+    installLegacyCalls(context, kernel);
     installProgramCalls(context, kernel);
+    // Before the vertex array objects: a new one's state holds the bindings too.
+    installAttribBindingCalls(context, kernel);
     installShaderCalls(context, kernel);
     installFramebufferCalls(context, kernel);
     installCoreCalls(context, kernel);
+    installUniformBufferCalls(context, kernel);
     // Last: a new vertex array object starts from the arrays as the others left them.
     installVertexArrayCalls(context, kernel);
+    installIndexedCalls(context, kernel);
+    installViewportCalls(context, kernel);
+    installLaterCalls(context, kernel);
+    installTessellationCalls(context, kernel);
+    installComputeCalls(context, kernel, gpu);
+    installInterfaceCalls(context, kernel);
+    installDebugCalls(context, kernel);
+    // A context made for debugging starts with its debug output on (4.3
+    // section 20.2).
+    if ((version.flags & GL.CONTEXT_FLAG_DEBUG_BIT) !== 0)
+    {
+        setState(GL.DEBUG_OUTPUT, [1]);
+    }
+    installSyncCalls(context, kernel);
+    installEs2Calls(context, kernel);
+    installSpirvCalls(context, kernel);
+    installSamplerCalls(context, kernel);
+    installQueryCalls(context, kernel);
+    installTransformFeedbackCalls(context, kernel);
+    // After every other: its calls drive their work.
+    installDirectStateCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 
@@ -1657,6 +2002,7 @@ export function createGlContext(options = {}){
                 + ' fragment passes it, and a program that masks with stencil draws unmasked');
         }
         entry.values = [value];
+        kernel.side.allBuffers?.(cap, entry.values);
     }
 
     /**
@@ -1739,18 +2085,20 @@ export function createGlContext(options = {}){
      * @param {number} y
      * @param {number} width
      * @param {number} height
+     * @returns {boolean} whether the box was taken
      */
     function setBox(name, query, x, y, width, height){
         if (!enter(name, [x, y, width, height]))
         {
-            return;
+            return false;
         }
         if (width < 0 || height < 0)
         {
             setError(GL.INVALID_VALUE);
-            return;
+            return false;
         }
         setState(query, [x, y, width, height]);
+        return true;
     }
 
     /**
@@ -1817,28 +2165,37 @@ export function createGlContext(options = {}){
         listNesting--;
     }
 
-    /** @returns {import('./raster.js').Box} what the scissor test leaves */
-    function scissorBox(){
+    /** @returns {readonly number[]} the unindexed scissor box */
+    function scissorRecord(){
+        return record(GL.SCISSOR_BOX).values;
+    }
+
+    /**
+     * @param {number} [test]  the scissor test, the unindexed one's unless given
+     * @param {readonly number[]} [box]  the box, likewise
+     * @returns {import('./raster.js').Box} what the scissor test leaves
+     */
+    function scissorBox(test = record(GL.SCISSOR_TEST).values[0], box = scissorRecord()){
         const target = kernel.side.drawTarget?.();
         if (target)
         {
             // A framebuffer object's rows run up from its first, as GL's
             // window coordinates do: the box is taken as it stands.
-            if (record(GL.SCISSOR_TEST).values[0] === 0)
+            if (test === 0)
             {
                 return { x0: 0, y0: 0, x1: target.width, y1: target.height };
             }
-            const [x, y, width, height] = record(GL.SCISSOR_BOX).values;
+            const [x, y, width, height] = box;
             return { x0: x, y0: y, x1: x + width, y1: y + height };
         }
-        if (record(GL.SCISSOR_TEST).values[0] === 0)
+        if (test === 0)
         {
             return wholeOf(framebuffer);
         }
         // GL measures the box from the bottom-left corner of the drawable and
         // the framebuffer's row zero is its top one, so the two y bounds swap
         // as well as move.
-        const [x, y, width, height] = record(GL.SCISSOR_BOX).values;
+        const [x, y, width, height] = box;
         return {
             x0: x,
             y0: framebuffer.height - (y + height),

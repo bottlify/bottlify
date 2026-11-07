@@ -127,6 +127,8 @@ export function createModelRenderer(){
             assembled.byReason[why] = (assembled.byReason[why] ?? 0) + 1;
         },
         copyToTexture(){},
+        /** The twin's renderer copies between images; nothing here holds them. */
+        copyImage: ()=>true,
         blit(){},
         generateMipmap(){},
         releaseBuffer(){},

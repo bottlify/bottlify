@@ -218,6 +218,8 @@ export function createMessageQueue(options = {}){
     const quits = new Map();
     let posted = 0;
     let retrieved = 0;
+    /** @type {((thread: number | null, classes: number) => void)[]} */
+    const newsListeners = [];
     // The keys held as of the last key message taken, which is what
     // TranslateMessage reads the modifiers from: the input layer may have let
     // go of Control (a paste's chord is pressed and released at once) before
@@ -260,6 +262,10 @@ export function createMessageQueue(options = {}){
      * @param {number | null} thread @param {number} classes
      */
     const arrived = (thread, classes)=>{
+        for (const listener of newsListeners)
+        {
+            listener(thread, classes);
+        }
         if (thread === null)
         {
             lookOf(null).changed |= classes;
@@ -1330,6 +1336,17 @@ export function createMessageQueue(options = {}){
          */
         sent(thread){
             arrived(thread, QS_SENDMESSAGE);
+        },
+
+        /**
+         * Tells `listener` of every arrival as it comes: the thread it is for
+         * (null for every thread) and its QS_* classes -- for a wait the queue
+         * is not polled in, which has to be woken.
+         *
+         * @param {(thread: number | null, classes: number) => void} listener
+         */
+        whenNews(listener){
+            newsListeners.push(listener);
         },
 
         /**

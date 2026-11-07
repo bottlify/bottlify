@@ -30,7 +30,18 @@
  * `GL_VERSIONS`, which the extension string does not name.
  */
 
-import { GL_FEATURE_COMMANDS, GL_SIGNATURES } from './registry.js';
+import { GL_EXTENSION_COMMANDS, GL_FEATURE_COMMANDS, GL_SIGNATURES } from './registry.js';
+
+/**
+ * An extension's commands as the registry lists them: for the extensions
+ * reported whole, whose every command answers here, each spelt as the
+ * extension spells it (an ARB name is the core function's handler,
+ * `exports.js`).
+ *
+ * @param {string} name
+ * @returns {string[]}
+ */
+const registryCommands = name=>(GL_EXTENSION_COMMANDS[name] ?? '').split(' ').filter(Boolean);
 
 /**
  * A command's arguments as the registry declares them (`registry.js`), a
@@ -124,6 +135,12 @@ export const GL_EXTENSIONS = Object.freeze({
         'glCompressedTexSubImage3DARB', 'glGetCompressedTexImageARB',
     ],
     GL_EXT_texture_compression_s3tc: [],
+    // Formats kept as their own bytes (`formats.js`), each whole: its images,
+    // its client layouts both ways, its sampling.
+    GL_EXT_texture_shared_exponent: [],
+    GL_ARB_texture_compression_rgtc: [],
+    GL_EXT_texture_compression_rgtc: [],
+    GL_ARB_texture_compression_bptc: [],
     GL_ARB_vertex_buffer_object: [
         'glBindBufferARB', 'glDeleteBuffersARB', 'glGenBuffersARB', 'glIsBufferARB',
         'glBufferDataARB', 'glBufferSubDataARB', 'glGetBufferSubDataARB', 'glMapBufferARB',
@@ -145,6 +162,12 @@ export const GL_EXTENSIONS = Object.freeze({
         'glFogCoordPointerEXT',
     ],
     GL_EXT_draw_range_elements: ['glDrawRangeElementsEXT'],
+    // The copies of 1.1 and 1.2 under their first names, which programs of
+    // the era ask for by them (Wine's opengl32 test_getprocaddress: RuneScape).
+    GL_EXT_copy_texture: [
+        'glCopyTexImage1DEXT', 'glCopyTexImage2DEXT', 'glCopyTexSubImage1DEXT',
+        'glCopyTexSubImage2DEXT', 'glCopyTexSubImage3DEXT',
+    ],
     GL_EXT_blend_color: ['glBlendColorEXT'],
     GL_EXT_blend_minmax: ['glBlendEquationEXT'],
     GL_EXT_blend_subtract: [],
@@ -172,6 +195,20 @@ export const GL_EXTENSIONS = Object.freeze({
     GL_EXT_bgra: [],
     GL_EXT_packed_pixels: [],
     GL_EXT_texture_edge_clamp: [],
+    GL_EXT_texture_filter_anisotropic: [],
+    GL_ARB_texture_swizzle: [],
+    GL_ARB_texture_rectangle: [],
+    GL_EXT_texture_rectangle: [],
+    GL_NV_texture_rectangle: [],
+    GL_ARB_texture_buffer_object: ['glTexBufferARB'],
+    GL_EXT_texture_buffer_object: ['glTexBufferEXT'],
+    GL_ARB_texture_buffer_range: ['glTexBufferRange'],
+    GL_ARB_texture_multisample: ['glTexImage2DMultisample', 'glTexImage3DMultisample',
+        'glGetMultisamplefv', 'glSampleMaski'],
+    GL_ARB_texture_storage_multisample: ['glTexStorage2DMultisample',
+        'glTexStorage3DMultisample'],
+    GL_EXT_texture_swizzle: [],
+    GL_ARB_texture_filter_anisotropic: [],
     GL_SGIS_texture_edge_clamp: [],
     GL_ARB_texture_mirrored_repeat: [],
     GL_EXT_rescale_normal: [],
@@ -215,10 +252,53 @@ export const GL_EXTENSIONS = Object.freeze({
         'glDrawElementsInstancedBaseVertexBaseInstance',
     ],
     GL_ARB_copy_buffer: ['glCopyBufferSubData'],
+    GL_ARB_buffer_storage: ['glBufferStorage'],
+    GL_ARB_invalidate_subdata: ['glInvalidateTexSubImage', 'glInvalidateTexImage',
+        'glInvalidateBufferSubData', 'glInvalidateBufferData', 'glInvalidateFramebuffer',
+        'glInvalidateSubFramebuffer'],
+    GL_ARB_texture_barrier: ['glTextureBarrier'],
+    GL_ARB_clip_control: ['glClipControl'],
+    GL_ARB_program_interface_query: ['glGetProgramInterfaceiv', 'glGetProgramResourceIndex',
+        'glGetProgramResourceName', 'glGetProgramResourceiv', 'glGetProgramResourceLocation',
+        'glGetProgramResourceLocationIndex'],
+    GL_ARB_multi_bind: ['glBindBuffersBase', 'glBindBuffersRange', 'glBindTextures',
+        'glBindSamplers', 'glBindImageTextures', 'glBindVertexBuffers'],
+    GL_ARB_query_buffer_object: [],
+    GL_ARB_compatibility: [],
+    GL_KHR_robustness: ['glGetGraphicsResetStatus', 'glReadnPixels', 'glGetnUniformfv',
+        'glGetnUniformiv', 'glGetnUniformuiv'],
+    GL_KHR_debug: ['glDebugMessageControl', 'glDebugMessageInsert', 'glDebugMessageCallback',
+        'glGetDebugMessageLog', 'glPushDebugGroup', 'glPopDebugGroup', 'glObjectLabel',
+        'glGetObjectLabel', 'glObjectPtrLabel', 'glGetObjectPtrLabel'],
+    GL_ARB_debug_output: ['glDebugMessageControlARB', 'glDebugMessageInsertARB',
+        'glDebugMessageCallbackARB', 'glGetDebugMessageLogARB'],
+    GL_ARB_get_program_binary: ['glGetProgramBinary', 'glProgramBinary',
+        'glProgramParameteri'],
+    GL_ARB_internalformat_query: ['glGetInternalformativ'],
+    GL_ARB_clear_buffer_object: ['glClearBufferData', 'glClearBufferSubData'],
+    GL_ARB_vertex_attrib_binding: ['glBindVertexBuffer', 'glVertexAttribFormat',
+        'glVertexAttribIFormat', 'glVertexAttribLFormat', 'glVertexAttribBinding',
+        'glVertexBindingDivisor'],
+    GL_ARB_viewport_array: ['glViewportArrayv', 'glViewportIndexedf', 'glViewportIndexedfv',
+        'glScissorArrayv', 'glScissorIndexed', 'glScissorIndexedv', 'glDepthRangeArrayv',
+        'glDepthRangeIndexed', 'glGetFloati_v', 'glGetDoublei_v'],
+    GL_ARB_ES2_compatibility: ['glReleaseShaderCompiler', 'glShaderBinary',
+        'glGetShaderPrecisionFormat', 'glDepthRangef', 'glClearDepthf'],
     GL_ARB_vertex_array_object: [
         'glBindVertexArray', 'glDeleteVertexArrays', 'glGenVertexArrays', 'glIsVertexArray',
     ],
     GL_ARB_shading_language_100: [],
+    // What a shader's #extension enables before the version that has it
+    // (glsl-versions.js), reported where all of it is here.
+    GL_ARB_uniform_buffer_object: [
+        'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
+        'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
+        'glUniformBlockBinding', 'glBindBufferRange', 'glBindBufferBase', 'glGetIntegeri_v',
+    ],
+    GL_ARB_explicit_attrib_location: [],
+    GL_ARB_draw_instanced: ['glDrawArraysInstancedARB', 'glDrawElementsInstancedARB'],
+    GL_ARB_shading_language_packing: [],
+    GL_ARB_provoking_vertex: ['glProvokingVertex'],
     GL_ARB_fragment_program: [
         'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
         'glProgramStringARB',
@@ -230,6 +310,80 @@ export const GL_EXTENSIONS = Object.freeze({
         'glGetProgramLocalParameterdvARB', 'glGetProgramLocalParameterfvARB',
         'glGetProgramivARB', 'glGetProgramStringARB',
     ],
+    // Whole levels and images by name (`context-textures.js`): immutable
+    // storage, raw copies between images, fills, and boxes read back.
+    GL_ARB_texture_storage: ['glTexStorage1D', 'glTexStorage2D', 'glTexStorage3D'],
+    GL_ARB_copy_image: ['glCopyImageSubData'],
+    GL_ARB_clear_texture: ['glClearTexImage', 'glClearTexSubImage'],
+    GL_ARB_get_texture_sub_image: ['glGetTextureSubImage', 'glGetCompressedTextureSubImage'],
+    // What 1.3 to 2.1 made core under the extensions' own names, for the
+    // programs that look for them by name.
+    GL_ARB_window_pos: registryCommands('GL_ARB_window_pos'),
+    GL_ARB_transpose_matrix: registryCommands('GL_ARB_transpose_matrix'),
+    GL_ARB_point_parameters: registryCommands('GL_ARB_point_parameters'),
+    GL_ARB_multisample: registryCommands('GL_ARB_multisample'),
+    GL_ARB_depth_texture: [],
+    GL_ARB_shadow: [],
+    GL_ARB_occlusion_query: registryCommands('GL_ARB_occlusion_query'),
+    GL_ARB_pixel_buffer_object: [],
+    GL_ARB_draw_buffers: registryCommands('GL_ARB_draw_buffers'),
+    // 3.0 to 3.3's, each whole.
+    GL_ARB_texture_float: [],
+    GL_ARB_half_float_pixel: [],
+    GL_ARB_half_float_vertex: [],
+    GL_ARB_color_buffer_float: registryCommands('GL_ARB_color_buffer_float'),
+    GL_ARB_depth_buffer_float: [],
+    GL_ARB_texture_rg: [],
+    GL_ARB_depth_clamp: [],
+    GL_ARB_seamless_cube_map: [],
+    GL_ARB_sync: registryCommands('GL_ARB_sync'),
+    GL_ARB_sampler_objects: registryCommands('GL_ARB_sampler_objects'),
+    GL_ARB_timer_query: registryCommands('GL_ARB_timer_query'),
+    GL_ARB_occlusion_query2: [],
+    GL_ARB_vertex_type_2_10_10_10_rev: registryCommands('GL_ARB_vertex_type_2_10_10_10_rev'),
+    GL_ARB_texture_rgb10_a2ui: [],
+    GL_ARB_shader_bit_encoding: [],
+    GL_ARB_blend_func_extended: registryCommands('GL_ARB_blend_func_extended'),
+    // 4.0 to 4.6's. What a shader's #extension enables of them is
+    // glsl-versions.js's, and each is reported with it.
+    GL_ARB_draw_indirect: registryCommands('GL_ARB_draw_indirect'),
+    GL_ARB_draw_buffers_blend: registryCommands('GL_ARB_draw_buffers_blend'),
+    GL_ARB_sample_shading: registryCommands('GL_ARB_sample_shading'),
+    GL_ARB_gpu_shader5: [],
+    GL_ARB_gpu_shader_fp64: registryCommands('GL_ARB_gpu_shader_fp64'),
+    GL_ARB_shader_subroutine: registryCommands('GL_ARB_shader_subroutine'),
+    GL_ARB_tessellation_shader: registryCommands('GL_ARB_tessellation_shader'),
+    GL_ARB_texture_cube_map_array: [],
+    GL_ARB_texture_gather: [],
+    GL_ARB_texture_query_lod: [],
+    GL_ARB_transform_feedback2: registryCommands('GL_ARB_transform_feedback2'),
+    GL_ARB_transform_feedback3: registryCommands('GL_ARB_transform_feedback3'),
+    GL_ARB_separate_shader_objects: registryCommands('GL_ARB_separate_shader_objects'),
+    GL_ARB_vertex_attrib_64bit: registryCommands('GL_ARB_vertex_attrib_64bit'),
+    GL_ARB_shading_language_420pack: [],
+    GL_ARB_transform_feedback_instanced: registryCommands('GL_ARB_transform_feedback_instanced'),
+    GL_ARB_conservative_depth: [],
+    GL_ARB_shader_atomic_counters: registryCommands('GL_ARB_shader_atomic_counters'),
+    GL_ARB_shader_image_load_store: registryCommands('GL_ARB_shader_image_load_store'),
+    GL_ARB_map_buffer_alignment: [],
+    GL_ARB_arrays_of_arrays: [],
+    GL_ARB_compute_shader: registryCommands('GL_ARB_compute_shader'),
+    GL_ARB_explicit_uniform_location: [],
+    GL_ARB_fragment_layer_viewport: [],
+    GL_ARB_framebuffer_no_attachments: registryCommands('GL_ARB_framebuffer_no_attachments'),
+    GL_ARB_multi_draw_indirect: registryCommands('GL_ARB_multi_draw_indirect'),
+    GL_ARB_shader_storage_buffer_object: registryCommands('GL_ARB_shader_storage_buffer_object'),
+    GL_ARB_texture_query_levels: [],
+    GL_ARB_enhanced_layouts: [],
+    GL_ARB_direct_state_access: registryCommands('GL_ARB_direct_state_access'),
+    GL_ARB_cull_distance: [],
+    GL_ARB_derivative_control: [],
+    GL_ARB_shader_texture_image_samples: [],
+    GL_ARB_indirect_parameters: registryCommands('GL_ARB_indirect_parameters'),
+    GL_ARB_shader_draw_parameters: [],
+    GL_ARB_shader_group_vote: [],
+    GL_ARB_polygon_offset_clamp: registryCommands('GL_ARB_polygon_offset_clamp'),
+    GL_ARB_robustness: registryCommands('GL_ARB_robustness'),
 });
 
 /** WGL extensions: name -> the functions it defines. */
@@ -240,6 +394,13 @@ export const WGL_EXTENSIONS = Object.freeze({
         'wglGetPixelFormatAttribivARB', 'wglGetPixelFormatAttribfvARB', 'wglChoosePixelFormatARB',
     ],
     WGL_EXT_swap_control: ['wglSwapIntervalEXT', 'wglGetSwapIntervalEXT'],
+    WGL_ARB_create_context: ['wglCreateContextAttribsARB'],
+    WGL_ARB_make_current_read: ['wglMakeContextCurrentARB', 'wglGetCurrentReadDCARB'],
+    WGL_ARB_pbuffer: ['wglCreatePbufferARB', 'wglGetPbufferDCARB', 'wglReleasePbufferDCARB',
+        'wglDestroyPbufferARB', 'wglQueryPbufferARB'],
+    WGL_ARB_render_texture: ['wglBindTexImageARB', 'wglReleaseTexImageARB',
+        'wglSetPbufferAttribARB'],
+    WGL_ARB_create_context_profile: [],
 });
 
 /** How many stack words a value of each GL type letter takes. */
@@ -353,6 +514,20 @@ export const PENDING_VERSION_FUNCTIONS = Object.freeze((()=>{
         .filter(name=>!earlier.has(name));
 })());
 
+/**
+ * Functions of extensions this implementation does not report, implemented
+ * because a later version's or another extension's do the same work: the
+ * EXT_direct_state_access forms of GL_ARB_framebuffer_no_attachments, and
+ * GL_ARB_gl_spirv's glSpecializeShaderARB, 4.6's glSpecializeShader (A231).
+ * Sized from the registry and obtainable as the pending versions' are.
+ *
+ * @type {readonly string[]}
+ */
+export const UNANNOUNCED_FUNCTIONS = Object.freeze([
+    'glGetFramebufferParameterivEXT', 'glNamedFramebufferParameteriEXT',
+    'glGetNamedFramebufferParameterivEXT', 'glPolygonOffsetClampEXT', 'glSpecializeShaderARB',
+]);
+
 /** The functions each version past 1.1 adds: obtainable, never in the extension string. */
 export const GL_VERSIONS = Object.freeze(Object.fromEntries(Object.entries(VERSION_FUNCTIONS)
     .map(([version, functions])=>[version, functions.map(([name])=>name)])));
@@ -381,6 +556,8 @@ const LATER_EXTENSION_WORDS = [
     ...SHADER_OBJECT_WORDS,
     ['glBindAttribLocationARB', 3], ['glGetActiveAttribARB', 7], ['glGetAttribLocationARB', 2],
     ['glBlendColorEXT', 4], ['glBlendEquationEXT', 1], ['glBlendFuncSeparateEXT', 4],
+    ['glCopyTexImage1DEXT', 7], ['glCopyTexImage2DEXT', 8], ['glCopyTexSubImage1DEXT', 6],
+    ['glCopyTexSubImage2DEXT', 8], ['glCopyTexSubImage3DEXT', 9],
 ];
 
 /**
@@ -390,8 +567,10 @@ const LATER_EXTENSION_WORDS = [
  * @type {Readonly<Record<number, readonly string[]>>}
  */
 const BASE_EXTENSION_WORDS = Object.freeze({
-    0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT'],
+    0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT',
+        'wglGetCurrentReadDCARB'],
     1: [
+        'wglGetPbufferDCARB', 'wglDestroyPbufferARB',
         'glActiveStencilFaceEXT',
         'glActiveTextureARB', 'glClientActiveTextureARB', 'glIsBufferARB', 'glUnmapBufferARB',
         'glSecondaryColor3bvEXT', 'glSecondaryColor3dvEXT', 'glSecondaryColor3fvEXT',
@@ -401,6 +580,8 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glIsProgramARB', 'glEnableVertexAttribArrayARB', 'glDisableVertexAttribArrayARB',
     ],
     2: [
+        'wglReleasePbufferDCARB', 'wglBindTexImageARB', 'wglReleaseTexImageARB',
+        'wglSetPbufferAttribARB',
         'glMultiTexCoord1fARB', 'glMultiTexCoord1iARB', 'glMultiTexCoord1sARB',
         'glMultiTexCoord1dvARB', 'glMultiTexCoord1fvARB', 'glMultiTexCoord1ivARB',
         'glMultiTexCoord1svARB', 'glMultiTexCoord2dvARB', 'glMultiTexCoord2fvARB',
@@ -421,6 +602,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
     ],
     3: [
+        'wglCreateContextAttribsARB', 'wglMakeContextCurrentARB', 'wglQueryPbufferARB',
         'glMultiTexCoord1dARB', 'glMultiTexCoord2fARB', 'glMultiTexCoord2iARB',
         'glMultiTexCoord2sARB', 'glGetCompressedTexImageARB', 'glGetBufferParameterivARB',
         'glGetBufferPointervARB', 'glSecondaryColor3bEXT', 'glSecondaryColor3fEXT',
@@ -442,6 +624,7 @@ const BASE_EXTENSION_WORDS = Object.freeze({
         'glProgramStringARB', 'glVertexAttrib3sARB', 'glVertexAttrib3fARB',
     ],
     5: [
+        'wglCreatePbufferARB',
         'glMultiTexCoord2dARB', 'glMultiTexCoord4fARB', 'glMultiTexCoord4iARB',
         'glMultiTexCoord4sARB',
         'glVertexAttrib2dARB', 'glVertexAttrib4sARB', 'glVertexAttrib4fARB',
@@ -488,7 +671,7 @@ export const EXTENSION_WORDS = (()=>{
     // the registry sizes them.
     const sized = new Set(Object.values(words).flat());
     for (const name of new Set([...Object.values(GL_EXTENSIONS).flat(),
-        ...PENDING_VERSION_FUNCTIONS]))
+        ...PENDING_VERSION_FUNCTIONS, ...UNANNOUNCED_FUNCTIONS]))
     {
         const count = sized.has(name) ? undefined : registryWords(name);
         if (count !== undefined)
@@ -499,7 +682,6 @@ export const EXTENSION_WORDS = (()=>{
     return Object.freeze(words);
 })();
 
-/** Every extension function name, for telling one from a core entry point. */
 /**
  * GL extensions that are implemented, sized and obtainable but left out of
  * the string a program reads: a program that finds them takes a path this
@@ -512,9 +694,11 @@ export const EXTENSION_WORDS = (()=>{
 /** @type {ReadonlySet<string>} */
 export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([]));
 
+/** Every extension function name, for telling one from a core entry point. */
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),
     ...PENDING_VERSION_FUNCTIONS,
+    ...UNANNOUNCED_FUNCTIONS,
     ...Object.values(WGL_EXTENSIONS).flat(),
     ...Object.values(GL_VERSIONS).flat(),
 ]));

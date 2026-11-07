@@ -69,6 +69,13 @@ const MIPMAP_FILTERS = new Set([
  *           the S3TC blocks as the guest gave them, kept alongside the
  *           decoded texels so a device that samples the blocks directly
  *           never has to decode what it can upload as-is
+ * @property {number} [depth]  a 3D level's depth or an array level's layers; one if absent
+ * @property {import('./formats.js').SizedFormat | null} [sized]  the format a level is
+ *           kept as its own bytes in (`formats.js`), or absent for one kept as RGBA
+ * @property {Uint8Array | null} [data]  that format's bytes, slices one after another,
+ *           or null where this context keeps none
+ * @property {TextureLevel} [source]  the level a texture view's level reads its bytes
+ *           from (`texture-views.js`)
  */
 
 /**
@@ -93,9 +100,19 @@ const MIPMAP_FILTERS = new Set([
  *           current one without re-deriving it
  * @property {number[]} borderColour
  * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
+ * @property {{ buffer: number, internal: number, offset: number, size: number | null,
+ *     version: number }} [store]  a buffer texture's (3.1): the buffer object its texels
+ *           are, in which format, over which range (null: to its end), and the
+ *           buffer's version the level was last made from
+ * @property {{ samples: number, fixed: boolean }} [multisample]  a multisample texture's
+ *           (3.2): the samples asked and whether their locations are fixed
  * @property {Map<number, DirtyRect | null>} dirty   the level keys written
  *           since a copy kept elsewhere last read them, each with the
  *           rectangle written or `null` for the whole level
+ * @property {{ root: TextureObject, minLevel: number, numLevels: number, minLayer: number,
+ *     numLayers: number, internal: number }} [view]  a texture view's (4.3): the
+ *           texture whose storage it reads, the range of its levels and layers, and
+ *           its own internal format (`texture-views.js`)
  */
 
 /**
@@ -105,7 +122,12 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} usage
  * @property {number} access
  * @property {Uint8Array} data
+ * @property {boolean} [captured]  transform feedback has written it on the device
+ * @property {boolean} immutable  its store was made by glBufferStorage (4.4)
+ * @property {number} storageFlags  GL_BUFFER_STORAGE_FLAGS: what the store may be
+ *           mapped for and whether glBufferSubData may write it
  * @property {number} mapped  the guest address it is mapped at, or zero
+ * @property {number} mapBlock  the guest memory the map was given, to give back
  * @property {number} accessFlags  the MAP_*_BIT a map asked for, zero when not mapped
  * @property {number} mapOffset  where the mapped range starts in the store
  * @property {number} mapLength  how many bytes are mapped
@@ -195,7 +217,82 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [GL.TEXTURE_MAX_LOD, 1000],
     [GL.TEXTURE_PRIORITY, 1],
     [GL.GENERATE_MIPMAP, 0],
+    // OpenGL 1.4's depth textures (ARB_shadow, ARB_depth_texture): no
+    // comparison, LEQUAL when there is one, a depth read as luminance.
+    [0x884c, GL.NONE],
+    [0x884d, GL.LEQUAL],
+    [0x884b, GL.LUMINANCE],
+    // OpenGL 4.6's anisotropy (EXT/ARB_texture_filter_anisotropic): none.
+    [GL.TEXTURE_MAX_ANISOTROPY, 1],
+    // OpenGL 3.3's swizzle (GL_ARB_texture_swizzle): each component its own.
+    [GL.TEXTURE_SWIZZLE_R, GL.RED],
+    [GL.TEXTURE_SWIZZLE_G, GL.GREEN],
+    [GL.TEXTURE_SWIZZLE_B, GL.BLUE],
+    [GL.TEXTURE_SWIZZLE_A, GL.ALPHA],
 ]);
+
+/**
+ * What a rectangle texture (3.1) starts with: one level, so a filter without
+ * mipmaps, and coordinates clamped to its edges (3.1 section 3.8.8).
+ *
+ * @type {ReadonlyArray<readonly [number, number]>}
+ */
+const RECTANGLE_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name, value])=>
+    /** @type {const} */ ([name, name === GL.TEXTURE_MIN_FILTER ? GL.LINEAR
+        : name === GL.TEXTURE_WRAP_S || name === GL.TEXTURE_WRAP_T || name === GL.TEXTURE_WRAP_R
+            ? GL.CLAMP_TO_EDGE : value])));
+
+/**
+ * What a buffer texture (3.1) or a multisample one (3.2) holds of sampling
+ * state: none a program can set; its one level is read texel by texel,
+ * which these filters keep complete.
+ *
+ * @type {ReadonlyArray<readonly [number, number]>}
+ */
+const BUFFER_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name, value])=>
+    /** @type {const} */ ([name, name === GL.TEXTURE_MIN_FILTER || name === GL.TEXTURE_MAG_FILTER
+        ? GL.NEAREST : value])));
+
+/**
+ * How wide a buffer texture's level is (3.1): its texels lie in rows of this
+ * many, WebGPU's least 2D extent, the last row short of it.
+ */
+export const BUFFER_ROW = 8192;
+
+/** The swizzle parameters, red to alpha. */
+const SWIZZLES = [GL.TEXTURE_SWIZZLE_R, GL.TEXTURE_SWIZZLE_G, GL.TEXTURE_SWIZZLE_B,
+    GL.TEXTURE_SWIZZLE_A];
+
+/** What a swizzle source is called in a code: a component or a constant. */
+/** @type {ReadonlyMap<number, string>} */
+const SWIZZLE_LETTERS = new Map([[GL.RED, 'r'], [GL.GREEN, 'g'], [GL.BLUE, 'b'],
+    [GL.ALPHA, 'a'], [GL.ZERO, '0'], [GL.ONE, '1']]);
+
+/**
+ * A texture's swizzle (3.3) as four letters, red's source to alpha's: `r`,
+ * `g`, `b`, `a`, `0` or `1`; empty for the identity, which every reader
+ * skips.
+ *
+ * @param {Map<number, number>} parameters
+ * @returns {string}
+ */
+export function swizzleCode(parameters){
+    const code = SWIZZLES.map(name=>SWIZZLE_LETTERS.get(parameters.get(name) ?? GL.RED) ?? 'r')
+        .join('');
+    return code === 'rgba' ? '' : code;
+}
+
+/**
+ * A texel swizzled by a code: each component its source's, a constant zero
+ * or `one` (1 for a normalised read, 255 for one of bytes).
+ *
+ * @param {readonly number[]} texel @param {string} code @param {number} one
+ * @returns {number[]}
+ */
+export function swizzleTexel(texel, code, one){
+    return [...code].map(letter=>(letter === '0' ? 0 : letter === '1' ? one
+        : texel['rgba'.indexOf(letter)]));
+}
 
 /**
  * @param {number} name
@@ -206,7 +303,10 @@ export function createTextureObject(name, target){
     return {
         name,
         target,
-        parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
+        parameters: new Map(target === GL.TEXTURE_RECTANGLE ? RECTANGLE_PARAMETERS
+            : target === GL.TEXTURE_BUFFER || target === GL.TEXTURE_2D_MULTISAMPLE
+                || target === GL.TEXTURE_2D_MULTISAMPLE_ARRAY ? BUFFER_PARAMETERS
+                : DEFAULT_TEXTURE_PARAMETERS),
         parametersVersion: 0,
         borderColour: [0, 0, 0, 0],
         levels: new Map(),
@@ -259,7 +359,8 @@ export function markDirty(texture, key, rect){
  */
 export function createBufferObject(name){
     return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
-        mapped: 0, accessFlags: 0, mapOffset: 0, mapLength: 0, flushed: [], written: null,
+        immutable: false, storageFlags: 0, mapped: 0, mapBlock: 0, accessFlags: 0, mapOffset: 0,
+        mapLength: 0, flushed: [], written: null,
         version: 1 };
 }
 
@@ -402,6 +503,7 @@ function createNamespace(){
  *             programs: ReturnType<typeof createNamespace>,
  *             glsl: ReturnType<typeof createNamespace>,
  *             renderbuffers: ReturnType<typeof createNamespace>,
+ *             framebuffers: Map<number, FramebufferObject | null>,
  *             contexts: number, used: boolean }}
  */
 export function createShareGroup(){
@@ -413,6 +515,13 @@ export function createShareGroup(){
         // OpenGL 2.0's shaders and programs, which share one namespace.
         glsl: createNamespace(),
         renderbuffers: createNamespace(),
+        /**
+         * Framebuffer objects, as GL_EXT_framebuffer_object shares them; a
+         * generated name holds null until it is first bound.
+         *
+         * @type {Map<number, FramebufferObject | null>}
+         */
+        framebuffers: new Map(),
         /** How many contexts name this group. The objects outlive all but the last. */
         contexts: 0,
         /**
@@ -435,8 +544,59 @@ export function createShareGroup(){
  */
 
 /**
+ * The array targets, whose layers are one level each (a 1D array's its
+ * rows): GL_TEXTURE_1D_ARRAY, 2D_ARRAY, CUBE_MAP_ARRAY, 2D_MULTISAMPLE_ARRAY.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const LAYERED_TARGETS = new Set([0x8c18, 0x8c1a, 0x9009, 0x9102]);
+
+/**
+ * The level an attached texture image is in: a cube map's face its own, an
+ * array's layer (`face`) one of its level's.
+ *
+ * @param {{ texture: TextureObject, level: number, face: number }} attachment
+ */
+export function attachedLevelKey(attachment){
+    return LAYERED_TARGETS.has(attachment.texture.target) ? levelKey(attachment.level)
+        : levelKey(attachment.level, attachment.face);
+}
+
+/**
+ * A texture attachment is layered (3.2) when a cube map or an array was
+ * attached whole: a geometry shader's gl_Layer chooses which face or layer a
+ * primitive is drawn into, the first by default.
+ *
  * @typedef {{ kind: 'texture', texture: TextureObject, level: number,
- *     face: number } | { kind: 'renderbuffer', renderbuffer: RenderbufferObject }} Attachment
+ *     face: number, layered?: boolean } | { kind: 'renderbuffer',
+ *     renderbuffer: RenderbufferObject }} Attachment
+ */
+
+/**
+ * How many layers an attachment is drawn into: a layered one's cube faces or
+ * array layers, one for any other.
+ *
+ * @param {Attachment} attachment
+ * @returns {number}
+ */
+export function attachmentLayers(attachment){
+    if (attachment.kind !== 'texture' || !attachment.layered)
+    {
+        return 1;
+    }
+    if (attachment.texture.target === GL.TEXTURE_CUBE_MAP)
+    {
+        return 6;
+    }
+    return attachment.texture.levels.get(attachedLevelKey(attachment))?.depth ?? 1;
+}
+
+/**
+ * A sampler object (3.3): its parameters as a texture keeps its own, so
+ * whoever reads one reads the other the same way (`gpu.js` samplerFor).
+ *
+ * @typedef {{ name: number, parameters: Map<number, number>, parametersVersion: number,
+ *     borderColour: number[] }} SamplerObject
  */
 
 /**
@@ -446,6 +606,9 @@ export function createShareGroup(){
  * @property {number[]} drawBuffers  per draw buffer: an attachment point or GL_NONE
  * @property {number} readBuffer
  * @property {number} version  raised by every change of what it draws into
+ * @property {{ width: number, height: number, layers: number, samples: number,
+ *     fixed: number }} defaults  what it is without attachments
+ *     (GL_ARB_framebuffer_no_attachments)
  */
 
 /** The internal formats a renderbuffer takes, and what each holds. */
@@ -478,7 +641,7 @@ export function attachmentImage(attachment){
             ? { holds, width: rb.width, height: rb.height, internalFormat: rb.internalFormat }
             : null;
     }
-    const level = attachment.texture.levels.get(levelKey(attachment.level, attachment.face));
+    const level = attachment.texture.levels.get(attachedLevelKey(attachment));
     if (!level || level.width === 0 || level.height === 0)
     {
         return null;
@@ -488,7 +651,8 @@ export function attachmentImage(attachment){
         return null;
     }
     const base = level.baseFormat;
-    const holds = base === GL.DEPTH_COMPONENT ? 'depth' : 'colour';
+    const holds = base === GL.DEPTH_COMPONENT ? 'depth' : base === GL.DEPTH_STENCIL
+        ? 'depthStencil' : base === GL.STENCIL_INDEX ? 'stencil' : 'colour';
     return { holds, width: level.width, height: level.height,
         internalFormat: level.internalFormat };
 }

@@ -225,7 +225,7 @@ test('glUniform* writes the program in use, typed, and the values read back', ()
     assert.equal(gl.glGetError(), GL.NO_ERROR);
     gl.uniform(at('image'), 1, [3], 'f', 1);
     assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
-    gl.uniform(at('image'), 1, [8], 'i', 1);
+    gl.uniform(at('image'), 1, [16], 'i', 1);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
     // A matrix of the uniform's shape, transposed when asked.
     gl.uniformMatrix(at('skew'), 1, 0, [1, 2, 3, 4, 5, 6], 2, 3);
@@ -294,12 +294,12 @@ test('a display list records glUseProgram and the uniforms, and not the object c
 
 test('the version, the shading language and the limits are what is implemented', ()=>{
     const gl = fixture();
-    assert.equal(gl.glGetString(GL.VERSION), '2.1');
-    assert.equal(gl.glGetString(GL.SHADING_LANGUAGE_VERSION), '1.20');
+    assert.equal(gl.glGetString(GL.VERSION), '4.6');
+    assert.equal(gl.glGetString(GL.SHADING_LANGUAGE_VERSION), '4.60');
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VERTEX_ATTRIBS_ARB), [16]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_DRAW_BUFFERS), [4]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_VARYING_FLOATS), [32]);
-    assert.deepEqual(gl.glGetIntegerv(GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS), [8]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS), [16]);
 });
 
 test('GL_ARB_shader_objects reads the same objects by handle (Wine\'s test_sharelists)', ()=>{
@@ -336,4 +336,59 @@ test('GL_ARB_shader_objects reads the same objects by handle (Wine\'s test_share
     assert.equal(gl.glIsProgram(prog), GL.FALSE, 'and as a program');
     gl.deleteObjectARB(77);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
+});
+
+test('program parameters are kept, and no program binary format is known (4.1)', ()=>{
+    const gl = /** @type {any} */ (createGlContext({}));
+    gl.attach({ width: 4, height: 4, doubleBuffered: true });
+    const made = gl.glCreateProgram();
+    assert.deepEqual(gl.glGetIntegerv(GL.NUM_PROGRAM_BINARY_FORMATS), [0]);
+    gl.glProgramParameteri(made, GL.PROGRAM_BINARY_RETRIEVABLE_HINT, GL.TRUE);
+    gl.glProgramParameteri(made, GL.PROGRAM_SEPARABLE, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.PROGRAM_BINARY_RETRIEVABLE_HINT), [1]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.PROGRAM_SEPARABLE), [1]);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.PROGRAM_BINARY_LENGTH), [0]);
+    gl.glProgramParameteri(made, GL.PROGRAM_SEPARABLE, 2);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
+    gl.glProgramParameteri(made, GL.LINK_STATUS, GL.TRUE);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glGetProgramBinary(made);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
+    gl.glProgramBinary(made, 0x1234);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glProgramBinary(made + 50, 0x1234);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'no such program');
+});
+
+test('a program\'s uniforms are written by name of the program, current or not (4.1)', ()=>{
+    const gl = fixture();
+    const made = program(gl);
+    const tint = gl.glGetUniformLocation(made, 'tint');
+    const skew = gl.glGetUniformLocation(made, 'skew');
+    gl.programUniform(made, tint, 1, [1, 2, 3, 4], 'f', 4, null);
+    assert.equal(gl.glGetError(), GL.NO_ERROR, 'no program is current');
+    assert.deepEqual(gl.getUniform(made, tint).values, [1, 2, 3, 4]);
+    gl.programUniform(made, skew, 1, [1, 2, 3, 4, 5, 6], 'f', 6,
+        { cols: 2, rows: 3, transpose: true });
+    assert.deepEqual(gl.getUniform(made, skew).values, [1, 3, 5, 2, 4, 6], 'given row by row');
+    gl.programUniform(made, tint, 1, [1, 2, 3, 4], 'i', 4, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'the uniform\'s own type');
+    const unlinked = gl.glCreateProgram();
+    gl.programUniform(unlinked, 0, 1, [1], 'f', 1, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'a program never linked');
+    gl.programUniform(unlinked + 40, 0, 1, [1], 'f', 1, null);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'no such program');
+    gl.glUseProgram(made);
+    gl.uniform(tint, 1, [9, 9, 9, 9], 'f', 4);
+    assert.deepEqual(gl.getUniform(made, tint).values, [9, 9, 9, 9], 'the bound form still');
+    // A relink that fails leaves the program's executable in use, and the
+    // program not linked: the bound form still writes it, the named one not.
+    gl.glAttachShader(made, shader(gl, GL.FRAGMENT_SHADER, 'void main() { broken }'));
+    gl.glLinkProgram(made);
+    assert.deepEqual(gl.glGetProgramiv(made, GL.LINK_STATUS), [0]);
+    gl.uniform(tint, 1, [8, 8, 8, 8], 'f', 4);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    gl.programUniform(made, tint, 1, [7, 7, 7, 7], 'f', 4, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION);
 });

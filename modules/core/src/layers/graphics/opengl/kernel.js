@@ -30,7 +30,11 @@
  * decisions `enter` makes. Passed to every `context-*.js` installer.
  *
  * @typedef {Object} ContextKernel
+ * @property {boolean} core  a core profile (or a forward-compatible 3.0 or 3.1):
+ *     what the compatibility profile adds is refused
  * @property {(name: string, args: any[]) => boolean} enter
+ * @property {(work: () => void) => void} executed  runs `work` as made outside any
+ *     list being compiled: for a call a list does not hold, whose draws are made now
  * @property {(code: number) => void} setError
  * @property {(query: number) => import('./state.js').StateRecord} record
  * @property {(query: number, values: number[]) => void} setState
@@ -41,7 +45,8 @@
  * @property {() => ContextMemory | null} memory
  * @property {() => import('./raster.js').Framebuffer} framebuffer
  * @property {() => boolean} inPrimitive
- * @property {() => import('./raster.js').Box} scissorBox
+ * @property {(test?: number, box?: readonly number[]) => import('./raster.js').Box} scissorBox
+ *     what the scissor test leaves, of the unindexed test and box unless given others
  * @property {Record<string, import('./matrix.js').MatrixStack>} stacks
  * @property {(mode: number, vertices: any[], assembled?: string) => void} drawVertices
  * @property {((request: import('./gpu.js').DrawRequest) => boolean) | null} drawArrays
@@ -54,12 +59,41 @@
  *           Copies a rectangle of the framebuffer into a texture level on the
  *           device, as a render pass into a view of that level. Null in a build
  *           that draws on the processor, where the copy reads `framebuffer()`.
+ * @property {((from: import('./gpu.js').CopiedImage,
+ *             into: import('./gpu.js').CopiedImage, size: { width: number, height: number,
+ *             depth: number }) => boolean) | null} [copyImage]
+ *           glCopyImageSubData on the device: true when the device copies the
+ *           box itself (both images live there in one format), false when the
+ *           copy is to be made from this side's bytes and uploaded.
  * @property {((texture: import('./objects.js').TextureObject) => void) | null} [generateMipmap]
  *           glGenerateMipmap's levels made on the device from the base level
  * @property {((request: { srcX0: number, srcY0: number, srcX1: number, srcY1: number,
  *             dstX0: number, dstY0: number, dstX1: number, dstY1: number,
  *             linear: boolean }) => void) | null} [blit]
  *           glBlitFramebuffer's colour, from the read framebuffer to the draw one
+ * @property {(() => { signalled: () => boolean, done: Promise<void>, flush: () => void }
+ *             | null) | null} [fence]
+ *           What a fence waits on: the commands recorded so far replayed
+ *           (`gpu.js` fence); null where nothing is drawn later than it is called
+ * @property {{ begin: (session: any) => void,
+ *     count: (target: number, query: any) => void, ended: (query: any) => void } | null}
+ *     [feedback]
+ *           Transform feedback captured on the device (`context-transform-feedback.js`,
+ *           `gpu.js`): a capture begun, and the queries counting its primitives;
+ *           null where nothing draws later
+ * @property {{ begin: (query: any) => void, end: (query: any) => void, flush: () => void,
+ *     condition: (query: any, inverted: boolean) => void } | null} [queries]
+ *           Occlusion counted on the device and rendering conditional on it
+ *           (`context-queries.js`, `gpu.js`); null where nothing draws later
+ * @property {((rect: { x: number, y: number, width: number, height: number })
+ *             => Promise<Uint8Array | null> | null) | null} [readBack]
+ *           The read buffer's colour on the device, RGBA, its bottom row first:
+ *           null where the renderer cannot read it (`gpu.js` readPixels)
+ * @property {(request: { mask: number, colour: readonly number[], depth: number,
+ *             stencil: number, masks?: readonly number[] }) => void} clearWith
+ *           Clears what the mask names within the scissor box: the colour draw
+ *           buffers each under its own mask when `masks` is given
+ *           (`context-indexed.js`), under GL_COLOR_WRITEMASK otherwise
  * @property {((buffer: import('./objects.js').BufferObject) => void) | null} bufferDeleted
  *           a buffer object deleted, for the renderer to let its copy go
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on

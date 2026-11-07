@@ -17,8 +17,8 @@
 
 import { createMirror, createPlayer, createRecording } from './replay.js';
 
-/** The one call whose answer only the renderer has: what it says of itself. */
-const ANSWERED = new Set(['diagnostics']);
+/** The calls whose answers only the renderer has: what it says of itself, and the pixels it drew. */
+const ANSWERED = new Set(['diagnostics', 'glReadPixels', 'glGetQueryObject', 'readDrawable']);
 
 /**
  * The root the program's contexts are made by: every call on it and on the

@@ -42,12 +42,14 @@ const VARYINGS = { texcoords: [0, 1, 2, 3], fogCoord: false };
 
 
 /** The program's own position, turned from GL's clip depth into WebGPU's. */
-const REMAP_Z = new RegExp(String.raw`out\.position\.z = \(out\.position\.z \* uniforms\.misc\.y`
-    + String.raw` \+ out\.position\.w\) \* 0\.5;`);
+const REMAP_Z = new RegExp(String.raw`let clip = out\.position;\n`
+    + String.raw`    out\.position = vec4f\(clip\.x, clip\.y \* uniforms\.clipControl\.x,`
+    + String.raw` clip\.z \* uniforms\.clipControl\.y \+ clip\.w \* uniforms\.clipControl\.z,`
+    + String.raw` clip\.w\);`);
 /** The fixed stage's position line, which position invariance reproduces. */
 const REMAP_POSITION = new RegExp(String.raw`out\.position = vec4f\(clip\.x,`
-    + String.raw` clip\.y \* uniforms\.misc\.z,`
-    + String.raw` \(clip\.z \* uniforms\.misc\.y \+ clip\.w\) \* 0\.5, clip\.w\);`);
+    + String.raw` clip\.y \* uniforms\.clipControl\.x, clip\.z \* uniforms\.clipControl\.y`
+    + String.raw` \+ clip\.w \* uniforms\.clipControl\.z, clip\.w\);`);
 test('every vertex instruction emits its arithmetic in vec4f', ()=>{
     const { code } = vertex(`!!ARBvp1.0
 TEMP r0, r1, r2, r3;
@@ -161,7 +163,7 @@ END
     assert.match(masked.code, /out\.position\.w = v\d+\.w;/);
     assert.match(masked.code, REMAP_Z);
     const writes = masked.code.indexOf('out.position.w =');
-    const remap = masked.code.indexOf('out.position.z = (out.position.z * uniforms.misc.y');
+    const remap = masked.code.indexOf('let clip = out.position;');
     assert.ok(remap > writes, 'the remap runs after the program wrote the position');
 });
 
@@ -253,8 +255,8 @@ END
         'TEX samples the coordinate as it is');
     assert.match(code, /textureSample\(t2Texture, t2Sampler, s\d+_0\.xyz \/ s\d+_0\.w\)/,
         'TXP divides a cube coordinate by w');
-    assert.match(code, /textureSampleBias\(t0Texture, t0Sampler, s\d+_0\.xy, s\d+_0\.w\)/,
-        'TXB biases with the source w');
+    assert.match(code, /textureSampleBias\(t0Texture, t0Sampler, \(s\d+_0\.xy\) \/ vec2f\(textureDimensions\(t0Texture\)\), s\d+_0\.w\)/,
+        'TXB biases with the source w, a rectangle\'s coordinates counted in texels');
     assert.match(code, /textureSample\(t3Texture, t3Sampler, vec2f\(select\(0\.0, s\d+_0\.x \/ s\d+_0\.w, s\d+_0\.w != 0\.0\), 0\.5\)\)/,
         'a 1D target samples a 2D texture\'s only row, a zero q at the origin');
     assert.deepEqual(needs.textures.map(t=>t.unit), [1, 2, 0, 3]);

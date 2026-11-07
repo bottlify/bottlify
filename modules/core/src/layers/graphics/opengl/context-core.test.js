@@ -109,31 +109,13 @@ test('a transposed matrix loads as its transpose, and a window position needs no
         assert.deepEqual(gl.glGetBooleanv(GL.CURRENT_RASTER_POSITION_VALID), [1]);
     });
 
-test('an occlusion query answers at once, and its errors are the specification\'s', ()=>{
+test('3D textures: WebGPU\'s size is taken, past it is a value error', ()=>{
     const gl = fixture();
-    const [q] = gl.glGenQueries(1);
-    assert.equal(gl.glIsQuery(q), GL.FALSE, 'not a query until begun');
-    gl.glBeginQuery(GL.SAMPLES_PASSED, q);
-    assert.deepEqual(gl.glGetQueryiv(GL.SAMPLES_PASSED, GL.CURRENT_QUERY), [q]);
-    gl.glBeginQuery(GL.SAMPLES_PASSED, q);
-    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'one active at a time');
-    assert.equal(gl.glGetQueryObject(q, GL.QUERY_RESULT), null);
-    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'not while it is active');
-    gl.glEndQuery(GL.SAMPLES_PASSED);
-    assert.deepEqual(gl.glGetQueryObject(q, GL.QUERY_RESULT_AVAILABLE), [1]);
-    assert.ok(gl.glGetQueryObject(q, GL.QUERY_RESULT)[0] > 0);
-    gl.glEndQuery(GL.SAMPLES_PASSED);
-    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'none active');
-    assert.deepEqual(gl.glGetQueryiv(GL.SAMPLES_PASSED, GL.QUERY_COUNTER_BITS), [32]);
-});
-
-test('3D textures: the minimum size is taken, past it is a value error', ()=>{
-    const gl = fixture();
-    gl.texImage3D('glTexImage3D', GL.TEXTURE_3D, 0, 16, 16, 16);
+    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 2048, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
-    gl.texImage3D('glTexImage3D', GL.TEXTURE_3D, 0, 32, 16, 16);
+    gl.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 2049, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.INVALID_VALUE);
-    gl.texImage3D('glTexImage3D', GL.TEXTURE_2D, 0, 1, 1, 1);
+    gl.glTexImage3D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
-    assert.deepEqual(gl.glGetIntegerv(GL.MAX_3D_TEXTURE_SIZE), [16]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_3D_TEXTURE_SIZE), [2048]);
 });

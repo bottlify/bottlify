@@ -16,9 +16,11 @@
  */
 
 import { GL } from './constants.js';
+import { TEX } from './formats.js';
 import { colourMaterialTargets, lightVertex, normalMatrix, normalise } from './lighting.js';
-import { levelKey } from './objects.js';
+import { levelKey, swizzleCode } from './objects.js';
 import { compare, drawPrimitive } from './pipeline.js';
+import { TESS } from './context-tessellation.js';
 
 /**
  * The blend factor for one channel, as the specification's table gives it.
@@ -206,6 +208,8 @@ export function createSceneBuilder(kernel){
         const units = side.activeTextures().map((/** @type {any} */ entry)=>{
             const { index, texture, unit } = entry;
             const cube = texture.target === GL.TEXTURE_CUBE_MAP;
+            // A rectangle (3.1) is read at texel coordinates.
+            const rectangle = texture.target === GL.TEXTURE_RECTANGLE;
             const images = [];
             for (let face = 0; face < (cube ? 6 : 1); face++)
             {
@@ -227,6 +231,7 @@ export function createSceneBuilder(kernel){
                 texture,
                 images,
                 cube,
+                rectangle,
                 baseFormat: texture.levels.get(levelKey(0)).baseFormat,
                 parameters: {
                     magFilter: texture.parameters.get(GL.TEXTURE_MAG_FILTER),
@@ -234,6 +239,7 @@ export function createSceneBuilder(kernel){
                     wrapS: texture.parameters.get(GL.TEXTURE_WRAP_S),
                     wrapT: texture.parameters.get(GL.TEXTURE_WRAP_T),
                 },
+                swizzle: swizzleCode(texture.parameters),
                 env: unit.env,
                 matrix: unit.stack.current,
                 generation: generated
@@ -275,7 +281,18 @@ export function createSceneBuilder(kernel){
             ? side.units.map((/** @type {any} */ unused, /** @type {number} */ index)=>({
                 twoD: side.textureBoundAt(index, GL.TEXTURE_2D),
                 cube: side.textureBoundAt(index, GL.TEXTURE_CUBE_MAP),
+                rectangle: side.textureBoundAt(index, GL.TEXTURE_RECTANGLE),
+                buffer: side.bufferTextureAt(index),
+                // 3.2's multisample textures, each kept with one sample a texel.
+                twoDMultisample: side.textureBoundAt(index, GL.TEXTURE_2D_MULTISAMPLE),
+                twoDMultisampleArray: side.textureBoundAt(index,
+                    GL.TEXTURE_2D_MULTISAMPLE_ARRAY),
                 oneD: side.textureBoundAt(index, GL.TEXTURE_1D),
+                // GLSL 1.30's samplers of 3D textures and arrays.
+                threeD: side.textureBoundAt(index, GL.TEXTURE_3D),
+                oneDArray: side.textureBoundAt(index, TEX.TEXTURE_1D_ARRAY),
+                twoDArray: side.textureBoundAt(index, TEX.TEXTURE_2D_ARRAY),
+                cubeArray: side.textureBoundAt(index, TEX.TEXTURE_CUBE_MAP_ARRAY),
             }))
             : [];
         const genericAttribs = programmed && programsSide
@@ -283,6 +300,8 @@ export function createSceneBuilder(kernel){
             : [];
 
         const blendOn = on(GL.BLEND);
+        // Blending and colour masks per draw buffer, when they differ.
+        const perBuffer = side.perBuffer?.() ?? null;
         const src = record(GL.BLEND_SRC).values[0];
         const dst = record(GL.BLEND_DST).values[0];
         const srcAlpha = record(GL.BLEND_SRC_ALPHA).values[0];
@@ -307,15 +326,22 @@ export function createSceneBuilder(kernel){
             projection: kernel.stacks.projection.current,
             viewport: record(GL.VIEWPORT).values,
             depthRange: record(GL.DEPTH_RANGE).values,
+            clipControl: { upperLeft: record(GL.CLIP_ORIGIN).values[0] === GL.UPPER_LEFT,
+                zeroToOne: record(GL.CLIP_DEPTH_MODE).values[0] === GL.ZERO_TO_ONE },
             framebuffer: kernel.framebuffer(),
             scissor: kernel.scissorBox(),
+            viewportAt: kernel.side.viewportAt,
             clipPlanes,
             lighting,
             fog,
             units,
             current: kernel.currentAttributes(),
-            blend: blendOn ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
+            blend: blendOn || perBuffer?.blend.some((/** @type {boolean} */ b)=>b)
+                ? { src, dst, srcAlpha, dstAlpha, equation, equationAlpha } : null,
             blendColor: record(GL.BLEND_COLOR).values,
+            perBuffer,
+            // Each unit's sampler object (3.3), when a unit has one.
+            samplers: side.boundSamplers?.() ?? null,
             // The framebuffer object drawn into, or null for the window.
             target: side.drawTarget?.() ?? null,
             readFramebuffer: side.readFramebuffer?.() ?? null,
@@ -368,10 +394,12 @@ export function createSceneBuilder(kernel){
                     zpass: back(GL.STENCIL_BACK_PASS_DEPTH_PASS),
                 };
             })(),
+            polygonStipple: side.polygonStipple?.() ?? null,
             polygonOffset: on(GL.POLYGON_OFFSET_FILL)
                 ? {
                     factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],
                     units: record(GL.POLYGON_OFFSET_UNITS).values[0],
+                    clamp: record(GL.POLYGON_OFFSET_CLAMP).values[0],
                 }
                 : null,
             colourSum: on(GL.COLOR_SUM)
@@ -381,6 +409,7 @@ export function createSceneBuilder(kernel){
                 : null,
             frontIsCcw: record(GL.FRONT_FACE).values[0] === GL.CCW,
             flat: record(GL.SHADE_MODEL).values[0] === GL.FLAT,
+            lastProvokes: record(GL.PROVOKING_VERTEX).values[0] === GL.LAST_VERTEX_CONVENTION,
             polygonMode: record(GL.POLYGON_MODE).values,
             pointSize: record(GL.POINT_SIZE).values[0],
             alphaTest: on(GL.ALPHA_TEST)
@@ -393,6 +422,7 @@ export function createSceneBuilder(kernel){
                 depthTest: depthOn ? compare : undefined,
                 depthFunc,
                 depthWrite: on(GL.DEPTH_WRITEMASK),
+                depthClamp: on(GL.DEPTH_CLAMP),
                 blend: blendOn && !(src === GL.ONE && dst === GL.ZERO)
                     ? (/** @type {number[]} */ s, /** @type {number[]} */ d)=>{
                         const sf = s.map(v=>v / 255);
@@ -411,6 +441,18 @@ export function createSceneBuilder(kernel){
             genericAttribs,
             textureMatrices,
             boundTextures,
+            uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
+            storageBuffers: glsl ? side.storageBuffers?.() ?? [] : [],
+            counterBuffers: glsl ? side.counterBuffers?.() ?? [] : [],
+            imageUnits: glsl ? side.imageUnits?.() ?? [] : [],
+            feedback: glsl ? side.feedbackSession?.() ?? null : null,
+            subroutines: glsl ? side.subroutineChoice?.() ?? null : null,
+            patch: glsl?.linked.tessEvaluation ? {
+                vertices: record(TESS.PATCH_VERTICES).values[0],
+                outer: record(TESS.PATCH_DEFAULT_OUTER_LEVEL).values,
+                inner: record(TESS.PATCH_DEFAULT_INNER_LEVEL).values,
+            } : null,
+            discard: on(GL.RASTERIZER_DISCARD),
 
             /**
              * The colour a vertex ends up with: lit, or its own.

@@ -394,6 +394,22 @@ test('the destination joins the source group, and sees what was made there', ()=
     f.assertAllReleased(source, destination);
 });
 
+test('two contexts already sharing share again', ()=>{
+    // Wine's opengl32 test_sharelists: both joined a third's group first.
+    const f = fixture();
+    setUpFormat(f);
+    const [source, destination, other] = [0, 1, 2].map(()=>f.wgl.wglCreateContext(WINDOW_DC));
+    assert.equal(f.wgl.wglShareLists(other, source), true);
+    assert.equal(f.wgl.wglShareLists(other, destination), true);
+    assert.equal(f.wgl.wglShareLists(source, destination), true);
+    assert.equal(f.wgl.wglShareLists(source, source), false, 'but not a context with itself');
+    for (const context of [source, destination, other])
+    {
+        f.wgl.wglDeleteContext(context);
+    }
+    f.assertAllReleased(source, destination, other);
+});
+
 test('a group that has ever held an object can never be shared into again', ()=>{
     const f = fixture();
     setUpFormat(f);
@@ -536,4 +552,37 @@ test('SwapBuffers counts against the drawable, not the device context', ()=>{
 
     assert.equal(f.wgl.wglDeleteContext(context), true);
     f.assertAllReleased(context);
+});
+
+test('wglCopyContext copies the groups asked for, into a context current nowhere', ()=>{
+    // Wine's opengl32 test_copy_context: the enables travel with
+    // GL_ENABLE_BIT, the depth function only with the depth group, and a
+    // destination current on the calling thread is ERROR_INVALID_HANDLE.
+    const f = fixture();
+    setUpFormat(f);
+    const source = f.wgl.wglCreateContext(WINDOW_DC);
+    const destination = f.wgl.wglCreateContext(WINDOW_DC);
+    f.wgl.wglMakeCurrent(WINDOW_DC, source);
+    source.glEnable(GL.DEPTH_TEST);
+    source.glDepthFunc(GL.GREATER);
+    assert.equal(f.wgl.wglCopyContext(source, destination, GL.ENABLE_BIT), true);
+    assert.equal(destination.glIsEnabled(GL.DEPTH_TEST), GL.TRUE);
+    assert.deepEqual(destination.glGetIntegerv(GL.DEPTH_FUNC), [GL.LESS], 'not its group');
+
+    f.wgl.wglMakeCurrent(WINDOW_DC, destination);
+    assert.equal(destination.glIsEnabled(GL.DEPTH_TEST), GL.TRUE,
+        'what was copied outlives the first make-current');
+    assert.deepEqual(destination.glGetIntegerv(GL.VIEWPORT).slice(2), [200, 150],
+        'which sizes the viewport still');
+    assert.equal(f.wgl.wglCopyContext(source, destination, GL.ALL_ATTRIB_BITS), false);
+    assert.equal(f.wgl.getLastError(), WIN32_ERROR.INVALID_HANDLE);
+    f.wgl.wglMakeCurrent(WINDOW_DC, source);
+    assert.equal(f.wgl.wglCopyContext(source, destination, GL.ALL_ATTRIB_BITS), true);
+    assert.deepEqual(destination.glGetIntegerv(GL.DEPTH_FUNC), [GL.GREATER]);
+    assert.equal(f.wgl.wglCopyContext(source, null, GL.ALL_ATTRIB_BITS), false);
+
+    f.wgl.wglMakeCurrent(WINDOW_DC, null);
+    f.wgl.wglDeleteContext(source);
+    f.wgl.wglDeleteContext(destination);
+    f.assertAllReleased(source, destination);
 });

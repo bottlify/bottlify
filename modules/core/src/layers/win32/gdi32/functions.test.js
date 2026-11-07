@@ -2058,8 +2058,18 @@ test('every DC of a window is one drawable, and any other DC is its own', ()=>{
 
     const bounded = gdi.windowContext(HWND, { left: 10, top: 20, right: 650, bottom: 500 });
     assert.deepEqual(gdi.describeDrawable(bounded),
-        { key: keyOf(first), window: HWND, width: 640, height: 480 },
+        { key: keyOf(first), window: HWND, width: 640, height: 480, memory: false },
         'a window context is the size of the area it was given');
+    assert.equal(gdi.describeDrawable(memoryDc)?.memory, true,
+        'a memory DC says so: OpenGL draws into its bitmap');
+
+    // An OpenGL pbuffer's DC is a drawable of its own size, drawn on the device.
+    const pbuffer = gdi.createPbufferDc(16, 8);
+    assert.deepEqual(gdi.describeDrawable(pbuffer),
+        { key: `pbuffer:${pbuffer}`, window: 0, width: 16, height: 8, memory: false });
+    assert.equal(fns.GetPixelFormat.handler([pbuffer]), 0, 'a DC GDI knows: no format yet');
+    assert.equal(gdi.deleteSurfaceDc(pbuffer), true);
+    assert.equal(gdi.describeDrawable(pbuffer), null);
 });
 
 test('a region is readable and fillable from user32, and nothing else is', ()=>{

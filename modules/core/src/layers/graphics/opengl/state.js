@@ -32,17 +32,54 @@
  * place any of that is allowed to happen.
  */
 
-import { GL } from './constants.js';
+import { GL, VIEWPORT_COUNT } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
+import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
+import { GLSL_CONSTANTS } from './glsl-library.js';
+import { TESSELLATION_STATE } from './context-tessellation.js';
+import { LEGACY_ENABLES, LEGACY_STATE } from './legacy-state.js';
 
 /**
- * How many texture units a context has: the larger of the coordinate sets
- * and the image units the specification's minimum requires, which is what
- * the unit selector ranges over.
+ * OpenGL 3.2's limits of geometry shaders and of what the stages pass, the
+ * values the language's gl_Max* constants have.
+ *
+ * @type {[number, string, number][]}
  */
-export const TEXTURE_UNITS = 8;
+export const GEOMETRY_LIMITS = [
+    [GL.MAX_GEOMETRY_TEXTURE_IMAGE_UNITS, 'GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS',
+        GLSL_LIMITS.textureImageUnits],
+    [GL.MAX_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_GEOMETRY_UNIFORM_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryUniformComponents],
+    [GL.MAX_GEOMETRY_OUTPUT_VERTICES, 'GL_MAX_GEOMETRY_OUTPUT_VERTICES',
+        GLSL_CONSTANTS.gl_MaxGeometryOutputVertices],
+    // 4.0's instancing: the minimum (glsl-link.js GEOMETRY_SHADER_INVOCATIONS).
+    [GL.MAX_GEOMETRY_SHADER_INVOCATIONS, 'GL_MAX_GEOMETRY_SHADER_INVOCATIONS', 32],
+    [GL.MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS, 'GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryTotalOutputComponents],
+    [GL.MAX_GEOMETRY_INPUT_COMPONENTS, 'GL_MAX_GEOMETRY_INPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryInputComponents],
+    [GL.MAX_GEOMETRY_OUTPUT_COMPONENTS, 'GL_MAX_GEOMETRY_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryOutputComponents],
+    [GL.MAX_VERTEX_OUTPUT_COMPONENTS, 'GL_MAX_VERTEX_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxVertexOutputComponents],
+    [GL.MAX_FRAGMENT_INPUT_COMPONENTS, 'GL_MAX_FRAGMENT_INPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxFragmentInputComponents],
+    [GL.MAX_GEOMETRY_UNIFORM_BLOCKS, 'GL_MAX_GEOMETRY_UNIFORM_BLOCKS', BLOCK_LIMITS.perStage],
+    [GL.MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+];
+
+/**
+ * How many texture units a context has: its image units, more than its
+ * coordinate sets, which is what the unit selector ranges over.
+ */
+export const TEXTURE_UNITS = GLSL_LIMITS.combinedTextureImageUnits;
+
+/** How many texture coordinate sets there are (GL_MAX_TEXTURE_COORDS). */
+export const TEXTURE_COORDS = GLSL_LIMITS.textureCoords;
 
 /**
  * How many units the conventional pipeline combines (GL_MAX_TEXTURE_UNITS):
@@ -83,6 +120,29 @@ export const CONVENTIONAL_UNITS = 4;
  */
 export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.DITHER, name: 'GL_DITHER', kind: 'bool', value: [1] },
+    // OpenGL 3.2: depth clamped rather than clipped, and cube maps filtered
+    // across their faces' edges.
+    { query: GL.DEPTH_CLAMP, name: 'GL_DEPTH_CLAMP', kind: 'bool', value: [0] },
+    { query: GL.SAMPLE_MASK, name: 'GL_SAMPLE_MASK', kind: 'bool', value: [0] },
+    // OpenGL 4.0's sample shading.
+    { query: GL.SAMPLE_SHADING, name: 'GL_SAMPLE_SHADING', kind: 'bool', value: [0] },
+    // OpenGL 4.3's debug output, off in a context not made for debugging.
+    { query: GL.DEBUG_OUTPUT, name: 'GL_DEBUG_OUTPUT', kind: 'bool', value: [0] },
+    {
+        query: GL.DEBUG_OUTPUT_SYNCHRONOUS, name: 'GL_DEBUG_OUTPUT_SYNCHRONOUS', kind: 'bool',
+        value: [0],
+    },
+    {
+        query: GL.TEXTURE_CUBE_MAP_SEAMLESS, name: 'GL_TEXTURE_CUBE_MAP_SEAMLESS', kind: 'bool',
+        value: [0],
+    },
+    // OpenGL 3.1 and 4.3: an index that ends one primitive and starts the next.
+    { query: GL.PRIMITIVE_RESTART, name: 'GL_PRIMITIVE_RESTART', kind: 'bool', value: [0] },
+    { query: GL.RASTERIZER_DISCARD, name: 'GL_RASTERIZER_DISCARD', kind: 'bool', value: [0] },
+    {
+        query: GL.PRIMITIVE_RESTART_FIXED_INDEX, name: 'GL_PRIMITIVE_RESTART_FIXED_INDEX',
+        kind: 'bool', value: [0],
+    },
     { query: GL.ALPHA_TEST, name: 'GL_ALPHA_TEST', kind: 'bool', value: [0] },
     { query: GL.BLEND, name: 'GL_BLEND', kind: 'bool', value: [0] },
     { query: GL.COLOR_MATERIAL, name: 'GL_COLOR_MATERIAL', kind: 'bool', value: [0] },
@@ -104,6 +164,7 @@ export const DEFAULT_ENABLES = Object.freeze([
     },
     { query: GL.TEXTURE_1D, name: 'GL_TEXTURE_1D', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_2D, name: 'GL_TEXTURE_2D', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_RECTANGLE, name: 'GL_TEXTURE_RECTANGLE', kind: 'bool', value: [0] },
     { query: GL.LIGHT1, name: 'GL_LIGHT1', kind: 'bool', value: [0] },
     { query: GL.LIGHT2, name: 'GL_LIGHT2', kind: 'bool', value: [0] },
     { query: GL.LIGHT3, name: 'GL_LIGHT3', kind: 'bool', value: [0] },
@@ -149,6 +210,8 @@ export const DEFAULT_ENABLES = Object.freeze([
         query: GL.VERTEX_PROGRAM_TWO_SIDE_ARB, name: 'GL_VERTEX_PROGRAM_TWO_SIDE_ARB',
         kind: 'bool', value: [0],
     },
+    // The evaluators' maps (`context-legacy.js`).
+    ...LEGACY_ENABLES,
 ]);
 
 /**
@@ -295,6 +358,15 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.CULL_FACE_MODE, name: 'GL_CULL_FACE_MODE', kind: 'enum', value: [GL.BACK] },
     { query: GL.FRONT_FACE, name: 'GL_FRONT_FACE', kind: 'enum', value: [GL.CCW] },
     { query: GL.SHADE_MODEL, name: 'GL_SHADE_MODEL', kind: 'enum', value: [GL.SMOOTH] },
+    // OpenGL 3.2: which vertex of a primitive a flat value is taken from.
+    {
+        query: GL.PROVOKING_VERTEX, name: 'GL_PROVOKING_VERTEX', kind: 'enum',
+        value: [GL.LAST_VERTEX_CONVENTION],
+    },
+    {
+        query: GL.QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION,
+        name: 'GL_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION', kind: 'int', value: [0],
+    },
     { query: GL.POLYGON_MODE, name: 'GL_POLYGON_MODE', kind: 'enum', value: [GL.FILL, GL.FILL] },
     { query: GL.POINT_SIZE, name: 'GL_POINT_SIZE', kind: 'float', value: [1] },
     { query: GL.LINE_WIDTH, name: 'GL_LINE_WIDTH', kind: 'float', value: [1] },
@@ -308,6 +380,18 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0],
     },
     { query: GL.POLYGON_OFFSET_UNITS, name: 'GL_POLYGON_OFFSET_UNITS', kind: 'float', value: [0] },
+    {
+        query: GL.MIN_SAMPLE_SHADING_VALUE, name: 'GL_MIN_SAMPLE_SHADING_VALUE', kind: 'float',
+        value: [0],
+    },
+    // OpenGL 4.6's (GL_ARB_polygon_offset_clamp): zero clamps nothing.
+    { query: GL.POLYGON_OFFSET_CLAMP, name: 'GL_POLYGON_OFFSET_CLAMP', kind: 'float', value: [0] },
+    // OpenGL 4.5's glClipControl.
+    { query: GL.CLIP_ORIGIN, name: 'GL_CLIP_ORIGIN', kind: 'enum', value: [GL.LOWER_LEFT] },
+    {
+        query: GL.CLIP_DEPTH_MODE, name: 'GL_CLIP_DEPTH_MODE', kind: 'enum',
+        value: [GL.NEGATIVE_ONE_TO_ONE],
+    },
     { query: GL.RENDER_MODE, name: 'GL_RENDER_MODE', kind: 'enum', value: [GL.RENDER] },
     {
         query: GL.PERSPECTIVE_CORRECTION_HINT, name: 'GL_PERSPECTIVE_CORRECTION_HINT',
@@ -393,12 +477,16 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.UNPACK_SKIP_PIXELS, name: 'GL_UNPACK_SKIP_PIXELS', kind: 'int', value: [0] },
     { query: GL.UNPACK_SWAP_BYTES, name: 'GL_UNPACK_SWAP_BYTES', kind: 'bool', value: [0] },
     { query: GL.UNPACK_LSB_FIRST, name: 'GL_UNPACK_LSB_FIRST', kind: 'bool', value: [0] },
+    { query: 0x806e, name: 'GL_UNPACK_IMAGE_HEIGHT', kind: 'int', value: [0] },
+    { query: 0x806d, name: 'GL_UNPACK_SKIP_IMAGES', kind: 'int', value: [0] },
     { query: GL.PACK_ALIGNMENT, name: 'GL_PACK_ALIGNMENT', kind: 'int', value: [4] },
     { query: GL.PACK_ROW_LENGTH, name: 'GL_PACK_ROW_LENGTH', kind: 'int', value: [0] },
     { query: GL.PACK_SKIP_ROWS, name: 'GL_PACK_SKIP_ROWS', kind: 'int', value: [0] },
     { query: GL.PACK_SKIP_PIXELS, name: 'GL_PACK_SKIP_PIXELS', kind: 'int', value: [0] },
     { query: GL.PACK_SWAP_BYTES, name: 'GL_PACK_SWAP_BYTES', kind: 'bool', value: [0] },
     { query: GL.PACK_LSB_FIRST, name: 'GL_PACK_LSB_FIRST', kind: 'bool', value: [0] },
+    { query: 0x806c, name: 'GL_PACK_IMAGE_HEIGHT', kind: 'int', value: [0] },
+    { query: 0x806b, name: 'GL_PACK_SKIP_IMAGES', kind: 'int', value: [0] },
 
     // --- texture and list bookkeeping ---
     { query: GL.TEXTURE_BINDING_1D, name: 'GL_TEXTURE_BINDING_1D', kind: 'int', value: [0] },
@@ -407,6 +495,30 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.TEXTURE_BINDING_CUBE_MAP, name: 'GL_TEXTURE_BINDING_CUBE_MAP', kind: 'int',
         value: [0],
     },
+    { query: GL.TEXTURE_BINDING_3D, name: 'GL_TEXTURE_BINDING_3D', kind: 'int', value: [0] },
+    {
+        query: GL.TEXTURE_BINDING_RECTANGLE, name: 'GL_TEXTURE_BINDING_RECTANGLE', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TEXTURE_BINDING_BUFFER, name: 'GL_TEXTURE_BINDING_BUFFER', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TEXTURE_BINDING_2D_MULTISAMPLE, name: 'GL_TEXTURE_BINDING_2D_MULTISAMPLE',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY,
+        name: 'GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY', kind: 'int', value: [0],
+    },
+    // OpenGL 3.2's sample mask: one word, every sample in it.
+    { query: GL.SAMPLE_MASK_VALUE, name: 'GL_SAMPLE_MASK_VALUE', kind: 'int', value: [-1] },
+    // The buffer bound to GL_TEXTURE_BUFFER as a buffer object target (3.1).
+    { query: GL.TEXTURE_BUFFER, name: 'GL_TEXTURE_BUFFER', kind: 'int', value: [0] },
+    { query: 0x8c1c, name: 'GL_TEXTURE_BINDING_1D_ARRAY', kind: 'int', value: [0] },
+    { query: 0x8c1d, name: 'GL_TEXTURE_BINDING_2D_ARRAY', kind: 'int', value: [0] },
+    { query: 0x900a, name: 'GL_TEXTURE_BINDING_CUBE_MAP_ARRAY', kind: 'int', value: [0] },
     { query: GL.ACTIVE_TEXTURE, name: 'GL_ACTIVE_TEXTURE', kind: 'enum', value: [GL.TEXTURE0] },
     {
         query: GL.CLIENT_ACTIVE_TEXTURE, name: 'GL_CLIENT_ACTIVE_TEXTURE', kind: 'enum',
@@ -530,10 +642,28 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.INDEX_MODE, name: 'GL_INDEX_MODE', kind: 'bool', value: [0] },
 
     // --- implementation limits ---
-    { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [2048] },
+    // WebGPU's default maxTextureDimension2D, which every adapter gives (A181).
+    { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [8192] },
+    // OpenGL 4.3's vertex attribute bindings, at the specification's least.
+    {
+        query: GL.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, name: 'GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET',
+        kind: 'int', value: [2047],
+    },
+    {
+        query: GL.MAX_VERTEX_ATTRIB_BINDINGS, name: 'GL_MAX_VERTEX_ATTRIB_BINDINGS', kind: 'int',
+        value: [16],
+    },
+    {
+        query: GL.MAX_VERTEX_ATTRIB_STRIDE, name: 'GL_MAX_VERTEX_ATTRIB_STRIDE', kind: 'int',
+        value: [2048],
+    },
+    {
+        query: GL.MAX_TEXTURE_MAX_ANISOTROPY, name: 'GL_MAX_TEXTURE_MAX_ANISOTROPY',
+        kind: 'float', value: [16],
+    },
     {
         query: GL.MAX_CUBE_MAP_TEXTURE_SIZE, name: 'GL_MAX_CUBE_MAP_TEXTURE_SIZE', kind: 'int',
-        value: [2048],
+        value: [8192],
     },
     {
         query: GL.MAX_TEXTURE_UNITS, name: 'GL_MAX_TEXTURE_UNITS', kind: 'int',
@@ -558,7 +688,7 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.MAX_LIST_NESTING, name: 'GL_MAX_LIST_NESTING', kind: 'int', value: [64] },
     { query: GL.MAX_NAME_STACK_DEPTH, name: 'GL_MAX_NAME_STACK_DEPTH', kind: 'int', value: [64] },
     { query: GL.MAX_EVAL_ORDER, name: 'GL_MAX_EVAL_ORDER', kind: 'int', value: [8] },
-    { query: GL.MAX_PIXEL_MAP_TABLE, name: 'GL_MAX_PIXEL_MAP_TABLE', kind: 'int', value: [32] },
+    { query: GL.MAX_PIXEL_MAP_TABLE, name: 'GL_MAX_PIXEL_MAP_TABLE', kind: 'int', value: [256] },
     {
         query: GL.MAX_ELEMENTS_VERTICES, name: 'GL_MAX_ELEMENTS_VERTICES', kind: 'int',
         value: [4096],
@@ -623,7 +753,7 @@ export const DEFAULT_STATE = Object.freeze([
     // is the compatible subset of.
     {
         query: GL.MAX_TEXTURE_COORDS_ARB, name: 'GL_MAX_TEXTURE_COORDS_ARB', kind: 'int',
-        value: [TEXTURE_UNITS],
+        value: [TEXTURE_COORDS],
     },
     {
         query: GL.MAX_TEXTURE_IMAGE_UNITS_ARB, name: 'GL_MAX_TEXTURE_IMAGE_UNITS_ARB',
@@ -783,6 +913,93 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.MAX_VARYING_FLOATS, name: 'GL_MAX_VARYING_FLOATS', kind: 'int',
         value: [GLSL_LIMITS.varyingFloats],
     },
+    // OpenGL 4.1's ES 2.0 compatibility: the same limits in vectors, a
+    // compiler always there, no binary formats, and what glReadPixels reads
+    // best.
+    {
+        query: GL.MAX_VERTEX_UNIFORM_VECTORS, name: 'GL_MAX_VERTEX_UNIFORM_VECTORS',
+        kind: 'int', value: [GLSL_LIMITS.vertexUniformComponents / 4],
+    },
+    {
+        query: GL.MAX_FRAGMENT_UNIFORM_VECTORS, name: 'GL_MAX_FRAGMENT_UNIFORM_VECTORS',
+        kind: 'int', value: [GLSL_LIMITS.fragmentUniformComponents / 4],
+    },
+    {
+        query: GL.MAX_VARYING_VECTORS, name: 'GL_MAX_VARYING_VECTORS', kind: 'int',
+        value: [GLSL_LIMITS.varyingFloats / 4],
+    },
+    { query: GL.SHADER_COMPILER, name: 'GL_SHADER_COMPILER', kind: 'bool', value: [1] },
+    // OpenGL 4.3's debug output limits (`context-debug.js`), the least allowed.
+    {
+        query: GL.MAX_DEBUG_MESSAGE_LENGTH, name: 'GL_MAX_DEBUG_MESSAGE_LENGTH', kind: 'int',
+        value: [1024],
+    },
+    {
+        query: GL.MAX_DEBUG_LOGGED_MESSAGES, name: 'GL_MAX_DEBUG_LOGGED_MESSAGES', kind: 'int',
+        value: [64],
+    },
+    {
+        query: GL.MAX_DEBUG_GROUP_STACK_DEPTH, name: 'GL_MAX_DEBUG_GROUP_STACK_DEPTH',
+        kind: 'int', value: [64],
+    },
+    { query: GL.MAX_LABEL_LENGTH, name: 'GL_MAX_LABEL_LENGTH', kind: 'int', value: [256] },
+    // OpenGL 4.1's program binaries: no format.
+    {
+        query: GL.NUM_PROGRAM_BINARY_FORMATS, name: 'GL_NUM_PROGRAM_BINARY_FORMATS',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.PROGRAM_BINARY_FORMATS, name: 'GL_PROGRAM_BINARY_FORMATS', kind: 'enum',
+        value: [],
+    },
+    // OpenGL 4.1's viewport arrays: sixteen, at whole pixels, the bounds the
+    // specification's least.
+    { query: GL.MAX_VIEWPORTS, name: 'GL_MAX_VIEWPORTS', kind: 'int', value: [VIEWPORT_COUNT] },
+    { query: GL.MAX_VERTEX_STREAMS, name: 'GL_MAX_VERTEX_STREAMS', kind: 'int', value: [4] },
+    // 4.5's robustness: no reset is ever told. 4.3's largest index: a 32-bit one.
+    {
+        query: GL.RESET_NOTIFICATION_STRATEGY, name: 'GL_RESET_NOTIFICATION_STRATEGY',
+        kind: 'enum', value: [GL.NO_RESET_NOTIFICATION],
+    },
+    { query: GL.MAX_ELEMENT_INDEX, name: 'GL_MAX_ELEMENT_INDEX', kind: 'int', value: [-1] },
+    {
+        query: GL.VIEWPORT_SUBPIXEL_BITS, name: 'GL_VIEWPORT_SUBPIXEL_BITS', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.VIEWPORT_BOUNDS_RANGE, name: 'GL_VIEWPORT_BOUNDS_RANGE', kind: 'float',
+        value: [-32768, 32767],
+    },
+    {
+        query: GL.LAYER_PROVOKING_VERTEX, name: 'GL_LAYER_PROVOKING_VERTEX', kind: 'enum',
+        value: [GL.UNDEFINED_VERTEX],
+    },
+    {
+        query: GL.VIEWPORT_INDEX_PROVOKING_VERTEX, name: 'GL_VIEWPORT_INDEX_PROVOKING_VERTEX',
+        kind: 'enum', value: [GL.UNDEFINED_VERTEX],
+    },
+    {
+        // SPIR-V's (4.6 section 7.2, `context-spirv.js`).
+        query: GL.NUM_SHADER_BINARY_FORMATS, name: 'GL_NUM_SHADER_BINARY_FORMATS', kind: 'int',
+        value: [1],
+    },
+    {
+        query: GL.SHADER_BINARY_FORMATS, name: 'GL_SHADER_BINARY_FORMATS', kind: 'enum',
+        value: [GL.SHADER_BINARY_FORMAT_SPIR_V],
+    },
+    {
+        // No SPIR-V extension is taken.
+        query: GL.NUM_SPIR_V_EXTENSIONS, name: 'GL_NUM_SPIR_V_EXTENSIONS', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.IMPLEMENTATION_COLOR_READ_FORMAT, name: 'GL_IMPLEMENTATION_COLOR_READ_FORMAT',
+        kind: 'enum', value: [GL.RGBA],
+    },
+    {
+        query: GL.IMPLEMENTATION_COLOR_READ_TYPE, name: 'GL_IMPLEMENTATION_COLOR_READ_TYPE',
+        kind: 'enum', value: [GL.UNSIGNED_BYTE],
+    },
     {
         query: GL.MAX_VERTEX_TEXTURE_IMAGE_UNITS, name: 'GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS',
         kind: 'int', value: [GLSL_LIMITS.vertexTextureImageUnits],
@@ -795,7 +1012,40 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.MAX_DRAW_BUFFERS, name: 'GL_MAX_DRAW_BUFFERS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],
     },
-    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [16] },
+    // WebGPU's default maxTextureDimension3D; the layers stay at its maxTextureArrayLayers.
+    { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [2048] },
+    // A buffer texture's texels (3.1) lie in rows of a 2D texture, as many
+    // as its sides allow of a buffer WebGPU binds; its range starts anywhere
+    // on a word.
+    {
+        query: GL.MAX_TEXTURE_BUFFER_SIZE, name: 'GL_MAX_TEXTURE_BUFFER_SIZE', kind: 'int',
+        value: [1 << 23],
+    },
+    {
+        query: GL.TEXTURE_BUFFER_OFFSET_ALIGNMENT, name: 'GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT',
+        kind: 'int', value: [4],
+    },
+    // A multisample texture (3.2) takes as many samples as a renderbuffer;
+    // a sample mask is one word of them.
+    {
+        query: GL.MAX_COLOR_TEXTURE_SAMPLES, name: 'GL_MAX_COLOR_TEXTURE_SAMPLES', kind: 'int',
+        value: [4],
+    },
+    {
+        query: GL.MAX_DEPTH_TEXTURE_SAMPLES, name: 'GL_MAX_DEPTH_TEXTURE_SAMPLES', kind: 'int',
+        value: [4],
+    },
+    { query: GL.MAX_INTEGER_SAMPLES, name: 'GL_MAX_INTEGER_SAMPLES', kind: 'int', value: [4] },
+    {
+        query: GL.MAX_SAMPLE_MASK_WORDS, name: 'GL_MAX_SAMPLE_MASK_WORDS', kind: 'int',
+        value: [1],
+    },
+    // A rectangle (3.1) is as large as any 2D texture here.
+    {
+        query: GL.MAX_RECTANGLE_TEXTURE_SIZE, name: 'GL_MAX_RECTANGLE_TEXTURE_SIZE', kind: 'int',
+        value: [8192],
+    },
+    { query: 0x88ff, name: 'GL_MAX_ARRAY_TEXTURE_LAYERS', kind: 'int', value: [256] },
 
     // --- OpenGL 2.1: pixel buffer objects ---
     {
@@ -815,18 +1065,143 @@ export const DEFAULT_STATE = Object.freeze([
     },
     { query: GL.RENDERBUFFER_BINDING, name: 'GL_RENDERBUFFER_BINDING', kind: 'int', value: [0] },
     { query: GL.VERTEX_ARRAY_BINDING, name: 'GL_VERTEX_ARRAY_BINDING', kind: 'int', value: [0] },
+    {
+        query: GL.PRIMITIVE_RESTART_INDEX, name: 'GL_PRIMITIVE_RESTART_INDEX', kind: 'int',
+        value: [0],
+    },
+    // OpenGL 3.0's colour clamping (glClampColor).
+    { query: GL.CLAMP_VERTEX_COLOR, name: 'GL_CLAMP_VERTEX_COLOR', kind: 'int', value: [1] },
+    {
+        query: GL.CLAMP_FRAGMENT_COLOR, name: 'GL_CLAMP_FRAGMENT_COLOR', kind: 'int',
+        value: [GL.FIXED_ONLY],
+    },
+    {
+        query: GL.CLAMP_READ_COLOR, name: 'GL_CLAMP_READ_COLOR', kind: 'int',
+        value: [GL.FIXED_ONLY],
+    },
     // A copy's two bindings answer under the target's own name (OpenGL 3.1).
+    {
+        query: GL.DRAW_INDIRECT_BUFFER_BINDING, name: 'GL_DRAW_INDIRECT_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.DISPATCH_INDIRECT_BUFFER_BINDING, name: 'GL_DISPATCH_INDIRECT_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.SHADER_STORAGE_BUFFER_BINDING, name: 'GL_SHADER_STORAGE_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.ATOMIC_COUNTER_BUFFER_BINDING, name: 'GL_ATOMIC_COUNTER_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.PARAMETER_BUFFER_BINDING, name: 'GL_PARAMETER_BUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.QUERY_BUFFER_BINDING, name: 'GL_QUERY_BUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
     { query: GL.COPY_READ_BUFFER, name: 'GL_COPY_READ_BUFFER_BINDING', kind: 'int', value: [0] },
     { query: GL.COPY_WRITE_BUFFER, name: 'GL_COPY_WRITE_BUFFER_BINDING', kind: 'int', value: [0] },
+    // OpenGL 3.1's uniform buffers: the general binding, and the limits
+    // (`BLOCK_LIMITS`; `context-uniform-buffers.js` has the indexed points).
+    {
+        query: GL.UNIFORM_BUFFER_BINDING, name: 'GL_UNIFORM_BUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.MAX_VERTEX_UNIFORM_BLOCKS, name: 'GL_MAX_VERTEX_UNIFORM_BLOCKS', kind: 'int',
+        value: [BLOCK_LIMITS.perStage],
+    },
+    {
+        query: GL.MAX_FRAGMENT_UNIFORM_BLOCKS, name: 'GL_MAX_FRAGMENT_UNIFORM_BLOCKS',
+        kind: 'int', value: [BLOCK_LIMITS.perStage],
+    },
+    {
+        query: GL.MAX_COMBINED_UNIFORM_BLOCKS, name: 'GL_MAX_COMBINED_UNIFORM_BLOCKS',
+        kind: 'int', value: [BLOCK_LIMITS.combined],
+    },
+    {
+        query: GL.MAX_UNIFORM_BUFFER_BINDINGS, name: 'GL_MAX_UNIFORM_BUFFER_BINDINGS',
+        kind: 'int', value: [BLOCK_LIMITS.bindings],
+    },
+    {
+        query: GL.MAX_UNIFORM_BLOCK_SIZE, name: 'GL_MAX_UNIFORM_BLOCK_SIZE', kind: 'int',
+        value: [BLOCK_LIMITS.size],
+    },
+    {
+        query: GL.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS,
+        name: 'GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS', kind: 'int',
+        value: [GLSL_LIMITS.vertexUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+    },
+    {
+        query: GL.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS,
+        name: 'GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS', kind: 'int',
+        value: [GLSL_LIMITS.fragmentUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+    },
+    {
+        query: GL.UNIFORM_BUFFER_OFFSET_ALIGNMENT, name: 'GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT',
+        kind: 'int', value: [256],
+    },
+    // Transform feedback (OpenGL 3.0, 4.0): the general binding, the object
+    // bound and whether it captures, and the limits (`FEEDBACK_LIMITS`).
+    {
+        query: GL.TRANSFORM_FEEDBACK_BUFFER_BINDING, name: 'GL_TRANSFORM_FEEDBACK_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_BINDING, name: 'GL_TRANSFORM_FEEDBACK_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_ACTIVE, name: 'GL_TRANSFORM_FEEDBACK_ACTIVE', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.TRANSFORM_FEEDBACK_PAUSED, name: 'GL_TRANSFORM_FEEDBACK_PAUSED', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS', kind: 'int',
+        value: [FEEDBACK_LIMITS.interleavedComponents],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS', kind: 'int',
+        value: [FEEDBACK_LIMITS.separateAttribs],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS,
+        name: 'GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS', kind: 'int',
+        value: [FEEDBACK_LIMITS.separateComponents],
+    },
+    {
+        query: GL.MAX_TRANSFORM_FEEDBACK_BUFFERS, name: 'GL_MAX_TRANSFORM_FEEDBACK_BUFFERS',
+        kind: 'int', value: [FEEDBACK_LIMITS.buffers],
+    },
+    // OpenGL 3.2's geometry shaders: their limits are the language's
+    // (`GLSL_CONSTANTS`), which a shader's gl_Max* constants read too.
+    ...GEOMETRY_LIMITS.map(([query, name, value])=>({ query, name,
+        kind: /** @type {'int'} */ ('int'), value: [value] })),
     {
         query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],
     },
     {
         query: GL.MAX_RENDERBUFFER_SIZE, name: 'GL_MAX_RENDERBUFFER_SIZE', kind: 'int',
-        value: [2048],
+        value: [8192],
     },
     { query: GL.MAX_SAMPLES, name: 'GL_MAX_SAMPLES', kind: 'int', value: [4] },
+    // OpenGL 4.0's tessellation.
+    ...TESSELLATION_STATE,
+    // Pixel transfer, the pixel maps' sizes and the evaluators' grids.
+    ...LEGACY_STATE,
 ]);
 
 /**
@@ -877,6 +1252,25 @@ export function createDefaultState(inputs){
 
 /** The largest signed 32-bit value, which a normalised 1.0 maps onto. */
 const INT_MAX = 0x7fffffff;
+
+/**
+ * The defaults the drawable decides -- the viewport and scissor box, the
+ * buffers drawn and read, the depth and double-buffering a query reports --
+ * set from it in `state`, every other entry left as it is.
+ *
+ * @param {Map<number, StateRecord>} state
+ * @param {StateInputs} inputs
+ */
+export function settleDrawableState(state, inputs){
+    for (const entry of DEFAULT_STATE)
+    {
+        const record = entry.dependsOn ? state.get(entry.query) : undefined;
+        if (record)
+        {
+            record.values = resolveStateDefault(entry, inputs);
+        }
+    }
+}
 
 /**
  * Reads a state record the way a typed query would see it.

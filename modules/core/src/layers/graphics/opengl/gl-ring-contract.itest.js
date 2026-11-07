@@ -556,8 +556,8 @@ const CASES = {
     glActiveTextureARB: [
         { label: 'the second unit', args: [GL.TEXTURE1], error: GL.NO_ERROR },
         { label: 'the last unit', args: [GL.TEXTURE0 + 3] },
-        { label: 'the last image unit', args: [GL.TEXTURE0 + 7] },
-        { label: 'past the last image unit', args: [GL.TEXTURE0 + 8], error: GL.INVALID_ENUM },
+        { label: 'the last image unit', args: [GL.TEXTURE0 + 15] },
+        { label: 'past the last image unit', args: [GL.TEXTURE0 + 16], error: GL.INVALID_ENUM },
         { label: 'no unit', args: [0], error: GL.INVALID_ENUM },
     ],
     glClientActiveTextureARB: [
@@ -676,6 +676,10 @@ const CASES = {
     glPolygonOffset: [
         { label: 'one and two', args: floats([1, 2]), error: GL.NO_ERROR },
         { label: 'negative', args: floats([-1, -0]) },
+    ],
+    glPolygonOffsetClamp: [
+        { label: 'clamped above', args: floats([1, 2, 0.5]), error: GL.NO_ERROR },
+        { label: 'clamped below', args: floats([-1, -2, -0.25]) },
     ],
     glShadeModel: [
         { label: 'FLAT', args: [GL.FLAT], error: GL.NO_ERROR },
@@ -1192,8 +1196,10 @@ Object.assign(CASES, {
     ],
     glBindFramebufferEXT: [
         { label: 'a name made on the bind', args: [GL.FRAMEBUFFER, 5], error: GL.NO_ERROR },
-        { label: 'a target of the ARB names', args: [GL.READ_FRAMEBUFFER, 5],
-            error: GL.INVALID_ENUM },
+        // GL_EXT_framebuffer_blit makes the read and draw targets the EXT bind's too.
+        { label: 'the read target of the blit extension', args: [GL.READ_FRAMEBUFFER, 5],
+            error: GL.NO_ERROR },
+        { label: 'a target there is not', args: [BAD, 5], error: GL.INVALID_ENUM },
     ],
     glUniform1f: uniformCases(0, floats([0.5]), 4),
     glUniform2f: uniformCases(1, floats([0.5, -2]), 5),
@@ -1203,7 +1209,7 @@ Object.assign(CASES, {
             before: uniforms, error: GL.INVALID_OPERATION }],
     glUniform1i: [...uniformCases(4, [-7], 0),
         { label: 'a sampler\'s unit', args: [28, 3], before: uniforms, error: GL.NO_ERROR },
-        { label: 'a unit past the last', args: [28, 8], before: uniforms,
+        { label: 'a unit past the last', args: [28, 16], before: uniforms,
             error: GL.INVALID_VALUE },
         { label: 'a bool', args: [29, 5], before: uniforms, error: GL.NO_ERROR }],
     glUniform2i: uniformCases(5, [3, -4], 1),

@@ -195,8 +195,8 @@ test('a GLSL program draws into a texture, upside down, and the window samples i
     const fixed = blocksAt(gpu, 0).filter((/** @type {Float32Array} */ b)=>
         b.length >= UNIFORM.floats);
     assert.deepEqual(fixed.map((/** @type {Float32Array} */ b)=>[b[UNIFORM.misc + 2],
-        b[UNIFORM.misc + 3]]),
-    [[-1, 16], [1, 32]], 'a framebuffer object\'s rows run up, the window\'s down');
+        b[UNIFORM.misc + 3], b[UNIFORM.clipControl]]),
+    [[-1, 16, -1], [1, 32, 1]], 'a framebuffer object\'s rows run up, the window\'s down');
     const vertex = blocksAt(gpu, 17);
     assert.equal(vertex[0][0], 0.5, 'the projection the program set, column by column');
     const fragment = blocksAt(gpu, 18);

@@ -64,16 +64,19 @@
 import { canonicalAttribName } from './arb-program.js';
 
 /**
- * The fixed stage's position, from GL's clip space into WebGPU's, which the
- * position-invariant option has to reproduce exactly. `uniforms.misc.y` is
- * the depth range's direction: -1 when it runs backwards, which a WebGPU
- * viewport cannot express. `uniforms.misc.z` is the target's row order: 1
- * for the window's back buffer, whose rows run down as WebGPU's do, and -1
- * for a framebuffer object's, drawn upside down so that its first row is
- * GL's bottom one, which is the row a texture made from it holds first.
+ * Every stage's position, from GL's clip space into WebGPU's: one
+ * expression, which the position-invariant option reproduces bit for bit.
+ * `uniforms.clipControl.x` is the sign of y: the target's row order (1 for
+ * the window's back buffer, whose rows run down as WebGPU's do, -1 for a
+ * framebuffer object's, drawn upside down so that its first row is GL's
+ * bottom one, which is the row a texture made from it holds first), turned
+ * round again for glClipControl's GL_UPPER_LEFT. z is `clip.z * .y + clip.w
+ * * .z`: GL's -w..w halved into WebGPU's 0..w (0.5, 0.5), or GL_ZERO_TO_ONE's
+ * as it is (1, 0), each run backwards where the depth range does (-0.5, 0.5;
+ * -1, 1), which a WebGPU viewport cannot express.
  */
-export const CLIP_REMAP = 'vec4f(clip.x, clip.y * uniforms.misc.z,'
-    + ' (clip.z * uniforms.misc.y + clip.w) * 0.5, clip.w)';
+export const CLIP_REMAP = 'vec4f(clip.x, clip.y * uniforms.clipControl.x,'
+    + ' clip.z * uniforms.clipControl.y + clip.w * uniforms.clipControl.z, clip.w)';
 
 export { canonicalAttribName };
 
@@ -87,6 +90,24 @@ export { canonicalAttribName };
  */
 export const VERTEX_PROGRAM_BINDING = 17;
 export const FRAGMENT_PROGRAM_BINDING = 18;
+
+/** Where the sampler bindings past the eighth start: past every other binding of group 0. */
+const SAMPLERS_PAST_EIGHT = 128;
+
+/**
+ * A sampler's texture binding in group 0, its sampler the next one: the
+ * first eight below the stages' uniform blocks (17 on), the rest past the
+ * blocks, storage, counters and images (`glsl-wgsl.js`, 32 to 103).
+ *
+ * @param {number} index  the program's sampler, or the unit an instruction names
+ * @returns {number}
+ */
+export const samplerBinding = index=>(index < 8 ? 1 + index * 2
+    : SAMPLERS_PAST_EIGHT + (index - 8) * 2);
+
+/** @param {number} binding a texture's (`samplerBinding`) @returns {number} its index */
+export const samplerIndex = binding=>(binding < SAMPLERS_PAST_EIGHT ? (binding - 1) / 2
+    : 8 + (binding - SAMPLERS_PAST_EIGHT) / 2);
 export const VERTEX_PROGRAM_GROUP = 0;
 export const FRAGMENT_PROGRAM_GROUP = 1;
 
@@ -979,6 +1000,11 @@ function sampleCall(instruction, source){
             ? `select(vec2f(0.0), ${source}.xy / ${source}.w, ${source}.w != 0.0)`
             : `${source}.xy`;
     }
+    if (texture.target === 'RECT')
+    {
+        // A rectangle's coordinates count texels (ARB_texture_rectangle).
+        coords = `(${coords}) / vec2f(textureDimensions(t${texture.unit}Texture))`;
+    }
     const sample = `t${texture.unit}Texture, t${texture.unit}Sampler, ${coords}`;
     return instruction.op === 'TXB'
         ? `textureSampleBias(${sample}, ${source}.w)`
@@ -1118,12 +1144,10 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
     body.push(...lines);
     if (!ir.positionInvariant && writesPosition)
     {
-        // GL's clip z runs -w..w and WebGPU's 0..w. The program may write the
-        // position one component at a time (a DP4 per matrix row), so the
-        // remap runs once here, against the w the program actually wrote,
-        // turned round as the fixed stage turns it for a backwards range.
-        body.push('    out.position.z = (out.position.z * uniforms.misc.y + out.position.w)'
-            + ' * 0.5;');
+        // The program may write the position one component at a time (a DP4
+        // per matrix row), so the remap runs once here, on what it wrote.
+        body.push('    let clip = out.position;');
+        body.push(`    out.position = ${CLIP_REMAP};`);
     }
     body.push('    return out;');
 
@@ -1234,8 +1258,9 @@ export function emitFragment(ir, group = FRAGMENT_PROGRAM_GROUP, viewportHeight 
     }
     const textureDeclarations = needs.textures.map(texture=>{
         const type = texture.target === 'CUBE' ? 'texture_cube<f32>' : 'texture_2d<f32>';
-        return `@group(0) @binding(${1 + texture.unit * 2}) var t${texture.unit}Texture: ${type};\n`
-            + `@group(0) @binding(${2 + texture.unit * 2}) var t${texture.unit}Sampler: sampler;`;
+        const at = samplerBinding(texture.unit);
+        return `@group(0) @binding(${at}) var t${texture.unit}Texture: ${type};\n`
+            + `@group(0) @binding(${at + 1}) var t${texture.unit}Sampler: sampler;`;
     }).join('\n');
 
     const paramCount = Math.max(1, analysed.params.length);

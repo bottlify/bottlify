@@ -42,21 +42,24 @@
  * at once, and the count is what says which of them a program actually wanted.
  */
 
-import { GL, WGL } from './constants.js';
+import { GL, PFD, WGL, WIN32_ERROR } from './constants.js';
 import {
-    EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, WGL_EXTENSIONS, registryArguments,
+    EXTENSION_WORDS, GL_EXTENSIONS, GL_VERSIONS, PENDING_VERSION_FUNCTIONS,
+    UNANNOUNCED_FUNCTIONS, WGL_EXTENSIONS, registryArguments,
 } from './extensions.js';
 import { laterEntryPoints } from './exports-later.js';
+import { legacyEntryPoints } from './exports-legacy.js';
+import { SYNC } from './context-sync.js';
 import {
-    choosePixelFormat, decodePixelFormat, encodePixelFormat, PIXEL_FORMATS,
-    PIXELFORMATDESCRIPTOR,
+    choosePixelFormat, choosePixelFormatsARB, decodePixelFormat, encodePixelFormat,
+    formatAttribute, PIXEL_FORMATS, PIXELFORMATDESCRIPTOR,
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
 import { createOpenglRoot } from './root.js';
+import { debugEntryPoints } from './exports-debug.js';
 import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
-import { PFD } from './constants.js';
 import {
     COMMAND_RING_BYTES, TEB_GL_CONTEXT, createCommandReader, placeCommandRing,
 } from '../seam/shadow.js';
@@ -429,6 +432,13 @@ const LIST_TYPES = new Map([
  *           it, and then every non-null handle is its own drawable the size of
  *           the screen -- which is right for the one window a program of this
  *           era opens and wrong as soon as it opens two.
+ * @property {(hdc: number) => import('./wgl-bitmap.js').BitmapSurface | null} [bitmapSurface]
+ *           The bitmap a memory DC has selected, which a context made on that DC
+ *           draws into (`wgl-bitmap.js`).
+ * @property {(width: number, height: number) => number} [createPbufferDc]
+ *           A GDI DC for a pbuffer of this size (WGL_ARB_pbuffer), which
+ *           `describeDrawable` names; absent, the pbuffers' DCs are WGL's own.
+ * @property {(hdc: number) => void} [deleteDc]  a pbuffer's DC gone with it
  * @property {() => void} [presented]  Told of every frame a program swaps.
  * @property {() => number} [currentThread]
  * @property {4 | 8} [pointerSize]
@@ -452,6 +462,8 @@ const LIST_TYPES = new Map([
  *           is advertised: a name in the extension string whose entry point
  *           cannot be handed out is a crash a program cannot see coming.
  * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
+ * @property {(call: { entry: number, args: number[] }) => Promise<number>} [callGuest]
+ *     a call into the program's code on the calling thread: the debug callback (4.3)
  *           Where a call that was accepted but not honoured is reported.
  * @property {() => any} [backend]
  *           The rendering backend, reached when the first context is made.
@@ -530,6 +542,13 @@ export function byteRunNames(bytes, width, count){
 }
 
 /**
+ * What wglGetProcAddress hands out though nothing reported names it, when it
+ * is implemented: the later versions' functions and the unreported
+ * extensions' (decision A111).
+ */
+const UNANNOUNCED = new Set([...PENDING_VERSION_FUNCTIONS, ...UNANNOUNCED_FUNCTIONS]);
+
+/**
  * @param {OpenglServices} services
  */
 export function createOpengl(services){
@@ -575,7 +594,8 @@ export function createOpengl(services){
     let madeContext = false;
 
     const wgl = createWgl({
-        gdi: { describeDrawable },
+        gdi: { describeDrawable, bitmapSurface: services.bitmapSurface,
+            createPbufferDc: services.createPbufferDc, deleteDc: services.deleteDc },
         currentThread: services.currentThread ?? (()=>0),
         setLastError: services.setLastError,
         memory: {
@@ -594,6 +614,7 @@ export function createOpengl(services){
             madeContext = true;
             return root.CreateContext(options);
         },
+        unannounced: name=>UNANNOUNCED.has(name) && implemented[name] !== undefined,
     });
 
     /** @type {Map<number, any>} guest handle -> the context it names */
@@ -607,7 +628,20 @@ export function createOpengl(services){
     /** Where a swapped frame is copied to, allocated when one first is. */
     let frameAddress = 0;
     let frameBytes = 0;
-    let swapInterval = 1;
+    /**
+     * Each window's swap interval, by its drawable's key: WGL_EXT_swap_control
+     * sets the current DC's window's, which every context on it reads and no
+     * other window shares (Wine's opengl32 test_swap_control). One is the
+     * default.
+     *
+     * @type {Map<string, number>}
+     */
+    const swapIntervals = new Map();
+    /** @returns {string | null} the current DC's drawable's key */
+    const currentDrawableKey = ()=>{
+        const hdc = wgl.wglGetCurrentDC();
+        return current() && hdc !== 0 ? describeDrawable(hdc)?.key ?? null : null;
+    };
 
     /** @type {Map<string, number>} what a program called that is not implemented */
     const unimplemented = new Map();
@@ -1368,7 +1402,8 @@ export function createOpengl(services){
         new Set([GL.FOG_COLOR]),
         (context, [parameter], values)=>context.glFogfv(parameter, values));
     parameterFamily('glTexParameter', 2,
-        parameter=>(parameter === GL.TEXTURE_BORDER_COLOR ? 4 : 1),
+        parameter=>(parameter === GL.TEXTURE_BORDER_COLOR
+            || parameter === GL.TEXTURE_SWIZZLE_RGBA ? 4 : 1),
         new Set([GL.TEXTURE_BORDER_COLOR]),
         (context, [target, parameter], values)=>
             context.glTexParameterfv(target, parameter, values));
@@ -1435,93 +1470,6 @@ export function createOpengl(services){
     });
 
     /**
-     * The one-time attribute answers WGL_ARB_pixel_format gives about a
-     * format, as the descriptor's fields.
-     *
-     * @param {import('./pixelformat.js').PixelFormat} format
-     * @param {number} attribute
-     * @returns {number | null}
-     */
-    const formatAttribute = (format, attribute)=>{
-        switch (attribute)
-        {
-            case WGL.NUMBER_PIXEL_FORMATS_ARB:
-                return PIXEL_FORMATS.length;
-            case WGL.DRAW_TO_WINDOW_ARB:
-                return (format.dwFlags & PFD.DRAW_TO_WINDOW) ? 1 : 0;
-            case WGL.DRAW_TO_BITMAP_ARB:
-                return (format.dwFlags & PFD.DRAW_TO_BITMAP) ? 1 : 0;
-            case WGL.ACCELERATION_ARB:
-                return (format.dwFlags & PFD.GENERIC_ACCELERATED) ? WGL.FULL_ACCELERATION_ARB
-                    : (format.dwFlags & PFD.GENERIC_FORMAT) ? WGL.NO_ACCELERATION_ARB
-                        : WGL.FULL_ACCELERATION_ARB;
-            case WGL.NEED_PALETTE_ARB:
-            case WGL.NEED_SYSTEM_PALETTE_ARB:
-            case WGL.NUMBER_OVERLAYS_ARB:
-            case WGL.NUMBER_UNDERLAYS_ARB:
-            case WGL.TRANSPARENT_ARB:
-            case WGL.SHARE_DEPTH_ARB:
-            case WGL.SHARE_STENCIL_ARB:
-            case WGL.SHARE_ACCUM_ARB:
-            case WGL.SAMPLE_BUFFERS_ARB:
-            case WGL.SAMPLES_ARB:
-                return 0;
-            case WGL.SWAP_LAYER_BUFFERS_ARB:
-                return (format.dwFlags & PFD.SWAP_LAYER_BUFFERS) ? 1 : 0;
-            case WGL.SWAP_METHOD_ARB:
-                return (format.dwFlags & PFD.SWAP_EXCHANGE) ? WGL.SWAP_EXCHANGE_ARB
-                    : (format.dwFlags & PFD.SWAP_COPY) ? WGL.SWAP_COPY_ARB : WGL.SWAP_UNDEFINED_ARB;
-            case WGL.SUPPORT_GDI_ARB:
-                return (format.dwFlags & PFD.SUPPORT_GDI) ? 1 : 0;
-            case WGL.SUPPORT_OPENGL_ARB:
-                return (format.dwFlags & PFD.SUPPORT_OPENGL) ? 1 : 0;
-            case WGL.DOUBLE_BUFFER_ARB:
-                return (format.dwFlags & PFD.DOUBLEBUFFER) ? 1 : 0;
-            case WGL.STEREO_ARB:
-                return (format.dwFlags & PFD.STEREO) ? 1 : 0;
-            case WGL.PIXEL_TYPE_ARB:
-                return format.iPixelType === PFD.TYPE_COLORINDEX
-                    ? WGL.TYPE_COLORINDEX_ARB : WGL.TYPE_RGBA_ARB;
-            case WGL.COLOR_BITS_ARB:
-                return format.cColorBits;
-            case WGL.RED_BITS_ARB:
-                return format.cRedBits;
-            case WGL.RED_SHIFT_ARB:
-                return format.cRedShift;
-            case WGL.GREEN_BITS_ARB:
-                return format.cGreenBits;
-            case WGL.GREEN_SHIFT_ARB:
-                return format.cGreenShift;
-            case WGL.BLUE_BITS_ARB:
-                return format.cBlueBits;
-            case WGL.BLUE_SHIFT_ARB:
-                return format.cBlueShift;
-            case WGL.ALPHA_BITS_ARB:
-                return format.cAlphaBits;
-            case WGL.ALPHA_SHIFT_ARB:
-                return format.cAlphaShift;
-            case WGL.ACCUM_BITS_ARB:
-                return format.cAccumBits;
-            case WGL.ACCUM_RED_BITS_ARB:
-                return format.cAccumRedBits;
-            case WGL.ACCUM_GREEN_BITS_ARB:
-                return format.cAccumGreenBits;
-            case WGL.ACCUM_BLUE_BITS_ARB:
-                return format.cAccumBlueBits;
-            case WGL.ACCUM_ALPHA_BITS_ARB:
-                return format.cAccumAlphaBits;
-            case WGL.DEPTH_BITS_ARB:
-                return format.cDepthBits;
-            case WGL.STENCIL_BITS_ARB:
-                return format.cStencilBits;
-            case WGL.AUX_BUFFERS_ARB:
-                return format.cAuxBuffers;
-            default:
-                return null;
-        }
-    };
-
-    /**
      * Answers a WGL_ARB_pixel_format attribute query, in either type.
      *
      * @param {number[]} args
@@ -1546,12 +1494,150 @@ export function createOpengl(services){
         return 1;
     };
 
+    /**
+     * wglMakeCurrent, and wglMakeContextCurrentARB with a DC to read from.
+     *
+     * @param {number} draw @param {number} read @param {number} handle
+     * @returns {number}
+     */
+    const makeCurrent = (draw, read, handle)=>{
+        const context = handle === 0 ? null : contexts.get(handle);
+        if (handle !== 0 && !context)
+        {
+            services.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        if (!wgl.wglMakeCurrent(draw, context ?? null, read))
+        {
+            return 0;
+        }
+        pointRoutines(context ?? null);
+        return 1;
+    };
+
+    /**
+     * A WGL attribute list as name and value pairs: it ends at a zero name,
+     * and a null list names nothing.
+     *
+     * @param {number} list @returns {number[]}
+     */
+    const attributeList = list=>{
+        /** @type {number[]} */
+        const attributes = [];
+        for (let at = list >>> 0; at !== 0 && attributes.length < 256; at += 8)
+        {
+            const pair = new DataView(services.readMemory(at, 8).slice().buffer);
+            const name = pair.getUint32(0, true);
+            if (name === 0)
+            {
+                break;
+            }
+            attributes.push(name, pair.getInt32(4, true));
+        }
+        return attributes;
+    };
+
+    /**
+     * Whether WGL_ARB_render_texture names a buffer the pbuffer has: either
+     * front one -- a right one of no stereo format binds an empty image, as
+     * the drivers Wine's test measured do -- and a back one where its format
+     * has one.
+     *
+     * @param {import('./wgl.js').Pbuffer} pbuffer @param {number} buffer
+     */
+    const pbufferHasBuffer = (pbuffer, buffer)=>buffer === WGL.FRONT_LEFT_ARB
+        || buffer === WGL.FRONT_RIGHT_ARB
+        || ((buffer === WGL.BACK_LEFT_ARB || buffer === WGL.BACK_RIGHT_ARB)
+            && (PIXEL_FORMATS[pbuffer.format - 1].dwFlags & PFD.DOUBLEBUFFER) !== 0);
+
+    /**
+     * The texture image a pbuffer bound as one is: on the current context's
+     * texture of its target, level zero (a cube's face), from `texels`, or
+     * empty for none.
+     *
+     * @param {any} context @param {import('./wgl.js').Pbuffer} pbuffer
+     * @param {Uint8Array | null} texels  RGBA, its bottom row first
+     */
+    const pbufferImage = (context, pbuffer, texels)=>{
+        const internal = pbuffer.textureFormat === WGL.TEXTURE_RGBA_ARB ? GL.RGBA : GL.RGB;
+        const width = texels ? pbuffer.width : 0;
+        const height = texels ? pbuffer.height : 0;
+        const pixels = texels ? { stored: texels } : null;
+        if (pbuffer.textureTarget === WGL.TEXTURE_1D_ARB)
+        {
+            context.glTexImage1D(GL.TEXTURE_1D, 0, internal, width, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+                pixels);
+            return;
+        }
+        const target = pbuffer.textureTarget === WGL.TEXTURE_CUBE_MAP_ARB
+            ? GL.TEXTURE_CUBE_MAP_POSITIVE_X + pbuffer.face - WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB
+            : GL.TEXTURE_2D;
+        context.glTexImage2D(target, 0, internal, width, height, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            pixels);
+    };
+
     /** @type {Record<string, (args: number[]) => number>} */
     const handlers = {
+        // --- WGL_ARB_pbuffer ---
+
+        wglCreatePbufferARB: ([hdc, format, width, height, list])=>wgl.wglCreatePbufferARB(
+            hdc >>> 0, format | 0, width | 0, height | 0, attributeList(list)),
+        wglGetPbufferDCARB: ([pbuffer])=>wgl.wglGetPbufferDCARB(pbuffer >>> 0),
+        wglReleasePbufferDCARB: ([pbuffer, hdc])=>(
+            wgl.wglReleasePbufferDCARB(pbuffer >>> 0, hdc >>> 0) ? 1 : 0),
+        wglDestroyPbufferARB: ([pbuffer])=>(wgl.wglDestroyPbufferARB(pbuffer >>> 0) ? 1 : 0),
+        wglQueryPbufferARB: ([pbuffer, attribute, out])=>{
+            const value = wgl.wglQueryPbufferARB(pbuffer >>> 0, attribute >>> 0);
+            if (value === null)
+            {
+                return 0;
+            }
+            if ((out >>> 0) !== 0)
+            {
+                writeWord(out >>> 0, value);
+            }
+            return 1;
+        },
+
+        // --- WGL_ARB_render_texture ---
+
+        wglSetPbufferAttribARB: ([pbuffer, list])=>(
+            wgl.wglSetPbufferAttribARB(pbuffer >>> 0, attributeList(list)) ? 1 : 0),
+        wglReleaseTexImageARB: ([handle, buffer])=>{
+            const pbuffer = wgl.pbufferOf(handle >>> 0);
+            if (!pbuffer)
+            {
+                wgl.fail(WIN32_ERROR.INVALID_HANDLE);
+                return 0;
+            }
+            if (!pbufferHasBuffer(pbuffer, buffer >>> 0))
+            {
+                wgl.fail(WIN32_ERROR.INVALID_DATA);
+                return 0;
+            }
+            // Let go of, the texture's image is none, as the drivers measured leave it.
+            const context = current();
+            if (pbuffer.bound === (buffer >>> 0) && context)
+            {
+                pbufferImage(context, pbuffer, null);
+            }
+            if (pbuffer.bound === (buffer >>> 0))
+            {
+                pbuffer.bound = 0;
+            }
+            return 1;
+        },
         // --- WGL ---
 
         wglCreateContext: ([hdc])=>{
             const context = wgl.wglCreateContext(hdc >>> 0);
+            return context ? handleFor(context) : 0;
+        },
+
+        wglCreateContextAttribsARB: ([hdc, share, list])=>{
+            const attributes = attributeList(list);
+            const shared = (share >>> 0) === 0 ? null : contexts.get(share >>> 0);
+            const context = wgl.wglCreateContextAttribsARB(hdc >>> 0, shared, attributes);
             return context ? handleFor(context) : 0;
         },
 
@@ -1577,20 +1663,12 @@ export function createOpengl(services){
             return 1;
         },
 
-        wglMakeCurrent: ([hdc, handle])=>{
-            const context = (handle >>> 0) === 0 ? null : contexts.get(handle >>> 0);
-            if ((handle >>> 0) !== 0 && !context)
-            {
-                services.setLastError?.(ERROR_INVALID_HANDLE);
-                return 0;
-            }
-            if (!wgl.wglMakeCurrent(hdc >>> 0, context ?? null))
-            {
-                return 0;
-            }
-            pointRoutines(context ?? null);
-            return 1;
-        },
+        wglMakeCurrent: ([hdc, handle])=>makeCurrent(hdc >>> 0, hdc >>> 0, handle >>> 0),
+
+        wglMakeContextCurrentARB: ([draw, read, handle])=>
+            makeCurrent(draw >>> 0, read >>> 0, handle >>> 0),
+
+        wglGetCurrentReadDCARB: ()=>wgl.wglGetCurrentReadDCARB(),
 
         wglGetCurrentContext: ()=>{
             const context = current();
@@ -1604,6 +1682,9 @@ export function createOpengl(services){
             const to = contexts.get(destination >>> 0);
             return from && to && wgl.wglShareLists(from, to) ? 1 : 0;
         },
+
+        wglCopyContext: ([source, destination, mask])=>(wgl.wglCopyContext(
+            contexts.get(source >>> 0), contexts.get(destination >>> 0), mask >>> 0) ? 1 : 0),
 
         /**
          * The address of an extension function, and null for everything
@@ -1642,76 +1723,65 @@ export function createOpengl(services){
             // presenter's, which paces to the display already.
             if ((interval | 0) < 0)
             {
+                // ERROR_INVALID_DATA, as the extension says.
+                services.setLastError?.(13);
                 return 0;
             }
-            swapInterval = interval | 0;
+            const key = currentDrawableKey();
+            if (key === null)
+            {
+                return 0;
+            }
+            swapIntervals.set(key, interval | 0);
             return 1;
         },
 
-        wglGetSwapIntervalEXT: ()=>swapInterval,
+        wglGetSwapIntervalEXT: ()=>{
+            const key = currentDrawableKey();
+            return key === null ? 1 : swapIntervals.get(key) ?? 1;
+        },
 
         wglGetPixelFormatAttribivARB: args=>pixelFormatAttributes(args, 'word'),
 
         wglGetPixelFormatAttribfvARB: args=>pixelFormatAttributes(args, 'float'),
 
         /**
-         * The extension's way of choosing: attribute pairs rather than a
-         * descriptor, answered with the one best format.
+         * The extension's way of choosing: attribute pairs, integer and float
+         * lists both, answered with every format that meets them, best first.
          */
         wglChoosePixelFormatARB: args=>{
-            const [hdc, intAttributes] = args;
-            const [maxFormats, out, outCount] = args.slice(3);
+            const [hdc, intAttributes, floatAttributes, maxFormats, out, outCount] = args;
             if (!describeDrawable(hdc >>> 0) || (out >>> 0) === 0 || (outCount >>> 0) === 0)
             {
                 return 0;
             }
-            const request = { ...PIXEL_FORMATS[0], dwFlags: 0, cDepthBits: 0, cStencilBits: 0,
-                cAlphaBits: 0, cAccumBits: 0, cAuxBuffers: 0, cColorBits: 0 };
-            /** @type {Record<number, number>} */
-            const flagOf = {
-                [WGL.DRAW_TO_WINDOW_ARB]: PFD.DRAW_TO_WINDOW,
-                [WGL.DRAW_TO_BITMAP_ARB]: PFD.DRAW_TO_BITMAP,
-                [WGL.SUPPORT_OPENGL_ARB]: PFD.SUPPORT_OPENGL,
-                [WGL.SUPPORT_GDI_ARB]: PFD.SUPPORT_GDI,
-                [WGL.DOUBLE_BUFFER_ARB]: PFD.DOUBLEBUFFER,
-                [WGL.STEREO_ARB]: PFD.STEREO,
+            /** @type {Array<[number, number]>} */
+            const pairs = [];
+            /**
+             * @param {number} address
+             * @param {(at: number) => number} valueAt
+             */
+            const readPairs = (address, valueAt)=>{
+                for (let at = address >>> 0; at !== 0; at += 8)
+                {
+                    const [attribute] = readI32s(at, 1);
+                    if (attribute === 0)
+                    {
+                        break;
+                    }
+                    pairs.push([attribute, valueAt(at + 4)]);
+                }
             };
-            for (let at = intAttributes >>> 0; at !== 0;)
+            readPairs(intAttributes, at=>readI32s(at, 1)[0]);
+            readPairs(floatAttributes, at=>readF32s(at, 1)[0]);
+            const { formats, unknown } = choosePixelFormatsARB(pairs);
+            if (unknown.length > 0)
             {
-                const [attribute, value] = readI32s(at, 2);
-                if (attribute === 0)
-                {
-                    break;
-                }
-                at += 8;
-                if (flagOf[attribute] !== undefined)
-                {
-                    request.dwFlags = value ? request.dwFlags | flagOf[attribute] : request.dwFlags;
-                }
-                else if (attribute === WGL.COLOR_BITS_ARB)
-                {
-                    request.cColorBits = value;
-                }
-                else if (attribute === WGL.DEPTH_BITS_ARB)
-                {
-                    request.cDepthBits = value;
-                }
-                else if (attribute === WGL.STENCIL_BITS_ARB)
-                {
-                    request.cStencilBits = value;
-                }
-                else if (attribute === WGL.ALPHA_BITS_ARB)
-                {
-                    request.cAlphaBits = value;
-                }
-                else if (attribute === WGL.PIXEL_TYPE_ARB)
-                {
-                    request.iPixelType = value === WGL.TYPE_COLORINDEX_ARB
-                        ? PFD.TYPE_COLORINDEX : PFD.TYPE_RGBA;
-                }
+                services.divergence?.('OpenGL', `wglChoosePixelFormatARB: attributes ${
+                    unknown.map(attribute=>`0x${attribute.toString(16)}`).join(', ')
+                } are not known here and match every format`);
             }
-            const chosen = choosePixelFormat(request);
-            const found = chosen > 0 && (maxFormats >>> 0) > 0 ? [chosen] : [];
+            const found = formats.slice(0, maxFormats >>> 0);
             writeU32s(out, found);
             writeU32s(outCount, [found.length]);
             return 1;
@@ -1725,6 +1795,8 @@ export function createOpengl(services){
         glGetError: ()=>current()?.glGetError() ?? GL.INVALID_OPERATION,
 
         glGetString: ([name])=>guestString(current()?.glGetString(name >>> 0)),
+        glGetStringi: ([name, index])=>guestString(
+            current()?.glGetStringi(name >>> 0, index >>> 0)),
 
         // --- capabilities and queries ---
 
@@ -1798,8 +1870,15 @@ export function createOpengl(services){
         glReadBuffer: ([mode])=>answer(current()?.glReadBuffer(mode >>> 0)),
         glRenderMode: ([mode])=>answer(current()?.glRenderMode(mode >>> 0)),
         glAccum: ([op, value])=>answer(current()?.glAccum(op >>> 0, asFloat(value))),
-        glFlush: ()=>answer(current()?.glFlush()),
-        glFinish: ()=>answer(current()?.glFinish()),
+        // On a memory DC the context's buffer meets the bitmap selected now.
+        glFlush: ()=>call(context=>{
+            context.glFlush();
+            wgl.meetBitmap(context);
+        }),
+        glFinish: ()=>call(context=>{
+            context.glFinish();
+            wgl.meetBitmap(context);
+        }),
         glColorMaterial: ([face, mode])=>
             answer(current()?.glColorMaterial(face >>> 0, mode >>> 0)),
         glClipPlane: ([plane, equation])=>
@@ -1884,6 +1963,15 @@ export function createOpengl(services){
             a[0] >>> 0, a[1] | 0, a[2] | 0, 0, a[3] | 0, a[4] | 0, a[5] | 0, 1)),
         glGetTexImage: ([target, level, format, type, out])=>call(context=>{
             const texels = context.glGetTexImage(target >>> 0, level | 0, format >>> 0, type >>> 0);
+            // A level kept as a sized format comes back packed already.
+            if (texels && !(texels instanceof Uint8Array))
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    services.writeMemory(out >>> 0, texels.packed);
+                }
+                return;
+            }
             const shape = texels && context.glGetTexLevelParameteriv(
                 target >>> 0, level | 0, GL.TEXTURE_WIDTH);
             const height = texels && context.glGetTexLevelParameteriv(
@@ -1915,13 +2003,20 @@ export function createOpengl(services){
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] >>> 0, a[7] | 0,
             a[8] >>> 0)),
         glCompressedTexImage1DARB: a=>answer(current()?.glCompressedTexImage1DARB(a[0] >>> 0)),
-        glCompressedTexImage3DARB: a=>answer(current()?.glCompressedTexImage3DARB(a[0] >>> 0)),
+        glCompressedTexImage3DARB: a=>answer(current()?.glCompressedTexImage3DARB(a[0] >>> 0,
+            a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0, a[8] >>> 0)),
         glCompressedTexSubImage1DARB: a=>
             answer(current()?.glCompressedTexSubImage1DARB(a[0] >>> 0)),
-        glCompressedTexSubImage3DARB: a=>
-            answer(current()?.glCompressedTexSubImage3DARB(a[0] >>> 0)),
-        glGetCompressedTexImageARB: ([target, level])=>
-            answer(current()?.glGetCompressedTexImageARB(target >>> 0, level | 0)),
+        glCompressedTexSubImage3DARB: a=>answer(current()?.glCompressedTexSubImage3DARB(
+            a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0,
+            a[8] >>> 0, a[9] | 0, a[10] >>> 0)),
+        glGetCompressedTexImageARB: ([target, level, out])=>call(context=>{
+            const blocks = context.glGetCompressedTexImageARB(target >>> 0, level | 0);
+            if (blocks && (out >>> 0) !== 0)
+            {
+                services.writeMemory(out >>> 0, blocks);
+            }
+        }),
 
         // --- display lists ---
 
@@ -2015,13 +2110,6 @@ export function createOpengl(services){
             current()?.glBufferDataARB(target >>> 0, size | 0, (data >>> 0) || null, usage >>> 0)),
         glBufferSubDataARB: ([target, offset, size, data])=>answer(
             current()?.glBufferSubDataARB(target >>> 0, offset | 0, size | 0, data >>> 0)),
-        glGetBufferSubDataARB: ([target, offset, size, out])=>call(context=>{
-            const bytes = context.glGetBufferSubDataARB(target >>> 0, offset | 0, size | 0);
-            if (bytes && (out >>> 0) !== 0)
-            {
-                services.writeMemory(out >>> 0, bytes);
-            }
-        }),
         glMapBufferARB: ([target, access])=>
             answer(current()?.glMapBufferARB(target >>> 0, access >>> 0)),
         glUnmapBufferARB: ([target])=>answer(current()?.glUnmapBufferARB(target >>> 0)),
@@ -2119,14 +2207,6 @@ export function createOpengl(services){
 
         // --- pixels ---
 
-        glReadPixels: ([x, y, width, height, format, type, out])=>call(context=>{
-            const packed = context.glReadPixels(
-                x | 0, y | 0, width | 0, height | 0, format >>> 0, type >>> 0);
-            if (packed && (out >>> 0) !== 0)
-            {
-                services.writeMemory(out >>> 0, packed);
-            }
-        }),
         glDrawPixels: ([width, height, format, type, pixels])=>call(context=>{
             const unpack = unpackState(context);
             const needed = imageBytes(width | 0, height | 0, format >>> 0, type >>> 0, unpack);
@@ -2158,6 +2238,19 @@ export function createOpengl(services){
         },
         pointerSize: services.pointerSize ?? 4,
     }));
+    Object.assign(implemented, legacyEntryPoints({ current, answer, readTyped }));
+    const debug = debugEntryPoints({
+        current, call, answer, readTyped, writeU32s,
+        writeMemory: services.writeMemory,
+        readMemory: (address, length)=>windowMemory(address >>> 0, length),
+        readText: address=>new TextDecoder('latin1').decode(
+            readToTerminator(services, address >>> 0, 1, SOURCE_LIMIT).bytes),
+        callGuest: services.callGuest,
+        allocate: services.scratch?.allocate,
+        free: services.scratch?.free,
+        divergence: (detail, severity)=>services.divergence?.('OpenGL', detail, severity),
+    });
+    Object.assign(implemented, debug.plain);
     family('glWindowPos', [2, 3], SIGNED, false, [0, 0, 0, 1],
         (context, x, y, z)=>context.glWindowPos3f(x, y, z));
     // A version's name for what an extension brought, and an extension's
@@ -2178,15 +2271,167 @@ export function createOpengl(services){
     }
 
     /**
-     * The two calls here that may wait before they answer: a swap on the
-     * device waits, once it is enough frames behind, for the oldest to
-     * finish. Kept apart from `implemented` so that `entry` never hands one
-     * out -- a caller already on this side of the boundary has no thread to
-     * park.
+     * glGetQueryObject{iv,uiv,i64v,ui64v}: a result not yet counted is waited
+     * for, so these are among the calls that may wait.
+     *
+     * @returns {Record<string, (args: number[]) => number | Promise<number>>}
+     */
+    function queryResults(){
+        /** @type {Record<string, (args: number[]) => number | Promise<number>>} */
+        const forms = {};
+        for (const [suffix, wide] of /** @type {[string, boolean][]} */ ([
+            ['iv', false], ['uiv', false], ['i64v', true], ['ui64v', true],
+        ]))
+        {
+            forms[`glGetQueryObject${suffix}`] = ([name, pname, out])=>{
+                const context = current();
+                if (!context)
+                {
+                    return 0;
+                }
+                /** @param {number[] | null} values */
+                const write = values=>{
+                    if (values && (out >>> 0) !== 0)
+                    {
+                        if (wide)
+                        {
+                            const bytes = new Uint8Array(values.length * 8);
+                            const view = new DataView(bytes.buffer);
+                            values.forEach((value, k)=>view.setBigUint64(k * 8,
+                                BigInt.asUintN(64, BigInt(Math.trunc(value))), true));
+                            services.writeMemory(out >>> 0, bytes);
+                        }
+                        else
+                        {
+                            writeQuery(out, values.map(value=>Math.min(value, 0xffffffff)),
+                                'word');
+                        }
+                    }
+                    return 0;
+                };
+                // With a query buffer bound (4.4) the pointer is an offset
+                // into it, and the answer is written there without a wait.
+                if (context.glGetIntegerv(GL.QUERY_BUFFER_BINDING)?.[0])
+                {
+                    context.queryIntoBuffer(name >>> 0, pname >>> 0, out >>> 0, wide,
+                        !suffix.startsWith('u'), null);
+                    return 0;
+                }
+                const answered = context.glGetQueryObject(name >>> 0, pname >>> 0);
+                return answered instanceof Promise ? answered.then(write) : write(answered);
+            };
+            forms[`glGetQueryBufferObject${suffix}`] = ([name, buffer, pname, offset])=>answer(
+                current()?.queryIntoBuffer(name >>> 0, pname >>> 0, offset | 0, wide,
+                    !suffix.startsWith('u'), buffer >>> 0));
+        }
+        // GL_ARB_occlusion_query's names for 1.5's, which wait the same way.
+        forms.glGetQueryObjectivARB = forms.glGetQueryObjectiv;
+        forms.glGetQueryObjectuivARB = forms.glGetQueryObjectuiv;
+        return forms;
+    }
+
+    /**
+     * The calls here that may wait before they answer: a swap on the device
+     * waits, once it is enough frames behind, for the oldest to finish, and a
+     * read of pixels on the device for them to be drawn and copied back. Kept
+     * apart from `implemented` so that `entry` never hands one out -- a
+     * caller already on this side of the boundary has no thread to park.
      *
      * @type {Record<string, (args: number[]) => number | Promise<number>>}
      */
     const swaps = {
+        /**
+         * WGL_ARB_render_texture: the pbuffer's buffer is the image of the
+         * current context's texture of its target until it is let go of,
+         * read from the device as it is now.
+         */
+        wglBindTexImageARB: ([handle, buffer])=>{
+            const pbuffer = wgl.pbufferOf(handle >>> 0);
+            if (!pbuffer)
+            {
+                wgl.fail(WIN32_ERROR.INVALID_HANDLE);
+                return 0;
+            }
+            const context = current();
+            if (!pbufferHasBuffer(pbuffer, buffer >>> 0) || pbuffer.bound !== 0
+                || pbuffer.textureFormat === WGL.NO_TEXTURE_ARB || !context)
+            {
+                wgl.fail(WIN32_ERROR.INVALID_DATA);
+                return 0;
+            }
+            pbuffer.bound = buffer >>> 0;
+            const drawable = wgl.pbufferDrawable(pbuffer);
+            const right = (buffer >>> 0) === WGL.FRONT_RIGHT_ARB
+                || (buffer >>> 0) === WGL.BACK_RIGHT_ARB;
+            const blank = new Uint8Array(pbuffer.width * pbuffer.height * 4);
+            const reading = right ? null
+                : drawable ? context.readDrawable?.(drawable) ?? null : null;
+            if (right)
+            {
+                // No stereo format here: the right buffer is none.
+                pbufferImage(context, pbuffer, null);
+                return 1;
+            }
+            if (!reading)
+            {
+                pbufferImage(context, pbuffer, blank);
+                return 1;
+            }
+            return reading.then((/** @type {Uint8Array | null} */ texels)=>{
+                pbufferImage(context, pbuffer, texels ?? blank);
+                return 1;
+            });
+        },
+
+        ...queryResults(),
+        // A wait on a fence the device has not reached waits for it, up to
+        // the timeout.
+        glClientWaitSync: ([sync, flags, low, high])=>{
+            const waited = current()?.glClientWaitSync(sync >>> 0, flags >>> 0,
+                (high >>> 0) * 0x100000000 + (low >>> 0));
+            return waited ?? SYNC.WAIT_FAILED;
+        },
+        glReadPixels: ([x, y, width, height, format, type, out])=>{
+            const context = current();
+            if (!context)
+            {
+                return 0;
+            }
+            wgl.meetBitmap(context);
+            const packed = context.glReadPixels(
+                x | 0, y | 0, width | 0, height | 0, format >>> 0, type >>> 0);
+            /** @param {Uint8Array | null} bytes */
+            const write = bytes=>{
+                if (bytes && (out >>> 0) !== 0)
+                {
+                    services.writeMemory(out >>> 0, bytes);
+                }
+                return 0;
+            };
+            return packed instanceof Promise ? packed.then(write) : write(packed);
+        },
+
+        // 4.5's robustness: glReadPixels into a buffer of a size.
+        glReadnPixels: ([x, y, width, height, format, type, size, out])=>{
+            const context = current();
+            if (!context)
+            {
+                return 0;
+            }
+            wgl.meetBitmap(context);
+            const packed = context.glReadnPixels(x | 0, y | 0, width | 0, height | 0,
+                format >>> 0, type >>> 0, size | 0);
+            /** @param {Uint8Array | null} bytes */
+            const write = bytes=>{
+                if (bytes && (out >>> 0) !== 0)
+                {
+                    services.writeMemory(out >>> 0, bytes);
+                }
+                return 0;
+            };
+            return packed instanceof Promise ? packed.then(write) : write(packed);
+        },
+
         wglSwapBuffers: ([hdc])=>{
             if (!wgl.SwapBuffers(hdc >>> 0))
             {
@@ -2206,6 +2451,42 @@ export function createOpengl(services){
             return held ? held.then(()=>1) : 1;
         },
     };
+
+    Object.assign(swaps, debug.waiting);
+    // GL_ARB_robustness's name for 4.5's, which waits the same way.
+    swaps.glReadnPixelsARB = swaps.glReadnPixels;
+
+    /**
+     * Bytes a read of a buffer object answers into guest memory: at once, or
+     * once the device has given back a buffer a shader wrote.
+     *
+     * @param {number} out @param {Uint8Array | Promise<Uint8Array | null> | null} bytes
+     * @returns {number | Promise<number>}
+     */
+    const deliverBuffer = (out, bytes)=>{
+        /** @param {Uint8Array | null} got */
+        const write = got=>{
+            if (got && (out >>> 0) !== 0)
+            {
+                services.writeMemory(out >>> 0, got);
+            }
+            return 0;
+        };
+        return bytes instanceof Promise ? bytes.then(write) : write(bytes);
+    };
+    Object.assign(swaps, {
+        glGetBufferSubDataARB: (/** @type {number[]} */ [target, offset, size, out])=>{
+            const context = current();
+            return context ? deliverBuffer(out, context.glGetBufferSubDataARB(target >>> 0,
+                offset | 0, size | 0)) : 0;
+        },
+        glGetNamedBufferSubData: (/** @type {number[]} */ [buffer, offset, size, out])=>{
+            const context = current();
+            return context ? deliverBuffer(out, context.namedBuffer('glGetBufferSubDataARB',
+                buffer >>> 0, [offset | 0, size | 0])) : 0;
+        },
+    });
+    swaps.glGetBufferSubData = swaps.glGetBufferSubDataARB;
 
     /** @param {number} address @returns {import('./pixelformat.js').PixelFormat} */
     function readDescriptor(address){
@@ -2306,13 +2587,13 @@ export function createOpengl(services){
          * a GLfloat as its bits, a GLdouble as two words low first, a pointer as a
          * guest address -- so a kernel that reads a pointer out of guest memory hands
          * it straight through. Null for a name this library does not implement,
-         * and for the two swaps, which may wait.
+         * and for the calls that may wait.
          *
          * @param {string} name
          * @returns {((args: number[]) => number) | null}
          */
         entry: name=>(implemented[name]
-            // The swaps, which may wait, are not among these.
+            // The calls that may wait are not among these.
             ? /** @type {(args: number[]) => number} */ (table[name].handler)
             : null),
 

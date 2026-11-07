@@ -69,7 +69,8 @@ function machine(){
  * window and screen each frame was presented for.
  *
  * @param {{ present?: boolean, raster?: boolean,
- *     describeDrawable?: (hdc: number) => any }} [options]
+ *     describeDrawable?: (hdc: number) => any,
+ *     callGuest?: (call: { entry: number, args: number[] }) => Promise<number> }} [options]
  */
 function library(options = {}){
     const box = machine();
@@ -89,6 +90,7 @@ function library(options = {}){
             },
         raster: options.raster,
         describeDrawable: options.describeDrawable,
+        callGuest: options.callGuest,
     });
     return { box, opengl, presented, presentedFor, table: /** @type {Table} */ (opengl.table) };
 }
@@ -234,13 +236,13 @@ test('an unimplemented export cleans its stack, answers zero, and is counted', (
     const { table, opengl } = library();
     startDrawing(table);
 
-    // The evaluators are the one part of GL 1.1 nothing here implements.
-    assert.equal(table.glMap1f.argBytes, 24);
-    assert.equal(table.glMap1f.handler([0, floatBits(0), floatBits(1), 3, 4, 0]), 0);
-    table.glMap1f.handler([0, floatBits(0), floatBits(1), 3, 4, 0]);
-    table.glEvalCoord1f.handler([floatBits(0.5)]);
+    // Selection is a part of GL 1.1 nothing here implements.
+    assert.equal(table.glPushName.argBytes, 4);
+    assert.equal(table.glPushName.handler([7]), 0);
+    table.glPushName.handler([7]);
+    table.glLoadName.handler([8]);
 
-    assert.deepEqual(opengl.diagnostics().unimplemented, { glMap1f: 2, glEvalCoord1f: 1 },
+    assert.deepEqual(opengl.diagnostics().unimplemented, { glPushName: 2, glLoadName: 1 },
         'which entry points a program reached for is what a run that drew nothing has to say');
 });
 
@@ -598,13 +600,27 @@ test('WGL_ARB_pixel_format answers attributes and chooses by them', ()=>{
     assert.ok(PIXEL_FORMATS[chosen - 1].cDepthBits >= 24);
 });
 
-test('the swap interval is remembered', ()=>{
-    const { table } = library();
-    assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1);
-    assert.equal(table.wglSwapIntervalEXT.handler([0]), 1);
-    assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0);
-    assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
-});
+test('the swap interval is the window\'s: every context on it reads it, no other window does',
+    ()=>{
+        const { table } = library({ describeDrawable: (/** @type {number} */ hdc)=>({
+            key: `window:${hdc}`, width: 4, height: 4, window: hdc }) });
+        assert.equal(table.wglSwapIntervalEXT.handler([0]), 0, 'no context is current');
+        for (const hdc of [0x900d, 0x900e])
+        {
+            assert.equal(table.wglSetPixelFormat.handler([hdc, 1, 0]), 1);
+        }
+        const first = table.wglCreateContext.handler([0x900d]);
+        const second = table.wglCreateContext.handler([0x900d]);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1, 'one by default');
+        assert.equal(table.wglSwapIntervalEXT.handler([0]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, second]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0, 'another context, one window');
+        assert.equal(table.wglMakeCurrent.handler([0x900e, first]), 1);
+        assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1, 'another window');
+        assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
+    });
 
 test('a vector argument is decoded from the window over guest memory, not from a copy', ()=>{
     // The `*v` entry points read a handful of floats the guest points at --
@@ -1155,4 +1171,356 @@ test('glCallLists reads GL_2_BYTES, GL_3_BYTES and GL_4_BYTES names two to four 
     assert.deepEqual(byteRunNames(bytes, 2, 3), [0x0102, 0x0304, 0x0506]);
     assert.deepEqual(byteRunNames(bytes, 3, 2), [0x010203, 0x040506]);
     assert.deepEqual(byteRunNames(bytes.subarray(0, 4), 4, 1), [0x01020304]);
+});
+
+test('wglCreateContextAttribsARB refuses what WGL_ARB_create_context refuses and makes the rest',
+    ()=>{
+        /** @type {number[]} */
+        const errors = [];
+        const box = machine();
+        const opengl = createOpengl({
+            readMemory: box.readMemory,
+            writeMemory: box.writeMemory,
+            screen: ()=>({ width: 4, height: 4 }),
+            scratch: box.scratch,
+            describeDrawable: (/** @type {number} */ hdc)=>(hdc === 0x900d
+                ? { key: `dc:${hdc}`, width: 4, height: 4 } : null),
+            setLastError: (/** @type {number} */ code)=>errors.push(code),
+        });
+        const table = /** @type {Table} */ (opengl.table);
+        /** @param {number} at @param {number[]} words */
+        const put = (at, words)=>box.writeMemory(at,
+            new Uint8Array(Uint32Array.from(words).buffer));
+        const create = (/** @type {number} */ hdc, /** @type {number} */ share,
+            /** @type {number} */ list)=>table.wglCreateContextAttribsARB.handler([hdc, share, list]);
+        assert.equal(table.wglSetPixelFormat.handler([0x900d, 1, 0]), 1);
+
+        assert.equal(create(0xdeadbeef, 0, 0), 0);
+        assert.equal(create(0x900d, 0xdeadbeef, 0), 0);
+        put(0x2000, [0x2099, 1, 0]);
+        assert.equal(create(0x900d, 0, 0x2000), 0);
+        put(0x2000, [0x2091, 4, 0x2092, 7, 0]);
+        assert.equal(create(0x900d, 0, 0x2000), 0, 'no OpenGL 4.7, past this implementation\'s');
+        assert.deepEqual(errors, [6, 4317, 87, 0x2095]);
+
+        // An earlier version: this implementation's, and the share list taken.
+        const first = create(0x900d, 0, 0);
+        assert.notEqual(first, 0);
+        put(0x2000, [0x2091, 2, 0x2092, 0, 0x2094, 1, 0]);
+        const second = create(0x900d, first, 0x2000);
+        assert.notEqual(second, 0);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, second]), 1);
+        const shared = opengl.withContext((/** @type {any} */ context)=>{
+            context.glNewList(1, GL.COMPILE);
+            context.glEndList();
+            return context.version;
+        });
+        assert.deepEqual(shared, { major: 4, minor: 6,
+            profile: GL.CONTEXT_COMPATIBILITY_PROFILE_BIT, flags: GL.CONTEXT_FLAG_DEBUG_BIT });
+        assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
+        assert.equal(opengl.withContext((/** @type {any} */ context)=>context.glIsList(1)),
+            GL.TRUE, 'the two share their lists');
+    });
+
+test('wglMakeContextCurrentARB reads from its second DC, which must carry the context\'s format',
+    ()=>{
+        /** @type {number[]} */
+        const errors = [];
+        const box = machine();
+        const opengl = createOpengl({
+            readMemory: box.readMemory,
+            writeMemory: box.writeMemory,
+            screen: ()=>({ width: 4, height: 4 }),
+            scratch: box.scratch,
+            describeDrawable: (/** @type {number} */ hdc)=>({ key: `window:${hdc}`,
+                width: 4, height: 4, window: hdc }),
+            setLastError: (/** @type {number} */ code)=>errors.push(code),
+        });
+        const table = /** @type {Table} */ (opengl.table);
+        const [draw, read, other] = [0x900d, 0x900e, 0x900f];
+        assert.equal(table.wglSetPixelFormat.handler([draw, 1, 0]), 1);
+        assert.equal(table.wglSetPixelFormat.handler([read, 1, 0]), 1);
+        assert.equal(table.wglSetPixelFormat.handler([other, 2, 0]), 1);
+        const context = table.wglCreateContext.handler([draw]);
+        assert.equal(table.wglMakeContextCurrentARB.handler([draw, other, context]), 0);
+        assert.deepEqual(errors, [2000], 'ERROR_INVALID_PIXEL_FORMAT: the read DC\'s format');
+        assert.equal(table.wglMakeContextCurrentARB.handler([draw, read, context]), 1);
+        assert.equal(table.wglGetCurrentDC.handler([]), draw);
+        assert.equal(table.wglGetCurrentReadDCARB.handler([]), read);
+        assert.equal(table.wglMakeCurrent.handler([draw, context]), 1);
+        assert.equal(table.wglGetCurrentReadDCARB.handler([]), draw, 'one DC both ways');
+        assert.equal(table.wglMakeContextCurrentARB.handler([draw, draw, 0]), 1);
+        assert.equal(table.wglGetCurrentReadDCARB.handler([]), 0);
+    });
+
+/** @param {{ errors: number[] }} [log] */
+function pbufferLibrary(log = { errors: [] }){
+    const box = machine();
+    const opengl = createOpengl({
+        readMemory: box.readMemory,
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+        describeDrawable: (/** @type {number} */ hdc)=>(hdc === 0x900d
+            ? { key: 'window:1', width: 200, height: 200, window: 1 } : null),
+        setLastError: (/** @type {number} */ code)=>log.errors.push(code),
+    });
+    const table = /** @type {Table} */ (opengl.table);
+    /** @param {number[]} words @returns {number} where they were put */
+    const list = words=>{
+        const at = box.scratch.allocate(words.length * 4);
+        box.writeMemory(at, new Uint8Array(Uint32Array.from(words).buffer));
+        return at;
+    };
+    const out = box.scratch.allocate(4);
+    /** @param {number} pbuffer @param {number} attribute */
+    const query = (pbuffer, attribute)=>(table.wglQueryPbufferARB.handler(
+        [pbuffer, attribute, out]) === 1 ? new DataView(box.bytes.buffer).getUint32(out, true)
+        : null);
+    assert.equal(table.wglSetPixelFormat.handler([0x900d, 1, 0]), 1);
+    return { opengl, table, list, query, errors: log.errors };
+}
+
+test('WGL_ARB_pbuffer: a pbuffer, its one DC, its attributes, and the refusals', ()=>{
+    const { table, list, query, errors } = pbufferLibrary();
+    const none = list([0]);
+    const create = (/** @type {number[]} */ args)=>table.wglCreatePbufferARB.handler(args);
+    assert.equal(create([0x900d, 0, 100, 100, none]), 0);
+    assert.equal(create([0x900d, 1, 0, 100, none]), 0);
+    assert.equal(create([0x900d, 1, 100, -1, none]), 0);
+    assert.equal(create([0x900d, 1, 65535, 65535, none]), 0);
+    // The generic renderer's formats draw no pbuffer.
+    const generic = PIXEL_FORMATS.findIndex(format=>(format.dwFlags & PFD.GENERIC_FORMAT) !== 0);
+    assert.equal(create([0x900d, generic + 1, 16, 16, none]), 0);
+    assert.deepEqual(errors, [2000, 13, 13, 1450, 2000],
+        'ERROR_INVALID_PIXEL_FORMAT, _INVALID_DATA twice, _NO_SYSTEM_RESOURCES, the format');
+    errors.length = 0;
+
+    const largest = create([0x900d, 1, 65535, 65535, list([WGL.PBUFFER_LARGEST_ARB, 1, 0])]);
+    assert.notEqual(largest, 0, 'the largest there is, when the program takes it');
+    assert.equal(query(largest, WGL.PBUFFER_WIDTH_ARB), 8192);
+    assert.equal(table.wglDestroyPbufferARB.handler([largest]), 1);
+
+    const pbuffer = create([0x900d, 1, 16, 8, list([WGL.TEXTURE_FORMAT_ARB,
+        WGL.TEXTURE_RGB_ARB, WGL.TEXTURE_TARGET_ARB, WGL.TEXTURE_2D_ARB, 0])]);
+    const dc = table.wglGetPbufferDCARB.handler([pbuffer]);
+    assert.notEqual(dc, 0);
+    assert.equal(table.wglGetPbufferDCARB.handler([pbuffer]), dc, 'the same DC every time');
+    assert.equal(table.wglGetPixelFormat.handler([dc]), 1, 'the pbuffer\'s format');
+    assert.equal(table.wglReleasePbufferDCARB.handler([pbuffer, 0x900d]), 0);
+    assert.deepEqual(errors, [1425], 'ERROR_DC_NOT_FOUND for a DC not its');
+    assert.equal(table.wglReleasePbufferDCARB.handler([pbuffer, dc]), 1);
+    assert.equal(table.wglReleasePbufferDCARB.handler([pbuffer, dc]), 1, 'and again');
+    assert.deepEqual([WGL.PBUFFER_WIDTH_ARB, WGL.PBUFFER_HEIGHT_ARB, WGL.PBUFFER_LOST_ARB,
+        WGL.TEXTURE_FORMAT_ARB, WGL.TEXTURE_TARGET_ARB, WGL.MIPMAP_TEXTURE_ARB,
+        WGL.MIPMAP_LEVEL_ARB, WGL.CUBE_MAP_FACE_ARB].map(name=>query(pbuffer, name)),
+    [16, 8, 0, WGL.TEXTURE_RGB_ARB, WGL.TEXTURE_2D_ARB, 0, 0,
+        WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB]);
+    errors.length = 0;
+    assert.equal(query(pbuffer, 0xdeadbeef), null);
+    assert.equal(query(0, WGL.PBUFFER_WIDTH_ARB), null);
+    assert.equal(table.wglSetPbufferAttribARB.handler([pbuffer, list([WGL.MIPMAP_LEVEL_ARB, 1,
+        0])]), 0, 'a level it does not have');
+    assert.equal(table.wglSetPbufferAttribARB.handler([pbuffer, list([WGL.CUBE_MAP_FACE_ARB,
+        WGL.TEXTURE_CUBE_MAP_POSITIVE_X_ARB, 0])]), 1, 'what it has, taken');
+    assert.deepEqual(errors, [13, 6, 13]);
+    assert.equal(table.wglDestroyPbufferARB.handler([pbuffer]), 1);
+    assert.equal(table.wglDestroyPbufferARB.handler([pbuffer]), 0, 'gone');
+    assert.equal(table.wglGetPixelFormat.handler([dc]), 0, 'and its DC with it');
+});
+
+test('WGL_ARB_render_texture: the pbuffer is the image of the texture bound until let go of',
+    async()=>{
+        const { opengl, table, list } = pbufferLibrary();
+        const pbuffer = table.wglCreatePbufferARB.handler([0x900d, 1, 16, 8, list([
+            WGL.TEXTURE_FORMAT_ARB, WGL.TEXTURE_RGBA_ARB, WGL.TEXTURE_TARGET_ARB,
+            WGL.TEXTURE_2D_ARB, 0])]);
+        table.wglGetPbufferDCARB.handler([pbuffer]);
+        const context = table.wglCreateContext.handler([0x900d]);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, context]), 1);
+        /** @returns {number[]} the bound 2D texture's level 0, width and height */
+        const level = ()=>/** @type {number[]} */ (opengl.withContext((/** @type {any} */ gl)=>[
+            gl.glGetTexLevelParameteriv(GL.TEXTURE_2D, 0, GL.TEXTURE_WIDTH)[0],
+            gl.glGetTexLevelParameteriv(GL.TEXTURE_2D, 0, GL.TEXTURE_HEIGHT)[0]]));
+        const bind = (/** @type {number} */ buffer)=>table.wglBindTexImageARB.handler(
+            [pbuffer, buffer]);
+        const release = (/** @type {number} */ buffer)=>table.wglReleaseTexImageARB.handler(
+            [pbuffer, buffer]);
+        assert.equal(await bind(GL.BACK), 0, 'GL\'s names are not WGL\'s');
+        assert.equal(release(WGL.BACK_LEFT_ARB), 0, 'a single-buffered pbuffer has no back');
+        assert.equal(release(WGL.FRONT_LEFT_ARB), 1, 'nothing bound to let go of');
+        assert.equal(await bind(WGL.FRONT_LEFT_ARB), 1);
+        assert.deepEqual(level(), [16, 8]);
+        assert.equal(await bind(WGL.FRONT_LEFT_ARB), 0, 'bound already');
+        assert.equal(release(WGL.FRONT_LEFT_ARB), 1);
+        assert.deepEqual(level(), [0, 0], 'let go of, the image is none');
+        assert.equal(await bind(WGL.FRONT_RIGHT_ARB), 1);
+        assert.deepEqual(level(), [0, 0], 'no stereo: the right buffer is none');
+        assert.equal(release(WGL.FRONT_RIGHT_ARB), 1);
+    });
+
+test('OpenGL ES 2.0\'s calls take floats and write their precisions to guest memory', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glDepthRangef.handler([floatBits(0.25), floatBits(0.75)]);
+    table.glClearDepthf.handler([floatBits(0.5)]);
+    const out = 0x4000;
+    table.glGetFloatv.handler([GL.DEPTH_RANGE, out]);
+    assert.deepEqual([view.getFloat32(out, true), view.getFloat32(out + 4, true)], [0.25, 0.75]);
+    table.glGetFloatv.handler([GL.DEPTH_CLEAR_VALUE, out]);
+    assert.equal(view.getFloat32(out, true), 0.5);
+    table.glGetShaderPrecisionFormat.handler([GL.FRAGMENT_SHADER, GL.HIGH_FLOAT, out, out + 8]);
+    assert.deepEqual([view.getInt32(out, true), view.getInt32(out + 4, true),
+        view.getInt32(out + 8, true)], [127, 127, 23]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
+
+test('the indexed viewport calls take floats and doubles, and answer them', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glViewportIndexedf.handler([2, floatBits(1), floatBits(2), floatBits(3),
+        floatBits(4)]);
+    const out = 0x4000;
+    table.glGetFloati_v.handler([GL.VIEWPORT, 2, out]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getFloat32(out + at, true)), [1, 2, 3, 4]);
+    table.glDepthRangeIndexed.handler([1, ...doubleBits(0.25), ...doubleBits(0.75)]);
+    table.glGetDoublei_v.handler([GL.DEPTH_RANGE, 1, out]);
+    assert.deepEqual([view.getFloat64(out, true), view.getFloat64(out + 8, true)], [0.25, 0.75]);
+    [5, 6, 7, 8].forEach((v, i)=>view.setInt32(0x3000 + i * 4, v, true));
+    table.glScissorIndexedv.handler([3, 0x3000]);
+    table.glGetIntegeri_v.handler([GL.SCISSOR_BOX, 3, out]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(out + at, true)), [5, 6, 7, 8]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
+
+test('glBindVertexBuffers reads its names, offsets and strides from guest memory, and the'
+    + ' named calls reach the object', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glGenBuffersARB.handler([2, 0x3000]);
+    const names = [view.getUint32(0x3000, true), view.getUint32(0x3004, true)];
+    [8, 12].forEach((v, i)=>view.setInt32(0x3100 + i * 4, v, true));
+    [16, 20].forEach((v, i)=>view.setInt32(0x3200 + i * 4, v, true));
+    table.glBindVertexBuffers.handler([4, 2, 0x3000, 0x3100, 0x3200]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    const out = 0x4000;
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_OFFSET, 5, out]);
+    assert.equal(view.getInt32(out, true), 12);
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_STRIDE, 4, out]);
+    assert.equal(view.getInt32(out, true), 16);
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_BUFFER, 5, out]);
+    assert.equal(view.getInt32(out, true), names[1]);
+
+    table.glCreateVertexArrays.handler([1, 0x3300]);
+    const vao = view.getUint32(0x3300, true);
+    table.glVertexArrayVertexBuffer.handler([vao, 2, names[0], 24, 32]);
+    table.glGetVertexArrayIndexed64iv.handler([vao, 2, GL.VERTEX_BINDING_OFFSET, out]);
+    assert.equal(view.getInt32(out, true), 24);
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_OFFSET, 2, out]);
+    assert.equal(view.getInt32(out, true), 0, 'the default object untouched');
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
+
+test('a debug message reaches the program\'s callback with its text in guest memory, or the log',
+    async()=>{
+        /** @type {{ entry: number, args: number[], text: string }[]} */
+        const shown = [];
+        /** @type {ReturnType<typeof library>} */
+        const lib = library({ callGuest: (/** @type {any} */ guestCall)=>{
+            const [, , , , length, address] = guestCall.args;
+            shown.push({ ...guestCall, text: String.fromCharCode(
+                ...lib.box.bytes.subarray(address, address + length)) });
+            return Promise.resolve(0);
+        } });
+        const { table, box } = lib;
+        startDrawing(table);
+        const view = new DataView(box.bytes.buffer);
+        box.bytes.set([...'hello'].map(c=>c.charCodeAt(0)), 0x3000);
+        table.glEnable.handler([0x92e0]);
+        // Without a callback: the log.
+        await table.glDebugMessageInsert.handler([0x824a, 0x824c, 7, 0x9146, 5, 0x3000]);
+        const out = 0x4000;
+        assert.equal(table.glGetDebugMessageLog.handler([4, 64, out, out + 16, out + 32,
+            out + 48, out + 64, out + 80]), 1);
+        assert.deepEqual([out, out + 16, out + 32, out + 48, out + 64].map(at=>
+            view.getUint32(at, true)), [0x824a, 0x824c, 7, 0x9146, 6]);
+        assert.equal(String.fromCharCode(...box.bytes.subarray(out + 80, out + 86)), 'hello\0');
+
+        table.glDebugMessageCallback.handler([0x7777, 0x55]);
+        table.glGetPointerv.handler([0x8244, out]);
+        assert.equal(view.getUint32(out, true), 0x7777);
+        await table.glDebugMessageInsert.handler([0x824a, 0x824c, 8, 0x9146, -1, 0x3000]);
+        assert.equal(shown.length, 1);
+        assert.equal(shown[0].entry, 0x7777);
+        assert.deepEqual(shown[0].args.slice(0, 5), [0x824a, 0x824c, 8, 0x9146, 5]);
+        assert.equal(shown[0].args[6], 0x55, 'the program\'s own parameter');
+        assert.equal(shown[0].text, 'hello');
+
+        await table.glPushDebugGroup.handler([0x824a, 3, 5, 0x3000]);
+        await table.glPopDebugGroup.handler([]);
+        assert.deepEqual(shown.slice(1).map(m=>m.args[1]), [0x8269, 0x826a],
+            'a group pushed and popped, each a message');
+        assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    });
+
+test('glProgramUniform reaches a program that is not current', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const text = (/** @type {string} */ s, /** @type {number} */ at)=>{
+        box.bytes.set([...s].map(c=>c.charCodeAt(0)), at);
+        box.bytes[at + s.length] = 0;
+    };
+    const view = new DataView(box.bytes.buffer);
+    text('uniform vec4 tint; void main() { gl_FragColor = tint; }', 0x3000);
+    view.setUint32(0x3800, 0x3000, true);
+    const fs = table.glCreateShader.handler([GL.FRAGMENT_SHADER]);
+    table.glShaderSource.handler([fs, 1, 0x3800, 0]);
+    table.glCompileShader.handler([fs]);
+    const made = table.glCreateProgram.handler([]);
+    table.glAttachShader.handler([made, fs]);
+    table.glLinkProgram.handler([made]);
+    text('tint', 0x3900);
+    const tint = table.glGetUniformLocation.handler([made, 0x3900]);
+    table.glProgramUniform4f.handler([made, tint, floatBits(1), floatBits(2), floatBits(3),
+        floatBits(4)]);
+    table.glGetUniformfv.handler([made, tint, 0x4000]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getFloat32(0x4000 + at, true)), [1, 2, 3, 4]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
+
+test('with a query buffer bound, glGetQueryObject writes its answer there', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    table.glGenQueries.handler([1, 0x3000]);
+    const query = new DataView(box.bytes.buffer).getUint32(0x3000, true);
+    table.glBeginQuery.handler([0x88bf, query]);
+    table.glEndQuery.handler([0x88bf]);
+    table.glGenBuffers.handler([1, 0x3004]);
+    const buffer = new DataView(box.bytes.buffer).getUint32(0x3004, true);
+    table.glBindBuffer.handler([GL.QUERY_BUFFER, buffer]);
+    table.glBufferData.handler([GL.QUERY_BUFFER, 8, 0, GL.DYNAMIC_READ]);
+    box.bytes.fill(0xee, 0x4, 0x8);
+    table.glGetQueryObjectuiv.handler([query, 0x8867 /* AVAILABLE */, 4]);
+    assert.deepEqual([...box.bytes.subarray(4, 8)], [0xee, 0xee, 0xee, 0xee],
+        'the pointer is an offset, guest memory untouched');
+    table.glGetBufferSubData.handler([GL.QUERY_BUFFER, 4, 4, 0x3100]);
+    assert.equal(new DataView(box.bytes.buffer).getUint32(0x3100, true), 1);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
+
+test('glTexParameteriv takes a whole swizzle, four words', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glBindTexture.handler([GL.TEXTURE_2D, 1]);
+    [GL.ALPHA, GL.ZERO, GL.ONE, GL.RED].forEach((v, i)=>view.setInt32(0x3000 + i * 4, v, true));
+    table.glTexParameteriv.handler([GL.TEXTURE_2D, GL.TEXTURE_SWIZZLE_RGBA, 0x3000]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    const out = 0x4000;
+    table.glGetTexParameteriv.handler([GL.TEXTURE_2D, GL.TEXTURE_SWIZZLE_RGBA, out]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(out + at, true)),
+        [GL.ALPHA, GL.ZERO, GL.ONE, GL.RED]);
 });
