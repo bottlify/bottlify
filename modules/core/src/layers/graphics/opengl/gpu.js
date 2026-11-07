@@ -637,7 +637,8 @@ export function createGpuRenderer(services){
      *     uniform block, a texture pair per unit the fragment stage samples,
      *     and a uniform block per program stage.
      * @property {string} key
-     * @property {{ binding: number, cube: boolean, unit: number, sampler?: number,
+     * @property {{ binding: number, cube: boolean, rectangle?: boolean, unit: number,
+ *     sampler?: number,
      *     layout?: { viewDimension: string, sampleType: string, multisampled: boolean },
      *     unfilterable?: boolean }[]} textures
      *     `sampler`: a GLSL program's sampler, whose unit is its uniform's value, and
@@ -682,7 +683,7 @@ export function createGpuRenderer(services){
                 + `${geometry ? '|gs' : ''}`;
             return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry };
         }
-        /** @type {{ binding: number, cube: boolean, unit: number }[]} */
+        /** @type {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }[]} */
         const textures = [];
         if (programs?.fragment)
         {
@@ -692,7 +693,7 @@ export function createGpuRenderer(services){
             {
                 textures.push({
                     binding: 1 + texture.unit * 2, cube: texture.target === 'CUBE',
-                    unit: texture.unit,
+                    rectangle: texture.target === 'RECT', unit: texture.unit,
                 });
             }
         }
@@ -1909,6 +1910,7 @@ export function createGpuRenderer(services){
                 rgbOnly: format === GL.RGB,
                 generation: unit.generation ? unit.generation.modes : [null, null, null, null],
                 swizzle: unit.swizzle ?? '',
+                rectangle: !!unit.rectangle,
             };
         });
         const operations = scene.operations;
@@ -3161,7 +3163,7 @@ export function createGpuRenderer(services){
      * enabled at that position.
      *
      * @param {import('./pipeline.js').Scene} scene
-     * @param {{ binding: number, cube: boolean, unit: number }} entry
+     * @param {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }} entry
      * @param {boolean} programFragment
      * @returns {import('./objects.js').TextureObject}
      */
@@ -3169,7 +3171,8 @@ export function createGpuRenderer(services){
         if (programFragment)
         {
             const bound = scene.boundTextures[entry.unit];
-            const texture = entry.cube ? bound?.cube : bound?.twoD;
+            const texture = entry.cube ? bound?.cube : entry.rectangle ? bound?.rectangle
+                : bound?.twoD;
             return texture ?? incompleteTexture(entry.cube);
         }
         const position = (entry.binding - 1) / 2;

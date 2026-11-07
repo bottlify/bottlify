@@ -53,6 +53,7 @@ import {
  * @property {boolean} intensity    GL_INTENSITY, which is both at once
  * @property {boolean} rgbOnly      GL_RGB, where DECAL is a plain replace
  * @property {(number | null)[]} generation   per coordinate: the texgen mode, or null
+ * @property {boolean} [rectangle]  a rectangle texture (3.1), read at texel coordinates
  * @property {string} [swizzle]  the texture's swizzle (`objects.js` swizzleCode), empty for none
  */
 
@@ -452,7 +453,8 @@ export function drawKey(state){
         }
         units += `${unit.index}${unit.cube ? 'c' : ''}:${unit.mode}:${combined}:`
             + `${unit.hasColour ? 1 : 0}${unit.hasAlpha ? 1 : 0}${unit.intensity ? 1 : 0}`
-            + `${unit.rgbOnly ? 1 : 0}:${generation}:${unit.swizzle ?? ''}`;
+            + `${unit.rgbOnly ? 1 : 0}:${generation}:${unit.swizzle ?? ''}`
+            + `${unit.rectangle ? 'r' : ''}`;
     }
     /** @param {DrawState['stencil']} face */
     const stencilFace = face=>(face
@@ -599,7 +601,7 @@ export function sameKeyInputs(a, b){
         if (x.index !== y.index || !x.cube !== !y.cube || x.mode !== y.mode
             || !x.hasColour !== !y.hasColour || !x.hasAlpha !== !y.hasAlpha
             || !x.intensity !== !y.intensity || !x.rgbOnly !== !y.rgbOnly
-            || (x.swizzle ?? '') !== (y.swizzle ?? '')
+            || (x.swizzle ?? '') !== (y.swizzle ?? '') || !x.rectangle !== !y.rectangle
             || !sameItems(x.generation, y.generation))
         {
             return false;
@@ -1149,7 +1151,8 @@ function fixedFragment(state){
             ? `    let ${read} = textureSample(t${unit.index}Texture,`
                 + ` t${unit.index}Sampler, ${tc}.xyz);`
             : `    let ${read} = textureSample(t${unit.index}Texture,`
-                + ` t${unit.index}Sampler, ${tc}.xy / ${tc}.w);`);
+                + ` t${unit.index}Sampler, ${tc}.xy / ${tc}.w${unit.rectangle
+                    ? ` / vec2f(textureDimensions(t${unit.index}Texture))` : ''});`);
         if (unit.swizzle)
         {
             fragmentBody.push(`    let t${unit.index} = `

@@ -121,7 +121,7 @@ function digestBlocks(bytes){
 }
 
 /** The targets a unit can have textures bound to, lowest priority first. */
-const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP];
+const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_RECTANGLE, GL.TEXTURE_CUBE_MAP];
 /** The targets from the highest precedence down, as a unit's enabled target is chosen. */
 const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
 /**
@@ -133,6 +133,7 @@ const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTU
 const BINDING_QUERY = Object.freeze({
     [GL.TEXTURE_1D]: GL.TEXTURE_BINDING_1D,
     [GL.TEXTURE_2D]: GL.TEXTURE_BINDING_2D,
+    [GL.TEXTURE_RECTANGLE]: GL.TEXTURE_BINDING_RECTANGLE,
     [GL.TEXTURE_CUBE_MAP]: GL.TEXTURE_BINDING_CUBE_MAP,
     [GL.TEXTURE_3D]: TEX.TEXTURE_BINDING_3D,
     [TEX.TEXTURE_1D_ARRAY]: TEX.TEXTURE_BINDING_1D_ARRAY,
@@ -148,13 +149,20 @@ const IMAGE_TARGETS = {
     1: new Set([GL.TEXTURE_1D, GL.PROXY_TEXTURE_1D]),
     2: new Set([GL.TEXTURE_2D, GL.PROXY_TEXTURE_2D, TEX.TEXTURE_1D_ARRAY,
         TEX.PROXY_TEXTURE_1D_ARRAY, GL.PROXY_TEXTURE_CUBE_MAP, 0x8515, 0x8516, 0x8517, 0x8518,
-        0x8519, 0x851a]),
+        0x8519, 0x851a, GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]),
     3: new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D, TEX.TEXTURE_2D_ARRAY,
         TEX.PROXY_TEXTURE_2D_ARRAY]),
 };
 /** @type {ReadonlySet<number>} */
 const PROXIES = new Set([GL.PROXY_TEXTURE_1D, GL.PROXY_TEXTURE_2D, GL.PROXY_TEXTURE_3D,
-    GL.PROXY_TEXTURE_CUBE_MAP, TEX.PROXY_TEXTURE_1D_ARRAY, TEX.PROXY_TEXTURE_2D_ARRAY]);
+    GL.PROXY_TEXTURE_CUBE_MAP, TEX.PROXY_TEXTURE_1D_ARRAY, TEX.PROXY_TEXTURE_2D_ARRAY,
+    GL.PROXY_TEXTURE_RECTANGLE]);
+
+/** The rectangle targets (3.1), whose one level is level zero. @type {ReadonlySet<number>} */
+const RECTANGLES = new Set([GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]);
+
+/** The filters a rectangle texture takes: none reads a mipmap. @type {ReadonlySet<number>} */
+const RECTANGLE_FILTERS = new Set([GL.NEAREST, GL.LINEAR]);
 /** The targets whose third dimension is a layer, not a depth. @type {ReadonlySet<number>} */
 const ARRAYS = new Set([TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY]);
 
@@ -329,7 +337,8 @@ const RGBA8 = /** @type {import('./formats.js').SizedFormat} */ (SIZED_FORMATS.g
 const STORAGE_TARGETS = {
     1: new Set([GL.TEXTURE_1D, GL.PROXY_TEXTURE_1D]),
     2: new Set([GL.TEXTURE_2D, GL.PROXY_TEXTURE_2D, TEX.TEXTURE_1D_ARRAY,
-        TEX.PROXY_TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP, GL.PROXY_TEXTURE_CUBE_MAP]),
+        TEX.PROXY_TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP, GL.PROXY_TEXTURE_CUBE_MAP,
+        GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]),
     3: new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D, TEX.TEXTURE_2D_ARRAY,
         TEX.PROXY_TEXTURE_2D_ARRAY]),
 };
@@ -340,6 +349,7 @@ const PROXY_TARGETS = new Map([
     [GL.PROXY_TEXTURE_3D, GL.TEXTURE_3D], [GL.PROXY_TEXTURE_CUBE_MAP, GL.TEXTURE_CUBE_MAP],
     [TEX.PROXY_TEXTURE_1D_ARRAY, TEX.TEXTURE_1D_ARRAY],
     [TEX.PROXY_TEXTURE_2D_ARRAY, TEX.TEXTURE_2D_ARRAY],
+    [GL.PROXY_TEXTURE_RECTANGLE, GL.TEXTURE_RECTANGLE],
 ]);
 
 /**
@@ -667,6 +677,34 @@ export function installTextureCalls(context, kernel){
      *             cube: boolean } | null}
      */
     function imageTarget(target){
+        return imageOf(target);
+    }
+
+    /**
+     * Whether a call names a level a rectangle (3.1) does not have: its one
+     * level is zero, any other GL_INVALID_VALUE.
+     *
+     * @param {string} name @param {number} target @param {number} level
+     * @returns {boolean} whether it was refused
+     */
+    function levelRefused(name, target, level){
+        if (!RECTANGLES.has(target) || level === 0)
+        {
+            return false;
+        }
+        if (enter(name, [target, level]))
+        {
+            setError(GL.INVALID_VALUE);
+        }
+        return true;
+    }
+
+    /**
+     * @param {number} target
+     * @returns {{ texture: import('./objects.js').TextureObject, face: number,
+     *     cube: boolean } | null}
+     */
+    function imageOf(target){
         const face = CUBE_FACES.findIndex(candidate=>candidate === target);
         if (face >= 0)
         {
@@ -674,7 +712,7 @@ export function installTextureCalls(context, kernel){
             return texture ? { texture, face, cube: true } : null;
         }
         if (target === GL.TEXTURE_2D || target === GL.TEXTURE_1D || target === GL.TEXTURE_3D
-            || ARRAYS.has(target))
+            || target === GL.TEXTURE_RECTANGLE || ARRAYS.has(target))
         {
             const texture = textureBound(active, target);
             return texture ? { texture, face: 0, cube: false } : null;
@@ -1519,6 +1557,24 @@ export function installTextureCalls(context, kernel){
         {
             setError(refusal);
             return;
+        }
+        if (texture.target === GL.TEXTURE_RECTANGLE)
+        {
+            // One level, read in place (3.1 section 3.8.4): no mipmap
+            // filter, no repeat, no other base level.
+            if ((parameter === GL.TEXTURE_MIN_FILTER && !RECTANGLE_FILTERS.has(value))
+                || ((parameter === GL.TEXTURE_WRAP_S || parameter === GL.TEXTURE_WRAP_T
+                    || parameter === GL.TEXTURE_WRAP_R)
+                    && (value === GL.REPEAT || value === GL.MIRRORED_REPEAT)))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (parameter === GL.TEXTURE_BASE_LEVEL && value !== 0)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
         }
         if ((parameter === GL.TEXTURE_BASE_LEVEL || parameter === GL.TEXTURE_MAX_LEVEL)
             && value < 0)
@@ -3028,6 +3084,12 @@ export function installTextureCalls(context, kernel){
          * @param {number} width @param {number} height
          */
         glTexStorage2D(target, levels, internal, width, height){
+            if (RECTANGLES.has(target) && levels !== 1)
+            {
+                enter('glTexStorage2D', [target]);
+                setError(GL.INVALID_VALUE);
+                return;
+            }
             texStorage('glTexStorage2D', 2, target, levels, internal, width, height, 1);
         },
 
@@ -3279,6 +3341,10 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
+            if (levelRefused('glTexImage2D', target, level))
+            {
+                return;
+            }
             texImage('glTexImage2D', target, level, internal, width, height, 1, border,
                 format, type, pixels ?? null);
         },
@@ -3379,6 +3445,10 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
+            if (levelRefused('glTexSubImage2D', target, level))
+            {
+                return;
+            }
             texSubImage('glTexSubImage2D', target, level, x0, y0, 0, width, height, 1, format,
                 type, pixels ?? null);
         },
@@ -3413,6 +3483,10 @@ export function installTextureCalls(context, kernel){
          * @param {number} border
          */
         glCopyTexImage2D(target, level, internalFormat, x, y, width, height, border){
+            if (levelRefused('glCopyTexImage2D', target, level))
+            {
+                return;
+            }
             const args = [target, level, internalFormat, x, y, width, height, border];
             const image = IMAGE_TARGETS[3].has(target) ? null : imageTarget(target);
             const baseFormat = baseFormatOf(internalFormat);
@@ -3476,6 +3550,10 @@ export function installTextureCalls(context, kernel){
          * @param {number} height
          */
         glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height){
+            if (levelRefused('glCopyTexSubImage2D', target, level))
+            {
+                return undefined;
+            }
             return copyTexSubImage2D('glCopyTexSubImage2D', target, level, xoffset, yoffset, x,
                 y, width, height);
         },
@@ -3630,6 +3708,13 @@ export function installTextureCalls(context, kernel){
          * @param {number | Uint8Array | null} [data]
          */
         glCompressedTexImage2DARB(target, level, internal, width, height, border, size, data){
+            if (RECTANGLES.has(target))
+            {
+                // No compressed format is a rectangle's (3.1 section 3.8.3).
+                enter('glCompressedTexImage2DARB', [target]);
+                setError(GL.INVALID_ENUM);
+                return;
+            }
             compressedTexImage('glCompressedTexImage2DARB', target, level, internal, width,
                 height, border, size, data ?? null);
         },

@@ -207,6 +207,8 @@ export function createSceneBuilder(kernel){
         const units = side.activeTextures().map((/** @type {any} */ entry)=>{
             const { index, texture, unit } = entry;
             const cube = texture.target === GL.TEXTURE_CUBE_MAP;
+            // A rectangle (3.1) is read at texel coordinates.
+            const rectangle = texture.target === GL.TEXTURE_RECTANGLE;
             const images = [];
             for (let face = 0; face < (cube ? 6 : 1); face++)
             {
@@ -228,6 +230,7 @@ export function createSceneBuilder(kernel){
                 texture,
                 images,
                 cube,
+                rectangle,
                 baseFormat: texture.levels.get(levelKey(0)).baseFormat,
                 parameters: {
                     magFilter: texture.parameters.get(GL.TEXTURE_MAG_FILTER),
@@ -277,6 +280,7 @@ export function createSceneBuilder(kernel){
             ? side.units.map((/** @type {any} */ unused, /** @type {number} */ index)=>({
                 twoD: side.textureBoundAt(index, GL.TEXTURE_2D),
                 cube: side.textureBoundAt(index, GL.TEXTURE_CUBE_MAP),
+                rectangle: side.textureBoundAt(index, GL.TEXTURE_RECTANGLE),
                 oneD: side.textureBoundAt(index, GL.TEXTURE_1D),
                 // GLSL 1.30's samplers of 3D textures and arrays.
                 threeD: side.textureBoundAt(index, GL.TEXTURE_3D),

@@ -43,8 +43,8 @@ test('glCreateTextures makes textures of their target at once, bound nowhere', (
     assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_CUBE_MAP), [0]);
     gl.glBindTexture(GL.TEXTURE_2D, names[0]);
     error(gl, GL.INVALID_OPERATION, 'a cube map\'s name for life');
-    gl.glCreateTextures(0x84f5, 1);
-    error(gl, GL.INVALID_ENUM, 'a rectangle texture this implementation has none of');
+    gl.glCreateTextures(0x9009, 1);
+    error(gl, GL.INVALID_ENUM, 'a cube map array texture this implementation has none of');
     gl.glCreateTextures(GL.TEXTURE_2D, -1);
     error(gl, GL.INVALID_VALUE);
 });

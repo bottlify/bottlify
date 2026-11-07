@@ -154,9 +154,9 @@ test('texture parameters refuse what is not a parameter or not a value of it', (
         [1, 0.5, 0, 1]);
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_BASE_LEVEL, -1);
     assert.equal(context.glGetError(), GL.INVALID_VALUE);
-    // GL_TEXTURE_RECTANGLE, which this implementation has no images for.
-    context.glTexParameteri(0x84f5, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
-    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'a target this has no textures for');
+    // GL_TEXTURE_2D_MULTISAMPLE, whose textures have no sampling state.
+    context.glTexParameteri(0x9100, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'a target with no parameters');
     context.glTexParameteri(0x806f, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
     assert.equal(context.glGetError(), GL.NO_ERROR, 'a 3D texture has parameters');
     assert.deepEqual(context.glGetTexParameteriv(GL.TEXTURE_2D, GL.TEXTURE_RESIDENT), [1]);

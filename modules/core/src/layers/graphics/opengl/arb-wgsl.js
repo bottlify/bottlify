@@ -979,6 +979,11 @@ function sampleCall(instruction, source){
             ? `select(vec2f(0.0), ${source}.xy / ${source}.w, ${source}.w != 0.0)`
             : `${source}.xy`;
     }
+    if (texture.target === 'RECT')
+    {
+        // A rectangle's coordinates count texels (ARB_texture_rectangle).
+        coords = `(${coords}) / vec2f(textureDimensions(t${texture.unit}Texture))`;
+    }
     const sample = `t${texture.unit}Texture, t${texture.unit}Sampler, ${coords}`;
     return instruction.op === 'TXB'
         ? `textureSampleBias(${sample}, ${source}.w)`

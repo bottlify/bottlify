@@ -151,6 +151,7 @@ export const DEFAULT_ENABLES = Object.freeze([
     },
     { query: GL.TEXTURE_1D, name: 'GL_TEXTURE_1D', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_2D, name: 'GL_TEXTURE_2D', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_RECTANGLE, name: 'GL_TEXTURE_RECTANGLE', kind: 'bool', value: [0] },
     { query: GL.LIGHT1, name: 'GL_LIGHT1', kind: 'bool', value: [0] },
     { query: GL.LIGHT2, name: 'GL_LIGHT2', kind: 'bool', value: [0] },
     { query: GL.LIGHT3, name: 'GL_LIGHT3', kind: 'bool', value: [0] },
@@ -474,6 +475,10 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0],
     },
     { query: GL.TEXTURE_BINDING_3D, name: 'GL_TEXTURE_BINDING_3D', kind: 'int', value: [0] },
+    {
+        query: GL.TEXTURE_BINDING_RECTANGLE, name: 'GL_TEXTURE_BINDING_RECTANGLE', kind: 'int',
+        value: [0],
+    },
     { query: 0x8c1c, name: 'GL_TEXTURE_BINDING_1D_ARRAY', kind: 'int', value: [0] },
     { query: 0x8c1d, name: 'GL_TEXTURE_BINDING_2D_ARRAY', kind: 'int', value: [0] },
     { query: GL.ACTIVE_TEXTURE, name: 'GL_ACTIVE_TEXTURE', kind: 'enum', value: [GL.TEXTURE0] },
@@ -921,6 +926,11 @@ export const DEFAULT_STATE = Object.freeze([
     },
     // OpenGL 3.0's minimums, both well inside WebGPU's 3D size and layers.
     { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [256] },
+    // A rectangle (3.1) is as large as any 2D texture here.
+    {
+        query: GL.MAX_RECTANGLE_TEXTURE_SIZE, name: 'GL_MAX_RECTANGLE_TEXTURE_SIZE', kind: 'int',
+        value: [2048],
+    },
     { query: 0x88ff, name: 'GL_MAX_ARRAY_TEXTURE_LAYERS', kind: 'int', value: [256] },
 
     // --- OpenGL 2.1: pixel buffer objects ---

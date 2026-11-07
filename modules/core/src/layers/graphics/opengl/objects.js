@@ -219,6 +219,17 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [GL.TEXTURE_SWIZZLE_A, GL.ALPHA],
 ]);
 
+/**
+ * What a rectangle texture (3.1) starts with: one level, so a filter without
+ * mipmaps, and coordinates clamped to its edges (3.1 section 3.8.8).
+ *
+ * @type {ReadonlyArray<readonly [number, number]>}
+ */
+const RECTANGLE_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name, value])=>
+    /** @type {const} */ ([name, name === GL.TEXTURE_MIN_FILTER ? GL.LINEAR
+        : name === GL.TEXTURE_WRAP_S || name === GL.TEXTURE_WRAP_T || name === GL.TEXTURE_WRAP_R
+            ? GL.CLAMP_TO_EDGE : value])));
+
 /** The swizzle parameters, red to alpha. */
 const SWIZZLES = [GL.TEXTURE_SWIZZLE_R, GL.TEXTURE_SWIZZLE_G, GL.TEXTURE_SWIZZLE_B,
     GL.TEXTURE_SWIZZLE_A];
@@ -263,7 +274,8 @@ export function createTextureObject(name, target){
     return {
         name,
         target,
-        parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
+        parameters: new Map(target === GL.TEXTURE_RECTANGLE ? RECTANGLE_PARAMETERS
+            : DEFAULT_TEXTURE_PARAMETERS),
         parametersVersion: 0,
         borderColour: [0, 0, 0, 0],
         levels: new Map(),

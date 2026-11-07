@@ -78,6 +78,7 @@ import { swizzleTexel } from './objects.js';
  * @property {boolean} cube
  * @property {number} baseFormat
  * @property {import('./texture.js').SamplerParameters} parameters
+ * @property {boolean} [rectangle]  read at texel coordinates (3.1)
  * @property {string} [swizzle]  the texture's swizzle (`objects.js` swizzleCode), empty for none
  * @property {import('./texture.js').TextureEnvironment} env
  * @property {ArrayLike<number>} matrix
@@ -184,7 +185,8 @@ import { swizzleTexel } from './objects.js';
  *           matrix of each unit, whether or not it is enabled
  * @property {readonly { twoD: import('./objects.js').TextureObject | null,
  *             cube: import('./objects.js').TextureObject | null,
- *             oneD?: import('./objects.js').TextureObject | null }[]} boundTextures
+ *             oneD?: import('./objects.js').TextureObject | null,
+ *             rectangle?: import('./objects.js').TextureObject | null }[]} boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
  * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
@@ -675,8 +677,11 @@ function shade(scene, fragment){
         }
         else
         {
-            texel = sample2D(
-                unit.images[0], unit.parameters, attributes[at] / q, attributes[at + 1] / q);
+            const image = unit.images[0];
+            // A rectangle's coordinates count texels (3.1 section 3.8.8).
+            const [w, h] = unit.rectangle ? [image.width, image.height] : [1, 1];
+            texel = sample2D(image, unit.parameters, attributes[at] / q / w,
+                attributes[at + 1] / q / h);
         }
         if (unit.swizzle)
         {
