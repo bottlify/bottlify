@@ -429,7 +429,7 @@ test('the adapter says who made it, in the shape a card database reads', ()=>{
         return String.fromCharCode(...bytes.subarray(0, end < 0 ? 512 : end));
     };
     assert.equal(text(D3DADAPTER_IDENTIFIER8.Description), 'Bottlify WebGPU Video Adapter');
-    assert.equal(text(D3DADAPTER_IDENTIFIER8.Driver), 'webgpu');
+    assert.equal(text(D3DADAPTER_IDENTIFIER8.Driver), 'bottlifyumd.dll');
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.VendorId), 0x10de);
     // The answer every generation gives, DirectDraw's GetDeviceIdentifier
     // included: a program asking through two compares them.

@@ -9,6 +9,7 @@ import { windowsVersion } from '../kernel32/versions.js';
 import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { verLanguageName } from '../kernel32/languages.js';
+import { DISPLAY_DRIVER } from '../user32/display.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -199,7 +200,8 @@ export function systemVersionResource(
     // A file the release describes carries its version there -- on XP, the
     // DirectX that is part of the system -- and any other DirectX library the
     // DirectX the bottle reports, as Windows 2000's redistributable left it.
-    const own = component ?? (directX ? directx : null);
+    const own = component ?? (name.toLowerCase() === DISPLAY_DRIVER.file ? DISPLAY_DRIVER.version
+        : directX ? directx : null);
     const quad = own !== null ? own.split('.').map(part=>Number(part)) : system;
     const spelled = own ?? system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
@@ -422,6 +424,7 @@ export function createVersionFunctions(host){
         const name = file.includes('.') ? file : `${file}.dll`;
         return (directory === '' || directory.toLowerCase() === SYSTEM_DIRECTORY.toLowerCase())
             && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name)
+                || name.toLowerCase() === DISPLAY_DRIVER.file
                 || (host.windows ?? windowsVersion()).components?.files[name.toLowerCase()]
                     !== undefined)
             ? name : null;

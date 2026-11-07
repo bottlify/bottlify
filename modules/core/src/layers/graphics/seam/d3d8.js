@@ -46,7 +46,8 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
-import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
+import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, refreshRatesOf, registryMode }
+    from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -2771,7 +2772,7 @@ export function createDirect3D8Seam(
                 block[at + index] = text.charCodeAt(index) & 0x7f;
             }
         };
-        ascii('webgpu', D3DADAPTER_IDENTIFIER8.Driver);
+        ascii(DISPLAY_DRIVER.file, D3DADAPTER_IDENTIFIER8.Driver);
         ascii(description, D3DADAPTER_IDENTIFIER8.Description);
         const view = new DataView(block.buffer);
         // A version of 1.0.0.0: the product word of the LARGE_INTEGER is its

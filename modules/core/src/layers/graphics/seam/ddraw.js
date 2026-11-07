@@ -96,7 +96,7 @@ import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { textureFormatOffered } from './texture-formats.js';
-import { REFRESH_HZ, displayModes, registryMode } from '../../win32/user32/display.js';
+import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, registryMode } from '../../win32/user32/display.js';
 
 /** The classes DDRAW.dll's DllGetClassObject makes. */
 const CLSID_DirectDraw = '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}';
@@ -2004,7 +2004,7 @@ export function createDirectDrawSeam(
                 block[at + index] = text.charCodeAt(index) & 0x7f;
             }
         };
-        ascii('webgpu.dll', DDDEVICEIDENTIFIER2.szDriver);
+        ascii(DISPLAY_DRIVER.file, DDDEVICEIDENTIFIER2.szDriver);
         ascii(description, DDDEVICEIDENTIFIER2.szDescription);
         const view = new DataView(block.buffer);
         // Version 1.0.0.0: the product word is the LARGE_INTEGER's high dword.
