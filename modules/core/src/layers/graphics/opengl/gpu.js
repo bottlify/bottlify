@@ -62,6 +62,11 @@ import {
 } from './gpu-layout.js';
 import { createGlGeometry } from './gpu-geometry.js';
 import { TESS_DRAW_ENTRIES, createGlTessellation } from './gpu-tessellation.js';
+import { createGlCompute, createGlMemory } from './gpu-compute.js';
+import { IMAGE_FORMATS } from './glsl-storage.js';
+
+/** The formats an image unit binds a texture's storage in: WebGPU's storage formats. */
+const IMAGE_STORAGE = new Set(IMAGE_FORMATS.map(([, , format])=>format));
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
     VERTEX_PROGRAM_BINDING,
@@ -74,8 +79,9 @@ import {
 } from './wgsl.js';
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
 import {
-    GLSL_BLOCK_BINDING, GLSL_GEOMETRY_BINDING, GLSL_GEOMETRY_DRAW_GROUP, GLSL_VERTEX_BINDING,
-    feedbackWrites, samplerTypeOf, textureLayoutOf,
+    GLSL_BLOCK_BINDING, GLSL_COUNTER_BINDING, GLSL_GEOMETRY_BINDING, GLSL_GEOMETRY_DRAW_GROUP,
+    GLSL_IMAGE_BINDING, GLSL_STORAGE_BINDING, GLSL_VERTEX_BINDING, feedbackWrites,
+    samplerTypeOf, textureLayoutOf,
 } from './glsl-wgsl.js';
 
 /**
@@ -680,6 +686,11 @@ export function createGpuRenderer(services){
      * @property {boolean} [geometry]  the draw reads what a geometry shader made (group 2)
      * @property {boolean} [tessellation]  the draw's vertex stage is an evaluation shader
      *     reading what the tessellation passes made (group 2)
+     * @property {number[]} [storage]  the storage blocks its fragment stage reaches (4.3)
+     * @property {number[]} [written]  those it writes
+     * @property {number[]} [counters]  the atomic counter buffers it changes (4.2)
+     * @property {import('./glsl-wgsl.js').UsedImage[]} [images]  the images it loads and
+     *     stores (4.2)
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -709,12 +720,18 @@ export function createGpuRenderer(services){
             const blocks = glsl.blocks ?? [];
             const geometry = !!glsl.geometry;
             const tessellation = !!glsl.tessellation;
+            const storage = glsl.storage ?? [];
+            const counters = glsl.counters ?? [];
+            const images = glsl.images ?? [];
             const key = `g${textures.map(t=>`${t.binding}${t.layout.viewDimension}`
                 + `${t.layout.sampleType}${t.layout.multisampled ? 'm' : ''}`).join(',')}|`
                 + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`
-                + `${geometry ? '|gs' : ''}${tessellation ? '|ts' : ''}`;
+                + `${geometry ? '|gs' : ''}${tessellation ? '|ts' : ''}`
+                + `${storage.length + counters.length + images.length > 0
+                    ? `|s${storage.join(',')}c${counters.join(',')}`
+                    + `i${images.map(i=>`${i.index}${i.access}`).join(',')}` : ''}`;
             return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry,
-                tessellation };
+                tessellation, storage, written: glsl.written ?? [], counters, images };
         }
         /** @type {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }[]} */
         const textures = [];
@@ -838,6 +855,23 @@ export function createGpuRenderer(services){
                 visibility: VERTEX_STAGE | FRAGMENT_STAGE,
                 buffer: { type: 'uniform' },
             });
+        }
+        // What the fragment stage writes: storage, which WebGPU's vertex
+        // stage may not see.
+        for (const index of plan.storage ?? [])
+        {
+            fixedEntries.push({ binding: GLSL_STORAGE_BINDING + index,
+                visibility: FRAGMENT_STAGE, buffer: { type: 'storage' } });
+        }
+        for (const binding of plan.counters ?? [])
+        {
+            fixedEntries.push({ binding: GLSL_COUNTER_BINDING + binding,
+                visibility: FRAGMENT_STAGE, buffer: { type: 'storage' } });
+        }
+        for (const { index, access, format, viewDimension } of plan.images ?? [])
+        {
+            fixedEntries.push({ binding: GLSL_IMAGE_BINDING + index, visibility: FRAGMENT_STAGE,
+                storageTexture: { access, format, viewDimension } });
         }
         /** @type {any[]} */
         const groups = [backend.createBindGroupLayout(
@@ -1026,6 +1060,12 @@ export function createGpuRenderer(services){
     // vertex pass of its own.
     const scratchUniforms = ring('gl-scratch-uniforms',
         BufferUsage.UNIFORM | BufferUsage.STORAGE | BufferUsage.COPY_DST, 1 << 16, 256);
+    const glMemory = createGlMemory({
+        backend,
+        bufferFor: buffer=>bufferFor(buffer),
+        textureFor: (texture, recording)=>textureFor(texture, recording),
+        lose: detail=>lose(detail),
+    });
     const geometryPasses = createGlGeometry({
         backend,
         uniform: view=>scratchUniforms.write(view),
@@ -1404,7 +1444,9 @@ export function createGpuRenderer(services){
                 usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
                     | TextureUsage.COPY_SRC
                     | (storage.renderable && !blocks && !solid
-                        ? TextureUsage.RENDER_ATTACHMENT : 0),
+                        ? TextureUsage.RENDER_ATTACHMENT : 0)
+                    // An image unit may bind it (4.2).
+                    | (IMAGE_STORAGE.has(format) ? TextureUsage.STORAGE_BINDING : 0),
             });
             record = {
                 gpu, width: base.width, height: base.height, levels, cube, format,
@@ -1611,7 +1653,8 @@ export function createGpuRenderer(services){
                     // copy target is never compressed.
                     usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
                         | TextureUsage.COPY_SRC
-                        | (bcFormat ? 0 : TextureUsage.RENDER_ATTACHMENT),
+                        | (bcFormat ? 0 : TextureUsage.RENDER_ATTACHMENT)
+                        | (IMAGE_STORAGE.has(format) ? TextureUsage.STORAGE_BINDING : 0),
                 }),
                 width: base.width,
                 height: base.height,
@@ -1784,8 +1827,12 @@ export function createGpuRenderer(services){
                     size: capacity,
                     // Storage too: what a pass before a geometry shader reads
                     // an array out of.
+                    // Indirect and a copy source too: what a dispatch reads its
+                    // grid from, and what a read of data the device wrote
+                    // copies back.
                     usage: BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.UNIFORM
-                        | BufferUsage.STORAGE | BufferUsage.COPY_DST,
+                        | BufferUsage.STORAGE | BufferUsage.INDIRECT | BufferUsage.COPY_SRC
+                        | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
                 }),
                 size: buffer.size,
@@ -2944,6 +2991,9 @@ export function createGpuRenderer(services){
                 : null;
         const blocks = plan.blocks && plan.blocks.length > 0 && executable
             ? uniformBlocksFor(scene, executable, plan.blocks, recording) : NO_BLOCKS;
+        const memory = executable && ((plan.storage?.length ?? 0) > 0
+            || (plan.counters?.length ?? 0) > 0 || (plan.images?.length ?? 0) > 0)
+            ? glMemory.bind(scene, executable, plan, recording, FRAGMENT_STAGE) : null;
         /**
          * Group 0 of a compute pass: the fixed block, the stage's own,
          * its textures and its uniform blocks, all at offsets of their
@@ -3228,6 +3278,7 @@ export function createGpuRenderer(services){
             vertexUniforms,
             fragmentUniforms,
             blocks,
+            memory: memory?.entries ?? null,
             slots: geometry || tessellated ? [] : slots,
             indices: geometry || tessellated ? null : indices,
             count,
@@ -3253,9 +3304,15 @@ export function createGpuRenderer(services){
         // one would take away exactly the resolution that mode exists for.
         // The picture is identical either way, so only the diagnostic loses
         // anything, and only while it is asked for.
-        if (!dumpDraws)
+        if (!dumpDraws && !memory)
         {
             joinLastDraw(recording);
+        }
+        // What the draw wrote is the device's from here: what the program
+        // stores into those buffers next reaches it after this draw.
+        if (memory?.writes)
+        {
+            void flush(context, surfaces, null);
         }
     };
 
@@ -4696,6 +4753,10 @@ export function createGpuRenderer(services){
                 {
                     entries.push(block);
                 }
+                for (const entry of command.memory ?? NO_BLOCKS)
+                {
+                    entries.push(entry);
+                }
                 pass.setBindings(0, pipeline.groups[0], entries);
                 if (command.fragmentUniforms)
                 {
@@ -4916,7 +4977,82 @@ export function createGpuRenderer(services){
     const sameRect = (a, b)=>a !== null && a.x === b.x && a.y === b.y && a.width === b.width
         && a.height === b.height && a.minDepth === b.minDepth && a.maxDepth === b.maxDepth;
 
+    const computes = createGlCompute({
+        backend,
+        memory: glMemory,
+        wrote: context=>{
+            const surfaces = drawables.get(context);
+            if (surfaces)
+            {
+                void flush(context, surfaces, null);
+            }
+        },
+        attached: context=>drawables.has(context),
+        recordingOf: context=>recordingOf(context),
+        mvpFor: (context, scene)=>mvpFor(context, scene),
+        // A compute stage has no window to flip into.
+        uniformsOf: (context, scene, mvp)=>uniformsOf(context, scene, mvp,
+            { flipped: false, height: 1 }),
+        glslUniforms: (plan, executable, scene, mvp)=>glslUniforms(plan, executable, scene, mvp),
+        uniform: view=>scratchUniforms.write(view),
+        textureForSampler: (scene, executable, entry)=>textureForSampler(scene, executable,
+            entry),
+        textureFor: (texture, recording)=>textureFor(texture, recording),
+        samplerFor: (texture, filtered, compared)=>samplerFor(texture, filtered, compared),
+        uniformBlocksFor: (scene, executable, blocks, recording)=>uniformBlocksFor(scene,
+            executable, blocks, recording),
+        samplerSwizzlesOf: (scene, executable)=>samplerSwizzlesOf(scene, executable),
+        bufferFor: buffer=>bufferFor(buffer),
+        dispatchAll: (recording, work)=>dispatchAll(recording, /** @type {any} */ (work)),
+        diverge: (detail, severity)=>(severity === 'loss' ? lose(detail) : diverge(detail)),
+    });
+
     return {
+        /**
+         * A compute dispatch of the current program (4.3 chapter 19),
+         * recorded in its turn among the context's draws.
+         *
+         * @param {object} context
+         * @param {{ grid: [number, number, number] }
+         *     | { indirect: { buffer: import('./objects.js').BufferObject, offset: number } }}
+         *     request
+         * @param {() => import('./pipeline.js').Scene} sceneOf
+         * @returns {boolean} whether it was recorded
+         */
+        dispatchCompute: (context, request, sceneOf)=>computes.dispatch(context, request,
+            sceneOf()),
+
+        /**
+         * A buffer object's bytes as the device holds them, once every
+         * command the context recorded so far has run: what a read of a
+         * buffer a shader or transform feedback wrote takes. Null where the
+         * device has no copy of it.
+         *
+         * @param {object} context @param {import('./objects.js').BufferObject} buffer
+         * @returns {Promise<Uint8Array | null> | null}
+         */
+        readBuffer(context, buffer){
+            const held = buffers.get(buffer);
+            if (!held || buffer.size === 0)
+            {
+                return null;
+            }
+            const surfaces = drawables.get(context);
+            const recorded = surfaces && recordings.has(context)
+                ? flush(context, surfaces, null) : chain;
+            /** @type {Uint8Array | null} */
+            let bytes = null;
+            chain = recorded.then(async()=>{
+                const frame = backend.beginFrame();
+                const read = frame.copyOut([{ buffer: held.gpu.gpu, offset: 0,
+                    size: buffer.size }]);
+                frame.end();
+                [bytes] = await read();
+            }).catch(error=>{
+                lose(error instanceof Error ? error.message : String(error));
+            });
+            return chain.then(()=>bytes);
+        },
         /**
          * A buffer object the program deleted: its GPU copy goes back once the
          * frames that drew from it are submitted.

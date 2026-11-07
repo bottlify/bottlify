@@ -1366,6 +1366,10 @@ ${stage.code}
             stages.fragment = fragment.plan;
             stages.samplers = fragment.usedSamplers;
             stages.blocks = fragment.usedBlocks;
+            stages.storage = fragment.usedStorage;
+            stages.written = fragment.writtenStorage;
+            stages.images = fragment.usedImages;
+            stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
             stages.geometry = {
                 vertex: { code: module(vertex, state.attributes.length > 0
@@ -1390,6 +1394,10 @@ ${stage.code}
             stages.fragment = fragment.plan;
             stages.samplers = [...new Set([...vertex.usedSamplers, ...fragment.usedSamplers])];
             stages.blocks = [...new Set([...vertex.usedBlocks, ...fragment.usedBlocks])];
+            stages.storage = fragment.usedStorage;
+            stages.written = fragment.writtenStorage;
+            stages.images = fragment.usedImages;
+            stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
         else if (program.vertex)
@@ -1419,6 +1427,10 @@ ${stage.code}
             stages.fragment = fragment.plan;
             stages.samplers = fragment.usedSamplers;
             stages.blocks = fragment.usedBlocks;
+            stages.storage = fragment.usedStorage;
+            stages.written = fragment.writtenStorage;
+            stages.images = fragment.usedImages;
+            stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
     }
@@ -1440,6 +1452,38 @@ ${parts.join('\n\n')}
 }
 
 /**
+ * A compute program's one pass (OpenGL 4.3 section 19): the fixed block,
+ * the stage's own uniforms, samplers and uniform blocks, and the stage, its
+ * entry point `computeMain`.
+ *
+ * @param {import('./glsl-link.js').LinkedProgram} program
+ * @param {Map<number, string>} [swizzles]  each sampler's texture swizzle (3.3)
+ * @returns {ComputeStage & { error?: string }}
+ */
+export function generateGlslCompute(program, swizzles){
+    try
+    {
+        const stage = emitStage(program, 'compute', /** @type {any} */ ({
+            attributes: [], flat: false, twoSide: false, alphaFunc: null, targets: 0,
+            compare: compareExpression, swizzles,
+        }), null, 'glsl');
+        const code = `${UNIFORM_STRUCT}
+${[...stage.usedBlocks].sort((a, b)=>a - b).map(index=>blockDeclaration(program, index))
+        .join('\n')}
+${samplerDeclarations(program, stage.usedSamplers).join('\n')}
+${stage.code}
+`;
+        return { code, plan: stage.plan, samplers: stage.usedSamplers, blocks: stage.usedBlocks,
+            storage: stage.usedStorage, written: stage.writtenStorage,
+            counters: stage.usedCounters, images: stage.usedImages };
+    }
+    catch (e){
+        return { code: '', plan: null, samplers: [], blocks: [], storage: [], counters: [],
+            error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+/**
  * A vertex's registers the geometry pass writes: gl_Position, the fields,
  * then what transform feedback captures.
  *
@@ -1454,6 +1498,11 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  * @property {import('./glsl-wgsl.js').BlockPlan | null} fragment
  * @property {number[]} samplers  the program's samplers the stages sample, by index
  * @property {number[]} blocks  the program's uniform blocks the stages read, by index
+ * @property {number[]} [storage]  the storage blocks its fragment stage reads or writes
+ * @property {number[]} [written]  those it writes
+ * @property {number[]} [counters]  the atomic counter buffers its fragment stage changes
+ * @property {import('./glsl-wgsl.js').UsedImage[]} [images]  the images it loads and
+ *     stores
  * @property {GeometryPasses} [geometry]  the passes before the draw, for a program
  *     with a geometry shader: the draw's vertex stage then reads what they made
  * @property {{ vertex: ComputeStage, inputs: number }} [capture]  the vertex stage as a
@@ -1494,6 +1543,11 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  * @property {import('./glsl-wgsl.js').BlockPlan | null} plan  its uniform block, if it has one
  * @property {number[]} samplers
  * @property {number[]} blocks
+ * @property {number[]} [storage]  the shader storage blocks it reads or writes, by index
+ * @property {number[]} [written]  those it writes
+ * @property {number[]} [counters]  the atomic counter buffers it changes, by binding
+ * @property {import('./glsl-wgsl.js').UsedImage[]} [images]  the images it loads and
+ *     stores, by index, and how
  */
 
 /**

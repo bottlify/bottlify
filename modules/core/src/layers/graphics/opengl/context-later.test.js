@@ -116,3 +116,18 @@ test('robust reads refuse a buffer too small, and no reset is ever told (4.5)', 
     assert.deepEqual(gl.getnUniform(program, tint, 16).values, [0, 0, 0, 0]);
     assert.deepEqual(gl.glGetIntegerv(GL.MAX_ELEMENT_INDEX), [-1]);
 });
+
+test('glBindBuffers reaches the storage points, checked against their limit', ()=>{
+    const gl = context();
+    const [buffer] = gl.glGenBuffersARB(1);
+    gl.glBindBufferARB(GL.ARRAY_BUFFER, buffer);
+    gl.glBufferDataARB(GL.ARRAY_BUFFER, 1024, 0, GL.STATIC_DRAW);
+    gl.glBindBuffers(GL.SHADER_STORAGE_BUFFER, 0, 2, [buffer, buffer], null);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetIntegeri_v(GL.SHADER_STORAGE_BUFFER_BINDING, 1), [buffer]);
+    const most = gl.glGetIntegerv(GL.MAX_SHADER_STORAGE_BUFFER_BINDINGS)[0];
+    gl.glBindBuffers(GL.SHADER_STORAGE_BUFFER, most - 1, 2, [buffer, buffer], null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'past the last point');
+    gl.glBindBuffers(GL.ATOMIC_COUNTER_BUFFER, 0, 1, [buffer], null);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+});

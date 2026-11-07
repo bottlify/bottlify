@@ -1182,6 +1182,32 @@ GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT is 4:** nothing here needs a coarser boundary
 **A154. glTexBuffer and glTexBufferRange run when they are reached, a list open or not,** as the
 buffer object calls do. *2026-11-07.*
 
+**A170. GLSL 4.20 and 4.30 are taken where a compute shader, storage blocks, images and atomic
+counters are written;** 4.00 and 4.10 stay refused outside the tessellation stages until the
+features they bring are written. *2026-11-07.*
+
+**A171. Temporary: the compute limits are WebGPU's defaults,** below GL's minimums: 256
+invocations a work group against 1024, 256 by 256 by 64 against 1024 by 1024 by 64, and 16 KiB of
+shared memory against 32 KiB. *2026-11-07.*
+
+**A172. The vertex, tessellation and geometry stages have no storage blocks, atomic counters or
+images:** their GL_MAX_* answer 0, which the specification allows; WebGPU writes no storage from a
+vertex stage. *2026-11-07.*
+
+**A173. Temporary: a stage has at most 4 image uniforms** (WebGPU's storage textures) against
+GL's 8, **storage buffer offsets are multiples of 256**, a counter range off 256 being a loss
+though glBindBufferRange takes word offsets as GL does, and **a stage binds 8 storage blocks and
+counter buffers together.** *2026-11-07.*
+
+**A174. imageAtomic* is refused, a loss at the dispatch or draw:** WGSL has no atomics on
+textures. The image formats WebGPU cannot store to (rg16f, r11f_g11f_b10f, the 16-bit normalised
+ones and others) are taken by glBindImageTexture and refused where a shader uses them. *2026-11-07.*
+
+**A175. Shared and packed storage blocks are laid out as std140;** a block an atomic function
+touches is atomic words throughout; signed min and max on block words and every atomicCompSwap
+are compare-and-swap loops; memoryBarrier*() outside a compute shader emits nothing, an
+invocation's own accesses being in its order already. *2026-11-07.*
+
 **A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
 many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an
 indirect dispatch sized there. *2026-11-07.*

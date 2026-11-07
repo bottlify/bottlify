@@ -232,7 +232,8 @@ export function installLaterCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            if (first + count > record(limit).values[0])
+            // A limit of the state table's or one a later layer answers (`kernel.side.queries`).
+            if (first + count > (context.glGetIntegerv(limit)?.[0] ?? 0))
             {
                 setError(GL.INVALID_OPERATION);
                 return;

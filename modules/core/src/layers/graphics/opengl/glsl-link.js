@@ -31,6 +31,15 @@
  *   out of it by the plan made here.
  */
 
+import {
+    IMAGE_FORMATS, STORAGE_LIMITS, atomicCountersOf, checkImageStages, storageBlocksOf,
+} from './glsl-storage.js';
+
+/** The format qualifiers of the images WebGPU stores into, and the others GLSL names. */
+const IMAGE_FORMAT_NAMES = new Set([...IMAGE_FORMATS.map(([name])=>name), 'rg16f',
+    'r11f_g11f_b10f', 'r16f', 'rgba16', 'rgb10_a2', 'rg16', 'rg8', 'r16', 'r8', 'rgba16_snorm',
+    'rg16_snorm', 'rg8_snorm', 'r16_snorm', 'r8_snorm', 'rg16i', 'rg8i', 'r16i', 'r8i',
+    'rgb10_a2ui', 'rg16ui', 'rg8ui', 'r16ui', 'r8ui']);
 import { BUILTIN_ATTRIBUTES, GLSL_LIMITS } from './glsl-builtins.js';
 import { baseOf, componentsOf, glslName, innermost } from './glsl-types.js';
 import { blockLayout, blockVariables } from './glsl-layout.js';
@@ -48,7 +57,8 @@ import { linkTessellation } from './glsl-link-tess.js';
  * One stage of a linked program, merged from its shader objects.
  *
  * @typedef {Object} LinkedStage
- * @property {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'} stage
+ * @property {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'
+ *     | 'compute'} stage
  * @property {UserFunction} main
  * @property {UserFunction[]} functions  the definitions main reaches, callees first
  * @property {VariableSymbol[]} globals  every global the stage's shaders declare
@@ -100,7 +110,7 @@ import { linkTessellation } from './glsl-link-tess.js';
  * @property {'std140' | 'std430'} packing
  * @property {import('./glsl-layout.js').MemberLayout[]} members
  * @property {{ vertex: boolean, geometry: boolean, fragment: boolean,
- *     tessControl?: boolean, tessEvaluation?: boolean }} stages
+ *     tessControl?: boolean, tessEvaluation?: boolean, compute?: boolean }} stages
  * @property {number} binding  the binding point a link leaves it at: the
  *     shader's `layout(binding)` (4.20), else 0
  */
@@ -219,6 +229,14 @@ export const FEEDBACK_LIMITS = Object.freeze({
  * @property {FragmentOutput[]} outputs  the fragment shader's own outputs
  * @property {UniformBlock[]} blocks  the active uniform blocks, by index
  * @property {BlockUniform[]} blockUniforms  their active uniforms
+ * @property {import('./glsl-storage.js').StorageBlock[]} [storageBlocks]  the active
+ *     shader storage blocks, by index (4.3)
+ * @property {import('./glsl-storage.js').AtomicCounter[]} [counters]  the active atomic
+ *     counters (4.2), which are not among `uniforms`
+ * @property {import('./glsl-storage.js').ImageUniform[]} [images]  the image uniforms'
+ *     elements (4.2), each its unit's value in the store
+ * @property {LinkedStage | null} [compute]  a compute program's one stage (4.3)
+ * @property {[number, number, number]} [localSize]  its work group's size
  */
 
 /** The uniform blocks a stage may read, and all its stages together (OpenGL 3.1). */
@@ -226,8 +244,23 @@ export const BLOCK_LIMITS = Object.freeze({
     perStage: 10, combined: 20, bindings: 24, size: 16384,
 });
 
+/**
+ * A compute dispatch's limits (OpenGL 4.3 table 23.53): WebGPU's own
+ * defaults where they are under GL's minimums - a work group of at most 256
+ * invocations, 256 by 256 by 64, and 16 KiB of shared memory against GL's
+ * 1024, 1024 by 1024 by 64 and 32 KiB (decision A171) - and GL's minimum
+ * where WebGPU allows as much: 65535 groups along each axis.
+ */
+export const COMPUTE_LIMITS = Object.freeze({
+    count: Object.freeze([65535, 65535, 65535]),
+    size: Object.freeze([256, 256, 64]),
+    invocations: 256,
+    sharedBytes: 16384,
+});
+
 /** @param {GlslType} type */
-const wordsOf = type=>(type.kind === 'sampler' ? 1 : componentsOf(type));
+const wordsOf = type=>(type.kind === 'sampler' || type.kind === 'image' ? 1
+    : componentsOf(type));
 
 /**
  * The leaves of a uniform: each basic or sampler element reachable through
@@ -264,7 +297,7 @@ const GEOMETRY_OUTPUTS = new Map([['points', 1], ['line_strip', 2], ['triangle_s
 
 /**
  * @param {{ vertex: ShaderUnit[], geometry?: ShaderUnit[], fragment: ShaderUnit[],
- *     tessControl?: ShaderUnit[], tessEvaluation?: ShaderUnit[],
+ *     tessControl?: ShaderUnit[], tessEvaluation?: ShaderUnit[], compute?: ShaderUnit[],
  *     feedback?: { names: readonly string[], mode: 'interleaved' | 'separate' },
  *     attribBindings: Map<string, number>,
  *     fragDataBindings?: Map<string, { location: number, index: number }> }} given
@@ -276,6 +309,7 @@ export function linkProgram(given){
     const geometry = given.geometry ?? [];
     const tessControl = given.tessControl ?? [];
     const tessEvaluation = given.tessEvaluation ?? [];
+    const compute = given.compute ?? [];
     const fragDataBindings = given.fragDataBindings ?? new Map();
     /** @type {string[]} */
     const errors = [];
@@ -285,7 +319,7 @@ export function linkProgram(given){
     };
 
     if (vertex.length === 0 && fragment.length === 0 && geometry.length === 0
-        && tessControl.length === 0 && tessEvaluation.length === 0)
+        && tessControl.length === 0 && tessEvaluation.length === 0 && compute.length === 0)
     {
         return { ok: false, log: 'ERROR: no shaders are attached\n' };
     }
@@ -434,9 +468,17 @@ export function linkProgram(given){
     const tes = mergeStage('tessEvaluation', tessEvaluation);
     const gs = mergeStage('geometry', geometry);
     const fs = mergeStage('fragment', fragment);
+    const cs = mergeStage('compute', compute);
     const geometryLayout = gs ? geometryLayoutOf(geometry, error) : null;
     const tessellation = linkTessellation({ vertex: vs, control: tcs, evaluation: tes,
         controlUnits: tessControl, evaluationUnits: tessEvaluation }, error);
+    if (cs && (vs || tcs || tes || gs || fs))
+    {
+        // OpenGL 4.3 section 7.3: a program with a compute shader has no
+        // other stage.
+        error('a compute shader is linked with shaders of other stages');
+    }
+    const localSize = cs ? localSizeOf(compute, error) : null;
     if (gs && !vs)
     {
         // OpenGL 3.2 section 2.12: a geometry shader takes what a vertex
@@ -651,11 +693,14 @@ export function linkProgram(given){
     // --- uniforms ---
     /** @type {Map<string, VariableSymbol>} */
     const uniformRoots = new Map();
-    for (const stage of [vs, tcs, tes, gs, fs])
+    for (const stage of [vs, tcs, tes, gs, fs, cs])
     {
         for (const symbol of usedOf(stage, 'uniform'))
         {
-            if (symbol.block)
+            // An atomic counter is a place in a buffer, not a value in the
+            // store (`glsl-storage.js`).
+            if (symbol.block || (symbol.type.kind === 'array' ? symbol.type.element
+                : symbol.type).kind === 'atomic')
             {
                 continue;
             }
@@ -677,6 +722,8 @@ export function linkProgram(given){
     const locations = new Map();
     /** @type {LinkedProgram["samplers"]} */
     const samplers = [];
+    /** @type {import('./glsl-storage.js').ImageUniform[]} */
+    const images = [];
     let nextLocation = 0;
     let storeWords = 0;
     for (const [rootName, symbol] of uniformRoots)
@@ -690,6 +737,19 @@ export function linkProgram(given){
                 size: leaf.size, location: nextLocation, offset: storeWords,
                 words: wordsOf(leaf.type),
             };
+            if (leaf.type.kind === 'image')
+            {
+                const layout = /** @type {Record<string, any>} */ (
+                    symbol.qualifiers?.layout ?? {});
+                const memory = symbol.qualifiers?.memory ?? new Set();
+                for (let k = 0; k < leaf.size; k++)
+                {
+                    images.push({ leaf: entry, element: k, type: leaf.type,
+                        format: Object.keys(layout).find(key=>IMAGE_FORMAT_NAMES.has(key)) ?? '',
+                        binding: (typeof layout.binding === 'number' ? layout.binding : 0) + k,
+                        readonly: memory.has('readonly'), writeonly: memory.has('writeonly') });
+                }
+            }
             if (leaf.type.kind === 'sampler')
             {
                 entry.samplerBindings = [];
@@ -726,7 +786,7 @@ export function linkProgram(given){
             {
                 continue;
             }
-            const base = leaf.type.kind === 'sampler' ? 'int'
+            const base = leaf.type.kind === 'sampler' || leaf.type.kind === 'image' ? 'int'
                 : /** @type {any} */ (leaf.type).base ?? 'float';
             constant.forEach((/** @type {number} */ value, /** @type {number} */ k)=>{
                 if (k < leaf.words * leaf.size)
@@ -765,7 +825,28 @@ export function linkProgram(given){
     }
 
     // --- uniform blocks ---
-    const { blocks, blockUniforms } = uniformBlocksOf([vs, tcs, tes, gs, fs], error);
+    const { blocks, blockUniforms } = uniformBlocksOf([vs, tcs, tes, gs, fs, cs], error);
+    const linkedStages = { vertex: vs, tessControl: tcs, tessEvaluation: tes, geometry: gs,
+        fragment: fs, compute: cs };
+    const storageBlocks = storageBlocksOf(linkedStages, error);
+    const counters = atomicCountersOf(linkedStages, error);
+    // An image unit's default is its `layout(binding)` (4.20 section 4.4.5).
+    for (const image of images)
+    {
+        new Int32Array(defaults)[image.leaf.offset + image.element] = image.binding;
+    }
+    checkImageStages(linkedStages, images, error);
+    // WebGPU's storage buffers a stage: the blocks and the counter buffers together.
+    for (const stage of /** @type {const} */ (['fragment', 'compute']))
+    {
+        const buffers = storageBlocks.filter(b=>b.stages[stage]).length
+            + new Set(counters.filter(c=>c.stages[stage]).map(c=>c.binding)).size;
+        if (buffers > STORAGE_LIMITS.perStage)
+        {
+            error(`${stage} shader: ${buffers} storage blocks and atomic counter buffers, more`
+                + ` than the ${STORAGE_LIMITS.perStage} a stage binds`);
+        }
+    }
 
     if (errors.length > 0)
     {
@@ -779,9 +860,51 @@ export function linkProgram(given){
             tessControl: tcs, tessEvaluation: tes, ...tessellation,
             attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
-            blocks, blockUniforms,
+            blocks, blockUniforms, storageBlocks, counters, images,
+            ...cs ? { compute: cs, localSize: /** @type {[number, number, number]} */ (
+                localSize) } : {},
         },
     };
+}
+
+/**
+ * A compute shader's work group size (section 4.4.1.4 of the 4.30
+ * language): declared in at least one of its shader objects, the same in
+ * every one that declares it.
+ *
+ * @param {ShaderUnit[]} units @param {(message: string) => void} error
+ * @returns {[number, number, number]}
+ */
+function localSizeOf(units, error){
+    /** @type {[number, number, number] | null} */
+    let size = null;
+    for (const unit of units)
+    {
+        const layout = /** @type {Record<string, any>} */ (unit.layouts.input);
+        const said = ['local_size_x', 'local_size_y', 'local_size_z'].map(k=>layout[k]);
+        if (said.every(v=>typeof v !== 'number'))
+        {
+            continue;
+        }
+        const here = /** @type {[number, number, number]} */ (said.map(v=>(
+            typeof v === 'number' ? v : 1)));
+        if (size && size.some((v, k)=>v !== here[k]))
+        {
+            error('compute shader: the local size is declared differently in two shaders');
+        }
+        size = here;
+    }
+    if (!size)
+    {
+        error('compute shader: no local size is declared');
+        return [1, 1, 1];
+    }
+    if (size[0] * size[1] * size[2] > COMPUTE_LIMITS.invocations)
+    {
+        error(`compute shader: a work group of ${size.join(' by ')} is more than`
+            + ` GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS (${COMPUTE_LIMITS.invocations})`);
+    }
+    return size;
 }
 
 /**
@@ -946,7 +1069,8 @@ function uniformBlocksOf(stages, error){
                     stages: { vertex: stage.stage === 'vertex',
                         geometry: stage.stage === 'geometry', fragment: stage.stage === 'fragment',
                         tessControl: stage.stage === 'tessControl',
-                        tessEvaluation: stage.stage === 'tessEvaluation' },
+                        tessEvaluation: stage.stage === 'tessEvaluation',
+                        compute: stage.stage === 'compute' },
                     binding: typeof info.layout.binding === 'number' ? binding + k : 0,
                 });
             }
@@ -1215,4 +1339,6 @@ function describe(struct){
  * @property {number} version  raised on every glUniform* that changes a value
  * @property {Int32Array} blockBindings  the binding point each uniform block
  *     reads (glUniformBlockBinding), by block index
+ * @property {Int32Array} [storageBindings]  the binding point each shader storage
+ *     block reads and writes (glShaderStorageBlockBinding), by block index
  */

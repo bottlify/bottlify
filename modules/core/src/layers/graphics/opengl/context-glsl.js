@@ -36,17 +36,21 @@ import { GL } from './constants.js';
 import { compileFront } from './glsl-front.js';
 import { GLSL_EXTENSIONS } from './glsl-versions.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
-import { BLOCK_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
+import { BLOCK_LIMITS, COMPUTE_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
+import { IMAGE_LIMITS } from './glsl-storage.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
-import { componentsOf } from './glsl-types.js';
+import { ATOMIC_UINT, componentsOf } from './glsl-types.js';
 import { TESS, tessellationProgramAnswer } from './context-tessellation.js';
 
 /**
  * The GLSL versions a shader may name: those the WGSL emitter writes whole
- * (`glsl-wgsl.js`). A later one fails to compile with the specification's
- * message for a version the implementation does not support.
+ * (`glsl-wgsl.js`), and 4.20 and 4.30, in which compute shaders, storage
+ * blocks, images and atomic counters are written (decision A170): a feature
+ * of theirs the emitter does not write fails the link with its reason. A
+ * later one fails to compile with the specification's message for a version
+ * the implementation does not support.
  */
-export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330]);
+export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 420, 430]);
 
 /**
  * The versions a tessellation shader may name: the language has the stages
@@ -55,7 +59,10 @@ export const EMITTED_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330]);
  */
 const TESSELLATION_VERSIONS = Object.freeze([400, 410, 420, 430, 440, 450, 460]);
 
-/** @typedef {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'} ShaderStage */
+/**
+ * @typedef {'vertex' | 'tessControl' | 'tessEvaluation' | 'geometry' | 'fragment'
+ *     | 'compute'} ShaderStage
+ */
 
 /**
  * The built-in constants of 1.30 and later as this implementation answers
@@ -79,6 +86,9 @@ export const CONTEXT_CONSTANTS = Object.freeze({
     gl_MaxTextureCoords: GLSL_LIMITS.textureCoords,
     gl_MaxClipPlanes: GLSL_LIMITS.clipPlanes,
     gl_MaxLights: GLSL_LIMITS.lights,
+    gl_MaxComputeWorkGroupSize: [...COMPUTE_LIMITS.size],
+    gl_MaxComputeWorkGroupCount: [...COMPUTE_LIMITS.count],
+    gl_MaxComputeTextureImageUnits: GLSL_LIMITS.textureImageUnits,
 });
 
 // GL_ARB_shader_objects' own enums; its other queries are the 2.0 ones.
@@ -146,7 +156,7 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
 /** The shader types. @type {Map<number, ShaderStage>} */
 const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.GEOMETRY_SHADER, 'geometry'],
     [TESS.TESS_CONTROL_SHADER, 'tessControl'], [TESS.TESS_EVALUATION_SHADER, 'tessEvaluation'],
-    [GL.FRAGMENT_SHADER, 'fragment']]);
+    [GL.FRAGMENT_SHADER, 'fragment'], [GL.COMPUTE_SHADER, 'compute']]);
 
 /** What GEOMETRY_INPUT_TYPE and GEOMETRY_OUTPUT_TYPE answer, by the layout's word. */
 const GEOMETRY_PRIMITIVES = Object.freeze(/** @type {Record<string, number>} */ ({
@@ -172,6 +182,7 @@ function executableOf(linked){
         ints: new Int32Array(store),
         version: 0,
         blockBindings: Int32Array.from(linked.blocks, block=>block.binding),
+        storageBindings: Int32Array.from(linked.storageBlocks ?? [], block=>block.binding),
     };
 }
 
@@ -251,6 +262,16 @@ export function glTypeOf(type){
             return SAMPLER_TYPES[`${type.sampled === 'float' ? '' : type.sampled}${type.dim}`
                 + `${type.ms ? 'MS' : ''}${type.array ? 'Array' : ''}`
                 + `${type.shadow ? 'Shadow' : ''}`] ?? 0;
+        case 'atomic':
+            return 0x92db; // GL_UNSIGNED_INT_ATOMIC_COUNTER
+        case 'image': {
+            // GL_IMAGE_1D on, eleven shapes a kind of value (4.2 table 7.3).
+            const shape = ['1D', '2D', '3D', '2DRect', 'Cube', 'Buffer', '1DArray', '2DArray',
+                'CubeArray', '2DMS', '2DMSArray'].indexOf(`${type.dim}${type.ms ? 'MS' : ''}`
+                + `${type.array ? 'Array' : ''}`);
+            return shape < 0 ? 0 : 0x904c + shape
+                + (type.sampled === 'int' ? 11 : type.sampled === 'uint' ? 22 : 0);
+        }
         default:
             return 0;
     }
@@ -280,18 +301,36 @@ const SAMPLER_TYPES = /** @type {Record<string, number>} */ ({
 
 /**
  * The uniforms a program lists (section 2.11.4 of 3.1): its default block's
- * leaves, then its named blocks' variables.
+ * leaves, then its named blocks' variables, then its atomic counters.
  *
  * @param {LinkedProgram} linked
  * @returns {{ name: string, size: number, type: GlslType, block: number, offset: number,
- *     arrayStride: number, matrixStride: number, rowMajor: boolean }[]}
+ *     arrayStride: number, matrixStride: number, rowMajor: boolean, counters: number }[]}
+ *     `counters` an atomic counter's buffer's index, -1 for every other
  */
 function activeUniforms(linked){
+    const buffers = counterBuffersOf(linked);
     return [
         ...linked.uniforms.map(u=>({ name: u.name, size: u.size, type: u.type, block: -1,
-            offset: -1, arrayStride: -1, matrixStride: -1, rowMajor: false })),
-        ...(linked.blockUniforms ?? []),
+            offset: -1, arrayStride: -1, matrixStride: -1, rowMajor: false, counters: -1 })),
+        ...(linked.blockUniforms ?? []).map(u=>({ ...u, counters: -1 })),
+        // An atomic counter is a uniform with no location (4.2 section 7.3.1),
+        // in the buffer of its binding.
+        ...(linked.counters ?? []).map(c=>({ name: c.count > 1 ? `${c.name}[0]` : c.name,
+            size: c.count, type: ATOMIC_UINT, block: -1, offset: c.offset,
+            arrayStride: c.count > 1 ? 4 : 0, matrixStride: 0, rowMajor: false,
+            counters: buffers.indexOf(c.binding) })),
     ];
+}
+
+/**
+ * The atomic counter buffers a program reads (4.2 section 7.3.1): its
+ * counters' bindings, each once, in order.
+ *
+ * @param {LinkedProgram} linked @returns {number[]}
+ */
+export function counterBuffersOf(linked){
+    return [...new Set((linked.counters ?? []).map(c=>c.binding))].sort((a, b)=>a - b);
 }
 
 /**
@@ -448,7 +487,9 @@ export function installShaderCalls(context, kernel){
         }
         const { executable, leaf, element } = target;
         const type = leaf.type;
-        if (type.kind === 'sampler')
+        // An image's value is its unit, as a sampler's is (4.2 section 7.6).
+        const opaque = type.kind === 'sampler' || type.kind === 'image';
+        if (opaque)
         {
             if (kind !== 'i' || components !== 1 || matrix)
             {
@@ -480,12 +521,14 @@ export function installShaderCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        if (type.kind === 'sampler')
+        if (opaque)
         {
+            const units = type.kind === 'image' ? IMAGE_LIMITS.units
+                : GLSL_LIMITS.combinedTextureImageUnits;
             for (let k = 0; k < count; k++)
             {
                 const unit = values[k];
-                if (unit < 0 || unit >= GLSL_LIMITS.combinedTextureImageUnits)
+                if (unit < 0 || unit >= units)
                 {
                     setError(GL.INVALID_VALUE);
                     return;
@@ -494,7 +537,7 @@ export function installShaderCalls(context, kernel){
         }
         const elements = Math.min(count, leaf.size - element);
         const stored = type.kind === 'scalar' || type.kind === 'vector' ? type.base
-            : type.kind === 'sampler' ? 'int' : 'float';
+            : opaque ? 'int' : 'float';
         const { floats, ints } = executable;
         let changed = false;
         for (let e = 0; e < elements; e++)
@@ -678,6 +721,13 @@ export function installShaderCalls(context, kernel){
         glslExecutable: ()=>currentProgram?.executable
             ?? (boundPipeline && Object.values(boundPipeline.stages).some(Boolean)
                 ? pipelineExecutable(boundPipeline) : null),
+        /**
+         * A program object by its name, as the program calls check it:
+         * INVALID_VALUE for no object, INVALID_OPERATION for a shader.
+         *
+         * @param {number} name @returns {ProgramObject | null}
+         */
+        programObject: name=>objectOf(name, 'program'),
     });
 
     /**
@@ -954,6 +1004,7 @@ export function installShaderCalls(context, kernel){
                 tessControl: units(TESS.TESS_CONTROL_SHADER),
                 tessEvaluation: units(TESS.TESS_EVALUATION_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
+                compute: units(GL.COMPUTE_SHADER),
                 feedback: program.feedback ?? undefined,
                 attribBindings: program.bindings,
                 fragDataBindings: program.fragData,
@@ -1347,6 +1398,8 @@ export function installShaderCalls(context, kernel){
                         .map(u=>u.name.length + 1)) : 0];
                 case GL.ACTIVE_UNIFORM_BLOCKS:
                     return [linked ? linked.blocks.length : 0];
+                case GL.ACTIVE_ATOMIC_COUNTER_BUFFERS:
+                    return [linked ? counterBuffersOf(linked).length : 0];
                 case GL.ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
                     return [linked ? Math.max(0, ...linked.blocks
                         .map(b=>b.name.length + 1)) : 0];
@@ -1373,6 +1426,15 @@ export function installShaderCalls(context, kernel){
                         : GEOMETRY_PRIMITIVES[pname === GL.GEOMETRY_INPUT_TYPE ? layout.input
                             : layout.output]];
                 }
+                // A compute program's work group (4.3), INVALID_OPERATION for
+                // any other (section 7.13).
+                case GL.COMPUTE_WORK_GROUP_SIZE:
+                    if (!program.linked || !linked?.localSize)
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    return [...linked.localSize];
                 // OpenGL 4.1's program binaries, of which no format is known.
                 case GL.PROGRAM_BINARY_LENGTH:
                     return [0];
@@ -1862,6 +1924,8 @@ export function installShaderCalls(context, kernel){
                     return [own.stages.tessControl ? 1 : 0];
                 case TESS.UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
                     return [own.stages.tessEvaluation ? 1 : 0];
+                case GL.UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
+                    return [own.stages.compute ? 1 : 0];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
@@ -1949,10 +2013,12 @@ export function installShaderCalls(context, kernel){
                 [GL.UNIFORM_NAME_LENGTH]: u=>u.name.length + 1,
                 [GL.UNIFORM_BLOCK_INDEX]: u=>u.block,
                 [GL.UNIFORM_OFFSET]: u=>u.offset,
-                [GL.UNIFORM_ARRAY_STRIDE]: u=>(u.block < 0 ? -1 : u.size > 1 || u.arrayStride > 0
-                    ? u.arrayStride : 0),
+                // An atomic counter's stride is its buffer's (4.2 section 7.3.1).
+                [GL.UNIFORM_ARRAY_STRIDE]: u=>(u.block < 0 && u.counters < 0 ? -1
+                    : u.size > 1 || u.arrayStride > 0 ? u.arrayStride : 0),
                 [GL.UNIFORM_MATRIX_STRIDE]: u=>(u.block < 0 ? -1 : u.matrixStride),
                 [GL.UNIFORM_IS_ROW_MAJOR]: u=>(u.rowMajor ? 1 : 0),
+                [GL.UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX]: u=>u.counters,
             };
             const answer = read[pname];
             if (!answer)

@@ -1070,6 +1070,18 @@ export const DEFAULT_STATE = Object.freeze([
         kind: 'int', value: [0],
     },
     {
+        query: GL.DISPATCH_INDIRECT_BUFFER_BINDING, name: 'GL_DISPATCH_INDIRECT_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.SHADER_STORAGE_BUFFER_BINDING, name: 'GL_SHADER_STORAGE_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.ATOMIC_COUNTER_BUFFER_BINDING, name: 'GL_ATOMIC_COUNTER_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
         query: GL.PARAMETER_BUFFER_BINDING, name: 'GL_PARAMETER_BUFFER_BINDING', kind: 'int',
         value: [0],
     },

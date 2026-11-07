@@ -439,6 +439,9 @@ export function createSceneBuilder(kernel){
             textureMatrices,
             boundTextures,
             uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
+            storageBuffers: glsl ? side.storageBuffers?.() ?? [] : [],
+            counterBuffers: glsl ? side.counterBuffers?.() ?? [] : [],
+            imageUnits: glsl ? side.imageUnits?.() ?? [] : [],
             feedback: glsl ? side.feedbackSession?.() ?? null : null,
             patch: glsl?.linked.tessEvaluation ? {
                 vertices: record(TESS.PATCH_VERTICES).values[0],

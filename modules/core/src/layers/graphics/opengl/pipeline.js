@@ -199,6 +199,15 @@ import { swizzleTexel } from './objects.js';
  * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
  *             size: number } | null)[]} [uniformBuffers]  what each uniform buffer
  *           binding point holds (glBindBufferRange), for a GLSL program's blocks
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [storageBuffers]  what each shader storage
+ *           binding point holds (4.3)
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [counterBuffers]  what each atomic counter
+ *           buffer binding point holds (4.2)
+ * @property {readonly ({ texture: import('./objects.js').TextureObject | null, level: number,
+ *             layered: boolean, layer: number, access: number, format: number }
+ *             | null)[]} [imageUnits]  what each image unit binds (glBindImageTexture, 4.2)
  * @property {{ primitive: number, feedback: import('./glsl-link.js').Feedback,
  *     buffers: ({ buffer: import('./objects.js').BufferObject, offset: number,
  *     size: number } | null)[], most: number } | null} [feedback]

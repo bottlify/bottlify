@@ -392,6 +392,26 @@ export function laterEntryPoints(h){
         glMemoryBarrierByRegion: ([barriers])=>answer(current()?.glMemoryBarrier(barriers >>> 0,
             true)),
         glTextureBarrier: ()=>answer(current()?.glTextureBarrier()),
+
+        // --- compute (4.3) ---
+        glDispatchCompute: ([x, y, z])=>answer(current()?.glDispatchCompute(x >>> 0, y >>> 0,
+            z >>> 0)),
+        glDispatchComputeIndirect: ([offset])=>answer(current()?.glDispatchComputeIndirect(
+            offset | 0)),
+        // --- image load and store (4.2) ---
+        glBindImageTexture: ([unit, texture, level, layered, layer, access, format])=>answer(
+            current()?.glBindImageTexture(unit >>> 0, texture >>> 0, level | 0,
+                (layered & 0xff) !== 0, layer | 0, access >>> 0, format >>> 0)),
+        // --- atomic counters (4.2) ---
+        glGetActiveAtomicCounterBufferiv: ([program, index, pname, out])=>call(context=>
+            writeQuery(out, context.glGetActiveAtomicCounterBufferiv(program >>> 0, index >>> 0,
+                pname >>> 0), 'word')),
+        // --- shader storage blocks (4.3) ---
+        glShaderStorageBlockBinding: ([program, index, binding])=>answer(
+            current()?.glShaderStorageBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),
+        glGetProgramResourceIndex: ([program, programInterface, name])=>(current()
+            ?.glGetProgramResourceIndex(program >>> 0, programInterface >>> 0,
+                h.readName(name)) ?? GL.INVALID_INDEX),
         glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
         // Tessellation's (4.0): the inner levels are two values, the outer four.
         glPatchParameteri: ([pname, value])=>answer(current()?.glPatchParameteri(pname >>> 0,
@@ -1387,8 +1407,7 @@ function storageAndNamedEntryPoints(h){
             context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, false), 'word')),
         glGetVertexArrayIndexed64iv: ([vao, index, pname, out])=>call(context=>writeInt64s(out,
             context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, true))),
-        glGetNamedBufferSubData: ([buffer, offset, size, out])=>call(context=>deliver(out,
-            context.namedBuffer('glGetBufferSubDataARB', buffer >>> 0, [offset | 0, size | 0]))),
+        // glGetNamedBufferSubData is `exports.js`'s: it may wait for the device.
         glMapNamedBuffer: ([buffer, access])=>current()?.namedBuffer('glMapBufferARB',
             buffer >>> 0, [access >>> 0]) ?? 0,
         glMapNamedBufferRange: ([buffer, offset, length, access])=>current()?.namedBuffer(
