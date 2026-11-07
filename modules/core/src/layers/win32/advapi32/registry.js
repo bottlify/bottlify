@@ -541,6 +541,16 @@ const machineKeys = (windows, directx, processors)=>{
             ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
                 path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
         ]),
+        // Windows Installer's file types, as it registers them: a setup that
+        // opens a package with ShellExecuteEx gets msiexec.
+        ...[['.msi', 'Msi.Package'], ['.msp', 'Msi.Patch']].map(([extension, type])=>({
+            root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\${extension}`,
+            values: { '': type } })),
+        ...[['Msi.Package', 'Open', '/i'], ['Msi.Package', 'Repair', '/f'],
+            ['Msi.Package', 'Uninstall', '/x'], ['Msi.Patch', 'Open', '/p']]
+            .map(([type, verb, option])=>({ root: HKEY_LOCAL_MACHINE,
+                path: `${MACHINE_CLASSES}\\${type}\\shell\\${verb}\\command`,
+                values: { '': `"${folders.Windows}\\system32\\msiexec.exe" ${option} "%1" %*` } })),
         { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
             ProgramFilesDir: folders.ProgramFiles,
             ProgramFilesPath: folders.ProgramFiles,
