@@ -315,3 +315,68 @@ test('glFramebufferTexture (3.2) attaches a texture of one image a level as its 
         gl.glFramebufferTexture(GL.TEXTURE_2D, GL.COLOR_ATTACHMENT0, plain, 0);
         error(gl, GL.INVALID_ENUM);
     });
+
+test('many bound at once (4.4): textures, samplers and buffers, a refused one leaving the rest',
+    ()=>{
+        const gl = fixture();
+        const [a, b] = gl.glCreateTextures(GL.TEXTURE_2D, 2);
+        gl.glBindTextures(1, 3, [a, 999, b]);
+        error(gl, GL.INVALID_OPERATION, 'a name that is no texture');
+        gl.glActiveTextureARB(GL.TEXTURE0 + 1);
+        assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D), [a]);
+        gl.glActiveTextureARB(GL.TEXTURE0 + 3);
+        assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D), [b], 'the rest still bound');
+        gl.glBindTextures(1, 3, null);
+        assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_2D), [0], 'null unbinds each');
+        gl.glBindTextures(7, 2, null);
+        error(gl, GL.INVALID_OPERATION, 'past the last unit');
+
+        const [s] = gl.glGenSamplers(1);
+        gl.glBindSamplers(0, 2, [s, 77]);
+        error(gl, GL.INVALID_OPERATION);
+        gl.glActiveTextureARB(GL.TEXTURE0);
+        assert.deepEqual(gl.glGetIntegerv(0x8919 /* SAMPLER_BINDING */), [s]);
+
+        const [u, v] = gl.glCreateBuffers(2);
+        gl.namedBuffer('glBufferDataARB', u, [512, null, GL.STATIC_DRAW]);
+        gl.namedBuffer('glBufferDataARB', v, [64, null, GL.STATIC_DRAW]);
+        gl.glBindBuffers(GL.UNIFORM_BUFFER, 2, 2, [u, v], null);
+        assert.deepEqual(gl.glGetIntegeri_v(GL.UNIFORM_BUFFER_BINDING, 3), [v]);
+        gl.glBindBuffers(GL.UNIFORM_BUFFER, 0, 1, [u], { offsets: [256], sizes: [32] });
+        assert.deepEqual(gl.glGetIntegeri_v(0x8a29 /* UNIFORM_BUFFER_START */, 0), [256]);
+        gl.glBindBuffers(GL.UNIFORM_BUFFER, 0, 1, [u], { offsets: [0], sizes: [0] });
+        error(gl, GL.INVALID_VALUE, 'a range of no bytes');
+        gl.glBindBuffers(GL.ARRAY_BUFFER, 0, 1, [u], null);
+        error(gl, GL.INVALID_ENUM, 'no indexed points');
+        gl.glBindBuffers(GL.UNIFORM_BUFFER, 1000, 1, [u], null);
+        error(gl, GL.INVALID_OPERATION, 'past the last point');
+    });
+
+test('buffer and multisample textures by name (4.5), and a bound texture read into a size',
+    ()=>{
+        const gl = fixture();
+        const [buffer] = gl.glCreateBuffers(1);
+        gl.namedBuffer('glBufferDataARB', buffer, [16, null, GL.STATIC_DRAW]);
+        const [texel] = gl.glCreateTextures(GL.TEXTURE_BUFFER, 1);
+        gl.glTextureBuffer(texel, GL.RGBA8, buffer, { offset: 4, size: 8 });
+        error(gl, GL.NO_ERROR);
+        gl.glActiveTextureARB(GL.TEXTURE0);
+        gl.glBindTexture(GL.TEXTURE_BUFFER, texel);
+        assert.deepEqual(gl.glGetTexLevelParameteriv(GL.TEXTURE_BUFFER, 0,
+            GL.TEXTURE_BUFFER_OFFSET), [4]);
+        const [plain] = gl.glCreateTextures(GL.TEXTURE_2D, 1);
+        gl.glTextureBuffer(plain, GL.RGBA8, buffer, null);
+        error(gl, GL.INVALID_OPERATION, 'not a buffer texture');
+        const [ms] = gl.glCreateTextures(GL.TEXTURE_2D_MULTISAMPLE, 1);
+        gl.glTextureStorageMultisample(ms, 4, GL.RGBA8, 4, 4, 1, 1);
+        error(gl, GL.NO_ERROR);
+
+        gl.textureStorage(2, plain, 1, GL.RGBA8, 2, 2, 1);
+        gl.glBindTexture(GL.TEXTURE_2D, plain);
+        assert.equal(gl.getnTexImage(false, GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE, 15), null);
+        error(gl, GL.INVALID_OPERATION, 'sixteen bytes do not fit fifteen');
+        assert.equal(gl.getnTexImage(false, GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            16).length, 16);
+        gl.getnTexImage(false, GL.TEXTURE_CUBE_MAP, 0, GL.RGBA, GL.UNSIGNED_BYTE, 16);
+        error(gl, GL.INVALID_ENUM, 'a cube map is read a face at a time');
+    });

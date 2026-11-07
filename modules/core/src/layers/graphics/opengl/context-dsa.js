@@ -81,7 +81,8 @@ export const DSA_CALLS_NOT_COMPILED = Object.freeze([
     'glFramebufferTexture',
     'glBlitNamedFramebuffer',
     'glCheckNamedFramebufferStatus', 'glInvalidateNamedFramebuffer', 'namedRenderbuffer',
-    'glCreateSamplers',
+    'glCreateSamplers', 'glTextureBuffer', 'glTextureStorageMultisample', 'glBindTextures',
+    'getnTexImage',
 ]);
 
 /**
@@ -451,6 +452,64 @@ export function installDirectStateCalls(context, kernel){
         },
 
         /**
+         * glTextureBuffer and glTextureBufferRange (4.5): the bound forms',
+         * on the buffer texture named.
+         *
+         * @param {number} name @param {number} internal @param {number} buffer
+         * @param {{ offset: number, size: number } | null} range  null: the whole buffer
+         */
+        glTextureBuffer(name, internal, buffer, range){
+            onTexture('glTextureBuffer', [name, internal, buffer, range], name,
+                new Set([GL.TEXTURE_BUFFER]), ()=>(range
+                    ? context.glTexBufferRange(GL.TEXTURE_BUFFER, internal, buffer, range.offset,
+                        range.size)
+                    : context.glTexBuffer(GL.TEXTURE_BUFFER, internal, buffer)));
+        },
+
+        /**
+         * glTextureStorage2DMultisample and 3DMultisample (4.5).
+         *
+         * @param {number} name @param {number} samples @param {number} internal
+         * @param {number} width @param {number} height @param {number} depth
+         * @param {number} fixed
+         */
+        glTextureStorageMultisample(name, samples, internal, width, height, depth, fixed){
+            onTexture('glTextureStorageMultisample', [name, samples, internal, width, height,
+                depth, fixed], name, new Set([GL.TEXTURE_2D_MULTISAMPLE,
+                GL.TEXTURE_2D_MULTISAMPLE_ARRAY]), texture=>context.glTexStorageMultisample(
+                texture.target, samples, internal, width, height, depth, fixed));
+        },
+
+        /**
+         * glBindTextures (4.4): each unit from `first` its texture, or none.
+         * A name that is no texture is refused and the rest still bound.
+         *
+         * @param {number} first @param {readonly number[] | null} names  null: none on each
+         * @param {number} count
+         */
+        glBindTextures(first, count, names){
+            if (!enter('glBindTextures', [first, count, names]))
+            {
+                return;
+            }
+            if (first + count > side.units.length)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            for (let k = 0; k < count; k++)
+            {
+                const name = names?.[k] ?? 0;
+                if (name !== 0 && !kernel.shareGroup().textures.objects.has(name))
+                {
+                    setError(GL.INVALID_OPERATION);
+                    continue;
+                }
+                context.glBindTextureUnit(first + k, name);
+            }
+        },
+
+        /**
          * Binds a texture to a unit on the target it was made for; zero
          * unbinds every target of the unit.
          *
@@ -507,6 +566,46 @@ export function installDirectStateCalls(context, kernel){
             }
             return textures().getCompressedTextureSubImage('glGetCompressedTextureImage', name,
                 level, null, bufSize, GL.INVALID_OPERATION);
+        },
+
+        /**
+         * glGetnTexImage and glGetnCompressedTexImage (4.5): the texture bound
+         * to `target` read as the named forms read it, refused when it would
+         * not fit `bufSize`; a cube map's face is its slice.
+         *
+         * @param {boolean} compressed @param {number} target @param {number} level
+         * @param {number} format @param {number} type @param {number} bufSize
+         * @returns {Uint8Array | null}
+         */
+        getnTexImage(compressed, target, level, format, type, bufSize){
+            if (!enter('getnTexImage', [compressed, target, level, format, type, bufSize]))
+            {
+                return null;
+            }
+            const face = CUBE_FACES.indexOf(target);
+            const name = side.units[side.activeUnit()]?.bindings.get(face >= 0
+                ? GL.TEXTURE_CUBE_MAP : target);
+            if (name === undefined || target === GL.TEXTURE_CUBE_MAP)
+            {
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+            if (name === 0)
+            {
+                diverge('glGetnTexImage of the default texture object read nothing: it has no'
+                    + ' name the named reads take');
+                return null;
+            }
+            const box = face < 0 ? null : { x: 0, y: 0, z: face,
+                width: context.glGetTexLevelParameteriv(target, level, GL.TEXTURE_WIDTH)?.[0] ?? 0,
+                height: context.glGetTexLevelParameteriv(target, level,
+                    GL.TEXTURE_HEIGHT)?.[0] ?? 0,
+                depth: 1 };
+            return compressed
+                ? textures().getCompressedTextureSubImage('glGetnCompressedTexImage', name, level,
+                    box, bufSize, GL.INVALID_OPERATION)
+                : textures().getTextureSubImage('glGetnTexImage', name, level, box, format, type,
+                    bufSize, GL.INVALID_OPERATION);
         },
 
         // --- buffers ---

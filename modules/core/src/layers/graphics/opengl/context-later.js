@@ -28,6 +28,7 @@ import { SIZED_FORMATS } from './formats.js';
 export const LATER_CALLS_NOT_COMPILED = Object.freeze([
     'glInvalidateFramebuffer', 'glInvalidateBufferData', 'glInvalidateTexImage',
     'glMemoryBarrier', 'glTextureBarrier', 'glGetInternalformativ', 'glGetGraphicsResetStatus',
+    'glBindSamplers', 'glBindBuffers',
 ]);
 
 /** Every barrier bit of 4.4 (table 7.4), and GL_ALL_BARRIER_BITS. */
@@ -36,6 +37,18 @@ const ALL_BARRIER_BITS = 0xffffffff;
 
 /** The bits glMemoryBarrierByRegion takes (4.5). */
 const REGION_BARRIER_BITS = 0x0004 | 0x0008 | 0x0020 | 0x0400 | 0x2000 | 0x0800;
+
+/**
+ * The indexed buffer targets glBindBuffers takes, each with the query of how
+ * many points it has; the targets later installers add join through
+ * `kernel.side.bufferBindingLimits`.
+ *
+ * @type {Map<number, number>}
+ */
+const BINDING_LIMITS = new Map([
+    [GL.UNIFORM_BUFFER, GL.MAX_UNIFORM_BUFFER_BINDINGS],
+    [GL.TRANSFORM_FEEDBACK_BUFFER, GL.MAX_TRANSFORM_FEEDBACK_BUFFERS],
+]);
 
 /** glGetInternalformativ's names (4.2, 4.3). */
 const FORMAT_QUERY = Object.freeze({
@@ -169,6 +182,80 @@ export function installLaterCalls(context, kernel){
          */
         glGetGraphicsResetStatus(){
             return enter('glGetGraphicsResetStatus', []) ? GL.NO_ERROR : GL.NO_ERROR;
+        },
+
+        /**
+         * glBindSamplers (4.4): each unit from `first` its sampler, or none;
+         * a name that is no sampler is refused and the rest still bound.
+         *
+         * @param {number} first @param {number} count @param {readonly number[] | null} names
+         */
+        glBindSamplers(first, count, names){
+            if (!enter('glBindSamplers', [first, count, names]))
+            {
+                return;
+            }
+            if (first + count > record(GL.MAX_COMBINED_TEXTURE_IMAGE_UNITS).values[0])
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            for (let k = 0; k < count; k++)
+            {
+                const name = names?.[k] ?? 0;
+                if (name !== 0 && context.glIsSampler(name) !== GL.TRUE)
+                {
+                    setError(GL.INVALID_OPERATION);
+                    continue;
+                }
+                context.glBindSampler(first + k, name);
+            }
+        },
+
+        /**
+         * glBindBuffersBase and glBindBuffersRange (4.4): each binding point
+         * from `first` its buffer, or none; one refused leaves the rest bound.
+         *
+         * @param {number} target @param {number} first @param {number} count
+         * @param {readonly number[] | null} names
+         * @param {{ offsets: readonly number[], sizes: readonly number[] } | null} ranges
+         */
+        glBindBuffers(target, first, count, names, ranges){
+            if (!enter('glBindBuffers', [target, first, count, names, ranges]))
+            {
+                return;
+            }
+            const limit = BINDING_LIMITS.get(target)
+                ?? kernel.side.bufferBindingLimits?.get(target);
+            if (limit === undefined)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (first + count > record(limit).values[0])
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            for (let k = 0; k < count; k++)
+            {
+                const name = names?.[k] ?? 0;
+                if (name !== 0 && context.glIsBufferARB(name) !== GL.TRUE)
+                {
+                    setError(GL.INVALID_OPERATION);
+                    continue;
+                }
+                if (ranges && name !== 0)
+                {
+                    // An offset or size refused is glBindBufferRange's error.
+                    context.glBindBufferRange(target, first + k, name, ranges.offsets[k],
+                        ranges.sizes[k]);
+                }
+                else
+                {
+                    context.glBindBufferBase(target, first + k, name);
+                }
+            }
         },
 
         /** @param {number} value */

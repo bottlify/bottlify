@@ -393,6 +393,64 @@ export function laterEntryPoints(h){
             }
         }),
 
+        // --- 4.4's binding of many at once, 4.5's named and sized forms ---
+
+        glBindTextures: ([first, count, list])=>call(context=>context.glBindTextures(
+            first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null)),
+        glBindSamplers: ([first, count, list])=>call(context=>context.glBindSamplers(
+            first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null)),
+        glBindBuffersBase: ([target, first, count, list])=>call(context=>context.glBindBuffers(
+            target >>> 0, first >>> 0, count | 0, (list >>> 0) !== 0 && (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : null, null)),
+        glBindBuffersRange: ([target, first, count, list, offsets, sizes])=>call(context=>{
+            const n = Math.max(0, count | 0);
+            // GLintptr and GLsizeiptr: a pointer wide each.
+            const readPointerWords = (/** @type {number} */ address, /** @type {number} */ k)=>{
+                const words = readTyped('i', address, k * (h.pointerSize === 8 ? 2 : 1));
+                return h.pointerSize === 8 ? Array.from({ length: k }, (_, j)=>words[j * 2])
+                    : words;
+            };
+            context.glBindBuffers(target >>> 0, first >>> 0, count | 0,
+                (list >>> 0) !== 0 && n > 0 ? readTyped('ui', list, n) : null,
+                (list >>> 0) !== 0 && n > 0 ? { offsets: readPointerWords(offsets, n),
+                    sizes: readPointerWords(sizes, n) } : null);
+        }),
+        glTextureBuffer: ([texture, internal, buffer])=>answer(current()?.glTextureBuffer(
+            texture >>> 0, internal >>> 0, buffer >>> 0, null)),
+        glTextureBufferRange: ([texture, internal, buffer, offset, size])=>answer(
+            current()?.glTextureBuffer(texture >>> 0, internal >>> 0, buffer >>> 0,
+                { offset: offset | 0, size: size | 0 })),
+        glTextureStorage2DMultisample: ([texture, samples, internal, width, height, fixed])=>
+            answer(current()?.glTextureStorageMultisample(texture >>> 0, samples | 0,
+                internal >>> 0, width | 0, height | 0, 1, fixed & 0xff)),
+        glTextureStorage3DMultisample: a=>answer(current()?.glTextureStorageMultisample(
+            a[0] >>> 0, a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
+        glGetnTexImage: ([target, level, format, type, size, out])=>call(context=>{
+            const bytes = context.getnTexImage(false, target >>> 0, level | 0, format >>> 0,
+                type >>> 0, size | 0);
+            if (bytes && (out >>> 0) !== 0)
+            {
+                h.writeMemory(out >>> 0, bytes);
+            }
+        }),
+        glGetnCompressedTexImage: ([target, level, size, out])=>call(context=>{
+            const bytes = context.getnTexImage(true, target >>> 0, level | 0, 0, 0, size | 0);
+            if (bytes && (out >>> 0) !== 0)
+            {
+                h.writeMemory(out >>> 0, bytes);
+            }
+        }),
+        glGetInternalformati64v: ([target, internal, pname, size, out])=>call(context=>{
+            const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,
+                pname >>> 0);
+            if (values && (size | 0) > 0)
+            {
+                writeInt64s(out, values.slice(0, size | 0));
+            }
+        }),
+
         glBufferStorage: ([target, size, data, flags])=>answer(current()?.glBufferStorage(
             target >>> 0, size | 0, (data >>> 0) || null, flags >>> 0)),
         glClearBufferData: ([target, internal, format, type, data])=>answer(
