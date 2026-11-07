@@ -119,6 +119,12 @@ export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.DEPTH_CLAMP, name: 'GL_DEPTH_CLAMP', kind: 'bool', value: [0] },
     // OpenGL 4.0's sample shading.
     { query: GL.SAMPLE_SHADING, name: 'GL_SAMPLE_SHADING', kind: 'bool', value: [0] },
+    // OpenGL 4.3's debug output, off in a context not made for debugging.
+    { query: GL.DEBUG_OUTPUT, name: 'GL_DEBUG_OUTPUT', kind: 'bool', value: [0] },
+    {
+        query: GL.DEBUG_OUTPUT_SYNCHRONOUS, name: 'GL_DEBUG_OUTPUT_SYNCHRONOUS', kind: 'bool',
+        value: [0],
+    },
     {
         query: GL.TEXTURE_CUBE_MAP_SEAMLESS, name: 'GL_TEXTURE_CUBE_MAP_SEAMLESS', kind: 'bool',
         value: [0],
@@ -885,6 +891,20 @@ export const DEFAULT_STATE = Object.freeze([
         value: [GLSL_LIMITS.varyingFloats / 4],
     },
     { query: GL.SHADER_COMPILER, name: 'GL_SHADER_COMPILER', kind: 'bool', value: [1] },
+    // OpenGL 4.3's debug output limits (`context-debug.js`), the least allowed.
+    {
+        query: GL.MAX_DEBUG_MESSAGE_LENGTH, name: 'GL_MAX_DEBUG_MESSAGE_LENGTH', kind: 'int',
+        value: [1024],
+    },
+    {
+        query: GL.MAX_DEBUG_LOGGED_MESSAGES, name: 'GL_MAX_DEBUG_LOGGED_MESSAGES', kind: 'int',
+        value: [64],
+    },
+    {
+        query: GL.MAX_DEBUG_GROUP_STACK_DEPTH, name: 'GL_MAX_DEBUG_GROUP_STACK_DEPTH',
+        kind: 'int', value: [64],
+    },
+    { query: GL.MAX_LABEL_LENGTH, name: 'GL_MAX_LABEL_LENGTH', kind: 'int', value: [256] },
     // OpenGL 4.1's program binaries: no format.
     {
         query: GL.NUM_PROGRAM_BINARY_FORMATS, name: 'GL_NUM_PROGRAM_BINARY_FORMATS',

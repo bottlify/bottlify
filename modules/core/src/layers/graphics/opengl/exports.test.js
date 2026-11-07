@@ -69,7 +69,8 @@ function machine(){
  * window and screen each frame was presented for.
  *
  * @param {{ present?: boolean, raster?: boolean,
- *     describeDrawable?: (hdc: number) => any }} [options]
+ *     describeDrawable?: (hdc: number) => any,
+ *     callGuest?: (call: { entry: number, args: number[] }) => Promise<number> }} [options]
  */
 function library(options = {}){
     const box = machine();
@@ -89,6 +90,7 @@ function library(options = {}){
             },
         raster: options.raster,
         describeDrawable: options.describeDrawable,
+        callGuest: options.callGuest,
     });
     return { box, opengl, presented, presentedFor, table: /** @type {Table} */ (opengl.table) };
 }
@@ -1421,3 +1423,45 @@ test('glBindVertexBuffers reads its names, offsets and strides from guest memory
     assert.equal(view.getInt32(out, true), 0, 'the default object untouched');
     assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
 });
+
+test('a debug message reaches the program\'s callback with its text in guest memory, or the log',
+    async()=>{
+        /** @type {{ entry: number, args: number[], text: string }[]} */
+        const shown = [];
+        /** @type {ReturnType<typeof library>} */
+        const lib = library({ callGuest: (/** @type {any} */ guestCall)=>{
+            const [, , , , length, address] = guestCall.args;
+            shown.push({ ...guestCall, text: String.fromCharCode(
+                ...lib.box.bytes.subarray(address, address + length)) });
+            return Promise.resolve(0);
+        } });
+        const { table, box } = lib;
+        startDrawing(table);
+        const view = new DataView(box.bytes.buffer);
+        box.bytes.set([...'hello'].map(c=>c.charCodeAt(0)), 0x3000);
+        table.glEnable.handler([0x92e0]);
+        // Without a callback: the log.
+        await table.glDebugMessageInsert.handler([0x824a, 0x824c, 7, 0x9146, 5, 0x3000]);
+        const out = 0x4000;
+        assert.equal(table.glGetDebugMessageLog.handler([4, 64, out, out + 16, out + 32,
+            out + 48, out + 64, out + 80]), 1);
+        assert.deepEqual([out, out + 16, out + 32, out + 48, out + 64].map(at=>
+            view.getUint32(at, true)), [0x824a, 0x824c, 7, 0x9146, 6]);
+        assert.equal(String.fromCharCode(...box.bytes.subarray(out + 80, out + 86)), 'hello\0');
+
+        table.glDebugMessageCallback.handler([0x7777, 0x55]);
+        table.glGetPointerv.handler([0x8244, out]);
+        assert.equal(view.getUint32(out, true), 0x7777);
+        await table.glDebugMessageInsert.handler([0x824a, 0x824c, 8, 0x9146, -1, 0x3000]);
+        assert.equal(shown.length, 1);
+        assert.equal(shown[0].entry, 0x7777);
+        assert.deepEqual(shown[0].args.slice(0, 5), [0x824a, 0x824c, 8, 0x9146, 5]);
+        assert.equal(shown[0].args[6], 0x55, 'the program\'s own parameter');
+        assert.equal(shown[0].text, 'hello');
+
+        await table.glPushDebugGroup.handler([0x824a, 3, 5, 0x3000]);
+        await table.glPopDebugGroup.handler([]);
+        assert.deepEqual(shown.slice(1).map(m=>m.args[1]), [0x8269, 0x826a],
+            'a group pushed and popped, each a message');
+        assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    });

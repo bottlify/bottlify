@@ -55,6 +55,7 @@ import {
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
 import { createOpenglRoot } from './root.js';
+import { debugEntryPoints } from './exports-debug.js';
 import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
@@ -460,6 +461,8 @@ const LIST_TYPES = new Map([
  *           is advertised: a name in the extension string whose entry point
  *           cannot be handed out is a crash a program cannot see coming.
  * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
+ * @property {(call: { entry: number, args: number[] }) => Promise<number>} [callGuest]
+ *     a call into the program's code on the calling thread: the debug callback (4.3)
  *           Where a call that was accepted but not honoured is reported.
  * @property {() => any} [backend]
  *           The rendering backend, reached when the first context is made.
@@ -2240,6 +2243,18 @@ export function createOpengl(services){
         },
         pointerSize: services.pointerSize ?? 4,
     }));
+    const debug = debugEntryPoints({
+        current, call, answer, readTyped, writeU32s,
+        writeMemory: services.writeMemory,
+        readMemory: (address, length)=>windowMemory(address >>> 0, length),
+        readText: address=>new TextDecoder('latin1').decode(
+            readToTerminator(services, address >>> 0, 1, SOURCE_LIMIT).bytes),
+        callGuest: services.callGuest,
+        allocate: services.scratch?.allocate,
+        free: services.scratch?.free,
+        divergence: (detail, severity)=>services.divergence?.('OpenGL', detail, severity),
+    });
+    Object.assign(implemented, debug.plain);
     family('glWindowPos', [2, 3], SIGNED, false, [0, 0, 0, 1],
         (context, x, y, z)=>context.glWindowPos3f(x, y, z));
     // A version's name for what an extension brought, and an extension's
@@ -2405,6 +2420,8 @@ export function createOpengl(services){
             return held ? held.then(()=>1) : 1;
         },
     };
+
+    Object.assign(swaps, debug.waiting);
 
     /** @param {number} address @returns {import('./pixelformat.js').PixelFormat} */
     function readDescriptor(address){

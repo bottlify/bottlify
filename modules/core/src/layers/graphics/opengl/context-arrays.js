@@ -1491,6 +1491,12 @@ export function installArrayCalls(context, kernel){
                 return null;
             }
             const name = /** @type {any} */ (POINTER_QUERIES)[query];
+            // Another installer's pointers (the debug callback, 4.3).
+            const other = kernel.side.pointerQueries?.get(query);
+            if (other)
+            {
+                return [other()];
+            }
             if (!name)
             {
                 setError(GL.INVALID_ENUM);

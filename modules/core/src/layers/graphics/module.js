@@ -824,6 +824,11 @@ export function createGraphicsModule(){
                     // A context is current on one thread at a time, and another
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
                     currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
+                    // The debug callback (4.3) runs on the thread whose call
+                    // made the message.
+                    /** @param {{ entry: number, args: number[] }} guestCall */
+                    callGuest: guestCall=>bridge.callGuest({ ...guestCall,
+                        thread: bridge.callerThread() }),
                     // Where the routines of a context's command ring find its
                     // block: the calling thread's TEB. A 64-bit process has no
                     // such routines (they are i386 code), and every call traps.
