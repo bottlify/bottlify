@@ -144,6 +144,14 @@ const accessOfBits = bits=>((bits & GL.MAP_READ_BIT) === 0 ? GL.WRITE_ONLY
  * @typedef {{ instances: number, baseInstance: number }} Instancing
  */
 
+/**
+ * The generic attribute index each conventional array is (the aliasing of
+ * `conventionalName`); the texture coordinates are 8 on, by unit.
+ *
+ * @type {Readonly<Record<string, number>>}
+ */
+const GENERIC_OF = Object.freeze({ vertex: 0, normal: 2, color: 3, secondary: 4, fogCoord: 5 });
+
 /** @type {Instancing} */
 const ONE_INSTANCE = Object.freeze({ instances: 1, baseInstance: 0 });
 
@@ -418,6 +426,12 @@ export function installArrayCalls(context, kernel){
         pointer.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
         pointer.normalised = spec.normalised ? 1 : 0;
         mirror(name);
+        // The generic attribute this array is: its binding point follows (4.3).
+        const generic = GENERIC_OF[name] ?? (name === 'texCoord' ? 8 + clientActive : null);
+        if (generic !== null)
+        {
+            kernel.side.attribBinding?.fromPointer(generic);
+        }
     }
 
     /**

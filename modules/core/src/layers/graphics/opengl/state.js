@@ -600,6 +600,19 @@ export const DEFAULT_STATE = Object.freeze([
 
     // --- implementation limits ---
     { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [2048] },
+    // OpenGL 4.3's vertex attribute bindings, at the specification's least.
+    {
+        query: GL.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, name: 'GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET',
+        kind: 'int', value: [2047],
+    },
+    {
+        query: GL.MAX_VERTEX_ATTRIB_BINDINGS, name: 'GL_MAX_VERTEX_ATTRIB_BINDINGS', kind: 'int',
+        value: [16],
+    },
+    {
+        query: GL.MAX_VERTEX_ATTRIB_STRIDE, name: 'GL_MAX_VERTEX_ATTRIB_STRIDE', kind: 'int',
+        value: [2048],
+    },
     {
         query: GL.MAX_TEXTURE_MAX_ANISOTROPY, name: 'GL_MAX_TEXTURE_MAX_ANISOTROPY',
         kind: 'float', value: [16],

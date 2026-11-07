@@ -960,6 +960,21 @@ function storageAndNamedEntryPoints(h){
         }
     };
 
+    /**
+     * GLintptr offsets, a pointer wide each (4.4's multiple vertex buffers).
+     *
+     * @param {number} address @param {number} count @returns {number[]}
+     */
+    const readOffsets = (address, count)=>{
+        if (count <= 0 || (address >>> 0) === 0)
+        {
+            return [];
+        }
+        const words = readTyped('i', address, count * (h.pointerSize === 8 ? 2 : 1));
+        return h.pointerSize === 8 ? Array.from({ length: count }, (_, k)=>words[k * 2])
+            : words;
+    };
+
     /** @param {(context: any, count: number) => number[]} make */
     const creator = make=>(/** @type {number[]} */ [count, out])=>call(context=>{
         const names = make(context, count | 0);
@@ -1118,6 +1133,66 @@ function storageAndNamedEntryPoints(h){
         glClearNamedBufferSubData: ([buffer, internal, offset, size, format, type, data])=>
             answer(current()?.namedBuffer('glClearBufferSubData', buffer >>> 0, [internal >>> 0,
                 offset | 0, size | 0, format >>> 0, type >>> 0, data >>> 0])),
+        // --- vertex attribute bindings (4.3, 4.4) and vertex array objects by name (4.5) ---
+
+        glBindVertexBuffer: ([point, buffer, offset, stride])=>answer(current()
+            ?.glBindVertexBuffer(point >>> 0, buffer >>> 0, offset | 0, stride | 0)),
+        glBindVertexBuffers: ([first, count, buffers, offsets, strides])=>call(context=>{
+            const n = Math.max(0, count | 0);
+            const given = (buffers >>> 0) !== 0;
+            context.glBindVertexBuffers(first >>> 0, count | 0,
+                given ? readTyped('ui', buffers, n) : null,
+                given ? readOffsets(offsets, n) : [], given ? readTyped('i', strides, n) : []);
+        }),
+        glVertexAttribFormat: ([index, size, type, normalised, relative])=>answer(current()
+            ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, normalised & 0xff,
+                relative >>> 0, 'float')),
+        glVertexAttribIFormat: ([index, size, type, relative])=>answer(current()
+            ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, 0, relative >>> 0, 'int')),
+        glVertexAttribLFormat: ([index, size, type, relative])=>answer(current()
+            ?.vertexAttribFormat(index >>> 0, size | 0, type >>> 0, 0, relative >>> 0, 'long')),
+        glVertexAttribBinding: ([index, point])=>answer(current()
+            ?.glVertexAttribBinding(index >>> 0, point >>> 0)),
+        glVertexBindingDivisor: ([point, divisor])=>answer(current()
+            ?.glVertexBindingDivisor(point >>> 0, divisor >>> 0)),
+        glCreateVertexArrays: creator((context, count)=>context.glCreateVertexArrays(count)),
+        glVertexArrayVertexBuffer: ([vao, point, buffer, offset, stride])=>answer(current()
+            ?.namedVertexArray('glBindVertexBuffer', vao >>> 0, [point >>> 0, buffer >>> 0,
+                offset | 0, stride | 0])),
+        glVertexArrayVertexBuffers: ([vao, first, count, buffers, offsets, strides])=>
+            call(context=>{
+                const n = Math.max(0, count | 0);
+                const given = (buffers >>> 0) !== 0;
+                context.namedVertexArray('glBindVertexBuffers', vao >>> 0, [first >>> 0,
+                    count | 0, given ? readTyped('ui', buffers, n) : null,
+                    given ? readOffsets(offsets, n) : [],
+                    given ? readTyped('i', strides, n) : []]);
+            }),
+        glVertexArrayAttribFormat: ([vao, index, size, type, normalised, relative])=>answer(
+            current()?.namedVertexArray('vertexAttribFormat', vao >>> 0, [index >>> 0, size | 0,
+                type >>> 0, normalised & 0xff, relative >>> 0, 'float'])),
+        glVertexArrayAttribIFormat: ([vao, index, size, type, relative])=>answer(current()
+            ?.namedVertexArray('vertexAttribFormat', vao >>> 0, [index >>> 0, size | 0,
+                type >>> 0, 0, relative >>> 0, 'int'])),
+        glVertexArrayAttribLFormat: ([vao, index, size, type, relative])=>answer(current()
+            ?.namedVertexArray('vertexAttribFormat', vao >>> 0, [index >>> 0, size | 0,
+                type >>> 0, 0, relative >>> 0, 'long'])),
+        glVertexArrayAttribBinding: ([vao, index, point])=>answer(current()?.namedVertexArray(
+            'glVertexAttribBinding', vao >>> 0, [index >>> 0, point >>> 0])),
+        glVertexArrayBindingDivisor: ([vao, point, divisor])=>answer(current()?.namedVertexArray(
+            'glVertexBindingDivisor', vao >>> 0, [point >>> 0, divisor >>> 0])),
+        glEnableVertexArrayAttrib: ([vao, index])=>answer(current()?.namedVertexArray(
+            'glEnableVertexAttribArrayARB', vao >>> 0, [index >>> 0])),
+        glDisableVertexArrayAttrib: ([vao, index])=>answer(current()?.namedVertexArray(
+            'glDisableVertexAttribArrayARB', vao >>> 0, [index >>> 0])),
+        glVertexArrayElementBuffer: ([vao, buffer])=>answer(current()
+            ?.glVertexArrayElementBuffer(vao >>> 0, buffer >>> 0)),
+        glGetVertexArrayiv: ([vao, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexArray(vao >>> 0, pname >>> 0), 'word')),
+        glGetVertexArrayIndexediv: ([vao, index, pname, out])=>call(context=>writeQuery(out,
+            context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, false), 'word')),
+        glGetVertexArrayIndexed64iv: ([vao, index, pname, out])=>call(context=>writeInt64s(out,
+            context.getVertexArrayIndexed(vao >>> 0, index >>> 0, pname >>> 0, true))),
         glGetNamedBufferSubData: ([buffer, offset, size, out])=>call(context=>deliver(out,
             context.namedBuffer('glGetBufferSubDataARB', buffer >>> 0, [offset | 0, size | 0]))),
         glMapNamedBuffer: ([buffer, access])=>current()?.namedBuffer('glMapBufferARB',

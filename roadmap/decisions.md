@@ -1152,6 +1152,18 @@ processor path): said each time, the destination left as it was. *2026-11-07.*
 (4.1) keep every viewport's state, but choosing another is a geometry shader's
 gl_ViewportIndex, which the GLSL front end does not take yet. *2026-11-07.*
 
+**A141. Temporary: a 64-bit attribute (glVertexAttribLFormat) is read at single precision,** as
+a double array of glVertexAttribPointer already is: no shader here takes a double input. It is
+said once. *2026-11-07.*
+
+**A142. A binding point's stride of zero reaches the device as a per-instance slot one element
+wide,** read at element zero by every instance: the pixels of a stride of zero, through the
+gather path every other per-instance array takes. *2026-11-07.*
+
+**A143. Temporary: after a binding call, GL_VERTEX_ATTRIB_ARRAY_POINTER answers where the
+attribute reads** (the point's offset and the relative offset), not the last
+glVertexAttribPointer's argument. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

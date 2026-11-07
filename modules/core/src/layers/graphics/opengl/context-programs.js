@@ -65,6 +65,7 @@ const ATTRIB_TYPES = new Set([
  * @property {number} buffer  the ARRAY_BUFFER bound when the pointer was set
  * @property {number} divisor  zero for an element a vertex, n for one every n instances
  * @property {number} [integer]  1 when glVertexAttribIPointer set it: read as integers
+ * @property {number} [literalStride]  a binding point's stride (4.3, `context-attrib-binding.js`)
  */
 
 /** @returns {GenericAttribArray} */
@@ -172,6 +173,7 @@ export function installProgramCalls(context, kernel){
                         pointer: {
                             size: array.size, type: array.type, stride: array.stride,
                             pointer: array.pointer, buffer: array.buffer, divisor: array.divisor,
+                            literalStride: array.literalStride,
                         },
                     });
                 });
@@ -211,7 +213,8 @@ export function installProgramCalls(context, kernel){
         saveClientPrograms(mask){
             return (mask & GL.CLIENT_VERTEX_ARRAY_BIT) === 0
                 ? null
-                : attribArrays.map(array=>({ ...array }));
+                : { arrays: attribArrays.map(array=>({ ...array })),
+                    binding: kernel.side.attribBinding?.save() ?? null };
         },
 
         /** @param {any} saved */
@@ -220,9 +223,14 @@ export function installProgramCalls(context, kernel){
             {
                 return;
             }
-            saved.forEach((/** @type {GenericAttribArray} */ array, /** @type {number} */ i)=>{
+            /** @type {GenericAttribArray[]} */ (saved.arrays).forEach((array, i)=>{
                 Object.assign(attribArrays[i], array);
             });
+            // After the arrays: the model writes the records it is the source of.
+            if (saved.binding)
+            {
+                kernel.side.attribBinding?.restore(saved.binding);
+            }
         },
     });
 
@@ -701,6 +709,7 @@ export function installProgramCalls(context, kernel){
             array.pointer = pointer;
             array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
             array.integer = 0;
+            kernel.side.attribBinding?.fromPointer(index);
         },
 
         /**
@@ -735,6 +744,7 @@ export function installProgramCalls(context, kernel){
             array.pointer = pointer;
             array.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
             array.integer = 1;
+            kernel.side.attribBinding?.fromPointer(index);
         },
 
         /**
@@ -823,6 +833,7 @@ export function installProgramCalls(context, kernel){
              * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
              */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
             array.divisor = divisor >>> 0;
+            kernel.side.attribBinding?.divisor(index, divisor >>> 0);
         },
 
         /** @param {number} index */
@@ -872,6 +883,12 @@ export function installProgramCalls(context, kernel){
                     return [array.divisor ?? 0];
                 case GL.VERTEX_ATTRIB_ARRAY_INTEGER:
                     return [array.integer ?? 0];
+                case GL.VERTEX_ATTRIB_ARRAY_LONG:
+                    return [kernel.side.attribBinding?.placeOf(index).long ?? 0];
+                case GL.VERTEX_ATTRIB_BINDING:
+                    return [kernel.side.attribBinding?.placeOf(index).binding ?? index];
+                case GL.VERTEX_ATTRIB_RELATIVE_OFFSET:
+                    return [kernel.side.attribBinding?.placeOf(index).relative ?? 0];
                 case GL.CURRENT_VERTEX_ATTRIB_ARB:
                     return [...attribValues[index]];
                 default:

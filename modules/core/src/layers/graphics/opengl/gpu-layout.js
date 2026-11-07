@@ -75,7 +75,16 @@ export const ATTRIBUTE_NAMES = Object.freeze([
  * @property {number} stride
  * @property {number} divisor     zero for a vertex's step; n for one element every n
  *           instances (glVertexAttribDivisor)
+ * @property {boolean} [constant]  a binding point's stride of zero (4.3): one
+ *           element for every vertex and instance, read as a per-instance slot
+ *           whose every instance takes element zero
  */
+
+/**
+ * The divisor a constant slot carries: past any instance count, so that the
+ * slot is read by instance and never steps.
+ */
+const CONSTANT_DIVISOR = 0xffffffff;
 
 /**
  * @typedef {Object} DrawLayout
@@ -210,8 +219,13 @@ export function planLayout(arrays){
         {
             return null;
         }
-        const stride = effectiveStride(pointer);
-        const divisor = array.divisor ?? pointer.divisor ?? 0;
+        // A stride of zero (a binding point's, 4.3) is one element for every
+        // vertex: its slot is a per-instance one wide enough for the element,
+        // whose every instance reads element zero (`instanceElements`).
+        const constant = effectiveStride(pointer) === 0;
+        const stride = constant ? Math.ceil(((pointer.pointer % 4) + format.bytes) / 4) * 4
+            : effectiveStride(pointer);
+        const divisor = constant ? CONSTANT_DIVISOR : array.divisor ?? pointer.divisor ?? 0;
         if (stride % 4 !== 0 || stride > 2048)
         {
             return null;
@@ -225,7 +239,8 @@ export function planLayout(arrays){
         for (let index = 0; index < slots.length; index++)
         {
             const candidate = slots[index];
-            if (candidate.buffer === pointer.buffer && candidate.stride === stride
+            if (!constant && !candidate.constant
+                && candidate.buffer === pointer.buffer && candidate.stride === stride
                 && candidate.divisor === divisor
                 && pointer.pointer >= candidate.base
                 && pointer.pointer - candidate.base + format.bytes <= stride
@@ -247,7 +262,8 @@ export function planLayout(arrays){
             {
                 return null;
             }
-            slot = slots.push({ buffer: pointer.buffer, base, stride, divisor }) - 1;
+            slot = slots.push(constant ? { buffer: pointer.buffer, base, stride, divisor, constant }
+                : { buffer: pointer.buffer, base, stride, divisor }) - 1;
         }
         attributes.push({
             name: array.name,
@@ -758,6 +774,10 @@ export function vertexRange(request, scanned){
  *     instance's element offset from the slot's base
  */
 export function instanceElements(slot, instances, baseInstance){
+    if (slot.constant)
+    {
+        return new Array(instances).fill(0);
+    }
     if (slot.divisor === 1)
     {
         return { at: slot.base + baseInstance * slot.stride,
