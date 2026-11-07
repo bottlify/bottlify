@@ -62,6 +62,7 @@ import { compare } from './pipeline.js';
 import { TEXTURE_CALLS_NOT_COMPILED, installTextureCalls } from './context-textures.js';
 import { installLightingCalls } from './context-lighting.js';
 import { installArrayCalls } from './context-arrays.js';
+import { installTessellationCalls } from './context-tessellation.js';
 import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
 import {
@@ -1897,6 +1898,7 @@ export function createGlContext(options = {}){
     installIndexedCalls(context, kernel);
     installViewportCalls(context, kernel);
     installLaterCalls(context, kernel);
+    installTessellationCalls(context, kernel);
     installDebugCalls(context, kernel);
     // A context made for debugging starts with its debug output on (4.3
     // section 20.2).

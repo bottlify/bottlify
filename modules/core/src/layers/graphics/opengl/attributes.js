@@ -21,6 +21,7 @@
 
 import { GL } from './constants.js';
 import { DEFAULT_CLIENT_ENABLES, DEFAULT_ENABLES, DEFAULT_STATE } from './state.js';
+import { TESSELLATION_QUERIES } from './context-tessellation.js';
 
 /** @type {[number, readonly number[]][]} */
 const SERVER_GROUPS = [
@@ -140,6 +141,7 @@ const CLIENT_GROUPS = [
  * @type {Set<number>}
  */
 export const NOT_SAVED = new Set([
+    ...TESSELLATION_QUERIES,
     // Vertex array state outside the vertex array objects, in no group (4.6
     // compatibility table 23.8); the two enables are the enable group's.
     GL.PRIMITIVE_RESTART_INDEX,

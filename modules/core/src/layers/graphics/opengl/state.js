@@ -38,6 +38,7 @@ import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
 import { BLOCK_LIMITS, FEEDBACK_LIMITS } from './glsl-link.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
+import { TESSELLATION_STATE } from './context-tessellation.js';
 
 /**
  * OpenGL 3.2's limits of geometry shaders and of what the stages pass, the
@@ -1164,6 +1165,8 @@ export const DEFAULT_STATE = Object.freeze([
         value: [2048],
     },
     { query: GL.MAX_SAMPLES, name: 'GL_MAX_SAMPLES', kind: 'int', value: [4] },
+    // OpenGL 4.0's tessellation.
+    ...TESSELLATION_STATE,
 ]);
 
 /**
