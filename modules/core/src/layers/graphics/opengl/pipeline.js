@@ -64,7 +64,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * What a scene draws with when its draw buffers do not agree: each buffer's
  * blending and colour mask (red 1, green 2, blue 4, alpha 8). Null when they do.
  *
- * @typedef {{ blend: boolean[], masks: number[] } | null} PerBuffer
+ * @typedef {{ blend: boolean[], masks: number[], functions?: (SceneBlend | null)[] | null }
+ *     | null} PerBuffer
  */
 
 /**

@@ -1856,7 +1856,8 @@ export function createGpuRenderer(services){
                 ? target.formats.map((/** @type {string} */ format, /** @type {number} */ k)=>
                     (scene.perBuffer
                         ? { format, mask: scene.perBuffer.masks[k] & target.masks[k],
-                            blend: scene.perBuffer.blend[k] }
+                            blend: scene.perBuffer.blend[k]
+                                && (scene.perBuffer.functions?.[k] ?? true) }
                         : { format, mask: colourMask & target.masks[k] }))
                 : scene.perBuffer
                     ? [{ format: target.formats[0] || COLOUR_FORMAT,

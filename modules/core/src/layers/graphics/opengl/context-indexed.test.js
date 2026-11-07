@@ -94,3 +94,37 @@ test('glClearBuffer clears one buffer with the value given, under that buffer\'s
     assert.equal(gl.framebuffer.depth[0], 0.75);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
 });
+
+test('blend factors and equations per draw buffer (4.0): the first is the unindexed state, the '
+    + 'unindexed calls set every buffer', ()=>{
+    const gl = fixture();
+    /** @param {number} query @param {number} index */
+    const at = (query, index)=>gl.glGetIntegeri_v(query, index)[0];
+    gl.glBlendFuncSeparatei(2, GL.ONE, GL.ONE, GL.ZERO, GL.ONE);
+    assert.deepEqual([GL.BLEND_SRC_RGB, GL.BLEND_DST_RGB, GL.BLEND_SRC_ALPHA, GL.BLEND_DST_ALPHA]
+        .map(q=>at(q, 2)), [GL.ONE, GL.ONE, GL.ZERO, GL.ONE]);
+    assert.equal(at(GL.BLEND_SRC_RGB, 1), GL.ONE, 'the others keep the unindexed state');
+    assert.deepEqual(gl.glGetIntegerv(GL.BLEND_DST_RGB), [GL.ZERO]);
+    gl.glBlendFuncSeparatei(0, GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA, GL.ONE, GL.ZERO);
+    assert.deepEqual(gl.glGetIntegerv(GL.BLEND_SRC_RGB), [GL.SRC_ALPHA], 'the first is it');
+    assert.equal(at(GL.BLEND_SRC_RGB, 1), GL.ONE, 'and the others did not follow it');
+    assert.equal(at(GL.BLEND_DST_RGB, 1), GL.ZERO);
+    gl.glBlendEquationSeparatei(3, GL.MAX, GL.MIN);
+    assert.deepEqual([at(GL.BLEND_EQUATION_RGB, 3), at(GL.BLEND_EQUATION_ALPHA, 3)],
+        [GL.MAX, GL.MIN]);
+    const apart = gl.side.perBuffer().functions;
+    assert.equal(apart[3].equation, GL.MAX);
+    assert.equal(apart[2].src, GL.ONE);
+    gl.glBlendFunc(GL.ONE, GL.ZERO);
+    assert.equal(at(GL.BLEND_SRC_RGB, 2), GL.ONE);
+    assert.equal(at(GL.BLEND_DST_RGB, 2), GL.ZERO, 'glBlendFunc sets every buffer');
+    assert.equal(at(GL.BLEND_EQUATION_RGB, 3), GL.MAX, 'but no equation');
+    gl.glBlendEquation(GL.FUNC_ADD);
+    assert.equal(gl.side.perBuffer(), null, 'all agree again');
+    gl.glBlendFuncSeparatei(4, GL.ONE, GL.ONE, GL.ONE, GL.ONE);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE);
+    gl.glBlendFuncSeparatei(1, GL.ONE, GL.SRC_ALPHA_SATURATE, GL.ONE, GL.ONE);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'saturate is no destination');
+    gl.glBlendEquationSeparatei(1, GL.ONE, GL.FUNC_ADD);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+});

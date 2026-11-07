@@ -9,8 +9,10 @@
  * of one buffer (section 4.2.3).
  *
  * - **Blending and the colour mask are per draw buffer.** glEnablei, glDisablei
- *   and glColorMaski set one buffer's; glEnable(GL_BLEND) and glColorMask set
- *   every buffer's, and the unindexed queries answer the first's. A scene
+ *   and glColorMaski set one buffer's, and glBlendFunci, glBlendEquationi and
+ *   their separate forms (4.0) its factors and equations; glEnable(GL_BLEND),
+ *   glColorMask, glBlendFunc and glBlendEquation set every buffer's, and the
+ *   unindexed queries answer the first's. A scene
  *   whose buffers all agree carries nothing more, so a program that never
  *   indexes draws as before.
  * - **An indexed query names its target and an index** (glGetIntegeri_v,
@@ -24,6 +26,7 @@
  */
 
 import { GL } from './constants.js';
+import { BLEND_FACTORS, EQUATIONS } from './context-core.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
 
 /** The draw buffers indexed state covers. */
@@ -53,6 +56,24 @@ export function installIndexedCalls(context, kernel){
     const blend = new Array(BUFFERS).fill(false);
     /** Each draw buffer's colour mask as four flags, the first mirrored in GL_COLOR_WRITEMASK. */
     const masks = Array.from({ length: BUFFERS }, ()=>[1, 1, 1, 1]);
+    /**
+     * Each draw buffer's factors (source and destination colour, then
+     * alpha) and equations (colour, alpha) where glBlendFunci or
+     * glBlendEquationi set them apart; null where it follows the unindexed
+     * state, which is the first buffer's.
+     *
+     * @type {{ factors: number[] | null, equations: number[] | null }[]}
+     */
+    const apart = Array.from({ length: BUFFERS }, ()=>({ factors: null, equations: null }));
+    /** @returns {number[]} the unindexed factors */
+    const factorsNow = ()=>[GL.BLEND_SRC_RGB, GL.BLEND_DST_RGB, GL.BLEND_SRC_ALPHA,
+        GL.BLEND_DST_ALPHA].map(q=>record(q).values[0]);
+    /** @returns {number[]} the unindexed equations */
+    const equationsNow = ()=>[GL.BLEND_EQUATION_RGB, GL.BLEND_EQUATION_ALPHA]
+        .map(q=>record(q).values[0]);
+    /** @param {number} index @returns {{ factors: number[], equations: number[] }} */
+    const functionsOf = index=>({ factors: apart[index].factors ?? factorsNow(),
+        equations: apart[index].equations ?? equationsNow() });
 
     /**
      * Every installer's indexed targets, whichever installs first.
@@ -64,6 +85,12 @@ export function installIndexedCalls(context, kernel){
         ? { kind: 'bool', values: [blend[index] ? 1 : 0] } : null));
     indexed.set(GL.COLOR_WRITEMASK, index=>(index < BUFFERS
         ? { kind: 'bool', values: masks[index] } : null));
+    [GL.BLEND_SRC_RGB, GL.BLEND_DST_RGB, GL.BLEND_SRC_ALPHA, GL.BLEND_DST_ALPHA]
+        .forEach((query, k)=>indexed.set(query, index=>(index < BUFFERS
+            ? { kind: 'int', values: [functionsOf(index).factors[k]] } : null)));
+    [GL.BLEND_EQUATION_RGB, GL.BLEND_EQUATION_ALPHA]
+        .forEach((query, k)=>indexed.set(query, index=>(index < BUFFERS
+            ? { kind: 'int', values: [functionsOf(index).equations[k]] } : null)));
 
     /**
      * The first buffer's from the unindexed state, which is its own: what
@@ -97,16 +124,35 @@ export function installIndexedCalls(context, kernel){
                     mask.splice(0, 4, ...values);
                 }
             }
+            else if (cap === GL.BLEND_SRC_RGB)
+            {
+                apart.forEach(one=>{
+                    one.factors = null;
+                });
+            }
+            else if (cap === GL.BLEND_EQUATION_RGB)
+            {
+                apart.forEach(one=>{
+                    one.equations = null;
+                });
+            }
         },
         /** @returns {PerBuffer} */
         perBuffer(){
             settle();
             const first = bits(masks[0]);
-            if (blend.every(on=>on === blend[0]) && masks.every(mask=>bits(mask) === first))
+            const functions = apart.some(one=>one.factors || one.equations);
+            if (blend.every(on=>on === blend[0]) && masks.every(mask=>bits(mask) === first)
+                && !functions)
             {
                 return null;
             }
-            return { blend: [...blend], masks: masks.map(bits) };
+            const kept = { blend: [...blend], masks: masks.map(bits) };
+            return !functions ? kept : { ...kept, functions: apart.map((_, index)=>{
+                const { factors: [src, dst, srcAlpha, dstAlpha],
+                    equations: [equation, equationAlpha] } = functionsOf(index);
+                return { src, dst, srcAlpha, dstAlpha, equation, equationAlpha };
+            }) };
         },
     });
 
@@ -218,6 +264,84 @@ export function installIndexedCalls(context, kernel){
             {
                 setState(GL.COLOR_WRITEMASK, values);
             }
+        },
+
+        /**
+         * glBlendFuncSeparatei and glBlendFunci (4.0): one draw buffer's
+         * factors. The first buffer's are the unindexed state; set, the
+         * others that followed it keep what they had.
+         *
+         * @param {number} buffer @param {number} srcRgb @param {number} dstRgb
+         * @param {number} srcAlpha @param {number} dstAlpha
+         */
+        glBlendFuncSeparatei(buffer, srcRgb, dstRgb, srcAlpha, dstAlpha){
+            if (!enter('glBlendFuncSeparatei', [buffer, srcRgb, dstRgb, srcAlpha, dstAlpha]))
+            {
+                return;
+            }
+            if (!bufferIndex(buffer))
+            {
+                return;
+            }
+            if (![srcRgb, dstRgb, srcAlpha, dstAlpha].every(f=>BLEND_FACTORS.has(f))
+                || dstRgb === GL.SRC_ALPHA_SATURATE || dstAlpha === GL.SRC_ALPHA_SATURATE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const values = [srcRgb, dstRgb, srcAlpha, dstAlpha];
+            if (buffer === 0)
+            {
+                const now = factorsNow();
+                apart.forEach((one, index)=>{
+                    if (index > 0 && !one.factors)
+                    {
+                        one.factors = now;
+                    }
+                });
+                [GL.BLEND_SRC_RGB, GL.BLEND_DST_RGB, GL.BLEND_SRC_ALPHA, GL.BLEND_DST_ALPHA]
+                    .forEach((query, k)=>setState(query, [values[k]]));
+                setState(GL.BLEND_SRC, [srcRgb]);
+                setState(GL.BLEND_DST, [dstRgb]);
+                return;
+            }
+            apart[buffer].factors = values;
+        },
+
+        /**
+         * glBlendEquationSeparatei and glBlendEquationi (4.0): one draw
+         * buffer's equations, the first's the unindexed state.
+         *
+         * @param {number} buffer @param {number} rgb @param {number} alpha
+         */
+        glBlendEquationSeparatei(buffer, rgb, alpha){
+            if (!enter('glBlendEquationSeparatei', [buffer, rgb, alpha]))
+            {
+                return;
+            }
+            if (!bufferIndex(buffer))
+            {
+                return;
+            }
+            if (!EQUATIONS.has(rgb) || !EQUATIONS.has(alpha))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (buffer === 0)
+            {
+                const now = equationsNow();
+                apart.forEach((one, index)=>{
+                    if (index > 0 && !one.equations)
+                    {
+                        one.equations = now;
+                    }
+                });
+                setState(GL.BLEND_EQUATION_RGB, [rgb]);
+                setState(GL.BLEND_EQUATION_ALPHA, [alpha]);
+                return;
+            }
+            apart[buffer].equations = [rgb, alpha];
         },
 
         /** @param {number} target @param {number} index @returns {number[] | null} */

@@ -39,7 +39,7 @@ const COMPARE_FUNCTIONS = new Set([
 ]);
 
 /** The blend equations. @type {Set<number>} */
-const EQUATIONS = new Set([GL.FUNC_ADD, GL.FUNC_SUBTRACT, GL.FUNC_REVERSE_SUBTRACT, GL.MIN,
+export const EQUATIONS = new Set([GL.FUNC_ADD, GL.FUNC_SUBTRACT, GL.FUNC_REVERSE_SUBTRACT, GL.MIN,
     GL.MAX]);
 
 /** @type {Set<number>} */
@@ -110,6 +110,7 @@ export function installCoreCalls(context, kernel){
             }
             setState(GL.BLEND_EQUATION_RGB, [rgb]);
             setState(GL.BLEND_EQUATION_ALPHA, [alpha]);
+            kernel.side.allBuffers?.(GL.BLEND_EQUATION_RGB, [rgb, alpha]);
         },
 
         /**
@@ -133,6 +134,7 @@ export function installCoreCalls(context, kernel){
             setState(GL.BLEND_DST_RGB, [dstRgb]);
             setState(GL.BLEND_SRC_ALPHA, [srcAlpha]);
             setState(GL.BLEND_DST_ALPHA, [dstAlpha]);
+            kernel.side.allBuffers?.(GL.BLEND_SRC_RGB, [srcRgb, dstRgb, srcAlpha, dstAlpha]);
         },
 
         // --- stencil, face by face ---

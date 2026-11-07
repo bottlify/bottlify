@@ -69,6 +69,23 @@ export function laterEntryPoints(h){
         ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
 
     /**
+     * glBlendFunci, glBlendFuncSeparatei, glBlendEquationi and
+     * glBlendEquationSeparatei (4.0).
+     *
+     * @returns {Record<string, (args: number[]) => number>}
+     */
+    const blendsApart = ()=>({
+        glBlendFunci: ([buffer, src, dst])=>answer(current()?.glBlendFuncSeparatei(buffer >>> 0,
+            src >>> 0, dst >>> 0, src >>> 0, dst >>> 0)),
+        glBlendFuncSeparatei: ([buffer, sr, dr, sa, da])=>answer(current()
+            ?.glBlendFuncSeparatei(buffer >>> 0, sr >>> 0, dr >>> 0, sa >>> 0, da >>> 0)),
+        glBlendEquationi: ([buffer, mode])=>answer(current()?.glBlendEquationSeparatei(
+            buffer >>> 0, mode >>> 0, mode >>> 0)),
+        glBlendEquationSeparatei: ([buffer, rgb, alpha])=>answer(current()
+            ?.glBlendEquationSeparatei(buffer >>> 0, rgb >>> 0, alpha >>> 0)),
+    });
+
+    /**
      * The packed attribute forms (3.3), each word given or read from where
      * the program points.
      *
@@ -423,6 +440,7 @@ export function laterEntryPoints(h){
             ?? GL.FALSE,
         glColorMaski: ([index, r, g, b, a])=>answer(current()?.glColorMaski(index >>> 0,
             r & 0xff, g & 0xff, b & 0xff, a & 0xff)),
+        ...blendsApart(),
         glGetIntegeri_v: ([target, index, out])=>call(context=>writeQuery(out,
             context.glGetIntegeri_v(target >>> 0, index >>> 0), 'word')),
         glGetBooleani_v: ([target, index, out])=>call(context=>writeQuery(out,

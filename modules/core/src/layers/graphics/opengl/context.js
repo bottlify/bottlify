@@ -935,6 +935,7 @@ export function createGlContext(options = {}){
             setState(GL.BLEND_DST_RGB, [destination]);
             setState(GL.BLEND_SRC_ALPHA, [source]);
             setState(GL.BLEND_DST_ALPHA, [destination]);
+            kernel.side.allBuffers?.(GL.BLEND_SRC_RGB, [source, destination, source, destination]);
         },
 
         /** @param {number} func */

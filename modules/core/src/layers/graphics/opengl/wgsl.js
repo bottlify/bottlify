@@ -96,9 +96,11 @@ import {
  *           the enabled user clip planes, in the uniform block's order, and
  *           whether the device clips by the distances a vertex stage writes
  *           (`clip-distances`) or the fragment stage discards what they cut
- * @property {{ format: string, mask: number, blend?: boolean }[]} [targets]  the colour
+ * @property {{ format: string, mask: number,
+ *     blend?: boolean | import('./pipeline.js').SceneBlend }[]} [targets]  the colour
  *           targets, `blend` false for a draw buffer blending is disabled for
- *           (glDisablei) where `blend` is on for another,
+ *           (glDisablei) where `blend` is on for another, or its own factors
+ *           and equations (glBlendFunci),
  *           when there is more than `targetFormat` with `colourMask`: a
  *           framebuffer object's draw buffers, each with the channels it is
  *           written in (an RGB attachment's alpha is not)
@@ -512,7 +514,8 @@ const targetsKey = targets=>{
     let key = '';
     for (const target of targets)
     {
-        key += `${target.format}/${target.mask}${target.blend === false ? '/n' : ''};`;
+        key += `${target.format}/${target.mask}${target.blend === false ? '/n'
+            : typeof target.blend === 'object' ? `/${blendKey(target.blend)}` : ''};`;
     }
     return key;
 };
@@ -1477,7 +1480,7 @@ export function drawDescriptor(state){
             // (section 4.1.8 of 3.0); nor is a buffer blending is disabled for.
             : { format: target.format,
                 blend: INTEGER_FORMAT.test(target.format) || target.blend === false ? undefined
-                    : blend,
+                    : typeof target.blend === 'object' ? blendStateOf(target.blend) : blend,
                 writeMask: target.mask }));
     return {
         vertexBuffers: buffers,

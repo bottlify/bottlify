@@ -2449,6 +2449,40 @@ test('blending and colour masks set apart per draw buffer reach each target\'s p
         && !list[0].blend && list[1].blend);
     assert.ok(swapped, 'a pipeline blending the second target alone');
     assert.deepEqual([swapped[0].writeMask, swapped[1].writeMask], [0xf, 0x1]);
+
+    // Each blending buffer with its own factors (4.0).
+    context.glEnable(GL.BLEND);
+    context.glBlendFuncSeparatei(1, GL.ONE, GL.ONE, GL.ONE, GL.ONE);
+    context.glBlendEquationSeparatei(1, GL.MAX, GL.FUNC_ADD);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const own = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets).find((/** @type {any[]} */ list)=>list.length === 2
+        && list[1].blend?.color.operation === 'max');
+    assert.ok(own, 'the second target blends by its own equation');
+    assert.equal(own[0].blend.color.srcFactor, 'src-alpha', 'the first by the unindexed state');
+    assert.equal(own[1].blend.alpha.dstFactor, 'one');
+    // Other factors alone make another pipeline (min and max take none).
+    context.glBlendEquationSeparatei(1, GL.FUNC_ADD, GL.FUNC_ADD);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    context.glBlendFuncSeparatei(1, GL.ZERO, GL.ONE, GL.ONE, GL.ONE);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    assert.ok(r.gpu.of('createRenderPipeline').some((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets[1]?.blend?.color.srcFactor === 'zero'));
 });
 
 test('a unit\'s sampler object samples its texture in place of the texture\'s own state', async()=>{
