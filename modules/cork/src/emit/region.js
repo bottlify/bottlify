@@ -256,6 +256,11 @@ const EXIT_KINDS = 8;
 export const BLOCK_MARK_END = 0xfff;
 /** The copy a switch's case arm is marked with (`markArm`): one arm runs a turn, not all. */
 export const BLOCK_MARK_ARM = 0xf;
+/**
+ * Where in the state page a block's mark is stored: short of `nanFirst` and in no
+ * field, past the 32-bit state block, in the 64-bit one's unused tail.
+ */
+export const BLOCK_MARK_AT = 1020;
 
 /**
  * A block's mark as a diagnostic build stores it (`markBlocks`): a constant no
@@ -4369,10 +4374,8 @@ export class RegionEmitter {
         this.marksMade ??= new Map();
         const copy = this.marksMade.get(index) ?? 0;
         this.marksMade.set(index, copy + 1);
-        // In the state page, short of `nanFirst` and in no field: past the 32-bit
-        // state block, in the 64-bit one's unused tail.
         atState(this.context, this.b).i32const(blockMark(index, copy))
-            .store('i32', { offset: this.layout.regs + 1020 });
+            .store('i32', { offset: this.layout.regs + BLOCK_MARK_AT });
     }
 
     /**
@@ -4387,7 +4390,7 @@ export class RegionEmitter {
             const index = this.formedIndex?.get(this.region.blocks[this.blockIndex].start)
                 ?? this.blockIndex;
             atState(this.context, this.b).i32const(blockMark(index, BLOCK_MARK_ARM))
-                .store('i32', { offset: this.layout.regs + 1020 });
+                .store('i32', { offset: this.layout.regs + BLOCK_MARK_AT });
         }
     }
 

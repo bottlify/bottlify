@@ -108,3 +108,29 @@ test('a store past the RAM held faults at the instruction, and lands once grown'
     assert.deepEqual([...m.read(0x2180000, 4)], u32(0x44444444));
     await m.dispose();
 });
+
+test('calls waiting two hundred deep leave the wrap word as the host set it', async()=>{
+    const m = growing();
+    // L: mov ecx, 200; call R; hlt
+    // R: dec ecx; jz done; call esi; ret; done: mov eax, [ebx]; ret
+    const R = LOOP + 0x40;
+    m.load(LOOP, [0xb9, ...u32(200), 0xe8, ...u32(R - (LOOP + 10)), 0xf4]);
+    m.load(R, [0x49, 0x74, 0x03, 0xff, 0xd6, 0xc3, 0x8b, 0x03, 0xc3]);
+    m.load(0x100000, u32(0x11111111));
+    // Once R is translated its calls (through esi: none is formed in) are wasm
+    // calls, two hundred waiting at once at the deepest, each with its return
+    // address in the state page; the read there, and every return's read of
+    // the stack, is wrapped by the word.
+    for (let round = 0; round < 20; round++)
+    {
+        m.setReg('ebx', 0x100000);
+        m.setReg('esi', R);
+        m.setReg('eax', 0);
+        m.setReg('esp', 0x300000);
+        m.setReg('eip', LOOP);
+        const stop = await m.run();
+        assert.equal(stop.reason, 'halt', `round ${round}`);
+        assert.equal(m.reg('eax'), 0x11111111, `round ${round}: the read wrapped by the word`);
+    }
+    await m.dispose();
+});
