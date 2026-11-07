@@ -582,9 +582,11 @@ export function createEnvironmentFunctions(host){
  * the user's from the registry if a program tells the two apart.
  *
  * @param {{ block: () => number, free: (block: number) => number,
+ *     expand?: (source: number, target: number, size: number) => number,
  *     writeMemory: (address: number, bytes: Uint8Array) => void,
  *     setLastError: (code: number) => void }} host
- *     `block` is GetEnvironmentStringsW, `free` FreeEnvironmentStringsW.
+ *     `block` is GetEnvironmentStringsW, `free` FreeEnvironmentStringsW,
+ *     `expand` ExpandEnvironmentStringsW.
  */
 export function createUserenvFunctions(host){
     return {
@@ -617,5 +619,38 @@ export function createUserenvFunctions(host){
             /** @param {number[]} args */
             handler: ([block])=>host.free(block),
         },
+
+        /**
+         * BOOL ExpandEnvironmentStringsForUserW(HANDLE hToken, LPCWSTR lpSrc,
+         *     LPWSTR lpDest, DWORD dwSize)
+         *
+         * As ExpandEnvironmentStringsW, the user's variables being the
+         * process's here; a buffer too small is ERROR_INSUFFICIENT_BUFFER.
+         */
+        ExpandEnvironmentStringsForUserW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, source, target, size])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0 || !host.expand)
+                {
+                    host.setLastError(87);
+                    return 0;
+                }
+                const needed = host.expand(source, target, size) >>> 0;
+                if (needed === 0 || needed > (size >>> 0))
+                {
+                    host.setLastError(122);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL UnloadUserProfile(HANDLE hToken, HANDLE hProfile)
+         *
+         * Nothing was loaded for another user: the one user's profile stays.
+         */
+        UnloadUserProfile: { argBytes: 8, handler: ()=>1 },
     };
 }

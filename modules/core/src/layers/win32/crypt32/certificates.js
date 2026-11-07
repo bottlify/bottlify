@@ -32,7 +32,8 @@
 import { childrenOf, contents as contentsOf, DerError, encoding as encodingOf, expect,
     readBitString, readNode, readOid, TAG } from '../crypto/der.js';
 import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
-import { parseSignedData } from '../crypto/pkcs7.js';
+import { checkSigner, parseSignedData, signedContent, signerCertificate }
+    from '../crypto/pkcs7.js';
 import { verifySigned } from '../crypto/signature.js';
 import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
     rsaKeyFromBits, sameBytes, USAGE, TLS_USAGE } from '../crypto/x509.js';
@@ -59,6 +60,11 @@ const CRYPT_E_NO_MATCH = 0x80092009;
 const CRYPT_E_NO_KEY_PROPERTY = 0x8009200b;
 const CRYPT_E_INVALID_MSG_TYPE = 0x80091004;
 const CRYPT_E_INVALID_INDEX = 0x80091008;
+const CRYPT_E_NO_TRUSTED_SIGNER = 0x8009202b;
+/** CryptMsgGetAndVerifySigner's flags. */
+const CMSG_TRUSTED_SIGNER_FLAG = 0x1;
+const CMSG_SIGNER_ONLY_FLAG = 0x2;
+const CMSG_USE_SIGNER_INDEX_FLAG = 0x4;
 
 /** Context properties, wincrypt.h's CERT_*_PROP_ID. */
 export const PROP = Object.freeze({ KEY_PROV_INFO: 2, SHA1_HASH: 3, MD5_HASH: 4,
@@ -2251,6 +2257,63 @@ export function createCertificateFunctions(host){
                             `parameter ${type >>> 0} is not kept`);
                         return fail(CRYPT_E_INVALID_MSG_TYPE);
                 }
+            },
+        },
+
+        /**
+         * BOOL CryptMsgGetAndVerifySigner(HCRYPTMSG hCryptMsg, DWORD cSignerStore,
+         *     HCERTSTORE *rghSignerStore, DWORD dwFlags, PCCERT_CONTEXT *ppSigner,
+         *     DWORD *pdwSignerIndex)
+         *
+         * The first signer - or the one at *pdwSignerIndex with
+         * CMSG_USE_SIGNER_INDEX_FLAG - whose certificate the message carries
+         * and whose signature over the content verifies under its key; with
+         * CMSG_SIGNER_ONLY_FLAG found, not verified. The certificate is
+         * answered as a context to free. Signer stores are not searched: a
+         * message trusted only by them (CMSG_TRUSTED_SIGNER_FLAG) has no signer
+         * here, CRYPT_E_NO_TRUSTED_SIGNER.
+         */
+        CryptMsgGetAndVerifySigner: {
+            argBytes: 24,
+            handler: (/** @type {number[]} */ [handle, , , flags, signerOut, indexAt])=>{
+                const message = messages.get(handle >>> 0);
+                if (!message)
+                {
+                    return fail(E_INVALIDARG);
+                }
+                if (((flags >>> 0) & CMSG_TRUSTED_SIGNER_FLAG) !== 0)
+                {
+                    return fail(CRYPT_E_NO_TRUSTED_SIGNER);
+                }
+                const only = ((flags >>> 0) & CMSG_USE_SIGNER_INDEX_FLAG) !== 0
+                    ? dword(indexAt >>> 0) : -1;
+                const covered = message.content ? signedContent(message.content)
+                    : new Uint8Array(0);
+                for (let index = 0; index < message.signers.length; index++)
+                {
+                    if (only >= 0 && index !== only)
+                    {
+                        continue;
+                    }
+                    const signer = message.signers[index];
+                    const certificate = signerCertificate(message.certificates, signer);
+                    if (!certificate || (((flags >>> 0) & CMSG_SIGNER_ONLY_FLAG) === 0
+                        && checkSigner(signer, certificate.publicKey, covered) !== 'ok'))
+                    {
+                        continue;
+                    }
+                    if ((signerOut >>> 0) !== 0)
+                    {
+                        setPointer(signerOut >>> 0, makeContext(certificate, 0));
+                    }
+                    if ((indexAt >>> 0) !== 0)
+                    {
+                        setDword(indexAt >>> 0, index);
+                    }
+                    return 1;
+                }
+                return fail(only >= message.signers.length ? CRYPT_E_INVALID_INDEX
+                    : CRYPT_E_NO_TRUSTED_SIGNER);
             },
         },
 

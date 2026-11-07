@@ -3798,6 +3798,8 @@ export function createWin32Module(){
                     block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
                     free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW
                         .handler([block]),
+                    expand: (source, target, size)=>libraries['KERNEL32.dll']
+                        .ExpandEnvironmentStringsW.handler([source, target, size]),
                     writeMemory, setLastError: setError,
                 }),
                 'SensApi.dll': createSensFunctions({ readMemory, writeMemory,

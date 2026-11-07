@@ -798,6 +798,39 @@ export function createPathFunctions(host, { A, W }){
         }),
 
         /**
+         * BOOL PathQuoteSpacesA(LPSTR lpsz)
+         *
+         * A path with a space in it put in double quotes, in place, when the
+         * quoted path still fits in MAX_PATH; TRUE when it was quoted.
+         */
+        ...both('PathQuoteSpaces', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null || !path.includes(' ') || path.length + 2 >= MAX_PATH)
+            {
+                return 0;
+            }
+            write(pointer, width, `"${path}"`);
+            return 1;
+        }),
+
+        /**
+         * BOOL PathCompactPathExA(LPSTR pszOut, LPCSTR pszSrc, UINT cchMax, DWORD dwFlags)
+         *
+         * PathCompactPath's cut, by characters: the path in cchMax characters
+         * with its terminator, the directories before the name given up to
+         * an ellipsis first. No flags are defined.
+         */
+        ...both('PathCompactPathEx', 16, (width, [out, source, max, flags])=>{
+            const path = width.read(source);
+            if ((out >>> 0) === 0 || path === null || (max >>> 0) === 0 || flags !== 0)
+            {
+                return 0;
+            }
+            write(out, width, compactPath(path, (max >>> 0) - 1, text=>text.length));
+            return 1;
+        }),
+
+        /**
          * void PathUndecorateA(LPSTR pszPath)
          *
          * The "[n]" a browser's cache puts before a file's extension taken

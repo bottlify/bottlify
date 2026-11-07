@@ -25,6 +25,8 @@
  * tells the callback everything inside the call and answers the stream.
  */
 
+import { pathFromFileUrl } from '../shlwapi/path.js';
+
 const S_OK = 0;
 const S_FALSE = 1;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -37,6 +39,7 @@ const MK_S_REDUCED_TO_SELF = 0x000401e2;
 const MK_E_NOINVERSE = 0x800401ec | 0;
 const MK_E_UNAVAILABLE = 0x800401e3 | 0;
 const INET_E_RESOURCE_NOT_FOUND = 0x800c0005 | 0;
+const INET_E_DOWNLOAD_FAILURE = 0x800c0008 | 0;
 
 export const CLSID_STD_URL_MONIKER = '{79EAC9E0-BAF9-11CE-8C82-00AA004BA90B}';
 const IID_IMONIKER = '{0000000F-0000-0000-C000-000000000046}';
@@ -109,28 +112,13 @@ export function canonicalUrl(url, context){
 }
 
 /**
- * The path of the local disk a `file:` URL names, or null for another
- * scheme: the slashes after `file:` dropped, a drive's `|` its colon, the
- * percent escapes undone and the slashes Windows'.
+ * The path of the local disk a `file:` URL names, as PathCreateFromUrl reads
+ * it (file:///C|/..., file://\C|\... as a program joins one onto a path), or
+ * null for another scheme.
  *
  * @param {string} url
  */
-export function fileUrlPath(url){
-    const match = /^file:(.*)$/i.exec(url);
-    if (!match)
-    {
-        return null;
-    }
-    // A backslash is a slash in a file URL (file://\C|\dir\name, as a
-    // program joins one onto a path, opens the same file).
-    let rest = match[1].replace(/\\/g, '/');
-    const unc = /^\/\/(?!\/)([^/]+)(\/.*)$/.exec(rest);
-    rest = unc && !/^[a-z][:|]$/i.test(unc[1]) ? `\\\\${unc[1]}${unc[2]}` : rest.replace(/^\/+/, '');
-    rest = rest.replace(/^([a-z])\|/i, '$1:');
-    // A byte at a time, and a % that escapes nothing kept as written.
-    return rest.replace(/%([0-9a-f]{2})/gi, (_, hex)=>String.fromCharCode(parseInt(hex, 16)))
-        .replace(/\//g, '\\');
-}
+export const fileUrlPath = url=>pathFromFileUrl(url, code=>String.fromCharCode(code));
 
 /** @param {string} text */
 const wide = text=>{
@@ -690,6 +678,35 @@ export function createUrlMonikers(host){
                 const url = urls.get(target >>> 0) ?? 'a moniker not made here';
                 diverge('HlinkSimpleNavigateToMoniker', `a link is not opened: ${url}`);
                 return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT URLDownloadToFileW(LPUNKNOWN pCaller, LPCWSTR szURL, LPCWSTR szFileName,
+         *     DWORD dwReserved, LPBINDSTATUSCALLBACK lpfnCB)
+         *
+         * A file: URL copied to the file named; another scheme is not
+         * fetched here, INET_E_DOWNLOAD_FAILURE, said once. The callback is
+         * not told of the copy.
+         */
+        URLDownloadToFileW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: async([, urlAt, target])=>{
+                if ((urlAt >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const url = canonicalUrl(host.readWideString(urlAt >>> 0, 0x8000), null);
+                const path = fileUrlPath(url);
+                if (path === null)
+                {
+                    diverge('URLDownloadToFileW', `${url.split(':')[0]}: is not fetched here`);
+                    return INET_E_DOWNLOAD_FAILURE;
+                }
+                const copied = await lendWide(path, from=>Promise.resolve(host.system(
+                    'KERNEL32.dll', 'CopyFileW', [from, target, 0], host.callerThread()) ?? 0));
+                return copied !== 0 ? S_OK : INET_E_DOWNLOAD_FAILURE;
             },
         },
 

@@ -178,6 +178,22 @@ export function createSecur32Functions(host){
         GetUserNameExW: userNameEx(true),
 
         /**
+         * BOOLEAN GetComputerObjectNameA/W(EXTENDED_NAME_FORMAT NameFormat,
+         *     LPSTR lpNameBuffer, PULONG nSize)
+         *
+         * The computer's name in the directory: a machine in no domain has no
+         * object there, in any format, as GetUserNameEx's directory formats.
+         */
+        GetComputerObjectNameA: { argBytes: 12, handler: ()=>{
+            host.setLastError(ERROR_NONE_MAPPED);
+            return 0;
+        } },
+        GetComputerObjectNameW: { argBytes: 12, handler: ()=>{
+            host.setLastError(ERROR_NONE_MAPPED);
+            return 0;
+        } },
+
+        /**
          * NTSTATUS LsaConnectUntrusted(PHANDLE LsaHandle)
          *
          * The local authority, which anyone may connect to; it knows no
