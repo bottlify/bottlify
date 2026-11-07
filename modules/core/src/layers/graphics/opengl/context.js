@@ -44,6 +44,7 @@ import {
     DEFAULT_VERSION, shadingLanguageVersion, versionState, versionString,
 } from './version.js';
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
+import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -120,7 +121,7 @@ const NOT_COMPILABLE = new Set([
     'glVertexAttribIPointer', 'getVertexAttribI',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
-    ...INDEXED_CALLS_NOT_COMPILED,
+    ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -464,6 +465,9 @@ export function createGlContext(options = {}){
             ? (texture, level, face, xoffset, yoffset, x, y, width, height)=>
                 gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
                     width, height, kernel.side.readFramebuffer?.() ?? null)
+            : null,
+        fence: gpu?.fence
+            ? ()=>(attached ? gpu.fence(context) : null)
             : null,
         readBack: gpu?.readPixels
             ? rect=>(attached
@@ -1737,6 +1741,7 @@ export function createGlContext(options = {}){
     // Last: a new vertex array object starts from the arrays as the others left them.
     installVertexArrayCalls(context, kernel);
     installIndexedCalls(context, kernel);
+    installSyncCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 

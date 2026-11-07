@@ -60,6 +60,10 @@
  *             dstX0: number, dstY0: number, dstX1: number, dstY1: number,
  *             linear: boolean }) => void) | null} [blit]
  *           glBlitFramebuffer's colour, from the read framebuffer to the draw one
+ * @property {(() => { signalled: () => boolean, done: Promise<void>, flush: () => void }
+ *             | null) | null} [fence]
+ *           What a fence waits on: the commands recorded so far replayed
+ *           (`gpu.js` fence); null where nothing is drawn later than it is called
  * @property {((rect: { x: number, y: number, width: number, height: number })
  *             => Promise<Uint8Array | null> | null) | null} [readBack]
  *           The read buffer's colour on the device, RGBA, its bottom row first:

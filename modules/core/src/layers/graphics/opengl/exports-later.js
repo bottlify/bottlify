@@ -20,6 +20,7 @@
  */
 
 import { GL } from './constants.js';
+import { TIMEOUT_IGNORED } from './context-sync.js';
 
 /**
  * What `exports.js` lends: the current context, and its readers and writers
@@ -54,6 +55,15 @@ const asFloat = word=>{
  */
 export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
+
+    /**
+     * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
+     * as the context names it.
+     *
+     * @param {number} low @param {number} high
+     */
+    const timeoutOf = (low, high)=>((low >>> 0) === 0xffffffff && (high >>> 0) === 0xffffffff
+        ? TIMEOUT_IGNORED : (high >>> 0) * 0x100000000 + (low >>> 0));
 
     /**
      * glVertexAttribI1i to glVertexAttribI4usv: each form's components, the
@@ -277,6 +287,24 @@ export function laterEntryPoints(h){
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- sync objects (3.2) ---
+
+        glFenceSync: ([condition, flags])=>current()?.glFenceSync(condition >>> 0, flags >>> 0)
+            ?? 0,
+        glIsSync: ([sync])=>current()?.glIsSync(sync >>> 0) ?? GL.FALSE,
+        glDeleteSync: ([sync])=>answer(current()?.glDeleteSync(sync >>> 0)),
+        glWaitSync: ([sync, flags, low, high])=>answer(current()?.glWaitSync(sync >>> 0,
+            flags >>> 0, timeoutOf(low, high))),
+        glGetSynciv: ([sync, pname, size, length, out])=>call(context=>{
+            const values = (context.glGetSynciv(sync >>> 0, pname >>> 0) ?? [])
+                .slice(0, Math.max(0, size | 0));
+            if ((length >>> 0) !== 0)
+            {
+                writeU32s(length, [values.length]);
+            }
+            writeQuery(out, values, 'word');
+        }),
 
         // --- integer vertex attributes (3.0) ---
 

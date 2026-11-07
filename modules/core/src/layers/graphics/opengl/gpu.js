@@ -500,6 +500,7 @@ export function createGpuRenderer(services){
      *     (`lockedFor`), by epoch, slot base and stride
      * @property {{ draws: number, clears: number, copies: number, refused: number,
      *               skipped: number, cut: number, merged: number }} counts
+     * @property {(() => void) | null} replayed  told once its replay has run (`fence`)
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -1688,6 +1689,8 @@ export function createGpuRenderer(services){
                 counts: {
                     draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, merged: 0,
                 },
+                /** @type {(() => void) | null} told once its replay has run */
+                replayed: null,
             };
             unflushed.add(recording.id);
             recordings.set(context, recording);
@@ -3940,6 +3943,7 @@ export function createGpuRenderer(services){
             // Ended whatever happened, or every later frame fails at beginFrame.
             frame.end();
             unflushed.delete(recording.id);
+            recording.replayed?.();
         }
         // The frame is submitted, so the probe read-backs resolve; each one
         // lands on its own dump line, which the report reads long after.
@@ -3954,6 +3958,31 @@ export function createGpuRenderer(services){
                     .join(' ')}]`;
         }
         return copied ? copied() : null;
+    };
+
+    /**
+     * Replays what the context recorded so far now, in a frame of its own
+     * that shows nothing; what it draws next goes into a recording of its
+     * own over the result.
+     *
+     * @param {object} context @param {DrawableSurfaces} surfaces
+     * @param {any} read  a surface to copy out at the frame's end, or null
+     * @returns {Promise<{ width: number, height: number, data: Uint8Array } | null>}
+     */
+    const flush = (context, surfaces, read)=>{
+        const recording = recordingOf(context);
+        recordings.delete(context);
+        /** @type {{ width: number, height: number, data: Uint8Array } | null} */
+        let shot = null;
+        chain = chain
+            .then(async()=>{
+                shot = await replay(recording, surfaces, null, undefined, read);
+            })
+            .catch(error=>{
+                unflushed.delete(recording.id);
+                lose(error instanceof Error ? error.message : String(error));
+            });
+        return chain.then(()=>shot);
     };
 
     /** @param {any} a @param {any} b */
@@ -4132,20 +4161,7 @@ export function createGpuRenderer(services){
             {
                 return null;
             }
-            // Everything drawn so far is drawn now; what the context draws
-            // after the read goes into a recording of its own over the result.
-            recordings.delete(context);
-            /** @type {{ width: number, height: number, data: Uint8Array } | null} */
-            let shot = null;
-            chain = chain
-                .then(async()=>{
-                    shot = await replay(recording, surfaces, null, undefined, read);
-                })
-                .catch(error=>{
-                    unflushed.delete(recording.id);
-                    lose(error instanceof Error ? error.message : String(error));
-                });
-            return chain.then(()=>{
+            return flush(context, surfaces, read).then(shot=>{
                 if (!shot)
                 {
                     return null;
@@ -4178,6 +4194,45 @@ export function createGpuRenderer(services){
                 }
                 return out;
             });
+        },
+
+        /**
+         * A fence (glFenceSync): signalled once every command the context
+         * recorded before it has been replayed -- what the program gave the
+         * calls before it was copied when they were made, so nothing it holds
+         * is read after that. `flush` replays what the context recorded so
+         * far now rather than at the next swap.
+         *
+         * @param {object} context
+         * @returns {{ signalled: () => boolean, done: Promise<void>, flush: () => void }}
+         */
+        fence(context){
+            const recording = recordings.get(context);
+            let signalled = false;
+            /** @type {Promise<void>} */
+            const done = (recording
+                ? new Promise(resolve=>{
+                    const earlier = recording.replayed;
+                    recording.replayed = ()=>{
+                        earlier?.();
+                        resolve(undefined);
+                    };
+                })
+                : chain).then(()=>{
+                signalled = true;
+            });
+            return {
+                signalled: ()=>signalled,
+                done,
+                // Everything the context recorded so far, as glFlush would.
+                flush: ()=>{
+                    const surfaces = drawables.get(context);
+                    if (recordings.has(context) && surfaces)
+                    {
+                        void flush(context, surfaces, null);
+                    }
+                },
+            };
         },
 
         /** Every replay queued so far has run. */

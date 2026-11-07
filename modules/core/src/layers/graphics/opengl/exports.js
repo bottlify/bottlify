@@ -48,6 +48,7 @@ import {
     UNANNOUNCED_FUNCTIONS, WGL_EXTENSIONS, registryArguments,
 } from './extensions.js';
 import { laterEntryPoints } from './exports-later.js';
+import { SYNC } from './context-sync.js';
 import {
     choosePixelFormat, choosePixelFormatsARB, decodePixelFormat, encodePixelFormat,
     formatAttribute, PIXEL_FORMATS, PIXELFORMATDESCRIPTOR,
@@ -2129,6 +2130,13 @@ export function createOpengl(services){
      * @type {Record<string, (args: number[]) => number | Promise<number>>}
      */
     const swaps = {
+        // A wait on a fence the device has not reached waits for it, up to
+        // the timeout.
+        glClientWaitSync: ([sync, flags, low, high])=>{
+            const waited = current()?.glClientWaitSync(sync >>> 0, flags >>> 0,
+                (high >>> 0) * 0x100000000 + (low >>> 0));
+            return waited ?? SYNC.WAIT_FAILED;
+        },
         glReadPixels: ([x, y, width, height, format, type, out])=>{
             const context = current();
             if (!context)
