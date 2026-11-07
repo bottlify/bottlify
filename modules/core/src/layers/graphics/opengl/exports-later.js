@@ -690,11 +690,8 @@ export function laterEntryPoints(h){
             a[2] >>> 0, a[3] >>> 0, a[4] | 0)),
         glFramebufferTexture3D: a=>answer(current()?.framebufferTexture(a[0] >>> 0, a[1] >>> 0,
             a[2] >>> 0, a[3] >>> 0, a[4] | 0)),
-        // A layer of a 3D or array texture, of which there are none: only a
-        // detach is not an error.
-        glFramebufferTextureLayer: a=>answer(current()?.framebufferTexture(a[0] >>> 0,
-            a[1] >>> 0, (a[2] >>> 0) === 0 ? GL.TEXTURE_2D : GL.TEXTURE_3D, a[2] >>> 0,
-            a[3] | 0)),
+        glFramebufferTextureLayer: a=>answer(current()?.glFramebufferTextureLayer(a[0] >>> 0,
+            a[1] >>> 0, a[2] >>> 0, a[3] | 0, a[4] | 0)),
         glFramebufferRenderbuffer: a=>answer(current()?.glFramebufferRenderbuffer(a[0] >>> 0,
             a[1] >>> 0, a[2] >>> 0, a[3] >>> 0)),
         glGetFramebufferAttachmentParameteriv: ([target, attachment, pname, out])=>call(
@@ -854,6 +851,8 @@ export function laterEntryPoints(h){
             }),
         glClipControl: ([origin, depth])=>answer(current()?.glClipControl(origin >>> 0,
             depth >>> 0)),
+        glTextureView: args=>answer(current()?.glTextureView(...args.slice(0, 8)
+            .map(value=>value >>> 0))),
 
         // --- program pipelines ---
 

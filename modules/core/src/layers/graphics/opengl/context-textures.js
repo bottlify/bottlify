@@ -43,6 +43,9 @@ import {
     S3TC_BLOCK_BYTES, UNSIZED_FORMATS, copyCompatible, copyFormatOf, mipLevels, rawFromKept,
     rawIntoKept,
 } from './texture-copy.js';
+import {
+    VIEW_TARGETS, ViewDirty, ViewLevels, layerCount, viewCompatible, viewReadable,
+} from './texture-views.js';
 
 /** glGetTexParameter's names for what glTexStorage makes (OpenGL 4.2, GL_ARB_texture_storage). */
 export const TEXTURE_IMMUTABLE_FORMAT = 0x912f;
@@ -132,7 +135,8 @@ const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
  * program samples -- 3D textures and the arrays of OpenGL 3.0.
  */
 const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY,
-    GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE_ARRAY];
+    TEX.TEXTURE_CUBE_MAP_ARRAY, GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE,
+    GL.TEXTURE_2D_MULTISAMPLE_ARRAY];
 
 /** The multisample targets (3.2), whose one level holds the samples. @type {ReadonlySet<number>} */
 const MULTISAMPLE = new Set([GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE_ARRAY]);
@@ -169,6 +173,7 @@ const BINDING_QUERY = Object.freeze({
     [GL.TEXTURE_3D]: TEX.TEXTURE_BINDING_3D,
     [TEX.TEXTURE_1D_ARRAY]: TEX.TEXTURE_BINDING_1D_ARRAY,
     [TEX.TEXTURE_2D_ARRAY]: TEX.TEXTURE_BINDING_2D_ARRAY,
+    [TEX.TEXTURE_CUBE_MAP_ARRAY]: TEX.TEXTURE_BINDING_CUBE_MAP_ARRAY,
     [GL.TEXTURE_BUFFER]: GL.TEXTURE_BINDING_BUFFER,
     [GL.TEXTURE_2D_MULTISAMPLE]: GL.TEXTURE_BINDING_2D_MULTISAMPLE,
     [GL.TEXTURE_2D_MULTISAMPLE_ARRAY]: GL.TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY,
@@ -185,11 +190,13 @@ const IMAGE_TARGETS = {
         TEX.PROXY_TEXTURE_1D_ARRAY, GL.PROXY_TEXTURE_CUBE_MAP, 0x8515, 0x8516, 0x8517, 0x8518,
         0x8519, 0x851a, GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]),
     3: new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D, TEX.TEXTURE_2D_ARRAY,
-        TEX.PROXY_TEXTURE_2D_ARRAY]),
+        TEX.PROXY_TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY,
+        TEX.PROXY_TEXTURE_CUBE_MAP_ARRAY]),
 };
 /** @type {ReadonlySet<number>} */
 const PROXIES = new Set([GL.PROXY_TEXTURE_1D, GL.PROXY_TEXTURE_2D, GL.PROXY_TEXTURE_3D,
     GL.PROXY_TEXTURE_CUBE_MAP, TEX.PROXY_TEXTURE_1D_ARRAY, TEX.PROXY_TEXTURE_2D_ARRAY,
+    TEX.PROXY_TEXTURE_CUBE_MAP_ARRAY,
     GL.PROXY_TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_2D_MULTISAMPLE,
     GL.PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY]);
 
@@ -199,7 +206,15 @@ const RECTANGLES = new Set([GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]);
 /** The filters a rectangle texture takes: none reads a mipmap. @type {ReadonlySet<number>} */
 const RECTANGLE_FILTERS = new Set([GL.NEAREST, GL.LINEAR]);
 /** The targets whose third dimension is a layer, not a depth. @type {ReadonlySet<number>} */
-const ARRAYS = new Set([TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY]);
+const ARRAYS = new Set([TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY]);
+
+/**
+ * The cube map array targets (4.0): a 2D array whose layers are its cubes'
+ * faces, six a cube, the faces square.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const CUBE_ARRAYS = new Set([TEX.TEXTURE_CUBE_MAP_ARRAY, TEX.PROXY_TEXTURE_CUBE_MAP_ARRAY]);
 
 /** @type {ReadonlySet<number>} */
 const COMPARE_FUNCS = new Set([0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207]);
@@ -221,6 +236,19 @@ const environmentBase = sized=>(sized.base === GL.RED || sized.base === TEX.RG
 /** The RGBA bytes made from a sized level's data, while that data is unchanged. */
 /** @type {WeakMap<object, Uint8Array | null>} */
 const rgbaCache = new WeakMap();
+
+/**
+ * Forgets the RGBA kept of a level whose bytes were written, and of the
+ * level it reads them from (a texture view's, `texture-views.js`).
+ *
+ * @param {import('./objects.js').TextureLevel | undefined} level
+ */
+function forgetRgba(level){
+    for (let at = level; at; at = at.source)
+    {
+        rgbaCache.delete(at);
+    }
+}
 
 /**
  * Pixels a list holds already in the level's own layout: replayed, they are
@@ -375,7 +403,8 @@ const STORAGE_TARGETS = {
         TEX.PROXY_TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP, GL.PROXY_TEXTURE_CUBE_MAP,
         GL.TEXTURE_RECTANGLE, GL.PROXY_TEXTURE_RECTANGLE]),
     3: new Set([GL.TEXTURE_3D, GL.PROXY_TEXTURE_3D, TEX.TEXTURE_2D_ARRAY,
-        TEX.PROXY_TEXTURE_2D_ARRAY]),
+        TEX.PROXY_TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY,
+        TEX.PROXY_TEXTURE_CUBE_MAP_ARRAY]),
 };
 
 /** The target each proxy stands for. @type {ReadonlyMap<number, number>} */
@@ -384,6 +413,7 @@ const PROXY_TARGETS = new Map([
     [GL.PROXY_TEXTURE_3D, GL.TEXTURE_3D], [GL.PROXY_TEXTURE_CUBE_MAP, GL.TEXTURE_CUBE_MAP],
     [TEX.PROXY_TEXTURE_1D_ARRAY, TEX.TEXTURE_1D_ARRAY],
     [TEX.PROXY_TEXTURE_2D_ARRAY, TEX.TEXTURE_2D_ARRAY],
+    [TEX.PROXY_TEXTURE_CUBE_MAP_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY],
     [GL.PROXY_TEXTURE_RECTANGLE, GL.TEXTURE_RECTANGLE],
     [GL.PROXY_TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE],
     [GL.PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY, GL.TEXTURE_2D_MULTISAMPLE_ARRAY],
@@ -1139,14 +1169,37 @@ export function installTextureCalls(context, kernel){
         }
         if (legacyBase === null)
         {
+            // An integer format takes no pixel transfer (4.6 section 8.4.4).
+            if (kept.kind !== 'int' && kept.kind !== 'uint')
+            {
+                kernel.side.transferSkipped?.(`an image of ${kept.name}`);
+            }
             return unpackToStorage(bytes, width, height, depth, format, type, unpack, kept);
         }
         const texels = rgbaFromClient(bytes, width, height, depth, format, type, unpack);
         if (texels)
         {
+            kernel.side.pixelTransfer?.()?.(texels);
             conformTexels(texels, legacyBase);
         }
         return texels;
+    }
+
+    /**
+     * RGBA texels as a read packs them: through the pixel transfer, into a
+     * copy where it changes them (`context-legacy.js`).
+     *
+     * @param {Uint8Array} texels @returns {Uint8Array}
+     */
+    function transferredCopy(texels){
+        const transfer = kernel.side.pixelTransfer?.();
+        if (!transfer)
+        {
+            return texels;
+        }
+        const copy = texels.slice();
+        transfer(copy);
+        return copy;
     }
 
     /**
@@ -1318,7 +1371,8 @@ export function installTextureCalls(context, kernel){
                 ? layers : max;
         const maxDepth = solid ? size3d : three ? layers : 1;
         if (level < 0 || border !== 0 || width < 0 || height < 0 || depth < 0
-            || width > maxWidth || height > maxHeight || depth > maxDepth)
+            || width > maxWidth || height > maxHeight || depth > maxDepth
+            || !cubeArrayFits(target, width, height, depth))
         {
             // A border is OpenGL 1.x's alone: the sized formats of 3.0 refuse
             // one, and so does every image kept here as bytes.
@@ -1414,7 +1468,7 @@ export function installTextureCalls(context, kernel){
             // box goes up.
             level.data ??= blankStorage(sized, level.width, level.height, level.depth ?? 1);
             copyBox(level.data, sized, level.width, level.height, box, stored, 'write');
-            rgbaCache.delete(level);
+            forgetRgba(level);
         }
         level.compressed = null;
         markDirty(texture, key, box.depth === (level.depth ?? 1) && box.z === 0
@@ -1560,14 +1614,18 @@ export function installTextureCalls(context, kernel){
             {
                 return null;
             }
-            const texels = stored.texels
-                ?? new Uint8Array(stored.width * stored.height * depth * 4);
+            const texels = transferredCopy(stored.texels
+                ?? new Uint8Array(stored.width * stored.height * depth * 4));
             return packFromStorage(texels, stored.width, stored.height, depth, format, type,
                 transferState(true), RGBA8);
         }
         if (!checkTransfer(sized, format, type))
         {
             return null;
+        }
+        if (sized.kind !== 'int' && sized.kind !== 'uint')
+        {
+            kernel.side.transferSkipped?.(`a read of a texture of ${sized.name}`);
         }
         const data = stored.data ?? blankStorage(sized, stored.width, stored.height, depth);
         return packFromStorage(data, stored.width, stored.height, depth, format, type,
@@ -1694,6 +1752,7 @@ export function installTextureCalls(context, kernel){
                     + ' into one slice of a 3D texture through no view here');
                 return;
             }
+            kernel.side.transferSkipped?.('a copy of the framebuffer into a texture on the device');
             // A layer of an array is addressed where a cube's face is.
             kernel.copyToTexture?.(texture, level, ARRAYS.has(texture.target) ? box.z : face,
                 box.x, box.y, x, y, box.width, box.height);
@@ -1760,6 +1819,8 @@ export function installTextureCalls(context, kernel){
                 out[at + 3] = frame.bytes[from + 3];
             }
         }
+        // A copy into a texture passes through the pixel transfer (2.1 section 3.8.2).
+        kernel.side.pixelTransfer?.()?.(out);
         return out;
     }
 
@@ -1892,6 +1953,21 @@ export function installTextureCalls(context, kernel){
         if (parameter === TEXTURE_IMMUTABLE_LEVELS)
         {
             return [immutableLevels.get(texture) ?? 0];
+        }
+        const view = texture.view;
+        switch (parameter)
+        {
+            // A texture that is no view answers its whole range (4.3 table 23.15).
+            case TEX.TEXTURE_VIEW_MIN_LEVEL:
+                return [view?.minLevel ?? 0];
+            case TEX.TEXTURE_VIEW_NUM_LEVELS:
+                return [view?.numLevels ?? 0];
+            case TEX.TEXTURE_VIEW_MIN_LAYER:
+                return [view?.minLayer ?? 0];
+            case TEX.TEXTURE_VIEW_NUM_LAYERS:
+                return [view?.numLayers ?? 0];
+            default:
+                break;
         }
         if (!texture.parameters.has(parameter))
         {
@@ -2312,6 +2388,22 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * Whether a cube map array's image is one (4.0 section 8.5): square
+     * faces, six a cube, no wider than a cube map's; any other target fits.
+     *
+     * @param {number} target @param {number} width @param {number} height
+     * @param {number} depth
+     */
+    function cubeArrayFits(target, width, height, depth){
+        if (!CUBE_ARRAYS.has(target))
+        {
+            return true;
+        }
+        return width === height && depth % 6 === 0
+            && width <= record(GL.MAX_CUBE_MAP_TEXTURE_SIZE).values[0];
+    }
+
+    /**
      * A level with a shape and nothing in it, in the format glTexStorage
      * gives every level: kept as an image call with no pixels would keep it.
      *
@@ -2386,9 +2478,10 @@ export function installTextureCalls(context, kernel){
         const max = record(cube ? GL.MAX_CUBE_MAP_TEXTURE_SIZE : GL.MAX_TEXTURE_SIZE).values[0];
         const size3d = record(GL.MAX_3D_TEXTURE_SIZE).values[0];
         const layers = record(TEX.MAX_ARRAY_TEXTURE_LAYERS)?.values[0] ?? 256;
-        const fits = solid ? width <= size3d && height <= size3d && depth <= size3d
+        const fits = (solid ? width <= size3d && height <= size3d && depth <= size3d
             : width <= max && (oneArray ? height <= layers : height <= max)
-                && (dimensions === 3 ? depth <= layers : true);
+                && (dimensions === 3 ? depth <= layers : true))
+            && cubeArrayFits(real, width, height, depth);
         if (!fits || (cube && width !== height))
         {
             // A proxy answers by what it leaves, not by an error.
@@ -2480,7 +2573,7 @@ export function installTextureCalls(context, kernel){
                 copyFormatOf(base.internalFormat)),
             width: base.width, height: target === GL.TEXTURE_1D ? 1 : base.height,
             depth: cube ? 6 : target === GL.TEXTURE_3D || target === TEX.TEXTURE_2D_ARRAY
-                ? base.depth ?? 1 : 1,
+                || target === TEX.TEXTURE_CUBE_MAP_ARRAY ? base.depth ?? 1 : 1,
             samples: 1 };
     }
 
@@ -2594,7 +2687,7 @@ export function installTextureCalls(context, kernel){
             else if (level.data)
             {
                 copyBox(level.data, sized, level.width, level.height, box, kept, 'write');
-                rgbaCache.delete(level);
+                forgetRgba(level);
             }
             return;
         }
@@ -3147,6 +3240,7 @@ export function installTextureCalls(context, kernel){
             {
                 return;
             }
+            kernel.side.transferSkipped?.('a copy of the framebuffer into a texture on the device');
             kernel.copyToTexture?.(image.texture, level, image.face, xoffset, yoffset, x, y,
                 width, height);
             return;
@@ -3268,7 +3362,8 @@ export function installTextureCalls(context, kernel){
     function compressedTexSubImage3D(name, target, level, x0, y0, z0, width, height, depth,
         format, size, data)
     {
-        const image = target === TEX.TEXTURE_2D_ARRAY ? imageTarget(target) : null;
+        const image = target === TEX.TEXTURE_2D_ARRAY || target === TEX.TEXTURE_CUBE_MAP_ARRAY
+            ? imageTarget(target) : null;
         const existing = image?.texture.levels.get(levelKey(level, image.face));
         if (!image || !existing?.sized?.compressed)
         {
@@ -3595,6 +3690,104 @@ export function installTextureCalls(context, kernel){
             unit.bindings.set(target, name);
         },
 
+        /**
+         * glTextureView (4.3 section 8.18): `name`, generated and never
+         * bound, made a view of a range of `original`'s immutable storage.
+         *
+         * @param {number} name @param {number} target @param {number} original
+         * @param {number} internal @param {number} minLevel @param {number} numLevels
+         * @param {number} minLayer @param {number} numLayers
+         */
+        glTextureView(name, target, original, internal, minLevel, numLevels, minLayer,
+            numLayers)
+        {
+            if (!enter('glTextureView', [name, target, original, internal, minLevel, numLevels,
+                minLayer, numLayers]))
+            {
+                return;
+            }
+            if (name === 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const group = kernel.shareGroup();
+            if (!group.textures.reserved.has(name))
+            {
+                // Never generated, or bound and given a target already.
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const from = group.textures.objects.get(original);
+            if (!from)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const base = from.levels.get(levelKey(0));
+            if (!immutableLevels.has(from) || !base)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (!(VIEW_TARGETS.get(from.target) ?? []).includes(target)
+                || !viewCompatible(base.internalFormat, internal))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const levels = from.view?.numLevels
+                ?? /** @type {number} */ (immutableLevels.get(from));
+            const layers = from.view?.numLayers ?? layerCount(from);
+            if (minLevel < 0 || minLayer < 0 || numLevels < 0 || numLayers < 0
+                || minLevel >= levels || minLayer >= layers)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            const viewLevels = Math.min(numLevels, levels - minLevel);
+            const viewLayers = Math.min(numLayers, layers - minLayer);
+            const cubes = target === GL.TEXTURE_CUBE_MAP || target === TEX.TEXTURE_CUBE_MAP_ARRAY;
+            const one = target === GL.TEXTURE_1D || target === GL.TEXTURE_2D
+                || target === GL.TEXTURE_3D || target === GL.TEXTURE_RECTANGLE
+                || target === GL.TEXTURE_2D_MULTISAMPLE;
+            if ((target === GL.TEXTURE_CUBE_MAP && viewLayers !== 6)
+                || (target === TEX.TEXTURE_CUBE_MAP_ARRAY && viewLayers % 6 !== 0)
+                || (one && viewLayers !== 1))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (cubes && base.width !== base.height)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            /** @type {import('./texture-views.js').ViewRange} */
+            const range = {
+                root: from.view?.root ?? from,
+                minLevel: (from.view?.minLevel ?? 0) + minLevel, numLevels: viewLevels,
+                minLayer: (from.view?.minLayer ?? 0) + minLayer, numLayers: viewLayers,
+                internal,
+            };
+            const texture = createTextureObject(name, target);
+            // The original's state is the view's, but for what makes it a view.
+            texture.parameters = new Map(from.parameters);
+            texture.borderColour = [...from.borderColour];
+            texture.view = range;
+            texture.levels = /** @type {any} */ (new ViewLevels(target, range));
+            texture.dirty = /** @type {any} */ (new ViewDirty(target, range));
+            group.textures.define(name, texture);
+            group.used = true;
+            immutableLevels.set(texture, /** @type {number} */ (immutableLevels.get(from)));
+            if (!viewReadable(target, range) || !texture.levels.get(levelKey(0)))
+            {
+                lose(`glTextureView of a ${from.target === GL.TEXTURE_CUBE_MAP
+                    ? 'cube map\'s faces as an array' : 'texture in a format kept otherwise'}`
+                    + ' reads none of its original here: the view samples as incomplete');
+            }
+        },
+
         /** @param {number[]} names */
         glDeleteTextures(names){
             if (!enter('glDeleteTextures', [names]))
@@ -3917,6 +4110,8 @@ export function installTextureCalls(context, kernel){
                 }
                 image.texture.levels.set(levelKey(level, image.face),
                     { width, height, internalFormat, border, baseFormat, texels: null });
+                kernel.side.transferSkipped?.('a copy of the framebuffer into a texture on the'
+                    + ' device');
                 kernel.copyToTexture?.(image.texture, level, image.face, 0, 0, x, y, width, height);
                 kernel.shareGroup().used = true;
                 return;
@@ -3983,8 +4178,8 @@ export function installTextureCalls(context, kernel){
                 }
                 const packed = stored.sized ? packSized(stored, format, type)
                     : checkTransfer(RGBA8, format, type)
-                        ? packFromStorage(stored.texels
-                            ?? new Uint8Array(stored.width * stored.height * 4), stored.width,
+                        ? packFromStorage(transferredCopy(stored.texels
+                            ?? new Uint8Array(stored.width * stored.height * 4)), stored.width,
                         stored.height, 1, format, type, transferState(true), RGBA8)
                         : null;
                 return packed ? { packed } : null;
@@ -4003,7 +4198,8 @@ export function installTextureCalls(context, kernel){
                 diverge('glGetTexImage was accepted and read black: the texels live with'
                     + ' the context that draws, in the graphics worker, and are not read back');
             }
-            return stored.texels ?? new Uint8Array(stored.width * stored.height * 4);
+            return transferredCopy(stored.texels
+                ?? new Uint8Array(stored.width * stored.height * 4));
         },
 
         /** @param {number} target @param {number} parameter @param {number} value */
@@ -4191,10 +4387,11 @@ export function installTextureCalls(context, kernel){
             data)
         {
             const sized = sizedFormatOf(internal);
-            if (target !== TEX.TEXTURE_2D_ARRAY || !sized?.compressed)
+            const layered = target === TEX.TEXTURE_2D_ARRAY || CUBE_ARRAYS.has(target);
+            if (!layered || !sized?.compressed)
             {
                 enter('glCompressedTexImage3DARB', [target]);
-                setError(target === TEX.TEXTURE_2D_ARRAY || target === GL.TEXTURE_3D
+                setError(layered || target === GL.TEXTURE_3D
                     ? GL.INVALID_OPERATION : GL.INVALID_ENUM);
                 return;
             }

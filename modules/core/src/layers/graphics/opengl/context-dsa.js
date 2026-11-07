@@ -36,23 +36,21 @@
 
 import { GL } from './constants.js';
 import { TEX } from './formats.js';
-import { createBufferObject, createTextureObject } from './objects.js';
+import { LAYERED_TARGETS, createBufferObject, createTextureObject } from './objects.js';
 import { clientLayout } from './texture-transfer.js';
 
 /** A cube map's faces, in the order a 3D call's z counts them. */
 const CUBE_FACES = [0x8515, 0x8516, 0x8517, 0x8518, 0x8519, 0x851a];
 
 /**
- * The targets glCreateTextures makes a texture of here, and those it is
- * given that name textures this implementation has none of.
+ * The targets glCreateTextures makes a texture of.
  *
  * @type {ReadonlySet<number>}
  */
 const CREATE_TARGETS = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D,
-    GL.TEXTURE_CUBE_MAP, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_RECTANGLE,
-    GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE, GL.TEXTURE_2D_MULTISAMPLE_ARRAY]);
-/** @type {ReadonlyMap<number, string>} */
-const ABSENT_TARGETS = new Map([[0x9009, 'cube map array']]);
+    GL.TEXTURE_CUBE_MAP, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY,
+    GL.TEXTURE_RECTANGLE, GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE,
+    GL.TEXTURE_2D_MULTISAMPLE_ARRAY]);
 
 /** The texture targets each dimension's calls take (sections 8.6 and 8.19). */
 /** @type {Record<1 | 2 | 3, ReadonlySet<number>>} */
@@ -60,7 +58,8 @@ const DIMENSION_TARGETS = {
     1: new Set([GL.TEXTURE_1D]),
     2: new Set([GL.TEXTURE_2D, TEX.TEXTURE_1D_ARRAY, GL.TEXTURE_CUBE_MAP,
         GL.TEXTURE_RECTANGLE]),
-    3: new Set([GL.TEXTURE_3D, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_CUBE_MAP]),
+    3: new Set([GL.TEXTURE_3D, TEX.TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY,
+        GL.TEXTURE_CUBE_MAP]),
 };
 
 /** The attachments glInvalidateNamedFramebufferData names on the default framebuffer. */
@@ -242,11 +241,6 @@ export function installDirectStateCalls(context, kernel){
             }
             if (!CREATE_TARGETS.has(target))
             {
-                if (ABSENT_TARGETS.has(target))
-                {
-                    diverge(`glCreateTextures of a ${ABSENT_TARGETS.get(target)} texture was`
-                        + ' refused: this implementation has none');
-                }
                 setError(GL.INVALID_ENUM);
                 return [];
             }
@@ -328,7 +322,8 @@ export function installDirectStateCalls(context, kernel){
             const call = `glCompressedTextureSubImage${dimensions}D`;
             const targets = dimensions === 1 ? new Set()
                 : dimensions === 2 ? new Set([GL.TEXTURE_2D])
-                    : new Set([TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_CUBE_MAP, GL.TEXTURE_3D]);
+                    : new Set([TEX.TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY,
+                        GL.TEXTURE_CUBE_MAP, GL.TEXTURE_3D]);
             onTexture(call, [dimensions, name, level, box, format, size, data], name, targets,
                 texture=>{
                     const calls = textures();
@@ -757,10 +752,19 @@ export function installDirectStateCalls(context, kernel){
                 }
                 textarget = object.target;
             }
+            else if (object && LAYERED_TARGETS.has(object.target))
+            {
+                if (layer === null)
+                {
+                    diverge('an array attached whole is drawn into its first layer alone');
+                }
+                boundFramebuffers({ draw: name }, ()=>context.glFramebufferTextureLayer(
+                    GL.DRAW_FRAMEBUFFER, attachment, texture, level, layer ?? 0));
+                return;
+            }
             else if (object && object.target !== GL.TEXTURE_1D && object.target !== GL.TEXTURE_2D)
             {
-                // A layer of a 3D texture or an array, as glFramebufferTextureLayer
-                // takes it: none is attached here.
+                // A slice of a 3D texture, which no draw here reaches.
                 textarget = GL.TEXTURE_3D;
             }
             else if (object && layer !== null)

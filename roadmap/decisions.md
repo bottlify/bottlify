@@ -1251,6 +1251,36 @@ again, is a loss,** as their passes are laid out on the processor for a count on
 has; a line loop of it is drawn without its closing line, and GL_PRIMITIVES_GENERATED does not
 count it. Each is said. *2026-11-07.*
 
+**A210. Temporary: GL_ARB_texture_cube_map_array is not reported.** The cube map array target
+is there for a shader of GLSL 4.20 or later, which names samplerCubeArray itself; no shader of an
+earlier version can enable the extension yet. *2026-11-07.*
+
+**A211. Temporary: a texture view in another format of its original's class reads the
+original's texels in the original's format on the device,** said as a loss: WebGPU views a
+surface only in the format it was made in. On the processor a view reads and writes its
+original's bytes where the original keeps its own format's bits (a legacy RGBA8 level's RGBA
+among them); where it keeps another's (a legacy format's RGBA8 in an array) the view holds no
+level, said when it is made. *2026-11-07.*
+
+**A212. Temporary: a view gathering a cube map's faces into an array** (a 2D array or cube map
+array view of a GL_TEXTURE_CUBE_MAP) **holds no levels and samples as incomplete,** said when it
+is made: a cube map's faces are separate images here, which no one level reads. A view of one
+face, of all six as a cube, and every view of a 2D array or cube map array's layers read their
+original. *2026-11-07.*
+
+**A213. Temporary: GL_ARB_texture_view is not reported** while A211 and A212 stand;
+glTextureView is 4.3's, handed out with the version and answering. *2026-11-07.*
+
+**A214. Temporary: a whole array attached to a framebuffer is drawn into its first layer,** said,
+as a cube map attached whole is; a layer of an array (a cube map array's layer-face among them)
+attached by glFramebufferTextureLayer is drawn into as a 2D image. A 3D texture's slice is not
+attached: GL_INVALID_OPERATION, as no draw here reaches one. *2026-11-07.*
+
+**A215. Temporary: an image kept in a sized format's own bytes and a copy the device makes skip
+the pixel transfer** (A200), and say so once while the transfer changes anything: the transfer
+runs on 8-bit RGBA, which these never are here. An integer format's image and a compressed one
+take no transfer, as the specification says. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

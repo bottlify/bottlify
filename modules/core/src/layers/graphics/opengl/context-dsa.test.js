@@ -44,7 +44,9 @@ test('glCreateTextures makes textures of their target at once, bound nowhere', (
     gl.glBindTexture(GL.TEXTURE_2D, names[0]);
     error(gl, GL.INVALID_OPERATION, 'a cube map\'s name for life');
     gl.glCreateTextures(0x9009, 1);
-    error(gl, GL.INVALID_ENUM, 'a cube map array texture this implementation has none of');
+    error(gl, GL.NO_ERROR, 'a cube map array texture (4.0)');
+    gl.glCreateTextures(0x900b, 1);
+    error(gl, GL.INVALID_ENUM, 'a proxy target makes no texture');
     gl.glCreateTextures(GL.TEXTURE_2D, -1);
     error(gl, GL.INVALID_VALUE);
 });

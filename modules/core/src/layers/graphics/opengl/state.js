@@ -514,6 +514,7 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.TEXTURE_BUFFER, name: 'GL_TEXTURE_BUFFER', kind: 'int', value: [0] },
     { query: 0x8c1c, name: 'GL_TEXTURE_BINDING_1D_ARRAY', kind: 'int', value: [0] },
     { query: 0x8c1d, name: 'GL_TEXTURE_BINDING_2D_ARRAY', kind: 'int', value: [0] },
+    { query: 0x900a, name: 'GL_TEXTURE_BINDING_CUBE_MAP_ARRAY', kind: 'int', value: [0] },
     { query: GL.ACTIVE_TEXTURE, name: 'GL_ACTIVE_TEXTURE', kind: 'enum', value: [GL.TEXTURE0] },
     {
         query: GL.CLIENT_ACTIVE_TEXTURE, name: 'GL_CLIENT_ACTIVE_TEXTURE', kind: 'enum',

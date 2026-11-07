@@ -485,6 +485,8 @@ export function installPixelCalls(context, kernel){
                     }
                 }
             }
+            // The copy passes through the transfer as a read and a draw would.
+            kernel.side.pixelTransfer?.()?.(texels);
             drawTexels(texels, width, height);
         },
 
