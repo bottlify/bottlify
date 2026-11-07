@@ -80,10 +80,16 @@ test('a context of 3.0 answers its version, extensions and flags; of 3.2 its pro
     assert.equal(old.glGetString(GL.VERSION), `${IMPLEMENTED_VERSION.major}.`
         + `${IMPLEMENTED_VERSION.minor}`);
     assert.equal(old.version, DEFAULT_VERSION);
+    // wglCreateContext's is the whole implemented version, compatibility
+    // profile, as a Windows driver makes it.
+    assert.deepEqual([GL.MAJOR_VERSION, GL.NUM_EXTENSIONS, GL.CONTEXT_PROFILE_MASK]
+        .map(query=>old.glGetIntegerv(query)), [[IMPLEMENTED_VERSION.major], [2],
+        [GL.CONTEXT_COMPATIBILITY_PROFILE_BIT]]);
+    const legacy = make({ major: 2, minor: 1, profile: 0, flags: 0 });
     for (const query of [GL.MAJOR_VERSION, GL.NUM_EXTENSIONS, GL.CONTEXT_PROFILE_MASK])
     {
-        assert.equal(old.glGetIntegerv(query), null);
-        assert.equal(old.glGetError(), GL.INVALID_ENUM);
+        assert.equal(legacy.glGetIntegerv(query), null, 'a 2.1 context has none of them');
+        assert.equal(legacy.glGetError(), GL.INVALID_ENUM);
     }
 
     const three = make({ major: 3, minor: 0, profile: 0, flags: 1 });

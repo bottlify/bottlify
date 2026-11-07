@@ -1215,7 +1215,7 @@ test('wglCreateContextAttribsARB refuses what WGL_ARB_create_context refuses and
             context.glEndList();
             return context.version;
         });
-        assert.deepEqual(shared, { major: 2, minor: 1,
+        assert.deepEqual(shared, { major: 3, minor: 3,
             profile: GL.CONTEXT_COMPATIBILITY_PROFILE_BIT, flags: GL.CONTEXT_FLAG_DEBUG_BIT });
         assert.equal(table.wglMakeCurrent.handler([0x900d, first]), 1);
         assert.equal(opengl.withContext((/** @type {any} */ context)=>context.glIsList(1)),
