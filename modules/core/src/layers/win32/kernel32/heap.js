@@ -851,6 +851,31 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
             // the heap looks half empty.
             return { blocks: liveBlocks, used, free, largestFree };
         },
+
+        /**
+         * What the live blocks hold by owner, the most first: a heap's handle,
+         * VirtualAlloc's, an image's -- who filled the arena, when an
+         * allocation is refused for want of room.
+         *
+         * @param {number} [count]
+         * @returns {{ owner: any, bytes: number, blocks: number }[]}
+         */
+        owners(count = 5){
+            /** @type {Map<any, { owner: any, bytes: number, blocks: number }>} */
+            const byOwner = new Map();
+            for (const block of live.values())
+            {
+                if (block)
+                {
+                    const entry = byOwner.get(block.owner)
+                        ?? { owner: block.owner, bytes: 0, blocks: 0 };
+                    entry.bytes += block.capacity;
+                    entry.blocks++;
+                    byOwner.set(block.owner, entry);
+                }
+            }
+            return [...byOwner.values()].sort((a, b)=>b.bytes - a.bytes).slice(0, count);
+        },
     };
 }
 
@@ -961,8 +986,15 @@ export function createHeapFunctions(host){
      */
     const refused = (api, size)=>{
         const state = allocator.diagnostics();
+        /** @param {any} owner */
+        const named = owner=>(typeof owner === 'number' ? `heap 0x${owner.toString(16)}`
+            : owner === VIRTUAL ? 'VirtualAlloc' : String(owner));
+        const holders = (allocator.owners?.() ?? [])
+            .map((/** @type {{ owner: any, bytes: number, blocks: number }} */ one)=>
+                `${named(one.owner)} ${one.bytes} in ${one.blocks}`).join(', ');
         host.divergence?.(api, `${size} bytes refused: ${state.largestFree} largest free`
-            + ` of ${state.free} free, ${state.used} used in ${state.blocks} blocks`);
+            + ` of ${state.free} free, ${state.used} used in ${state.blocks} blocks`
+            + (holders ? ` (${holders})` : ''));
     };
 
     /** @param {number} address */

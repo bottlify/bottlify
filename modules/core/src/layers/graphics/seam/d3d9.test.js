@@ -1884,7 +1884,7 @@ test('the adapter a Direct3D 9 program is told about is the one every generation
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.VendorId), shared.vendorId);
     assert.deepEqual([...h.box.services.readMemory(out + D3DADAPTER_IDENTIFIER9.DeviceIdentifier,
         16)], [...ADAPTER_GUID]);
-    assert.equal(text(D3DADAPTER_IDENTIFIER9.Driver), 'webgpu');
+    assert.equal(text(D3DADAPTER_IDENTIFIER9.Driver), 'bottlifyumd.dll');
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.WHQLLevel), 1);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.FIELDS), 0xcdcdcdcd,
         'the padding after the fields is not written');

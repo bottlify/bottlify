@@ -16,6 +16,16 @@
  * the surface follows whatever size the program creates its device at.
  */
 
+/**
+ * The display driver the adapter names (D3DADAPTER_IDENTIFIER9's `Driver`,
+ * DirectDraw's `szDriver`): a file in the system directory whose version
+ * resource is the identifier's `DriverVersion`, as a real driver's is. A
+ * program reads the driver's version from the file it names, and a name that
+ * is no file answered GetFileVersionInfoSize with 0 -- a size one benchmark
+ * then allocated less one.
+ */
+export const DISPLAY_DRIVER = Object.freeze({ file: 'bottlifyumd.dll', version: '1.0.0.0' });
+
 /** The refresh rate a display reports when it is told none (`refreshOf`). */
 export const REFRESH_HZ = 60;
 

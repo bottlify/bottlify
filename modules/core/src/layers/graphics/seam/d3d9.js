@@ -70,7 +70,8 @@ import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, EX_SURFACE_USAGE, PALETTE_
     from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
-import { REFRESH_HZ, displayModes, refreshRatesOf, registryMode } from '../../win32/user32/display.js';
+import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, refreshRatesOf, registryMode }
+    from '../../win32/user32/display.js';
 import { scanWindows } from '../../win32/common/scan-windows.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
@@ -3414,7 +3415,7 @@ export function createDirect3D9Seam(
                 block[at + index] = text.charCodeAt(index) & 0x7f;
             }
         };
-        ascii('webgpu', D3DADAPTER_IDENTIFIER9.Driver, ADAPTER_STRING_LENGTH);
+        ascii(DISPLAY_DRIVER.file, D3DADAPTER_IDENTIFIER9.Driver, ADAPTER_STRING_LENGTH);
         ascii(description, D3DADAPTER_IDENTIFIER9.Description, ADAPTER_STRING_LENGTH);
         ascii('\\\\.\\DISPLAY1', D3DADAPTER_IDENTIFIER9.DeviceName, 32);
         const view = new DataView(block.buffer);

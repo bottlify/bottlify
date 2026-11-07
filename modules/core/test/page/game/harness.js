@@ -1626,6 +1626,9 @@ export function createHarness(canvas, how = {}){
                 // do not belong in `failure` above; a run watching one still
                 // wants to see them as they happen.
                 recentEvents: collected.events.slice(-5),
+                // The last divergences, every process's: a run whose page stops
+                // answering leaves only this to say what it was refused.
+                divergences: collected.divergences.slice(-20),
                 frames: seen.frames,
                 averageFrameMs: seen.averageFrameMs,
                 hostShare: seen.hostShare,

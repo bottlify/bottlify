@@ -1045,7 +1045,9 @@ test('a refused allocation says what was asked and what was left', ()=>{
     assert.equal(fns.VirtualAlloc.handler([0, ARENA.size * 2, 0x1000, 4]), 0);
     assert.equal(reports.length, 2);
     assert.equal(reports[0][0], 'HeapAlloc');
-    assert.match(reports[0][1], /^\d+ bytes refused: \d+ largest free of \d+ free, \d+ used in 1 blocks$/);
+    assert.match(reports[0][1],
+        /^\d+ bytes refused: \d+ largest free of \d+ free, \d+ used in 1 blocks \(heap 0x[0-9a-f]+ \d+ in 1\)$/,
+        'with who holds what');
     assert.equal(reports[1][0], 'VirtualAlloc');
 });
 

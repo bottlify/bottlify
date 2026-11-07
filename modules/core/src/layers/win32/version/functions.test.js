@@ -288,6 +288,9 @@ test('a system library the engine answers for has the version of the system it b
             // The 16-bit USER every 32-bit Windows keeps, which a setup reads
             // the system's language from.
             ['C:\\WINDOWS\\system32\\user.exe', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
+            // The display driver the adapter names, at the version its
+            // identifier reports: a program reads one from the other.
+            ['C:\\WINDOWS\\system32\\bottlifyumd.dll', 1 << 16 | 0, 0, '1.0.0.0'],
         ]))
         {
             const size = version.GetFileVersionInfoSizeA.handler([put(path), 0]);
