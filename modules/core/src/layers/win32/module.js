@@ -115,6 +115,7 @@ import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
+import { createUrlMonikers } from './urlmon/monikers.js';
 import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
 import { createOleaccFunctions } from './oleacc/functions.js';
@@ -3325,10 +3326,35 @@ export function createWin32Module(){
                 'faultrep.dll': createFaultrepFunctions(),
                 // What Internet Explorer calls itself, for a module that
                 // embeds a browser or fetches with the system's identity.
-                'urlmon.dll': createUrlmonFunctions({ windows: windows.name,
-                    readU32: address=>memory.readU32(address),
-                    writeU32: (address, value)=>memory.writeU32(address, value),
-                    writeMemory }),
+                'urlmon.dll': {
+                    ...createUrlmonFunctions({ windows: windows.name,
+                        readU32: address=>memory.readU32(address),
+                        writeU32: (address, value)=>memory.writeU32(address, value),
+                        writeMemory }),
+                    // A control that loads its content by URL - Flash Player
+                    // names its movie so even on the local disk.
+                    ...createUrlMonikers({
+                        readMemory, writeMemory, readWideString, heap,
+                        vtables: comVtables, makeObject: createComObject,
+                        call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        callerThread: ()=>bridge.callerThread(),
+                        system: (library, name, args, thread)=>{
+                            const entry = libraries[library]?.[name];
+                            if (!entry)
+                            {
+                                return null;
+                            }
+                            return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                                : entry.handler(args);
+                        },
+                        window: {
+                            create: handler=>apartmentWindow(handler),
+                            post: (window, message)=>libraries['USER32.dll'].PostMessageA
+                                .handler([window, message, 0, 0]),
+                        },
+                        divergence: config?.divergence,
+                    }),
+                },
                 'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
 
                 // The ODBC Driver Manager, with no driver and no data source set up.
