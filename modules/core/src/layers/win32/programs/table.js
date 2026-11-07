@@ -26,11 +26,11 @@ import { synthesiseProgram } from '../../loader/internal/synth.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { versionStringOf } from '../version/functions.js';
-import { DSETUPERR_SUCCESS } from '../dsetup/functions.js';
 import { runMsiexec } from './msiexec.js';
 import { runRundll32 } from './rundll32.js';
 import { runRegsvr32 } from './regsvr32.js';
 import { runNotepad } from './notepad.js';
+import { runDxsetup } from './dxsetup.js';
 
 /** Where the programs are: GetSystemDirectory's answer. */
 export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
@@ -68,15 +68,16 @@ export const SYSTEM_PROGRAMS = new Map([
  * the drawing layer answers every DirectX library whatever a setup copies.
  * Run, it found XP's own DirectX files missing from the system folder, copied
  * them in, and answered "succeeded, restart needed" -- which a game's
- * installer stops at. In its place it puts nothing down and succeeds, with no
- * window: the licence it shows is for files it would not install.
+ * installer stops at. In its place it installs only the optional components
+ * beside it - D3DX, the shader compilers, XAudio2 - and succeeds with no
+ * window (`dxsetup.js`).
  *
  * @type {readonly { routine: string, company: string, original: string,
  *     run: (context: import('./msiexec.js').ProgramContext) => Promise<number> }[]}
  */
 export const PROGRAMS_IN_PLACE = [
     { routine: 'dxsetup', company: 'Microsoft Corporation', original: 'dxsetup.exe',
-        run: async()=>DSETUPERR_SUCCESS },
+        run: runDxsetup },
 ];
 
 const RT_VERSION = 16;

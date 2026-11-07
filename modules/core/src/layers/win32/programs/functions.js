@@ -90,6 +90,7 @@ export function createProgramFunctions(host){
                 callGuest: (entry, args)=>host.callGuest(entry, args, thread),
                 wide,
                 read: (at, length)=>host.readMemory?.(at, length).slice() ?? new Uint8Array(0),
+                write: (at, data)=>host.writeMemory(at, data),
                 block: size=>place(new Uint8Array(size)),
                 bytes: data=>place(data.slice()),
                 ansi: text=>place(encodeAnsi(`${text}\0`)),

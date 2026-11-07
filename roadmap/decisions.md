@@ -1469,6 +1469,14 @@ and succeeds without a restart, `DirectXSetupGetVersion` names the bottle's Dire
 of the engine's that exits with 0 and shows nothing. The D3DX helpers are not put in the system
 folder; the engine answers them whether or not a file is there. Revisit if a title is found that
 reads a D3DX helper's bytes from system32 rather than loading it. *2026-10-15.*
+Reconsidered: the engine answers D3DX 9, but not D3DX 10 and 11, the shader compilers, XAudio2 or
+XACT, and its D3DX 10 table refuses to compile HLSL. A setup that installed nothing left a program
+importing `d3dx10_43.dll` with the engine's table and no compiler behind it. The `DXSETUP.exe` run
+in a title's setup's place now installs the optional components' cabinets beside it
+(`Jun2010_d3dx10_43_x86.cab` and the like) by their Windows NT INFs, as a Steam bottle's install
+already did (A67); the system's own DirectX cabinets are still left alone, and still no restart
+is asked. A library whose imports the engine's table covers stays the engine's (the loader's rule
+for a system copy). *2026-11-07.*
 
 **The screen is composed as Windows 7's desktop window manager composes it, not drawn into as XP's
 is.** On XP every window draws straight onto one screen, clipped by the windows over it, and a

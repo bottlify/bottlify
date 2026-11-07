@@ -425,6 +425,8 @@ export function parseMsiexec(line){
  * @property {(text: string) => number} ansi  The same, in the ANSI code page.
  * @property {(address: number, length: number) => Uint8Array} read
  *     A copy of guest memory: what a call the program made wrote there.
+ * @property {(address: number, data: Uint8Array) => void} write
+ *     Bytes into guest memory the program holds - a buffer it allocated.
  * @property {(size: number) => number} block
  *     Zeroed guest memory for a call to write into, held until the program ends.
  * @property {(data: Uint8Array) => number} bytes

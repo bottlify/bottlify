@@ -102,7 +102,7 @@ test('DirectX\'s setup a title brings is run as the engine\'s own, known by its 
     assert.equal(programInPlaceOf(new Uint8Array(64)), null, 'and bytes that are no image');
 });
 
-test('the setup run in DXSETUP\'s place succeeds without a restart, and shows nothing', async()=>{
+test('DXSETUP\'s place, nothing beside it: succeeds, no restart, shows nothing', async()=>{
     const functions = createProgramFunctions(/** @type {any} */ ({
         callerThread: ()=>null,
         answering: (/** @type {any} */ thread, /** @type {() => any} */ fn)=>fn(),
@@ -112,7 +112,9 @@ test('the setup run in DXSETUP\'s place succeeds without a restart, and shows no
         readWideString: ()=>'"D:\\DirectX\\DXSETUP.exe" /silent',
         /** @param {string} library */
         exports: library=>(library === 'KERNEL32.dll'
-            ? { GetCommandLineW: { handler: ()=>0x2000 } } : {}),
+            ? { GetCommandLineW: { handler: ()=>0x2000 },
+                GetModuleFileNameW: { handler: ()=>0 }, GetNativeSystemInfo: { handler: ()=>0 },
+                FindFirstFileW: { handler: ()=>0xffffffff } } : {}),
     }));
     assert.equal(await functions.dxsetup.handler(), 0, 'DSETUPERR_SUCCESS: no restart');
 });
