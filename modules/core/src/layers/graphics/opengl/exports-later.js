@@ -354,6 +354,37 @@ export function laterEntryPoints(h){
             target >>> 0, offset | 0, length | 0, access >>> 0) ?? 0,
         glFlushMappedBufferRange: ([target, offset, length])=>answer(
             current()?.glFlushMappedBufferRange(target >>> 0, offset | 0, length | 0)),
+        // --- invalidation, barriers, sample shading, format queries (4.0 to 4.5) ---
+
+        glInvalidateFramebuffer: ([target, count, list])=>call(context=>
+            context.glInvalidateFramebuffer(target >>> 0, count | 0, (count | 0) > 0
+                ? readTyped('ui', list, count | 0) : [], null)),
+        glInvalidateSubFramebuffer: a=>call(context=>
+            context.glInvalidateFramebuffer(a[0] >>> 0, a[1] | 0, (a[1] | 0) > 0
+                ? readTyped('ui', a[2], a[1] | 0) : [], { width: a[5] | 0, height: a[6] | 0 })),
+        glInvalidateBufferData: ([buffer])=>answer(current()?.glInvalidateBufferData(
+            buffer >>> 0, null, 0)),
+        glInvalidateBufferSubData: ([buffer, offset, length])=>answer(
+            current()?.glInvalidateBufferData(buffer >>> 0, offset | 0, length | 0)),
+        glInvalidateTexImage: ([texture, level])=>answer(current()?.glInvalidateTexImage(
+            texture >>> 0, level | 0, null)),
+        glInvalidateTexSubImage: a=>answer(current()?.glInvalidateTexImage(a[0] >>> 0,
+            a[1] | 0, { x: a[2] | 0, y: a[3] | 0, z: a[4] | 0, width: a[5] | 0,
+                height: a[6] | 0, depth: a[7] | 0 })),
+        glMemoryBarrier: ([barriers])=>answer(current()?.glMemoryBarrier(barriers >>> 0, false)),
+        glMemoryBarrierByRegion: ([barriers])=>answer(current()?.glMemoryBarrier(barriers >>> 0,
+            true)),
+        glTextureBarrier: ()=>answer(current()?.glTextureBarrier()),
+        glMinSampleShading: ([value])=>answer(current()?.glMinSampleShading(asFloat(value))),
+        glGetInternalformativ: ([target, internal, pname, size, out])=>call(context=>{
+            const values = context.glGetInternalformativ(target >>> 0, internal >>> 0,
+                pname >>> 0);
+            if (values && (size | 0) > 0)
+            {
+                writeQuery(out, values.slice(0, size | 0), 'word');
+            }
+        }),
+
         glBufferStorage: ([target, size, data, flags])=>answer(current()?.glBufferStorage(
             target >>> 0, size | 0, (data >>> 0) || null, flags >>> 0)),
         glClearBufferData: ([target, internal, format, type, data])=>answer(

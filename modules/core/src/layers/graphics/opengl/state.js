@@ -117,6 +117,8 @@ export const DEFAULT_ENABLES = Object.freeze([
     // OpenGL 3.2: depth clamped rather than clipped, and cube maps filtered
     // across their faces' edges.
     { query: GL.DEPTH_CLAMP, name: 'GL_DEPTH_CLAMP', kind: 'bool', value: [0] },
+    // OpenGL 4.0's sample shading.
+    { query: GL.SAMPLE_SHADING, name: 'GL_SAMPLE_SHADING', kind: 'bool', value: [0] },
     {
         query: GL.TEXTURE_CUBE_MAP_SEAMLESS, name: 'GL_TEXTURE_CUBE_MAP_SEAMLESS', kind: 'bool',
         value: [0],
@@ -362,6 +364,10 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0],
     },
     { query: GL.POLYGON_OFFSET_UNITS, name: 'GL_POLYGON_OFFSET_UNITS', kind: 'float', value: [0] },
+    {
+        query: GL.MIN_SAMPLE_SHADING_VALUE, name: 'GL_MIN_SAMPLE_SHADING_VALUE', kind: 'float',
+        value: [0],
+    },
     // OpenGL 4.6's (GL_ARB_polygon_offset_clamp): zero clamps nothing.
     { query: GL.POLYGON_OFFSET_CLAMP, name: 'GL_POLYGON_OFFSET_CLAMP', kind: 'float', value: [0] },
     { query: GL.RENDER_MODE, name: 'GL_RENDER_MODE', kind: 'enum', value: [GL.RENDER] },
