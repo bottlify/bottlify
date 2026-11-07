@@ -18,6 +18,7 @@ import { GL } from './constants.js';
 import { transform } from './matrix.js';
 import { readPixel, writeFragment } from './raster.js';
 import { fogFactor } from './pipeline.js';
+import { imageBytes } from './texture.js';
 
 /** @type {Set<number>} */
 const COLOUR_FORMATS = new Set([
@@ -257,6 +258,28 @@ export function installPixelCalls(context, kernel){
                 setState(GL.ZOOM_X, [x]);
                 setState(GL.ZOOM_Y, [y]);
             }
+        },
+
+        /**
+         * glReadnPixels (4.5, KHR_robustness): glReadPixels into a buffer of
+         * `size` bytes, refused when the pixels would not fit it.
+         *
+         * @param {number} x @param {number} y @param {number} width @param {number} height
+         * @param {number} format @param {number} type @param {number} size
+         * @returns {Uint8Array | Promise<Uint8Array | null> | null}
+         */
+        glReadnPixels(x, y, width, height, format, type, size){
+            if (!enter('glReadnPixels', [x, y, width, height, format, type, size]))
+            {
+                return null;
+            }
+            if (width > 0 && height > 0 && imageBytes(width, height, format, type,
+                { ...packState(), swapBytes: false }) > size)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            return context.glReadPixels(x, y, width, height, format, type);
         },
 
         /**

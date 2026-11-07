@@ -2412,6 +2412,27 @@ export function createOpengl(services){
             return packed instanceof Promise ? packed.then(write) : write(packed);
         },
 
+        // 4.5's robustness: glReadPixels into a buffer of a size.
+        glReadnPixels: ([x, y, width, height, format, type, size, out])=>{
+            const context = current();
+            if (!context)
+            {
+                return 0;
+            }
+            wgl.meetBitmap(context);
+            const packed = context.glReadnPixels(x | 0, y | 0, width | 0, height | 0,
+                format >>> 0, type >>> 0, size | 0);
+            /** @param {Uint8Array | null} bytes */
+            const write = bytes=>{
+                if (bytes && (out >>> 0) !== 0)
+                {
+                    services.writeMemory(out >>> 0, bytes);
+                }
+                return 0;
+            };
+            return packed instanceof Promise ? packed.then(write) : write(packed);
+        },
+
         wglSwapBuffers: ([hdc])=>{
             if (!wgl.SwapBuffers(hdc >>> 0))
             {

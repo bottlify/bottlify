@@ -918,6 +918,12 @@ export const DEFAULT_STATE = Object.freeze([
     // specification's least.
     { query: GL.MAX_VIEWPORTS, name: 'GL_MAX_VIEWPORTS', kind: 'int', value: [16] },
     { query: GL.MAX_VERTEX_STREAMS, name: 'GL_MAX_VERTEX_STREAMS', kind: 'int', value: [4] },
+    // 4.5's robustness: no reset is ever told. 4.3's largest index: a 32-bit one.
+    {
+        query: GL.RESET_NOTIFICATION_STRATEGY, name: 'GL_RESET_NOTIFICATION_STRATEGY',
+        kind: 'enum', value: [GL.NO_RESET_NOTIFICATION],
+    },
+    { query: GL.MAX_ELEMENT_INDEX, name: 'GL_MAX_ELEMENT_INDEX', kind: 'int', value: [-1] },
     {
         query: GL.VIEWPORT_SUBPIXEL_BITS, name: 'GL_VIEWPORT_SUBPIXEL_BITS', kind: 'int',
         value: [0],

@@ -27,7 +27,7 @@ import { SIZED_FORMATS } from './formats.js';
 /** The calls of this file a display list does not record: all but the sample shading. */
 export const LATER_CALLS_NOT_COMPILED = Object.freeze([
     'glInvalidateFramebuffer', 'glInvalidateBufferData', 'glInvalidateTexImage',
-    'glMemoryBarrier', 'glTextureBarrier', 'glGetInternalformativ',
+    'glMemoryBarrier', 'glTextureBarrier', 'glGetInternalformativ', 'glGetGraphicsResetStatus',
 ]);
 
 /** Every barrier bit of 4.4 (table 7.4), and GL_ALL_BARRIER_BITS. */
@@ -159,6 +159,16 @@ export function installLaterCalls(context, kernel){
 
         glTextureBarrier(){
             enter('glTextureBarrier', []);
+        },
+
+        /**
+         * glGetGraphicsResetStatus (4.5, KHR_robustness): no context here is
+         * ever lost to a reset the program could see.
+         *
+         * @returns {number}
+         */
+        glGetGraphicsResetStatus(){
+            return enter('glGetGraphicsResetStatus', []) ? GL.NO_ERROR : GL.NO_ERROR;
         },
 
         /** @param {number} value */

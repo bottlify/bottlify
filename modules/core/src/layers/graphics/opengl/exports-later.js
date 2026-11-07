@@ -811,6 +811,23 @@ export function laterEntryPoints(h){
                     'word');
             }
         }),
+        // 4.5's robustness: the same answers, into a buffer of a size.
+        ...Object.fromEntries(['f', 'i', 'ui'].flatMap(kind=>{
+            /** @param {number[]} args */
+            const handler = ([program, location, size, out])=>call(context=>{
+                const answered = context.getnUniform(program >>> 0, location | 0, size | 0);
+                if (answered)
+                {
+                    const values = kind === 'f' || !answered.float ? answered.values
+                        : answered.values.map((/** @type {number} */ v)=>(kind === 'ui'
+                            ? Math.trunc(v) >>> 0
+                            : Math.trunc(v)));
+                    writeQuery(out, values, kind === 'f' ? 'float' : 'word');
+                }
+            });
+            return [[`glGetnUniform${kind}v`, handler]];
+        })),
+        glGetGraphicsResetStatus: ()=>current()?.glGetGraphicsResetStatus() ?? GL.NO_ERROR,
         glBindFragDataLocation: ([program, colour, name])=>call(context=>
             context.bindFragData(program >>> 0, colour >>> 0, 0, h.readName(name))),
         glBindFragDataLocationIndexed: ([program, colour, index, name])=>call(context=>

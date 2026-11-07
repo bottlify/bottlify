@@ -93,3 +93,26 @@ test('a format answers its sample counts up to the most there are', ()=>{
     gl.glGetInternalformativ(GL.ARRAY_BUFFER, GL.RGBA8, 0x9380);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
 });
+
+test('robust reads refuse a buffer too small, and no reset is ever told (4.5)', ()=>{
+    const gl = context();
+    assert.equal(gl.glGetGraphicsResetStatus(), GL.NO_ERROR);
+    assert.deepEqual(gl.glGetIntegerv(GL.RESET_NOTIFICATION_STRATEGY), [GL.NO_RESET_NOTIFICATION]);
+    assert.equal(gl.glReadnPixels(0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 15), null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'sixteen bytes do not fit fifteen');
+    const read = gl.glReadnPixels(0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 16);
+    assert.equal(read.length, 16);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+
+    const vs = gl.glCreateShader(GL.VERTEX_SHADER);
+    gl.glShaderSource(vs, ['uniform vec4 tint; void main() { gl_Position = tint; }']);
+    gl.glCompileShader(vs);
+    const program = gl.glCreateProgram();
+    gl.glAttachShader(program, vs);
+    gl.glLinkProgram(program);
+    const tint = gl.glGetUniformLocation(program, 'tint');
+    assert.equal(gl.getnUniform(program, tint, 12), null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'four floats do not fit twelve bytes');
+    assert.deepEqual(gl.getnUniform(program, tint, 16).values, [0, 0, 0, 0]);
+    assert.deepEqual(gl.glGetIntegerv(GL.MAX_ELEMENT_INDEX), [-1]);
+});

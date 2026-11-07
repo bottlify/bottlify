@@ -1596,6 +1596,27 @@ export function installShaderCalls(context, kernel){
         },
 
         /**
+         * glGetnUniform{f,i,ui}v (4.5, KHR_robustness): getUniform's answer,
+         * refused when its values would not fit `size` bytes.
+         *
+         * @param {number} programName @param {number} location @param {number} size
+         * @returns {{ values: number[], float: boolean, unsigned?: boolean } | null}
+         */
+        getnUniform(programName, location, size){
+            if (!enter('getnUniform', [programName, location, size]))
+            {
+                return null;
+            }
+            const answered = context.getUniform(programName, location);
+            if (answered && answered.values.length * 4 > size)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            return answered;
+        },
+
+        /**
          * @param {number} programName @param {number} location
          * @returns {{ values: number[], float: boolean, unsigned?: boolean } | null}
          *     the element's values, and whether it holds floats or unsigned integers
@@ -1670,4 +1691,5 @@ export const SHADER_CALLS_NOT_COMPILED = Object.freeze([
     'glGetUniformBlockIndex', 'glGetActiveUniformBlockiv', 'glGetActiveUniformBlockName',
     'glGetUniformIndices', 'glGetActiveUniformsiv', 'glGetActiveUniformName',
     'glProgramParameteri', 'glGetProgramBinary', 'glProgramBinary', 'programUniform',
+    'getnUniform',
 ]);
