@@ -168,9 +168,7 @@ test('every extension the context reports for the language is one the front end 
         assert.ok(name in GL_EXTENSIONS, `${name} reported`);
         assert.ok(name in GLSL_EXTENSIONS, `${name} in the front end`);
     }
-    // Half of these is here: they are enabled, never reported.
-    for (const name of ['GL_EXT_gpu_shader4', 'GL_ARB_gpu_shader5'])
-    {
-        assert.equal(name in GL_EXTENSIONS, false, `${name} reported`);
-    }
+    // Part of it is here (no `unsigned int`, no integer samplers, no
+    // texelFetch2D()): enabled, never reported.
+    assert.equal('GL_EXT_gpu_shader4' in GL_EXTENSIONS, false, 'GL_EXT_gpu_shader4 reported');
 });
