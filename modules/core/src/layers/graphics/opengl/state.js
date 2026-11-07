@@ -917,6 +917,7 @@ export const DEFAULT_STATE = Object.freeze([
     // OpenGL 4.1's viewport arrays: sixteen, at whole pixels, the bounds the
     // specification's least.
     { query: GL.MAX_VIEWPORTS, name: 'GL_MAX_VIEWPORTS', kind: 'int', value: [16] },
+    { query: GL.MAX_VERTEX_STREAMS, name: 'GL_MAX_VERTEX_STREAMS', kind: 'int', value: [4] },
     {
         query: GL.VIEWPORT_SUBPIXEL_BITS, name: 'GL_VIEWPORT_SUBPIXEL_BITS', kind: 'int',
         value: [0],
@@ -1004,6 +1005,10 @@ export const DEFAULT_STATE = Object.freeze([
     },
     {
         query: GL.PARAMETER_BUFFER_BINDING, name: 'GL_PARAMETER_BUFFER_BINDING', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.QUERY_BUFFER_BINDING, name: 'GL_QUERY_BUFFER_BINDING', kind: 'int',
         value: [0],
     },
     { query: GL.COPY_READ_BUFFER, name: 'GL_COPY_READ_BUFFER_BINDING', kind: 'int', value: [0] },

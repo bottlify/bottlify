@@ -159,3 +159,61 @@ test('conditional rendering\'s errors', ()=>{
     gl.glEndConditionalRender();
     assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'none to end');
 });
+
+test('a stream past the first counts nothing, and only the primitive counts have streams (4.0)',
+    ()=>{
+        const gl = /** @type {any} */ (createGlContext({}));
+        gl.attach({ width: 4, height: 4, doubleBuffered: true });
+        const [a, b] = gl.glGenQueries(2);
+        gl.glBeginQueryIndexed(QUERY.PRIMITIVES_GENERATED, 2, a);
+        assert.equal(gl.glGetError(), GL.NO_ERROR);
+        assert.deepEqual(gl.glGetQueryIndexediv(QUERY.PRIMITIVES_GENERATED, 2,
+            QUERY.CURRENT_QUERY), [a]);
+        assert.deepEqual(gl.glGetQueryiv(QUERY.PRIMITIVES_GENERATED, QUERY.CURRENT_QUERY), [0],
+            'the first stream\'s is another');
+        gl.glBeginQueryIndexed(QUERY.PRIMITIVES_GENERATED, 2, b);
+        assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'that stream is counting');
+        gl.glEndQueryIndexed(QUERY.PRIMITIVES_GENERATED, 2);
+        assert.deepEqual(gl.glGetQueryObject(a, QUERY.QUERY_RESULT), [0]);
+        gl.glBeginQueryIndexed(QUERY.PRIMITIVES_GENERATED, 4, a);
+        assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'past GL_MAX_VERTEX_STREAMS');
+        gl.glBeginQueryIndexed(QUERY.SAMPLES_PASSED, 1, a);
+        assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'occlusion has one stream');
+        gl.glBeginQueryIndexed(QUERY.TIME_ELAPSED, 0, b);
+        assert.deepEqual(gl.glGetQueryiv(QUERY.TIME_ELAPSED, QUERY.CURRENT_QUERY), [b],
+            'stream zero is the unindexed query');
+        gl.glEndQueryIndexed(QUERY.TIME_ELAPSED, 0);
+        assert.deepEqual(gl.glGetIntegerv(GL.MAX_VERTEX_STREAMS), [4]);
+    });
+
+test('a created query is an object with its result available, and a result goes into a query'
+    + ' buffer', ()=>{
+    const gl = /** @type {any} */ (createGlContext({}));
+    gl.attach({ width: 4, height: 4, doubleBuffered: true });
+    const [made] = gl.glCreateQueries(QUERY.TIME_ELAPSED, 1);
+    assert.equal(gl.glIsQuery(made), GL.TRUE);
+    assert.deepEqual(gl.glGetQueryObject(made, QUERY.QUERY_RESULT_AVAILABLE), [GL.TRUE]);
+    gl.glBeginQuery(QUERY.SAMPLES_PASSED, made);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'made for its own target');
+    gl.glCreateQueries(0x1234, 1);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+
+    const [buffer] = gl.glGenBuffersARB(1);
+    gl.glBindBufferARB(GL.QUERY_BUFFER, buffer);
+    gl.glBufferDataARB(GL.QUERY_BUFFER, 16, new Uint8Array(16).fill(0xee), GL.DYNAMIC_READ);
+    gl.glBeginQuery(QUERY.SAMPLES_PASSED, 7);
+    gl.glEndQuery(QUERY.SAMPLES_PASSED);
+    gl.queryIntoBuffer(7, QUERY.QUERY_RESULT, 4, false, false, null);
+    gl.queryIntoBuffer(7, QUERY.QUERY_RESULT_AVAILABLE, 0, false, false, null);
+    gl.queryIntoBuffer(7, QUERY.QUERY_RESULT, 8, true, false, null);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    const bytes = gl.glGetBufferSubDataARB(GL.QUERY_BUFFER, 0, 16);
+    const view = new DataView(bytes.buffer, bytes.byteOffset);
+    assert.deepEqual([view.getUint32(0, true), view.getUint32(4, true),
+        Number(view.getBigUint64(8, true))], [1, 16, 16], 'the viewport\'s area, without a device');
+    gl.queryIntoBuffer(7, QUERY.QUERY_RESULT, 12, true, false, null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'past the store');
+    gl.glBindBufferARB(GL.QUERY_BUFFER, 0);
+    gl.queryIntoBuffer(7, QUERY.QUERY_RESULT, 0, false, false, buffer);
+    assert.equal(gl.glGetError(), GL.NO_ERROR, 'a buffer named (4.5)');
+});

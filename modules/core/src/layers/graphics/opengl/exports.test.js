@@ -1490,3 +1490,23 @@ test('glProgramUniform reaches a program that is not current', ()=>{
     assert.deepEqual([0, 4, 8, 12].map(at=>view.getFloat32(0x4000 + at, true)), [1, 2, 3, 4]);
     assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
 });
+
+test('with a query buffer bound, glGetQueryObject writes its answer there', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    table.glGenQueries.handler([1, 0x3000]);
+    const query = new DataView(box.bytes.buffer).getUint32(0x3000, true);
+    table.glBeginQuery.handler([0x88bf, query]);
+    table.glEndQuery.handler([0x88bf]);
+    table.glGenBuffers.handler([1, 0x3004]);
+    const buffer = new DataView(box.bytes.buffer).getUint32(0x3004, true);
+    table.glBindBuffer.handler([GL.QUERY_BUFFER, buffer]);
+    table.glBufferData.handler([GL.QUERY_BUFFER, 8, 0, GL.DYNAMIC_READ]);
+    box.bytes.fill(0xee, 0x4, 0x8);
+    table.glGetQueryObjectuiv.handler([query, 0x8867 /* AVAILABLE */, 4]);
+    assert.deepEqual([...box.bytes.subarray(4, 8)], [0xee, 0xee, 0xee, 0xee],
+        'the pointer is an offset, guest memory untouched');
+    table.glGetBufferSubData.handler([GL.QUERY_BUFFER, 4, 4, 0x3100]);
+    assert.equal(new DataView(box.bytes.buffer).getUint32(0x3100, true), 1);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});

@@ -770,6 +770,19 @@ export function laterEntryPoints(h){
         glEndQuery: ([target])=>answer(current()?.glEndQuery(target >>> 0)),
         glGetQueryiv: ([target, pname, out])=>call(context=>writeQuery(out,
             context.glGetQueryiv(target >>> 0, pname >>> 0), 'word')),
+        glBeginQueryIndexed: ([target, index, name])=>answer(current()?.glBeginQueryIndexed(
+            target >>> 0, index >>> 0, name >>> 0)),
+        glEndQueryIndexed: ([target, index])=>answer(current()?.glEndQueryIndexed(target >>> 0,
+            index >>> 0)),
+        glGetQueryIndexediv: ([target, index, pname, out])=>call(context=>writeQuery(out,
+            context.glGetQueryIndexediv(target >>> 0, index >>> 0, pname >>> 0), 'word')),
+        glCreateQueries: ([target, count, out])=>call(context=>{
+            const names = context.glCreateQueries(target >>> 0, count | 0);
+            if (names.length > 0)
+            {
+                writeU32s(out, names);
+            }
+        }),
         glQueryCounter: ([name, target])=>answer(current()?.glQueryCounter(name >>> 0,
             target >>> 0)),
         glBeginConditionalRender: ([name, mode])=>answer(current()

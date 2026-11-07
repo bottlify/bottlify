@@ -58,8 +58,16 @@ export const QUERY = Object.freeze({
 export const QUERY_CALLS_NOT_COMPILED = Object.freeze([
     'glGenQueries', 'glDeleteQueries', 'glIsQuery', 'glGetQueryiv', 'glGetQueryObject',
     'glBeginQuery', 'glEndQuery', 'glQueryCounter', 'glBeginConditionalRender',
-    'glEndConditionalRender',
+    'glEndConditionalRender', 'glBeginQueryIndexed', 'glEndQueryIndexed', 'glGetQueryIndexediv',
+    'glCreateQueries', 'queryIntoBuffer',
 ]);
+
+/** GL_MAX_VERTEX_STREAMS (4.0): the streams a primitive query may count. */
+export const MAX_VERTEX_STREAMS = 4;
+
+/** GL_QUERY_BUFFER and its binding (4.4). */
+export const QUERY_BUFFER = 0x9192;
+export const QUERY_BUFFER_BINDING = 0x9193;
 
 /** The targets glBeginQuery takes, and how wide each one's counter is. */
 /** @type {Map<number, number>} */
@@ -151,7 +159,232 @@ export function installQueryCalls(context, kernel){
         condition: ()=>condition,
     });
 
+    /**
+     * Queries of a stream past the first (4.0): no shader here emits to one
+     * (a geometry shader's other streams are refused when it is compiled), so
+     * each counts nothing, exactly.
+     *
+     * @type {Map<string, QueryObject>}
+     */
+    const streams = new Map();
+
+    /**
+     * Whether a query names its stream as its target allows: any of
+     * GL_MAX_VERTEX_STREAMS for the primitive counts, the first for the rest.
+     *
+     * @param {number} target @param {number} index @returns {boolean}
+     */
+    const indexAllowed = (target, index)=>{
+        if (!COUNTER_BITS.has(target))
+        {
+            setError(GL.INVALID_ENUM);
+            return false;
+        }
+        if (index < 0 || index >= (PRIMITIVE_COUNTS.has(target) ? MAX_VERTEX_STREAMS : 1))
+        {
+            setError(GL.INVALID_VALUE);
+            return false;
+        }
+        return true;
+    };
+
+    /**
+     * A query's answer as the bytes a query buffer takes: a 32-bit form
+     * clamped to its range, a 64-bit one whole.
+     *
+     * @param {number} value @param {boolean} wide @param {boolean} signed
+     * @returns {Uint8Array}
+     */
+    const resultBytes = (value, wide, signed)=>{
+        const bytes = new Uint8Array(wide ? 8 : 4);
+        const view = new DataView(bytes.buffer);
+        if (wide)
+        {
+            view.setBigUint64(0, BigInt.asUintN(64, BigInt(Math.trunc(value))), true);
+        }
+        else
+        {
+            view.setUint32(0, Math.min(value, signed ? 0x7fffffff : 0xffffffff) >>> 0, true);
+        }
+        return bytes;
+    };
+
     Object.assign(context, {
+        /**
+         * glBeginQueryIndexed (4.0): stream zero is glBeginQuery's.
+         *
+         * @param {number} target @param {number} index @param {number} name
+         */
+        glBeginQueryIndexed(target, index, name){
+            if (!enter('glBeginQueryIndexed', [target, index, name])
+                || !indexAllowed(target, index))
+            {
+                return;
+            }
+            if (index === 0)
+            {
+                context.glBeginQuery(target, name);
+                return;
+            }
+            const key = `${target}/${index}`;
+            const held = queries.get(name);
+            const busy = [...active.values(), ...streams.values()].some(q=>q.name === name);
+            if (name === 0 || streams.has(key) || busy || (held && held.target !== target))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const query = begin(name, target);
+            queries.set(name, query);
+            streams.set(key, query);
+        },
+
+        /** @param {number} target @param {number} index */
+        glEndQueryIndexed(target, index){
+            if (!enter('glEndQueryIndexed', [target, index]) || !indexAllowed(target, index))
+            {
+                return;
+            }
+            if (index === 0)
+            {
+                context.glEndQuery(target);
+                return;
+            }
+            const key = `${target}/${index}`;
+            const query = streams.get(key);
+            if (!query)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            streams.delete(key);
+            query.finish();
+        },
+
+        /**
+         * @param {number} target @param {number} index @param {number} pname
+         * @returns {number[] | null}
+         */
+        glGetQueryIndexediv(target, index, pname){
+            if (!enter('glGetQueryIndexediv', [target, index, pname])
+                || !indexAllowed(target, index))
+            {
+                return null;
+            }
+            if (index === 0 || pname !== QUERY.CURRENT_QUERY)
+            {
+                return context.glGetQueryiv(target, pname);
+            }
+            return [streams.get(`${target}/${index}`)?.name ?? 0];
+        },
+
+        /**
+         * glCreateQueries (4.5): names that are objects of `target` at once,
+         * each with its result zero and available.
+         *
+         * @param {number} target @param {number} count @returns {number[]}
+         */
+        glCreateQueries(target, count){
+            if (!enter('glCreateQueries', [target, count]))
+            {
+                return [];
+            }
+            if (!COUNTER_BITS.has(target) && target !== QUERY.TIMESTAMP)
+            {
+                setError(GL.INVALID_ENUM);
+                return [];
+            }
+            if (count < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return [];
+            }
+            /** @type {number[]} */
+            const names = [];
+            for (let name = 1; names.length < count; name++)
+            {
+                if (!queries.has(name))
+                {
+                    const query = begin(name, target);
+                    query.finish();
+                    query.result = 0;
+                    queries.set(name, query);
+                    names.push(name);
+                }
+            }
+            return names;
+        },
+
+        /**
+         * A query's answer written into a buffer (4.4's query buffer, 4.5's
+         * glGetQueryBufferObject): at once when it is known or only its
+         * availability is asked, when it is counted otherwise; a result
+         * asked without waiting and not yet known leaves the bytes alone.
+         *
+         * @param {number} name @param {number} pname @param {number} offset
+         * @param {boolean} wide @param {boolean} signed
+         * @param {number | null} bufferName  null: the bound GL_QUERY_BUFFER
+         */
+        queryIntoBuffer(name, pname, offset, wide, signed, bufferName){
+            if (!enter('queryIntoBuffer', [name, pname, offset, wide, signed, bufferName]))
+            {
+                return;
+            }
+            const query = queries.get(name);
+            if (!query || [...active.values(), ...streams.values()].includes(query))
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const which = bufferName ?? record(QUERY_BUFFER_BINDING).values[0];
+            const buffer = which === 0 ? undefined
+                : kernel.shareGroup().buffers.objects.get(which);
+            if (!buffer)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            const size = wide ? 8 : 4;
+            if (offset < 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (offset + size > buffer.size)
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (pname !== QUERY.QUERY_RESULT && pname !== QUERY.QUERY_RESULT_AVAILABLE
+                && pname !== QUERY.QUERY_RESULT_NO_WAIT)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            /** @param {number} value */
+            const put = value=>{
+                buffer.data.set(resultBytes(value, wide, signed), offset);
+                buffer.written = buffer.written
+                    ? { start: Math.min(buffer.written.start, offset),
+                        end: Math.max(buffer.written.end, offset + size) }
+                    : { start: offset, end: offset + size };
+                buffer.version++;
+            };
+            if (pname === QUERY.QUERY_RESULT_AVAILABLE)
+            {
+                put(query.available ? 1 : 0);
+            }
+            else if (query.available)
+            {
+                put(query.result);
+            }
+            else if (pname === QUERY.QUERY_RESULT)
+            {
+                kernel.queries?.flush();
+                query.done.then(()=>put(query.result));
+            }
+        },
+
         /** @param {number} count @returns {number[]} */
         glGenQueries(count){
             if (!enter('glGenQueries', [count]))
@@ -190,6 +423,14 @@ export function installQueryCalls(context, kernel){
                     {
                         // Deleting an active query ends it, as glEndQuery would.
                         context.glEndQuery(target);
+                    }
+                }
+                for (const [key, query] of streams)
+                {
+                    if (query.name === name)
+                    {
+                        streams.delete(key);
+                        query.finish();
                     }
                 }
                 queries.delete(name);

@@ -2313,9 +2313,20 @@ export function createOpengl(services){
                     }
                     return 0;
                 };
+                // With a query buffer bound (4.4) the pointer is an offset
+                // into it, and the answer is written there without a wait.
+                if (context.glGetIntegerv(GL.QUERY_BUFFER_BINDING)?.[0])
+                {
+                    context.queryIntoBuffer(name >>> 0, pname >>> 0, out >>> 0, wide,
+                        !suffix.startsWith('u'), null);
+                    return 0;
+                }
                 const answered = context.glGetQueryObject(name >>> 0, pname >>> 0);
                 return answered instanceof Promise ? answered.then(write) : write(answered);
             };
+            forms[`glGetQueryBufferObject${suffix}`] = ([name, buffer, pname, offset])=>answer(
+                current()?.queryIntoBuffer(name >>> 0, pname >>> 0, offset | 0, wide,
+                    !suffix.startsWith('u'), buffer >>> 0));
         }
         return forms;
     }
