@@ -173,22 +173,22 @@ const isQualified = path=>/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
  * The redistributables whose job the engine already does.
  *
  * On a real machine these put side-by-side runtimes into `system32` and the
- * registry: the Visual C++ redistributable, the .NET runtime, OpenAL's
- * installer. The engine answers for those itself -- the C runtime under
- * `msvcrt` -- so there is nothing for the child to install. The request is
+ * registry: the .NET runtime, OpenAL's installer. The engine answers for
+ * those itself, so there is nothing for the child to install. The request is
  * answered as a process that has run and exited 0, which is the same decision
  * already made for a shortcut.
  *
- * The DirectX End-User Runtime's `DXSETUP` is not one of them. What it
- * installs beyond the interfaces the drawing layer answers for -- the `d3dx`
- * helpers, the shader compilers -- is Microsoft's code the engine does not
- * carry, so the setup a title brings runs like any other child and puts them in
- * `system32`, where the loader finds them.
+ * The Visual C++ redistributable and the DirectX End-User Runtime's `DXSETUP`
+ * are not among them. The engine carries only the older C runtimes (`msvcrt`,
+ * `MSVCR71`, `MSVCR80`, `ucrtbase`); `MSVCR100`, `MSVCP100` and the rest, the
+ * `d3dx` helpers and the shader compilers are Microsoft's code it does not
+ * carry, so the setup a title brings runs like any other child and puts them
+ * in `system32`, where the loader finds them.
  *
  * The name is what the child is, and never the title that started it, so an
  * installer is treated the same whatever bundle it came in.
  */
-const REDISTRIBUTABLE = /(^|[\\/])(vcredist[^\\/]*|vc_redist[^\\/]*|dotnetfx[^\\/]*|ndp[^\\/]*|netfx[^\\/]*|oalinst)\.exe$/i;
+const REDISTRIBUTABLE = /(^|[\\/])(dotnetfx[^\\/]*|ndp[^\\/]*|netfx[^\\/]*|oalinst)\.exe$/i;
 
 /**
  * @param {string} path
