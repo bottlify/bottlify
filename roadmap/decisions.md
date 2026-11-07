@@ -1067,6 +1067,34 @@ GL_TIMESTAMP the clock at glQueryCounter; the device's own timestamps (`timestam
 read. A program timing its passes sees how long it took to issue them, not to draw them.
 *2026-11-07.*
 
+**A120. Temporary: wglSetPbufferAttribARB takes only the values a pbuffer already has.** A
+render-texture pbuffer's mipmap level or cube face is fixed when it is made; asked to change,
+the call fails. Rendering into another level or face of a bound pbuffer texture is the case it
+leaves out. *2026-11-07.*
+
+**A121. Temporary: a pbuffer's DC is a memory DC that draws nowhere.** GDI drawing into it is
+accepted and not shown through GL, which reads only what a context drew there. Releasing the DC
+keeps it alive until the pbuffer is destroyed, as the pbuffer's own DC is not the caller's to
+end. *2026-11-07.*
+
+**A122. A pbuffer is at most 8192 by 8192,** WebGPU's least 2D texture size, and every pixel
+format but the generic renderer's draws to one. *2026-11-07.*
+
+**A123. A context's commands are replayed on the device when it stops being current or is
+deleted;** glFlush and glFinish leave them recorded until a swap or a read needs them. Another
+context reading the drawable then sees what was drawn, as the specification promises after a
+flush, without a replay at every glFlush a program issues each frame. *2026-11-07.*
+
+**A124. The swap interval belongs to the window,** as Windows drivers keep it, not to the context
+that set it; a window starts at 1. *2026-11-07.*
+
+**A125. Every double-buffered pixel format exchanges its buffers on a swap**
+(PFD_SWAP_EXCHANGE): after a swap the back buffer holds what the front held. *2026-11-07.*
+
+**A126. A mapped buffer's pointer is on a 64-byte boundary,** offset by the mapped range's own
+offset within one (`address % 64 == offset % 64`), as drivers give, which programs writing it
+with aligned SIMD stores rely on. *2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
