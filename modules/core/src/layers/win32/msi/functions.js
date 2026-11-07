@@ -202,8 +202,9 @@ const IDOK = 1;
  * @property {() => import('./session.js').Machine} machine
  * @property {(text: string, caption: string, flags: number) => number | Promise<number>}
  *     [messageBox]
- * @property {(commandLine: string, directory: string | null, wait: boolean)
- *     => Promise<number | null>} [runExe]
+ * @property {(commandLine: string, directory: string | null, wait: boolean,
+ *     thread: unknown) => Promise<number | null>} [runExe]
+ *     A program a custom action runs, started and waited for as the thread's call.
  * @property {(path: string) => Uint8Array | null | Promise<Uint8Array | null>} [versionInfo]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
@@ -537,7 +538,7 @@ export function createMsiFunctions(host){
                     callDll: (path, entry, args)=>callDll(path, entry, args, made.thread),
                     startDll: (path, entry, args)=>startDll(path, entry, args, made.thread),
                     runExe: async(commandLine, directory, wait)=>
-                        host.runExe?.(commandLine, directory, wait) ?? null,
+                        host.runExe?.(commandLine, directory, wait, made.thread) ?? null,
                     registerTypeLib: (path, helpDir)=>registerTypeLib(path, helpDir, made.thread),
                     unregisterTypeLib: (libId, major, minor, language)=>
                         unregisterTypeLib(libId, major, minor, language, made.thread),

@@ -187,3 +187,32 @@ test('a library action that is not run in parallel is called and waited for, as 
     assert.equal(engine.async.length, 0);
     assert.equal(await finishAsync(engine), 0, 'nothing is left to wait for');
 });
+
+test('a program action is run on its command line, and a failure is in the log', async()=>{
+    // Type 34: a program, its command line the target, run in a directory.
+    const row = { action: 'InitService', type: 34, source: 'INSTALLDIR',
+        target: 'C:\\Program Files\\Vendor\\Service.exe /Service' };
+    for (const [code, answer, said] of /** @type {const} */ ([
+        [0, 0, 'ran C:\\Program Files\\Vendor\\Service.exe /Service: exit 0.'],
+        [2, 1603, 'ran C:\\Program Files\\Vendor\\Service.exe /Service: exit 2.'],
+        [null, 1603, 'could not start C:\\Program Files\\Vendor\\Service.exe /Service.'],
+    ]))
+    {
+        const { engine, events } = engineWith();
+        engine.session.folders = new Map();
+        /** @type {string[]} */
+        const ran = [];
+        engine.host.runExe = async(/** @type {string} */ line)=>{
+            ran.push(line);
+            return code;
+        };
+        assert.equal(await runCustomAction(engine, row), answer);
+        assert.deepEqual(ran, [row.target]);
+        assert.ok(events.includes(`log Custom action InitService ${said}`), events.join('\n'));
+    }
+    const { engine } = engineWith();
+    engine.session.folders = new Map();
+    engine.host.runExe = async()=>null;
+    assert.equal(await runCustomAction(engine, { ...row, type: 34 | CONTINUE }), 0,
+        'unless its answer is ignored');
+});

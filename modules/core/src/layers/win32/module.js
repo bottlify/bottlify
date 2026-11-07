@@ -3652,6 +3652,59 @@ export function createWin32Module(){
                     }),
                     /** @param {string} path */
                     versionInfo: path=>modules.versionInfo?.(path) ?? null,
+                    // A program a custom action runs: CreateProcessW on its
+                    // command line, as Windows Installer starts it, waited for
+                    // and its exit code read when the action waits.
+                    runExe: async(commandLine, directory, wait, thread)=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        /** @param {string} name @param {number[]} args */
+                        const call = async(name, args)=>(await bridge.answering(thread,
+                            ()=>kernel32[name].handler(args))) >>> 0;
+                        /** @param {string} text */
+                        const wide = text=>{
+                            const bytes = new Uint8Array(
+                                Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer);
+                            const at = heap.allocate(bytes.length);
+                            writeMemory(at, bytes);
+                            return at;
+                        };
+                        const line = wide(commandLine);
+                        const folder = directory ? wide(directory) : 0;
+                        const STARTUPINFO = 68;
+                        const startup = heap.allocate(STARTUPINFO + 16 + 4);
+                        writeMemory(startup, new Uint8Array(STARTUPINFO + 16 + 4));
+                        writeMemory(startup, Uint8Array.of(STARTUPINFO, 0, 0, 0));
+                        const information = startup + STARTUPINFO;
+                        const codeSlot = information + 16;
+                        try
+                        {
+                            if (!await call('CreateProcessW', [0, line, 0, 0, 0, 0, 0, folder,
+                                startup, information]))
+                            {
+                                return null;
+                            }
+                            const process = memory.readU32(information);
+                            let code = 0;
+                            if (wait)
+                            {
+                                await call('WaitForSingleObject', [process, 0xffffffff]);
+                                await call('GetExitCodeProcess', [process, codeSlot]);
+                                code = memory.readU32(codeSlot);
+                            }
+                            await call('CloseHandle', [process]);
+                            await call('CloseHandle', [memory.readU32(information + 4)]);
+                            return code;
+                        }
+                        finally
+                        {
+                            heap.free(startup);
+                            heap.free(line);
+                            if (folder)
+                            {
+                                heap.free(folder);
+                            }
+                        }
+                    },
                     divergence: config?.divergence,
                     // The installer's own log, where a failed installation says why.
                     /** @param {string} text */
