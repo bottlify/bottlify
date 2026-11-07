@@ -107,7 +107,7 @@ const COMPARE_FUNCTIONS = /** @type {Record<number, string>} */ ({
 const BOUND_TARGETS = Object.freeze({
     '1D': 'oneD', '2D': 'twoD', Cube: 'cube', '3D': 'threeD', '1DArray': 'oneDArray',
     '2DArray': 'twoDArray', CubeArray: 'cubeArray', '2DRect': 'rectangle',
-    '2DMS': 'twoDMultisample', '2DMSArray': 'twoDMultisampleArray',
+    '2DMS': 'twoDMultisample', '2DMSArray': 'twoDMultisampleArray', Buffer: 'buffer',
 });
 
 /**

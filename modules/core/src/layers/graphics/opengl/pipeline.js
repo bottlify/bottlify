@@ -186,7 +186,8 @@ import { swizzleTexel } from './objects.js';
  * @property {readonly { twoD: import('./objects.js').TextureObject | null,
  *             cube: import('./objects.js').TextureObject | null,
  *             oneD?: import('./objects.js').TextureObject | null,
- *             rectangle?: import('./objects.js').TextureObject | null }[]} boundTextures
+ *             rectangle?: import('./objects.js').TextureObject | null,
+ *             buffer?: import('./objects.js').TextureObject | null }[]} boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
  * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,

@@ -22,14 +22,16 @@
  */
 
 import { GL } from './constants.js';
-import { createTextureObject, isTextureComplete, levelKey, markDirty } from './objects.js';
+import {
+    BUFFER_ROW, createTextureObject, isTextureComplete, levelKey, markDirty,
+} from './objects.js';
 import { createMatrixStacks } from './matrix.js';
 import { CONVENTIONAL_UNITS, TEXTURE_UNITS } from './state.js';
 import {
     baseFormatOf, compressedBytes, conformTexels, createTextureEnvironment, decodeS3tc,
     imageBytes, unpackImage,
 } from './texture.js';
-import { SIZED_FORMATS, TEX, sizedFormatOf } from './formats.js';
+import { SIZED_FORMATS, TEX, modelTexelBytes, sizedFormatOf } from './formats.js';
 import {
     clientBytes, decodeClient, decodeStorage, encodeStorage, packFromStorage, transferError,
     unpackToStorage,
@@ -65,7 +67,7 @@ const immutableLevels = new WeakMap();
 export const TEXTURE_CALLS_NOT_COMPILED = Object.freeze([
     'glTexStorage1D', 'glTexStorage2D', 'glTexStorage3D', 'glCopyImageSubData',
     'glClearTexImage', 'glClearTexSubImage', 'glGetTextureSubImage',
-    'glGetCompressedTextureSubImage',
+    'glGetCompressedTextureSubImage', 'glTexBuffer', 'glTexBufferRange',
 ]);
 
 
@@ -128,7 +130,32 @@ const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
  * Every target a unit binds a texture to: the enabled ones, and those only a
  * program samples -- 3D textures and the arrays of OpenGL 3.0.
  */
-const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY];
+const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY,
+    GL.TEXTURE_BUFFER];
+
+/**
+ * The formats a buffer texture's texels are in (3.1 table 3.15, 4.3 table
+ * 8.16): each its components' own bytes, one after another.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const BUFFER_FORMATS = new Set([
+    TEX.R8, TEX.R16, TEX.R16F, TEX.R32F, TEX.R8I, TEX.R16I, TEX.R32I, TEX.R8UI, TEX.R16UI,
+    TEX.R32UI, TEX.RG8, TEX.RG16, TEX.RG16F, TEX.RG32F, TEX.RG8I, TEX.RG16I, TEX.RG32I,
+    TEX.RG8UI, TEX.RG16UI, TEX.RG32UI, TEX.RGB32F, TEX.RGB32I, TEX.RGB32UI, GL.RGBA8,
+    GL.RGBA16, TEX.RGBA16F, TEX.RGBA32F, TEX.RGBA8I, TEX.RGBA16I, TEX.RGBA32I, TEX.RGBA8UI,
+    TEX.RGBA16UI, TEX.RGBA32UI,
+]);
+
+/**
+ * A buffer texture's texel in its buffer: its components' bytes, three where
+ * the format has three.
+ *
+ * @param {import('./formats.js').SizedFormat} sized
+ */
+const bufferTexelBytes = sized=>(sized.base === GL.RED ? 1 : sized.base === TEX.RG ? 2
+    : sized.base === GL.RGB ? 3 : 4) * sized.bits[0] / 8;
+
 
 const BINDING_QUERY = Object.freeze({
     [GL.TEXTURE_1D]: GL.TEXTURE_BINDING_1D,
@@ -138,6 +165,7 @@ const BINDING_QUERY = Object.freeze({
     [GL.TEXTURE_3D]: TEX.TEXTURE_BINDING_3D,
     [TEX.TEXTURE_1D_ARRAY]: TEX.TEXTURE_BINDING_1D_ARRAY,
     [TEX.TEXTURE_2D_ARRAY]: TEX.TEXTURE_BINDING_2D_ARRAY,
+    [GL.TEXTURE_BUFFER]: GL.TEXTURE_BINDING_BUFFER,
 });
 
 /**
@@ -678,6 +706,149 @@ export function installTextureCalls(context, kernel){
      */
     function imageTarget(target){
         return imageOf(target);
+    }
+
+    /**
+     * A buffer texture's level query (3.1, 4.3 table 23.15): what it is
+     * attached to, and its level zero as the texels of that range.
+     *
+     * @param {number} level @param {number} parameter
+     * @returns {number[] | null}
+     */
+    function bufferLevelParameter(level, parameter){
+        const texture = textureBound(active, GL.TEXTURE_BUFFER);
+        if (level !== 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return null;
+        }
+        const store = texture?.store ?? null;
+        const buffer = store ? kernel.shareGroup().buffers.objects.get(store.buffer) : null;
+        const size = store && buffer ? store.size ?? Math.max(0, buffer.size - store.offset) : 0;
+        const sized = store ? SIZED_FORMATS.get(store.internal) : undefined;
+        switch (parameter)
+        {
+            case GL.TEXTURE_BUFFER_DATA_STORE_BINDING:
+                return [store?.buffer ?? 0];
+            case GL.TEXTURE_BUFFER_OFFSET:
+                return [store?.offset ?? 0];
+            case GL.TEXTURE_BUFFER_SIZE:
+                return [size];
+            case GL.TEXTURE_INTERNAL_FORMAT:
+                return [store?.internal ?? GL.RGBA8];
+            case GL.TEXTURE_WIDTH:
+                return [sized ? Math.floor(size / bufferTexelBytes(sized)) : 0];
+            case GL.TEXTURE_HEIGHT:
+            case TEX.TEXTURE_DEPTH:
+                return [store ? 1 : 0];
+            default: {
+                const answer = sized ? sizedLevelAnswer(sized, parameter) : undefined;
+                if (answer !== undefined)
+                {
+                    return [answer];
+                }
+                setError(GL.INVALID_ENUM);
+                return null;
+            }
+        }
+    }
+
+    /**
+     * glTexBuffer and glTexBufferRange (3.1, 4.3): the buffer object whose
+     * bytes the bound buffer texture's texels are, in `internal`, over a
+     * range or to the end; zero detaches it.
+     *
+     * @param {string} name @param {number} target @param {number} internal
+     * @param {number} buffer @param {number | null} offset  null: the whole store
+     * @param {number} size
+     */
+    function texBuffer(name, target, internal, buffer, offset, size){
+        if (!enter(name, [target, internal, buffer, offset, size]))
+        {
+            return;
+        }
+        if (target !== GL.TEXTURE_BUFFER || !BUFFER_FORMATS.has(internal))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const object = buffer === 0 ? null : kernel.shareGroup().buffers.objects.get(buffer);
+        if (buffer !== 0 && !object)
+        {
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        const alignment = record(GL.TEXTURE_BUFFER_OFFSET_ALIGNMENT).values[0];
+        if (offset !== null && object && (offset < 0 || size <= 0
+            || offset + size > object.size || offset % alignment !== 0))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        const texture = /** @type {import('./objects.js').TextureObject} */ (
+            textureBound(active, GL.TEXTURE_BUFFER));
+        texture.levels.clear();
+        texture.store = object ? { buffer, internal, offset: offset ?? 0,
+            size: offset === null ? null : size, version: -1 } : undefined;
+        texture.parametersVersion++;
+    }
+
+    /**
+     * A buffer texture's level zero, made again from its buffer's bytes when
+     * they changed: `BUFFER_ROW` texels a row, in the format's model layout
+     * (a three-component texel widened to four, its fourth one).
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     */
+    function refreshBufferLevel(texture){
+        const store = texture.store;
+        const buffer = store ? kernel.shareGroup().buffers.objects.get(store.buffer) : null;
+        if (!store || !buffer)
+        {
+            texture.levels.clear();
+            return;
+        }
+        if (store.version === buffer.version && texture.levels.has(levelKey(0)))
+        {
+            return;
+        }
+        store.version = buffer.version;
+        const sized = /** @type {import('./formats.js').SizedFormat} */ (
+            SIZED_FORMATS.get(store.internal));
+        const size = Math.max(0, Math.min(store.size ?? Infinity, buffer.size - store.offset));
+        const texel = bufferTexelBytes(sized);
+        const count = Math.min(Math.floor(size / texel),
+            record(GL.MAX_TEXTURE_BUFFER_SIZE).values[0]);
+        if (count === 0)
+        {
+            texture.levels.clear();
+            return;
+        }
+        const width = Math.min(count, BUFFER_ROW);
+        const height = Math.ceil(count / BUFFER_ROW);
+        const model = modelTexelBytes(sized);
+        const data = new Uint8Array(width * height * model);
+        const bytes = buffer.data.subarray(store.offset, store.offset + count * texel);
+        if (model === texel)
+        {
+            data.set(bytes);
+        }
+        else
+        {
+            // RGB32F, RGB32I and RGB32UI: a fourth component of one.
+            const one = new Uint8Array(new (sized.kind === 'float' ? Float32Array : Uint32Array)(
+                [1]).buffer);
+            for (let k = 0; k < count; k++)
+            {
+                data.set(bytes.subarray(k * texel, k * texel + texel), k * model);
+                data.set(one, k * model + texel);
+            }
+        }
+        texture.levels.set(levelKey(0), {
+            width, height, internalFormat: store.internal, border: 0,
+            baseFormat: environmentBase(sized), texels: null, sized, data,
+        });
+        texture.dirty.set(levelKey(0), null);
     }
 
     /**
@@ -1520,6 +1691,12 @@ export function installTextureCalls(context, kernel){
         const texture = BIND_TARGETS.some(t=>t === target) ? textureBound(active, target) : null;
         if (!texture)
         {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (texture.target === GL.TEXTURE_BUFFER)
+        {
+            // A buffer texture has no sampling state (3.1 section 3.8.5).
             setError(GL.INVALID_ENUM);
             return;
         }
@@ -2745,6 +2922,10 @@ export function installTextureCalls(context, kernel){
         {
             return null;
         }
+        if (target === GL.TEXTURE_BUFFER)
+        {
+            return bufferLevelParameter(level, parameter);
+        }
         const image = imageTarget(target);
         if (!image || level < 0)
         {
@@ -3068,7 +3249,40 @@ export function installTextureCalls(context, kernel){
         immutableLevels: texture=>immutableLevels.get(texture) ?? 0,
     });
 
+    Object.assign(kernel.side, {
+        /**
+         * The buffer texture a unit has bound, its level made from the
+         * buffer's bytes as they are now (3.1); null for none.
+         *
+         * @param {number} unitIndex
+         * @returns {import('./objects.js').TextureObject | null}
+         */
+        bufferTextureAt(unitIndex){
+            const texture = kernel.side.textureBoundAt(unitIndex, GL.TEXTURE_BUFFER);
+            if (texture)
+            {
+                refreshBufferLevel(texture);
+            }
+            return texture;
+        },
+    });
+
     Object.assign(context, {
+        /**
+         * @param {number} target @param {number} internal @param {number} buffer
+         */
+        glTexBuffer(target, internal, buffer){
+            texBuffer('glTexBuffer', target, internal, buffer, null, 0);
+        },
+
+        /**
+         * @param {number} target @param {number} internal @param {number} buffer
+         * @param {number} offset @param {number} size
+         */
+        glTexBufferRange(target, internal, buffer, offset, size){
+            texBuffer('glTexBufferRange', target, internal, buffer, offset, size);
+        },
+
         // --- GL_ARB_texture_storage (4.2) ---
 
         /**

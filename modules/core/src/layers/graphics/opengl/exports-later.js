@@ -1002,6 +1002,15 @@ function storageAndNamedEntryPoints(h){
 
         glTexStorage1D: a=>answer(current()?.glTexStorage1D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
             a[3] | 0)),
+        // --- the texture kinds of 3.1 to 3.3: buffer and multisample textures ---
+
+        ...Object.fromEntries(['glTexBuffer', 'glTexBufferARB', 'glTexBufferEXT'].map(name=>[
+            name, (/** @type {number[]} */ [target, internal, buffer])=>answer(
+                current()?.glTexBuffer(target >>> 0, internal >>> 0, buffer >>> 0))])),
+        glTexBufferRange: ([target, internal, buffer, offset, size])=>answer(
+            current()?.glTexBufferRange(target >>> 0, internal >>> 0, buffer >>> 0, offset | 0,
+                size | 0)),
+
         glTexStorage2D: a=>answer(current()?.glTexStorage2D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,
             a[3] | 0, a[4] | 0)),
         glTexStorage3D: a=>answer(current()?.glTexStorage3D(a[0] >>> 0, a[1] | 0, a[2] >>> 0,

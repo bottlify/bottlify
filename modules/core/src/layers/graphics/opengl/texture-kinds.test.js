@@ -306,3 +306,89 @@ test('a fragment program\'s RECT target samples the unit\'s rectangle', async()=
     assert.ok(labels.includes(`gl-texture:${name}`), 'the rectangle bound, not a 2D texture');
     assert.deepEqual(r.divergences, []);
 });
+
+// --- buffer textures (3.1) ---
+
+test('a buffer texture is a buffer\'s range in a format, with no sampling state', ()=>{
+    const gl = /** @type {any} */ (createGlContext({}));
+    gl.attach({ width: 4, height: 4, doubleBuffered: true });
+    const [buffer] = gl.glGenBuffersARB(1);
+    gl.glBindBufferARB(GL.TEXTURE_BUFFER, buffer);
+    assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BUFFER), [buffer], 'a buffer target too');
+    gl.glBufferDataARB(GL.TEXTURE_BUFFER, 64, new Uint8Array(64), GL.STATIC_DRAW);
+    const [name] = gl.glGenTextures(1);
+    gl.glBindTexture(GL.TEXTURE_BUFFER, name);
+    assert.deepEqual(gl.glGetIntegerv(GL.TEXTURE_BINDING_BUFFER), [name]);
+    gl.glTexBuffer(GL.TEXTURE_BUFFER, 0x8814 /* RGBA32F */, buffer);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    /** @param {number} q */
+    const level = q=>gl.glGetTexLevelParameteriv(GL.TEXTURE_BUFFER, 0, q)[0];
+    assert.equal(level(GL.TEXTURE_BUFFER_DATA_STORE_BINDING), buffer);
+    assert.equal(level(GL.TEXTURE_INTERNAL_FORMAT), 0x8814);
+    assert.equal(level(GL.TEXTURE_BUFFER_SIZE), 64, 'to the end');
+    assert.equal(level(GL.TEXTURE_WIDTH), 4, 'texels of sixteen bytes');
+    gl.glTexBufferRange(GL.TEXTURE_BUFFER, 0x8236 /* R32UI */, buffer, 8, 12);
+    assert.deepEqual([level(GL.TEXTURE_BUFFER_OFFSET), level(GL.TEXTURE_BUFFER_SIZE),
+        level(GL.TEXTURE_WIDTH)], [8, 12, 3]);
+    gl.glTexBufferRange(GL.TEXTURE_BUFFER, 0x8236, buffer, 8, 60);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'past the store');
+    gl.glTexBufferRange(GL.TEXTURE_BUFFER, 0x8236, buffer, 2, 4);
+    assert.equal(gl.glGetError(), GL.INVALID_VALUE, 'off the offset alignment');
+    gl.glTexBuffer(GL.TEXTURE_BUFFER, GL.RGB8, buffer);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'not a buffer texture\'s format');
+    gl.glTexBuffer(GL.TEXTURE_2D, 0x8236, buffer);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM);
+    gl.glTexBuffer(GL.TEXTURE_BUFFER, 0x8236, 99);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'no such buffer');
+    gl.glTexParameteri(GL.TEXTURE_BUFFER, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'no sampling state');
+    gl.glTexBuffer(GL.TEXTURE_BUFFER, 0x8236, 0);
+    assert.equal(level(GL.TEXTURE_BUFFER_DATA_STORE_BINDING), 0, 'detached');
+    assert.ok(gl.glGetIntegerv(GL.MAX_TEXTURE_BUFFER_SIZE)[0] >= 65536);
+});
+
+test('a GLSL samplerBuffer fetches the buffer\'s texels, as they are at the draw', async()=>{
+    const r = rig();
+    const { gl } = r;
+    const [buffer] = gl.glGenBuffersARB(1);
+    gl.glBindBufferARB(GL.TEXTURE_BUFFER, buffer);
+    // Three RGB32F texels: twelve bytes each in the buffer.
+    gl.glBufferDataARB(GL.TEXTURE_BUFFER, 36,
+        new Uint8Array(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer), GL.STATIC_DRAW);
+    const [name] = gl.glGenTextures(1);
+    gl.glActiveTextureARB(GL.TEXTURE0 + 2);
+    gl.glBindTexture(GL.TEXTURE_BUFFER, name);
+    gl.glTexBuffer(GL.TEXTURE_BUFFER, 0x8815 /* RGB32F */, buffer);
+    const program = use(gl, `#version 140
+in vec4 position;
+void main() { gl_Position = position; }`, `#version 140
+uniform samplerBuffer table;
+out vec4 c;
+void main() { c = texelFetch(table, 1) + vec4(float(textureSize(table))); }`);
+    gl.uniform(gl.glGetUniformLocation(program, 'table'), 1, [2], 'i', 1);
+    /** @returns {Float32Array[]} every upload of the texture's level so far */
+    const uploads = ()=>r.gpu.of('writeTexture').map((/** @type {any} */ call)=>
+        new Float32Array(call.bytes.buffer.slice(call.bytes.byteOffset,
+            call.bytes.byteOffset + call.bytes.byteLength)));
+    const triangle = ()=>{
+        gl.glBegin(GL.TRIANGLES);
+        gl.glVertex2f(0, 0);
+        gl.glVertex2f(1, 0);
+        gl.glVertex2f(0, 1);
+        gl.glEnd();
+    };
+    triangle();
+    await r.swap();
+    const code = r.modules().join('\n');
+    assert.match(code, /textureLoad\(glt0, vec2i\(\w+ % 8192, \w+ \/ 8192\), 0\)/);
+    assert.match(code, /i32\(\w+\.x \* \w+\.y\)/, 'its size is its texels\'');
+    assert.deepEqual([.../** @type {Float32Array} */ (uploads().at(-1))], [1, 2, 3, 1, 4, 5, 6, 1, 7, 8, 9, 1],
+        'three texels, each widened by a fourth component of one');
+
+    gl.glBufferSubDataARB(GL.TEXTURE_BUFFER, 12, 4, new Uint8Array(new Float32Array([40]).buffer));
+    triangle();
+    await r.swap();
+    assert.deepEqual([.../** @type {Float32Array} */ (uploads().at(-1))].slice(4, 8), [40, 5, 6, 1],
+        'a write to the buffer reaches the texture');
+    assert.deepEqual(r.divergences, []);
+});

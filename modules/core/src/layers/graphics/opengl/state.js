@@ -479,6 +479,12 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.TEXTURE_BINDING_RECTANGLE, name: 'GL_TEXTURE_BINDING_RECTANGLE', kind: 'int',
         value: [0],
     },
+    {
+        query: GL.TEXTURE_BINDING_BUFFER, name: 'GL_TEXTURE_BINDING_BUFFER', kind: 'int',
+        value: [0],
+    },
+    // The buffer bound to GL_TEXTURE_BUFFER as a buffer object target (3.1).
+    { query: GL.TEXTURE_BUFFER, name: 'GL_TEXTURE_BUFFER', kind: 'int', value: [0] },
     { query: 0x8c1c, name: 'GL_TEXTURE_BINDING_1D_ARRAY', kind: 'int', value: [0] },
     { query: 0x8c1d, name: 'GL_TEXTURE_BINDING_2D_ARRAY', kind: 'int', value: [0] },
     { query: GL.ACTIVE_TEXTURE, name: 'GL_ACTIVE_TEXTURE', kind: 'enum', value: [GL.TEXTURE0] },
@@ -926,6 +932,17 @@ export const DEFAULT_STATE = Object.freeze([
     },
     // OpenGL 3.0's minimums, both well inside WebGPU's 3D size and layers.
     { query: GL.MAX_3D_TEXTURE_SIZE, name: 'GL_MAX_3D_TEXTURE_SIZE', kind: 'int', value: [256] },
+    // A buffer texture's texels (3.1) lie in rows of a 2D texture, as many
+    // as its sides allow of a buffer WebGPU binds; its range starts anywhere
+    // on a word.
+    {
+        query: GL.MAX_TEXTURE_BUFFER_SIZE, name: 'GL_MAX_TEXTURE_BUFFER_SIZE', kind: 'int',
+        value: [1 << 23],
+    },
+    {
+        query: GL.TEXTURE_BUFFER_OFFSET_ALIGNMENT, name: 'GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT',
+        kind: 'int', value: [4],
+    },
     // A rectangle (3.1) is as large as any 2D texture here.
     {
         query: GL.MAX_RECTANGLE_TEXTURE_SIZE, name: 'GL_MAX_RECTANGLE_TEXTURE_SIZE', kind: 'int',

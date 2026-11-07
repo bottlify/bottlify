@@ -49,9 +49,10 @@ const CUBE_FACES = [0x8515, 0x8516, 0x8517, 0x8518, 0x8519, 0x851a];
  * @type {ReadonlySet<number>}
  */
 const CREATE_TARGETS = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D,
-    GL.TEXTURE_CUBE_MAP, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_RECTANGLE]);
+    GL.TEXTURE_CUBE_MAP, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, GL.TEXTURE_RECTANGLE,
+    GL.TEXTURE_BUFFER]);
 /** @type {ReadonlyMap<number, string>} */
-const ABSENT_TARGETS = new Map([[0x8c2a, 'buffer'],
+const ABSENT_TARGETS = new Map([
     [0x9009, 'cube map array'], [0x9100, 'multisample'], [0x9102, 'multisample array']]);
 
 /** The texture targets each dimension's calls take (sections 8.6 and 8.19). */

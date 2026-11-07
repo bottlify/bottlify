@@ -98,6 +98,10 @@ const MIPMAP_FILTERS = new Set([
  *           current one without re-deriving it
  * @property {number[]} borderColour
  * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
+ * @property {{ buffer: number, internal: number, offset: number, size: number | null,
+ *     version: number }} [store]  a buffer texture's (3.1): the buffer object its texels
+ *           are, in which format, over which range (null: to its end), and the
+ *           buffer's version the level was last made from
  * @property {Map<number, DirtyRect | null>} dirty   the level keys written
  *           since a copy kept elsewhere last read them, each with the
  *           rectangle written or `null` for the whole level
@@ -230,6 +234,23 @@ const RECTANGLE_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name
         : name === GL.TEXTURE_WRAP_S || name === GL.TEXTURE_WRAP_T || name === GL.TEXTURE_WRAP_R
             ? GL.CLAMP_TO_EDGE : value])));
 
+/**
+ * What a buffer texture (3.1) holds of sampling state: none a program can
+ * set; its one level is read texel by texel, which these filters keep
+ * complete.
+ *
+ * @type {ReadonlyArray<readonly [number, number]>}
+ */
+const BUFFER_PARAMETERS = Object.freeze(DEFAULT_TEXTURE_PARAMETERS.map(([name, value])=>
+    /** @type {const} */ ([name, name === GL.TEXTURE_MIN_FILTER || name === GL.TEXTURE_MAG_FILTER
+        ? GL.NEAREST : value])));
+
+/**
+ * How wide a buffer texture's level is (3.1): its texels lie in rows of this
+ * many, WebGPU's least 2D extent, the last row short of it.
+ */
+export const BUFFER_ROW = 8192;
+
 /** The swizzle parameters, red to alpha. */
 const SWIZZLES = [GL.TEXTURE_SWIZZLE_R, GL.TEXTURE_SWIZZLE_G, GL.TEXTURE_SWIZZLE_B,
     GL.TEXTURE_SWIZZLE_A];
@@ -275,7 +296,7 @@ export function createTextureObject(name, target){
         name,
         target,
         parameters: new Map(target === GL.TEXTURE_RECTANGLE ? RECTANGLE_PARAMETERS
-            : DEFAULT_TEXTURE_PARAMETERS),
+            : target === GL.TEXTURE_BUFFER ? BUFFER_PARAMETERS : DEFAULT_TEXTURE_PARAMETERS),
         parametersVersion: 0,
         borderColour: [0, 0, 0, 0],
         levels: new Map(),

@@ -47,6 +47,7 @@ import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
+import { BUFFER_ROW } from './objects.js';
 
 /**
  * @typedef {import('./glsl-types.js').GlslType} GlslType
@@ -309,8 +310,8 @@ export function textureTypeOf(type){
             return `texture_3d<${scalar}>`;
         case 'Cube':
             return type.array ? `texture_cube_array<${scalar}>` : `texture_cube<${scalar}>`;
+        // A buffer texture's texels (3.1) are a 2D texture's, `BUFFER_ROW` a row.
         case 'Buffer':
-            throw new Error('a buffer texture is sampled, and this implementation has none');
         default:
             return type.array ? `texture_2d_array<${scalar}>` : `texture_2d<${scalar}>`;
     }
@@ -2148,7 +2149,19 @@ export function emitStage(program, which, options, given, partner){
         const c = oneD ? 1 : dim === '3D' || dim === 'Cube' ? 3 : 2;
         if (dim === 'Buffer')
         {
-            throw new Error('a buffer texture is sampled, and this implementation has none');
+            // Texel n of a buffer texture is at (n mod BUFFER_ROW, n / BUFFER_ROW);
+            // its size is its rows', whole past the first (`context-textures.js`).
+            if (name === 'textureSize')
+            {
+                const d = temp(out, `textureDimensions(${tex})`, 'vec2u');
+                return `i32(${d}.x * ${d}.y)`;
+            }
+            if (name !== 'texelFetch')
+            {
+                throw new Error(`glsl: the built-in '${name}' takes no buffer texture`);
+            }
+            const at = temp(out, expr(rest[0], out), 'i32');
+            return `textureLoad(${tex}, vec2i(${at} % ${BUFFER_ROW}, ${at} / ${BUFFER_ROW}), 0)`;
         }
         if (name === 'textureSize')
         {
