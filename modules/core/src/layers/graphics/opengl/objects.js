@@ -458,6 +458,14 @@ export function createShareGroup(){
  */
 
 /**
+ * A sampler object (3.3): its parameters as a texture keeps its own, so
+ * whoever reads one reads the other the same way (`gpu.js` samplerFor).
+ *
+ * @typedef {{ name: number, parameters: Map<number, number>, parametersVersion: number,
+ *     borderColour: number[] }} SamplerObject
+ */
+
+/**
  * @typedef {Object} FramebufferObject
  * @property {number} name
  * @property {Map<number, Attachment>} attachments  by attachment point

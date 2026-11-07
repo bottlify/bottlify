@@ -56,6 +56,9 @@ const asFloat = word=>{
 export function laterEntryPoints(h){
     const { current, call, answer, readTyped, writeU32s, writeQuery } = h;
 
+    /** How many values a sampler parameter's vector form reads. @param {number} pname */
+    const samplerCount = pname=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? 4 : 1);
+
     /**
      * A GLuint64 timeout from its two words, GL_TIMEOUT_IGNORED (all ones)
      * as the context names it.
@@ -287,6 +290,37 @@ export function laterEntryPoints(h){
         glCopyBufferSubData: ([read, write, readOffset, writeOffset, size])=>answer(
             current()?.glCopyBufferSubData(read >>> 0, write >>> 0, readOffset | 0,
                 writeOffset | 0, size | 0)),
+
+        // --- sampler objects (3.3) ---
+
+        glGenSamplers: generator((context, count)=>context.glGenSamplers(count)),
+        glDeleteSamplers: deleter((context, names)=>context.glDeleteSamplers(names)),
+        glIsSampler: ([name])=>current()?.glIsSampler(name >>> 0) ?? GL.FALSE,
+        glBindSampler: ([unit, name])=>answer(current()?.glBindSampler(unit >>> 0, name >>> 0)),
+        glSamplerParameteri: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [value | 0])),
+        glSamplerParameterf: ([name, pname, value])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, [asFloat(value)])),
+        glSamplerParameteriv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname))
+                .map(v=>((pname >>> 0) === GL.TEXTURE_BORDER_COLOR ? v / 0x7fffffff : v)))),
+        glSamplerParameterfv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('f', values, samplerCount(pname)))),
+        glSamplerParameterIiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('i', values, samplerCount(pname)))),
+        glSamplerParameterIuiv: ([name, pname, values])=>answer(current()?.samplerParameter(
+            name >>> 0, pname >>> 0, readTyped('ui', values, samplerCount(pname)))),
+        glGetSamplerParameteriv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0)?.map((/** @type {number} */ v)=>
+                ((pname >>> 0) === GL.TEXTURE_BORDER_COLOR
+                    ? Math.round(Math.max(-1, Math.min(1, v)) * 0x7fffffff) : Math.round(v)))
+                ?? null, 'word')),
+        glGetSamplerParameterfv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'float')),
+        glGetSamplerParameterIiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
+        glGetSamplerParameterIuiv: ([name, pname, out])=>call(context=>writeQuery(out,
+            context.getSamplerParameter(name >>> 0, pname >>> 0), 'word')),
 
         // --- sync objects (3.2) ---
 

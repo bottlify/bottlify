@@ -914,12 +914,13 @@ export function createGpuRenderer(services){
      * key are only built again when `glTexParameter*` actually changed
      * something, not once per unit per draw.
      *
-     * @type {WeakMap<import('./objects.js').TextureObject,
+     * @type {WeakMap<object,
      *     { version: number, sampler: any, filtered: boolean, compared?: boolean }>}
      */
     const samplerByTexture = new WeakMap();
     /**
-     * @param {import('./objects.js').TextureObject} texture
+     * @param {{ parameters: Map<number, number>, parametersVersion: number }} texture  the
+     *     texture, or the sampler object (3.3) its unit samples it through
      * @param {boolean} [filtered]  false for a texture no sampler may filter,
      *     which is read nearest, the nearest level too
      */
@@ -2659,11 +2660,15 @@ export function createGpuRenderer(services){
             // placeholder, filters and all.
             const loaded = entry.layout?.sampleType === 'sint'
                 || entry.layout?.sampleType === 'uint';
+            // A unit's sampler object samples in place of the texture's own state.
+            const unit = scene.samplers ? unitOf(scene, executable, entry,
+                plan.fragmentBlock) : -1;
             return {
                 binding: entry.binding,
                 view: copy.sampleView ?? copy.gpu.view,
                 // A comparison filters a depth texture as any other is.
-                sampler: samplerFor(texture, kind === 'f' || compared || loaded, compared),
+                sampler: samplerFor(scene.samplers?.[unit] ?? texture,
+                    kind === 'f' || compared || loaded, compared),
                 texture,
             };
         });
@@ -2818,6 +2823,29 @@ export function createGpuRenderer(services){
         }
         const position = (entry.binding - 1) / 2;
         return scene.units[position]?.texture ?? incompleteTexture(entry.cube);
+    };
+
+    /**
+     * The texture unit one binding reads: a GLSL sampler's uniform's, the
+     * unit a fragment program's instruction named, or on the fixed path the
+     * enabled unit at that position.
+     *
+     * @param {import('./pipeline.js').Scene} scene @param {any} executable
+     * @param {{ binding: number, unit?: number, sampler?: number }} entry
+     * @param {boolean} programFragment
+     * @returns {number}
+     */
+    const unitOf = (scene, executable, entry, programFragment)=>{
+        if (entry.sampler !== undefined && executable)
+        {
+            const sampler = executable.linked.samplers[entry.sampler];
+            return executable.ints[sampler.leaf.offset + sampler.element];
+        }
+        if (programFragment)
+        {
+            return entry.unit ?? 0;
+        }
+        return scene.units[(entry.binding - 1) / 2]?.index ?? 0;
     };
 
     /**

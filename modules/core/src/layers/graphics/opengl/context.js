@@ -45,6 +45,7 @@ import {
 } from './version.js';
 import { INDEXED_CALLS_NOT_COMPILED, installIndexedCalls } from './context-indexed.js';
 import { SYNC_CALLS_NOT_COMPILED, installSyncCalls } from './context-sync.js';
+import { SAMPLER_CALLS_NOT_COMPILED, installSamplerCalls } from './context-samplers.js';
 import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
 import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
 import { compare } from './pipeline.js';
@@ -121,7 +122,7 @@ const NOT_COMPILABLE = new Set([
     'glVertexAttribIPointer', 'getVertexAttribI',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED, ...CORE_CALLS_NOT_COMPILED,
     ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
-    ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED,
+    ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
 ]);
 
 /** @type {Set<number>} */
@@ -692,6 +693,12 @@ export function createGlContext(options = {}){
             if (depth)
             {
                 return readState({ kind: 'int', values: [stacks[depth].saved.length + 1] }, as);
+            }
+            // State an installer answers itself (`kernel.side.queries`).
+            const answered = kernel.side.queries?.get(query);
+            if (answered)
+            {
+                return readState(answered(), as);
             }
             const entry = state.get(query);
             if (!entry)
@@ -1742,6 +1749,7 @@ export function createGlContext(options = {}){
     installVertexArrayCalls(context, kernel);
     installIndexedCalls(context, kernel);
     installSyncCalls(context, kernel);
+    installSamplerCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 
