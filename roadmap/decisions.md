@@ -1182,6 +1182,23 @@ GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT is 4:** nothing here needs a coarser boundary
 **A154. glTexBuffer and glTexBufferRange run when they are reached, a list open or not,** as the
 buffer object calls do. *2026-11-07.*
 
+**A190. Temporary: a geometry shader after tessellation is refused at the draw, as a loss.** How
+many primitives the tessellator makes is known only on the GPU, so the geometry pass would need an
+indirect dispatch sized there. *2026-11-07.*
+
+**A191. Temporary: transform feedback of tessellated output is refused, as a loss,** for the same
+reason: the count of what is captured is the GPU's. *2026-11-07.*
+
+**A192. Default tessellation levels are kept as glPatchParameterfv gives them;** clamping and
+rounding by the spacing happen in the tessellator when a draw reads them, so a query answers what
+was set. *2026-11-07.*
+
+**A193. Temporary: GL_ARB_tessellation_shader is not reported.** A `#version 150` shader cannot
+enable it yet; the 4.0 entry points are handed out with the rest of 4.0. *2026-11-07.*
+
+**A194. Patches reaching the immediate drawing path are a loss:** that path has no tessellator.
+*2026-11-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
