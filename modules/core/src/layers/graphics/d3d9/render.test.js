@@ -2085,3 +2085,133 @@ test('a depth texture is drawn into as the depth buffer and sampled as a shadow 
             entry.texture?.sampleType === 'depth'), 'and a depth texture');
     }
 });
+
+test('a pixel shader\'s oC1 is drawn into the target at index 1, a target it does not write is'
+    + ' left as it was, and a clear clears every target', async()=>{
+    // Wine's d3d9 visual.c multiple_rendertargets_test.
+    const h = harness({ width: 16, height: 16 });
+    const { device } = h;
+    /** @param {number} index */
+    const targetAt = index=>{
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(16, 16, 1, D3DUSAGE.RENDERTARGET, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, made), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+        assert.equal(device.SetRenderTarget(index, level.surface), D3D_OK);
+        return level.surface;
+    };
+    targetAt(0);
+    targetAt(1);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader([0xfffe0300, 0x0200001f, 0x80000000, 0x900f0000,
+        0x0200001f, 0x80000000, 0xe00f0000, 0x02000001, 0xe00f0000, 0x90e40000, 0x0000ffff], vs),
+    D3D_OK);
+    /** @type {{ shader?: any }} */
+    const ps1 = {};
+    assert.equal(device.CreatePixelShader([0xffff0300, 0x05000051, 0xa00f0000, 0, 0x3f800000, 0,
+        0, 0x02000001, 0x800f0800, 0xa0e40000, 0x0000ffff], ps1), D3D_OK);
+    /** @type {{ shader?: any }} */
+    const ps2 = {};
+    assert.equal(device.CreatePixelShader([0xffff0300, 0x05000051, 0xa00f0000, 0, 0x3f800000, 0,
+        0, 0x05000051, 0xa00f0001, 0, 0, 0x3f800000, 0, 0x02000001, 0x800f0800, 0xa0e40000,
+        0x02000001, 0x800f0801, 0xa0e40001, 0x0000ffff], ps2), D3D_OK);
+    assert.equal(device.SetVertexShader(vs.shader), D3D_OK);
+    assert.equal(device.SetFVF(FVF.XYZ), D3D_OK);
+    const quad = new Uint8Array(new Float32Array([-1, -1, 0.1, -1, 1, 0.1, 1, -1, 0.1, 1, 1, 0.1])
+        .buffer);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff0000ff, 0, 0), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetPixelShader(ps1.shader), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2, quad, 12), D3D_OK);
+    assert.equal(device.SetPixelShader(ps2.shader), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLESTRIP, 2, quad, 12), D3D_OK);
+    // A part of the targets: the quad a clear draws writes every one.
+    assert.equal(device.Clear(1, [{ x1: 0, y1: 0, x2: 8, y2: 8 }], D3DCLEAR.TARGET, 0xff00ff00,
+        0, 0), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.deepEqual(h.gpu.errors, [], 'the device took the frame');
+    const passes = h.gpu.of('beginRenderPass').filter((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments.length === 2);
+    assert.ok(passes.length > 0, 'both targets attached to one pass');
+    assert.deepEqual(passes[0].descriptor.colorAttachments.map((/** @type {any} */ one)=>
+        [one.loadOp, one.clearValue?.b]), [['clear', 1], ['clear', 1]], 'both cleared');
+    const pipelines = h.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets);
+    // Built in their own order: one draw's mask, two that write it.
+    const masks = pipelines.filter((/** @type {any[]} */ targets)=>targets.length === 2)
+        .map((/** @type {any[]} */ targets)=>targets[1].writeMask).sort((a, b)=>a - b);
+    assert.deepEqual(masks, [0, 0xf, 0xf],
+        'ps1 leaves the second as it was; ps2 and the part clear write it');
+    const modules = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).join('\n');
+    assert.match(modules, /@location\(1\) oC1: vec4f/);
+    assert.match(modules, /struct Fanned/, 'the clear\'s quad fans its colour out');
+
+    // Let go of, the second target is in no later pass.
+    assert.equal(device.SetRenderTarget(1, null), D3D_OK);
+    const before = h.gpu.of('beginRenderPass').length;
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0, 0, 0), D3D_OK);
+    await h.present();
+    assert.ok(h.gpu.of('beginRenderPass').slice(before).every((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments.length === 1));
+});
+
+test('targets smaller than the depth buffer are each drawn through a stand-in of its size and'
+    + ' given back', async()=>{
+    // Wine's multiple_rendertargets_test draws 16x16 targets beside the
+    // device's 640x480 depth buffer.
+    const h = harness({ width: 32, height: 32 });
+    const { device } = h;
+    /** @type {any[]} */
+    const levels = [0, 1].map(index=>{
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(16, 16, 1, D3DUSAGE.RENDERTARGET, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, made), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+        assert.equal(device.SetRenderTarget(index, level.surface), D3D_OK);
+        return level.surface;
+    });
+    assert.ok(levels.length === 2);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff0000ff, 0, 0), D3D_OK);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    const pass = h.gpu.of('beginRenderPass').find((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments.length === 2);
+    assert.ok(pass, 'both targets in one pass');
+    const standIns = pass.descriptor.colorAttachments.map((/** @type {any} */ one)=>
+        one.view.texture);
+    assert.deepEqual(standIns.map((/** @type {any} */ texture)=>[texture.descriptor.label,
+        texture.descriptor.size.width]), [['colour-stand-in', 32], ['colour-stand-in', 32]]);
+    const back = h.gpu.of('copyTextureToTexture').filter((/** @type {any} */ call)=>
+        standIns.includes(call.source.texture));
+    assert.equal(back.length, 2, 'each given back to its target');
+    assert.notEqual(back[0].destination.texture, back[1].destination.texture);
+});
+
+test('a clear clears a target of another size than the first in a pass of its own', async()=>{
+    // Wine's d3d9 test_clear_different_size_surfaces.
+    const h = harness({ width: 16, height: 16 });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const other = {};
+    assert.equal(device.CreateRenderTarget(8, 4, D3DFMT.A8R8G8B8, true, other), D3D_OK);
+    assert.equal(device.SetRenderTarget(1, other.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 0, 0), D3D_OK);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    const cleared = h.gpu.of('beginRenderPass').filter((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments.some((/** @type {any} */ one)=>one
+            && one.view.texture.descriptor.size.width === 8 && one.loadOp === 'clear'
+            && one.clearValue.g === 1));
+    assert.equal(cleared.length, 1, 'the 8x4 target cleared, alone');
+    assert.equal(cleared[0].descriptor.colorAttachments.length, 1);
+});

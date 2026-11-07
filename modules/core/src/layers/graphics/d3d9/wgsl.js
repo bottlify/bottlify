@@ -315,6 +315,8 @@ export function varyingLocation(usage, index){
  *     writes (`varyingLocation`): what a fragment stage made for it may read.
  * @property {number[]} reads     A pixel stage's varyings, as the locations it
  *     reads: what the vertex stage paired with it has to write.
+ * @property {number[]} [targets]  A pixel stage's colour outputs past oC0, oC1 to oC3,
+ *     where it writes any: the render targets it draws into beside the first.
  * @property {{ index: number, type: string, compared?: boolean }[]} samplers
  *     `compared` for a shadow map's (`SamplerVariant.compared`).
  * @property {number} constants   How many float registers the shader reaches.
@@ -2282,6 +2284,8 @@ export function translateShader(parsed, options = {}){
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
         ...(clipRegister === undefined ? {} : { clipRegister }),
         ...(biasRegister === undefined ? {} : { biasRegister }),
+        ...(!vertex && [...pixelOutputs].some(output=>output > 0)
+            ? { targets: [...pixelOutputs].filter(output=>output > 0).sort() } : {}),
         error,
     };
 }

@@ -659,6 +659,9 @@ export function surfaceBytes(format, width, height){
 
 const reinterpret = new DataView(new ArrayBuffer(4));
 
+/** The render targets a pixel shader writes at once, oC0 to oC3. */
+export const SIMULTANEOUS_TARGETS = 4;
+
 /**
  * D3DCOLORWRITEENABLE's alpha bit.
  *

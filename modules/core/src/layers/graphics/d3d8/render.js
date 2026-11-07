@@ -1723,6 +1723,8 @@ function inverseRotation(view){
  * @property {number} baseVertexIndex
  * @property {import('../webgpu/contract.js').ViewportState} viewport
  * @property {any} renderTarget
+ * @property {readonly any[]} [extraTargets]  Direct3D 9's targets at indices 1 to 3,
+ *     null where none is bound: empty or absent while only the first is.
  * @property {any} depthStencil
  * @property {Map<number, Float32Array>} transforms
  * @property {Map<number, { light: Light, enabled: boolean }>} lights
@@ -2697,6 +2699,11 @@ function depthBiasOf(model, depthFormat, topology, diverge){
  * @param {string} shape.targetFormat
  * @param {boolean} [shape.targetHasAlpha]
  *     Whether the target's Direct3D format has an alpha channel at all.
+ * @param {(string | null)[]} [shape.extraFormats]  The GPU formats of the
+ *     targets bound past the first (`formatsOf`), null where none is.
+ * @param {readonly number[]} [shape.writtenTargets]  The targets past the
+ *     first the stage writes (a pixel shader's oC1 to oC3); one it does not
+ *     write is left as it is.
  * @param {boolean} [shape.fog]  Whether fog is applied at all; see RendererOptions.
  * @param {string | undefined} shape.depthFormat
  * @param {import('../webgpu/internal/pipeline.js').StageKey[]} shape.stages
@@ -2765,6 +2772,10 @@ export function pipelineStateOf(model, shape){
         // opaque the presented frame is, which nothing in the picture explains.
         colorWrite: rs('COLORWRITEENABLE')
             & (shape.targetHasAlpha === false ? ~COLORWRITEENABLE_ALPHA : ~0),
+        ...(shape.extraFormats ? { extraTargets: shape.extraFormats.map((format, index)=>(format
+            ? { format, colorWrite: shape.writtenTargets?.includes(index + 1)
+                ? rs9(D3DRS9.COLORWRITEENABLE1 + index) & 0xf : 0 }
+            : null)) } : {}),
         alphaTest: rs('ALPHATESTENABLE') !== 0,
         alphaFunc: rs('ALPHAFUNC'),
         fogMode: fog.mode,
@@ -6267,21 +6278,117 @@ export function createRenderer(options){
     };
 
     /**
+     * The GPU surfaces of the targets bound past the first, by index less one,
+     * null where none is; null for none at all. A pass's colour targets are of
+     * one size: one of another size than the first is not drawn into, and says
+     * so (Direct3D 9 asks the same of them).
+     *
+     * @param {RenderModel} model @param {any} target  The first's surface.
+     * @returns {(any | null)[] | null}
+     */
+    const extraSurfacesOf = (model, target)=>{
+        const bound = model.extraTargets;
+        if (!bound || bound.length === 0)
+        {
+            return null;
+        }
+        /** @param {string} detail */
+        const lost = detail=>{
+            if (!unsizedTargets.has(detail))
+            {
+                unsizedTargets.add(detail);
+                divergence?.('Direct3D', detail, 'loss');
+            }
+        };
+        return bound.map((surface, index)=>{
+            if (!surface)
+            {
+                return null;
+            }
+            const made = surfaceFor(surface);
+            if (made.width !== target.width || made.height !== target.height)
+            {
+                lost(`target ${index + 1}, ${made.width}x${made.height}, beside a first of`
+                    + ` ${target.width}x${target.height}, was not drawn into`);
+                return null;
+            }
+            return made;
+        });
+    };
+    /** What `extraSurfacesOf` said already. @type {Set<string>} */
+    const unsizedTargets = new Set();
+
+    /**
+     * Direct3D 9's targets past the first that are of another size than it,
+     * which a clear clears as it clears the first (Wine's d3d9
+     * test_clear_different_size_surfaces) and a draw does not reach
+     * (`extraSurfacesOf`): each cleared whole by a pass of its own, before the
+     * first's, where the clear's areas cover it. One they cover in part is
+     * not cleared, and says so.
+     *
+     * @param {RenderModel} model
+     * @param {{ x1: number, y1: number, x2: number, y2: number }[]} areas
+     * @param {number} color  D3DCOLOR
+     */
+    const clearOtherSizes = (model, areas, color)=>{
+        const first = surfaceFor(model.renderTarget);
+        for (const surface of model.extraTargets ?? [])
+        {
+            if (!surface)
+            {
+                continue;
+            }
+            const made = surfaceFor(surface);
+            if (made.width === first.width && made.height === first.height)
+            {
+                continue;
+            }
+            if (!areas.some(area=>area.x1 <= 0 && area.y1 <= 0 && area.x2 >= made.width
+                && area.y2 >= made.height))
+            {
+                divergence?.('Direct3D', `a clear of part of a ${made.width}x${made.height}`
+                    + ' target beside a first of another size did not clear it', 'loss');
+                continue;
+            }
+            const value = colorToFloats(color);
+            const frame = ensureFrame();
+            frame.commands.push({ kind: 'pass', target: made, depth: null,
+                clearColor: { ...value,
+                    a: FORMAT_INFO[describe(surface).Format]?.alpha === true ? value.a : 1 } });
+            // The first's pass is opened again by what comes next.
+            frame.pass = null;
+        }
+    };
+
+    /**
+     * Whether two passes' extra targets are the same.
+     *
+     * @param {(any | null)[] | null} a @param {(any | null)[] | null} b
+     */
+    const sameExtras = (a, b)=>a === b || (a !== null && b !== null && a.length === b.length
+        && a.every((surface, index)=>surface === b[index]));
+
+    /**
      * @param {RenderModel} model
      * @param {{ clearColor?: any, clearDepth?: number, clearStencil?: number }} clearing
      */
     const beginPass = (model, clearing)=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
-        const drawnInto = textures.get(model.renderTarget);
-        if (drawnInto && (surfaceLevels.get(model.renderTarget) ?? 0) === 0)
+        for (const surface of [model.renderTarget, ...model.extraTargets ?? []])
         {
-            markMips(drawnInto);
+            const drawnInto = surface ? textures.get(surface) : undefined;
+            if (drawnInto && (surfaceLevels.get(surface) ?? 0) === 0)
+            {
+                markMips(drawnInto);
+            }
         }
         const depth = depthFor(model, target);
-        frame.commands.push({ kind: 'pass', target, depth, ...clearing,
-            ...(liveDump ? { targetId: drawnInto?.id ?? '' } : {}) });
-        frame.pass = { target, depth };
+        const extra = extraSurfacesOf(model, target);
+        frame.commands.push({ kind: 'pass', target, depth, ...extra ? { extra } : {},
+            ...clearing,
+            ...(liveDump ? { targetId: textures.get(model.renderTarget)?.id ?? '' } : {}) });
+        frame.pass = { target, depth, extra };
         frame.viewport = null;
         frame.scissor = '';
     };
@@ -6291,7 +6398,8 @@ export function createRenderer(options){
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
         const depth = depthFor(model, target);
-        if (!frame.pass || frame.pass.target !== target || frame.pass.depth !== depth)
+        if (!frame.pass || frame.pass.target !== target || frame.pass.depth !== depth
+            || !sameExtras(frame.pass.extra, extraSurfacesOf(model, target)))
         {
             beginPass(model, {});
         }
@@ -6299,11 +6407,16 @@ export function createRenderer(options){
     };
 
     /** @param {RenderModel} model */
-    const formatsOf = model=>({
-        targetFormat: surfaceFor(model.renderTarget).format,
-        targetHasAlpha: FORMAT_INFO[describe(model.renderTarget).Format].alpha !== false,
-        depthFormat: model.depthStencil ? surfaceFor(model.depthStencil).format : undefined,
-    });
+    const formatsOf = model=>{
+        const target = surfaceFor(model.renderTarget);
+        const extra = extraSurfacesOf(model, target);
+        return {
+            targetFormat: target.format,
+            targetHasAlpha: FORMAT_INFO[describe(model.renderTarget).Format].alpha !== false,
+            depthFormat: model.depthStencil ? surfaceFor(model.depthStencil).format : undefined,
+            ...extra ? { extraFormats: extra.map(surface=>surface?.format ?? null) } : {},
+        };
+    };
 
     /** A viewport over all of 0..1 in depth, one a viewport. @type {WeakMap<object, any>} */
     const wholeDepthOf = new WeakMap();
@@ -6922,9 +7035,10 @@ export function createRenderer(options){
         words[at++] = formatIdOf(formats.targetFormat);
         words[at++] = formats.targetHasAlpha ? 1 : 0;
         words[at++] = formats.depthFormat === undefined ? -1 : formatIdOf(formats.depthFormat);
+        words[at++] = extraFormatsIdOf(formats.extraFormats);
         return programStateNumbering(words, at);
     };
-    const programStateWords = new Int32Array(2 + STAGE_COUNT * 2 + 3);
+    const programStateWords = new Int32Array(2 + STAGE_COUNT * 2 + 4);
     const programStateNumbering = createNumbering();
 
     /** The streams a declaration may read, as Direct3D 9 has them. */
@@ -7410,6 +7524,7 @@ export function createRenderer(options){
                 diverge: stateDiverge,
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
                 fog: fogApplied, clipping: !transformed, clipDistances,
+                ...(pixel.targets ? { writtenTargets: pixel.targets } : {}),
             }),
             vertexShader: program.vertex ? program.vertexId : -1,
             pixelShader: program.pixelId,
@@ -8519,7 +8634,11 @@ export function createRenderer(options){
     const unsampledTargets = (model, bindings)=>{
         const target = model.renderTarget ? textures.get(model.renderTarget) ?? null : null;
         const depth = model.depthStencil ? textures.get(model.depthStencil) ?? null : null;
-        if (target === null && depth === null)
+        // Direct3D 9's targets past the first are drawn into as the first is.
+        const extra = model.extraTargets?.length
+            ? model.extraTargets.map(surface=>(surface ? textures.get(surface) ?? null : null))
+            : null;
+        if (target === null && depth === null && extra === null)
         {
             return bindings;
         }
@@ -8527,7 +8646,8 @@ export function createRenderer(options){
         for (let index = 0; index < bindings.length; index++)
         {
             const sampled = bindings[index].record;
-            if (!sampled || (sampled !== target && sampled !== depth))
+            const drawnInto = sampled && (sampled === target || extra?.includes(sampled));
+            if (!sampled || (!drawnInto && sampled !== depth))
             {
                 continue;
             }
@@ -8535,11 +8655,11 @@ export function createRenderer(options){
             {
                 safe = bindings.slice();
             }
-            if (sampled === target && target.gpu && target.gpuLevels === 1 && target.faces === 1
-                && !target.volume)
+            if (drawnInto && sampled.gpu && sampled.gpuLevels === 1 && sampled.faces === 1
+                && !sampled.volume)
             {
                 safe[index] = { ...bindings[index], record: null,
-                    view: targetSnapshot(target.gpu).view };
+                    view: targetSnapshot(sampled.gpu).view };
                 continue;
             }
             safe[index] = { ...bindings[index], record: null, placeholder: true,
@@ -8905,6 +9025,7 @@ export function createRenderer(options){
         floats[at++] = formats.depthFormat === undefined ? -1 : formatIdOf(formats.depthFormat);
         floats[at++] = surfaceIdOf(surfaceFor(model.renderTarget));
         floats[at++] = model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : -1;
+        floats[at++] = extraFormatsIdOf(formats.extraFormats);
         slowAt = at;
         model.transforms.forEach(putTransform);
         at = slowAt;
@@ -8980,7 +9101,8 @@ export function createRenderer(options){
      */
     const slowSourcesHeld = model=>{
         if (model.renderTarget !== heldTarget || model.depthStencil !== heldDepth
-            || model.material !== heldMaterial || model.viewport !== heldViewport)
+            || model.material !== heldMaterial || model.viewport !== heldViewport
+            || model.extraTargets !== heldExtras)
         {
             return false;
         }
@@ -9006,6 +9128,7 @@ export function createRenderer(options){
     /** @param {RenderModel} model */
     const holdSlowSources = model=>{
         heldTarget = model.renderTarget;
+        heldExtras = model.extraTargets;
         heldDepth = model.depthStencil;
         heldMaterial = model.material;
         heldViewport = model.viewport;
@@ -9037,6 +9160,14 @@ export function createRenderer(options){
         return true;
     };
 
+    /**
+     * The formats of the targets past the first, as one number: -1 for none.
+     *
+     * @param {(string | null)[] | undefined} formats
+     */
+    const extraFormatsIdOf = formats=>(formats
+        ? formatIdOf(formats.map(format=>format ?? '-').join('+')) : -1);
+
     /** @param {string} format */
     const formatIdOf = format=>{
         let id = formatIds.get(format);
@@ -9058,6 +9189,8 @@ export function createRenderer(options){
     let slowHeld = false;
     /** @type {unknown} */
     let heldTarget = null;
+    /** @type {unknown} */
+    let heldExtras = undefined;
     /** @type {unknown} */
     let heldDepth = null;
     /** @type {unknown} */
@@ -10719,6 +10852,10 @@ export function createRenderer(options){
             {
                 frameStats.clearColor = color >>> 0;
             }
+            if ((flags & D3DCLEAR.TARGET) !== 0 && model.extraTargets?.length)
+            {
+                clearOtherSizes(model, areas, color);
+            }
             // A depth surface larger than the target is cleared only under
             // the target's corner: a pass's load clear would take all of it.
             const depthDesc = model.depthStencil ? describe(model.depthStencil) : null;
@@ -10787,6 +10924,12 @@ export function createRenderer(options){
                 // A target without alpha keeps one there, as a whole clear
                 // leaves it: a blend by the destination's alpha reads one.
                 colorWrite: (flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0,
+                // Every bound target is cleared, the quad's colour in each
+                // (Wine's d3d9 multiple_rendertargets_test).
+                ...(formatsOf(model).extraFormats ? { extraTargets: formatsOf(model).extraFormats
+                    ?.map(format=>(format
+                        ? { format, colorWrite: (flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0 }
+                        : null)) } : {}),
                 alphaTest: false,
                 // Its source too: table fog left on by the scene asked the
                 // shader for a curve the mode of nothing does not declare,
@@ -11933,12 +12076,12 @@ export function createRenderer(options){
          *
          * @param {any} command
          */
-        const widened = command=>{
-            const { target, depth } = command;
-            if (!depth || (depth.width === target.width && depth.height === target.height))
-            {
-                return command;
-            }
+        /**
+         * A colour target's stand-in of a depth surface's size.
+         *
+         * @param {any} target @param {any} depth
+         */
+        const standInOf = (target, depth)=>{
             let sizes = colourStandIns.get(target);
             if (!sizes)
             {
@@ -11960,14 +12103,65 @@ export function createRenderer(options){
                 sizes.set(key, made);
                 standIn = made;
             }
-            return { ...command, target: standIn, within: target };
+            return standIn;
+        };
+        /** @param {any} command */
+        const widened = command=>{
+            const { target, depth } = command;
+            if (!depth || (depth.width === target.width && depth.height === target.height))
+            {
+                return command;
+            }
+            // Direct3D 9's targets past the first are drawn through stand-ins
+            // of their own, given back as the first's is.
+            return { ...command, target: standInOf(target, depth), within: target,
+                ...command.extra ? {
+                    extra: command.extra.map((/** @type {any} */ one)=>(one
+                        ? standInOf(one, depth) : null)),
+                    extraWithin: command.extra,
+                } : {} };
+        };
+        /**
+         * Every target of a stand-in pass into its stand-in (`toStandIn`), or
+         * back out of it.
+         *
+         * @param {boolean} toStandIn
+         */
+        const copyStandIns = toStandIn=>{
+            const pairs = [[opened.target, opened.within],
+                ...(opened.extra ?? []).map((/** @type {any} */ one, /** @type {number} */ at)=>
+                    [one, opened.extraWithin?.[at]])];
+            for (const [standIn, real] of pairs)
+            {
+                if (standIn && real)
+                {
+                    copyCorner(toStandIn ? real : standIn, toStandIn ? standIn : real, real);
+                }
+            }
+        };
+        /**
+         * A pass's colour targets: the first alone, or with Direct3D 9's
+         * targets past it (`extra`), every one cleared to the colour a clear
+         * gives.
+         *
+         * @param {any} command @param {any} clearColor  undefined for no clear
+         */
+        const colourTargetsOf = (command, clearColor)=>{
+            if (!command.extra)
+            {
+                return { target: command.target, clear: clearColor !== undefined,
+                    clearValue: clearColor };
+            }
+            const targets = [command.target, ...command.extra];
+            return clearColor === undefined ? { targets }
+                : { targets, clearValues: targets.map(()=>clearColor) };
         };
         // A pass drawing into a stand-in gives the target its pixels back as
         // it closes: before anything else reads or writes the target.
         const giveBack = ()=>{
             if (pass && opened?.within)
             {
-                copyCorner(opened.target, opened.within, opened.within);
+                copyStandIns(false);
             }
             pass = null;
         };
@@ -11981,11 +12175,10 @@ export function createRenderer(options){
             }
             if (opened.within)
             {
-                copyCorner(opened.within, opened.target, opened.within);
+                copyStandIns(true);
             }
             pass = countingPass({
-                target: opened.target,
-                clear: false,
+                ...colourTargetsOf(opened, undefined),
                 depthStencilAttachment: opened.depth
                     ? depthAttachment({ depth: opened.depth })
                     : undefined,
@@ -12029,12 +12222,10 @@ export function createRenderer(options){
                 drawArea = reachableArea(command.target);
                 if (opened.within && command.clearColor === undefined)
                 {
-                    copyCorner(opened.within, opened.target, opened.within);
+                    copyStandIns(true);
                 }
                 pass = countingPass({
-                    target: opened.target,
-                    clear: command.clearColor !== undefined,
-                    clearValue: command.clearColor,
+                    ...colourTargetsOf(opened, command.clearColor),
                     depthStencilAttachment: command.depth
                         ? depthAttachment(command)
                         : undefined,

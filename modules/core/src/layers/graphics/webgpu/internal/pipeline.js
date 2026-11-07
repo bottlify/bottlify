@@ -30,6 +30,8 @@
  * picture.
  */
 
+import { formatTraits } from './textures.js';
+
 /**
  * Where the fog factor of a draw comes from, which is decided by which of the
  * two fog modes is set and not by the curve either of them names.
@@ -230,6 +232,11 @@ function lookUp(table, value, what){
  * @property {number} [destBlendAlpha]
  * @property {number} [blendOpAlpha]
  * @property {number} colorWrite         D3DCOLORWRITEENABLE bits.
+ * @property {({ format: string, colorWrite: number } | null)[]} [extraTargets]
+ *     The render targets bound at indices 1 to 3, a pixel shader's oC1 to oC3,
+ *     each with D3DRS_COLORWRITEENABLE1 to 3 -- none where the stage does not
+ *     write it, which leaves it as it was -- and null where none is bound.
+ *     Blended as the first is, where the format blends.
  * @property {boolean} alphaTest
  * @property {number} alphaFunc
  * @property {boolean} [srgbWrite]       D3DRS_SRGBWRITEENABLE into an eight-bit target:
@@ -355,6 +362,8 @@ export function pipelineKey(state){
         state.srcBlendAlpha === undefined ? '-'
             : `${state.srcBlendAlpha}/${state.destBlendAlpha}/${state.blendOpAlpha}`,
         state.colorWrite,
+        ...(state.extraTargets?.length ? [`x${state.extraTargets.map(target=>(target
+            ? `${target.format}:${target.colorWrite}` : '-')).join('+')}`] : []),
         state.alphaTest ? 1 : 0,
         state.alphaFunc,
         `${fogSourceOf(state)}/${state.fogMode}`,
@@ -550,6 +559,17 @@ export function pipelineDescriptor(state, layout){
             blend,
             writeMask: colorWriteMask(state.colorWrite),
         },
+        // Every colour target, by location: the first, then the extra ones.
+        targets: [
+            { format: state.targetFormat, blend, writeMask: colorWriteMask(state.colorWrite) },
+            ...(state.extraTargets ?? []).map(extra=>(extra
+                ? {
+                    format: extra.format,
+                    ...(blend && formatTraits(extra.format).blendable ? { blend } : {}),
+                    writeMask: colorWriteMask(extra.colorWrite),
+                }
+                : null)),
+        ],
     };
 }
 

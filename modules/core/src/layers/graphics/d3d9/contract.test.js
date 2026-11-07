@@ -787,7 +787,7 @@ test('streams past the last are refused, and a frequency is checked for sense', 
     assert.equal(device.release(), 0);
 });
 
-test('a render target must be one, only index zero exists, and a depth stencil must be one', ()=>{
+test('a render target must be one, four indices exist, and a depth stencil must be one', ()=>{
     const { device } = make();
     /** @type {{ texture?: any }} */
     const plain = {};
@@ -800,8 +800,29 @@ test('a render target must be one, only index zero exists, and a depth stencil m
     /** @type {{ surface?: any }} */
     const target = {};
     device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, false, target);
-    assert.equal(device.SetRenderTarget(1, target.surface), D3DERR_INVALIDCALL);
-    assert.equal(device.GetRenderTarget(1, target), D3DERR_INVALIDCALL);
+    // Wine's d3d9 test_set_rt_vp_scissor, multiple_rendertargets_test and
+    // test_reset_resources: indices 1 to 3 hold a target or none, none is
+    // D3DERR_NOTFOUND, only the first resets the viewport, and a reset lets
+    // the others go.
+    /** @type {{ surface?: any }} */
+    const read = {};
+    assert.equal(device.GetRenderTarget(1, read), D3DERR_NOTFOUND);
+    assert.equal(device.SetViewport({ X: 1, Y: 2, Width: 3, Height: 4 }), D3D_OK);
+    assert.equal(device.SetRenderTarget(1, target.surface), D3D_OK);
+    /** @type {{ viewport?: any }} */
+    const viewport = {};
+    device.GetViewport(viewport);
+    assert.equal(viewport.viewport.Width, 3, 'the viewport stays');
+    assert.equal(device.GetRenderTarget(1, read), D3D_OK);
+    assert.equal(read.surface, target.surface);
+    read.surface.release();
+    assert.equal(device.SetRenderTarget(3, null), D3D_OK);
+    assert.equal(device.SetRenderTarget(4, target.surface), D3DERR_INVALIDCALL);
+    assert.equal(device.GetRenderTarget(4, read), D3DERR_INVALIDCALL);
+    assert.equal(device.SetRenderTarget(0, null), D3DERR_INVALIDCALL);
+    assert.equal(device.SetRenderTarget(1, level.surface), D3DERR_INVALIDCALL, 'not a target');
+    assert.equal(device.SetRenderTarget(1, null), D3D_OK);
+    assert.equal(device.GetRenderTarget(1, read), D3DERR_NOTFOUND);
     assert.equal(device.SetDepthStencilSurface(null), D3D_OK);
     /** @type {{ surface?: any }} */
     const depth = {};

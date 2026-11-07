@@ -891,6 +891,10 @@ export function lightingBody(lighting, has, specular, normalizeNormals, colour,
  * @returns {{ code: string, label: string, textureCount: number }}
  */
 export function generateFixedFunction(state, layout){
+    // The targets past the first a clear's quad writes, its colour in each:
+    // a draw's fixed stages write the first alone.
+    const fanned = (state.extraTargets ?? []).flatMap((target, index)=>(target?.colorWrite
+        ? [index + 1] : []));
     const has = (/** @type {string} */ name)=>
         layout.attributes.some(attribute=>attribute.name === name);
     const colour = (/** @type {string} */ name)=>vertexColour(layout, name);
@@ -1157,12 +1161,19 @@ ${[...assignments, ...fogAmount, ...clipped?.lines ?? []].join('\n')}
     return out;
 }
 
-@fragment
-fn fragmentMain(input: ${clip?.distances ? 'FragmentIn' : 'VertexOut'}) -> @location(0) vec4f {
+${fanned.length > 0 ? `struct Fanned {
+${['    @location(0) c0: vec4f,', ...fanned.map(at=>`    @location(${at}) c${at}: vec4f,`)]
+        .join('\n')}
+}
+
+` : ''}@fragment
+fn fragmentMain(input: ${clip?.distances ? 'FragmentIn' : 'VertexOut'}) -> ${
+    fanned.length > 0 ? 'Fanned' : '@location(0) vec4f'} {
 ${fragmentBody(state, specularEnable, undefined,
         flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular',
         points?.sprite === true)}${discarded?.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
-    return current;
+    return ${fanned.length > 0
+        ? `Fanned(${['current', ...fanned.map(()=>'current')].join(', ')})` : 'current'};
 }
 `;
 

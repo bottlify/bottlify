@@ -154,7 +154,7 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.PrimitiveMiscCaps & (0x00000400 | 0x00008000), 0x00008400,
         'TSSARGTEMP and PERSTAGECONSTANT, the generated cascade\'s registers');
     assert.equal(words.MaxVolumeExtent, 256);
-    assert.equal(words.NumSimultaneousRTs, 1);
+    assert.equal(words.NumSimultaneousRTs, 4, 'oC0 to oC3');
     assert.equal(words.StretchRectFilterCaps, 0x03000300,
         'point and linear, minifying and magnifying');
     assert.equal(words.MaxAnisotropy, 16, 'WebGPU\'s ceiling');

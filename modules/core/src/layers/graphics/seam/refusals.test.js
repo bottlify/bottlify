@@ -18,6 +18,8 @@ test('a device method that fails is reported once by method and code, its answer
         assert.equal(loud('Present', 0), 0);
         assert.equal(loud('GetData', 1), 1, 'S_FALSE is no failure');
         assert.equal(await loud('Reset', Promise.resolve(0x88760868)), 0x88760868);
+        assert.equal(loud('GetRenderTarget', 0x88760866), 0x88760866,
+            'nothing bound at an index is an answer, not a refusal');
         assert.deepEqual(said, ['Direct3D 9: StretchRect answered D3DERR_INVALIDCALL',
             'Direct3D 9: Reset answered D3DERR_DEVICELOST']);
     });

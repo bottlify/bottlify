@@ -22,6 +22,12 @@ const HRESULT_NAMES = new Map([
     [0x80004005, 'E_FAIL'],
 ]);
 
+/**
+ * Failures that answer a question rather than refuse a call: a getter's
+ * D3DERR_NOTFOUND says nothing is bound at that place.
+ */
+const ANSWERS = new Set(['GetRenderTarget:2289436774', 'GetDepthStencilSurface:2289436774']);
+
 /** @param {number} hr */
 export const hresultName = hr=>HRESULT_NAMES.get(hr >>> 0) ?? `0x${(hr >>> 0).toString(16)}`;
 
@@ -41,7 +47,7 @@ export function loudRefusals(api, divergence){
         if (typeof hr === 'number' && (hr & 0x80000000) !== 0 && divergence)
         {
             const key = `${name}:${hr >>> 0}`;
-            if (!said.has(key))
+            if (!said.has(key) && !ANSWERS.has(key))
             {
                 said.add(key);
                 const asked = args ? `(${args.map(arg=>(typeof arg === 'number'

@@ -413,7 +413,7 @@ test('the root makes a device and describes itself in the shape the header gives
     assert.equal(h.fields.readU32(caps + D3DCAPS9.VertexShaderVersion), 0xfffe0300);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.PixelShaderVersion), 0xffff0300);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxTextureWidth), 4096);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.NumSimultaneousRTs), 1);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.NumSimultaneousRTs), 4);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxPixelShader30InstructionSlots), 512,
         'the last field was written, so nothing past it was');
     assert.equal(h.fields.readF32(caps + D3DCAPS9.MaxPointSize), 64);

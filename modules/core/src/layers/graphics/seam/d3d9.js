@@ -167,6 +167,7 @@ export const HOST_COMMAND_MIRRORS = {
 const D3D_OK = 0;
 const S_FALSE = 1;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
+const D3DERR_NOTFOUND = 0x88760866;
 /** D3DQUERYTYPE_OCCLUSION. */
 const D3DQUERYTYPE_OCCLUSION = 9;
 /** D3DISSUE_BEGIN. */
@@ -2315,6 +2316,12 @@ export function createDirect3D9Seam(
             {
                 return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, E_OUTOFMEMORY, device);
+            }
+            // An index with no target clears the pointer (Wine's d3d9
+            // test_get_rt); one past the indices leaves it as it was.
+            if ((hr >>> 0) === D3DERR_NOTFOUND)
+            {
+                writePointer(out >>> 0, 0);
             }
             return hr;
         },

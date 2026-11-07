@@ -54,8 +54,8 @@ import {
     S_PRESENT_OCCLUDED,
     D3DERR_NOTAVAILABLE,
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
-    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, storageBytes, surfaceBytes, surfacePitch,
-    videoPoolAllowed,
+    D3D_OK, FORMAT_INFO, SIMULTANEOUS_TARGETS, blockAligned, isCompressed, storageBytes,
+    surfaceBytes, surfacePitch, videoPoolAllowed,
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
@@ -1034,6 +1034,32 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const textures = new HeldBindings();
     /** @type {Map<number, any>} */
     const renderTargets = new Map();
+    /**
+     * The targets bound past the first, by index less one, as the renderer
+     * reads them (`extraTargets`): empty while only the first is bound, the
+     * same array while they stay as they are.
+     *
+     * @type {readonly any[]}
+     */
+    let extraTargets = [];
+    const noteExtraTargets = ()=>{
+        let last = SIMULTANEOUS_TARGETS - 1;
+        while (last > 0 && !renderTargets.get(last))
+        {
+            last--;
+        }
+        extraTargets = Array.from({ length: last },
+            (_, index)=>renderTargets.get(index + 1) ?? null);
+    };
+    /** Lets go of the targets past the first, as a reset and the last release do. */
+    const unbindExtraTargets = ()=>{
+        for (let index = 1; index < SIMULTANEOUS_TARGETS; index++)
+        {
+            rebound(renderTargets.get(index), null);
+            renderTargets.delete(index);
+        }
+        extraTargets = [];
+    };
     /** @type {any} */
     let indices = null;
     let baseVertexIndex = 0;
@@ -1667,6 +1693,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
         get renderTarget(){
             return renderTargets.get(0);
+        },
+        /** The targets bound at indices 1 to 3, null where none is; empty for none. */
+        get extraTargets(){
+            return extraTargets;
         },
         get depthStencil(){
             return depthStencil;
@@ -2315,6 +2345,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         streams.clear();
         indices = rebound(indices, null);
         rebound(renderTargets.get(0), null);
+        unbindExtraTargets();
         renderTargets.clear();
         depthStencil = rebound(depthStencil, null);
         retireImplicitSurfaces();
@@ -2860,6 +2891,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             makeImplicitSurfaces();
             adoptBackBuffers();
             renderTargets.set(0, rebound(renderTargets.get(0), backBuffers[0]));
+            // A reset leaves the back buffer the only target (Wine's d3d9
+            // test_reset_resources).
+            unbindExtraTargets();
             depthStencil = rebound(depthStencil, autoDepthStencil);
             const target = describe(backBuffers[0]);
             // An extended device keeps the depth range it had.
@@ -4048,16 +4082,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
-         * One target: the renderer draws into index zero, and the capability
-         * block says so, which is what makes refusing a higher index right.
+         * A target at one of the indices a pixel shader's oC0 to oC3 write.
+         * The first is never none; a later one may be let go of, and only the
+         * first resets the viewport and the scissor (Wine's d3d9
+         * multiple_rendertargets_test, test_set_rt_vp_scissor).
          *
          * @param {number} index
          * @param {any} surface
          */
         SetRenderTarget(index, surface){
-            if (index !== 0 || !surface)
+            if (index >= SIMULTANEOUS_TARGETS || (index === 0 && !surface))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (!surface)
+            {
+                renderTargets.set(index, rebound(renderTargets.get(index), null));
+                renderTargets.delete(index);
+                noteExtraTargets();
+                drawStateVersion++;
+                return D3D_OK;
             }
             const target = describe(surface);
             if ((target.Usage & D3DUSAGE.RENDERTARGET) === 0)
@@ -4065,6 +4109,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             renderTargets.set(index, rebound(renderTargets.get(index), surface));
+            if (index > 0)
+            {
+                noteExtraTargets();
+                drawStateVersion++;
+                return D3D_OK;
+            }
             // A new target resets the viewport and the scissor to all of it,
             // so that one left over from a smaller target cannot stay latched.
             viewport = fullTarget({ width: target.Width, height: target.Height });
@@ -4159,7 +4209,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ surface?: any }} out
          */
         GetRenderTarget(index, out){
-            if (index !== 0)
+            if (index >= SIMULTANEOUS_TARGETS)
             {
                 return D3DERR_INVALIDCALL;
             }

@@ -475,7 +475,7 @@ export function createProgramCache({ backend }){
                         fragment: {
                             module: pixelModule,
                             entryPoint: program.pixel.entry,
-                            targets: [descriptor.target],
+                            targets: descriptor.targets,
                         },
                         primitive: descriptor.primitive,
                         depthStencil: descriptor.depthStencil,

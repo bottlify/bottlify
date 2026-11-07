@@ -363,7 +363,7 @@ export function createBackend(options){
                     fragment: {
                         module,
                         entryPoint: 'fragmentMain',
-                        targets: [descriptor.target],
+                        targets: descriptor.targets,
                     },
                     primitive: descriptor.primitive,
                     depthStencil: descriptor.depthStencil,
