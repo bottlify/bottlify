@@ -82,6 +82,9 @@ test('the startup arena stays below the thread stacks when the libraries reach t
         const app = await createApp({
             executable,
             imagePath: 'C:\\App\\Arena.exe',
+            // The library fills the whole window up to the stacks, where a memory
+            // that grows keeps the engine's range: the whole memory, as before.
+            cpu: { grow: false },
             files: [{ path: 'C:\\App\\big.dll', bytes: buildLibrary(stackPoolBase) }],
         });
         t.after(()=>app.dispose());

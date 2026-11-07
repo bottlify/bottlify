@@ -1,0 +1,124 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * A process's memory holds what the program has been given, and grows as it is
+ * given more (`engineAreaFor`, the cpu layer's `growTo`): a program that commits
+ * half a gigabyte has a memory of that order, not the whole RAM it may reach.
+ * A memory of 4 GiB gives a program linked /LARGEADDRESSAWARE addresses past
+ * 2 GiB, as a 64-bit Windows does, and any other program none.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createApp } from './app.js';
+import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+
+/** @param {number} value @returns {number[]} */
+const u32 = value=>[
+    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
+];
+const MIB = 1 << 20;
+const MEM_COMMIT_RESERVE = 0x3000;
+const PAGE_READWRITE = 4;
+const imports = { 'KERNEL32.dll': ['VirtualAlloc', 'ExitProcess'] };
+
+/**
+ * The memories the run makes that may hold its whole RAM: the processes'.
+ *
+ * @param {import('node:test').TestContext} t @param {number} ram
+ * @returns {WebAssembly.Memory[]}
+ */
+function watchMemories(t, ram){
+    const Made = WebAssembly.Memory;
+    /** @type {WebAssembly.Memory[]} */
+    const made = [];
+    WebAssembly.Memory = /** @type {any} */ (function(/** @type {any} */ descriptor){
+        const memory = new Made(descriptor);
+        if ((descriptor.maximum ?? descriptor.initial) * 65536 >= ram)
+        {
+            made.push(memory);
+        }
+        return memory;
+    });
+    WebAssembly.Memory.prototype = Made.prototype;
+    t.after(()=>{
+        WebAssembly.Memory = Made;
+    });
+    return made;
+}
+
+/**
+ * VirtualAlloc(address, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) into eax,
+ * to `fail` where it answers NULL.
+ *
+ * @param {(name: string) => number} iat @param {number} address @param {number} size
+ */
+const commit = (iat, address, size)=>[
+    0x6a, PAGE_READWRITE, 0x68, ...u32(MEM_COMMIT_RESERVE), 0x68, ...u32(size),
+    0x68, ...u32(address), 0xff, 0x15, ...u32(iat('VirtualAlloc')),
+    0x85, 0xc0, { jump: /** @type {const} */ ('jz'), to: 'fail' },
+];
+
+/** @param {(name: string) => number} iat @returns {import('../../../tools/make-pe.mjs').AsmPart[]} */
+const failing = iat=>[{ label: 'fail' }, 0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))];
+
+test('a process\'s memory holds what the program commits, not its whole RAM',
+    { timeout: 120_000 }, async t=>{
+        const ram = 2 ** 31;
+        const made = watchMemories(t, ram);
+        // Eight commits of 64 MiB, the last byte of each written; exit 0.
+        const executable = buildExe({ imports, codeSize: 0x100, code: ({ iat })=>assemble([
+            0xbe, ...u32(8), //                                  mov esi, 8
+            { label: 'next' },
+            ...commit(iat, 0, 64 * MIB),
+            0xc6, 0x80, ...u32(64 * MIB - 1), 1, //              mov byte [eax + 64 MiB - 1], 1
+            0x4e, { jump: 'jnz', to: 'next' }, //               dec esi; jnz next
+            0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ...failing(iat),
+        ]) });
+        const app = await createApp({ executable, imagePath: 'C:\\App\\commit.exe',
+            memorySize: ram });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0, 'every commit given and written');
+        assert.equal(made.length, 1);
+        const held = made[0].buffer.byteLength;
+        assert.ok(held >= 512 * MIB, `the memory grew to hold what was committed: ${held}`);
+        assert.ok(held < ram, `and no further than that: ${held} of ${ram}`);
+    });
+
+/**
+ * A program that commits a page at 0x90000000, writes a dword there and exits
+ * with what it reads back; 7 where the commit is refused.
+ *
+ * @param {boolean} largeAddressAware
+ */
+const highCommit = largeAddressAware=>buildExe({ imports, largeAddressAware, codeSize: 0x80,
+    code: ({ iat })=>assemble([
+        ...commit(iat, 0x90000000, 0x10000),
+        0xc7, 0x00, ...u32(0x12345678), //                       mov dword [eax], 0x12345678
+        0x8b, 0x18, 0x53, //                                     mov ebx, [eax]; push ebx
+        0xff, 0x15, ...u32(iat('ExitProcess')),
+        ...failing(iat),
+    ]) });
+
+test('a memory of 4 GiB gives a large-address-aware program addresses past 2 GiB, and only it',
+    { timeout: 120_000 }, async t=>{
+        const ram = 2 ** 32;
+        watchMemories(t, ram);
+        const aware = await createApp({ executable: highCommit(true),
+            imagePath: 'C:\\App\\aware.exe', memorySize: ram });
+        t.after(()=>aware.dispose());
+        assert.equal(await aware.run({ timeoutMs: 60_000 }), 0x12345678,
+            'the page at 0x90000000 committed, written and read');
+        await aware.dispose();
+
+        const plain = await createApp({ executable: highCommit(false),
+            imagePath: 'C:\\App\\plain.exe', memorySize: ram });
+        t.after(()=>plain.dispose());
+        assert.equal(await plain.run({ timeoutMs: 60_000 }), 7,
+            'a program not linked for it is refused the address');
+    });

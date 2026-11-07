@@ -22,7 +22,7 @@ import {
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
     heapSizeFor,
-    spaceAbove,
+    spaceAbove, engineAreaFor,
     placeMainStack,
     stackReserveOf,
     resourceLookup,
@@ -2127,4 +2127,27 @@ test('a divergence is said once, a loss the first time and every 256th with its 
     // And kept, for the diagnostics, after the journal has let them go.
     assert.deepEqual([...report.losses], [['Direct3D: lost: a draw', 512]]);
     assert.deepEqual([...report.divergences], ['Direct3D: a state accepted and not drawn']);
+});
+
+test('the engine keeps a range under the stacks, short of 0x10000000, or none', ()=>{
+    const MIB = 0x100000;
+    const space = { moduleBase: 0x02000000, stackPoolStart: 0x08000000, heapStart: 0x0c000000 };
+    const image = { imageBase: 0x400000, sizeOfImage: MIB };
+    /** @param {number} executors @param {object} [more] */
+    const area = (executors, more = {})=>engineAreaFor({ long: false, memorySize: 2 ** 31,
+        ...space, executors, image, ...more });
+    assert.deepEqual(area(1), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false },
+        'twenty MiB an executor and eight shared, at the top of the libraries\' space');
+    assert.deepEqual(area(3), { at: 0x08000000 - 68 * MIB, span: 68 * MIB, inHeap: false });
+    assert.equal(area(4), undefined,
+        'too large for the libraries\' space, and at the heap\'s start it would reach 0x10000000');
+    assert.deepEqual(area(1, { moduleBase: 0x06000000, stackPoolStart: 0x07800000 }),
+        { at: 0x0c000000, span: 28 * MIB, inHeap: true },
+        'too little of the libraries\' space left: the heap\'s start');
+    assert.equal(area(1, { long: true }), undefined, 'long mode keeps its whole memory');
+    assert.equal(area(1, { memorySize: 3 * 2 ** 30 }), undefined, 'a RAM not a power of two');
+    assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x10000 } }),
+        { at: 0x0c000000, span: 28 * MIB, inHeap: true }, 'the program\'s image at the top');
+    assert.equal(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x06000000 } }),
+        undefined, 'the program\'s image over both');
 });

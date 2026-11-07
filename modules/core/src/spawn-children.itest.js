@@ -297,9 +297,14 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         const memorySize = 256 * 1024 * 1024;
         const Made = WebAssembly.Memory;
         let made = 0;
+        let whole = 0;
         WebAssembly.Memory = /** @type {any} */ (function(/** @type {any} */ descriptor){
             const memory = new Made(descriptor);
-            made += memory.buffer.byteLength >= memorySize ? 1 : 0;
+            // A process's memory: one that may hold the whole RAM. One that holds
+            // it from the start is counted too -- it should be none, every process
+            // holding what it was given and growing as it is given more.
+            made += (descriptor.maximum ?? descriptor.initial) * 65536 >= memorySize ? 1 : 0;
+            whole += memory.buffer.byteLength >= memorySize ? 1 : 0;
             return memory;
         });
         WebAssembly.Memory.prototype = Made.prototype;
@@ -324,6 +329,7 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         assert.notEqual(codes[0], 0, 'the writer was given a block');
         assert.equal(codes[1], codes[0], 'the reader was given the same block, and found it zero');
         assert.equal(made, 2, 'the parent\'s memory and one more, not one per child');
+        assert.equal(whole, 0, 'none of them holding the whole RAM from its start');
     });
 
 test('a child starts from its image as it was when CreateProcess was called, gone from the disk'

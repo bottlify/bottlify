@@ -54,8 +54,8 @@ is ignored; `executors`, the older name of `cpu.cores`, is refused.
 | `machine` | `'x86'` \| `'amd64'` | the first program's width | Whether the machine is a 32- or a 64-bit Windows. On a 64-bit one a 32-bit process runs under WOW64: `IsWow64Process`, `GetNativeSystemInfo`, `GetSystemWow64Directory` and the environment's `PROCESSOR_ARCHITEW6432` say so. A 64-bit program always runs on a 64-bit machine. |
 | `graphicsApi` | `'directx7'` \| `'directx8'` \| `'directx9'` \| `'directx10'` \| `'directx11'` \| `'opengl'` | every API | The graphics the program gets. `directxN` keeps every DirectX up to N (DirectDraw, Direct3D 8, 9, then Direct3D 10 with DXGI, then Direct3D 11); `opengl` keeps OpenGL alone. Only those system DLLs exist and only their code is built. The registry, `DirectXSetupGetVersion`, DxDiag and the DLLs' file versions report DirectX 7.0, 8.1 or 9.0c (9.0c for 9, 10 and 11). Absent: every API, DirectX 9.0c. |
 | `gpuProfile` | `'sm1'` \| `'sm2'` \| `'sm3'` \| `'sm4'` \| `'host'` | `'host'` | The card the video adapter is shown as ([configuration.md](configuration.md#graphics)). |
-| `memorySize` | number | 1 GiB | Guest RAM in bytes, a power of two; reserved, not committed. |
-| `cpu` | `{ cores? }` | automatic | The program's processors ([configuration.md](configuration.md#cpu)). |
+| `memorySize` | number | 1 GiB | Guest RAM in bytes, a power of two up to 4 GiB; a process's memory grows to what its program takes ([configuration.md](configuration.md#cpu)). |
+| `cpu` | `{ cores?, grow? }` | automatic | The program's processors ([configuration.md](configuration.md#cpu)). |
 | `win32` | `{ trustedRoots?, steam? }` | none | The machine's trusted roots and a Steam account ([configuration.md](configuration.md#win32)). |
 | `unattended` | boolean | `false` | Nobody is at the screen: every modal dialog and message box gets its default button, and each answer is reported as a `divergence` event. |
 | `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and where its translations are kept ([configuration.md](configuration.md#cpu)). |

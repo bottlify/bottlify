@@ -228,6 +228,13 @@ export function createCpuModule(){
             const log = moduleHost?.requireApi('log');
 
             /**
+             * Who is told the guest's memory grew (`onGrow`), kept from before
+             * the machine boots.
+             *
+             * @type {((held: number) => void)[]}
+             */
+            const growListeners = [];
+            /**
              * Everything this instance owns, and whether it is still open.
              *
              * The calls an api hands out close over this object rather than over
@@ -398,6 +405,9 @@ export function createCpuModule(){
                 zeroReadsBelow: config?.zeroReadsBelow ?? 0,
                 // Ranges past RAM a read finds where an untested one does.
                 readThrough: config?.readThrough ?? [],
+                // The guest range the engine keeps for its tables, where the memory
+                // grows as the guest is given more (`CorkHostConfig.engineArea`).
+                engineArea: config?.engineArea,
                 // And below this nothing runs, whatever reads and writes the
                 // range answers.
                 noExecuteBelow: config?.noExecuteBelow ?? 0,
@@ -635,6 +645,7 @@ export function createCpuModule(){
                         readThrough: settings.readThrough,
                         noExecuteBelow: settings.noExecuteBelow,
                         executors: settings.executors,
+                        ...(settings.engineArea ? { engineArea: settings.engineArea } : {}),
                         // One time-stamp counter for every executor (`useGuestClock`).
                         ...(several ? { tsc: createTsc() } : {}),
                         // Settled here, once, for every executor of the process:
@@ -645,6 +656,10 @@ export function createCpuModule(){
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                         reused: settings.reused });
+                    for (const listener of growListeners)
+                    {
+                        state.host.onGrow?.(listener);
+                    }
                     state.nudge?.stop();
                     state.nudge = nudging ? startGcNudge(nudging) : null;
                     if (several)
@@ -934,6 +949,31 @@ export function createCpuModule(){
                  * @returns {Uint8Array | null}
                  */
                 ramView: ()=>started().ramView?.() ?? null,
+                /**
+                 * Grows the guest's memory to hold `end` bytes of RAM where it grows
+                 * as the guest is given more; answers the RAM it holds, which is the
+                 * whole RAM for a memory that does not grow and less than `end`
+                 * where it could not.
+                 *
+                 * @param {number} end
+                 * @returns {number}
+                 */
+                growTo: end=>state.host?.growTo?.(end) ?? settings.memorySize,
+                /** The RAM the guest's memory holds now. @returns {number} */
+                ramHeld: ()=>state.host?.ramHeld?.() ?? settings.memorySize,
+                /** Whether the guest's memory grows as the guest is given more. */
+                growing: ()=>state.host?.growing?.() === true,
+                /**
+                 * Called with the RAM held each time the guest's memory grows.
+                 *
+                 * @param {(held: number) => void} listener
+                 */
+                onGrow: listener=>{
+                    growListeners.push(listener);
+                    state.host?.onGrow?.(listener);
+                },
+                /** The guest range the engine keeps for its tables; empty where none. */
+                engineRange: ()=>state.host?.engineRange?.() ?? { from: 0, to: 0 },
                 /**
                  * The engine's whole memory, for a process that takes it once
                  * this one has gone (`CorkHostConfig.reused`); null under an

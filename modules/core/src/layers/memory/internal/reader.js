@@ -150,7 +150,8 @@ export class DwordReader {
             }
             this.data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             this.words = bytes.byteOffset % 4 === 0
-                ? new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2)
+                ? new Int32Array(bytes.buffer, bytes.byteOffset,
+                    Math.floor(bytes.byteLength / 4))
                 : new Int32Array(0);
         }
         return this.data;

@@ -30,6 +30,8 @@ export const DIR_BASERELOC = 5;
 /** Section characteristics. */
 /** The COFF characteristic that marks an image as a library rather than a program. */
 const IMAGE_FILE_DLL = 0x2000;
+/** The image handles addresses past 2 GiB: given them on a 64-bit Windows. */
+const IMAGE_FILE_LARGE_ADDRESS_AWARE = 0x0020;
 
 const SECTION_MEM_EXECUTE = 0x20000000;
 const SECTION_MEM_READ = 0x40000000;
@@ -63,6 +65,8 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {boolean} library         A DLL, as against a program: only a DLL's imports
  *                                     are resolved and its entry point run when one is
  *                                     loaded by LoadLibrary.
+ * @property {boolean} largeAddressAware  Linked /LARGEADDRESSAWARE: on 64-bit Windows a
+ *                                     32-bit process of it is given addresses up to 4 GiB.
  * @property {PeSection[]} sections
  * @property {{ address: number, size: number }[]} directories
  */
@@ -187,6 +191,7 @@ function parseHeaders(bytes, wide){
         relocatable: relocDirectory !== undefined && relocDirectory.size > 0
             || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0,
         library: (characteristics & IMAGE_FILE_DLL) !== 0,
+        largeAddressAware: (characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) !== 0,
         sections,
         directories,
     };
