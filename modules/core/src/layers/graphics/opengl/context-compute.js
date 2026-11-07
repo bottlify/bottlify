@@ -27,13 +27,15 @@
 import { GL } from './constants.js';
 import { BLOCK_LIMITS, COMPUTE_LIMITS } from './glsl-link.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
-import { COUNTER_LIMITS, STORAGE_BUFFER_OFFSET_ALIGNMENT, STORAGE_LIMITS }
-    from './glsl-storage.js';
+import {
+    COUNTER_LIMITS, IMAGE_LIMITS, IMAGE_UNIT_FORMATS, STORAGE_BUFFER_OFFSET_ALIGNMENT,
+    STORAGE_LIMITS,
+} from './glsl-storage.js';
 
 /** The calls of this file a display list does not record (4.6 compatibility 21.4). */
 export const COMPUTE_CALLS_NOT_COMPILED = Object.freeze([
     'glDispatchCompute', 'glDispatchComputeIndirect', 'glShaderStorageBlockBinding',
-    'glGetProgramResourceIndex',
+    'glGetProgramResourceIndex', 'glBindImageTexture',
 ]);
 
 /**
@@ -47,6 +49,8 @@ export function installComputeCalls(context, kernel, gpu){
     const { enter, setError, record } = kernel;
 
     const queries = kernel.side.queries ??= new Map();
+    const indexed = /** @type {Map<number, (index: number) => ({ kind: string,
+     *     values: number[] } | null)>} */ (kernel.side.indexed ??= new Map());
     /** @param {number} query @param {number} value */
     const answer = (query, value)=>queries.set(query, ()=>({ kind: 'int', values: [value] }));
     answer(GL.MAX_COMPUTE_WORK_GROUP_INVOCATIONS, COMPUTE_LIMITS.invocations);
@@ -95,14 +99,55 @@ export function installComputeCalls(context, kernel, gpu){
         .set(GL.SHADER_STORAGE_BUFFER, GL.MAX_SHADER_STORAGE_BUFFER_BINDINGS)
         .set(GL.ATOMIC_COUNTER_BUFFER, GL.MAX_ATOMIC_COUNTER_BUFFER_BINDINGS);
 
+    // Images: units GL's 8, but WebGPU's 4 storage textures a stage.
+    answer(GL.MAX_IMAGE_UNITS, IMAGE_LIMITS.units);
+    answer(GL.MAX_IMAGE_SAMPLES, 0);
+    for (const query of [GL.MAX_VERTEX_IMAGE_UNIFORMS, GL.MAX_TESS_CONTROL_IMAGE_UNIFORMS,
+        GL.MAX_TESS_EVALUATION_IMAGE_UNIFORMS, GL.MAX_GEOMETRY_IMAGE_UNIFORMS])
+    {
+        answer(query, 0);
+    }
+    for (const query of [GL.MAX_FRAGMENT_IMAGE_UNIFORMS, GL.MAX_COMPUTE_IMAGE_UNIFORMS,
+        GL.MAX_COMBINED_IMAGE_UNIFORMS])
+    {
+        answer(query, IMAGE_LIMITS.perStage);
+    }
+
+    /**
+     * What each image unit binds (glBindImageTexture): the context's, as the
+     * texture units are.
+     *
+     * @type {{ name: number, level: number, layered: boolean, layer: number, access: number,
+     *     format: number }[]}
+     */
+    const units = Array.from({ length: IMAGE_LIMITS.units }, ()=>({ name: 0, level: 0,
+        layered: false, layer: 0, access: GL.READ_ONLY, format: 0x8058 /* RGBA8 */ }));
+    /** @param {number} name */
+    const textureNamed = name=>(name === 0 ? undefined
+        : kernel.shareGroup().textures.objects.get(name));
+    /** @param {(unit: typeof units[0]) => number} read */
+    const unitQuery = read=>(/** @type {number} */ index)=>(index < 0 || index >= units.length
+        ? null : { kind: 'int', values: [read(units[index])] });
+    // A deleted texture's name answers 0 (4.2 section 8.26).
+    indexed.set(GL.IMAGE_BINDING_NAME, unitQuery(unit=>(textureNamed(unit.name) ? unit.name
+        : 0)));
+    indexed.set(GL.IMAGE_BINDING_LEVEL, unitQuery(unit=>unit.level));
+    indexed.set(GL.IMAGE_BINDING_LAYERED, unitQuery(unit=>(unit.layered ? 1 : 0)));
+    indexed.set(GL.IMAGE_BINDING_LAYER, unitQuery(unit=>unit.layer));
+    indexed.set(GL.IMAGE_BINDING_ACCESS, unitQuery(unit=>unit.access));
+    indexed.set(GL.IMAGE_BINDING_FORMAT, unitQuery(unit=>unit.format));
+    kernel.side.imageUnits = ()=>units.map(unit=>{
+        const texture = textureNamed(unit.name);
+        return texture ? { texture, level: unit.level, layered: unit.layered,
+            layer: unit.layer, access: unit.access, format: unit.format } : null;
+    });
+
     // A buffer a shader wrote, read on this side (`context-arrays.js`).
     kernel.side.readDeviceBuffer = (/** @type {any} */ buffer)=>gpu?.readBuffer?.(context,
         buffer) ?? null;
 
     // The two indexed limits, by axis (glGetIntegeri_v); neither has a
     // plain form.
-    const indexed = /** @type {Map<number, (index: number) => ({ kind: string,
-     *     values: number[] } | null)>} */ (kernel.side.indexed ??= new Map());
     indexed.set(GL.MAX_COMPUTE_WORK_GROUP_COUNT, index=>(index >= 0 && index < 3
         ? { kind: 'int', values: [COMPUTE_LIMITS.count[index]] } : null));
     indexed.set(GL.MAX_COMPUTE_WORK_GROUP_SIZE, index=>(index >= 0 && index < 3
@@ -136,6 +181,33 @@ export function installComputeCalls(context, kernel, gpu){
     };
 
     Object.assign(context, {
+        /**
+         * glBindImageTexture (4.2 section 8.26): a texture's level, all its
+         * layers or one, bound to an image unit for loads and stores.
+         *
+         * @param {number} unit @param {number} name @param {number} level
+         * @param {boolean} layered @param {number} layer @param {number} access
+         * @param {number} format
+         */
+        glBindImageTexture(unit, name, level, layered, layer, access, format){
+            if (!enter('glBindImageTexture', [unit, name, level, layered, layer, access, format]))
+            {
+                return;
+            }
+            if (unit < 0 || unit >= units.length || level < 0 || layer < 0
+                || (name !== 0 && !textureNamed(name)) || !IMAGE_UNIT_FORMATS.has(format))
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (access !== GL.READ_ONLY && access !== GL.WRITE_ONLY && access !== GL.READ_WRITE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            units[unit] = { name, level, layered, layer, access, format };
+        },
+
         /**
          * @param {number} programName @param {number} index @param {number} binding
          */

@@ -389,6 +389,10 @@ export function laterEntryPoints(h){
             z >>> 0)),
         glDispatchComputeIndirect: ([offset])=>answer(current()?.glDispatchComputeIndirect(
             offset | 0)),
+        // --- image load and store (4.2) ---
+        glBindImageTexture: ([unit, texture, level, layered, layer, access, format])=>answer(
+            current()?.glBindImageTexture(unit >>> 0, texture >>> 0, level | 0,
+                (layered & 0xff) !== 0, layer | 0, access >>> 0, format >>> 0)),
         // --- shader storage blocks (4.3) ---
         glShaderStorageBlockBinding: ([program, index, binding])=>answer(
             current()?.glShaderStorageBlockBinding(program >>> 0, index >>> 0, binding >>> 0)),

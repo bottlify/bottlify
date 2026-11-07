@@ -31,7 +31,15 @@
  *   out of it by the plan made here.
  */
 
-import { atomicCountersOf, storageBlocksOf } from './glsl-storage.js';
+import {
+    IMAGE_FORMATS, STORAGE_LIMITS, atomicCountersOf, checkImageStages, storageBlocksOf,
+} from './glsl-storage.js';
+
+/** The format qualifiers of the images WebGPU stores into, and the others GLSL names. */
+const IMAGE_FORMAT_NAMES = new Set([...IMAGE_FORMATS.map(([name])=>name), 'rg16f',
+    'r11f_g11f_b10f', 'r16f', 'rgba16', 'rgb10_a2', 'rg16', 'rg8', 'r16', 'r8', 'rgba16_snorm',
+    'rg16_snorm', 'rg8_snorm', 'r16_snorm', 'r8_snorm', 'rg16i', 'rg8i', 'r16i', 'r8i',
+    'rgb10_a2ui', 'rg16ui', 'rg8ui', 'r16ui', 'r8ui']);
 import { BUILTIN_ATTRIBUTES, GLSL_LIMITS } from './glsl-builtins.js';
 import { baseOf, componentsOf, glslName, innermost } from './glsl-types.js';
 import { blockLayout, blockVariables } from './glsl-layout.js';
@@ -217,6 +225,8 @@ export const FEEDBACK_LIMITS = Object.freeze({
  *     shader storage blocks, by index (4.3)
  * @property {import('./glsl-storage.js').AtomicCounter[]} [counters]  the active atomic
  *     counters (4.2), which are not among `uniforms`
+ * @property {import('./glsl-storage.js').ImageUniform[]} [images]  the image uniforms'
+ *     elements (4.2), each its unit's value in the store
  * @property {LinkedStage | null} [compute]  a compute program's one stage (4.3)
  * @property {[number, number, number]} [localSize]  its work group's size
  */
@@ -241,7 +251,8 @@ export const COMPUTE_LIMITS = Object.freeze({
 });
 
 /** @param {GlslType} type */
-const wordsOf = type=>(type.kind === 'sampler' ? 1 : componentsOf(type));
+const wordsOf = type=>(type.kind === 'sampler' || type.kind === 'image' ? 1
+    : componentsOf(type));
 
 /**
  * The leaves of a uniform: each basic or sampler element reachable through
@@ -694,6 +705,8 @@ export function linkProgram(given){
     const locations = new Map();
     /** @type {LinkedProgram["samplers"]} */
     const samplers = [];
+    /** @type {import('./glsl-storage.js').ImageUniform[]} */
+    const images = [];
     let nextLocation = 0;
     let storeWords = 0;
     for (const [rootName, symbol] of uniformRoots)
@@ -707,6 +720,19 @@ export function linkProgram(given){
                 size: leaf.size, location: nextLocation, offset: storeWords,
                 words: wordsOf(leaf.type),
             };
+            if (leaf.type.kind === 'image')
+            {
+                const layout = /** @type {Record<string, any>} */ (
+                    symbol.qualifiers?.layout ?? {});
+                const memory = symbol.qualifiers?.memory ?? new Set();
+                for (let k = 0; k < leaf.size; k++)
+                {
+                    images.push({ leaf: entry, element: k, type: leaf.type,
+                        format: Object.keys(layout).find(key=>IMAGE_FORMAT_NAMES.has(key)) ?? '',
+                        binding: (typeof layout.binding === 'number' ? layout.binding : 0) + k,
+                        readonly: memory.has('readonly'), writeonly: memory.has('writeonly') });
+                }
+            }
             if (leaf.type.kind === 'sampler')
             {
                 entry.samplerBindings = [];
@@ -743,7 +769,7 @@ export function linkProgram(given){
             {
                 continue;
             }
-            const base = leaf.type.kind === 'sampler' ? 'int'
+            const base = leaf.type.kind === 'sampler' || leaf.type.kind === 'image' ? 'int'
                 : /** @type {any} */ (leaf.type).base ?? 'float';
             constant.forEach((/** @type {number} */ value, /** @type {number} */ k)=>{
                 if (k < leaf.words * leaf.size)
@@ -786,6 +812,23 @@ export function linkProgram(given){
     const linkedStages = { vertex: vs, geometry: gs, fragment: fs, compute: cs };
     const storageBlocks = storageBlocksOf(linkedStages, error);
     const counters = atomicCountersOf(linkedStages, error);
+    // An image unit's default is its `layout(binding)` (4.20 section 4.4.5).
+    for (const image of images)
+    {
+        new Int32Array(defaults)[image.leaf.offset + image.element] = image.binding;
+    }
+    checkImageStages(linkedStages, images, error);
+    // WebGPU's storage buffers a stage: the blocks and the counter buffers together.
+    for (const stage of /** @type {const} */ (['fragment', 'compute']))
+    {
+        const buffers = storageBlocks.filter(b=>b.stages[stage]).length
+            + new Set(counters.filter(c=>c.stages[stage]).map(c=>c.binding)).size;
+        if (buffers > STORAGE_LIMITS.perStage)
+        {
+            error(`${stage} shader: ${buffers} storage blocks and atomic counter buffers, more`
+                + ` than the ${STORAGE_LIMITS.perStage} a stage binds`);
+        }
+    }
 
     if (errors.length > 0)
     {
@@ -798,7 +841,7 @@ export function linkProgram(given){
             vertex: vs, geometry: gs, geometryInputs, geometryLayout, feedback, fragment: fs,
             attributes, builtinAttributes, uniforms, locations,
             storeWords, defaults, varyings, samplers, writesData, fragmentOutputs, outputs,
-            blocks, blockUniforms, storageBlocks, counters,
+            blocks, blockUniforms, storageBlocks, counters, images,
             ...cs ? { compute: cs, localSize: /** @type {[number, number, number]} */ (
                 localSize) } : {},
         },

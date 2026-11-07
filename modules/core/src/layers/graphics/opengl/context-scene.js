@@ -438,6 +438,7 @@ export function createSceneBuilder(kernel){
             uniformBuffers: glsl ? side.uniformBuffers?.() ?? [] : [],
             storageBuffers: glsl ? side.storageBuffers?.() ?? [] : [],
             counterBuffers: glsl ? side.counterBuffers?.() ?? [] : [],
+            imageUnits: glsl ? side.imageUnits?.() ?? [] : [],
             feedback: glsl ? side.feedbackSession?.() ?? null : null,
             discard: on(GL.RASTERIZER_DISCARD),
 

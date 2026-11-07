@@ -22,10 +22,10 @@
  */
 
 import {
-    GLSL_BLOCK_BINDING, GLSL_COMPUTE_BINDING, GLSL_COUNTER_BINDING, GLSL_STORAGE_BINDING,
-    samplerTypeOf, textureLayoutOf,
+    GLSL_BLOCK_BINDING, GLSL_COMPUTE_BINDING, GLSL_COUNTER_BINDING, GLSL_IMAGE_BINDING,
+    GLSL_STORAGE_BINDING, samplerTypeOf, textureLayoutOf,
 } from './glsl-wgsl.js';
-import { STORAGE_BUFFER_OFFSET_ALIGNMENT } from './glsl-storage.js';
+import { IMAGE_FORMATS, STORAGE_BUFFER_OFFSET_ALIGNMENT } from './glsl-storage.js';
 import { generateGlslCompute } from './wgsl.js';
 
 const COMPUTE_STAGE = 4;
@@ -34,6 +34,7 @@ const COMPUTE_STAGE = 4;
  * @typedef {Object} MemoryServices
  * @property {any} backend
  * @property {(buffer: any) => any} bufferFor  a buffer object's GPU copy
+ * @property {(texture: any, recording: any) => any} textureFor  a texture's GPU copy
  * @property {(detail: string) => void} lose
  */
 
@@ -99,11 +100,14 @@ export function createGlMemory(services){
 
     /**
      * @param {import('./pipeline.js').Scene} scene @param {any} executable
-     * @param {{ storage?: number[], written?: number[], counters?: number[] }} stage
-     * @param {number} recording @param {number} visibility
+     * @param {{ storage?: number[], written?: number[], counters?: number[],
+     *     images?: import('./glsl-wgsl.js').UsedImage[] }} stage
+     * @param {any} recorded  the recording the command goes into
+     * @param {number} visibility
      * @returns {MemoryBinding}
      */
-    const bind = (scene, executable, stage, recording, visibility)=>{
+    const bind = (scene, executable, stage, recorded, visibility)=>{
+        const recording = recorded.id;
         /** @type {MemoryBinding} */
         const out = { layout: [], entries: [], key: '', writes: false };
         const linked = executable.linked;
@@ -145,7 +149,88 @@ export function createGlMemory(services){
                 ?? { buffer: spareOf(reach), offset: 0, size: Math.max(4, reach) } });
             out.key += `c${binding}`;
         }
+        for (const { index, access, format, viewDimension } of stage.images ?? [])
+        {
+            const image = linked.images[index];
+            const unit = executable.ints[image.leaf.offset + image.element];
+            const view = imageView(scene.imageUnits?.[unit], unit, format, viewDimension,
+                recorded);
+            if (view && access !== 'read-only')
+            {
+                out.writes = true;
+            }
+            const binding = GLSL_IMAGE_BINDING + index;
+            out.layout.push({ binding, visibility, storageTexture: { access, format,
+                viewDimension } });
+            out.entries.push({ binding, resource: view ?? spareImage(format, viewDimension) });
+            out.key += `i${index}${access}${format}${viewDimension}`;
+        }
         return out;
+    };
+
+    /**
+     * The view of the level and layers an image unit binds, as the shader
+     * declared it, or null - said - where WebGPU cannot show it so.
+     *
+     * @param {{ texture: any, level: number, layered: boolean, layer: number,
+     *     format: number } | null | undefined} bound
+     * @param {number} unit @param {string} format @param {string} viewDimension
+     * @param {any} recorded
+     */
+    const imageView = (bound, unit, format, viewDimension, recorded)=>{
+        const what = `image unit ${unit}`;
+        if (!bound?.texture)
+        {
+            services.lose(`${what} has no texture bound: its loads read zero and its stores`
+                + ' were dropped');
+            return null;
+        }
+        const unitFormat = IMAGE_FORMATS.find(([, gl])=>gl === bound.format)?.[2];
+        const copy = services.textureFor(bound.texture, recorded);
+        if (unitFormat !== format || copy.format !== format)
+        {
+            services.lose(`${what} binds a texture of ${copy.format} as ${unitFormat
+                ?? `format 0x${bound.format.toString(16)}`} to an image of ${format}: WebGPU`
+                + ' views a storage texture in its own format alone, and nothing was read or'
+                + ' written');
+            return null;
+        }
+        const whole = viewDimension === '2d-array' || viewDimension === '3d';
+        if (whole !== (bound.layered || viewDimension === '3d'))
+        {
+            services.lose(`${what} binds ${bound.layered ? 'every layer' : 'one layer'} to an`
+                + ` image of ${viewDimension}, which WebGPU does not view so: nothing was read`
+                + ' or written');
+            return null;
+        }
+        if (bound.level >= copy.levels)
+        {
+            services.lose(`${what} binds level ${bound.level}, which the texture lacks`);
+            return null;
+        }
+        return copy.gpu.texture.createView({ label: `gl-image:${unit}`, format,
+            dimension: viewDimension, baseMipLevel: bound.level, mipLevelCount: 1,
+            ...whole ? {} : { baseArrayLayer: bound.layer, arrayLayerCount: 1 } });
+    };
+
+    /** Storage textures an image with nothing usable bound reaches, by shape. */
+    /** @type {Map<string, any>} */
+    const spareImages = new Map();
+    /** @param {string} format @param {string} viewDimension */
+    const spareImage = (format, viewDimension)=>{
+        const key = `${format}|${viewDimension}`;
+        let view = spareImages.get(key);
+        if (!view)
+        {
+            const surface = services.backend.createSurface({ width: 1,
+                height: 1, format, label: `gl-spare-image:${key}`,
+                dimension: viewDimension === '3d' ? '3d' : undefined,
+                // STORAGE_BINDING and TEXTURE_BINDING.
+                usage: 0x08 | 0x04 });
+            view = surface.texture.createView({ format, dimension: viewDimension });
+            spareImages.set(key, view);
+        }
+        return view;
     };
 
     return { bind };
@@ -319,7 +404,7 @@ export function createGlCompute(services){
                 buffer: { type: 'uniform' } });
             entries.push(...services.uniformBlocksFor(scene, executable, [index], recording));
         }
-        const memory = services.memory.bind(scene, executable, stage, recording.id,
+        const memory = services.memory.bind(scene, executable, stage, recording,
             COMPUTE_STAGE);
         layout.push(...memory.layout);
         entries.push(...memory.entries);

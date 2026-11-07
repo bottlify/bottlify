@@ -37,6 +37,7 @@ import { compileFront } from './glsl-front.js';
 import { GLSL_EXTENSIONS } from './glsl-versions.js';
 import { GLSL_CONSTANTS } from './glsl-library.js';
 import { BLOCK_LIMITS, COMPUTE_LIMITS, FEEDBACK_LIMITS, linkProgram } from './glsl-link.js';
+import { IMAGE_LIMITS } from './glsl-storage.js';
 import { BUILTIN_VARIABLES, GLSL_LIMITS } from './glsl-builtins.js';
 import { componentsOf } from './glsl-types.js';
 
@@ -202,6 +203,14 @@ export function glTypeOf(type){
             return SAMPLER_TYPES[`${type.sampled === 'float' ? '' : type.sampled}${type.dim}`
                 + `${type.ms ? 'MS' : ''}${type.array ? 'Array' : ''}`
                 + `${type.shadow ? 'Shadow' : ''}`] ?? 0;
+        case 'image': {
+            // GL_IMAGE_1D on, eleven shapes a kind of value (4.2 table 7.3).
+            const shape = ['1D', '2D', '3D', '2DRect', 'Cube', 'Buffer', '1DArray', '2DArray',
+                'CubeArray', '2DMS', '2DMSArray'].indexOf(`${type.dim}${type.ms ? 'MS' : ''}`
+                + `${type.array ? 'Array' : ''}`);
+            return shape < 0 ? 0 : 0x904c + shape
+                + (type.sampled === 'int' ? 11 : type.sampled === 'uint' ? 22 : 0);
+        }
         default:
             return 0;
     }
@@ -397,7 +406,9 @@ export function installShaderCalls(context, kernel){
         }
         const { executable, leaf, element } = target;
         const type = leaf.type;
-        if (type.kind === 'sampler')
+        // An image's value is its unit, as a sampler's is (4.2 section 7.6).
+        const opaque = type.kind === 'sampler' || type.kind === 'image';
+        if (opaque)
         {
             if (kind !== 'i' || components !== 1 || matrix)
             {
@@ -429,12 +440,14 @@ export function installShaderCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        if (type.kind === 'sampler')
+        if (opaque)
         {
+            const units = type.kind === 'image' ? IMAGE_LIMITS.units
+                : GLSL_LIMITS.combinedTextureImageUnits;
             for (let k = 0; k < count; k++)
             {
                 const unit = values[k];
-                if (unit < 0 || unit >= GLSL_LIMITS.combinedTextureImageUnits)
+                if (unit < 0 || unit >= units)
                 {
                     setError(GL.INVALID_VALUE);
                     return;
@@ -443,7 +456,7 @@ export function installShaderCalls(context, kernel){
         }
         const elements = Math.min(count, leaf.size - element);
         const stored = type.kind === 'scalar' || type.kind === 'vector' ? type.base
-            : type.kind === 'sampler' ? 'int' : 'float';
+            : opaque ? 'int' : 'float';
         const { floats, ints } = executable;
         let changed = false;
         for (let e = 0; e < elements; e++)

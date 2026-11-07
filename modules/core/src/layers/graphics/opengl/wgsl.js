@@ -1325,6 +1325,7 @@ ${stage.code}
             stages.blocks = fragment.usedBlocks;
             stages.storage = fragment.usedStorage;
             stages.written = fragment.writtenStorage;
+            stages.images = fragment.usedImages;
             stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
             stages.geometry = {
@@ -1352,6 +1353,7 @@ ${stage.code}
             stages.blocks = [...new Set([...vertex.usedBlocks, ...fragment.usedBlocks])];
             stages.storage = fragment.usedStorage;
             stages.written = fragment.writtenStorage;
+            stages.images = fragment.usedImages;
             stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
@@ -1384,6 +1386,7 @@ ${stage.code}
             stages.blocks = fragment.usedBlocks;
             stages.storage = fragment.usedStorage;
             stages.written = fragment.writtenStorage;
+            stages.images = fragment.usedImages;
             stages.counters = fragment.usedCounters;
             parts.unshift(...samplerDeclarations(program, stages.samplers));
         }
@@ -1429,7 +1432,7 @@ ${stage.code}
 `;
         return { code, plan: stage.plan, samplers: stage.usedSamplers, blocks: stage.usedBlocks,
             storage: stage.usedStorage, written: stage.writtenStorage,
-            counters: stage.usedCounters };
+            counters: stage.usedCounters, images: stage.usedImages };
     }
     catch (e){
         return { code: '', plan: null, samplers: [], blocks: [], storage: [], counters: [],
@@ -1455,6 +1458,8 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  * @property {number[]} [storage]  the storage blocks its fragment stage reads or writes
  * @property {number[]} [written]  those it writes
  * @property {number[]} [counters]  the atomic counter buffers its fragment stage changes
+ * @property {import('./glsl-wgsl.js').UsedImage[]} [images]  the images it loads and
+ *     stores
  * @property {GeometryPasses} [geometry]  the passes before the draw, for a program
  *     with a geometry shader: the draw's vertex stage then reads what they made
  * @property {{ vertex: ComputeStage, inputs: number }} [capture]  the vertex stage as a
@@ -1483,6 +1488,8 @@ const geometryOutputRegisters = (program, fields)=>1 + fields.length
  * @property {number[]} [storage]  the shader storage blocks it reads or writes, by index
  * @property {number[]} [written]  those it writes
  * @property {number[]} [counters]  the atomic counter buffers it changes, by binding
+ * @property {import('./glsl-wgsl.js').UsedImage[]} [images]  the images it loads and
+ *     stores, by index, and how
  */
 
 /**

@@ -62,6 +62,10 @@ import {
 } from './gpu-layout.js';
 import { createGlGeometry } from './gpu-geometry.js';
 import { createGlCompute, createGlMemory } from './gpu-compute.js';
+import { IMAGE_FORMATS } from './glsl-storage.js';
+
+/** The formats an image unit binds a texture's storage in: WebGPU's storage formats. */
+const IMAGE_STORAGE = new Set(IMAGE_FORMATS.map(([, , format])=>format));
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
     VERTEX_PROGRAM_BINDING,
@@ -75,7 +79,8 @@ import {
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
 import {
     GLSL_BLOCK_BINDING, GLSL_COUNTER_BINDING, GLSL_GEOMETRY_BINDING, GLSL_GEOMETRY_DRAW_GROUP,
-    GLSL_STORAGE_BINDING, GLSL_VERTEX_BINDING, feedbackWrites, samplerTypeOf, textureLayoutOf,
+    GLSL_IMAGE_BINDING, GLSL_STORAGE_BINDING, GLSL_VERTEX_BINDING, feedbackWrites,
+    samplerTypeOf, textureLayoutOf,
 } from './glsl-wgsl.js';
 
 /**
@@ -653,6 +658,8 @@ export function createGpuRenderer(services){
      * @property {number[]} [storage]  the storage blocks its fragment stage reaches (4.3)
      * @property {number[]} [written]  those it writes
      * @property {number[]} [counters]  the atomic counter buffers it changes (4.2)
+     * @property {import('./glsl-wgsl.js').UsedImage[]} [images]  the images it loads and
+     *     stores (4.2)
      */
     /** @type {BindPlan} */
     const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
@@ -683,14 +690,16 @@ export function createGpuRenderer(services){
             const geometry = !!glsl.geometry;
             const storage = glsl.storage ?? [];
             const counters = glsl.counters ?? [];
+            const images = glsl.images ?? [];
             const key = `g${textures.map(t=>`${t.binding}${t.layout.viewDimension}`
                 + `${t.layout.sampleType}${t.layout.multisampled ? 'm' : ''}`).join(',')}|`
                 + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}|${blocks.join(',')}`
                 + `${geometry ? '|gs' : ''}`
-                + `${storage.length + counters.length > 0
-                    ? `|s${storage.join(',')}c${counters.join(',')}` : ''}`;
+                + `${storage.length + counters.length + images.length > 0
+                    ? `|s${storage.join(',')}c${counters.join(',')}`
+                    + `i${images.map(i=>`${i.index}${i.access}`).join(',')}` : ''}`;
             return { key, textures, vertexBlock, fragmentBlock, glsl: true, blocks, geometry,
-                storage, written: glsl.written ?? [], counters };
+                storage, written: glsl.written ?? [], counters, images };
         }
         /** @type {{ binding: number, cube: boolean, rectangle?: boolean, unit: number }[]} */
         const textures = [];
@@ -826,6 +835,11 @@ export function createGpuRenderer(services){
         {
             fixedEntries.push({ binding: GLSL_COUNTER_BINDING + binding,
                 visibility: FRAGMENT_STAGE, buffer: { type: 'storage' } });
+        }
+        for (const { index, access, format, viewDimension } of plan.images ?? [])
+        {
+            fixedEntries.push({ binding: GLSL_IMAGE_BINDING + index, visibility: FRAGMENT_STAGE,
+                storageTexture: { access, format, viewDimension } });
         }
         /** @type {any[]} */
         const groups = [backend.createBindGroupLayout(
@@ -1011,6 +1025,7 @@ export function createGpuRenderer(services){
     const glMemory = createGlMemory({
         backend,
         bufferFor: buffer=>bufferFor(buffer),
+        textureFor: (texture, recording)=>textureFor(texture, recording),
         lose: detail=>lose(detail),
     });
     const geometryPasses = createGlGeometry({
@@ -1385,7 +1400,9 @@ export function createGpuRenderer(services){
                 usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
                     | TextureUsage.COPY_SRC
                     | (storage.renderable && !blocks && !solid
-                        ? TextureUsage.RENDER_ATTACHMENT : 0),
+                        ? TextureUsage.RENDER_ATTACHMENT : 0)
+                    // An image unit may bind it (4.2).
+                    | (IMAGE_STORAGE.has(format) ? TextureUsage.STORAGE_BINDING : 0),
             });
             record = {
                 gpu, width: base.width, height: base.height, levels, cube, format,
@@ -1592,7 +1609,8 @@ export function createGpuRenderer(services){
                     // copy target is never compressed.
                     usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
                         | TextureUsage.COPY_SRC
-                        | (bcFormat ? 0 : TextureUsage.RENDER_ATTACHMENT),
+                        | (bcFormat ? 0 : TextureUsage.RENDER_ATTACHMENT)
+                        | (IMAGE_STORAGE.has(format) ? TextureUsage.STORAGE_BINDING : 0),
                 }),
                 width: base.width,
                 height: base.height,
@@ -2917,8 +2935,8 @@ export function createGpuRenderer(services){
         const blocks = plan.blocks && plan.blocks.length > 0 && executable
             ? uniformBlocksFor(scene, executable, plan.blocks, recording) : NO_BLOCKS;
         const memory = executable && ((plan.storage?.length ?? 0) > 0
-            || (plan.counters?.length ?? 0) > 0)
-            ? glMemory.bind(scene, executable, plan, recording.id, FRAGMENT_STAGE) : null;
+            || (plan.counters?.length ?? 0) > 0 || (plan.images?.length ?? 0) > 0)
+            ? glMemory.bind(scene, executable, plan, recording, FRAGMENT_STAGE) : null;
         /**
          * Group 0 of a compute pass: the fixed block, the stage's own,
          * its textures and its uniform blocks, all at offsets of their

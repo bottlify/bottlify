@@ -35,6 +35,45 @@ export const STORAGE_LIMITS = Object.freeze({
  */
 export const STORAGE_BUFFER_OFFSET_ALIGNMENT = 256;
 
+/**
+ * The image limits (4.2 table 23.62): GL's 8 units, and WebGPU's 4 storage
+ * textures a stage where GL asks for 8 (decision A173).
+ */
+export const IMAGE_LIMITS = Object.freeze({ units: 8, perStage: 4 });
+
+/**
+ * The image formats GLSL names (4.20 section 4.4.6.2) that WebGPU stores
+ * into, with the internal format glBindImageTexture names them by and
+ * WGSL's texel format; the others of GL's table 8.33 bind and are refused
+ * when a shader reaches them (decision A174).
+ *
+ * @type {readonly [string, number, string][]}
+ */
+export const IMAGE_FORMATS = Object.freeze([
+    ['rgba32f', 0x8814, 'rgba32float'], ['rgba16f', 0x881a, 'rgba16float'],
+    ['rg32f', 0x8230, 'rg32float'], ['r32f', 0x822e, 'r32float'],
+    ['rgba8', 0x8058, 'rgba8unorm'], ['rgba8_snorm', 0x8f97, 'rgba8snorm'],
+    ['rgba32i', 0x8d82, 'rgba32sint'], ['rgba16i', 0x8d88, 'rgba16sint'],
+    ['rgba8i', 0x8d8e, 'rgba8sint'], ['rg32i', 0x823b, 'rg32sint'], ['r32i', 0x8235, 'r32sint'],
+    ['rgba32ui', 0x8d70, 'rgba32uint'], ['rgba16ui', 0x8d76, 'rgba16uint'],
+    ['rgba8ui', 0x8d7c, 'rgba8uint'], ['rg32ui', 0x823c, 'rg32uint'],
+    ['r32ui', 0x8236, 'r32uint'],
+]);
+
+/**
+ * Every internal format glBindImageTexture takes (4.2 table 8.33), WebGPU's
+ * or not.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const IMAGE_UNIT_FORMATS = new Set([...IMAGE_FORMATS.map(([, gl])=>gl),
+    // rg16f, r11f_g11f_b10f, r16f, rgba16, rgb10_a2, rg16, rg8, r16, r8,
+    0x822f, 0x8c3a, 0x822d, 0x805b, 0x8059, 0x822c, 0x822b, 0x822a, 0x8229,
+    // rgba16_snorm, rg16_snorm, rg8_snorm, r16_snorm, r8_snorm,
+    0x8f9b, 0x8f99, 0x8f95, 0x8f98, 0x8f94,
+    // rg16i, rg8i, r16i, r8i, rgb10_a2ui, rg16ui, rg8ui, r16ui, r8ui.
+    0x8239, 0x8237, 0x8233, 0x8231, 0x906f, 0x823a, 0x8238, 0x8234, 0x8232]);
+
 /** The atomic counter buffers (4.2 table 23.61): one binding, 8 counters a stage. */
 export const COUNTER_LIMITS = Object.freeze({
     bindings: 1, perStage: 8, buffersPerStage: 1, bufferBytes: 32,
@@ -173,6 +212,47 @@ export function storageBlocksOf(stages, error){
         error(`more than ${STORAGE_LIMITS.combined} shader storage blocks in a program`);
     }
     return blocks;
+}
+
+/**
+ * An image uniform's element (4.2 section 8.27 of the language's 4.4.6).
+ *
+ * @typedef {Object} ImageUniform
+ * @property {any} leaf  its uniform's leaf, whose store word is the unit
+ * @property {number} element
+ * @property {import('./glsl-types.js').ImageType} type
+ * @property {string} format  the format qualifier, '' for none
+ * @property {number} binding  the unit `layout(binding)` gives it
+ * @property {boolean} readonly
+ * @property {boolean} writeonly
+ */
+
+/**
+ * What WebGPU lets a stage bind of what it writes: images in the fragment
+ * and compute stages alone, at most IMAGE_LIMITS.perStage, and storage
+ * buffers and counter buffers together at most 8 (maxStorageBuffersPerShaderStage).
+ *
+ * @param {Stages} stages @param {ImageUniform[]} images
+ * @param {(message: string) => void} error
+ */
+export function checkImageStages(stages, images, error){
+    for (const stage of [stages.vertex, stages.geometry, stages.fragment, stages.compute])
+    {
+        if (!stage)
+        {
+            continue;
+        }
+        const named = images.filter(image=>stage.uses.has(image.leaf.root));
+        if (named.length > 0 && stage.stage !== 'fragment' && stage.stage !== 'compute')
+        {
+            error(`${stage.stage} shader: an image is used where this implementation has none`
+                + ' (GL_MAX_*_IMAGE_UNIFORMS is 0 there)');
+        }
+        if (named.length > IMAGE_LIMITS.perStage)
+        {
+            error(`${stage.stage} shader: more than ${IMAGE_LIMITS.perStage} image uniforms`);
+        }
+    }
 }
 
 /**

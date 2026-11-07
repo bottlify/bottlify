@@ -47,6 +47,7 @@ import { vertexFetch } from '../d3d10/wgsl.js';
 import { BUILTIN_ATTRIBUTES, BUILTIN_VARIABLES } from './glsl-builtins.js';
 import { canonicalAttribName } from './arb-program.js';
 import { membersLayout, typeLayout } from './glsl-layout.js';
+import { IMAGE_FORMATS } from './glsl-storage.js';
 import { BUFFER_ROW } from './objects.js';
 
 /**
@@ -628,6 +629,29 @@ const atomicTypeOf = type=>(type.kind === 'array'
     ? `array<${atomicTypeOf(type.element)}, ${type.length}>`
     : `atomic<${type.base === 'int' ? 'i32' : 'u32'}>`);
 
+/**
+ * An image a stage loads or stores: its binding's access, texel format and
+ * view, as the bind group layout declares it.
+ *
+ * @typedef {{ index: number, access: 'read-only' | 'write-only' | 'read-write',
+ *     format: string, viewDimension: '1d' | '2d' | '2d-array' | '3d' }} UsedImage
+ */
+
+/**
+ * @param {import('./glsl-storage.js').ImageUniform} image @param {number} index
+ * @param {Set<string>} ways  'read', 'write'
+ * @returns {UsedImage}
+ */
+const imageUse = (image, index, ways)=>{
+    const layered = image.type.array || image.type.dim === 'Cube';
+    return { index,
+        access: ways.has('read') && ways.has('write') ? 'read-write'
+            : ways.has('read') ? 'read-only' : 'write-only',
+        format: IMAGE_FORMATS.find(([name])=>name === image.format)?.[2] ?? '',
+        viewDimension: image.type.dim === '3D' ? '3d' : image.type.dim === '1D' ? '1d'
+            : layered ? '2d-array' : '2d' };
+};
+
 /** The WGSL scalar of each GLSL one. */
 const SCALARS = /** @type {Record<string, string>} */ ({ float: 'f32', int: 'i32', uint: 'u32',
     bool: 'bool' });
@@ -810,7 +834,9 @@ export function emitStage(program, which, options, given, partner){
     {
         if (symbol.storage !== 'uniform' || !linked.uses.has(symbol.name) || symbol.block
             || symbol.subroutine || symbol.type.kind === 'sampler'
-            || (symbol.type.kind === 'array' && symbol.type.element.kind === 'sampler'))
+            || symbol.type.kind === 'image'
+            || (symbol.type.kind === 'array' && (symbol.type.element.kind === 'sampler'
+                || symbol.type.element.kind === 'image')))
         {
             continue;
         }
@@ -1069,6 +1095,12 @@ export function emitStage(program, which, options, given, partner){
     /** The texture and sampler a sampler uniform is bound to, by name. */
     /** @type {Map<string, number>} */
     const samplerOf = new Map(program.samplers.map((s, k)=>[`${s.leaf.base}#${s.element}`, k]));
+    /** An image uniform's element, by name: its index in the program's images. */
+    /** @type {Map<string, number>} */
+    const imageOf = new Map((program.images ?? []).map((image, k)=>
+        [`${image.leaf.base}#${image.element}`, k]));
+    /** The images the stage reads and writes, by index: how. @type {Map<number, Set<string>>} */
+    const usedImages = new Map();
     /** @type {Set<number>} */
     const usedSamplers = new Set();
     /** The sizes of matrix the stage inverts. @type {Set<number>} */
@@ -1800,7 +1832,8 @@ export function emitStage(program, which, options, given, partner){
 
     /** Evaluates and drops a value. @param {string} code @param {Emit} out */
     const discardValue = (code, out)=>{
-        if (!/^[A-Za-z_][A-Za-z0-9_.()*]*$/.test(code) || code.includes('('))
+        // A store into an image has no value at all.
+        if (code !== '' && (!/^[A-Za-z_][A-Za-z0-9_.()*]*$/.test(code) || code.includes('(')))
         {
             out.pre.push(`_ = ${code};`);
         }
@@ -2364,6 +2397,59 @@ export function emitStage(program, which, options, given, partner){
         }
     }
 
+    /**
+     * An image's load, store or size (4.20 section 8.12) on the storage
+     * texture its unit binds. The atomics on images have no WGSL form and
+     * are refused (decision A174).
+     *
+     * @param {any} node @param {Emit} out @returns {string}
+     */
+    function imageCall(node, out){
+        const image = node.args[0];
+        const base = image.node === 'name' ? image.symbol.name
+            : image.node === 'index' && image.object.node === 'name' && image.index.constant
+                ? image.object.symbol.name : null;
+        const element = image.node === 'index' ? image.index.constant[0] : 0;
+        const index = base === null ? undefined : imageOf.get(`${base}#${element}`);
+        if (index === undefined)
+        {
+            throw new Error('an image must be named by a uniform or an array element with a'
+                + ' constant index');
+        }
+        const known = /** @type {any} */ (program.images)[index];
+        const type = known.type;
+        if (type.ms || (type.dim !== '1D' && type.dim !== '2D' && type.dim !== '3D'
+            && type.dim !== 'Cube'))
+        {
+            throw new Error(`glsl: an image of ${type.dim}${type.ms ? ' multisampled' : ''} has`
+                + ' no WebGPU storage texture');
+        }
+        const ways = usedImages.get(index) ?? new Set();
+        usedImages.set(index, ways);
+        const texture = `gim${index}`;
+        const layered = type.array || type.dim === 'Cube';
+        if (node.name === 'imageSize')
+        {
+            if (layered)
+            {
+                return `vec3i(vec3u(textureDimensions(${texture}), textureNumLayers(${texture})))`;
+            }
+            return type.dim === '1D' ? `i32(textureDimensions(${texture}))`
+                : `vec${type.dim === '3D' ? 3 : 2}i(textureDimensions(${texture}))`;
+        }
+        const at = once(out, expr(node.args[1], out), node.args[1].type);
+        const where = !layered ? at : type.dim === '1D' ? `${at}.x, ${at}.y`
+            : `${at}.xy, ${at}.z`;
+        if (node.name === 'imageLoad')
+        {
+            ways.add('read');
+            return `textureLoad(${texture}, ${where})`;
+        }
+        ways.add('write');
+        out.pre.push(`textureStore(${texture}, ${where}, ${expr(node.args[2], out)});`);
+        return '';
+    }
+
     /** @param {any} node @param {Emit} out @returns {string} */
     function builtinCall(node, out){
         const name = node.name;
@@ -2376,6 +2462,10 @@ export function emitStage(program, which, options, given, partner){
         if (name in ATOMIC_OPS)
         {
             return atomicCall(node, out);
+        }
+        if (name === 'imageLoad' || name === 'imageStore' || name === 'imageSize')
+        {
+            return imageCall(node, out);
         }
         if (name.startsWith('atomicCounter'))
         {
@@ -3610,6 +3700,22 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
             + `${GLSL_STORAGE_BINDING + index}) var<storage, read_write> gss${index}: array<`
             + `${atomicStorage.has(/** @type {any} */ (program.storageBlocks)[index].blockName)
                 ? 'atomic<u32>' : 'u32'}>;`),
+        ...[...usedImages].sort(([a], [b])=>a - b).map(([index, ways])=>{
+            const image = /** @type {any} */ (program.images)[index];
+            const format = IMAGE_FORMATS.find(([name])=>name === image.format)?.[2];
+            if (!format)
+            {
+                throw new Error(`glsl: image '${image.leaf.base}' is of format`
+                    + ` '${image.format || 'none'}', which WebGPU does not store into`);
+            }
+            const layered = image.type.array || image.type.dim === 'Cube';
+            const shape = image.type.dim === '3D' ? '3d' : image.type.dim === '1D' ? '1d'
+                : layered ? '2d_array' : '2d';
+            const access = ways.has('read') && ways.has('write') ? 'read_write'
+                : ways.has('read') ? 'read' : 'write';
+            return `@group(0) @binding(${GLSL_IMAGE_BINDING + index}) var gim${index}:`
+                + ` texture_storage_${shape}<${format}, ${access}>;`;
+        }),
         ...[...usedCounters].sort((a, b)=>a - b).map(point=>`@group(0) @binding(`
             + `${GLSL_COUNTER_BINDING + point}) var<storage, read_write> gac${point}:`
             + ' array<atomic<u32>>;'),
@@ -3625,6 +3731,8 @@ ${[...inputs, ...initial, `    ${p}main();`, ...alpha, '    var out: FragmentOut
         usedSamplers: [...usedSamplers],
         usedBlocks: [...usedBlocks],
         usedStorage: [...usedStorage],
+        usedImages: [...usedImages].map(([index, ways])=>imageUse(
+            /** @type {any} */ (program.images)[index], index, ways)),
         writtenStorage: [...writtenStorage],
         usedCounters: [...usedCounters],
         plan: blockMembers.length > 0 ? plan : null,
