@@ -256,7 +256,8 @@ export function registerMsxmlClasses(host){
         }
     };
     /** @param {number} bstr */
-    const readBstr = bstr=>((bstr >>> 0) === 0 ? '' : host.readWideString(bstr >>> 0, MAX_TEXT));
+    const readBstr = bstr=>((bstr >>> 0) === 0 ? ''
+        : host.readWideString(bstr >>> 0, MAX_TEXT * 2));
     /** @param {string} text @returns {number} a BSTR from the heap, or 0 */
     const allocateBstr = text=>{
         const block = host.heap.allocate(4 + text.length * 2 + 2) >>> 0;
