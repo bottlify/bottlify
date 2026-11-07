@@ -1853,8 +1853,8 @@ test('MsgWaitForMultipleObjects on an event ends when a message arrives while it
 
         memory.putU32s(HANDLES, [handles.open('process', {})]);
         ready = false;
-        assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 1, INFINITE, QS_ALLINPUT]),
-            PARKED, 'waiting for all and the input, a process is kernel32\'s whole');
+        assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, INFINITE, QS_ALLINPUT]),
+            PARKED, 'a process is kernel32\'s to wait on');
         assert.equal(asked.at(-1)?.[3], INFINITE);
 
         // A thread is signalled by having ended, whoever asks: polled, so a
@@ -1868,38 +1868,6 @@ test('MsgWaitForMultipleObjects on an event ends when a message arrives while it
         await tick();
         assert.equal(await third, WAIT_OBJECT_0 + 1);
     });
-
-test('MsgWaitForMultipleObjects on a process is kernel32\'s in slices, and a message sent while '
-    + 'it waits ends it', async()=>{
-    // opengl32's test_other_process_parent: the child process sends to the
-    // parent's window while the parent waits for the child to end.
-    const HANDLES = 0x11800;
-    let ended = false;
-    /** @type {number[][]} */
-    const asked = [];
-    const { fns, handles, memory, queue, tick } = setup({ waitForObjects: args=>{
-        asked.push(args);
-        const answer = ended ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
-        return /** @type {any} */ (args[3] === 0 ? answer : Promise.resolve(answer));
-    } });
-    memory.putU32s(HANDLES, [handles.open('process', {})]);
-    /** @returns {Promise<number>} */
-    const waiting = ()=>/** @type {any} */ (fns.MsgWaitForMultipleObjects.handler(
-        [1, HANDLES, 0, INFINITE, QS_ALLINPUT]));
-    const first = waiting();
-    assert.equal(typeof first.then, 'function');
-    await tick();
-    assert.ok(asked.some(args=>args[3] === 10), 'kernel32 waits a slice at a time');
-    assert.ok(asked.every(args=>args[3] === 0 || args[3] === 10));
-    queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
-    assert.equal(await first, WAIT_OBJECT_0 + 1, 'the message, past the process');
-    queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
-
-    const second = waiting();
-    await tick();
-    ended = true;
-    assert.equal(await second, WAIT_OBJECT_0, 'and the process, once it ended');
-});
 
 test('with fWaitAll the handles and the input together end the wait, and neither alone',
     async()=>{

@@ -498,12 +498,6 @@ const INFINITE = 0xffffffff;
  */
 const POLLED_KINDS = new Set(['event', 'semaphore', 'timer', 'thread']);
 
-/**
- * How long a MsgWaitForMultipleObjects on a process or a mutex is kernel32's
- * before the queue is looked at again: the longest a message waits to end it.
- */
-const KERNEL_WAIT_SLICE_MS = 10;
-
 /** The parent a message-only window is made with. */
 const HWND_MESSAGE = 0xfffffffd;
 
@@ -9000,14 +8994,8 @@ export function createWindowFunctions(host){
          * handles a poll can answer for any thread: an event, a semaphore, a
          * waitable timer, a thread. A process or a mutex, whose answer
          * depends on who is waiting or whose wait hands the machine to
-         * another process, is kernel32's to hold, in slices of
-         * KERNEL_WAIT_SLICE_MS between which the queue is looked at: a
-         * message another process sends while this thread waits for it to
-         * end ends the wait as on Windows (Wine's opengl32
-         * test_other_process_parent), where a whole wait held by kernel32
-         * left both waiting on each other. Waiting for all of them and the
-         * input, the wait is kernel32's whole, so that no mutex is taken
-         * before the input came.
+         * another process, is kernel32's to hold, and a message arriving
+         * while it holds one does not end the wait.
          *
          * A sixth and a seventh element, which no program's call carries, are
          * MsgWaitForMultipleObjectsEx's flags: MWMO_INPUTAVAILABLE, input
@@ -9064,34 +9052,11 @@ export function createWindowFunctions(host){
                 {
                     return WAIT_TIMEOUT;
                 }
-                const deadline = wait === INFINITE ? null : (host.now?.() ?? 0) + wait;
                 if (total > 0 && (alertable || !pollable(handles >>> 0, total)))
                 {
-                    if (alertable || waitAll !== 0)
-                    {
-                        return askHandles(wait);
-                    }
-                    return (async()=>{
-                        for (;;)
-                        {
-                            const left = deadline === null ? KERNEL_WAIT_SLICE_MS
-                                : Math.max(0, deadline - (host.now?.() ?? 0));
-                            const answer = await askHandles(Math.min(left, KERNEL_WAIT_SLICE_MS));
-                            if (answer !== WAIT_TIMEOUT)
-                            {
-                                return answer;
-                            }
-                            if (input())
-                            {
-                                return WAIT_OBJECT_0 + total;
-                            }
-                            if (deadline !== null && (host.now?.() ?? 0) >= deadline)
-                            {
-                                return WAIT_TIMEOUT;
-                            }
-                        }
-                    })();
+                    return askHandles(wait);
                 }
+                const deadline = wait === INFINITE ? null : (host.now?.() ?? 0) + wait;
                 return (async()=>{
                     for (;;)
                     {
