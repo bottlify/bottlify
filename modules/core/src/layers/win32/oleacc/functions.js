@@ -46,6 +46,23 @@ export function createOleaccFunctions(host){
                 return E_NOTIMPL;
             },
         },
+        /**
+         * HRESULT AccessibleObjectFromWindow(HWND hwnd, DWORD dwId, REFIID riid,
+         *                                    void **ppvObject)
+         */
+        AccessibleObjectFromWindow: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, , , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+                said('AccessibleObjectFromWindow');
+                return E_NOTIMPL;
+            },
+        },
         /** LRESULT LresultFromObject(REFIID riid, WPARAM wParam, LPUNKNOWN punk) */
         LresultFromObject: {
             argBytes: 12,

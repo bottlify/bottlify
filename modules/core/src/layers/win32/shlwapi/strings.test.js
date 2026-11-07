@@ -167,6 +167,23 @@ test('StrDup copies into the heap, and an absent string is an empty one', ()=>{
     }
 });
 
+test('SHStrDup makes a wide copy from either spelling; no string is E_INVALIDARG', ()=>{
+    // Wine's test_SHStrDupN.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const out = m.count(0xdeadbeef);
+        assert.equal(m.fns[`SHStrDup${suffix}`].handler([m.put('GPU-Z', wide), out]), 0);
+        const copy = m.dwordAt(out);
+        assert.notEqual(copy, 0);
+        assert.equal(m.read(copy, true), 'GPU-Z', 'wide whichever spelling it came in');
+        assert.equal(m.fns[`SHStrDup${suffix}`].handler([0, out]) >>> 0, 0x80070057);
+        assert.equal(m.dwordAt(out), 0);
+        assert.equal(m.fns[`SHStrDup${suffix}`].handler([m.put('x', wide), 0]) >>> 0,
+            0x80070057);
+    }
+});
+
 test('StrStr finds a string, case and all, and never an empty one', ()=>{
     // Wine's test_StrStrA and test_StrStrW.
     for (const [suffix, wide] of WIDTHS)

@@ -426,6 +426,30 @@ export function createStringFunctions(host, { A, W }){
         ...both('StrDup', 4, (width, [source])=>duplicate(width, source)),
 
         /**
+         * HRESULT SHStrDupA(LPCSTR psz, LPWSTR *ppwsz)
+         * HRESULT SHStrDupW(LPCWSTR psz, LPWSTR *ppwsz)
+         *
+         * A wide copy, from either spelling, in memory the caller frees with
+         * CoTaskMemFree. No string is E_INVALIDARG with a null copy (Wine's
+         * test_SHStrDupN).
+         */
+        ...both('SHStrDup', 8, (width, [source, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const text = (source >>> 0) === 0 ? null : width.read(source);
+            const block = text === null ? 0 : host.allocate?.((text.length + 1) * 2) ?? 0;
+            if (block !== 0)
+            {
+                host.writeMemory(block, W.sz(/** @type {string} */ (text)));
+            }
+            host.writeMemory(out >>> 0, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+                block >>> 16 & 0xff, block >>> 24 & 0xff));
+            return text === null ? E_INVALIDARG : block === 0 ? E_OUTOFMEMORY : S_OK;
+        }),
+
+        /**
          * PSTR StrStrA(PCSTR pszFirst, PCSTR pszSrch)
          *
          * Where the second string first is in the first, case and all; NULL

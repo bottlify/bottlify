@@ -317,13 +317,19 @@ async function execute(engine, row, kind, flags, data){
         }
         if (!commandLine)
         {
+            host.log?.(`Custom action ${row.action}: no program ${row.source}.`);
             return answer(ERROR_INSTALL_FAILURE);
         }
         const wait = (flags & ASYNC) === 0;
         const code = await host.runExe(commandLine, directory, wait);
         if (code === null)
         {
+            host.log?.(`Custom action ${row.action} could not start ${commandLine}.`);
             return answer(ERROR_INSTALL_FAILURE);
+        }
+        if (wait)
+        {
+            host.log?.(`Custom action ${row.action} ran ${commandLine}: exit ${code}.`);
         }
         return answer(wait && code !== 0 ? ERROR_INSTALL_FAILURE : ERROR_SUCCESS);
     }
