@@ -61,6 +61,9 @@ import { installLightingCalls } from './context-lighting.js';
 import { installArrayCalls } from './context-arrays.js';
 import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
+import {
+    ATTRIB_BINDING_CALLS_NOT_COMPILED, installAttribBindingCalls,
+} from './context-attrib-binding.js';
 import { SHADER_CALLS_NOT_COMPILED, installShaderCalls } from './context-glsl.js';
 import { FRAMEBUFFER_CALLS_NOT_COMPILED, installFramebufferCalls } from './context-framebuffers.js';
 import { BLEND_FACTORS, installCoreCalls } from './context-core.js';
@@ -132,7 +135,8 @@ const NOT_COMPILABLE = new Set([
     'glMultiDrawElementsIndirect', 'glMultiDrawArraysIndirectCount',
     'glMultiDrawElementsIndirectCount',
     ...SHADER_CALLS_NOT_COMPILED, ...FRAMEBUFFER_CALLS_NOT_COMPILED,
-    ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
+    ...VERTEX_ARRAY_CALLS_NOT_COMPILED, ...ATTRIB_BINDING_CALLS_NOT_COMPILED,
+    ...UNIFORM_BUFFER_CALLS_NOT_COMPILED,
     ...INDEXED_CALLS_NOT_COMPILED, ...SYNC_CALLS_NOT_COMPILED, ...SAMPLER_CALLS_NOT_COMPILED,
     ...ES2_CALLS_NOT_COMPILED,
     ...QUERY_CALLS_NOT_COMPILED, ...FEEDBACK_CALLS_NOT_COMPILED, ...TEXTURE_CALLS_NOT_COMPILED,
@@ -1849,6 +1853,8 @@ export function createGlContext(options = {}){
     installArrayCalls(context, kernel);
     installPixelCalls(context, kernel);
     installProgramCalls(context, kernel);
+    // Before the vertex array objects: a new one's state holds the bindings too.
+    installAttribBindingCalls(context, kernel);
     installShaderCalls(context, kernel);
     installFramebufferCalls(context, kernel);
     installCoreCalls(context, kernel);

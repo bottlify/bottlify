@@ -40,6 +40,9 @@ import { GL } from './constants.js';
  *                               element a vertex, n for one every n instances
  * @property {number} [integer]  set by glVertexAttribIPointer: read as the
  *                               integers it holds, never converted to floats
+ * @property {number} [literalStride]  a binding point's stride (4.3), read
+ *                               as it is: zero reads one element for every
+ *                               vertex. Absent for the pointer calls' arrays
  */
 
 /** @type {Map<number, number>} */
@@ -90,6 +93,10 @@ export function unpackWord(word, type, normalised){
  * @returns {number} the bytes between one element and the next
  */
 export function effectiveStride(pointer){
+    if (pointer.literalStride !== undefined)
+    {
+        return pointer.literalStride;
+    }
     return pointer.stride > 0 ? pointer.stride
         : isPacked(pointer.type) ? 4 : pointer.size * componentBytes(pointer.type);
 }

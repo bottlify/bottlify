@@ -1392,3 +1392,32 @@ test('the indexed viewport calls take floats and doubles, and answer them', ()=>
     assert.deepEqual([0, 4, 8, 12].map(at=>view.getInt32(out + at, true)), [5, 6, 7, 8]);
     assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
 });
+
+test('glBindVertexBuffers reads its names, offsets and strides from guest memory, and the'
+    + ' named calls reach the object', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    table.glGenBuffersARB.handler([2, 0x3000]);
+    const names = [view.getUint32(0x3000, true), view.getUint32(0x3004, true)];
+    [8, 12].forEach((v, i)=>view.setInt32(0x3100 + i * 4, v, true));
+    [16, 20].forEach((v, i)=>view.setInt32(0x3200 + i * 4, v, true));
+    table.glBindVertexBuffers.handler([4, 2, 0x3000, 0x3100, 0x3200]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    const out = 0x4000;
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_OFFSET, 5, out]);
+    assert.equal(view.getInt32(out, true), 12);
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_STRIDE, 4, out]);
+    assert.equal(view.getInt32(out, true), 16);
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_BUFFER, 5, out]);
+    assert.equal(view.getInt32(out, true), names[1]);
+
+    table.glCreateVertexArrays.handler([1, 0x3300]);
+    const vao = view.getUint32(0x3300, true);
+    table.glVertexArrayVertexBuffer.handler([vao, 2, names[0], 24, 32]);
+    table.glGetVertexArrayIndexed64iv.handler([vao, 2, GL.VERTEX_BINDING_OFFSET, out]);
+    assert.equal(view.getInt32(out, true), 24);
+    table.glGetIntegeri_v.handler([GL.VERTEX_BINDING_OFFSET, 2, out]);
+    assert.equal(view.getInt32(out, true), 0, 'the default object untouched');
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+});
