@@ -63,6 +63,7 @@ export const CONTEXT_CONSTANTS = Object.freeze({
     gl_MaxVertexTextureImageUnits: GLSL_LIMITS.vertexTextureImageUnits,
     gl_MaxCombinedTextureImageUnits: GLSL_LIMITS.combinedTextureImageUnits,
     gl_MaxTextureImageUnits: GLSL_LIMITS.textureImageUnits,
+    gl_MaxGeometryTextureImageUnits: GLSL_LIMITS.textureImageUnits,
     gl_MaxDrawBuffers: GLSL_LIMITS.drawBuffers,
     gl_MaxTextureUnits: GLSL_LIMITS.textureUnits,
     gl_MaxTextureCoords: GLSL_LIMITS.textureCoords,
@@ -112,8 +113,16 @@ const OBJECT_SUBTYPE_ARB = 0x8b4f;
  * @property {number} users  the contexts it is current in
  */
 
-/** The shader types. @type {Map<number, 'vertex' | 'fragment'>} */
-const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.FRAGMENT_SHADER, 'fragment']]);
+/** The shader types. @type {Map<number, 'vertex' | 'geometry' | 'fragment'>} */
+const SHADER_TYPES = new Map([[GL.VERTEX_SHADER, 'vertex'], [GL.GEOMETRY_SHADER, 'geometry'],
+    [GL.FRAGMENT_SHADER, 'fragment']]);
+
+/** What GEOMETRY_INPUT_TYPE and GEOMETRY_OUTPUT_TYPE answer, by the layout's word. */
+const GEOMETRY_PRIMITIVES = Object.freeze(/** @type {Record<string, number>} */ ({
+    points: GL.POINTS, lines: GL.LINES, lines_adjacency: GL.LINES_ADJACENCY,
+    triangles: GL.TRIANGLES, triangles_adjacency: GL.TRIANGLES_ADJACENCY,
+    line_strip: GL.LINE_STRIP, triangle_strip: GL.TRIANGLE_STRIP,
+}));
 
 let executables = 0;
 
@@ -128,7 +137,7 @@ const COMPILED_KEPT = 256;
 const SHADER_EXTENSIONS = Object.keys(GLSL_EXTENSIONS);
 
 /**
- * @param {readonly string[]} sources @param {'vertex' | 'fragment'} stage
+ * @param {readonly string[]} sources @param {'vertex' | 'geometry' | 'fragment'} stage
  * @returns {{ ok: boolean, log: string, unit: ShaderUnit | null }}
  */
 export function compileShader(sources, stage){
@@ -549,7 +558,8 @@ export function installShaderCalls(context, kernel){
             {
                 return;
             }
-            const stage = /** @type {'vertex' | 'fragment'} */ (SHADER_TYPES.get(shader.type));
+            const stage = /** @type {'vertex' | 'geometry' | 'fragment'} */ (
+                SHADER_TYPES.get(shader.type));
             const result = compileShader(shader.sources ?? [], stage);
             shader.compiled = result.ok;
             shader.log = result.log;
@@ -740,6 +750,7 @@ export function installShaderCalls(context, kernel){
                 .map(shader=>/** @type {ShaderUnit} */ (shader.unit));
             const result = linkProgram({
                 vertex: units(GL.VERTEX_SHADER),
+                geometry: units(GL.GEOMETRY_SHADER),
                 fragment: units(GL.FRAGMENT_SHADER),
                 attribBindings: program.bindings,
                 fragDataBindings: program.fragData,
@@ -889,6 +900,21 @@ export function installShaderCalls(context, kernel){
                 case GL.ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH:
                     return [linked ? Math.max(0, ...linked.blocks
                         .map(b=>b.name.length + 1)) : 0];
+                // A program linked with a geometry shader answers these, any
+                // other INVALID_OPERATION (OpenGL 3.2 section 6.1.16).
+                case GL.GEOMETRY_VERTICES_OUT:
+                case GL.GEOMETRY_INPUT_TYPE:
+                case GL.GEOMETRY_OUTPUT_TYPE: {
+                    const layout = program.linked ? linked?.geometryLayout : null;
+                    if (!layout)
+                    {
+                        setError(GL.INVALID_OPERATION);
+                        return null;
+                    }
+                    return [pname === GL.GEOMETRY_VERTICES_OUT ? layout.maxVertices
+                        : GEOMETRY_PRIMITIVES[pname === GL.GEOMETRY_INPUT_TYPE ? layout.input
+                            : layout.output]];
+                }
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;
@@ -1236,7 +1262,7 @@ export function installShaderCalls(context, kernel){
                 case GL.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
                     return [own.stages.fragment ? 1 : 0];
                 case GL.UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
-                    return [0];
+                    return [own.stages.geometry ? 1 : 0];
                 default:
                     setError(GL.INVALID_ENUM);
                     return null;

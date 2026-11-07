@@ -37,6 +37,36 @@ import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { GLSL_LIMITS } from './glsl-builtins.js';
 import { BLOCK_LIMITS } from './glsl-link.js';
+import { GLSL_CONSTANTS } from './glsl-library.js';
+
+/**
+ * OpenGL 3.2's limits of geometry shaders and of what the stages pass, the
+ * values the language's gl_Max* constants have.
+ *
+ * @type {[number, string, number][]}
+ */
+export const GEOMETRY_LIMITS = [
+    [GL.MAX_GEOMETRY_TEXTURE_IMAGE_UNITS, 'GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS',
+        GLSL_LIMITS.textureImageUnits],
+    [GL.MAX_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_GEOMETRY_UNIFORM_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryUniformComponents],
+    [GL.MAX_GEOMETRY_OUTPUT_VERTICES, 'GL_MAX_GEOMETRY_OUTPUT_VERTICES',
+        GLSL_CONSTANTS.gl_MaxGeometryOutputVertices],
+    [GL.MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS, 'GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryTotalOutputComponents],
+    [GL.MAX_GEOMETRY_INPUT_COMPONENTS, 'GL_MAX_GEOMETRY_INPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryInputComponents],
+    [GL.MAX_GEOMETRY_OUTPUT_COMPONENTS, 'GL_MAX_GEOMETRY_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryOutputComponents],
+    [GL.MAX_VERTEX_OUTPUT_COMPONENTS, 'GL_MAX_VERTEX_OUTPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxVertexOutputComponents],
+    [GL.MAX_FRAGMENT_INPUT_COMPONENTS, 'GL_MAX_FRAGMENT_INPUT_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxFragmentInputComponents],
+    [GL.MAX_GEOMETRY_UNIFORM_BLOCKS, 'GL_MAX_GEOMETRY_UNIFORM_BLOCKS', BLOCK_LIMITS.perStage],
+    [GL.MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS',
+        GLSL_CONSTANTS.gl_MaxGeometryUniformComponents
+            + BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4],
+];
 
 /**
  * How many texture units a context has: the larger of the coordinate sets
@@ -870,6 +900,10 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.UNIFORM_BUFFER_OFFSET_ALIGNMENT, name: 'GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT',
         kind: 'int', value: [256],
     },
+    // OpenGL 3.2's geometry shaders: their limits are the language's
+    // (`GLSL_CONSTANTS`), which a shader's gl_Max* constants read too.
+    ...GEOMETRY_LIMITS.map(([query, name, value])=>({ query, name,
+        kind: /** @type {'int'} */ ('int'), value: [value] })),
     {
         query: GL.MAX_COLOR_ATTACHMENTS, name: 'GL_MAX_COLOR_ATTACHMENTS', kind: 'int',
         value: [GLSL_LIMITS.drawBuffers],
