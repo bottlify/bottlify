@@ -75,8 +75,8 @@ import {
 import {
     BLIT_UNIFORM_FLOATS, CLEAR_UNIFORM_FLOATS, CLIP_PLANES, COPY_UNIFORM_FLOATS, UNIFORM, UNITS,
     blitKey, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateBlit,
-    generateClear, generateCopy, generateDraw, generateShow, lightingStateOf, sameKeyInputs,
-    showDescriptor, showKey, writeLighting,
+    blendsBySecondSource, generateClear, generateCopy, generateDraw, generateShow,
+    lightingStateOf, sameKeyInputs, showDescriptor, showKey, writeLighting,
 } from './wgsl.js';
 import { MATRIX_STATE as MATRIX_ONLY, packState } from './glsl-state.js';
 import {
@@ -2945,6 +2945,23 @@ export function createGpuRenderer(services){
             diverge('a draw without a GLSL program wrote an integer colour buffer, and drew'
                 + ' nothing');
             return;
+        }
+        if (blendsBySecondSource(state))
+        {
+            // A dual-source blend (3.3) takes the GLSL program's second output
+            // into its one target, on a device that blends by it.
+            const reason = !state.glsl ? 'only a GLSL program\'s fragment shader has a second'
+                + ' output here'
+                : (state.targets?.length ?? 1) > 1 ? 'it has more than one draw buffer'
+                    + ' (GL_MAX_DUAL_SOURCE_DRAW_BUFFERS is 1)'
+                    : backend.hasFeature?.('dual-source-blending') !== true
+                        ? 'the device has no dual-source-blending' : null;
+            if (reason)
+            {
+                lose(`a draw blending by the fragment shader's second output (GL_SRC1_*) was`
+                    + ` not drawn: ${reason}`);
+                return;
+            }
         }
         const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
             ? lastDraw.key : drawKey(state);

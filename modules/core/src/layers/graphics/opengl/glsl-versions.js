@@ -43,6 +43,8 @@ const FEATURES = Object.freeze({
     /** Blocks for a stage's inputs and outputs. */
     ioBlocks: 150,
     explicitLocation: 330,
+    /** A fragment output's `layout(index)`: the blend's second source. */
+    dualSource: 330,
     double: 400,
     tessellation: 400,
     subroutine: 400,
@@ -104,6 +106,7 @@ export const GLSL_EXTENSIONS = Object.freeze({
     GL_ARB_uniform_buffer_object: { features: ['uniformBlocks', 'layout'], keywords: ['layout'] },
     GL_ARB_explicit_attrib_location: { features: ['explicitLocation', 'layout'],
         keywords: ['layout'] },
+    GL_ARB_blend_func_extended: { features: ['dualSource', 'layout'], keywords: ['layout'] },
     // gl_InstanceIDARB (glsl-library.js).
     GL_ARB_draw_instanced: {},
     // Of its integer language: the bit operators, gl_VertexID and

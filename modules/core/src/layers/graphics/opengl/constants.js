@@ -813,6 +813,11 @@ export const GL = Object.freeze({
     ONE_MINUS_CONSTANT_COLOR: 0x8002,
     CONSTANT_ALPHA: 0x8003,
     ONE_MINUS_CONSTANT_ALPHA: 0x8004,
+    // OpenGL 3.3's dual-source factors; SRC1_ALPHA is SOURCE1_ALPHA's value.
+    SRC1_COLOR: 0x88f9,
+    SRC1_ALPHA: 0x8589,
+    ONE_MINUS_SRC1_COLOR: 0x88fa,
+    ONE_MINUS_SRC1_ALPHA: 0x88fb,
     BLEND_COLOR: 0x8005,
 
     // --- GL_EXT_stencil_two_side ---

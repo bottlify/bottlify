@@ -1874,7 +1874,7 @@ export function checkShader(ast, options){
                 return since === 410 ? ['separateShaders'] : since === 430
                     ? ['explicitUniformLocation'] : ['enhancedLayouts'];
             case 'index':
-                return since === 430 ? ['explicitUniformLocation'] : [];
+                return since === 430 ? ['explicitUniformLocation'] : ['dualSource'];
             case 'stream':
             case 'invocations':
                 return ['gpuShader5'];

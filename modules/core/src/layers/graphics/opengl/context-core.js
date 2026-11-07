@@ -22,7 +22,8 @@ import { GL } from './constants.js';
 import { transpose } from './matrix.js';
 
 /**
- * The blend factors OpenGL 1.4 takes, constant colours among them.
+ * The blend factors OpenGL 1.4 takes, constant colours among them, and 3.3's
+ * that blend by the fragment shader's second output.
  *
  * @type {Set<number>}
  */
@@ -30,7 +31,8 @@ export const BLEND_FACTORS = new Set([
     GL.ZERO, GL.ONE, GL.SRC_COLOR, GL.ONE_MINUS_SRC_COLOR, GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA,
     GL.DST_ALPHA, GL.ONE_MINUS_DST_ALPHA, GL.DST_COLOR, GL.ONE_MINUS_DST_COLOR,
     GL.SRC_ALPHA_SATURATE, GL.CONSTANT_COLOR, GL.ONE_MINUS_CONSTANT_COLOR, GL.CONSTANT_ALPHA,
-    GL.ONE_MINUS_CONSTANT_ALPHA,
+    GL.ONE_MINUS_CONSTANT_ALPHA, GL.SRC1_COLOR, GL.SRC1_ALPHA, GL.ONE_MINUS_SRC1_COLOR,
+    GL.ONE_MINUS_SRC1_ALPHA,
 ]);
 
 /** @type {Set<number>} */

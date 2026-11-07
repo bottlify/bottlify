@@ -387,7 +387,32 @@ const BLEND_FACTOR = Object.freeze({
     // blend uses no constant colour (`blendConstantOf`).
     [GL.CONSTANT_ALPHA]: 'constant',
     [GL.ONE_MINUS_CONSTANT_ALPHA]: 'one-minus-constant',
+    // The fragment shader's second output at location 0 (index 1, 3.3).
+    [GL.SRC1_COLOR]: 'src1',
+    [GL.SRC1_ALPHA]: 'src1-alpha',
+    [GL.ONE_MINUS_SRC1_COLOR]: 'one-minus-src1',
+    [GL.ONE_MINUS_SRC1_ALPHA]: 'one-minus-src1-alpha',
 });
+
+/** The factors that blend by the fragment shader's second output (index 1, 3.3). */
+/** @type {ReadonlySet<number>} */
+const SECOND_SOURCE_FACTORS = new Set([GL.SRC1_COLOR, GL.SRC1_ALPHA, GL.ONE_MINUS_SRC1_COLOR,
+    GL.ONE_MINUS_SRC1_ALPHA]);
+
+/**
+ * Whether a draw blends by the fragment shader's second output: a factor of
+ * its blend, or of any draw buffer's, is one of GL_SRC1_*.
+ *
+ * @param {DrawState} state
+ * @returns {boolean}
+ */
+export function blendsBySecondSource(state){
+    // A draw buffer's `true` is the draw's own blend.
+    return [state.blend, ...(state.targets ?? []).map(target=>target.blend)].some(blend=>
+        typeof blend === 'object' && blend !== null
+            && [blend.src, blend.dst, blend.srcAlpha, blend.dstAlpha].some(factor=>
+                factor !== undefined && SECOND_SOURCE_FACTORS.has(factor)));
+}
 
 /** GL blend equation → WebGPU blend operation. */
 const BLEND_OPERATION = Object.freeze({
@@ -1319,6 +1344,8 @@ function generateGlslDraw(state){
         subroutines: /** @type {NonNullable<DrawState['glsl']>} */ (state.glsl).subroutines
             ?.chosen,
         alphaFunc: state.alphaFunc, targets, compare: compareExpression,
+        // Both of a dual-source blend's sources go to its one target.
+        dualSource: targets === 1 && blendsBySecondSource(state),
         targetScalars: (state.targets?.map(t=>t.format) ?? [state.targetFormat])
             .map(format=>(/sint$/.test(format) ? 'i32' : /uint$/.test(format) ? 'u32' : 'f32')),
         fixed: {
@@ -1524,7 +1551,8 @@ ${stage.code}
     // A vertex shader that reads no array -- one drawing from gl_VertexID --
     // takes no vertex struct, which WGSL does not have empty.
     const vertexIn = program.vertex && state.attributes.length > 0 ? fixedVertexIn(state) : '';
-    const code = `diagnostic(off, derivative_uniformity);
+    const code = `${options.dualSource ? 'enable dual_source_blending;\n' : ''
+    }diagnostic(off, derivative_uniformity);
 ${UNIFORM_STRUCT}
 ${vertexIn}
 ${parts.join('\n\n')}

@@ -1275,6 +1275,12 @@ gl_InstanceID. The extensions' wording differs from the versions' in places (the
 functions' result where invocations are inactive); the version's behaviour is the one run.
 *2026-11-07.*
 
+**A185. Dual-source blending (3.3, GL_ARB_blend_func_extended) needs the device's
+dual-source-blending;** without it, with more than one draw buffer (GL_MAX_DUAL_SOURCE_DRAW_BUFFERS
+is 1), or without a GLSL fragment shader to give a second output, a draw blending by GL_SRC1_* is
+a loss, said. The factors are taken by glBlendFunc* whatever the device, as the specification
+has them, so the refusal is at the draw. *2026-11-07.*
+
 **A190. A geometry shader after tessellation runs over the most the tessellator may make:** the
 evaluation shader as a compute pass over every index the tessellator's room holds and the
 geometry shader's passes over as many primitives, both reading how many indices it wrote from

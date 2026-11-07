@@ -431,6 +431,8 @@ export function textureLayoutOf(type){
  *     vertex stage run as a compute pass, which reads them as words
  * @property {boolean} [compute]  the vertex stage runs as a compute pass, for the
  *     geometry shader after it (`vertexCompute`)
+ * @property {boolean} [dualSource]  the fragment shader's second output at location 0
+ *     (index 1) is the blend's second source, beside its first (3.3)
  * @property {boolean} [limited]  the geometry shader reads what the tessellator
  *     made, as many primitives as the first word of `gsLimit` has indices for
  * @property {Map<string, Map<string, string>>} [subroutines]  by stage, the function
@@ -4127,6 +4129,15 @@ ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
             const { code, type } = written(k);
             outputs.push(`    out.c${k} = ${asTarget(code, type, scalar)};`);
         }
+        if (options.dualSource)
+        {
+            // The output of index 1 at location 0, unwritten zero (its value
+            // is undefined where the shader has none, 3.3 section 4.1.8).
+            const second = (program.outputs ?? []).find(o=>o.index === 1 && o.location === 0);
+            outputs.push(`    out.c0s = ${second ? asTarget(`${p}g_${second.name}`,
+                second.type.kind === 'array' ? second.type.element : second.type, 'f32')
+                : 'vec4f(0.0f)'};`);
+        }
         if (writesDepth)
         {
             outputs.push(`    out.depth = clamp(${p}gl_FragDepth, 0.0f, 1.0f);`);
@@ -4138,8 +4149,11 @@ ${[...prologue, ...initial, `    ${p}main();`, '    var out: VertexOut;',
         const alpha = options.alphaFunc === null ? []
             : [`    if (!(${options.compare(options.alphaFunc, `${colour(0)}.a`,
                 'uniforms.misc.x')})) {`, '        discard;', '    }'];
-        declarations.push(`struct FragmentOut {\n${scalars.map((scalar, k)=>
-            `    @location(${k}) c${k}: vec4${suffixOf(scalar)},`).join('\n')}${writesDepth
+        declarations.push(`struct FragmentOut {\n${options.dualSource
+            ? '    @location(0) @blend_src(0) c0: vec4f,\n'
+                + '    @location(0) @blend_src(1) c0s: vec4f,'
+            : scalars.map((scalar, k)=>
+                `    @location(${k}) c${k}: vec4${suffixOf(scalar)},`).join('\n')}${writesDepth
             ? '\n    @builtin(frag_depth) depth: f32,' : ''}${writesMask
             ? '\n    @builtin(sample_mask) mask: u32,' : ''}\n};`);
         const sampleInputs = `${perSample ? ', @builtin(sample_index) sampleIndex: u32' : ''}${

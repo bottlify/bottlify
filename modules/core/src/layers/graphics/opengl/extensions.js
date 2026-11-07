@@ -343,6 +343,7 @@ export const GL_EXTENSIONS = Object.freeze({
     GL_ARB_vertex_type_2_10_10_10_rev: registryCommands('GL_ARB_vertex_type_2_10_10_10_rev'),
     GL_ARB_texture_rgb10_a2ui: [],
     GL_ARB_shader_bit_encoding: [],
+    GL_ARB_blend_func_extended: registryCommands('GL_ARB_blend_func_extended'),
     // 4.0 to 4.6's. What a shader's #extension enables of them is
     // glsl-versions.js's, and each is reported with it.
     GL_ARB_draw_indirect: registryCommands('GL_ARB_draw_indirect'),
