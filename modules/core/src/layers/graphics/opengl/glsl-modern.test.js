@@ -170,6 +170,17 @@ out vec4 a; out vec4 b[4]; void main() { a = vec4(1.0); b[0] = a; }`).log,
     assert.match(link(PASS, `#version 330
 layout(location = 1) out vec4 a; layout(location = 1) out vec4 b;
 void main() { a = vec4(1.0); b = a; }`).log, /location 1, which another output has/);
+    const bound = link(PASS, `#version 150
+out vec4 s_frag_color; out vec4 s_frag_data_0; out vec4 s_frag_data_1;
+void main() { s_frag_data_0 = vec4(1.0); s_frag_data_1 = s_frag_data_0; }`, {
+        fragData: [['s_frag_color', 0, 0], ['s_frag_data_0', 0, 0], ['s_frag_data_1', 1, 0]] });
+    assert.deepEqual(linked(bound).outputs.map(o=>`${o.name}@${o.location}`),
+        ['s_frag_data_0@0', 's_frag_data_1@1'],
+        'an output main never writes is not active: its binding to a taken number is no conflict');
+    assert.match(link(PASS, `#version 150
+out vec4 c; out vec4 d; void main() { c = vec4(1.0); d = c; }`, {
+        fragData: [['c', 0, 0], ['d', 0, 0]] }).log, /location 0, which another output has/,
+    'two active outputs bound to one number fail the link');
 
     const written = linked(link(PASS, `#version 330
 layout(location = 1) out ivec4 ids; layout(location = 0) out vec2 rg;

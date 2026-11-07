@@ -1060,6 +1060,11 @@ function localSizeOf(units, error){
  * A fragment shader's own outputs and their colour numbers (section 3.9.2 of
  * 3.0, 4.4.2 of the 3.30 language): `layout(location)` first, then
  * glBindFragDataLocation's, then the lowest free numbers in declaration order.
+ * An output `main` never reaches is not active and takes no number unless its
+ * layout gives it one: binding two names to one number fails a link only
+ * when both are active (4.6 section 15.2.3), and an engine that binds one
+ * name for a forward pass and another for a deferred one to colour 0 before
+ * linking either kind was refused every shader that declared both.
  *
  * @param {LinkedStage} fs
  * @param {Map<string, { location: number, index: number }>} bindings
@@ -1067,7 +1072,8 @@ function localSizeOf(units, error){
  * @returns {FragmentOutput[]}
  */
 function fragmentOutputsOf(fs, bindings, error){
-    const declared = fs.globals.filter(s=>s.storage === 'out' && !s.block);
+    const declared = fs.globals.filter(s=>s.storage === 'out' && !s.block
+        && (fs.uses.has(s.name) || typeof s.qualifiers?.layout?.location === 'number'));
     /** @type {FragmentOutput[]} */
     const outputs = [];
     /** @type {Set<string>} taken `location:index` pairs */
