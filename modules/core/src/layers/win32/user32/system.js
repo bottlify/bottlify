@@ -25,7 +25,7 @@ import {
     transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
-import { cursorFilePicture, dibToBgra, groupImageId } from './cursors.js';
+import { cursorFilePicture, dibToBgra, groupImageId, iconFilePicture } from './cursors.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { displayModes, refreshOf, registryMode } from './display.js';
 import {
@@ -745,6 +745,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
     host.pictures?.(cursorPicture);
     const SM_CXCURSOR = 13;
+    const SM_CXICON = 11;
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard
@@ -1569,15 +1570,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      *
      * @param {number} instance @param {number} name @param {number} type
      * @param {boolean} wide @param {number} [flags]  fuLoad.
+     * @param {number} [size]  cx, the width asked for; 0 for the system's.
      */
-    const loadImage = (instance, name, type, wide, flags = 0)=>{
+    const loadImage = (instance, name, type, wide, flags = 0, size = 0)=>{
         const IMAGE_BITMAP = 0;
         const IMAGE_ICON = 1;
         const IMAGE_CURSOR = 2;
         const LR_LOADFROMFILE = 0x10;
         switch (type >>> 0){
             case IMAGE_ICON:
-                return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
+                return (flags & LR_LOADFROMFILE) !== 0
+                    ? loadIconFile(readText(host, name >>> 0, wide, MAX_PATH), size)
+                    : loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
             case IMAGE_CURSOR:
                 return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
             case IMAGE_BITMAP:
@@ -1672,6 +1676,21 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const read = files.read(node, 0, stat.size);
         return read instanceof Uint8Array ? done(read) : read.then(done);
     };
+
+    /**
+     * An icon out of an .ico file, as LoadImage loads one with LR_LOADFROMFILE:
+     * the image of the size asked for, or of the system's icon size. 0 for a
+     * name that is no file and for one that holds no icon this can read.
+     *
+     * @param {string} path @param {number} size
+     */
+    const loadIconFile = (path, size)=>readWhole(path, bytes=>{
+        const picture = iconFilePicture(bytes, (size | 0) > 0 ? size | 0 : metric(SM_CXICON));
+        return picture
+            ? host.handles.open('icon', { hotSpot: picture.hotSpot, width: picture.width,
+                height: picture.height, picture })
+            : 0;
+    });
 
     /**
      * A cursor out of a .cur or .ani file, as LoadCursorFromFile loads one: a
@@ -2434,7 +2453,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const header = host.readMemory(bits >>> 0, 6);
         const count = header[4] | header[5] << 8;
         const cursor = (icon >>> 0) === 0;
-        const SM_CXICON = 11;
         const size = width > 0 ? width : metric(cursor ? SM_CXCURSOR : SM_CXICON);
         return groupImageId(host.readMemory(bits >>> 0, 6 + count * 14).slice(), cursor, size)
             ?? 0;
@@ -4529,16 +4547,16 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         LoadImageA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type, , , flags])=>
-                loadImage(instance, name, type, false, flags),
+            handler: ([instance, name, type, cx, , flags])=>
+                loadImage(instance, name, type, false, flags, cx),
         },
 
         /** HANDLE LoadImageW(HINSTANCE hInst, LPCWSTR name, UINT type, int cx, int cy, UINT) */
         LoadImageW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type, , , flags])=>
-                loadImage(instance, name, type, true, flags),
+            handler: ([instance, name, type, cx, , flags])=>
+                loadImage(instance, name, type, true, flags, cx),
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */

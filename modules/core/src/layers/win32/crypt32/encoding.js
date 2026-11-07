@@ -17,7 +17,9 @@
  */
 
 import { childrenOf, DerError, expect, readBitString, readBoolean, readInteger,
-    readNode, readOid, TAG } from '../crypto/der.js';
+    readNode, readOid, readTime, TAG } from '../crypto/der.js';
+import { parseSignerInfo } from '../crypto/pkcs7.js';
+import { signerInfoBlock } from './signer-info.js';
 import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { derElement, oidContents, readGeneralNames } from '../crypto/x509.js';
 import { NAME_STR, stringToName } from './names.js';
@@ -39,13 +41,17 @@ export const STRING = Object.freeze({
 
 /** The struct types handled, by their number (an LPCSTR below 0x10000) and their OID. */
 const STRUCT = Object.freeze({ ALTERNATE_NAME: 12, KEY_USAGE: 14, BASIC_CONSTRAINTS2: 15,
-    ENHANCED_KEY_USAGE: 36 });
+    UTC_TIME: 17, CHOICE_OF_TIME: 30, ENHANCED_KEY_USAGE: 36, PKCS7_SIGNER_INFO: 500 });
 const STRUCT_OIDS = new Map([
     ['2.5.29.17', STRUCT.ALTERNATE_NAME], ['2.5.29.18', STRUCT.ALTERNATE_NAME],
     ['2.5.29.7', STRUCT.ALTERNATE_NAME], ['2.5.29.8', STRUCT.ALTERNATE_NAME],
     ['2.5.29.15', STRUCT.KEY_USAGE], ['2.5.29.19', STRUCT.BASIC_CONSTRAINTS2],
     ['2.5.29.37', STRUCT.ENHANCED_KEY_USAGE],
+    // szOID_RSA_signingTime: the signing time attribute's value, a UTCTime.
+    ['1.2.840.113549.1.9.5', STRUCT.UTC_TIME],
 ]);
+/** Milliseconds from 1601, FILETIME's epoch, to 1970. */
+const FILETIME_EPOCH_MS = 11644473600000n;
 const CRYPT_DECODE_ALLOC_FLAG = 0x8000;
 /** The ALG_IDs CryptHashPublicKeyInfo hashes with, SHA-1 the default. */
 const CALG_SHA1 = 0x8004;
@@ -473,6 +479,23 @@ export function createEncodingFunctions(host){
                     }
                     return [choice, 0, 0];
                 })]);
+            }
+            case STRUCT.UTC_TIME:
+            case STRUCT.CHOICE_OF_TIME: {
+                // A FILETIME: 100-nanosecond intervals since 1601. A UTCTime
+                // alone for PKCS_UTC_TIME; either kind for the choice.
+                if (type === STRUCT.UTC_TIME && root.tag !== TAG.UTC_TIME)
+                {
+                    throw new DerError('not a UTCTime');
+                }
+                const ticks = (BigInt(readTime(root)) + FILETIME_EPOCH_MS) * 10000n;
+                const out = new Uint8Array(8);
+                new DataView(out.buffer).setBigUint64(0, ticks, true);
+                return ()=>out;
+            }
+            case STRUCT.PKCS7_SIGNER_INFO: {
+                const signer = parseSignerInfo(root);
+                return base=>signerInfoBlock(signer, base);
             }
             default:
                 return null;

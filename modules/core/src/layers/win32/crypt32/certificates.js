@@ -34,10 +34,11 @@ import { childrenOf, contents as contentsOf, DerError, encoding as encodingOf, e
 import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { checkSigner, parseSignedData, signedContent, signerCertificate }
     from '../crypto/pkcs7.js';
+import { signerInfoBlock } from './signer-info.js';
 import { verifySigned } from '../crypto/signature.js';
 import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
     rsaKeyFromBits, sameBytes, USAGE, TLS_USAGE } from '../crypto/x509.js';
-import { readSubject } from '../wintrust/subject.js';
+import { msiSubject, readSubject } from '../wintrust/subject.js';
 import { nameToString, NAME_STR } from './names.js';
 
 /** @typedef {import('../crypto/x509.js').Certificate} Certificate */
@@ -98,8 +99,8 @@ const FORMAT = Object.freeze({ BINARY: 1, BASE64: 2 });
 const PKCS_7_ASN_ENCODING = 0x10000;
 
 /** CryptMsgGetParam's parameters, and the message type a SignedData is. */
-const MSG_PARAM = Object.freeze({ TYPE: 1, CONTENT: 2, SIGNER_COUNT: 5, SIGNER_CERT_INFO: 7,
-    CERT_COUNT: 11, CERT: 12 });
+const MSG_PARAM = Object.freeze({ TYPE: 1, CONTENT: 2, SIGNER_COUNT: 5, SIGNER_INFO: 6,
+    SIGNER_CERT_INFO: 7, CERT_COUNT: 11, CERT: 12 });
 const CMSG_SIGNED = 2;
 
 /** CryptVerifyCertificateSignatureEx's subject and issuer kinds. */
@@ -1266,8 +1267,10 @@ export function createCertificateFunctions(host){
      *
      * @param {Uint8Array} bytes @param {number} wanted  The content type flags allowed.
      * @param {number} formats  The format flags allowed.
+     * @param {import('../wintrust/subject.js').Subject | null} [subject]  the file as a
+     *     signature's subject, read beforehand where reading it waits
      */
-    const queryContent = (bytes, wanted, formats)=>{
+    const queryContent = (bytes, wanted, formats, subject = readSubject(bytes))=>{
         /** @type {{ der: Uint8Array, format: number }[]} */
         const forms = [];
         if ((formats & (1 << FORMAT.BINARY)) !== 0)
@@ -1276,7 +1279,13 @@ export function createCertificateFunctions(host){
         }
         if ((formats & (1 << FORMAT.BASE64)) !== 0)
         {
-            const text = String.fromCharCode(...bytes.subarray(0, 0x100000));
+            // A chunk at a time: a megabyte spread into one call's arguments
+            // overflows the stack.
+            let text = '';
+            for (let at = 0; at < Math.min(bytes.length, 0x100000); at += 0x8000)
+            {
+                text += String.fromCharCode(...bytes.subarray(at, Math.min(at + 0x8000, 0x100000)));
+            }
             const pem = /-----BEGIN [^-]+-----([\s\S]*?)-----END/.exec(text);
             try
             {
@@ -1324,7 +1333,6 @@ export function createCertificateFunctions(host){
         if ((wanted & (1 << CONTENT.PKCS7_SIGNED_EMBED)) !== 0
             && (formats & (1 << FORMAT.BINARY)) !== 0)
         {
-            const subject = readSubject(bytes);
             if (subject?.signature)
             {
                 try
@@ -2141,56 +2149,68 @@ export function createCertificateFunctions(host){
                 {
                     return fail(E_INVALIDARG);
                 }
-                const found = queryContent(bytes, contentTypes >>> 0, formatTypes >>> 0);
-                if (!found)
-                {
-                    return fail(CRYPT_E_NO_MATCH);
-                }
-                /** @param {number} at @param {number} value */
-                const put = (at, value)=>{
-                    if ((at >>> 0) !== 0)
+                /** @param {ReturnType<typeof queryContent>} found */
+                const finish = found=>{
+                    if (!found)
                     {
-                        setDword(at >>> 0, value);
+                        return fail(CRYPT_E_NO_MATCH);
                     }
-                };
-                put(encodingOut, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING);
-                put(contentOut, found.type);
-                put(formatOut, found.format);
-                const certificates = 'certificate' in found && found.certificate
-                    ? [found.certificate] : found.signed?.certificates ?? [];
-                if ((storeOut >>> 0) !== 0)
-                {
-                    const store = handleOf({ refs: 1, held: [] });
-                    for (const certificate of certificates)
-                    {
-                        const address = makeContext(certificate, store);
-                        if (address !== 0)
+                    /** @param {number} at @param {number} value */
+                    const put = (at, value)=>{
+                        if ((at >>> 0) !== 0)
                         {
+                            setDword(at >>> 0, value);
+                        }
+                    };
+                    put(encodingOut, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING);
+                    put(contentOut, found.type);
+                    put(formatOut, found.format);
+                    const certificates = 'certificate' in found && found.certificate
+                        ? [found.certificate] : found.signed?.certificates ?? [];
+                    if ((storeOut >>> 0) !== 0)
+                    {
+                        const store = handleOf({ refs: 1, held: [] });
+                        for (const certificate of certificates)
+                        {
+                            const address = makeContext(certificate, store);
+                            if (address !== 0)
+                            {
                             /** @type {Store} */ (storeOf(store)).held.push(address);
+                            }
+                        }
+                        setPointer(storeOut >>> 0, store);
+                    }
+                    if ((messageOut >>> 0) !== 0)
+                    {
+                        if (found.signed && found.message)
+                        {
+                            const handle = nextMessage;
+                            nextMessage += 4;
+                            messages.set(handle, { ...found.signed, der: found.message });
+                            setPointer(messageOut >>> 0, handle);
+                        }
+                        else
+                        {
+                            setPointer(messageOut >>> 0, 0);
                         }
                     }
-                    setPointer(storeOut >>> 0, store);
-                }
-                if ((messageOut >>> 0) !== 0)
-                {
-                    if (found.signed && found.message)
+                    if ((contextOut >>> 0) !== 0)
                     {
-                        const handle = nextMessage;
-                        nextMessage += 4;
-                        messages.set(handle, { ...found.signed, der: found.message });
-                        setPointer(messageOut >>> 0, handle);
+                        setPointer(contextOut >>> 0, found.type === CONTENT.CERT
+                            ? makeContext(certificates[0], 0) : 0);
                     }
-                    else
-                    {
-                        setPointer(messageOut >>> 0, 0);
-                    }
-                }
-                if ((contextOut >>> 0) !== 0)
+                    return 1;
+                };
+                // An installer database's signature is read out of its streams,
+                // which waits; the other forms answer at once.
+                const local = bytes;
+                if ((contentTypes & (1 << CONTENT.PKCS7_SIGNED_EMBED)) !== 0 && !readSubject(local)
+                    && local[0] === 0xd0 && local[1] === 0xcf)
                 {
-                    setPointer(contextOut >>> 0, found.type === CONTENT.CERT
-                        ? makeContext(certificates[0], 0) : 0);
+                    return msiSubject(local).then(subject=>finish(queryContent(local,
+                        contentTypes >>> 0, formatTypes >>> 0, subject)));
                 }
-                return 1;
+                return finish(queryContent(local, contentTypes >>> 0, formatTypes >>> 0));
             },
         },
 
@@ -2229,6 +2249,11 @@ export function createCertificateFunctions(host){
                         const certificate = message.certificates[index >>> 0];
                         return certificate ? answer(certificate.encoded, out >>> 0, size >>> 0)
                             : fail(CRYPT_E_INVALID_INDEX);
+                    }
+                    case MSG_PARAM.SIGNER_INFO: {
+                        const signer = message.signers[index >>> 0];
+                        return signer ? answer(at=>signerInfoBlock(signer, at), out >>> 0,
+                            size >>> 0) : fail(CRYPT_E_INVALID_INDEX);
                     }
                     case MSG_PARAM.SIGNER_CERT_INFO: {
                         const signer = message.signers[index >>> 0];

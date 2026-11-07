@@ -99,6 +99,7 @@ import { registerDragDropHelperClass } from './shell32/dragdrop.js';
 import { registerTaskbarListClass } from './shell32/taskbar.js';
 import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
+import { registerMsxmlClasses } from './msxml/dom.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { registerJScriptClass } from './jscript/active-script.js';
 import { registerVBScriptClass } from './vbscript/active-script.js';
@@ -1878,6 +1879,30 @@ export function createWin32Module(){
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 physicalMemory: arena.size, processors: processors.count(), windows: reported,
                 divergence: config?.divergence, processorMhz: config?.processorMhz,
+            });
+
+            // MSXML's DOMDocument, which a setup engine reads its configuration
+            // with and a WiX bootstrapper its manifest.
+            registerMsxmlClasses({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                readFile: async path=>{
+                    const entry = volume.stat(path);
+                    const node = entry && !entry.isDirectory
+                        ? volume.open(path, { read: true }) : null;
+                    if (!entry || !node)
+                    {
+                        return null;
+                    }
+                    try
+                    {
+                        return await volume.read(node, 0, entry.size);
+                    }
+                    finally
+                    {
+                        volume.close(node);
+                    }
+                },
+                divergence: config?.divergence,
             });
 
             // DxDiag's provider, which an installer asks which DirectX this is
