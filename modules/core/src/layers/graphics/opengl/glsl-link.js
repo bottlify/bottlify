@@ -694,10 +694,6 @@ export function linkProgram(given){
         error(`too many samplers: ${samplers.length}, at most`
             + ` ${GLSL_LIMITS.combinedTextureImageUnits}`);
     }
-    if (samplers.some(s=>s.dim === '3D'))
-    {
-        error('a 3D sampler is used, and this implementation has no 3D textures');
-    }
     const defaults = new ArrayBuffer(Math.max(4, storeWords * 4));
     {
         const floats = new Float32Array(defaults);
