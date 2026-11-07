@@ -134,6 +134,9 @@ const CLIENT_GROUPS = [
  * @type {Set<number>}
  */
 export const NOT_SAVED = new Set([
+    // Vertex array state outside the vertex array objects, in no group (4.6
+    // compatibility table 23.8); the two enables are the enable group's.
+    GL.PRIMITIVE_RESTART_INDEX,
     GL.LIST_INDEX, GL.LIST_MODE, GL.RENDER_MODE, GL.ATTRIB_STACK_DEPTH,
     GL.CLIENT_ATTRIB_STACK_DEPTH, GL.RED_BITS, GL.GREEN_BITS, GL.BLUE_BITS, GL.ALPHA_BITS,
     GL.DEPTH_BITS, GL.STENCIL_BITS, GL.INDEX_BITS, GL.ACCUM_RED_BITS, GL.ACCUM_GREEN_BITS,
