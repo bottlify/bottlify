@@ -173,7 +173,8 @@ const FILTERS = Object.freeze({
 
 /**
  * GL wrap → the sampler's address mode. A border clamp has no counterpart
- * and clamps to the edge, which differs by the border colour along one texel.
+ * and clamps to the edge (A186): outside the texture the edge's texels are
+ * read where the border colour would be, said when it is sampled.
  *
  * @type {Readonly<Record<number, string>>}
  */
@@ -1126,6 +1127,12 @@ export function createGpuRenderer(services){
             ?? FILTERS[GL.LINEAR];
         const wrap = (/** @type {number} */ query)=>
             WRAPS[parameters.get(query) ?? GL.REPEAT] ?? 'repeat';
+        if ([GL.TEXTURE_WRAP_S, GL.TEXTURE_WRAP_T, GL.TEXTURE_WRAP_R].some(query=>
+            parameters.get(query) === GL.CLAMP_TO_BORDER))
+        {
+            diverge('a texture wrapped GL_CLAMP_TO_BORDER is clamped to its edge: outside it the'
+                + ' edge\'s texels are read, not the border colour');
+        }
         if (!filtered && (mag.filter !== 'nearest' || min.filter !== 'nearest'
             || (min.mip ?? 'nearest') !== 'nearest'))
         {

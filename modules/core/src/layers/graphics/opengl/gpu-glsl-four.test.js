@@ -184,3 +184,51 @@ ${samplers} out vec4 c; void main() { c = ${sum}; }`]])
         assert.equal(samplerIndex(samplerBinding(index)), index, 'a binding names its sampler');
     }
 });
+
+test('a texture wrapped GL_CLAMP_TO_BORDER is sampled clamped to its edge, and that is said',
+    async()=>{
+        const gpu = createFakeDevice();
+        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+            presentTo: ()=>{} });
+        /** @type {string[]} */
+        const divergences = [];
+        /** @type {any[]} */
+        const samplers = [];
+        const renderer = createGpuRenderer({ backend,
+            createSampler: descriptor=>{
+                samplers.push(descriptor);
+                return { kind: 'sampler', descriptor };
+            },
+            divergence: d=>divergences.push(d) });
+        /** @type {any} */
+        const gl = createGlContext({ memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
+            gpu: renderer, divergence: d=>divergences.push(d) });
+        gl.attach({ width: 8, height: 8, doubleBuffered: true });
+        const program = gl.glCreateProgram();
+        for (const [type, text] of [[GL.VERTEX_SHADER, `#version 330
+in vec4 position; void main() { gl_Position = position; }`], [GL.FRAGMENT_SHADER, `#version 330
+uniform sampler2D s; out vec4 c; void main() { c = texture(s, vec2(1.5)); }`]])
+        {
+            const shader = gl.glCreateShader(type);
+            gl.glShaderSource(shader, [text]);
+            gl.glCompileShader(shader);
+            gl.glAttachShader(program, shader);
+        }
+        gl.glLinkProgram(program);
+        gl.glUseProgram(program);
+        const [texture] = gl.glGenTextures(1);
+        gl.glBindTexture(GL.TEXTURE_2D, texture);
+        gl.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            Uint8Array.of(1, 2, 3, 4));
+        gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_BORDER);
+        const [vertices] = gl.glGenBuffersARB(1);
+        gl.glBindBufferARB(GL.ARRAY_BUFFER, vertices);
+        gl.glBufferDataARB(GL.ARRAY_BUFFER, 48, new Uint8Array(48), GL.STATIC_DRAW);
+        gl.glVertexAttribPointerARB(0, 4, GL.FLOAT, 0, 16, 0);
+        gl.glEnableVertexAttribArrayARB(0);
+        gl.glDrawArrays(GL.TRIANGLES, 0, 3);
+        renderer.present(gl);
+        await renderer.settled();
+        assert.match(divergences.join('\n'), /GL_CLAMP_TO_BORDER is clamped to its edge/);
+        assert.ok(samplers.some(d=>d.addressModeU === 'clamp-to-edge'));
+    });
