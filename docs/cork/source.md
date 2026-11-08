@@ -14,7 +14,7 @@
 
 How cork sits in Bottlify (loading by URL, the executor contract in
 [`engine.js`](../../modules/core/src/layers/cpu/engine.js), threads, the translation pool, several executors
-of one process) is in [`docs/architecture.md`](../architecture/README.md), section 5.
+of one process) is in [cork in the engine](../architecture/cork.md).
 
 ## Testing
 

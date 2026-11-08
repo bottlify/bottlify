@@ -32,12 +32,13 @@
      *     steps: { title: string, hops: [string, string][], nodes: string[] }[],
      *     github: string }} */
     const data = JSON.parse(json.textContent ?? '{}');
-    const COLOUR = { package: '#ffd166', layer: '#4cc9f0', library: '#8d99f5', cork: '#ff9f1c',
-        thread: '#f72585', outside: '#80ed99' };
-    const SIZE = { package: 6, layer: 3, thread: 2.5, outside: 3, cork: 1.6, library: 0.8 };
+    const COLOUR = { package: '#ffd166', layer: '#4cc9f0', ours: '#06d6a0', cork: '#ff9f1c',
+        thread: '#f72585', outside: '#b8f2c6', windows: '#7c86b8' };
+    const SIZE = { package: 6, layer: 3, thread: 2.5, outside: 3, ours: 1.8, cork: 1.8,
+        windows: 0.8 };
     // The camera nearer its pivot than this is zoomed in: every point in view is named.
     const ZOOMED = 420;
-    const NAMED = new Set(['package', 'layer', 'thread', 'outside']);
+    const NAMED = new Set(['package', 'layer', 'thread', 'outside', 'ours', 'cork']);
 
     // Each step's arrows are lines of their own, curved off the structure's, so
     // a pulse runs the way the step goes whatever the structure's line says.

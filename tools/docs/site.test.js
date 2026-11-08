@@ -114,7 +114,8 @@ test('a walkthrough: its parts, each step\'s arrows and parts under its heading'
 });
 
 test('the project graph is read from the tree, and a line to no part fails', async()=>{
-    const block = 'node page | Page | The browser page.\nlink page > worker/engine\n';
+    const block = 'node page | Page | The browser page.\nlink page > worker/engine\n'
+        + 'ours core/graphics/webgpu | The backend.\n';
     const { nodes, links } = await projectGraph(ROOT, block);
     const ids = new Set(nodes.map(node=>node.id));
     for (const id of ['core', 'cork', 'core/win32', 'core/win32/user32', 'core/graphics/gdi',
@@ -123,6 +124,10 @@ test('the project graph is read from the tree, and a line to no part fails', asy
         assert.ok(ids.has(id), `${id} is a part`);
     }
     assert.ok(!ids.has('core/win32/common') && !ids.has('core/cpu/internal'), 'workings left out');
+    assert.ok(!ids.has('core/bridge/sessions'), 'a folder with no code is data, not a part');
+    const group = (/** @type {string} */ id)=>nodes.find(node=>node.id === id)?.group;
+    assert.equal(group('core/win32/user32'), 'windows', 'a layer\'s part is Windows reproduced');
+    assert.equal(group('core/graphics/webgpu'), 'ours', 'unless the page names it as ours');
     const has = (/** @type {string} */ a, /** @type {string} */ b, /** @type {string} */ kind)=>
         links.some(link=>link.source === a && link.target === b && link.kind === kind);
     assert.ok(has('core/win32', 'core/bridge', 'requires'), 'a layer requires what its module says');

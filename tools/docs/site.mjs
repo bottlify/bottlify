@@ -398,6 +398,9 @@ export async function projectGraph(root, block){
         ? readdirSync(join(root, dir)).filter(name=>!NOT_PARTS.has(name)
             && statSync(join(root, dir, name)).isDirectory()).sort()
         : [];
+    // A folder with no code in it is data (recorded sessions, fixtures), not a part.
+    const parts = (/** @type {string} */ dir)=>folders(dir)
+        .filter(name=>readdirSync(join(root, dir, name)).some(file=>file.endsWith('.js')));
     for (const name of folders('modules'))
     {
         const file = join(root, 'modules', name, 'package.json');
@@ -423,14 +426,17 @@ export async function projectGraph(root, block){
         add({ id, label: layer.name, group: 'layer', about: layer.summary, file: dir });
         connect('core', id, 'holds');
         layer.requires.forEach(need=>connect(id, `core/${need}`, 'requires'));
-        for (const part of folders(dir))
+        for (const part of parts(dir))
         {
-            add({ id: `${id}/${part}`, label: part, group: 'library',
-                about: `Part of the ${layer.name} layer.`, file: `${dir}/${part}` });
+            // What a layer holds reproduces Windows (its libraries and APIs) unless the page
+            // names it as the project's own.
+            add({ id: `${id}/${part}`, label: part, group: 'windows',
+                about: `A part of Windows the ${layer.name} layer reproduces.`,
+                file: `${dir}/${part}` });
             connect(id, `${id}/${part}`, 'holds');
         }
     }
-    for (const part of folders('modules/cork/src'))
+    for (const part of parts('modules/cork/src'))
     {
         add({ id: `cork/${part}`, label: part, group: 'cork', about: 'Part of the translator.',
             file: `modules/cork/src/${part}` });
@@ -454,6 +460,7 @@ export async function projectGraph(root, block){
     {
         const node = /^node\s+(\S+)\s*\|(.*)$/.exec(line);
         const link = /^link\s+(\S+)\s*>\s*(\S+)$/.exec(line);
+        const own = /^ours\s+(\S+)\s*\|(.*)$/.exec(line);
         if (node)
         {
             const fields = node[2].split('|').map(field=>field.trim());
@@ -464,10 +471,20 @@ export async function projectGraph(root, block){
         {
             connect(link[1], link[2], 'runs');
         }
+        else if (own)
+        {
+            const part = nodes.get(own[1]);
+            if (!part)
+            {
+                throw new Error(`graph3d: ours ${own[1]} is no part of the project`);
+            }
+            part.group = part.group === 'cork' ? 'cork' : 'ours';
+            part.about = own[2].trim();
+        }
         else if (!/^route\s/.test(line))
         {
-            throw new Error(`graph3d: a line is "node id | label | about", "link a > b" or `
-                + `"route page.md": ${line}`);
+            throw new Error('graph3d: a line is "node id | label | about", "ours id | about", '
+                + `"link a > b" or "route page.md": ${line}`);
         }
     }
     for (const { source, target } of links.values())
@@ -536,7 +553,12 @@ async function graph3dBody(root, block, href){
         + '<button type="button" data-act="next" aria-label="Next step">&#8250;</button>'
         + '<span class="g3-caption" aria-live="polite">The hello world route</span>'
         + '<button type="button" data-act="full" aria-label="Full screen">&#x26F6;</button></div>'
-        + '<div class="g3-card" hidden></div><noscript>The graph needs JavaScript.</noscript></div>'
+        + '<div class="g3-card" hidden></div><ul class="g3-legend">'
+        + '<li class="g3-package">package</li><li class="g3-layer">layer of the engine</li>'
+        + '<li class="g3-ours">our part</li><li class="g3-cork">cork</li>'
+        + '<li class="g3-thread">thread</li><li class="g3-windows">Windows, reproduced</li>'
+        + '<li class="g3-outside">outside the code</li></ul>'
+        + '<noscript>The graph needs JavaScript.</noscript></div>'
         + `<script type="application/json" id="graph3d-data">${data}</script>`;
 }
 
