@@ -663,7 +663,7 @@ test('a bundle whose program sits past the quota starts, its late blocks read fi
         });
         assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60_000 }), 0);
         assert.equal(printed, PLANTED);
-        const packs = [...files.keys()].filter(path=>path.endsWith('.pack'));
+        const packs = [...files.keys()].filter(path=>/\.pack\.\d+$/.test(path));
         assert.ok(packs.length === 1 && (files.get(packs[0]) ?? 0) > BLOCK_SIZE / 2,
             `kept on the store, as long as the blocks read: ${JSON.stringify([...files])}`);
     });
