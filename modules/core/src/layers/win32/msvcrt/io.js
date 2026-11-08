@@ -934,6 +934,8 @@ export function createDescriptors(host){
  *           Where a call refuses what real Windows would have done.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Where the high half of an __int64 answer goes: EDX.
+ * @property {() => number} [systemTimeMs]  The guest's wall clock, for a
+ *           time stamp the caller leaves to "now".
  */
 
 /**
@@ -1129,6 +1131,57 @@ export function createIoFunctions(host, descriptors){
             device: 0, mode: S_IFREG | ALL_READ | ALL_WRITE,
             size: entry?.size ?? 0, modified: entry?.modified ?? 0,
         }, layout);
+        return 0;
+    };
+
+    /**
+     * The file a path names, as `_stat` reads the name, or null for none.
+     *
+     * @param {number} path @param {boolean} wideName
+     */
+    const namedFile = (path, wideName)=>{
+        if ((path >>> 0) === 0)
+        {
+            return null;
+        }
+        const name = (wideName ? wideStringAt(host.readMemory, path >>> 0)
+            : host.readCString(path >>> 0, MAX_STRING)).replace(/ +$/, '');
+        return name !== '' && host.files.stat(name) ? name : null;
+    };
+
+    /**
+     * A file's modification time set, from the times given or the clock:
+     * the volume keeps one time per file, the modification time, and the
+     * access time is accepted as the volume has none to keep it in.
+     *
+     * @param {string | null} name @param {number} times
+     * @param {4 | 8} width  bytes of a time in the structure
+     * @param {number} [missing]  errno when there is no such file
+     */
+    const stamp = (name, times, width, missing = ENOENT)=>{
+        if (name === null)
+        {
+            fail(missing);
+            return -1;
+        }
+        let stampSeconds = Math.floor((host.systemTimeMs?.() ?? Date.now()) / 1000);
+        if ((times >>> 0) !== 0)
+        {
+            const view = new DataView(host.readMemory((times >>> 0) + width, width).slice()
+                .buffer);
+            stampSeconds = width === 8 ? Number(view.getBigInt64(0, true)) : view.getInt32(0, true);
+            if (stampSeconds < 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+        }
+        if (!host.files.setModified)
+        {
+            host.divergence?.('_utime', 'the volume keeps no time stamps');
+            return 0;
+        }
+        host.files.setModified(name, stampSeconds * 1000);
         return 0;
     };
 
@@ -1588,6 +1641,24 @@ export function createIoFunctions(host, descriptors){
 
         /** int _fstati64(int fd, struct _stati64 *buffer) -- `_fstat` with the 64-bit size. */
         _fstati64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STATI64)),
+
+        // The time stamps: __utimbuf64 is two __time64_t, __utimbuf32 (and
+        // msvcrt's own _utimbuf) two longs; a null one is now.
+        /** int _utime64(const char *filename, struct __utimbuf64 *times) */
+        _utime64: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 8)),
+        /** int _utime32(const char *filename, struct __utimbuf32 *times) */
+        _utime32: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
+        _utime: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
+        _wutime64: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 8)),
+        _wutime32: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
+        _wutime: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
+        /** int _futime64(int fd, struct __utimbuf64 *times) */
+        _futime64: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 8,
+            EBADF)),
+        _futime32: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 4,
+            EBADF)),
+        _futime: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 4,
+            EBADF)),
 
         /** int _stat(const char *path, struct _stat *buffer) */
         _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT)),

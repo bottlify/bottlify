@@ -70,7 +70,8 @@ import { createMessageQueue } from './user32/messages.js';
 import { KEY_OF_HANDLE, createRegistryFunctions } from './advapi32/functions.js';
 import { RECORD_SECURITY } from './advapi32/named-security.js';
 import {
-    ADMINISTRATORS_SID, USER_SID_TEXT, RECORD_OBJECT_SECURITY, createTokenFunctions, isTokenMember,
+    ADMINISTRATORS_SID, USER_SID_TEXT, RECORD_OBJECT_SECURITY, accountNamed, createTokenFunctions,
+    isTokenMember,
 } from './advapi32/tokens.js';
 import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
@@ -266,6 +267,7 @@ const EXCEPTION_NONCONTINUABLE = 1;
 
 /** A path as GetModuleFileNameA writes one: MAX_PATH characters and the terminator. */
 const MAX_PATH_BYTES = 261;
+const ERROR_LOGON_FAILURE = 1326;
 
 /** How many refused file opens a report names, the latest. */
 const REFUSED_OPENS_KEPT = 32;
@@ -605,6 +607,8 @@ export function createWin32Module(){
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
+            /** Whether CreateProcessWithLogonW has said it checks no password. */
+            let loggedOnSaid = false;
             /**
              * Each thread's error information: oleaut32's SetErrorInfo and
              * GetErrorInfo, and a call between processes handing a failure
@@ -4759,6 +4763,45 @@ export function createWin32Module(){
                         /** @param {number[]} args */
                         handler: ([, ...args])=>
                             libraries['KERNEL32.dll'].CreateProcessW.handler(args),
+                    },
+                    // BOOL CreateProcessWithTokenW(HANDLE hToken, DWORD dwLogonFlags,
+                    //     LPCWSTR app, LPWSTR command, DWORD flags, LPVOID env,
+                    //     LPCWSTR directory, LPSTARTUPINFOW, LPPROCESS_INFORMATION):
+                    // the one user's token, so CreateProcess with no attributes.
+                    CreateProcessWithTokenW: {
+                        argBytes: 36,
+                        /** @param {number[]} args */
+                        handler: ([, , app, command, flags, env, directory, startup, info])=>
+                            libraries['KERNEL32.dll'].CreateProcessW.handler([app, command, 0,
+                                0, 0, flags, env, directory, startup, info]),
+                    },
+                    // BOOL CreateProcessWithLogonW(LPCWSTR user, LPCWSTR domain,
+                    //     LPCWSTR password, DWORD logonFlags, then CreateProcessWithTokenW's
+                    //     last seven): the one account by its name is started as itself;
+                    // any other name is a logon that fails. Its password is not checked.
+                    CreateProcessWithLogonW: {
+                        argBytes: 44,
+                        /** @param {number[]} args */
+                        handler: ([user, domain, , , ...rest])=>{
+                            const name = (user >>> 0) === 0 ? '' : readWideString(user, 512);
+                            const where = (domain >>> 0) === 0 ? '' : readWideString(domain, 512);
+                            const account = accountNamed(where && !name.includes('\\')
+                                ? `${where}\\${name}` : name);
+                            if (!account || account.name !== USER_NAME)
+                            {
+                                setError(ERROR_LOGON_FAILURE);
+                                return 0;
+                            }
+                            if (!loggedOnSaid)
+                            {
+                                loggedOnSaid = true;
+                                config?.divergence?.('CreateProcessWithLogonW',
+                                    'the password is not checked');
+                            }
+                            const [app, command, flags, env, directory, startup, info] = rest;
+                            return libraries['KERNEL32.dll'].CreateProcessW.handler([app, command,
+                                0, 0, 0, flags, env, directory, startup, info]);
+                        },
                     },
                 },
 

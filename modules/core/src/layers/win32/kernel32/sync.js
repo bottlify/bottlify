@@ -1126,6 +1126,38 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * BOOL GetSystemTimes(LPFILETIME lpIdleTime, LPFILETIME lpKernelTime,
+         *     LPFILETIME lpUserTime)
+         *
+         * The machine's processor time since it started, summed over its
+         * processors: user time is what this process's threads ran, idle
+         * the rest, and kernel time includes the idle time, as Windows
+         * counts it. Each pointer may be null.
+         */
+        GetSystemTimes: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([idle, kernelTime, userTime])=>{
+                const total = kernel.clock.virtualTime() * processors.count();
+                const busy = Math.min(kernel.processCpuMs?.() ?? 0, total);
+                /** @param {number} address @param {number} ms */
+                const write = (address, ms)=>{
+                    if ((address >>> 0) !== 0)
+                    {
+                        const bytes = new Uint8Array(8);
+                        new DataView(bytes.buffer).setBigUint64(0,
+                            BigInt(Math.round(ms * 10000)), true);
+                        host.writeMemory(address >>> 0, bytes);
+                    }
+                };
+                write(idle, total - busy);
+                write(kernelTime, total - busy);
+                write(userTime, busy);
+                return 1;
+            },
+        },
+
+        /**
          * DWORD_PTR SetThreadAffinityMask(HANDLE hThread, DWORD_PTR dwThreadAffinityMask)
          *
          * The processors a thread may run on, which the scheduler keeps it to,
