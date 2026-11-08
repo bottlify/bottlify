@@ -568,11 +568,11 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     assert.equal(await cachedBundle({ root: root(short), id: 'game', fetchRange,
         decode: decodeBlock, manifest }), null, 'a block missing from the cache: nothing to write');
 
-    const pack = /** @type {Uint8Array} */ (files.get(`${name}.pack`));
+    const pack = /** @type {Uint8Array} */ (files.get(`${name}.pack.0`));
     const cut = new Map(files);
-    cut.set(`${name}.pack`, pack.subarray(0, pack.length - 1));
+    cut.set(`${name}.pack.0`, pack.subarray(0, pack.length - 1));
     assert.equal(await cachedBundle({ root: root(cut), id: 'game', fetchRange,
-        decode: decodeBlock, manifest }), null, 'a pack short of its last block: nothing');
+        decode: decodeBlock, manifest }), null, 'a segment short of its last block: nothing');
 
     const swapped = new Map(files);
     const other = table.slice();

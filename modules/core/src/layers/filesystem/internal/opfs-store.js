@@ -53,7 +53,7 @@ import { ErrorCode, fsError } from './errors.js';
  * @typedef {Object} OpfsFile
  * @property {'file'} kind
  * @property {() => Promise<OpfsAccess>} [createSyncAccessHandle]
- * @property {() => Promise<{ size: number }>} getFile
+ * @property {() => Promise<{ size: number, lastModified?: number }>} getFile
  */
 
 /**
@@ -101,7 +101,9 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
         throw fsError(ErrorCode.INVALID_PARAMETER, 'At least one handle has to fit in the pool');
     }
 
-    /** @type {Map<string, { directory: boolean, size: number }>} */
+    // `modified`: when the file was last written, as the walk found it or as this
+    // store wrote it -- what a cache that has to let something go ages it by.
+    /** @type {Map<string, { directory: boolean, size: number, modified: number }>} */
     const index = new Map();
     /** @type {Map<string, OpfsDirectory>} */
     const directories = new Map([['', root]]);
@@ -289,7 +291,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
         evict();
         if (!known)
         {
-            index.set(path, { directory: false, size: access.getSize() });
+            index.set(path, { directory: false, size: access.getSize(), modified: Date.now() });
         }
     };
 
@@ -304,7 +306,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
             if (handle.kind === 'directory')
             {
                 directories.set(path, handle);
-                index.set(path, { directory: true, size: 0 });
+                index.set(path, { directory: true, size: 0, modified: 0 });
                 await walk(handle, path);
                 continue;
             }
@@ -312,7 +314,9 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
             // `getFile` rather than an access handle: reading a size must not
             // take the exclusive lock, or mounting would fail over any file
             // something else already holds open.
-            index.set(path, { directory: false, size: (await handle.getFile()).size });
+            const file = await handle.getFile();
+            index.set(path, { directory: false, size: file.size,
+                modified: file.lastModified ?? 0 });
         }
     };
 
@@ -324,6 +328,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
                 path,
                 directory: entry.directory,
                 size: entry.size,
+                modified: entry.modified,
             }));
         },
 
@@ -365,6 +370,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
             const entry = writableEntry(path);
             resident(path).write(bytes, { at: offset });
             entry.size = Math.max(entry.size, offset + bytes.length);
+            entry.modified = Date.now();
         },
 
         /** @param {string} path @param {number} size */
@@ -376,6 +382,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
             const entry = writableEntry(path);
             resident(path).truncate(size);
             entry.size = size;
+            entry.modified = Date.now();
         },
 
         /**
@@ -413,7 +420,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
                 throw fsError(ErrorCode.ALREADY_EXISTS, `"${path}" already exists`);
             }
             requireParent(path);
-            index.set(path, { directory: true, size: 0 });
+            index.set(path, { directory: true, size: 0, modified: Date.now() });
             enqueue(async()=>{
                 await directoryHandle(path, true);
             });

@@ -20,12 +20,17 @@ const SEGMENT_BLOCKS = 1024;
 function fakeStore(){
     /** @type {Map<string, Uint8Array>} */
     const files = new Map();
+    /** When each file was last written, in writes: the OPFS store's `modified`. */
+    /** @type {Map<string, number>} */
+    const modified = new Map();
+    let clock = 0;
 
     /** @param {string} path @returns {Uint8Array} */
     const bytesOf = path=>files.get(path) ?? new Uint8Array(0);
 
     /** @param {string} path @param {number} size */
     const grow = (path, size)=>{
+        modified.set(path, ++clock);
         const held = files.get(path) ?? new Uint8Array(0);
         if (held.length >= size)
         {
@@ -39,6 +44,8 @@ function fakeStore(){
 
     return {
         files,
+        list: ()=>[...files.keys()].map(path=>({ path, directory: false,
+            size: bytesOf(path).length, modified: modified.get(path) ?? 0 })),
         /** @param {string} path */
         async open(path){
             // The origin's file system refuses a name with a separator in it,
@@ -63,6 +70,7 @@ function fakeStore(){
         },
         /** @param {string} path @param {number} size */
         truncate(path, size){
+            modified.set(path, ++clock);
             files.set(path, new Uint8Array(size));
         },
         /** @param {string} path */
@@ -89,7 +97,7 @@ test('a block goes to storage and comes back, and nothing is held in the heap', 
     assert.equal(cache.diagnostics().resident, 1);
 });
 
-test('blocks go into the pack one after another, each with its header, in the order they came',
+test('blocks go into a segment one after another, each with its header, in the order they came',
     async()=>{
         // The table names where each one went: a block put late in the bundle
         // costs its own length in the pack and no more.
@@ -99,7 +107,7 @@ test('blocks go into the pack one after another, each with its header, in the or
         await cache.put(7, new Uint8Array(16).fill(0x11));
         await cache.put(2, new Uint8Array(16).fill(0x22));
 
-        const pack = store.files.get('war.pack');
+        const pack = store.files.get('war.pack.0');
         assert.equal(pack?.length, 16 + 2 * (16 + 16), 'the pack\'s header and two records');
         assert.equal(pack?.[16 + 16], 0x11, 'block 7 first, after its header');
         assert.equal(pack?.[16 + 32 + 16], 0x22, 'block 2 after it');
@@ -141,7 +149,7 @@ test('a cache on storage takes on disk what it holds, whatever blocks of the bun
         assert.equal(onDisk, 16 + put.size * (16 + blockSize) + table + order,
             'the pack\'s header, a header and the bytes of each block, the table and the order');
         assert.ok(onDisk < blocks * 1.2, `${onDisk} bytes on disk for ${blocks} of blocks`);
-        assert.equal(cache.diagnostics().diskBytes, (store.files.get('wide.pack')?.length ?? 0)
+        assert.equal(cache.diagnostics().diskBytes, (store.files.get('wide.pack.0')?.length ?? 0)
             + table, 'the cache says what its blocks take');
         const again = await createBlockCache({ store, ...options });
         for (const index of put)
@@ -270,10 +278,11 @@ test('the cache is backed by the store it was given, under a name the store allo
 
     assert.equal(cache.backed, true);
     assert.deepEqual([...store.files.keys()].sort(),
-        ['a_game_with_odd_chars.index', 'a_game_with_odd_chars.order',
-            'a_game_with_odd_chars.pack']);
-    assert.equal(store.files.get('a_game_with_odd_chars.pack')?.length, 16,
-        'the pack holds its header alone before a block is put');
+        ['a_game_with_odd_chars.index', 'a_game_with_odd_chars.order'],
+        'no segment before a block is put');
+    await cache.put(1, new Uint8Array(16));
+    assert.equal(store.files.get('a_game_with_odd_chars.pack.0')?.length, 16 + 16 + 16,
+        'the first segment: its header and the record');
 });
 
 test('a store that will not open says why, rather than only falling back', async()=>{
@@ -359,6 +368,7 @@ test('what of a bundle is here is read off its table and pack, the seed aside', 
     const blockCount = 2 * SEGMENT_BLOCKS + 10;
     const bundle = {
         fingerprint: 'abc',
+        blockSize: 128,
         blockCount,
         block: ()=>({ packed: 100, codec: 2, length: 100 }),
         translations: { firstBlock: blockCount - 2, blocks: 2 },
@@ -377,7 +387,7 @@ test('what of a bundle is here is read off its table and pack, the seed aside', 
         { blocks: blockCount - 2, resident: 4, bytes: (blockCount - 2) * 100, residentBytes: 400 });
     assert.equal((await residency(new Map())).resident, 0, 'no cache yet');
     const cut = new Map(store.files);
-    cut.set(`${name}.pack`, (store.files.get(`${name}.pack`) ?? new Uint8Array(0))
+    cut.set(`${name}.pack.0`, (store.files.get(`${name}.pack.0`) ?? new Uint8Array(0))
         .slice(0, 16 + 3 * 116));
     assert.equal((await residency(cut)).resident, 3, 'a block past the pack\'s end is not here');
     assert.equal((await residency(new Map([...store.files, [`${name}.index`, Uint8Array.of(1)]])))
@@ -458,7 +468,7 @@ test('a cache of the segment layout is dropped, every segment and its bitmap', a
     store.files.set('war.blocks.2', new Uint8Array(64).fill(0xee));
     const cache = await createBlockCache({ store, ...options });
     assert.equal(cache.has(1), false);
-    assert.deepEqual([...store.files.keys()].sort(), ['war.index', 'war.order', 'war.pack']);
+    assert.deepEqual([...store.files.keys()].sort(), ['war.index', 'war.order']);
     assert.deepEqual(cacheFiles.replaced('war', options.blockCount).slice(-3),
         ['war.blocks.0', 'war.blocks.1', 'war.blocks.2']);
 });
@@ -476,7 +486,7 @@ test('a block whose record the table does not name is fetched again, not handed 
     const table = store.files.get('war.index') ?? new Uint8Array(0);
     const view = new DataView(table.buffer);
     view.setFloat64(4 * 8, view.getFloat64(3 * 8, true), true);
-    store.files.set('war.pack', (store.files.get('war.pack') ?? new Uint8Array(0))
+    store.files.set('war.pack.0', (store.files.get('war.pack.0') ?? new Uint8Array(0))
         .slice(0, 16 + 2 * 32 + 20));
     const second = await createBlockCache({ store, ...OPTIONS });
     assert.deepEqual(second.read(3, 16), new Uint8Array(16).fill(1));
@@ -487,7 +497,7 @@ test('a block whose record the table does not name is fetched again, not handed 
     const third = await createBlockCache({ store, ...OPTIONS });
     assert.equal(third.has(4), false, 'what the read found wrong is not believed next time');
 
-    store.files.set('war.pack', new Uint8Array(64).fill(0x11));
+    store.files.set('war.pack.0', new Uint8Array(64).fill(0x11));
     const fourth = await createBlockCache({ store, ...OPTIONS });
     assert.equal(fourth.has(3), false, 'a pack without its mark starts again');
 });
@@ -496,7 +506,7 @@ test('a block the store refuses is held in the heap, and the cache says it is fu
     const store = fakeStore();
     /** @param {string} path @param {number} at @param {Uint8Array} bytes */
     const write = (path, at, bytes)=>{
-        if (path.endsWith('.pack') && at > 0)
+        if (/\.pack\.\d+$/.test(path) && at > 0)
         {
             throw new DOMException('quota', 'QuotaExceededError');
         }
@@ -510,4 +520,90 @@ test('a block the store refuses is held in the heap, and the cache says it is fu
     await cache.persist();
     const again = await createBlockCache({ store, ...OPTIONS });
     assert.equal(again.has(6), false, 'nothing recorded that is not on disk');
+});
+
+/**
+ * A store with room for `limit` bytes in all, refusing a write past it as the
+ * origin's file system does.
+ *
+ * @param {ReturnType<typeof fakeStore>} store @param {number} limit
+ */
+const roomFor = (store, limit)=>({ ...store,
+    /** @param {string} path @param {number} at @param {Uint8Array} bytes */
+    write(path, at, bytes){
+        const held = store.files.get(path)?.length ?? 0;
+        const total = [...store.files.values()].reduce((sum, one)=>sum + one.length, 0);
+        if (total - held + Math.max(held, at + bytes.length) > limit)
+        {
+            throw new DOMException('quota', 'QuotaExceededError');
+        }
+        store.write(path, at, bytes);
+    } });
+
+/** Three records of 16-byte blocks to a segment, after its header. */
+const SPAN = 16 + 3 * 32;
+
+test('a store out of room lets the segment written longest ago go, another bundle\'s', async()=>{
+    const store = fakeStore();
+    const old = await createBlockCache({ store, ...OPTIONS, name: 'old', segmentBytes: SPAN });
+    for (let index = 0; index < 6; index++)
+    {
+        await old.put(index, new Uint8Array(16).fill(index));
+    }
+    assert.deepEqual([...store.files.keys()].filter(path=>path.includes('.pack')),
+        ['old.pack.0', 'old.pack.1']);
+    // Room for both tables and three segments: the fourth asks for more.
+    const limit = 2 * OPTIONS.blockCount * 8 + 3 * SPAN;
+    const war = await createBlockCache({ store: roomFor(store, limit), ...OPTIONS,
+        segmentBytes: SPAN });
+    for (let index = 0; index < 4; index++)
+    {
+        await war.put(index, new Uint8Array(16).fill(0x40 + index));
+    }
+    assert.equal(store.files.has('old.pack.0'), false, 'the oldest segment went');
+    assert.equal(store.files.has('old.pack.1'), true, 'and only it');
+    assert.deepEqual(war.read(3, 16), new Uint8Array(16).fill(0x43), 'the block is on disk');
+    assert.equal(store.files.get('war.pack.1')?.length, 16 + 32);
+    assert.deepEqual(war.diagnostics().letGo, { segments: 1, bytes: SPAN });
+    assert.equal(war.diagnostics().full, 'quota', 'the refusal is said');
+
+    const again = await createBlockCache({ store, ...OPTIONS, name: 'old', segmentBytes: SPAN });
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map(index=>again.has(index)),
+        [false, false, false, true, true, true], 'what went is fetched again, the rest is here');
+    assert.deepEqual(again.read(4, 16), new Uint8Array(16).fill(4));
+});
+
+test('a bundle larger than the room keeps its newest blocks, on disk', async()=>{
+    const store = fakeStore();
+    const cache = await createBlockCache({ store: roomFor(store, OPTIONS.blockCount * 8 + 2 * SPAN),
+        ...OPTIONS, segmentBytes: SPAN });
+    for (let index = 0; index < 9; index++)
+    {
+        await cache.put(index, new Uint8Array(16).fill(index));
+    }
+    const here = Array.from({ length: 9 }, (_, index)=>cache.has(index));
+    assert.deepEqual(here, [false, false, false, true, true, true, true, true, true]);
+    assert.equal(cache.diagnostics().heapBytes, OPTIONS.blockCount * 8, 'nothing in the heap');
+    const again = await createBlockCache({ store, ...OPTIONS, segmentBytes: SPAN });
+    assert.deepEqual(Array.from({ length: 9 }, (_, index)=>again.has(index)), here);
+    assert.deepEqual(again.read(8, 16), new Uint8Array(16).fill(8));
+});
+
+test('a refusal that is not for room lets nothing go', async()=>{
+    const store = fakeStore();
+    const old = await createBlockCache({ store, ...OPTIONS, name: 'old', segmentBytes: SPAN });
+    await old.put(0, new Uint8Array(16));
+    const broken = { ...store,
+        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
+        write(path, at, bytes){
+            if (path.startsWith('war.pack'))
+            {
+                throw new TypeError('handle closed');
+            }
+            store.write(path, at, bytes);
+        } };
+    const war = await createBlockCache({ store: broken, ...OPTIONS, segmentBytes: SPAN });
+    await war.put(1, new Uint8Array(16).fill(1));
+    assert.equal(store.files.has('old.pack.0'), true);
+    assert.deepEqual(war.read(1, 16), new Uint8Array(16).fill(1), 'held in the heap');
 });
