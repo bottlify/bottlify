@@ -34,6 +34,8 @@ import { headings, links } from './markdown.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const REPO = 'https://github.com/bottlify/bottlify/blob/main/';
+/** Where the site built from docs/ is served (`tools/docs/site.mjs`). */
+const SITE = 'https://bottlify.app/docs/';
 
 /**
  * The markdown pages under a folder, as paths relative to `root` with `/`.
@@ -94,6 +96,15 @@ export function check(root){
             if (url.startsWith(REPO))
             {
                 [target, anchor = ''] = url.slice(REPO.length).split('#');
+            }
+            else if (url.startsWith(SITE))
+            {
+                // The page the site builds from: `x.html` from `x.md`, a folder
+                // from its README.md.
+                const [path, hash = ''] = url.slice(SITE.length).split('#');
+                target = `docs/${path.replace(/(^|\/)$/, '$1README.md')
+                    .replace(/(^|\/)index\.html$/, '$1README.md').replace(/\.html$/, '.md')}`;
+                anchor = hash;
             }
             else if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(url))
             {

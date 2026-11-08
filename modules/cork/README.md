@@ -44,7 +44,7 @@ the registers and how many instructions ran.
 
 ## Documentation
 
-- [What cork runs, how it works, how fast it is](https://github.com/bottlify/bottlify/blob/main/docs/cork/README.md)
-- [Settings](https://github.com/bottlify/bottlify/blob/main/docs/cork/settings.md)
+- [What cork runs, how it works, how fast it is](https://bottlify.app/docs/cork/)
+- [Settings](https://bottlify.app/docs/cork/settings.html)
 
 MPL-2.0.

@@ -49,9 +49,12 @@ test('a sound tree passes, and each kind of break is named', ()=>{
         writeFileSync(join(root, 'docs/a.md'), '# A\n## Part one\nSee [B](sub/b.md#start) and [C](c.md).\n');
         writeFileSync(join(root, 'docs/stray.md'), '# Stray\n');
         writeFileSync(join(root, 'README.md'),
-            '[gone](https://github.com/bottlify/bottlify/blob/main/docs/gone.md)\n');
+            '[gone](https://github.com/bottlify/bottlify/blob/main/docs/gone.md)\n'
+            + '[site](https://bottlify.app/docs/sub/b.html#end) [home](https://bottlify.app/docs/)\n'
+            + '[moved](https://bottlify.app/docs/sub/c.html)\n');
         const problems = check(root);
-        assert.equal(problems.length, 4, problems.join('\n'));
+        assert.equal(problems.length, 5, problems.join('\n'));
+        assert.match(problems.join('\n'), /sub\/c\.html: no such file/);
         assert.match(problems.join('\n'), /no heading #start in docs\/sub\/b\.md/);
         assert.match(problems.join('\n'), /c\.md: no such file/);
         assert.match(problems.join('\n'), /gone\.md: no such file/);
