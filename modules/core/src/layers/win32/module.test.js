@@ -350,6 +350,15 @@ test('msimg32 is gdi32\'s blending under the name a program linked against', asy
         assert.ok(libraries['GDI32.dll'][target], `gdi32 has ${target}`);
         assert.equal(libraries['MSIMG32.dll'][name], libraries['GDI32.dll'][target], name);
     }
+    // olepro32 likewise, oleaut32's under its own numbers (Wine's olepro32.spec).
+    const numbers = api.ordinals()['OLEPRO32.dll'];
+    assert.deepEqual(numbers, { 250: 'OleCreatePropertyFrame', 251: 'OleLoadPicture',
+        252: 'OleCreatePictureIndirect', 253: 'OleCreateFontIndirect', 254: 'OleTranslateColor' });
+    for (const name of Object.values(numbers))
+    {
+        assert.ok(libraries['OLEAUT32.dll'][name], `oleaut32 has ${name}`);
+        assert.equal(libraries['OLEPRO32.dll'][name], libraries['OLEAUT32.dll'][name], name);
+    }
 
     await win32Module.dispose();
 });

@@ -36,6 +36,9 @@ export const CLSID_FILTER_GRAPH_NO_THREAD = '{E436EBB8-524F-11CE-9F53-0020AF0BA7
 
 /** Where a filter DLL's DllRegisterServer goes to announce itself. */
 export const CLSID_FILTER_MAPPER2 = '{CDA42200-BD88-11D0-BD4E-00A0C911CE86}';
+/** The first filter mapper, which the SDK's registration falls back to without the second. */
+export const CLSID_FILTER_MAPPER = '{E436EBB2-524F-11CE-9F53-0020AF0BA770}';
+export const IID_IFILTER_MAPPER = '{56A868A3-0AD4-11CE-B03A-0020AF0BA770}';
 
 export const IID_IFILTER_GRAPH = '{56A8689F-0AD4-11CE-B03A-0020AF0BA770}';
 export const IID_IGRAPH_BUILDER = '{56A868A9-0AD4-11CE-B03A-0020AF0BA770}';
@@ -266,6 +269,23 @@ export const IMEDIA_SEEKING_SLOTS = [
     ['SetRate', 2],
     ['GetRate', 1],
     ['GetPreroll', 1],
+];
+
+/**
+ * IFilterMapper, which is IUnknown-derived. A CLSID it takes by value is four
+ * dwords on the stack.
+ *
+ * @type {[string, number][]}
+ */
+export const IFILTER_MAPPER_SLOTS = [
+    ['RegisterFilter', 6],
+    ['RegisterFilterInstance', 6],
+    ['RegisterPin', 14],
+    ['RegisterPinType', 13],
+    ['UnregisterFilter', 4],
+    ['UnregisterFilterInstance', 4],
+    ['UnregisterPin', 5],
+    ['EnumMatchingFilters', 21],
 ];
 
 /** IFilterMapper2, which is IUnknown-derived. @type {[string, number][]} */

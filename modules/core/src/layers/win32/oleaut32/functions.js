@@ -6097,3 +6097,21 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     440: 'VarUI8FromUI4',
     441: 'VarUI8FromDec',
 });
+
+/**
+ * olepro32.dll's exports, by the numbers it has them under: a forwarder to
+ * oleaut32 and nothing else (Wine's olepro32.spec), which an MFC application
+ * links its pictures, fonts, colours and property pages through, by number.
+ * 248 (OleIconToCursor) and 249 (OleCreatePropertyFrameIndirect) are left out
+ * while oleaut32 has neither: an ordinal pointing at nothing binds and jumps
+ * into nowhere.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const OLEPRO32_ORDINALS = Object.freeze({
+    250: 'OleCreatePropertyFrame',
+    251: 'OleLoadPicture',
+    252: 'OleCreatePictureIndirect',
+    253: 'OleCreateFontIndirect',
+    254: 'OleTranslateColor',
+});
