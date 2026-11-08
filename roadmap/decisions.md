@@ -2010,3 +2010,16 @@ blocks, and any level made or converted into BC1 to BC5, is encoded by this load
 whose endpoints and indices differ from Windows' where several encodings come equally close. The
 sRGB curve is the power 2.2 the tests show, held to 0 to 1; Windows reads a float above 1 past
 the end of its table. *2026-11-08.*
+
+**A237. A .NET runtime's folder holds the engine's `fusion.dll`, and `WineFakeDlls` is answered
+by what stands there.** Wine's fusion tests reach the library as programs do, through mscoree's
+`LoadLibraryShim("fusion.dll", "v4.0.30319")`, which loads it from the runtime's folder; a bottle
+with Mono has those folders but not the library, and wine-mono's support installer asks for it
+there with Wine's own INF directive, `WineFakeDlls`, which Windows' setupapi does not know. A
+library the engine implements as a runtime's own (`fusion.dll`) now stands in each runtime's
+folder (`Microsoft.NET\Framework\v2.0.50727`, `v4.0.30319`) while the folder is there, as A41
+stands the engine's libraries in the system folder, and loads as the engine's table. `WineFakeDlls`
+is carried out with an install section's files: the folder each line names is made, and a library
+that does not stand there afterwards - `ngen.exe`, `mscorwks.dll` and the other runtime parts
+wine-mono places as Wine's fake images - is said as not provided. The global assembly cache is
+the Windows folders and nothing beside them; Mono's own cache is not listed in it. *2026-11-08.*

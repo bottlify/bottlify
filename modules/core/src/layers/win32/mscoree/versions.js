@@ -19,6 +19,22 @@
 /** The runtimes, oldest first, by the names their directories have. */
 export const RUNTIME_VERSIONS = Object.freeze(['v2.0.50727', 'v4.0.30319']);
 
+/**
+ * The libraries of the engine's own that a runtime's directory holds, each
+ * standing in `<windows>\Microsoft.NET\Framework\<version>` as in the system
+ * folder (A41): LoadLibraryShim and ICLRRuntimeInfo::LoadLibrary find them
+ * there.
+ */
+export const RUNTIME_LIBRARIES = Object.freeze(['fusion.dll']);
+
+/**
+ * The runtimes' directories, which a runtime library stands in.
+ *
+ * @param {string} windows  the Windows folder
+ */
+export const runtimeDirectories = windows=>RUNTIME_VERSIONS.map(version=>
+    `${windows}\\Microsoft.NET\\Framework\\${version}`);
+
 /** The newest runtime the legacy entry points (GetCORVersion and kin) hand out. */
 export const LATEST_LEGACY = 'v2.0.50727';
 

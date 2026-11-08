@@ -19,6 +19,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { readGuid } from '../ole32/guid.js';
+import { readClrImage } from './metadata.js';
 import { LATEST_LEGACY, RUNTIME_VERSIONS, exactRuntime, requestedRuntime } from './versions.js';
 
 const S_OK = 0;
@@ -106,54 +107,7 @@ const STREAM_SLOTS = /** @type {[string, number][]} */ ([['Read', 3], ['Write', 
  * @returns {string | null}
  */
 export function metadataVersion(file){
-    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
-    if (file.length < 0x40 || view.getUint16(0, true) !== 0x5a4d)
-    {
-        return null;
-    }
-    const pe = view.getUint32(0x3c, true);
-    if (pe + 24 > file.length || view.getUint32(pe, true) !== 0x4550)
-    {
-        return null;
-    }
-    const sections = view.getUint16(pe + 6, true);
-    const optional = pe + 24;
-    const optionalSize = view.getUint16(pe + 20, true);
-    const wide = view.getUint16(optional, true) === 0x20b;
-    // Data directory 14, the CLI header.
-    const directory = optional + (wide ? 112 : 96) + 14 * 8;
-    if (directory + 8 > optional + optionalSize)
-    {
-        return null;
-    }
-    /** @param {number} rva */
-    const offsetOf = rva=>{
-        for (let i = 0; i < sections; i++)
-        {
-            const at = optional + optionalSize + i * 40;
-            const address = view.getUint32(at + 12, true);
-            const size = Math.max(view.getUint32(at + 8, true), view.getUint32(at + 16, true));
-            if (rva >= address && rva < address + size)
-            {
-                return rva - address + view.getUint32(at + 20, true);
-            }
-        }
-        return -1;
-    };
-    const cli = offsetOf(view.getUint32(directory, true));
-    if (cli < 0 || cli + 16 > file.length)
-    {
-        return null;
-    }
-    const root = offsetOf(view.getUint32(cli + 8, true));
-    if (root < 0 || root + 16 > file.length || view.getUint32(root, true) !== 0x424a5342)
-    {
-        return null;
-    }
-    const length = view.getUint32(root + 12, true);
-    const bytes = file.subarray(root + 16, Math.min(file.length, root + 16 + length));
-    const end = bytes.indexOf(0);
-    return new TextDecoder().decode(end < 0 ? bytes : bytes.subarray(0, end));
+    return readClrImage(file)?.version ?? null;
 }
 
 /**

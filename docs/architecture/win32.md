@@ -154,6 +154,12 @@ flowchart TD
   engine's table answers `d3dx9_*`, `d3dx10_*` and `d3dx11_42`/`_43`, the copy in `system32`
   included. D3DX 10 and 11 are one library over two devices: the image loaders make their
   textures through the device's own creates, the compiles go to `D3DCompile`.
+- **Where an engine library stands as a file:** in the system folder, as a file a setup or a
+  program can find, read and replace (`withSystemLibraries`); a .NET runtime's own library
+  (`fusion.dll`) also in each runtime's folder, `C:\WINDOWS\Microsoft.NET\Framework\v2.0.50727`
+  and `v4.0.30319`, while that folder is there: `LoadLibraryShim` and
+  `ICLRRuntimeInfo::LoadLibrary` load it from there, and a setup made for Wine that asks for it
+  with `WineFakeDlls` finds it in place.
 
 Where to look in the code: [`core/src/layers/loader/internal/synth.js`](../../modules/core/src/layers/loader/internal/synth.js) (the image),
 [`core/src/layers/cpu/internal/thunks.js`](../../modules/core/src/layers/cpu/internal/thunks.js) (the stubs), [`core/src/layers/bridge/`](../../modules/core/src/layers/bridge/) (the bridge), the

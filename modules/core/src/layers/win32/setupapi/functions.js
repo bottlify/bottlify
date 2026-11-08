@@ -281,7 +281,7 @@ const SPINST_PROFILEITEMS = 0x100;
 
 /** The directives an install section's carrying out answers for. */
 const CARRIED_OUT = new Set(['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg', 'include',
-    'needs', 'registerdlls', 'unregisterdlls', 'profileitems']);
+    'needs', 'registerdlls', 'unregisterdlls', 'profileitems', 'winefakedlls']);
 
 /** A RegisterDlls line's flags: call DllRegisterServer, call DllInstall. */
 const FLG_REGSVR_DLLREGISTER = 0x1;
@@ -2505,6 +2505,7 @@ export function createSetupapiFunctions(host){
         {
             return after(registry());
         }
+        fakeDlls(open, section, api);
         const queue = newQueue();
         queueInstallSection(queue, open.inf, section, {
             root, copyFlags, dirid: diridOf(open),
@@ -2541,6 +2542,34 @@ export function createSetupapiFunctions(host){
     const diridPath = (open, fields)=>joinPath(
         diridOf(open)(Number.parseInt(fields[0] ?? '', 10)) ?? '', fields[1] ?? '',
         fields[2] ?? '');
+
+    /**
+     * An install section's WineFakeDlls - Wine's own directive, which a
+     * setup made for Wine (wine-mono's support installer) carries: each
+     * line a DIRID, a subdirectory and a library to stand there. The folder
+     * is made; a library the engine implements already stands in the
+     * folders it belongs in (A41, A237), and every other one is not
+     * provided, which is said.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').InfSection} section @param {string} api
+     */
+    const fakeDlls = (open, section, api)=>{
+        for (const named of namedBy(open, section, 'winefakedlls'))
+        {
+            for (const line of /** @type {import('./inf.js').InfSection} */ (named).lines)
+            {
+                const fields = allFields(line).map(field=>expand(open, field));
+                const path = diridPath(open, fields);
+                const folder = directoryOf(path).replace(/\\$/, '');
+                makeDirectories(folder);
+                if (!host.files.stat(path))
+                {
+                    host.divergence?.(api, `the fake library ${fields[2] ?? ''} in ${folder}`
+                        + ' is not provided');
+                }
+            }
+        }
+    };
 
     /**
      * An install section's UnregisterDlls and then its RegisterDlls, as

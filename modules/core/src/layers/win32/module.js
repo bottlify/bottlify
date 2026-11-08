@@ -116,6 +116,8 @@ import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createMscoreeFunctions } from './mscoree/functions.js';
+import { createFusionFunctions } from './fusion/functions.js';
+import { RUNTIME_LIBRARIES, runtimeDirectories } from './mscoree/versions.js';
 import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
@@ -846,6 +848,8 @@ export function createWin32Module(){
                 createVolume(filesystem, config?.fetchBlocks ?? null),
                 ()=>systemLibraryNames(),
                 { homeOf: libraryHome,
+                    alsoIn: name=>(RUNTIME_LIBRARIES.includes(name.toLowerCase())
+                        ? runtimeDirectories('C:\\WINDOWS') : []),
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
@@ -4041,6 +4045,19 @@ export function createWin32Module(){
                         }
                     },
                     publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    divergence: config?.divergence,
+                }),
+
+                // The .NET assembly cache, as folders on the volume.
+                'fusion.dll': createFusionFunctions({
+                    readMemory,
+                    writeMemory,
+                    readWideString,
+                    pointerSize,
+                    windowsDirectory: ()=>'C:\\WINDOWS',
+                    files: volume,
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    objectAt: pointer=>bridge.interfaceObject(pointer),
                     divergence: config?.divergence,
                 }),
 

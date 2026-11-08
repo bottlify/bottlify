@@ -35,6 +35,13 @@ event, an error. Neither stops the program.
   unloading are refused (`E_NOTIMPL`), and a runtime-loaded callback's thread mark changes
   nothing. Only 32-bit console programs are tested so far; WinForms, WPF, XNA and mixed C++/CLI
   assemblies are not.
+- The global assembly cache (`fusion.dll`) is the Windows folders `C:\WINDOWS\assembly` and
+  `C:\WINDOWS\Microsoft.NET\assembly`: a strongly named assembly installed lands there, and a
+  query or an enumeration reads what is there; Mono's own cache under `C:\Windows\Mono` is not
+  part of it. There is no download cache, no native image cache and no install references: an
+  enumeration of either cache is empty, a reference passed in is not kept (and said), and
+  installing from streams (`IAssemblyCacheItem`), the scavenger, `CopyPDBs` and
+  `CreateApplicationContext` are refused (`E_NOTIMPL`) and said.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
