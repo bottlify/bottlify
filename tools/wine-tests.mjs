@@ -48,6 +48,9 @@
  *     --gate              with --baseline: exit 1 when a test got worse than the
  *                         baseline says (`regressions`): its status, or a check
  *                         failing that held there
+ *     --volume <dir>      a directory of this machine laid on C: before each test:
+ *                         a runtime the tests need that is not part of the engine
+ *                         (the Mono runtime and the .NET Framework stubs for mscoree)
  *     --cork-config <json>  the translator's settings, over the ones used here
  *     --browser           run each test in a headless browser on WebGPU, through
  *                         tools/cdp_test/game.mjs: what a test draws is drawn and
@@ -399,13 +402,39 @@ async function buildId(winetest){
 }
 
 /**
+ * Every file under a directory of this machine, at its place under a guest
+ * directory: what `--volume` lays on C: before a test runs.
+ *
+ * @param {string} host @param {string} guest
+ * @returns {Promise<{ path: string, bytes: Uint8Array }[]>}
+ */
+async function filesUnder(host, guest){
+    const { readdir, stat } = await import('node:fs/promises');
+    /** @type {{ path: string, bytes: Uint8Array }[]} */
+    const out = [];
+    for (const name of await readdir(host))
+    {
+        const path = join(host, name);
+        if ((await stat(path)).isDirectory())
+        {
+            out.push(...await filesUnder(path, `${guest}\\${name}`));
+        }
+        else
+        {
+            out.push({ path: `${guest}\\${name}`, bytes: new Uint8Array(await readFile(path)) });
+        }
+    }
+    return out;
+}
+
+/**
  * One test program, in this process: what runs in the child.
  *
  * Everything the program prints goes to the parent as it is printed, so a
  * run ended from outside still reports how far it got.
  *
  * @param {string} exePath @param {string} test
- * @param {{ timeout: number, corkConfig: object }} settings
+ * @param {{ timeout: number, corkConfig: object, volume?: string }} settings
  */
 async function runChild(exePath, test, settings){
     const send = (/** @type {any} */ message)=>new Promise(resolve=>{
@@ -437,7 +466,8 @@ async function runChild(exePath, test, settings){
             commandLine: test === '' ? `"${imagePath}"` : `"${imagePath}" ${test}`,
             // The program on its own volume, where GetModuleFileName says it is:
             // a test that reads its own resources or copies itself opens it.
-            files: [{ path: imagePath, bytes: executable }],
+            files: [{ path: imagePath, bytes: executable },
+                ...settings.volume ? await filesUnder(settings.volume, 'C:') : []],
             // The run's first process is numbered at random otherwise, and
             // the test's own closing count is told from a child's by it.
             processId: MAIN_PROCESS,
@@ -651,7 +681,8 @@ function parseArgs(argv){
         return at === -1 ? fallback : argv[at + 1];
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
-        '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter', '--graphics-config']);
+        '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter', '--graphics-config',
+        '--volume']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -680,6 +711,7 @@ function parseArgs(argv){
         baseline: value('--baseline'),
         gate: argv.includes('--gate'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
+        volume: value('--volume'),
         graphicsConfig: value('--graphics-config')
             ? JSON.parse(/** @type {string} */ (value('--graphics-config'))) : undefined,
         specs,
@@ -1030,6 +1062,7 @@ async function main(){
     const extracted = new URL('extracted/', LOCAL);
     await mkdir(extracted, { recursive: true });
     const settings = { timeout: options.timeout, corkConfig: options.corkConfig,
+        volume: options.volume,
         adapter: options.adapter, graphicsConfig: options.graphicsConfig };
     /** @type {Map<string, string>} module -> its bundle, for --browser */
     const bundles = new Map();

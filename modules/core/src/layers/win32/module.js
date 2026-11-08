@@ -4012,6 +4012,27 @@ export function createWin32Module(){
                         }
                     },
                     exitProcess: code=>libraries['KERNEL32.dll'].ExitProcess.handler([code]),
+                    readMemory,
+                    readWideString,
+                    windowsDirectory: ()=>'C:\\WINDOWS',
+                    readFile: async path=>{
+                        const entry = volume.stat(path);
+                        const node = entry && !entry.isDirectory
+                            ? volume.open(path, { read: true }) : null;
+                        if (!entry || !node)
+                        {
+                            return null;
+                        }
+                        try
+                        {
+                            return await volume.read(node, 0, entry.size);
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
                     divergence: config?.divergence,
                 }),
 

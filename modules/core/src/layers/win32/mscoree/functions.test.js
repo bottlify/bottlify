@@ -19,8 +19,13 @@ function machine(shape = {}){
     const memory = new Uint8Array(0x10000);
     let next = 0x100;
     /** @type {Record<string, number>} */
-    const exports = { mono_set_dirs: 1, mono_config_parse: 2, mono_jit_init_version: 3,
-        mono_domain_assembly_open: 4, mono_jit_exec: 5 };
+    const exports = Object.fromEntries(['mono_set_dirs', 'mono_config_parse',
+        'mono_jit_init_version', 'mono_domain_assembly_open', 'mono_jit_exec', 'mono_thread_attach',
+        'mono_get_corlib', 'mono_class_from_name', 'mono_class_get_method_from_name',
+        'mono_runtime_invoke', 'mono_object_unbox', 'mono_string_new', 'mono_object_new',
+        'mono_runtime_object_init', 'mono_assembly_get_image', 'mono_gchandle_new',
+        'mono_gchandle_free', 'mono_domain_get_by_id', 'mono_domain_set',
+        'mono_object_get_virtual_method'].map((name, i)=>[name, i + 1]));
     const names = Object.fromEntries(Object.entries(exports).map(([name, at])=>[at, name]));
     /** @type {any[]} */
     const calls = [];
@@ -84,13 +89,15 @@ test('_CorExeMain runs the process\'s assembly under the bottle\'s Mono, ends wi
         assert.deepEqual(calls.shift(), { name: 'setEnvironment',
             args: ['MONO_DEBUG', 'explicit-null-checks'] }, 'before Mono reads it');
         assert.deepEqual(calls.map(call=>call.name), ['mono_set_dirs', 'mono_config_parse',
-            'mono_jit_init_version', 'mono_domain_assembly_open', 'mono_jit_exec']);
+            'mono_jit_init_version', 'mono_thread_attach', 'mono_domain_assembly_open',
+            'mono_jit_exec']);
         assert.ok(calls.every(call=>call.thread === 'main'), 'on the thread that called it');
         assert.deepEqual(calls[0].args, [`${MONO_DIRECTORY}\\lib`, `${MONO_DIRECTORY}\\etc`]);
         assert.deepEqual(calls[1].args, [0], 'the runtime\'s own configuration');
         assert.deepEqual(calls[2].args, ['C:\\Games\\Swap.exe', 'v4.0.30319']);
-        assert.deepEqual(calls[3].args, [0xd0, 'C:\\Games\\Swap.exe']);
-        assert.deepEqual(calls[4].args, [0xd0, 0xa0, 3,
+        assert.deepEqual(calls[3].args, [0xd0], 'the thread attached to the root domain');
+        assert.deepEqual(calls[4].args, [0xd0, 'C:\\Games\\Swap.exe']);
+        assert.deepEqual(calls[5].args, [0xd0, 0xa0, 3,
             ['C:\\Games\\Swap.exe', '-windowed', 'ä', null]],
         'the executable\'s own path first, then the arguments, in UTF-8, null-ended');
         assert.deepEqual(exits, [42]);
