@@ -451,10 +451,21 @@ export function createD3dxFunctions(host, options = {}){
      * @typedef {{ text: string | null | Promise<string | null>, include: Include | undefined }}
      *     ShaderSource
      */
+    /**
+     * A source's text, ended at a NUL inside the size given: a program that
+     * passes strlen + 1 hands the terminator over with the text, and the
+     * compiler reads a C string.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const untilNul = bytes=>{
+        const end = bytes.indexOf(0);
+        return latin1(end < 0 ? bytes : bytes.subarray(0, end));
+    };
     const shaderSources = {
         /** @param {number} data @param {number} size @param {number} include */
         memory: (data, size, include)=>/** @type {ShaderSource} */ ({
-            text: latin1(host.readMemory(data >>> 0, size >>> 0)),
+            text: untilNul(host.readMemory(data >>> 0, size >>> 0)),
             include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) }),
         /**
          * @param {string} api @param {number} file @param {boolean} wide @param {number} include

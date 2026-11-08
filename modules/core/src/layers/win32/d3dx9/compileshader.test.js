@@ -266,6 +266,17 @@ test('D3DXAssembleShader assembles to bytecode the translator takes', async()=>{
     assert.equal(g.view.getUint32(out + 4, true), 0, 'no error buffer');
 });
 
+test('D3DXAssembleShader reads the text up to a terminator the size takes in', async()=>{
+    // 3DMark06 passes strlen + 1: the NUL is handed over with the text.
+    const g = guest();
+    const source = g.put(`${ASSEMBLY}\0`);
+    const out = 0x800;
+    const answer = await g.fns.D3DXAssembleShader.handler([source, ASSEMBLY.length + 1, 0, 0, 0,
+        out, out + 4]);
+    assert.equal(answer, 0);
+    assert.equal(words(g.buffer(out), g.memory)[0], 0xffff0200);
+});
+
 test('D3DXAssembleShader expands the program\'s macros and names the bad line', async()=>{
     const g = guest();
     const text = '#define SRC c0\nps_2_0\nmov r0, REG\nbogus r0\nmov oC0, SRC\n';
