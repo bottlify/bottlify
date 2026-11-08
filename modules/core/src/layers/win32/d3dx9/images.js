@@ -200,7 +200,7 @@ const DDSCAPS2_ALL_FACES = 0xfc00;
 
 /** DDS_PIXELFORMAT flags. */
 const DDPF = { ALPHAPIXELS: 0x1, ALPHA: 0x2, FOURCC: 0x4, PALETTEINDEXED8: 0x20, RGB: 0x40,
-    LUMINANCE: 0x20000 };
+    LUMINANCE: 0x20000, BUMPDUDV: 0x80000 };
 /** A palette-indexed DDS: 256 PALETTEENTRY (r, g, b, alpha in peFlags) after the header. */
 const DDS_PALETTE_BYTES = 256 * 4;
 
@@ -271,6 +271,22 @@ function ddsFormat(view){
             {
                 return FMT.X4R4G4B4;
             }
+        }
+    }
+    // Signed bump maps, U in the low byte or word.
+    if (flags & DDPF.BUMPDUDV)
+    {
+        if (bits === 16 && masks([0xff, 0xff00, 0]))
+        {
+            return FMT.V8U8;
+        }
+        if (bits === 32 && masks([0xff, 0xff00, 0xff0000, 0xff000000]))
+        {
+            return FMT.Q8W8V8U8;
+        }
+        if (bits === 32 && masks([0xffff, 0xffff0000, 0]))
+        {
+            return FMT.V16U16;
         }
     }
     if ((flags & DDPF.LUMINANCE) && bits === 8)

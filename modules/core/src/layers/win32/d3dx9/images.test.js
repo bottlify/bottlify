@@ -173,6 +173,20 @@ test('a DDS named A16B16G16R16 by its FourCC field keeps its sixteen-bit texels'
     assert.equal(readImage(Uint8Array.from([...masked, 0, 0, 0, 0])).format, FMT.G16R16);
 });
 
+test('a signed bump-map DDS is named by DDPF_BUMPDUDV and its masks, its texels kept', ()=>{
+    // 3DMark06's normal maps: Q8W8V8U8, four signed bytes.
+    const header = ddsHeader({ width: 1, height: 1, pfFlags: 0x80000, bits: 32, r: 0xff,
+        g: 0xff00, b: 0xff0000, a: 0xff000000 });
+    const image = readImage(Uint8Array.from([...header, 0x81, 0x7f, 0, 0xff]));
+    assert.equal(image.format, FMT.Q8W8V8U8);
+    assert.deepEqual([...image.levels[0].data], [0x81, 0x7f, 0, 0xff]);
+    const pair = ddsHeader({ width: 1, height: 1, pfFlags: 0x80000, bits: 16, r: 0xff, g: 0xff00 });
+    assert.equal(readImage(Uint8Array.from([...pair, 0, 0])).format, FMT.V8U8);
+    const wide = ddsHeader({ width: 1, height: 1, pfFlags: 0x80000, bits: 32, r: 0xffff,
+        g: 0xffff0000 });
+    assert.equal(readImage(Uint8Array.from([...wide, 0, 0, 0, 0])).format, FMT.V16U16);
+});
+
 test('a palette-indexed DDS reads its texels through the palette, alpha from peFlags', ()=>{
     // DDPF_PALETTEINDEXED8, eight bits a texel, 256 entries of r, g, b and the alpha
     // Direct3D keeps in peFlags, between the header and the texels.

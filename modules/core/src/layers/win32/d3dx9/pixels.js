@@ -20,7 +20,8 @@
 export const FMT = Object.freeze({
     UNKNOWN: 0, R8G8B8: 20, A8R8G8B8: 21, X8R8G8B8: 22, R5G6B5: 23, X1R5G5B5: 24,
     A1R5G5B5: 25, A4R4G4B4: 26, A8: 28, X4R4G4B4: 30, A8B8G8R8: 32, X8B8G8R8: 33,
-    G16R16: 34, A16B16G16R16: 36, P8: 41, L8: 50, A8L8: 51, L16: 81,
+    G16R16: 34, A16B16G16R16: 36, P8: 41, L8: 50, A8L8: 51, V8U8: 60, Q8W8V8U8: 63,
+    V16U16: 64, L16: 81,
     DXT1: 0x31545844, DXT2: 0x32545844, DXT3: 0x33545844, DXT4: 0x34545844,
     DXT5: 0x35545844,
 });
@@ -32,19 +33,28 @@ export const isCompressed = format=>format === FMT.DXT1 || format === FMT.DXT2
 /**
  * Whether a file's level is held in its own format rather than the working
  * form: a compressed one, and one with more than eight bits a channel, which
- * the working form would cut. A texture of that same format takes it as it is.
+ * the working form would cut, or signed ones, which it holds offset by half
+ * the range. A texture of that same format takes it as it is.
  *
  * @param {number} format
  */
-export const keptAsIs = format=>isCompressed(format) || format === FMT.L16
-    || format === FMT.G16R16 || format === FMT.A16B16G16R16;
+export const keptAsIs = format=>isCompressed(format) || DEEP_OR_SIGNED.has(format);
 
 /** Bytes a texel takes, for the formats this module reads and writes uncompressed. */
 /** @type {Map<number, number>} */
 const TEXEL_BYTES = new Map([[FMT.R8G8B8, 3], [FMT.A8R8G8B8, 4], [FMT.X8R8G8B8, 4],
     [FMT.R5G6B5, 2], [FMT.X1R5G5B5, 2], [FMT.A1R5G5B5, 2], [FMT.A4R4G4B4, 2],
     [FMT.X4R4G4B4, 2], [FMT.A8, 1], [FMT.L8, 1], [FMT.A8L8, 2], [FMT.A8B8G8R8, 4],
-    [FMT.X8B8G8R8, 4], [FMT.L16, 2], [FMT.G16R16, 4], [FMT.A16B16G16R16, 8]]);
+    [FMT.X8B8G8R8, 4], [FMT.L16, 2], [FMT.G16R16, 4], [FMT.A16B16G16R16, 8], [FMT.V8U8, 2],
+    [FMT.Q8W8V8U8, 4], [FMT.V16U16, 4]]);
+
+/**
+ * The formats a file's level is held in as it is (`keptAsIs`), beside the compressed ones.
+ *
+ * @type {Set<number>}
+ */
+const DEEP_OR_SIGNED = new Set([FMT.L16, FMT.G16R16, FMT.A16B16G16R16, FMT.V8U8, FMT.Q8W8V8U8,
+    FMT.V16U16]);
 
 /** @param {number} format */
 export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(format);
@@ -52,13 +62,13 @@ export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(forma
 /**
  * Formats this module has no codec for, by the bytes a texel takes: a level
  * of one is copied row by row into a surface of the same format and size, as
- * D3DX copies it, and goes no other way. A2B10G10R10, A2R10G10B10, V8U8,
- * Q8W8V8U8, V16U16, R16F, G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F.
+ * D3DX copies it, and goes no other way. A2B10G10R10, A2R10G10B10, R16F,
+ * G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F.
  *
  * @type {Map<number, number>}
  */
-const COPIED_BYTES = new Map([[31, 4], [35, 4], [60, 2], [63, 4], [64, 4], [111, 2], [112, 4],
-    [113, 8], [114, 4], [115, 8], [116, 16]]);
+const COPIED_BYTES = new Map([[31, 4], [35, 4], [111, 2], [112, 4], [113, 8], [114, 4], [115, 8],
+    [116, 16]]);
 
 /**
  * Whether a level of this format can be copied into a surface of the same
@@ -178,6 +188,21 @@ export function decodeTexels(format, data, width, height, palette){
                 b = narrow(view.getUint16(at + 4, true));
                 a = narrow(view.getUint16(at + 6, true));
                 break;
+            // Signed: U in the low byte (red), then V, W, Q; zero held as 128.
+            case FMT.V8U8:
+                r = view.getInt8(at) + 128;
+                g = view.getInt8(at + 1) + 128;
+                break;
+            case FMT.Q8W8V8U8:
+                r = view.getInt8(at) + 128;
+                g = view.getInt8(at + 1) + 128;
+                b = view.getInt8(at + 2) + 128;
+                a = view.getInt8(at + 3) + 128;
+                break;
+            case FMT.V16U16:
+                r = (view.getInt16(at, true) >> 8) + 128;
+                g = (view.getInt16(at + 2, true) >> 8) + 128;
+                break;
             case FMT.P8: {
                 const entry = /** @type {Uint8Array} */ (palette).subarray(data[at] * 4);
                 r = entry[0];
@@ -267,6 +292,20 @@ export function encodeTexels(format, bgra, width, height){
                 view.setUint16(at + 2, g * 257, true);
                 view.setUint16(at + 4, b * 257, true);
                 view.setUint16(at + 6, a * 257, true);
+                break;
+            case FMT.V8U8:
+                view.setInt8(at, r - 128);
+                view.setInt8(at + 1, g - 128);
+                break;
+            case FMT.Q8W8V8U8:
+                view.setInt8(at, r - 128);
+                view.setInt8(at + 1, g - 128);
+                view.setInt8(at + 2, b - 128);
+                view.setInt8(at + 3, a - 128);
+                break;
+            case FMT.V16U16:
+                view.setInt16(at, (r - 128) * 256, true);
+                view.setInt16(at + 2, (g - 128) * 256, true);
                 break;
             default:
                 throw new Error(`no encoder for format ${format}`);
