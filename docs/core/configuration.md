@@ -1,4 +1,5 @@
 # Configuration
+<!-- covers: modules/core/src/app.js modules/core/src/layers/cpu/module.js modules/core/src/layers/kernel/module.js modules/core/src/layers/win32/module.js modules/core/src/layers/graphics/module.js modules/core/src/layers/audio/module.js -->
 
 What `createApp`'s nested options ([api.md](api.md)) set, layer by layer. Options that exist to
 rule something out while debugging are listed apart, under [Debugging](api.md#debugging); they are
@@ -39,10 +40,10 @@ opened is kept in the translation store so the next run opens as many at its sta
 own executor answers every call the others make, and keeps itself for those answers while a thread
 is pinned to its processor: another executor plays that processor. Without shared memory the
 program runs on one executor, is told of one, and the cpu layer's diagnostics say why
-(`executorsRefused`). How threads are placed: [architecture.md](../architecture.md#execution-in-bottlify).
+(`executorsRefused`). How threads are placed: [execution in Bottlify](../architecture/cork.md#execution-in-bottlify).
 
 cork's own settings (`cork.config`, `EngineConfig` in `src/layers/cpu/engine.js`) are in
-[modules/cork/SETTINGS.md](../../modules/cork/SETTINGS.md). The cpu layer sets `atomic` for a
+[cork settings](../cork/settings.md). The cpu layer sets `atomic` for a
 process whose threads run on more than one executor.
 
 ## Memory zones

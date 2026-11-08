@@ -1,7 +1,5 @@
 # `@bottlify/cork`
 
-[По-русски](README.ru.md)
-
 Cork is the x86 processor of [Bottlify](https://github.com/bottlify/bottlify): it translates 32-bit
 x86 machine code into WebAssembly and runs it, in a browser or in Node. It knows nothing about
 Windows; a system call, a port write or a fault stops it and hands control back to the caller.
@@ -46,7 +44,7 @@ the registers and how many instructions ran.
 
 ## Documentation
 
-- [What cork runs, how it works, how fast it is](https://github.com/bottlify/bottlify/blob/main/docs/cork/README.md)
-- [Settings](https://github.com/bottlify/bottlify/blob/main/modules/cork/SETTINGS.md)
+- [What cork runs, how it works, how fast it is](https://bottlify.app/docs/cork/)
+- [Settings](https://bottlify.app/docs/cork/settings.html)
 
 MPL-2.0.

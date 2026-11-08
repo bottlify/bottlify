@@ -1,7 +1,5 @@
 # Bottlify: run Windows games and programs in the browser
 
-[По-русски](README.ru.md)
-
 **Play old PC games and run Windows programs in a web browser**, with no Windows, no install and
 no plugin. Try it at [bottlify.app](https://bottlify.app/).
 
@@ -12,7 +10,7 @@ WebGPU, and sound.
 
 Supported: 32-bit programs, DirectDraw, Direct3D 7–10, OpenGL 1.1 with extensions, Vulkan,
 DirectSound, DirectMusic, video through DirectShow and networking through Winsock. Which games
-and programs run: [the list](docs/games.md).
+and programs run: [the list](https://bottlify.app/docs/games.html).
 
 ## Why
 
@@ -37,9 +35,11 @@ Audio, OPFS), and programs need no rewriting for it.
 - **[installer](modules/installer/README.md)** (`@bottlify/installer`, optional): makes a bottle out
   of a game's installer, run unchanged inside the engine.
 
-How the whole thing works (threads, startup, translation, Win32, graphics, sound, networking,
-storage) is in [the architecture](docs/architecture.md). Embedding `@bottlify/core`: [its API,
-configuration and limits](docs/core/README.md). Plans are in [`roadmap/`](roadmap/README.md).
+The documentation is at [bottlify.app/docs](https://bottlify.app/docs/), built from
+[`docs/`](docs/README.md). How the whole thing works (threads, startup, translation, Win32,
+graphics, sound, networking, storage) is in [the architecture](https://bottlify.app/docs/architecture/).
+Embedding `@bottlify/core`: [its API, configuration and limits](https://bottlify.app/docs/core/).
+Plans are in [`roadmap/`](roadmap/README.md).
 
 ## Building and testing
 

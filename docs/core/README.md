@@ -1,8 +1,9 @@
 # @bottlify/core
+<!-- covers: modules/core/src/core.js modules/core/src/mode.js -->
 
 `@bottlify/core` runs an unchanged 32-bit Windows program in a browser tab: its layers answer the
 program's calls into Windows on WebGPU, Web Audio, OPFS and WebSocket
-([how it works](../architecture.md)).
+([how it works](../architecture/README.md)).
 
 ## The smallest page
 
@@ -140,7 +141,7 @@ allow.
 | Mode | Choose it when | What it gives | What it costs |
 | --- | --- | --- | --- |
 | `isolated` | The page can be cross-origin isolated: your origin serves the player and everything it loads, and nothing on it comes from a site that does not opt in | Guest memory is shared with the workers beside the engine: the graphics worker reads what a program unlocked straight from it, not from a copy per unlock, and sound plays from shared memory | An iframe, image or script from another origin loads only if it sends `Cross-Origin-Resource-Policy` or CORS headers, and a sign-in pop-up from another origin cannot reach the page through `window.opener` |
-| `compatible` | The page cannot be isolated (it sits in another site's iframe, or next to third-party content or sign-in pop-ups), or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | Everything that crosses to another thread is copied. Sound is mixed on the engine's thread, posted to the worklet, and lags further behind the picture ([limits.md](limits.md)) |
+| `compatible` | The page cannot be isolated (it sits in another site's iframe, or next to third-party content or sign-in pop-ups), or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | Everything that crosses to another thread is copied. Sound is mixed on the engine's thread, posted to the worklet, and lags further behind the picture ([limits](limits/README.md)) |
 | `auto` | The default: you want what the page allows | `isolated` on an isolated page, `compatible` elsewhere | |
 
 `createApp` refuses `isolated` on a page that cannot share memory rather than run in another mode.
@@ -191,6 +192,6 @@ method.
 
 - [api.md](api.md): `createApp`'s options, the controller, the events.
 - [configuration.md](configuration.md): the module contract and each layer's configuration.
-- [limits.md](limits.md): what is missing, and where the engine differs from Windows.
-- [../architecture.md](../architecture.md): how it works inside: threads, startup, cork, how a
+- [limits](limits/README.md): what is missing, and where the engine differs from Windows.
+- [the architecture](../architecture/README.md): how it works inside: threads, startup, cork, how a
   DLL is made, graphics, sound, network, storage.

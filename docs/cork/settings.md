@@ -1,7 +1,5 @@
 # cork settings
 
-[По-русски](SETTINGS.ru.md) · [README](README.md)
-
 cork has no settings for a person to tune. Every number it works by is a constant beside its use,
 chosen by measurement. What it takes as `config` (to `createMachine`, `--config '<json>'` to
 `cork run`, or `createApp({ cork: { config } })` in `@bottlify/core`) is of three kinds: what a

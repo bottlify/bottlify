@@ -1,0 +1,71 @@
+# Limits
+
+What is missing, and where the engine answers differently from Windows. A call that answers
+differently raises a `divergence` event naming the API, a warning in the journal; one whose work
+did not happen at all -- a draw or a frame lost, an object the GPU refused -- raises a `loss`
+event, an error. Neither stops the program.
+
+## Programs
+
+- 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs on one executor, with
+  its pages below 4 GiB, as far as console programs on msvcrt or vcruntime140 go, structured and
+  C++ exceptions, floating-point arguments and results, and a window program's classes,
+  windows, messages, hooks and painting, and Direct3D 9 and OpenGL included, every call into
+  them a trap: dialogs, MDI, DirectDraw and the other Direct3D versions are not there yet at
+  64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
+  first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
+  the file system's and the registry's redirection.
+  A structured exception there passes no `_set_se_translator` translator. The exports that are
+  i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
+  `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
+  refused when it is loaded.
+- Only user mode. There is no kernel underneath; the engine's layers answer every system call.
+- Below `0x10000` a write or running code faults, as an access violation, as on Windows; a read
+  there finds zeros where Windows would fault too (`roadmap/decisions.md` A79).
+- The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
+  AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
+  title's code uses.
+- With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
+  RAM's last 128 KiB, and the heap ends below it.
+- An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
+  library, a library the program brought). Otherwise the program stops with `unimplemented import`
+  and the function's name.
+- The guest's zone is measured, not enforced: a program that holds more than 1 GiB of its RAM marks
+  the zones' table `over` and goes on.
+- The tab's memory is held to 1.5 GiB in three zones ([configuration.md](../configuration.md#memory-zones)).
+  Not every pool of the engine's own heaps is measured yet: the zones' table names those that are
+  not, and the bytes they hold are counted nowhere.
+
+## Sound
+
+- Without `SharedArrayBuffer` (the `compatible` mode) sound is mixed on the engine's thread and
+  posted to the worklet. A DirectSound buffer is then read out on the guest's clock rather than by
+  the device, and what piles up while the device runs short stays queued: the sound can lag the
+  picture by up to the ring's depth, a third of a second.
+- 64 voices play at once.
+- DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
+  3D processing off.
+- No capture: recording answers `DSERR_NODRIVER`.
+
+## Input
+
+- Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
+  never do.
+
+## Network
+
+- No raw TCP or UDP. Sockets go through the relay over WebSocket; without `network` only the
+  loopback adapter exists.
+- The relay links tabs in one room and reaches outside hosts only from its server's allow list.
+- A single TCP `send` over 64 KiB fails: the relay's frames carry at most 64 KiB and are not split.
+- crypt32 builds a certificate chain from the certificates it was given and the ROOT store
+  (`win32.trustedRoots`); it fetches nothing, so a missing intermediate is a partial chain and
+  revocation, when asked, is unknown and offline (`CRYPT_E_REVOCATION_OFFLINE` under the SSL
+  policy). Only RSA signatures are verified: a certificate signed with an ECDSA key fails as
+  not signature valid.
+
+## Files
+
+- The bundle is read-only. What the program writes goes into the session, kept per `id`.
+- A file mapping is a copy: a view reads the file when it is made and writes it back when it is
+  closed, so two views of one file do not see each other's writes.

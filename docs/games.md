@@ -1,7 +1,5 @@
 # Games and programs
 
-[По-русски](games.ru.md)
-
 ## Runs and plays
 
 - 3DMark2001 SE (benchmark)
