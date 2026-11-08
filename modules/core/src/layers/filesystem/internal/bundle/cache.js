@@ -24,11 +24,13 @@
  * held its whole length on disk.
  *
  * Segments are what lets the oldest blocks go. A write the store refuses -- the
- * origin's quota reached, the disk full -- removes the segment written longest
- * ago, of whichever bundle, this one's own included but the one being written,
- * and is tried again: a game larger than the room there is keeps its newest
- * blocks rather than none, and the browser is not left to clear the origin
- * whole, saved games with it. A segment another tab holds open stays.
+ * origin's quota reached, the disk full -- removes one segment and is tried
+ * again: this bottle's own written longest ago, of those not written in the
+ * last two hours (`KEEP_RECENT_MS`), and where it has none, another bottle's,
+ * the oldest first, unless `evictOthers` is off. A game larger than the room
+ * there is keeps its newest blocks rather than none, and the browser is not
+ * left to clear the origin whole, saved games with it. A segment another tab
+ * holds open stays. With nothing left to let go, `onFull` is told.
  *
  * Each block goes in with a header of its own -- a mark, its index and its
  * length -- and a read checks it before the bytes go to a guest, so a table
@@ -63,8 +65,8 @@ import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
 /**
  * `list` names everything the store holds, with when each file was last written:
- * what a full store ages the segments of every bundle by. A store without it lets
- * go of this cache's own segments alone.
+ * what a full store ages the segments of every bundle by. A store without it
+ * lets nothing go.
  *
  * @typedef {{ read: Function, write: Function, truncate: Function, stat: Function,
  *     open: Function, remove: Function, flush?: Function,
@@ -137,6 +139,16 @@ export const cacheFiles = {
 
 /** Any cache's segment, by its file name at the store's root. */
 const SEGMENT_FILE = /^([^\\/]+)\.pack\.(\d+)$/;
+
+/** A segment's number, by its file name. @param {string} path */
+const segmentNumber = path=>Number(SEGMENT_FILE.exec(path)?.[2] ?? 0);
+
+/**
+ * How long a bottle's own blocks are safe from its own full store: what it
+ * brought in this lately is what the person is playing now, and letting it go
+ * would fetch it again at once.
+ */
+export const KEEP_RECENT_MS = 2 * 60 * 60 * 1000;
 
 /**
  * The bytes a segment spans: enough that letting one go frees a useful amount,
@@ -564,10 +576,15 @@ const ORDER_LIMIT = 4096;
  *                                         nowhere to put blocks but the heap.
  * @param {number} [options.segmentBytes]  A segment's span (`segmentSpan`), for a
  *     test to fill one with a few blocks; every reader of the cache uses the default.
+ * @param {boolean} [options.evictOthers]  Whether a full store may let other
+ *     bottles' blocks go when this one has none old enough. On by default.
+ * @param {(reason: string) => void} [options.onFull]  Told, once a run, that the
+ *     store refused a block for lack of room with nothing left it may let go.
  * @returns {Promise<any>}
  */
 export async function createBlockCache(options){
     const { store, name, blockSize, blockCount } = options;
+    const evictOthers = options.evictOthers !== false;
     // Counted in blocks rather than bytes, because what the bound has to hold is
     // the blocks of one read: too few of them and every read evicts the one
     // before it. Sixty-four mebibytes is the floor for a small block size, not
@@ -748,21 +765,25 @@ export async function createBlockCache(options){
     /** What letting segments go has freed, for the diagnostics. */
     const letGo = { segments: 0, bytes: 0 };
     /**
-     * Removes the segment written longest ago, of any bundle's cache on the
-     * store, this one's own included but the one being written and any begun
-     * after it; one another tab holds open is passed over, and so is one that
-     * holds nothing, as letting it go frees nothing. Answers whether one went.
+     * Removes one segment to make room: this bottle's own first, the one
+     * written longest ago of those last written before `KEEP_RECENT_MS` -- what
+     * it brought in lately is what it is playing now -- and only where it has
+     * none, another bottle's, the oldest first, if `evictOthers` lets it. One
+     * another tab holds open is passed over, and so is one that holds nothing,
+     * as letting it go frees nothing. Answers whether one went.
      */
     const letOldestGo = async()=>{
-        const listed = store.list
-            ? store.list().filter(one=>!one.directory && SEGMENT_FILE.test(one.path))
-            : Array.from({ length: Math.max(active, 0) }, (_, n)=>({ path: segmentPath(n),
-                modified: n }));
-        const candidates = listed.filter(one=>(store.stat(one.path)?.size ?? 0) > PACK_HEADER
-            && (ownSegment(one.path) < 0 || ownSegment(one.path) < active))
-            .sort((one, other)=>(one.modified ?? 0) - (other.modified ?? 0)
-                || ownSegment(one.path) - ownSegment(other.path));
-        for (const one of candidates)
+        const settled = Date.now() - KEEP_RECENT_MS;
+        const segments = (store.list?.() ?? []).filter(one=>!one.directory
+            && SEGMENT_FILE.test(one.path) && (store.stat(one.path)?.size ?? 0) > PACK_HEADER);
+        /** @param {{ path: string, modified?: number }} one @param {{ path: string, modified?: number }} other */
+        const oldest = (one, other)=>(one.modified ?? 0) - (other.modified ?? 0)
+            || segmentNumber(one.path) - segmentNumber(other.path);
+        const own = segments.filter(one=>ownSegment(one.path) >= 0
+            && ownSegment(one.path) < active && (one.modified ?? 0) <= settled).sort(oldest);
+        const others = evictOthers
+            ? segments.filter(one=>ownSegment(one.path) < 0).sort(oldest) : [];
+        for (const one of [...own, ...others])
         {
             const n = ownSegment(one.path);
             const bytes = store.stat(one.path)?.size ?? 0;
@@ -805,6 +826,8 @@ export async function createBlockCache(options){
     const refused = createMemoryCache(maxHeapBytes, 'the store refused a write');
     /** Why the store last refused a write, while it does. @type {string | null} */
     let full = null;
+    /** Whether `onFull` was told: once a run. */
+    let saidFull = false;
 
     return {
         backed: true,
@@ -892,9 +915,14 @@ export async function createBlockCache(options){
                     table[index] = 0;
                     // Only a store out of room is helped by room: any other
                     // refusal lets nothing go.
-                    if (/** @type {Error} */ (e).name !== 'QuotaExceededError'
-                        || !await letOldestGo())
+                    const room = /** @type {Error} */ (e).name === 'QuotaExceededError';
+                    if (!room || !await letOldestGo())
                     {
+                        if (room && !saidFull)
+                        {
+                            saidFull = true;
+                            options.onFull?.(/** @type {string} */ (full));
+                        }
                         refused.put(index, bytes);
                         return;
                     }

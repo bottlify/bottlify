@@ -113,6 +113,7 @@
     "src/layers/win32/programs/table.js",
     "src/layers/win32/shell32/icons.js",
     "src/layers/win32/user32/cursors.js",
+    "src/layers/win32/user32/display.js",
     "src/layers/win32/version/functions.js",
     "src/steam/depot.js",
     "src/steam/index.js",
