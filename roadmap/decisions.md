@@ -2033,3 +2033,23 @@ a container it has no source for, and the loss is said with the file's name; a s
 E_NOTIMPL, also said. A video media type has no MFVIDEOFORMAT (`GetVideoFormat` answers NULL)
 and no AM_MEDIA_TYPE (MF_E_UNSUPPORTED_REPRESENTATION); an audio type's is its WAVEFORMATEX, or
 WAVEFORMATEXTENSIBLE past two channels or with a channel mask. *2026-11-08.*
+
+**A239. DirectWrite's system fonts are gdi32's outline faces, written as TrueType tables, and a
+glyph is a character.** No font file ships, so the system collection holds the faces gdi32 draws
+(its table without the bitmap faces and the substitutes), each family with the faces Windows
+ships of it (Tahoma regular and bold, so an italic Tahoma is an oblique simulation), at
+`C:\WINDOWS\Fonts\<name>.ttf` through the local file loader. Each face's file is made from what
+the font engine measures of it at 128 pixels, in 2048 units to the em: 'cmap' (every character of
+the Basic Multilingual Plane but the surrogates to the glyph of its own number), 'head', 'hhea',
+'hmtx' (a long metric for each glyph up to U+024F; DirectWrite's own advances are measured for
+every glyph), 'maxp', 'name', 'OS/2' and 'post', so metrics, glyph indices and TryGetFontTable
+read tables like any file's; there is no 'glyf', no 'GSUB' and no 'GPOS'. Without an engine
+(node) the measurements are estimates of Arial's and Courier New's proportions. Shaping is a
+glyph a character, mirrored in right to left runs: no ligatures, no reordering, no OpenType
+features. Bidi levels follow the Unicode algorithm's strong, number and explicit embedding rules
+without isolates or bracket pairs; line breaks follow UAX #14 for spaces, hyphens and
+break-after characters, brackets, mandatory breaks and ideographs. A run is drawn from the
+browser's glyphs, as GDI's text is; a face a program loads from a file is measured from its own
+tables but has no rasteriser, and its texture is empty, said as a loss. Text formats, text
+layouts, typography, trimming signs and glyph outlines are refused with `E_NOTIMPL`, and said.
+*2026-11-08.*
