@@ -4369,6 +4369,8 @@ export function createWin32Module(){
                     // program picks its mode from this and would otherwise be
                     // offered one the device it then creates does not have.
                     screen: config?.screen,
+                    // The user's profile SystemParametersInfo keeps settings in.
+                    registry: hive,
                     // The desktop's background where no window is, when the
                     // embedder gave it a picture rather than its colour.
                     desktopPicture: config?.desktop?.picture ?? null,

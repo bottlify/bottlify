@@ -23,6 +23,8 @@ import { createWindowFunctions } from './windows.js';
 import { createInputRouter } from '../../input/router.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { displayModes } from './display.js';
+import { createHive } from '../advapi32/registry.js';
+import { createRegistryService } from '../advapi32/registry-service.js';
 
 const CLASS_NAME = 0x10000;
 const CLASS_STRUCT = 0x10100;
@@ -198,6 +200,7 @@ function fakeContexts(){
  * @param {any} [options.files]  The volume, for an image loaded from a file.
  * @param {(bytes: number) => number} [options.allocate]
  * @param {(address: number) => void} [options.release]
+ * @param {any} [options.registry]  The run's registry, where the user's settings are kept.
  * @param {(entry: number, args: number[]) => number} [options.call]
  * @param {any} [options.draw]  What draws on a context, for a test that reads its clip.
  * @param {() => unknown} [options.callerThread]  The thread a call is made on.
@@ -207,7 +210,7 @@ function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, regionBox,
         moduleBase, bitmapFromDib, files, allocate, release, call, draw, callerThread,
-        processExists } = {})
+        processExists, registry } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -261,6 +264,7 @@ function setup(
         draw,
         callerThread,
         processExists,
+        registry,
         /** @param {string} text */
         say: text=>said.push(text),
         /** @param {string} api @param {string} detail */
@@ -3277,7 +3281,8 @@ test('EnumDisplaySettingsW fills a DEVMODEW at its own offsets, past the wide de
     assert.equal(fns.EnumDisplaySettingsW.argBytes, 12);
     assert.equal(fns.EnumDisplaySettingsW.handler([0, -1 >>> 0, DEVMODE_BUFFER]), 1);
     const u16 = (/** @type {number} */ at)=>memory.bytes[at] | memory.bytes[at + 1] << 8;
-    assert.equal(u16(DEVMODE_BUFFER + DEVMODEW.dmSize), DEVMODEW.SIZE);
+    assert.equal(u16(DEVMODE_BUFFER + DEVMODEW.dmSize), DEVMODEW.dmDisplayFrequency + 4,
+        'the members up to dmICMMethod, the ones a display has');
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmPelsWidth), SCREEN.width);
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmPelsHeight), SCREEN.height);
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmBitsPerPel), SCREEN.bitsPerPixel);
@@ -4088,4 +4093,330 @@ test('SetCaretBlinkTime sets what GetCaretBlinkTime answers, INFINITE included',
     assert.equal(fns.GetCaretBlinkTime.handler([]), 250);
     fns.SetCaretBlinkTime.handler([0xffffffff]);
     assert.equal(fns.GetCaretBlinkTime.handler([]), 0xffffffff, 'a caret that does not blink');
+});
+
+// --- SystemParametersInfo: the profile, the announcement, the metrics a setting moves ---
+
+const SPIF_UPDATEINIFILE = 0x1;
+const SPIF_SENDCHANGE = 0x2;
+const WM_SETTINGCHANGE = 0x001a;
+
+/** A run's registry, and the values of the user's profile in it. */
+function profile(){
+    const HKEY_CURRENT_USER = 0x80000001;
+    const registry = createRegistryService(createHive());
+    const root = /** @type {number} */ (registry.root(HKEY_CURRENT_USER));
+    /** @param {string} path @param {string} name */
+    const value = (path, name)=>{
+        const key = registry.open(root, path);
+        return key === null ? null : registry.getValue(key, name);
+    };
+    return {
+        registry,
+        value,
+        /** @param {string} path @param {string} name */
+        text: (path, name)=>{
+            const found = value(path, name);
+            return found === null ? null : decodeAnsi(found.data).replace(/\0+$/, '');
+        },
+        /** @param {string} path @param {string} name @param {string} text */
+        put: (path, name, text)=>{
+            const REG_SZ = 1;
+            registry.setValue(registry.create(root, path).key, name, REG_SZ,
+                new TextEncoder().encode(text));
+        },
+    };
+}
+
+test('a set with SPIF_SENDCHANGE tells every top-level window, the action in wParam', ()=>{
+    // sysparams.c test_change_message: a message for every set asked to
+    // announce it, the same value set twice included, and none for a set
+    // that was not.
+    /** @type {any[]} */
+    const heard = [];
+    const { memory, fns } = setup({ dispatch: (_, message)=>{
+        heard.push(message);
+        return 0;
+    } });
+    const hwnd = makeWindow(memory, fns);
+    const SPI_SETBEEP = 0x0002;
+    const told = ()=>heard.filter(message=>message.message === WM_SETTINGCHANGE)
+        .map(message=>[message.hwnd, message.wParam]);
+    assert.equal(fns.SystemParametersInfoA.handler([SPI_SETBEEP, 1, 0, SPIF_SENDCHANGE]), 1);
+    assert.equal(fns.SystemParametersInfoA.handler([SPI_SETBEEP, 1, 0, SPIF_SENDCHANGE]), 1);
+    assert.deepEqual(told(), [[hwnd, SPI_SETBEEP], [hwnd, SPI_SETBEEP]]);
+    heard.length = 0;
+    fns.SystemParametersInfoA.handler([SPI_SETBEEP, 0, 0, SPIF_UPDATEINIFILE]);
+    fns.SystemParametersInfoA.handler([0x0001, 0, OUT_BUFFER, SPIF_SENDCHANGE]);
+    assert.deepEqual(told(), [], 'nor for a get');
+    // The icon spacing is set and read through one action.
+    fns.SystemParametersInfoW.handler([0x000d, 40, 0, SPIF_SENDCHANGE]);
+    assert.deepEqual(told(), [[hwnd, 0x000d]]);
+});
+
+test('a set with SPIF_UPDATEINIFILE writes the user\'s profile as Windows writes it', ()=>{
+    // sysparams.c's test_reg_key and metricfromreg: strings, "Yes"/"No" for
+    // the beep, sizes in negative twips, DWORDs for the smoothing type.
+    const user = profile();
+    const { memory, fns } = setup({ registry: user.registry });
+    /** @param {number} action @param {number} param @param {number} [value] */
+    const set = (action, param, value = 0)=>fns.SystemParametersInfoA.handler([action, param,
+        value, SPIF_UPDATEINIFILE]);
+    assert.equal(set(0x0002, 0), 1);
+    assert.equal(user.text('Control Panel\\Sound', 'Beep'), 'No');
+    set(0x000b, 20);
+    assert.equal(user.text('Control Panel\\Keyboard', 'KeyboardSpeed'), '20');
+    set(0x0006, 2);
+    assert.equal(user.text('Control Panel\\Desktop\\WindowMetrics', 'BorderWidth'), '-30');
+    set(0x001c, 1);
+    assert.equal(user.text('Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows',
+        'MenuDropAlignment'), '1');
+    set(0x0039, 1);
+    assert.equal(user.text('Control Panel\\Accessibility\\ShowSounds', 'On'), '1');
+    set(0x004b, 0xffffffff);
+    assert.equal(user.text('Control Panel\\Desktop', 'FontSmoothing'), '2', 'smoothing on is 2');
+    set(0x200b, 0, 2);
+    assert.deepEqual([...user.value('Control Panel\\Desktop', 'FontSmoothingType')?.data ?? []],
+        [2, 0, 0, 0]);
+    memory.putU32s(OUT_BUFFER, [7, 8, 2]);
+    fns.SystemParametersInfoW.handler([0x0004, 0, OUT_BUFFER, SPIF_UPDATEINIFILE]);
+    assert.deepEqual(['MouseThreshold1', 'MouseThreshold2', 'MouseSpeed']
+        .map(name=>user.text('Control Panel\\Mouse', name)), ['7', '8', '2']);
+    set(0x000d, 74);
+    assert.equal(user.text('Control Panel\\Desktop\\WindowMetrics', 'IconSpacing'), '-1110');
+    // KEYBOARDCUES is bit 5 of UserPreferencesMask, set from pvParam.
+    set(0x100b, 0, 1);
+    assert.equal((user.value('Control Panel\\Desktop', 'UserPreferencesMask')?.data[0] ?? 0)
+        & 0x20, 0x20);
+
+    fns.SystemParametersInfoA.handler([0x000b, 9, 0, 0]);
+    assert.equal(user.text('Control Panel\\Keyboard', 'KeyboardSpeed'), '20',
+        'a set not asked to is the session\'s');
+});
+
+test('a process starts from the user\'s profile and writes in what it lacks', ()=>{
+    // sysparams.c test_SPI_SETNONCLIENTMETRICS reads the metrics and fonts
+    // from WindowMetrics before it sets any, and test_SPI_SETICONMETRICS the
+    // icon spacing and title wrap.
+    const user = profile();
+    user.put('Control Panel\\Sound', 'Beep', 'No');
+    user.put('Control Panel\\Desktop', 'WheelScrollLines', '7');
+    user.put('Control Panel\\Desktop\\WindowMetrics', 'BorderWidth', '-45');
+    user.put('Control Panel\\Desktop\\WindowMetrics', 'IconSpacing', '80');
+    const { memory, fns } = setup({ registry: user.registry });
+    const SM_CXSIZEFRAME = 32;
+    const SM_CXICONSPACING = 38;
+    fns.SystemParametersInfoA.handler([0x0001, 0, OUT_BUFFER, 0]);
+    assert.equal(memory.u32(OUT_BUFFER), 0, 'the beep off');
+    fns.SystemParametersInfoA.handler([0x0068, 0, OUT_BUFFER, 0]);
+    assert.equal(memory.u32(OUT_BUFFER), 7);
+    assert.equal(fns.GetSystemMetrics.handler([SM_CXSIZEFRAME]), 3 + 3, 'a border of 45 twips');
+    assert.equal(fns.GetSystemMetrics.handler([SM_CXICONSPACING]), 80, 'pixels as they are');
+    const metrics = 'Control Panel\\Desktop\\WindowMetrics';
+    assert.deepEqual(['ScrollWidth', 'CaptionHeight', 'MenuWidth', 'IconVerticalSpacing',
+        'IconTitleWrap'].map(name=>user.text(metrics, name)), ['-240', '-270', '-270', '-1125',
+        '1']);
+    const font = user.value(metrics, 'CaptionFont')?.data ?? new Uint8Array();
+    assert.equal(font.length, 92, 'a LOGFONTW');
+    const view = new DataView(font.slice().buffer);
+    assert.deepEqual([view.getInt32(0, true), view.getInt32(16, true), font[23]],
+        [-11, 700, 1], 'eleven pixels high, bold, DEFAULT_CHARSET');
+    assert.equal(user.text('Control Panel\\Sound', 'Beep'), 'No', 'and what it has, it keeps');
+});
+
+test('SPI_SETBORDER moves the sizing frame and the metrics derived from it', ()=>{
+    // sysparams.c test_setborder: SM_CXFRAME is the border and SM_CXDLGFRAME,
+    // NONCLIENTMETRICS' iBorderWidth the border, a pixel at least.
+    const { memory, fns, diverged } = setup();
+    const [SM_CXDLGFRAME, SM_CXFRAME, SM_CYFRAME, SM_CYMIN, SM_CXMIN] = [7, 32, 33, 29, 28];
+    const gsm = (/** @type {number} */ index)=>fns.GetSystemMetrics.handler([index]);
+    assert.deepEqual([gsm(SM_CXFRAME), gsm(SM_CXMIN)], [4, 108]);
+    assert.equal(fns.SystemParametersInfoA.handler([0x0006, 3, 0, 0]), 1);
+    assert.deepEqual([gsm(SM_CXFRAME), gsm(SM_CYFRAME)], [3 + gsm(SM_CXDLGFRAME), 6]);
+    assert.equal(gsm(SM_CYMIN), 19 + 2 * 6);
+    assert.equal(gsm(SM_CXMIN), 108 + 2 * 2, 'two frames wider');
+    memory.putU32s(OUT_BUFFER, [340]);
+    fns.SystemParametersInfoA.handler([0x0029, 0, OUT_BUFFER, 0]);
+    assert.equal(memory.u32(OUT_BUFFER + 4), 3, 'iBorderWidth');
+    fns.SystemParametersInfoA.handler([0x0006, 0, 0, 0]);
+    fns.SystemParametersInfoA.handler([0x0005, 0, OUT_BUFFER, 0]);
+    assert.equal(memory.u32(OUT_BUFFER), 1, 'no border is a pixel');
+    assert.ok(diverged.some(text=>text.includes('SPI_SETBORDER')),
+        'and that the windows keep their own frame is said');
+});
+
+test('the icon spacing is an icon wide at least, and GetSystemMetrics and ICONMETRICS follow', ()=>{
+    // sysparams.c dotest_spi_iconhorizontalspacing and test_SPI_SETICONMETRICS.
+    const { memory, fns } = setup();
+    const [SM_CXICONSPACING, SM_CYICONSPACING] = [38, 39];
+    const ICONMETRICSA_SIZE = 76;
+    const spi = (/** @type {number[]} */ args)=>fns.SystemParametersInfoA.handler(args);
+    assert.equal(spi([0x000d, 10, 0, 0]), 1);
+    assert.equal(fns.GetSystemMetrics.handler([SM_CXICONSPACING]), 32);
+    assert.equal(spi([0x0018, 70, 0, 0]), 1);
+    assert.equal(spi([0x0018, 0, OUT_BUFFER, 0]), 1);
+    assert.equal(memory.u32(OUT_BUFFER), 70);
+    memory.putU32s(OUT_BUFFER, [ICONMETRICSA_SIZE]);
+    assert.equal(spi([0x002d, ICONMETRICSA_SIZE, OUT_BUFFER, 0]), 1);
+    assert.deepEqual([4, 8, 12].map(at=>memory.u32(OUT_BUFFER + at)), [32, 70, 1]);
+    assert.equal(memory.bytes[OUT_BUFFER + 16 + 23], 1, 'the font\'s DEFAULT_CHARSET');
+
+    // Set whole: the spacing, the wrap and every field of the font.
+    memory.putU32s(OUT_BUFFER, [ICONMETRICSA_SIZE, 85, 81, 0, -12, 2, 1, 0, 314]);
+    memory.bytes.set([1, 1, 1, 0, 7, 0x12, 2, 1], OUT_BUFFER + 16 + 20);
+    memory.putString(OUT_BUFFER + 16 + 28, 'MS Serif');
+    assert.equal(spi([0x002e, ICONMETRICSA_SIZE, OUT_BUFFER, 0]), 1);
+    assert.deepEqual([fns.GetSystemMetrics.handler([SM_CXICONSPACING]),
+        fns.GetSystemMetrics.handler([SM_CYICONSPACING])], [85, 81]);
+    spi([0x0019, 0, RECT_BUFFER, 0]);
+    assert.equal(memory.u32(RECT_BUFFER), 0, 'the title wrap');
+    memory.fill(TEXT_BUFFER, 15);
+    assert.equal(spi([0x001f, 60, TEXT_BUFFER, 0]), 1);
+    assert.deepEqual([...memory.bytes.subarray(TEXT_BUFFER, TEXT_BUFFER + 36)],
+        [...memory.bytes.subarray(OUT_BUFFER + 16, OUT_BUFFER + 52)],
+        'the icon title font is the one set');
+    assert.equal(memory.readCString(TEXT_BUFFER + 28, 32), 'MS Serif');
+});
+
+test('MINIMIZEDMETRICS clamps what it is given, and the minimised metrics follow it', ()=>{
+    // sysparams.c test_SPI_SETMINIMIZEDMETRICS and test_GetSystemMetrics:
+    // SM_CXMINIMIZED is iWidth and six, SM_CYMINIMIZED a caption and five,
+    // the spacing adds the gaps; widths and gaps none at least, the
+    // arrangement its four bits.
+    const { memory, fns } = setup();
+    const [SM_ARRANGE, SM_CXMINIMIZED, SM_CYMINIMIZED, SM_CXMINSPACING, SM_CYMINSPACING] =
+        [56, 57, 58, 47, 48];
+    const gsm = (/** @type {number} */ index)=>fns.GetSystemMetrics.handler([index]);
+    memory.putU32s(OUT_BUFFER, [20]);
+    fns.SystemParametersInfoA.handler([0x002b, 20, OUT_BUFFER, 0]);
+    assert.deepEqual([4, 8, 12, 16].map(at=>memory.u32(OUT_BUFFER + at)), [154, 0, 0, 8]);
+    assert.deepEqual([gsm(SM_CXMINIMIZED), gsm(SM_CYMINIMIZED)], [160, 24]);
+    memory.putU32s(OUT_BUFFER, [20, 180, 1, 2, 5]);
+    assert.equal(fns.SystemParametersInfoA.handler([0x002c, 20, OUT_BUFFER, 0]), 1);
+    assert.deepEqual([gsm(SM_CXMINIMIZED), gsm(SM_CXMINSPACING), gsm(SM_CYMINSPACING),
+        gsm(SM_ARRANGE)], [186, 187, 26, 5]);
+    memory.putU32s(OUT_BUFFER, [20, -1, -1, -1, -1]);
+    fns.SystemParametersInfoA.handler([0x002c, 20, OUT_BUFFER, 0]);
+    fns.SystemParametersInfoA.handler([0x002b, 20, OUT_BUFFER, 0]);
+    assert.deepEqual([4, 8, 12, 16].map(at=>memory.u32(OUT_BUFFER + at)), [0, 0, 0, 15]);
+});
+
+test('the settings GetSystemMetrics answers too follow their sets', ()=>{
+    // sysparams.c: SM_MENUDROPALIGNMENT, SM_SHOWSOUNDS, SM_CXDOUBLECLK and
+    // SM_SWAPBUTTON; GetDoubleClickTime 500 for a time of 0; SwapMouseButton
+    // answers what it replaced.
+    const { fns, diverged } = setup();
+    const gsm = (/** @type {number} */ index)=>fns.GetSystemMetrics.handler([index]);
+    const spi = (/** @type {number} */ action, /** @type {number} */ param)=>
+        fns.SystemParametersInfoA.handler([action, param, 0, 0]);
+    const [SM_SWAPBUTTON, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SM_MENUDROPALIGNMENT, SM_SHOWSOUNDS] =
+        [23, 36, 37, 40, 70];
+    assert.deepEqual([SM_MENUDROPALIGNMENT, SM_SHOWSOUNDS, SM_CXDOUBLECLK, SM_SWAPBUTTON]
+        .map(gsm), [0, 0, 4, 0]);
+    spi(0x001c, 1);
+    spi(0x0039, 1);
+    spi(0x001d, 10000);
+    spi(0x001e, 0);
+    spi(0x0021, 1);
+    assert.deepEqual([SM_MENUDROPALIGNMENT, SM_SHOWSOUNDS, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
+        SM_SWAPBUTTON].map(gsm), [1, 1, 10000, 0, 1]);
+    assert.equal(fns.SwapMouseButton.handler([0]), 1);
+    assert.equal(gsm(SM_SWAPBUTTON), 0);
+    spi(0x0020, 0);
+    assert.equal(fns.GetDoubleClickTime.handler([]), 500, 'none is the default');
+    spi(0x0020, 1000);
+    assert.equal(fns.GetDoubleClickTime.handler([]), 1000);
+    assert.ok(diverged.some(text=>text.includes('double click')));
+});
+
+test('font smoothing is on or off, its contrast what was set, the hover time 10 ms at least', ()=>{
+    // sysparams.c test_SPI_SETFONTSMOOTHING and test_SPI_SETMOUSEHOVERTIME.
+    const { memory, fns } = setup();
+    /** @param {number} action */
+    const get = action=>{
+        fns.SystemParametersInfoA.handler([action, 0, OUT_BUFFER, 0]);
+        return memory.u32(OUT_BUFFER);
+    };
+    assert.deepEqual([get(0x004a), get(0x200c), get(0x0066)], [0, 1400, 400]);
+    fns.SystemParametersInfoA.handler([0x004b, 0xffffffff, 0, 0]);
+    fns.SystemParametersInfoA.handler([0x200d, 0, 0xffffffff, 0]);
+    fns.SystemParametersInfoA.handler([0x0067, 3, 0, 0]);
+    assert.deepEqual([get(0x004a), get(0x200c), get(0x0066)], [1, 0xffffffff, 10]);
+});
+
+test('EnumDisplaySettings writes the display\'s members of DEVMODE and no further', ()=>{
+    // sysparams.c test_EnumDisplaySettings: dmSize becomes the offset of
+    // dmICMMethod, nothing past it is touched; the Ex spelling writes no
+    // further than a shorter dmSize and keeps it; the mode in effect has its
+    // position, every mode its orientation and display flags.
+    const { memory, fns, errors } = setup();
+    const u16 = (/** @type {number} */ at)=>memory.bytes[at] | memory.bytes[at + 1] << 8;
+    const CURRENT = 0xffffffff;
+    const SETTING_FIELDS = 0x7c00a0;
+    const MODE_FIELDS = 0x7c0080;
+    memory.bytes.fill(0xcc, DEVMODE_BUFFER, DEVMODE_BUFFER + DEVMODEW.SIZE);
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, CURRENT, DEVMODE_BUFFER]), 1);
+    assert.equal(u16(DEVMODE_BUFFER + DEVMODEA.dmSize), 124);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmFields), SETTING_FIELDS);
+    assert.deepEqual([44, 48, 52].map(at=>memory.u32(DEVMODE_BUFFER + at)), [0, 0, 0],
+        'at the origin, not turned');
+    assert.ok(memory.bytes.subarray(DEVMODE_BUFFER + 124, DEVMODE_BUFFER + DEVMODEA.SIZE)
+        .every(byte=>byte === 0xcc), 'nothing written past dmICMMethod');
+    assert.equal(fns.EnumDisplaySettingsW.handler([0, 0, DEVMODE_BUFFER]), 1);
+    assert.equal(u16(DEVMODE_BUFFER + DEVMODEW.dmSize), 188);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmFields), MODE_FIELDS);
+    assert.ok(memory.bytes.subarray(DEVMODE_BUFFER + 188, DEVMODE_BUFFER + DEVMODEW.SIZE)
+        .every(byte=>byte === 0xcc));
+
+    memory.bytes.fill(0, DEVMODE_BUFFER, DEVMODE_BUFFER + DEVMODEA.SIZE);
+    memory.bytes[DEVMODE_BUFFER + DEVMODEA.dmSize] = DEVMODEA.dmFields + 1;
+    assert.equal(fns.EnumDisplaySettingsExA.handler([0, CURRENT, DEVMODE_BUFFER, 0]), 1);
+    assert.equal(u16(DEVMODE_BUFFER + DEVMODEA.dmSize), DEVMODEA.dmFields + 1, 'kept');
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmFields), SETTING_FIELDS & 0xff,
+        'the first byte of dmFields is all that fits');
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 0);
+
+    memory.putString(DEVICE_NAME_BUFFER, '\\\\.\\display1');
+    assert.equal(fns.EnumDisplaySettingsA.handler([DEVICE_NAME_BUFFER, CURRENT,
+        DEVMODE_BUFFER]), 1, 'the adapter, in any case');
+    memory.bytes.fill(0, DEVMODE_BUFFER, DEVMODE_BUFFER + DEVMODEA.SIZE);
+    for (const name of ['invalid', '\\\\.\\DISPLAY1\\Monitor0'])
+    {
+        memory.putString(DEVICE_NAME_BUFFER, name);
+        assert.equal(fns.EnumDisplaySettingsA.handler([DEVICE_NAME_BUFFER, CURRENT,
+            DEVMODE_BUFFER]), 0, name);
+    }
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmFields), 0, 'nothing written');
+    assert.deepEqual(errors, [], 'and no error set');
+});
+
+test('GetMonitorInfo names the adapter in a MONITORINFOEX, and the work area follows its set', ()=>{
+    // sysparams.c test_enum_display_settings takes the name to
+    // EnumDisplaySettings; test_SPI_SETWORKAREA reads back what it set.
+    const { memory, fns, screen } = setup();
+    const MONITOR = fns.MonitorFromWindow.handler([0, 0]);
+    memory.putU32s(OUT_BUFFER, [72]);
+    assert.equal(fns.GetMonitorInfoA.handler([MONITOR, OUT_BUFFER]), 1);
+    assert.equal(memory.readCString(OUT_BUFFER + 40, 32), '\\\\.\\DISPLAY1');
+    memory.putU32s(OUT_BUFFER, [104]);
+    assert.equal(fns.GetMonitorInfoW.handler([MONITOR, OUT_BUFFER]), 1);
+    assert.equal(decodeAnsi(memory.bytes.subarray(OUT_BUFFER + 40, OUT_BUFFER + 64)
+        .filter((_, at)=>at % 2 === 0)), '\\\\.\\DISPLAY1');
+
+    memory.putU32s(RECT_BUFFER, [0, 0, 1023, 767]);
+    assert.equal(fns.SystemParametersInfoA.handler([0x002f, 0, RECT_BUFFER, 0]), 1);
+    memory.putU32s(OUT_BUFFER, [40]);
+    fns.GetMonitorInfoA.handler([MONITOR, OUT_BUFFER]);
+    assert.deepEqual([20, 24, 28, 32].map(at=>memory.u32(OUT_BUFFER + at)), [0, 0, 1023, 767]);
+    memory.putU32s(RECT_BUFFER, [5, 5, 5, 9]);
+    assert.equal(fns.SystemParametersInfoA.handler([0x002f, 0, RECT_BUFFER, 0]), 0,
+        'an empty area');
+    fns.SystemParametersInfoA.handler([0x0030, 0, RECT_BUFFER, 0]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [0, 0, 1023, 767]);
+    putMode(memory, 800, 600);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]);
+    fns.SystemParametersInfoA.handler([0x0030, 0, RECT_BUFFER, 0]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        [0, 0, screen.width, screen.height], 'a mode change gives the whole screen back');
 });

@@ -6478,8 +6478,9 @@ test('ArrangeIconicWindows lines minimised children up as SPI_SETMINIMIZEDMETRIC
     fns.ShowWindow.handler([children[0], 6]);
     fns.ShowWindow.handler([children[2], 6]);
     assert.equal(fns.ArrangeIconicWindows.handler([hwnd]), 2);
+    // SM_CXMINIMIZED is the width set and a three-pixel frame either side.
     assert.deepEqual([rect(children[0]).slice(0, 2), rect(children[2]).slice(0, 2)],
-        [[40, 3], [40 + 160 + 40, 3]]);
+        [[40, 3], [40 + 106 + 40, 3]]);
     assert.deepEqual(rect(children[1]), [100, 200, 300, 400], 'the one not minimised stays');
 
     memory.putU32s(TEXT_BUFFER, [20, 0, 0, 0, 0]);

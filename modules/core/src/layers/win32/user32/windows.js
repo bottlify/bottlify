@@ -659,6 +659,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           posted to. A host with no other process gets one of its own.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The display every system metric is derived from.
+ * @property {any} [registry]  The run's registry hive, where SystemParametersInfo
+ *           keeps the user's settings.
  * @property {{ width: number, height: number, bits: Uint8Array } | null} [desktopPicture]
  *           What the desktop shows where no window is, in place of its colour:
  *           32 bits a pixel, top row first, scaled to the screen.
