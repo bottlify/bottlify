@@ -492,6 +492,90 @@ const CS_HREDRAW = 0x0002;
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
+/**
+ * The SystemParametersInfo settings that are one number, with Windows 7's
+ * default: [get action, set action, default, where the set finds the value].
+ * The older ones take it in uiParam; the 0x1000 and 0x2000 ranges, and the
+ * mouse speed, in pvParam itself. A get writes a BOOL or DWORD at pvParam.
+ *
+ * @type {ReadonlyArray<readonly [number, number, number, 'param' | 'pointer']>}
+ */
+const SPI_NUMBERS = Object.freeze([
+    [0x0001, 0x0002, 1, 'param'], // BEEP
+    [0x0005, 0x0006, 1, 'param'], // BORDER
+    [0x000a, 0x000b, 31, 'param'], // KEYBOARDSPEED
+    [0x000e, 0x000f, 600, 'param'], // SCREENSAVETIMEOUT
+    [0x0010, 0x0011, 0, 'param'], // SCREENSAVEACTIVE
+    [0x0016, 0x0017, 1, 'param'], // KEYBOARDDELAY
+    [0x0019, 0x001a, 1, 'param'], // ICONTITLEWRAP
+    [0x001b, 0x001c, 0, 'param'], // MENUDROPALIGNMENT
+    [0x0023, 0x0024, 1, 'param'], // FASTTASKSWITCH
+    [0x0026, 0x0025, 1, 'param'], // DRAGFULLWINDOWS
+    [0x0038, 0x0039, 0, 'param'], // SHOWSOUNDS
+    [0x0044, 0x0045, 0, 'param'], // KEYBOARDPREF
+    [0x0046, 0x0047, 0, 'param'], // SCREENREADER
+    [0x004f, 0x0051, 0, 'param'], // LOWPOWERTIMEOUT
+    [0x0050, 0x0052, 0, 'param'], // POWEROFFTIMEOUT
+    [0x0053, 0x0055, 0, 'param'], // LOWPOWERACTIVE
+    [0x0054, 0x0056, 0, 'param'], // POWEROFFACTIVE
+    [0x005e, 0x005d, 0, 'param'], // MOUSETRAILS
+    [0x005f, 0x0060, 0, 'param'], // SNAPTODEFBUTTON
+    [0x0068, 0x0069, 3, 'param'], // WHEELSCROLLLINES
+    [0x006a, 0x006b, 400, 'param'], // MENUSHOWDELAY
+    [0x006c, 0x006d, 3, 'param'], // WHEELSCROLLCHARS
+    [0x006e, 0x006f, 1, 'param'], // SHOWIMEUI
+    [0x0070, 0x0071, 10, 'pointer'], // MOUSESPEED
+    [0x0072, 0, 0, 'param'], // SCREENSAVERRUNNING
+    [0x0076, 0x0077, 0, 'param'], // SCREENSAVESECURE
+    [0x0078, 0x0079, 5000, 'param'], // HUNGAPPTIMEOUT
+    [0x007a, 0x007b, 20000, 'param'], // WAITTOKILLTIMEOUT
+    [0x007c, 0x007d, 12000, 'param'], // WAITTOKILLSERVICETIMEOUT
+    // The user interface effects, each a BOOL: activewindow tracking, menu,
+    // combo box and list box animation, gradient captions, keyboard cues
+    // (hidden until the keyboard is used), z-order tracking, hot tracking,
+    // menu and selection fades, tooltip animation and fade, the cursor's
+    // shadow, sonar, click lock, vanish, flat menus, drop shadows, input
+    // resets, the effects as a whole, overlapped content, client-area
+    // animation, ClearType (off: text is drawn without smoothing here).
+    ...[[0x1000, 0], [0x1002, 1], [0x1004, 1], [0x1006, 1], [0x1008, 1], [0x100a, 0],
+        [0x100c, 0], [0x100e, 1], [0x1012, 1], [0x1014, 1], [0x1016, 1], [0x1018, 1],
+        [0x101a, 1], [0x101c, 0], [0x101e, 0], [0x1020, 1], [0x1022, 1], [0x1024, 1],
+        [0x1026, 0], [0x103e, 1], [0x1040, 0], [0x1042, 1], [0x1048, 0]]
+        .map(([get, on])=>/** @type {const} */ ([get, get + 1, on, 'pointer'])),
+    // Foreground lock timeout, window-tracking timeout, flash count, caret
+    // width, click-lock time, font smoothing type and orientation, focus
+    // border width and height, message duration.
+    ...[[0x2000, 200000], [0x2002, 0], [0x2004, 7], [0x2006, 1], [0x2008, 1200],
+        [0x200a, 1], [0x200e, 1], [0x2010, 1], [0x2012, 1], [0x2016, 5]]
+        .map(([get, value])=>/** @type {const} */ ([get, get + 1, value, 'pointer'])),
+]);
+
+/**
+ * The settings that are a structure beginning with its cbSize, by get action:
+ * the set action and the default words, the size first. FILTERKEYS,
+ * TOGGLEKEYS, MOUSEKEYS, STICKYKEYS, ACCESSTIMEOUT, SOUNDSENTRY (its effect
+ * library's name left null) and ANIMATIONINFO, with Windows 7's accessibility
+ * defaults.
+ *
+ * @type {ReadonlyMap<number, { set: number, words: readonly number[] }>}
+ */
+const SPI_STRUCTURES = new Map([
+    [0x0032, { set: 0x0033, words: [24, 126, 1000, 1000, 500, 0] }],
+    [0x0034, { set: 0x0035, words: [8, 58] }],
+    [0x0036, { set: 0x0037, words: [28, 62, 80, 3000, 0, 0, 0] }],
+    [0x003a, { set: 0x003b, words: [8, 510] }],
+    [0x003c, { set: 0x003d, words: [12, 2, 300000] }],
+    [0x0040, { set: 0x0041, words: [48, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }],
+    [0x0048, { set: 0x0049, words: [8, 1] }],
+]);
+
+/** GetSystemMetrics' indices of the icon spacing. */
+const SM_CXICONSPACING_INDEX = 38;
+const SM_CYICONSPACING_INDEX = 39;
+
+/** HIGHCONTRAST's flags: available, its hot key active, confirmed, sounded, shown. */
+const HIGHCONTRAST_DEFAULT_FLAGS = 0x7e;
+
 /** The metrics SPI_SETMINIMIZEDMETRICS and ArrangeIconicWindows go by. */
 const SM_ARRANGE = 56;
 const SM_CXMINIMIZED = 57;
@@ -2255,14 +2339,114 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         FIXED_METRICS.get(SM_ARRANGE) ?? 0];
 
     /**
-     * SystemParametersInfo, both spellings: the work area, the hover
-     * parameters TrackMouseEvent works by, the non-client and minimised
-     * windows' metrics, whether text is smoothed, and a refusal for
-     * everything else.
+     * The one-number settings as they stand, by get and by set action: a set
+     * is what the next get reads.
      *
-     * @param {number} action @param {number} value @param {boolean} wide
+     * @type {Map<number, { set: number, from: 'param' | 'pointer', value: number }>}
      */
-    const systemParameter = (action, value, wide)=>{
+    const numberSettings = new Map();
+    for (const [get, set, value, from] of SPI_NUMBERS)
+    {
+        const setting = { set, from, value };
+        numberSettings.set(get, setting);
+        if (set !== 0)
+        {
+            numberSettings.set(set, setting);
+        }
+    }
+    /**
+     * The structure settings as they stand, by get and by set action.
+     *
+     * @type {Map<number, { get: number, set: number, words: number[] }>}
+     */
+    const structureSettings = new Map();
+    for (const [get, { set, words }] of SPI_STRUCTURES)
+    {
+        const setting = { get, set, words: [...words] };
+        structureSettings.set(get, setting);
+        structureSettings.set(set, setting);
+    }
+    /** SPI_GETMOUSE's thresholds and acceleration. */
+    let mouseThresholds = [6, 10, 1];
+    let highContrast = HIGHCONTRAST_DEFAULT_FLAGS;
+    let wallpaper = '';
+    /** The actions SystemParametersInfo has said it does not answer. */
+    const saidSettings = new Set();
+    /** HIGHCONTRAST: cbSize, dwFlags, lpszDefaultScheme. */
+    const HIGHCONTRAST_SIZE = 12;
+    /** The default scheme's name, an empty string of each spelling, made once. */
+    const schemeNames = { ansi: 0, wide: 0 };
+    /** @param {boolean} wide */
+    const schemeName = wide=>{
+        const key = wide ? 'wide' : 'ansi';
+        if (schemeNames[key] === 0 && host.allocate)
+        {
+            schemeNames[key] = host.allocate(2) >>> 0;
+            host.writeMemory(schemeNames[key], new Uint8Array(2));
+        }
+        return schemeNames[key];
+    };
+    /** The icon title font: the message font, Tahoma at 8 points. @param {boolean} wide */
+    const iconTitleFont = wide=>logFontBytes({ height: -11, width: 0, escapement: 0,
+        orientation: 0, weight: 400, italic: 0, underline: 0, strikeOut: 0, charSet: 0,
+        outPrecision: 0, clipPrecision: 0, quality: 0, pitchAndFamily: 0,
+        faceName: 'Tahoma' }, wide);
+    /**
+     * A structure setting read or set: its cbSize must be the structure's.
+     *
+     * @param {{ get: number, set: number, words: number[] }} setting
+     * @param {number} action @param {number} at
+     */
+    const structureSetting = (setting, action, at)=>{
+        if (at === 0 || readU32(at) !== setting.words[0])
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (action === setting.set)
+        {
+            setting.words = setting.words.map((word, index)=>(index === 0 ? word
+                : readU32(at + index * 4)));
+            return 1;
+        }
+        writeU32s(host, at + 4, setting.words.slice(1));
+        return 1;
+    };
+
+    /**
+     * SystemParametersInfo, both spellings: the work area, the hover
+     * parameters TrackMouseEvent works by, the non-client, icon and
+     * minimised windows' metrics, whether text is smoothed, the one-number
+     * settings and the accessibility structures (SPI_NUMBERS,
+     * SPI_STRUCTURES), each read back as it was last set. A setting it does
+     * not know is refused with ERROR_INVALID_PARAMETER, as Windows refuses
+     * an action it does not have, and said once.
+     *
+     * @param {number} action @param {number} param  uiParam
+     * @param {number} value  pvParam @param {boolean} wide
+     * @param {number} [ini]  fWinIni
+     */
+    const systemParameter = (action, param, value, wide, ini = 0)=>{
+        // A set asked to be written to the user's profile or announced is
+        // kept for this run alone, and no window hears of it.
+        const SPIF_UPDATEINIFILE_OR_SENDCHANGE = 0x3;
+        if ((ini & SPIF_UPDATEINIFILE_OR_SENDCHANGE) !== 0 && !saidSettings.has(-1))
+        {
+            saidSettings.add(-1);
+            host.divergence?.('SystemParametersInfo', 'a setting is neither written to the'
+                + ' registry nor announced with WM_SETTINGCHANGE');
+        }
+        const SPI_GETMOUSE = 0x0003;
+        const SPI_SETMOUSE = 0x0004;
+        const SPI_ICONHORIZONTALSPACING = 0x000d;
+        const SPI_SETDESKWALLPAPER = 0x0014;
+        const SPI_ICONVERTICALSPACING = 0x0018;
+        const SPI_GETICONTITLEWRAP = 0x0019;
+        const SPI_GETICONTITLELOGFONT = 0x001f;
+        const SPI_GETICONMETRICS = 0x002d;
+        const SPI_GETHIGHCONTRAST = 0x0042;
+        const SPI_SETHIGHCONTRAST = 0x0043;
+        const SPI_GETDESKWALLPAPER = 0x0073;
         const SPI_GETMINIMIZEDMETRICS = 0x002b;
         const SPI_SETMINIMIZEDMETRICS = 0x002c;
         const MINIMIZEDMETRICS_SIZE = 20;
@@ -2273,11 +2457,95 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const SPI_GETMOUSEHOVERTIME = 0x0066;
         const SPI_GETFONTSMOOTHING = 0x004a;
         const SPI_GETFONTSMOOTHINGCONTRAST = 0x200c;
-        if ((value >>> 0) === 0)
+        const asked = action >>> 0;
+        const number = numberSettings.get(asked);
+        if (number)
         {
+            if (number.set === asked)
+            {
+                number.value = (number.from === 'param' ? param : value) >>> 0;
+                return 1;
+            }
+            if ((value >>> 0) === 0)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            writeU32s(host, value >>> 0, [number.value]);
+            return 1;
+        }
+        const structure = structureSettings.get(asked);
+        if (structure)
+        {
+            return structureSetting(structure, asked, value >>> 0);
+        }
+        if ((value >>> 0) === 0 && asked !== SPI_ICONHORIZONTALSPACING
+            && asked !== SPI_ICONVERTICALSPACING)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        switch (action >>> 0){
+        switch (asked){
+            case SPI_GETMOUSE:
+                writeU32s(host, value >>> 0, mouseThresholds);
+                return 1;
+            case SPI_SETMOUSE:
+                mouseThresholds = [0, 4, 8].map(at=>readU32((value >>> 0) + at));
+                return 1;
+            case SPI_ICONHORIZONTALSPACING:
+            case SPI_ICONVERTICALSPACING:
+                // A pointer asks for the spacing; none sets it, which the
+                // metrics here do not follow.
+                if ((value >>> 0) !== 0)
+                {
+                    writeU32s(host, value >>> 0, [metric(asked === SPI_ICONHORIZONTALSPACING
+                        ? SM_CXICONSPACING_INDEX : SM_CYICONSPACING_INDEX)]);
+                    return 1;
+                }
+                host.divergence?.('SystemParametersInfo', 'the icon spacing is not changed');
+                return 1;
+            case SPI_GETICONTITLELOGFONT:
+                host.writeMemory(value >>> 0, iconTitleFont(wide));
+                return 1;
+            case SPI_GETICONMETRICS: {
+                const size = 16 + (wide ? LOGFONTW_SIZE : LOGFONTA.SIZE);
+                if (readU32(value >>> 0) !== size)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, (value >>> 0) + 4, [metric(SM_CXICONSPACING_INDEX),
+                    metric(SM_CYICONSPACING_INDEX),
+                    numberSettings.get(SPI_GETICONTITLEWRAP)?.value ?? 1]);
+                host.writeMemory((value >>> 0) + 16, iconTitleFont(wide));
+                return 1;
+            }
+            case SPI_GETHIGHCONTRAST: {
+                if (readU32(value >>> 0) !== HIGHCONTRAST_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, (value >>> 0) + 4, [highContrast, schemeName(wide)]);
+                return 1;
+            }
+            case SPI_SETHIGHCONTRAST:
+                if (readU32(value >>> 0) !== HIGHCONTRAST_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                highContrast = readU32((value >>> 0) + 4);
+                return 1;
+            case SPI_GETDESKWALLPAPER: {
+                const bytes = textBytes(wallpaper, wide);
+                host.writeMemory(value >>> 0, bytes.subarray(0, Math.min(bytes.length,
+                    Math.max(param >>> 0, wide ? 2 : 1))));
+                return 1;
+            }
+            case SPI_SETDESKWALLPAPER:
+                wallpaper = readText(host, value >>> 0, wide);
+                return 1;
             case SPI_GETNONCLIENTMETRICS:
                 return nonClientMetrics(value >>> 0, wide);
             case SPI_GETWORKAREA:
@@ -2322,6 +2590,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return 1;
             }
             default:
+                if (!saidSettings.has(asked))
+                {
+                    saidSettings.add(asked);
+                    host.divergence?.('SystemParametersInfo',
+                        `action 0x${asked.toString(16)} is not answered`);
+                }
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
                 return 0;
         }
     };
@@ -2720,15 +2995,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam,
          *                            UINT fWinIni)
          *
-         * Only the work area, the one a window uses to place itself, the
-         * hover parameters and the non-client metrics are answered. Everything
-         * else reports failure rather than a default that would contradict the
-         * screen above.
+         * The settings `systemParameter` knows, Windows 7's defaults until a
+         * program sets them; any other is refused and said.
          */
         SystemParametersInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value, false),
+            handler: ([action, param, value, ini])=>systemParameter(action, param, value, false,
+                ini),
         },
 
         /**
@@ -2740,7 +3014,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         SystemParametersInfoW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value, true),
+            handler: ([action, param, value, ini])=>systemParameter(action, param, value, true,
+                ini),
         },
 
         /**

@@ -1782,8 +1782,42 @@ test('SystemParametersInfoW answers the work area as the A spelling does', ()=>{
     assert.equal(fns.SystemParametersInfoW.handler([SPI_GETWORKAREA, 0, RECT_BUFFER, 0]), 1);
     assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
         [0, 0, SCREEN.width, SCREEN.height]);
-    assert.equal(fns.SystemParametersInfoW.handler([0x0068, 0, RECT_BUFFER, 0]), 0,
+    assert.equal(fns.SystemParametersInfoW.handler([0x9999, 0, RECT_BUFFER, 0]), 0,
         'and refuses what the A spelling refuses');
+});
+
+test('SystemParametersInfo settings read Windows 7\'s defaults and back what was set', ()=>{
+    const { memory, fns } = setup();
+    /** @param {number} action @param {number} param @param {number} value */
+    const spi = (action, param, value)=>fns.SystemParametersInfoW.handler([action, param, value,
+        0]);
+    const read = ()=>memory.u32(RECT_BUFFER);
+    // KEYBOARDCUES (pvParam BOOL): hidden until the keyboard is used.
+    assert.equal(spi(0x100a, 0, RECT_BUFFER), 1);
+    assert.equal(read(), 0);
+    assert.equal(spi(0x100b, 0, 1), 1, 'the 0x1000 range sets from pvParam');
+    spi(0x100a, 0, RECT_BUFFER);
+    assert.equal(read(), 1);
+    // WHEELSCROLLLINES: 3, set from uiParam.
+    spi(0x0068, 0, RECT_BUFFER);
+    assert.equal(read(), 3);
+    spi(0x0069, 5, 0);
+    spi(0x0068, 0, RECT_BUFFER);
+    assert.equal(read(), 5);
+    assert.equal(spi(0x0068, 0, 0), 0, 'a get with nowhere to write');
+    // HIGHCONTRAST: its size checked, off and available.
+    memory.fill(RECT_BUFFER, 12);
+    assert.equal(spi(0x0042, 12, RECT_BUFFER), 0, 'cbSize not filled in');
+    memory.putU32s(RECT_BUFFER, [12]);
+    assert.equal(spi(0x0042, 12, RECT_BUFFER), 1);
+    assert.equal(memory.u32(RECT_BUFFER + 4) & 1, 0, 'high contrast is off');
+    assert.equal(memory.u32(RECT_BUFFER + 4), 0x7e);
+    // ANIMATIONINFO: minimise animation on, then set off.
+    memory.putU32s(RECT_BUFFER, [8, 0]);
+    assert.equal(spi(0x0049, 8, RECT_BUFFER), 1);
+    memory.putU32s(RECT_BUFFER, [8, 9]);
+    spi(0x0048, 8, RECT_BUFFER);
+    assert.equal(memory.u32(RECT_BUFFER + 4), 0);
 });
 
 test('SetMessageExtraInfo answers with the value it replaced, which GetMessageExtraInfo read', ()=>{
