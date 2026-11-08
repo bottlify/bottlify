@@ -96,7 +96,7 @@ export function readImage(bytes){
  * @param {Uint8Array} bytes
  * @returns {Image}
  */
-function readJpeg(bytes){
+export function readJpeg(bytes){
     let image;
     try
     {
@@ -546,34 +546,188 @@ function readTga(bytes){
         levels: [{ width, height, format: FMT.A8R8G8B8, data: bgra }] };
 }
 
-/** @param {Uint8Array} bytes @returns {Image} */
-function readBmp(bytes){
+/**
+ * A device-independent bitmap's pixels as it holds them: the rows top-down,
+ * each `rowBytes` (unpadded) at the bitmap's own bits a pixel; RLE8 and RLE4
+ * expanded to the indices they encode; the colour table as 0xAARRGGBB with
+ * alpha 255; the bit fields' masks (red, green, blue, alpha); pixels a metre.
+ * WIC's BMP and ICO decoders hand these out in their own format, D3DX's
+ * reader makes BGRA of them.
+ *
+ * @typedef {Object} BitmapPixels
+ * @property {number} width
+ * @property {number} height
+ * @property {number} bits
+ * @property {number} compression  BI_RGB 0, BI_RLE8 1, BI_RLE4 2, BI_BITFIELDS 3
+ * @property {number[]} masks
+ * @property {number[]} palette
+ * @property {number} rowBytes
+ * @property {Uint8Array} pixels
+ * @property {[number, number]} pixelsPerMetre
+ * @property {number} headerSize
+ * @property {number} end  where the pixels end in `bytes` (an icon's AND mask follows)
+ */
+
+/**
+ * @param {Uint8Array} bytes  a file, or a DIB from its info header on
+ * @param {{ dib?: boolean, height?: number }} [options]  `dib`: no file header
+ *     (an icon's image), its pixels right after the colour table; `height`:
+ *     the rows to read, where the header's counts an icon's mask too
+ * @returns {BitmapPixels}
+ */
+export function bitmapPixels(bytes, options = {}){
     const view = viewOf(bytes);
-    const dataAt = view.getUint32(10, true);
-    const headerSize = view.getUint32(14, true);
-    const core = headerSize === 12;
-    const width = core ? view.getUint16(18, true) : view.getInt32(18, true);
-    const signedHeight = core ? view.getInt16(20, true) : view.getInt32(22, true);
-    const bits = view.getUint16(core ? 24 : 28, true);
-    const compression = core ? 0 : view.getUint32(30, true);
-    const height = Math.abs(signedHeight);
-    if (width <= 0 || height === 0 || ![1, 4, 8, 16, 24, 32].includes(bits)
-        || ![0, 3].includes(compression))
+    const base = options.dib ? 0 : 14;
+    if (bytes.length < base + 12)
     {
-        throw new ImageError(`a bitmap D3DX's loader here does not read (${bits} bits, `
-            + `compression ${compression})`);
+        throw new ImageError('a bitmap cut short of its header');
     }
-    const paletteAt = 14 + headerSize + (compression === 3 && headerSize === 40 ? 12 : 0);
+    const headerSize = view.getUint32(base, true);
+    const core = headerSize === 12;
+    if (!core && (headerSize < 40 || bytes.length < base + 40))
+    {
+        throw new ImageError(`a bitmap header of ${headerSize} bytes`);
+    }
+    const width = core ? view.getUint16(base + 4, true) : view.getInt32(base + 4, true);
+    const signedHeight = core ? view.getInt16(base + 6, true) : view.getInt32(base + 8, true);
+    const bits = view.getUint16(base + (core ? 10 : 14), true);
+    const compression = core ? 0 : view.getUint32(base + 16, true);
+    const height = options.height ?? Math.abs(signedHeight);
+    if (width <= 0 || height === 0 || ![1, 2, 4, 8, 16, 24, 32].includes(bits)
+        || ![0, 1, 2, 3].includes(compression) || (compression === 1 && bits !== 8)
+        || (compression === 2 && bits !== 4) || (compression === 3 && bits !== 16 && bits !== 32))
+    {
+        throw new ImageError(`a bitmap of ${bits} bits and compression ${compression}`);
+    }
+    const masksAt = base + 40;
+    const bitfields = compression === 3 && headerSize === 40 ? 12 : 0;
     const entry = core ? 3 : 4;
-    const colours = core ? 1 << bits : (view.getUint32(46, true) || 1 << bits);
+    const colours = bits > 8 ? (core ? 0 : view.getUint32(base + 32, true))
+        : core ? 1 << bits : (view.getUint32(base + 32, true) || 1 << bits);
+    const paletteAt = base + headerSize + bitfields;
+    /** @type {number[]} */
+    const palette = [];
+    for (let i = 0; i < Math.min(colours, 256) && paletteAt + i * entry + 3 <= bytes.length; i++)
+    {
+        const p = paletteAt + i * entry;
+        palette.push((0xff000000 | bytes[p + 2] << 16 | bytes[p + 1] << 8 | bytes[p]) >>> 0);
+    }
     let masks = bits === 16 ? [0x7c00, 0x3e0, 0x1f, 0] : [0xff0000, 0xff00, 0xff, 0];
     if (compression === 3)
     {
         // After a 40-byte header, or inside a V4 or V5 one at the same place.
-        const at = 14 + 40;
-        masks = [view.getUint32(at, true), view.getUint32(at + 4, true),
-            view.getUint32(at + 8, true), headerSize >= 56 ? view.getUint32(at + 12, true) : 0];
+        masks = [view.getUint32(masksAt, true), view.getUint32(masksAt + 4, true),
+            view.getUint32(masksAt + 8, true),
+            headerSize >= 56 ? view.getUint32(masksAt + 12, true) : 0];
     }
+    const dataAt = options.dib ? paletteAt + colours * entry : view.getUint32(10, true);
+    const ppm = /** @type {[number, number]} */ (core ? [0, 0]
+        : [view.getInt32(base + 24, true), view.getInt32(base + 28, true)]);
+    const rowBytes = Math.ceil(width * bits / 8);
+    const pixels = new Uint8Array(rowBytes * height);
+    /** @param {number} row  in the file's order @returns {number} the row top-down */
+    const place = row=>(signedHeight > 0 ? height - 1 - row : row);
+    let end;
+    if (compression === 1 || compression === 2)
+    {
+        end = expandRle(bytes, dataAt, width, height, bits, (x, row, index)=>{
+            const y = place(row);
+            const bit = x * bits;
+            pixels[y * rowBytes + (bit >> 3)] |= index << (8 - bits - (bit & 7));
+        });
+    }
+    else
+    {
+        const stride = Math.ceil(width * bits / 32) * 4;
+        for (let row = 0; row < height; row++)
+        {
+            const line = dataAt + row * stride;
+            if (line + rowBytes > bytes.length)
+            {
+                throw new ImageError('a bitmap cut short');
+            }
+            pixels.set(bytes.subarray(line, line + rowBytes), place(row) * rowBytes);
+        }
+        end = dataAt + stride * height;
+    }
+    return { width, height, bits, compression, masks, palette, rowBytes, pixels,
+        pixelsPerMetre: ppm, headerSize, end };
+}
+
+/**
+ * RLE8 or RLE4 run by run, each index handed to `put` at its column and row
+ * (rows in the file's order, bottom-up for a bitmap of positive height);
+ * texels a run never reaches stay index 0. Where the runs end.
+ *
+ * @param {Uint8Array} bytes @param {number} at @param {number} width @param {number} height
+ * @param {number} bits @param {(x: number, row: number, index: number) => void} put
+ */
+function expandRle(bytes, at, width, height, bits, put){
+    let x = 0;
+    let row = 0;
+    /** @param {number} index */
+    const emit = index=>{
+        if (x < width && row < height)
+        {
+            put(x, row, index);
+        }
+        x++;
+    };
+    while (at + 1 < bytes.length && row < height)
+    {
+        const count = bytes[at];
+        const value = bytes[at + 1];
+        at += 2;
+        if (count > 0)
+        {
+            for (let i = 0; i < count; i++)
+            {
+                emit(bits === 8 ? value : (i & 1 ? value & 0xf : value >> 4));
+            }
+            continue;
+        }
+        if (value === 0)
+        {
+            x = 0;
+            row++;
+        }
+        else if (value === 1)
+        {
+            break;
+        }
+        else if (value === 2)
+        {
+            x += bytes[at] ?? 0;
+            row += bytes[at + 1] ?? 0;
+            at += 2;
+        }
+        else
+        {
+            const length = bits === 8 ? value : Math.ceil(value / 2);
+            for (let i = 0; i < value; i++)
+            {
+                emit(bits === 8 ? bytes[at + i] : (i & 1 ? bytes[at + (i >> 1)] & 0xf
+                    : bytes[at + (i >> 1)] >> 4));
+            }
+            at += length + (length & 1);
+        }
+    }
+    return at;
+}
+
+/** @param {Uint8Array} bytes @returns {Image} */
+function readBmp(bytes){
+    const view = viewOf(bytes);
+    const headerSize = view.getUint32(14, true);
+    const core = headerSize === 12;
+    const declaredBits = view.getUint16(core ? 24 : 28, true);
+    const declaredCompression = core ? 0 : view.getUint32(30, true);
+    if (![1, 4, 8, 16, 24, 32].includes(declaredBits) || ![0, 3].includes(declaredCompression))
+    {
+        throw new ImageError(`a bitmap D3DX's loader here does not read (${declaredBits} bits, `
+            + `compression ${declaredCompression})`);
+    }
+    const { width, height, bits, masks, palette, rowBytes, pixels } = bitmapPixels(bytes);
     /** @param {number} value @param {number} mask */
     const channel = (value, mask)=>{
         if (mask === 0)
@@ -584,35 +738,30 @@ function readBmp(bytes){
         const top = mask >>> shift;
         return Math.round(((value & mask) >>> shift) * 255 / top);
     };
-    const stride = Math.ceil(width * bits / 32) * 4;
+    const rows = viewOf(pixels);
     const bgra = new Uint8Array(width * height * 4);
-    for (let row = 0; row < height; row++)
+    for (let y = 0; y < height; y++)
     {
-        const y = signedHeight > 0 ? height - 1 - row : row;
-        const line = dataAt + row * stride;
-        if (line + Math.ceil(width * bits / 8) > bytes.length)
-        {
-            throw new ImageError('a bitmap cut short');
-        }
+        const line = y * rowBytes;
         for (let x = 0; x < width; x++)
         {
             let texel;
             if (bits <= 8)
             {
-                const byte = bytes[line + Math.floor(x * bits / 8)];
+                const byte = pixels[line + Math.floor(x * bits / 8)];
                 const index = byte >> (8 - bits - (x * bits) % 8) & ((1 << bits) - 1);
-                const p = paletteAt + Math.min(index, colours - 1) * entry;
-                texel = [bytes[p], bytes[p + 1], bytes[p + 2], 255];
+                const colour = palette[Math.min(index, palette.length - 1)] ?? 0;
+                texel = [colour & 0xff, colour >> 8 & 0xff, colour >> 16 & 0xff, 255];
             }
             else if (bits === 24)
             {
                 const p = line + x * 3;
-                texel = [bytes[p], bytes[p + 1], bytes[p + 2], 255];
+                texel = [pixels[p], pixels[p + 1], pixels[p + 2], 255];
             }
             else
             {
-                const value = bits === 16 ? view.getUint16(line + x * 2, true)
-                    : view.getUint32(line + x * 4, true);
+                const value = bits === 16 ? rows.getUint16(line + x * 2, true)
+                    : rows.getUint32(line + x * 4, true);
                 texel = [channel(value, masks[2]), channel(value, masks[1]),
                     channel(value, masks[0]), channel(value, masks[3])];
             }

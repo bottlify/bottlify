@@ -160,6 +160,11 @@ flowchart TD
   and `v4.0.30319`, while that folder is there: `LoadLibraryShim` and
   `ICLRRuntimeInfo::LoadLibrary` load it from there, and a setup made for Wine that asks for it
   with `WineFakeDlls` finds it in place.
+- **The Windows Imaging Component** (`windowscodecs.dll`) is the engine's too, its factory a COM
+  class as on Windows: its decoders reuse the D3DX and media layers' readers, and a bitmap's
+  pixels live in guest memory, since its lock hands the program a pointer into them. The
+  `<Interface>_<Method>_Proxy` exports .NET calls go straight to the object's method when the
+  object is the engine's and through its vtable when the program wrote it.
 
 Where to look in the code: [`core/src/layers/loader/internal/synth.js`](../../modules/core/src/layers/loader/internal/synth.js) (the image),
 [`core/src/layers/cpu/internal/thunks.js`](../../modules/core/src/layers/cpu/internal/thunks.js) (the stubs), [`core/src/layers/bridge/`](../../modules/core/src/layers/bridge/) (the bridge), the
