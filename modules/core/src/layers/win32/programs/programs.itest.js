@@ -212,3 +212,29 @@ test('rundll32 calls the entry with the rest of the line, its W spelling first, 
         assert.equal(wide.value('Wide'), 'three', 'WideEntryW, handed the line as UTF-16');
         assert.equal(wide.value('Plain'), null, 'and not the ANSI WideEntry');
     });
+
+test('reg adds, overwrites with /f and deletes keys and values through advapi32, exiting 0,'
+    + ' and 1 for a key that is not there', { timeout: 120000 }, async t=>{
+    const added = await startedBy(t, 'reg add HKCU\\Software\\Bottlify\\Reg /v Name /d "two words"'
+        + ' /f');
+    assert.equal(added.code, 0);
+    assert.equal(added.value('Reg', 'Name'), 'two words');
+
+    const number = await startedBy(t, 'REG.EXE ADD "HKEY_CURRENT_USER\\Software\\Bottlify\\Reg"'
+        + ' /v Count /t REG_DWORD /d 0x2a /f');
+    assert.equal(number.code, 0);
+    const hive = number.app.registry();
+    const key = hive.open(hive.root(HKEY_CURRENT_USER), 'Software\\Bottlify\\Reg');
+    const count = hive.getValue(key, 'Count');
+    assert.deepEqual([count.type, [...count.data]], [4, [42, 0, 0, 0]], 'REG_DWORD 42');
+
+    // A key every machine has, as a custom action removes its own.
+    const runOnce = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce';
+    const removed = await startedBy(t, `REG DELETE "HKLM\\${runOnce}" /f`);
+    assert.equal(removed.code, 0);
+    const machine = removed.app.registry();
+    assert.equal(machine.open(machine.root(0x80000002), runOnce), null, 'gone');
+
+    assert.equal((await startedBy(t, 'reg delete HKLM\\SOFTWARE\\Nobody /f')).code, 1);
+    assert.equal((await startedBy(t, 'reg frobnicate HKLM\\SOFTWARE')).code, 1, 'syntax');
+});

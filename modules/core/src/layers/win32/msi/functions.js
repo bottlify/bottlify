@@ -205,6 +205,9 @@ const IDOK = 1;
  * @property {(commandLine: string, directory: string | null, wait: boolean,
  *     thread: unknown) => Promise<number | null>} [runExe]
  *     A program a custom action runs, started and waited for as the thread's call.
+ * @property {(commandLine: string, directory: string | null, thread: unknown)
+ *     => Promise<{ settle: () => Promise<number> } | null>} [startExe]
+ *     One that runs beside the installation; `settle` waits for it and answers its exit code.
  * @property {(path: string) => Uint8Array | null | Promise<Uint8Array | null>} [versionInfo]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
@@ -539,6 +542,8 @@ export function createMsiFunctions(host){
                     startDll: (path, entry, args)=>startDll(path, entry, args, made.thread),
                     runExe: async(commandLine, directory, wait)=>
                         host.runExe?.(commandLine, directory, wait, made.thread) ?? null,
+                    startExe: async(commandLine, directory)=>
+                        host.startExe?.(commandLine, directory, made.thread) ?? null,
                     registerTypeLib: (path, helpDir)=>registerTypeLib(path, helpDir, made.thread),
                     unregisterTypeLib: (libId, major, minor, language)=>
                         unregisterTypeLib(libId, major, minor, language, made.thread),

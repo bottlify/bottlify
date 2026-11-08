@@ -216,3 +216,49 @@ test('a program action is run on its command line, and a failure is in the log',
     assert.equal(await runCustomAction(engine, { ...row, type: 34 | CONTINUE }), 0,
         'unless its answer is ignored');
 });
+
+test('a program action run in parallel and not ignored is waited for where the sequence ends,'
+    + ' its exit code then the installation\'s', async()=>{
+    // RegisterHelpers of a vendor package: type 34 | async | in-script, its
+    // server registering itself while the sequence goes on.
+    const row = { action: 'RegisterHelpers', type: 34 | ASYNC | 0x400, source: 'INSTALLDIR',
+        target: '"C:\\Program Files\\Vendor\\Server.exe" /RegServer' };
+    for (const [exit, answer] of [[0, 0], [5, 1603]])
+    {
+        const { engine } = engineWith();
+        engine.session.folders = new Map();
+        /** @type {(code: number) => void} */
+        let end = ()=>{};
+        engine.host.runExe = async()=>assert.fail('not started as one waited for at once');
+        engine.host.startExe = async(/** @type {string} */ line)=>{
+            assert.equal(line, row.target);
+            return { settle: ()=>new Promise(resolve=>{
+                end = resolve;
+            }) };
+        };
+        assert.equal(await runCustomAction(engine, row), 0, 'the sequence goes on');
+        let over = false;
+        const finishing = finishAsync(engine).then(code=>{
+            over = true;
+            return code;
+        });
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(over, false, 'the installation waits for the program');
+        end(exit);
+        assert.equal(await finishing, answer);
+    }
+    const ignored = engineWith();
+    ignored.engine.session.folders = new Map();
+    /** @type {boolean[]} */
+    const waits = [];
+    /** @param {string} line @param {string | null} directory @param {boolean} wait */
+    const leave = async(line, directory, wait)=>{
+        waits.push(wait);
+        return 0;
+    };
+    ignored.engine.host.runExe = leave;
+    ignored.engine.host.startExe = async()=>assert.fail('not waited for at all');
+    assert.equal(await runCustomAction(ignored.engine, { ...row, type: row.type | CONTINUE }), 0);
+    assert.deepEqual(waits, [false], 'with its answer ignored, left to run');
+    assert.equal(ignored.engine.async.length, 0);
+});

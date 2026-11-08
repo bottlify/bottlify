@@ -145,6 +145,7 @@ import { PROGRAMS_LIBRARY } from './programs/table.js';
 import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
+import { CABINET_ORDINALS } from './cabinet/ordinals.js';
 import { SHLWAPI_ORDINALS } from './shlwapi/forwards.js';
 import { UNKNOWN_ORDINALS, createUnknownFunctions } from './shlwapi/unknown.js';
 import { COMPUTER_NAME } from './kernel32/drives.js';
@@ -239,6 +240,12 @@ const VCRUNTIME_EXPORTS = [
     '__uncaught_exception', '_purecall', '_setjmp3', 'longjmp', 'memchr', 'memcmp', 'memcpy',
     'memmove', 'memset', 'strchr', 'strrchr', 'strstr', 'wcschr', 'wcsrchr', 'wcsstr',
 ];
+
+/**
+ * How often a custom action's program is looked at while the installation
+ * waits for it to end, in milliseconds of wall time.
+ */
+const PROGRAM_POLL_MS = 5;
 
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
@@ -2231,6 +2238,90 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
+            /**
+             * A program started by CreateProcessW on a thread's behalf, as
+             * Windows Installer starts a custom action's: `settle` waits for
+             * it and answers its exit code, `leave` lets it run on; either
+             * gives the handles back. Null when it could not start.
+             *
+             * @param {string} commandLine @param {string | null} directory
+             * @param {unknown} thread
+             * @returns {Promise<{ settle: () => Promise<number>, leave: () => Promise<number> }
+             *     | null>}
+             */
+            const startProgram = async(commandLine, directory, thread)=>{
+                const kernel32 = libraries['KERNEL32.dll'];
+                /** @param {string} name @param {number[]} args */
+                const call = async(name, args)=>(await bridge.answering(thread,
+                    ()=>kernel32[name].handler(args))) >>> 0;
+                /** @param {string} text */
+                const wide = text=>{
+                    const bytes = new Uint8Array(
+                        Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer);
+                    const at = heap.allocate(bytes.length);
+                    writeMemory(at, bytes);
+                    return at;
+                };
+                const line = wide(commandLine);
+                const folder = directory ? wide(directory) : 0;
+                const STARTUPINFO = 68;
+                const startup = heap.allocate(STARTUPINFO + 16);
+                writeMemory(startup, new Uint8Array(STARTUPINFO + 16));
+                writeMemory(startup, Uint8Array.of(STARTUPINFO, 0, 0, 0));
+                const information = startup + STARTUPINFO;
+                try
+                {
+                    if (!await call('CreateProcessW', [0, line, 0, 0, 0, 0, 0, folder,
+                        startup, information]))
+                    {
+                        return null;
+                    }
+                    const process = memory.readU32(information);
+                    const mainThread = memory.readU32(information + 4);
+                    const close = async()=>{
+                        await call('CloseHandle', [process]);
+                        await call('CloseHandle', [mainThread]);
+                    };
+                    return {
+                        settle: async()=>{
+                            const slot = heap.allocate(4);
+                            try
+                            {
+                                // Asked, not waited on: the thread is already
+                                // waiting for this handler, and a host call that
+                                // has awaited cannot park it a second time. The
+                                // program runs between the looks.
+                                while (await call('WaitForSingleObject', [process, 0]) !== 0)
+                                {
+                                    await new Promise(resolve=>setTimeout(resolve,
+                                        PROGRAM_POLL_MS));
+                                }
+                                await call('GetExitCodeProcess', [process, slot]);
+                                return memory.readU32(slot);
+                            }
+                            finally
+                            {
+                                heap.free(slot);
+                                await close();
+                            }
+                        },
+                        leave: async()=>{
+                            await close();
+                            return 0;
+                        },
+                    };
+                }
+                finally
+                {
+                    heap.free(startup);
+                    heap.free(line);
+                    if (folder)
+                    {
+                        heap.free(folder);
+                    }
+                }
+            };
+
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
             // file calls and setupapi's alike. Every layer's, not only this
@@ -3725,54 +3816,15 @@ export function createWin32Module(){
                     // command line, as Windows Installer starts it, waited for
                     // and its exit code read when the action waits.
                     runExe: async(commandLine, directory, wait, thread)=>{
-                        const kernel32 = libraries['KERNEL32.dll'];
-                        /** @param {string} name @param {number[]} args */
-                        const call = async(name, args)=>(await bridge.answering(thread,
-                            ()=>kernel32[name].handler(args))) >>> 0;
-                        /** @param {string} text */
-                        const wide = text=>{
-                            const bytes = new Uint8Array(
-                                Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer);
-                            const at = heap.allocate(bytes.length);
-                            writeMemory(at, bytes);
-                            return at;
-                        };
-                        const line = wide(commandLine);
-                        const folder = directory ? wide(directory) : 0;
-                        const STARTUPINFO = 68;
-                        const startup = heap.allocate(STARTUPINFO + 16 + 4);
-                        writeMemory(startup, new Uint8Array(STARTUPINFO + 16 + 4));
-                        writeMemory(startup, Uint8Array.of(STARTUPINFO, 0, 0, 0));
-                        const information = startup + STARTUPINFO;
-                        const codeSlot = information + 16;
-                        try
-                        {
-                            if (!await call('CreateProcessW', [0, line, 0, 0, 0, 0, 0, folder,
-                                startup, information]))
-                            {
-                                return null;
-                            }
-                            const process = memory.readU32(information);
-                            let code = 0;
-                            if (wait)
-                            {
-                                await call('WaitForSingleObject', [process, 0xffffffff]);
-                                await call('GetExitCodeProcess', [process, codeSlot]);
-                                code = memory.readU32(codeSlot);
-                            }
-                            await call('CloseHandle', [process]);
-                            await call('CloseHandle', [memory.readU32(information + 4)]);
-                            return code;
-                        }
-                        finally
-                        {
-                            heap.free(startup);
-                            heap.free(line);
-                            if (folder)
-                            {
-                                heap.free(folder);
-                            }
-                        }
+                        const started = await startProgram(commandLine, directory, thread);
+                        return started === null ? null : wait ? started.settle() : started.leave();
+                    },
+                    // One that runs beside the installation until the end of
+                    // its sequence, when the installer waits for it and reads
+                    // its exit code.
+                    startExe: async(commandLine, directory, thread)=>{
+                        const started = await startProgram(commandLine, directory, thread);
+                        return started === null ? null : { settle: started.settle };
                     },
                     divergence: config?.divergence,
                     // The installer's own log, where a failed installation says why.
@@ -5100,6 +5152,7 @@ export function createWin32Module(){
                     'SFC.dll': SFC_ORDINALS,
                     'ODBC32.dll': ODBC32_ORDINALS,
                     'MSI.dll': MSI_ORDINALS,
+                    'CABINET.dll': CABINET_ORDINALS,
                     // A program of the 9x era imports shlwapi's wide-character
                     // wrappers by number alone.
                     'SHLWAPI.dll': { ...SHLWAPI_ORDINALS, ...UNKNOWN_ORDINALS },

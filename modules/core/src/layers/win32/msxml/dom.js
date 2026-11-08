@@ -57,6 +57,8 @@ const VT_DISPATCH = 9;
 const VT_BOOL = 11;
 const VT_VARIANT = 12;
 const VT_UNKNOWN = 13;
+const VT_UI1 = 17;
+const VT_ARRAY = 0x2000;
 const VT_BYREF = 0x4000;
 
 /** How far a string of the DOM is read. */
@@ -320,12 +322,25 @@ export function registerMsxmlClasses(host){
         return S_OK;
     };
     /**
+     * The bytes of a one-dimensional SAFEARRAY of VT_UI1: cDims at 0, the data
+     * pointer at 12, the bound's element count at 16.
+     *
+     * @param {number} array
+     */
+    const arrayBytes = array=>{
+        const header = new DataView(host.readMemory(array, 24).slice().buffer);
+        return header.getUint16(0, true) === 1
+            ? host.readMemory(header.getUint32(12, true), header.getUint32(16, true)).slice()
+            : new Uint8Array(0);
+    };
+    /**
      * A VARIANT passed by value, as its four words: a string, a number, an
-     * interface pointer, or null for empty.
+     * interface pointer, an array of bytes, or null for empty.
      *
      * @param {number[]} words
      * @returns {{ kind: 'string', value: string } | { kind: 'number', value: number }
-     *     | { kind: 'object', value: number } | { kind: 'empty' }}
+     *     | { kind: 'object', value: number } | { kind: 'bytes', value: Uint8Array }
+     *     | { kind: 'empty' }}
      */
     const readVariant = words=>{
         let type = words[0] & 0xffff;
@@ -355,6 +370,8 @@ export function registerMsxmlClasses(host){
             case VT_DISPATCH:
             case VT_UNKNOWN:
                 return low === 0 ? { kind: 'empty' } : { kind: 'object', value: low };
+            case VT_ARRAY | VT_UI1:
+                return low === 0 ? { kind: 'empty' } : { kind: 'bytes', value: arrayBytes(low) };
             default:
                 return { kind: 'empty' };
         }
@@ -1166,6 +1183,12 @@ export function registerMsxmlClasses(host){
                     diverge('IXMLDOMDocument::load',
                         'a stream or an object as the source is not read');
                     return loaded(out, false);
+                }
+                if (source.kind === 'bytes')
+                {
+                    // A document held in memory, as a setup engine hands over
+                    // the manifest it carries inside its own executable.
+                    return loaded(out, parseInto(state, decodeDocument(source.value), ''));
                 }
                 if (source.kind !== 'string')
                 {

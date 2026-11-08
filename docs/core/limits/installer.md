@@ -26,10 +26,14 @@
   cache assemblies are not installed.
 - An advertise script cannot be written or read (`MsiAdvertiseScript`,
   `MsiProcessAdvertiseScript`, `MsiGetProductInfoFromScript`, `MsiAdvertiseProduct` to a file).
-- `msiexec.exe`, `rundll32.exe` and `regsvr32.exe` in `C:\WINDOWS\system32` are the engine's own:
-  a program that starts one gets a process that drives `msi.dll`, the named library's entry point
-  or its registration exports, and exits with what Windows' program would. The volume shows no
-  file at those paths, so a setup that checks for one before starting it does not find it.
+- `msiexec.exe`, `rundll32.exe`, `regsvr32.exe` and `reg.exe` in `C:\WINDOWS\system32` are the
+  engine's own: a program that starts one gets a process that drives `msi.dll`, the named
+  library's entry point, its registration exports or the registry, and exits with what Windows'
+  program would. `reg` takes `add`, `delete` and `query` (with `/s` alone of the query's filters)
+  on this machine's keys. The volume shows no file at those paths, so a setup that checks for one
+  before starting it does not find it.
+- A program custom action run asynchronously is waited for where its sequence ends, unless its
+  answer is ignored, and its exit code is then the action's.
 - `notepad.exe` (in `C:\WINDOWS` and `C:\WINDOWS\system32`) is the engine's too: it shows a text
   file read-only and exits when its window is closed; it does not edit, save or print.
   ShellExecute opens `.txt`, `.log`, `.ini`, `.inf`, `.nfo` and `.diz` files in it; an address

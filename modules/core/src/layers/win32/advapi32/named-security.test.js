@@ -275,3 +275,17 @@ test('the permissions step of an installer: read the DACL, merge an entry, set i
         0, 0, DACL_OUT, 0, SD_OUT]), 0);
     assert.equal(bytes[dword(DACL_OUT) + 4], 4, 'the DACL set on it, kept for the run');
 });
+
+test('DecryptFile: a file that is there is in the clear already; one that is not, fails', ()=>{
+    const { host, fns, narrow, wide } = setup();
+    /** @type {number[]} */
+    const errors = [];
+    const answered = createNamedSecurityFunctions({ ...host,
+        setLastError: code=>errors.push(code) });
+    assert.equal(fns.DecryptFileW.argBytes, 8);
+    assert.equal(answered.DecryptFileW.handler([wide('C:\\WINDOWS\\win.ini'), 0]), 1);
+    assert.equal(answered.DecryptFileA.handler([narrow('C:\\WINDOWS\\win.ini'), 0]), 1);
+    assert.deepEqual(errors, [], 'nothing said of a success');
+    assert.equal(answered.DecryptFileW.handler([wide('C:\\WINDOWS\\gone.ini'), 0]), 0);
+    assert.deepEqual(errors, [ERROR_FILE_NOT_FOUND]);
+});

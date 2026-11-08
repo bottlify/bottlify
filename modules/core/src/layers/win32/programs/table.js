@@ -6,7 +6,7 @@
 
 /**
  * The programs Windows keeps in its system folder and this engine provides
- * itself: msiexec, rundll32, regsvr32.
+ * itself: msiexec, rundll32, regsvr32, reg.
  *
  * Installers, bootstrappers and uninstall strings start them by name -- `MsiExec.exe
  * /X{GUID}`, `rundll32 setupapi,InstallHinfSection ...`, `regsvr32 /s x.dll` --
@@ -29,6 +29,7 @@ import { versionStringOf } from '../version/functions.js';
 import { runMsiexec } from './msiexec.js';
 import { runRundll32 } from './rundll32.js';
 import { runRegsvr32 } from './regsvr32.js';
+import { runReg } from './reg.js';
 import { runNotepad } from './notepad.js';
 import { runDxsetup } from './dxsetup.js';
 
@@ -56,6 +57,7 @@ export const SYSTEM_PROGRAMS = new Map([
     ['msiexec.exe', { routine: 'msiexec', run: runMsiexec }],
     ['rundll32.exe', { routine: 'rundll32', run: runRundll32 }],
     ['regsvr32.exe', { routine: 'regsvr32', run: runRegsvr32 }],
+    ['reg.exe', { routine: 'reg', run: runReg }],
     ['notepad.exe', { routine: 'notepad', run: runNotepad,
         directories: [WINDOWS_DIRECTORY, SYSTEM_DIRECTORY] }],
 ]);

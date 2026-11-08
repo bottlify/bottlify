@@ -128,6 +128,19 @@ test('WINMM\'s ordinal 2 is PlaySoundA, as winmm.spec numbers it', async()=>{
     await win32Module.dispose();
 });
 
+test('cabinet.dll\'s numbered exports are its FCI and FDI entries, every one of them served',
+    async()=>{
+        // A setup engine imports FDICreate, FDICopy and FDIDestroy as #20, #22
+        // and #23 and nothing else; an unresolved number ends it before its UI.
+        const api = await win32Module.create({ screen: SCREEN }, stubHost());
+        const ordinals = api.ordinals()['CABINET.dll'];
+        assert.deepEqual([20, 22, 23].map(number=>ordinals[number]),
+            ['FDICreate', 'FDICopy', 'FDIDestroy']);
+        const cabinet = api.libraries()['CABINET.dll'];
+        assert.deepEqual(Object.values(ordinals).filter(name=>!cabinet[name]), []);
+        await win32Module.dispose();
+    });
+
 test('dsetup is a library here, so an autorun that loads it by name finds DirectX', async()=>{
     // An autorun that cannot load it reads the installed DirectX as none and
     // refuses to install, whatever the registry says.

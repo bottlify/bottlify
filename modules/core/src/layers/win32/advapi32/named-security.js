@@ -592,7 +592,28 @@ export function createNamedSecurityFunctions(host){
         },
     });
 
+    /**
+     * BOOL DecryptFile(LPCTSTR lpFileName, DWORD dwReserved)
+     *
+     * No file on this volume is encrypted (there is no EFS), so a file that is
+     * there is already in the clear and the call succeeds without changing
+     * it, as Windows answers for a file that was never encrypted; one that is
+     * not there fails as a lookup does. A setup engine calls it on each file
+     * it copies into its cache.
+     *
+     * @param {boolean} wide
+     */
+    const decryptFile = wide=>({
+        argBytes: 8,
+        handler: (/** @type {number[]} */ [name])=>{
+            const object = objectOf('DecryptFile', name, SE_FILE_OBJECT, wide);
+            return typeof object === 'number' ? setError(object) : 1;
+        },
+    });
+
     return {
+        DecryptFileA: decryptFile(false),
+        DecryptFileW: decryptFile(true),
         GetNamedSecurityInfoA: getNamedSecurityInfo(false),
         GetNamedSecurityInfoW: getNamedSecurityInfo(true),
         SetNamedSecurityInfoA: setNamedSecurityInfo(false),

@@ -320,6 +320,23 @@ async function execute(engine, row, kind, flags, data){
             host.log?.(`Custom action ${row.action}: no program ${row.source}.`);
             return answer(ERROR_INSTALL_FAILURE);
         }
+        if ((flags & ASYNC) !== 0 && !ignore && host.startExe)
+        {
+            // Beside the sequence, and waited for where it ends: its exit code
+            // is the action's answer then, as for a synchronous one.
+            const started = await host.startExe(commandLine, directory);
+            if (started === null)
+            {
+                host.log?.(`Custom action ${row.action} could not start ${commandLine}.`);
+                return answer(ERROR_INSTALL_FAILURE);
+            }
+            host.log?.(`Custom action ${row.action} started ${commandLine}.`);
+            engine.async.push({ name: row.action, wait: true, over: false, stop: ()=>{},
+                done: Promise.resolve(null),
+                settle: async()=>((await started.settle()) === 0 ? ERROR_SUCCESS
+                    : ERROR_INSTALL_FAILURE) });
+            return ERROR_SUCCESS;
+        }
         const wait = (flags & ASYNC) === 0;
         const code = await host.runExe(commandLine, directory, wait);
         if (code === null)
@@ -405,7 +422,7 @@ export async function finishAsync(engine){
     {
         if (action.wait)
         {
-            const code = await action.done;
+            const code = await (action.settle?.() ?? action.done);
             engine.host.log?.(`Custom action ${action.name} answered ${code}.`);
             if (code === null || sequenceAnswer(code >>> 0) === ERROR_INSTALL_FAILURE)
             {

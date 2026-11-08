@@ -183,6 +183,29 @@ test('a document that does not parse says why, where', ()=>{
     assert.equal(h.call(h.document, 'get_documentElement', element), 1, 'no element: S_FALSE');
 });
 
+test('load reads a document from a SAFEARRAY of bytes, as a setup engine hands its manifest',
+    async()=>{
+        const h = harness();
+        const text = new TextEncoder().encode('﻿<BurnManifest><Payload Id="ux"/></BurnManifest>');
+        const data = h.out() + 0x100;
+        h.bytes.set(text, data);
+        // SAFEARRAY: one dimension, one-byte elements, the data, its count.
+        const array = h.out();
+        h.view.setUint16(array, 1, true);
+        h.view.setUint32(array + 4, 1, true);
+        h.view.setUint32(array + 12, data, true);
+        h.view.setUint32(array + 16, text.length, true);
+        const ok = h.out();
+        // VT_ARRAY | VT_UI1 by value: the type word, a reserved word, the array.
+        assert.equal(await h.call(h.document, 'load', 0x2011, 0, array, 0, ok), 0);
+        assert.equal(h.view.getInt16(ok, true), -1, 'VARIANT_TRUE');
+        const element = h.out();
+        h.call(h.document, 'get_documentElement', element);
+        const name = h.out();
+        assert.equal(h.call(h.u32(element), 'get_nodeName', name), 0);
+        assert.equal(h.readBstr(h.u32(name)), 'BurnManifest');
+    });
+
 test('a node made by the document is answered as its kind and goes into the tree', ()=>{
     const h = harness();
     h.call(h.document, 'loadXML', h.bstr('<root/>'), h.out());
