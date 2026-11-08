@@ -202,6 +202,16 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   interpreter. The exception then goes to the program's SEH, where #GP and #PF become
   `EXCEPTION_ACCESS_VIOLATION`.
 
+### 64-bit programs
+
+An x86-64 program (a PE32+ image) runs on the same translator and runtime at a 64-bit width: the
+sixteen 64-bit registers live in the state block, and its memory is a 4 GiB window, every page
+below 4 GiB and an image whose base is above it relocated down. A 64-bit process runs on one
+executor. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
+Windows (`machine: 'amd64'`, [API](../core/api.md#what-runs)), where a 32-bit child runs under
+WOW64. What the Windows layer has at 64 bits is in
+[the limits](../core/limits/README.md#programs).
+
 Where to look in the code: [`cork/src/decode/`](../../modules/cork/src/decode/), [`cork/src/region.js`](../../modules/cork/src/region.js), [`cork/src/emit/`](../../modules/cork/src/emit/),
 [`cork/src/wasm/`](../../modules/cork/src/wasm/), [`cork/src/runtime/`](../../modules/cork/src/runtime/), [`cork/src/interp.js`](../../modules/cork/src/interp.js), [`cork/src/interp-wasm.c`](../../modules/cork/src/interp-wasm.c); the engine
 glue is [`core/src/layers/cpu/internal/cork-host.js`](../../modules/core/src/layers/cpu/internal/cork-host.js). Where cork goes next is

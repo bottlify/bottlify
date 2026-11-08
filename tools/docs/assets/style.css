@@ -116,6 +116,73 @@ svg.graph marker path { fill: var(--muted); }
 }
 .legend { font-size: 14px; color: var(--muted); }
 
+/* A walkthrough: the panel stays under the header while its steps scroll by. */
+.walk {
+    position: sticky; top: 56px; z-index: 3; margin: 12px -8px 8px; padding: 8px 8px 6px;
+    background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.walk-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.walk-bar button {
+    font: inherit; font-size: 14px; padding: 4px 12px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--soft); color: var(--fg); cursor: pointer;
+}
+.walk-bar button:hover { border-color: var(--accent); }
+.walk-title { flex: 1; text-align: center; font-weight: 600; font-size: 14px; }
+svg.walk-map { display: block; width: 100%; max-height: 34vh; }
+svg.walk-map .node { cursor: pointer; }
+svg.walk-map .node rect { fill: var(--node); stroke: var(--muted); stroke-width: 1.2; }
+svg.walk-map .node text { fill: var(--fg); font: 600 13px Inter, "Segoe UI", sans-serif; pointer-events: none; }
+svg.walk-map .edge { stroke: var(--muted); stroke-width: 1.2; opacity: 0; }
+svg.walk-map marker path { fill: var(--accent); }
+svg.walk-map.stepping .node { opacity: .35; transition: opacity .2s; }
+svg.walk-map.stepping .node.on { opacity: 1; }
+svg.walk-map .node.on rect { fill: var(--hot); stroke: var(--accent); stroke-width: 2.2; }
+svg.walk-map .edge.on { opacity: 1; stroke: var(--accent); stroke-width: 2.4; transition: opacity .2s; }
+main h3.current { color: var(--accent); }
+
+/* The project in 3D: always on a dark ground, the points glow on it. */
+.graph3d {
+    position: relative; height: min(78vh, 760px); margin: 20px 0; border-radius: 12px; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 40%, #1a2233 0%, #0b0e14 70%); color: #e3e8eb;
+}
+.graph3d:fullscreen { height: 100vh; border-radius: 0; }
+.g3-canvas { position: absolute; inset: 0; }
+.g3-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.g3-tag {
+    position: absolute; left: 0; top: 0; white-space: nowrap; font: 600 12px Inter, "Segoe UI", sans-serif;
+    color: #e3e8eb; text-shadow: 0 0 4px #000, 0 0 2px #000; transition: color .2s;
+}
+.g3-tag.g3-package { font-size: 15px; color: #ffd166; }
+.g3-tag.g3-layer { color: #9ee5f8; }
+.g3-tag.g3-thread { color: #ff8cc6; }
+.g3-tag.g3-outside { color: #b4f5c4; }
+.g3-tag.dim { color: #5b6577; }
+.g3-bar {
+    position: absolute; left: 12px; right: 12px; top: 12px; z-index: 2; display: flex; gap: 8px;
+    align-items: center;
+}
+.g3-bar button {
+    font: inherit; font-size: 14px; padding: 5px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid #39465a; background: rgba(20, 26, 36, .85); color: #e3e8eb;
+}
+.g3-bar button:hover { border-color: #ffd166; }
+.g3-caption {
+    flex: 1; text-align: center; font-weight: 600; font-size: 14px; text-shadow: 0 0 4px #000;
+}
+.g3-card {
+    position: absolute; left: 12px; bottom: 12px; z-index: 2; width: min(360px, calc(100% - 24px));
+    max-height: 45%; overflow: auto; padding: 4px 16px 8px; border-radius: 10px;
+    background: rgba(16, 21, 30, .92); border: 1px solid #39465a; font-size: 14px; line-height: 1.5;
+}
+.g3-card h3 { margin: 10px 0 4px; color: #ffd166; }
+.g3-card a { color: #7aa7ff; }
+.g3-close {
+    float: right; margin-top: 6px; border: 0; background: none; color: #97a3aa; font-size: 20px;
+    cursor: pointer;
+}
+.g3-failed { display: flex; align-items: center; justify-content: center; }
+.graph3d .scene-tooltip { color: #e3e8eb; font-size: 13px; max-width: 280px; }
+
 @media (max-width: 1100px) {
     .layout { grid-template-columns: 240px minmax(0, 1fr); }
     aside.toc { display: none; }
@@ -127,8 +194,11 @@ svg.graph marker path { fill: var(--muted); }
     header .brand span { display: none; }
     .menu { display: block; }
     .layout { display: block; }
-    nav.side { display: none; position: static; height: auto; border-right: 0;
-        border-bottom: 1px solid var(--line); }
+    /* Over the page wherever it is scrolled to, not at its top. */
+    nav.side { display: none; position: fixed; top: 56px; left: 0; right: 0; bottom: 0; z-index: 6;
+        height: auto; background: var(--bg); border-right: 0; padding-bottom: 80px; }
     #menu:checked ~ .layout nav.side { display: block; }
+    body:has(#menu:checked) { overflow: hidden; }
+    svg.walk-map { max-height: 26vh; }
     main { padding: 20px 16px 60px; }
 }

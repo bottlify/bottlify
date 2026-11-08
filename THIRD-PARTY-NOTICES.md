@@ -259,3 +259,19 @@ Joliet specification.
   types and parameter directions as the specification declares them; none of the specification's
   text is copied, and the compiler that checks calls against them is original work under the MPL
 - License: CC-BY-4.0 (the specification's sources)
+
+## mermaid: the diagrams on the documentation site
+
+- Source: the npm package `mermaid` 11.4.1 (https://github.com/mermaid-js/mermaid), loaded from
+  jsdelivr at that version
+- Used by: the documentation site `tools/docs/site.mjs` builds, on a page with a diagram; not
+  part of any module and not distributed with the product
+- License: MIT
+
+## 3d-force-graph: the 3D graph on the documentation site
+
+- Source: the npm package `3d-force-graph` 1.79.1 (https://github.com/vasturiano/3d-force-graph),
+  its UMD bundle (with three.js inside) loaded from jsdelivr at that version
+- Used by: the documentation site's `architecture/graph.html` (`tools/docs/assets/graph3d.js`);
+  not part of any module and not distributed with the product
+- License: MIT (three.js inside it: MIT)

@@ -3,6 +3,8 @@
 Paths without a prefix are relative to [`modules/`](../../modules/) in bottlify; paths starting with `ui/` are
 relative to the root of bottlify-ui. Where a diagram and the code disagree, the code is right.
 
+How one small program runs through all of it, step by step: [hello world](hello-world.md).
+
 The pages, in the order they build on each other:
 
 - [Threads: who starts whom, and why](threads.md)
@@ -25,7 +27,7 @@ forwards network traffic.
 | --- | --- | --- |
 | An x86 processor | cork, translating x86 to wasm | WebAssembly |
 | System DLLs | the `win32` layer: functions in JS that the program sees as real PE images | |
-| DirectDraw, Direct3D 7–10, OpenGL, Vulkan, GDI | the `graphics` layer | WebGPU |
+| DirectDraw, Direct3D 7–11, OpenGL, Vulkan, GDI | the `graphics` layer | WebGPU |
 | DirectSound, waveOut, DirectMusic | the `audio` layer | AudioWorklet, SharedArrayBuffer where the page has it |
 | Several processors | the `cpu` layer's executors, each a worker over the program's memory | Web Workers, SharedArrayBuffer |
 | DirectInput, XInput, window messages | the `input` layer | keyboard and mouse events, Gamepad API |
@@ -87,7 +89,7 @@ with `graphics: null`, for instance, a game runs with no picture. The module con
 | `bridge` | calling conventions, parking threads, callbacks, COM in the program's memory | `cpu`, `kernel`, `memory`, `log` |
 | `filesystem` | the bundle, the block cache, the `C:` drive, the files the program writes | `log` |
 | `win32` | kernel32, user32, gdi32, advapi32, ole32, msvcrt, winmm, wsock32 and some thirty more DLLs | `bridge`, `kernel`, `memory`, `loader`, `filesystem`, `media`, `log` |
-| `graphics` | DirectDraw, Direct3D 7/8/9/10, OpenGL, Vulkan and the WebGPU backend under them | `win32`, `bridge`, `memory` |
+| `graphics` | DirectDraw, Direct3D 7/8/9/10/11, OpenGL, Vulkan and the WebGPU backend under them | `win32`, `bridge`, `memory` |
 | `audio` | DirectSound, DirectMusic, the mixer, MP3 for Miles | `win32`, `bridge`, `memory` |
 | `input` | DirectInput, XInput, keyboard and mouse in the message queue | `win32`, `bridge`, `memory` |
 | `media` | the video decoder (FFmpeg in wasm) and `ijl15.dll` | `log` |

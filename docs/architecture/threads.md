@@ -77,7 +77,7 @@ flowchart LR
   from then on only the engine draws into it.
 - **Engine → log keeper.** Shared memory only: the keeper looks into the ring every 200 ms. Without
   `SharedArrayBuffer` the page forwards the records to it as messages.
-- **Engine ⇄ graphics.** Direct3D 7, 8, 9, 10 and OpenGL each have a `MessageChannel` of their own. Calls go into one
+- **Engine ⇄ graphics.** Direct3D 7, 8, 9, 10 (with 11, which shares its device) and OpenGL each have a `MessageChannel` of their own. Calls go into one
   buffer per batch, and the buffer is transferred without a copy. Back come the frame as an
   `ImageBitmap` and the answers to calls only the renderer knows.
 - **Engine ⇄ translation.** Regions missing from the store go one way; module bytes and an already

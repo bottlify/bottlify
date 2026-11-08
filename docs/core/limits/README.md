@@ -10,8 +10,8 @@ event, an error. Neither stops the program.
 - 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs on one executor, with
   its pages below 4 GiB, as far as console programs on msvcrt or vcruntime140 go, structured and
   C++ exceptions, floating-point arguments and results, and a window program's classes,
-  windows, messages, hooks and painting, and Direct3D 9 and OpenGL included, every call into
-  them a trap: dialogs, MDI, DirectDraw and the other Direct3D versions are not there yet at
+  windows, messages, hooks and painting, and Direct3D 9, OpenGL and DirectSound included, every
+  call into them a trap: dialogs, MDI, DirectDraw and the other Direct3D versions are not there yet at
   64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
   first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
   the file system's and the registry's redirection.
