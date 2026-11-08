@@ -48,6 +48,26 @@ const TEXEL_BYTES = new Map([[FMT.R8G8B8, 3], [FMT.A8R8G8B8, 4], [FMT.X8R8G8B8, 
 /** @param {number} format */
 export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(format);
 
+/**
+ * Formats this module has no codec for, by the bytes a texel takes: a level
+ * of one is copied row by row into a surface of the same format and size, as
+ * D3DX copies it, and goes no other way. G16R16, A2B10G10R10, A16B16G16R16,
+ * A2R10G10B10, V8U8, Q8W8V8U8, V16U16, R16F, G16R16F, A16B16G16R16F, R32F,
+ * G32R32F, A32B32G32R32F.
+ *
+ * @type {Map<number, number>}
+ */
+const COPIED_BYTES = new Map([[34, 4], [31, 4], [36, 8], [35, 4], [60, 2], [63, 4], [64, 4],
+    [111, 2], [112, 4], [113, 8], [114, 4], [115, 8], [116, 16]]);
+
+/**
+ * Whether a level of this format can be copied into a surface of the same
+ * format and size.
+ *
+ * @param {number} format
+ */
+export const isCopyable = format=>isSupported(format) || COPIED_BYTES.has(format);
+
 /** @param {number} format */
 const blockBytes = format=>(format === FMT.DXT1 ? 8 : 16);
 
@@ -63,7 +83,8 @@ export function layoutOf(format, width, height){
         return { rowBytes: Math.max(1, Math.ceil(width / 4)) * blockBytes(format),
             rows: Math.max(1, Math.ceil(height / 4)) };
     }
-    return { rowBytes: width * /** @type {number} */ (TEXEL_BYTES.get(format)), rows: height };
+    return { rowBytes: width * /** @type {number} */ (TEXEL_BYTES.get(format)
+        ?? COPIED_BYTES.get(format)), rows: height };
 }
 
 /** @param {number} value @param {number} bits */

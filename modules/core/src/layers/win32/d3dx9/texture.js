@@ -7,7 +7,8 @@
 import { DEVICE, SURFACE, TEXTURE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
 import { ImageError, bitmapFile, readImage } from './images.js';
 import {
-    FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, keptAsIs, layoutOf, resample,
+    FMT, decodeTexels, encodeTexels, halve, isCompressed, isCopyable, isSupported, keptAsIs,
+    layoutOf, resample,
 } from './pixels.js';
 
 /**
@@ -678,7 +679,14 @@ export function createTextureLoader(host){
             {
                 return typeof from === 'number' ? from : /** @type {number} */ (to);
             }
-            if (!isSupported(from.format) || !isSupported(to.format)
+            // One format at one size with no key is a copy of the rows, as D3DX
+            // makes it: a compressed one decoded and encoded again took the
+            // Crysis demo's engine a tenth of its time, and changed its blocks.
+            // A format with no codec here goes this way only.
+            const copied = from.format === to.format && from.width === to.width
+                && from.height === to.height && colorKey === 0;
+            const converted = isSupported(from.format) && isSupported(to.format);
+            if (!(converted || (copied && isCopyable(from.format)))
                 || from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0)
             {
                 host.divergence?.(api, `answered D3DERR_INVALIDCALL:`
@@ -691,11 +699,6 @@ export function createTextureLoader(host){
             {
                 return packed;
             }
-            // One format at one size with no key is a copy of the rows, as D3DX
-            // makes it: a compressed one decoded and encoded again took the
-            // Crysis demo's engine a tenth of its time, and changed its blocks.
-            const copied = from.format === to.format && from.width === to.width
-                && from.height === to.height && colorKey === 0;
             let bgra = copied ? null : decodeTexels(from.format, packed, from.width, from.height);
             if (bgra && (from.width !== to.width || from.height !== to.height))
             {
