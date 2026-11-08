@@ -2010,3 +2010,13 @@ blocks, and any level made or converted into BC1 to BC5, is encoded by this load
 whose endpoints and indices differ from Windows' where several encodings come equally close. The
 sRGB curve is the power 2.2 the tests show, held to 0 to 1; Windows reads a float above 1 past
 the end of its table. *2026-11-08.*
+
+**A237. Media Foundation describes media and plays none.** `mfplat`'s objects (attributes, media
+types, memory buffers, samples, events) are whole, but there is no pipeline behind them: no
+source resolver, decoder, transform or work queue. `MFTRegister` is refused with E_ACCESSDENIED,
+what Windows answers a user who may not write the machine's registration; a source reader is
+refused for a file that is there with MF_E_UNSUPPORTED_BYTESTREAM_TYPE, what Windows answers for
+a container it has no source for, and the loss is said with the file's name; a sink writer is
+E_NOTIMPL, also said. A video media type has no MFVIDEOFORMAT (`GetVideoFormat` answers NULL)
+and no AM_MEDIA_TYPE (MF_E_UNSUPPORTED_REPRESENTATION); an audio type's is its WAVEFORMATEX, or
+WAVEFORMATEXTENSIBLE past two channels or with a channel mask. *2026-11-08.*
