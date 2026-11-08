@@ -3496,7 +3496,8 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'POWRPROF.dll': createPowrprofFunctions({ writeMemory, setLastError: setError,
+                'POWRPROF.dll': createPowrprofFunctions({ writeMemory, readMemory,
+                    setLastError: setError,
                     processors: processors.count(), mhz: config?.processorMhz ?? PROCESSOR.mhz,
                     localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
                         .handler([0x40, bytes]) >>> 0 }),

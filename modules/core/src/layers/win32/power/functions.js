@@ -42,6 +42,7 @@ const PDH_NO_DATA = 0x800007d5;
  * @property {number} processors  How many processors the process is told of.
  * @property {number} mhz  Their speed, as the registry's `~MHz` says it.
  * @property {(bytes: number) => number} [localAlloc]  LPTR memory the caller LocalFrees
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
  */
 
 /** The Balanced scheme's GUID, {381b4222-f694-41f0-9685-ff5bb260df2e}, as its bytes. */
@@ -147,6 +148,35 @@ export function createPowrprofFunctions(host){
         ReadProcessorPwrScheme: noPolicy(8),
         /** BOOLEAN WriteProcessorPwrScheme(UINT, PMACHINE_PROCESSOR_POWER_POLICY) */
         WriteProcessorPwrScheme: noPolicy(8),
+        /** BOOLEAN ReadPwrScheme(UINT uiID, PPOWER_POLICY) */
+        ReadPwrScheme: noPolicy(8),
+        /** BOOLEAN WritePwrScheme(PUINT puiID, LPWSTR lpszName, LPWSTR lpszDescription, PPOWER_POLICY) */
+        WritePwrScheme: noPolicy(16),
+        /** BOOLEAN DeletePwrScheme(UINT uiID) */
+        DeletePwrScheme: noPolicy(4),
+        /** BOOLEAN EnumPwrSchemes(PWRSCHEMESENUMPROC, LPARAM): no XP-era policy to hand the callback. */
+        EnumPwrSchemes: noPolicy(8),
+        /** BOOLEAN CanUserWritePwrScheme(void): no scheme here takes a write. */
+        CanUserWritePwrScheme: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * DWORD PowerSetActiveScheme(HKEY UserRootPowerKey, const GUID *SchemeGuid)
+         *
+         * Balanced is active already; any other is not a scheme this machine has.
+         */
+        PowerSetActiveScheme: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, scheme])=>{
+                if ((scheme >>> 0) === 0 || !host.readMemory)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const asked = host.readMemory(scheme >>> 0, 16);
+                return asked.every((byte, at)=>byte === BALANCED[at]) ? ERROR_SUCCESS
+                    : ERROR_FILE_NOT_FOUND;
+            },
+        },
 
         /**
          * NTSTATUS CallNtPowerInformation(POWER_INFORMATION_LEVEL InformationLevel,
