@@ -270,3 +270,53 @@ test('URLDownloadToFileW copies a file URL and fetches nothing else', async()=>{
         h.m.putWide('http://example.com/a.cab'), target, 0, 0]), 0x800c0008 | 0);
     assert.equal(h.copies.length, 1, 'no copy for another scheme');
 });
+
+test('CreateAsyncBindCtx makes a bind context with the callback registered; IsAsyncMoniker asks'
+    + ' for IMonikerAsync', async()=>{
+    // 3DMark06 imports both: a context for an asynchronous bind, and the
+    // question whether a moniker binds that way.
+    const m = machine();
+    /** @type {Map<string, number>} */
+    const params = new Map();
+    let references = 1;
+    const context = m.fake({
+        2: ()=>--references,
+        9: ([key, unknown])=>{
+            params.set(m.wideAt(key), unknown);
+            return 0;
+        },
+    });
+    const callback = m.fake({});
+    const urlmon = createUrlMonikers(/** @type {any} */ ({
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            m.bytes.subarray(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>m.bytes.set(data, at),
+        readWideString: (/** @type {number} */ at)=>m.wideAt(at),
+        heap: { allocate: m.allocate, free: ()=>0 },
+        makeObject: createComObject,
+        call: async(/** @type {number} */ entry, /** @type {number[]} */ args)=>
+            /** @type {any} */ (m.entries.get(entry))(args.slice(1)),
+        callerThread: ()=>'main',
+        /** @param {string} library @param {string} name @param {number[]} args */
+        system: (library, name, [, out])=>{
+            assert.equal(`${library}!${name}`, 'ole32.dll!CreateBindCtx');
+            m.view.setUint32(out, context, true);
+            return 0;
+        },
+        divergence: ()=>{},
+    }));
+    const out = m.allocate(4);
+    assert.equal(await urlmon.CreateAsyncBindCtx.handler([0, callback, 0, out]), 0);
+    assert.equal(m.u32(out), context);
+    assert.equal(params.get('_BSCB_Holder_'), callback, 'the callback where a bind looks for it');
+    assert.equal(await urlmon.CreateAsyncBindCtx.handler([0, 0, 0, out]), 0x80070057 | 0);
+
+    const asynchronous = m.fake({ 0: ([, at])=>{
+        m.view.setUint32(at, asynchronous, true);
+        return 0;
+    }, 2: ()=>0 });
+    const plain = m.fake({ 0: ()=>0x80004002 | 0 });
+    assert.equal(await urlmon.IsAsyncMoniker.handler([asynchronous]), 0);
+    assert.equal(await urlmon.IsAsyncMoniker.handler([plain]), 1, 'S_FALSE');
+    assert.equal(await urlmon.IsAsyncMoniker.handler([0]), 0x80070057 | 0);
+});

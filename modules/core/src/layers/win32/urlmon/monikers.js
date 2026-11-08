@@ -594,6 +594,79 @@ export function createUrlMonikers(host){
         },
 
         /**
+         * HRESULT CreateAsyncBindCtx(DWORD reserved, IBindStatusCallback *pBSCb,
+         *     IEnumFORMATETC *pEFetc, IBindCtx **ppBC)
+         *
+         * A bind context, as CreateBindCtx makes it, with the callback
+         * registered on it as RegisterBindStatusCallback registers one. A
+         * format enumerator is not kept, said once: the media a bind offers
+         * here are its own.
+         */
+        CreateAsyncBindCtx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([, callback, formats, out])=>{
+                if ((callback >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                const thread = host.callerThread();
+                const made = await lend(4, async at=>{
+                    const hr = (await host.system('ole32.dll', 'CreateBindCtx', [0, at], thread)
+                        ?? E_NOTIMPL) | 0;
+                    return hr < 0 ? hr : readU32(at);
+                }, E_OUTOFMEMORY);
+                if (made < 0 || made === 0)
+                {
+                    return made === 0 ? E_OUTOFMEMORY : made;
+                }
+                if ((formats >>> 0) !== 0)
+                {
+                    diverge('CreateAsyncBindCtx', 'the format enumerator is not kept');
+                }
+                const hr = await lendWide(BSCB_HOLDER, name=>callMethod(made,
+                    SLOT.REGISTER_OBJECT_PARAM, [name, callback], thread));
+                if (hr < 0)
+                {
+                    await release(made, thread);
+                    return hr;
+                }
+                writeU32(out, made);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT IsAsyncMoniker(IMoniker *pmk)
+         *
+         * S_OK for a moniker that binds asynchronously - one that answers
+         * IMonikerAsync, as a URL moniker does - S_FALSE for another.
+         */
+        IsAsyncMoniker: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([moniker])=>{
+                if ((moniker >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.callerThread();
+                return lend(20, async at=>{
+                    host.writeMemory(at, iidBytes(IID_IASYNCMONIKER));
+                    const answer = await callMethod(moniker, SLOT.QUERY_INTERFACE, [at, at + 16],
+                        thread);
+                    if (answer < 0)
+                    {
+                        return S_FALSE;
+                    }
+                    await release(readU32(at + 16), thread);
+                    return S_OK;
+                }, E_OUTOFMEMORY);
+            },
+        },
+
+        /**
          * HRESULT CopyStgMedium(const STGMEDIUM *pcstgmedSrc, STGMEDIUM *pstgmedDest)
          *
          * The medium copied with what it holds made the copy's own: an

@@ -126,6 +126,8 @@ const TYPE_E_CANTLOADLIBRARY = 0x80029c4a | 0;
 const TYPE_E_LIBNOTREGISTERED = 0x8002801d | 0;
 const TYPE_E_REGISTRYACCESS = 0x8002801c | 0;
 const E_INVALIDARG = 0x80070057;
+/** The last system colour index GetSysColor knows (Windows XP's menu bar). */
+const COLOR_MENUBAR = 30;
 const E_POINTER = 0x80004003;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -5212,6 +5214,65 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT OleTranslateColor(OLE_COLOR clr, HPALETTE hpal, COLORREF *pcolorref)
+         *
+         * An OLE_COLOR made the COLORREF GDI draws with, by its high byte: an
+         * RGB value as it is (palette-relative with a palette), a palette
+         * index checked against the palette given, a palette-relative RGB as
+         * it is, and 0x80 a system colour index read through GetSysColor.
+         * Anything else, or an index the palette or the system colours do
+         * not have, is E_INVALIDARG. The result pointer may be NULL.
+         */
+        OleTranslateColor: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([color, palette, out])=>{
+                const clr = color >>> 0;
+                let answer = clr;
+                switch (clr >>> 24)
+                {
+                    case 0x00:
+                        answer = (palette >>> 0) !== 0 ? (0x02000000 | clr) >>> 0 : clr;
+                        break;
+                    case 0x01: {
+                        if ((palette >>> 0) !== 0)
+                        {
+                            const entry = host.heap.allocate(4);
+                            const found = entry === 0 ? 1 : Number(host.gdi32?.('GetPaletteEntries')
+                                ?.handler([palette, clr & 0xffff, 1, entry]) ?? 1);
+                            if (entry !== 0)
+                            {
+                                host.heap.free(entry);
+                            }
+                            if (found === 0)
+                            {
+                                return E_INVALIDARG;
+                            }
+                        }
+                        break;
+                    }
+                    case 0x02:
+                        break;
+                    case 0x80:
+                        if ((clr & 0xffff) > COLOR_MENUBAR)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        answer = Number(host.user32?.('GetSysColor')?.handler([clr & 0xff]) ?? 0)
+                            >>> 0;
+                        break;
+                    default:
+                        return E_INVALIDARG;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32(out >>> 0, answer);
+                }
+                return S_OK;
+            },
+        },
+
+        /**
          * HRESULT OleCreateFontIndirect(LPFONTDESC lpFontDesc, REFIID riid,
          *   LPVOID *lplpvObj)
          *
@@ -6017,6 +6078,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     418: 'OleLoadPicture',
     419: 'OleCreatePictureIndirect',
     420: 'OleCreateFontIndirect',
+    421: 'OleTranslateColor',
     425: 'VarUI4FromI8',
     426: 'VarUI4FromUI8',
     427: 'VarI8FromUI8',

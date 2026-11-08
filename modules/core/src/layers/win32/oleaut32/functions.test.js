@@ -2266,3 +2266,29 @@ test('VarNumFromParseNum: hex digits are bits for the first type wide enough', (
     assert.equal(make([5], 0, 1 << 14), S_OK);
     assert.equal(host.u16(VARIANT_A), 14, 'a DECIMAL when that is all that is asked for');
 });
+
+test('OleTranslateColor makes an OLE_COLOR a COLORREF by its high byte', ()=>{
+    // MFC dialogs and ActiveX hosts translate their system colours through it
+    // (3DMark06 imports it by ordinal 421).
+    host = fakeHost();
+    fx = createAutomationFunctions(/** @type {any} */ ({ ...host,
+        user32: (/** @type {string} */ name)=>(name === 'GetSysColor'
+            ? { handler: ([index])=>0x00c0c0c0 + index } : undefined),
+        gdi32: (/** @type {string} */ name)=>(name === 'GetPaletteEntries'
+            ? { handler: ([, index])=>(index < 16 ? 1 : 0) } : undefined),
+    }));
+    assert.equal(OLEAUT32_ORDINALS[421], 'OleTranslateColor');
+    const translate = (/** @type {number} */ color, palette = 0)=>{
+        const answer = call('OleTranslateColor', [color, palette, SLOT]);
+        return [answer, host.u32(SLOT)];
+    };
+    assert.deepEqual(translate(0x00123456), [0, 0x00123456], 'an RGB value as it is');
+    assert.deepEqual(translate(0x00123456, 0x77), [0, 0x02123456], 'palette-relative with one');
+    assert.deepEqual(translate(0x80000005), [0, 0x00c0c0c5], 'COLOR_WINDOW through GetSysColor');
+    assert.equal(call('OleTranslateColor', [0x8000001f, 0, SLOT]), 0x80070057,
+        'past COLOR_MENUBAR');
+    assert.deepEqual(translate(0x01000003, 0x77), [0, 0x01000003], 'an index the palette has');
+    assert.equal(call('OleTranslateColor', [0x01000020, 0x77, SLOT]), 0x80070057);
+    assert.equal(call('OleTranslateColor', [0x03000000, 0, SLOT]), 0x80070057);
+    assert.equal(call('OleTranslateColor', [0x80000005, 0, 0]), 0, 'no pointer: S_OK all the same');
+});
