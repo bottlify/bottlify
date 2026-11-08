@@ -25,6 +25,11 @@ event, an error. Neither stops the program.
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
   title's code uses.
+- A .NET program runs under Mono: `mscoree.dll`'s `_CorExeMain` loads the bottle's runtime from
+  `C:\Windows\Mono` (Mono's own Windows build: `bin\libmono-2.0-x86.dll`, `lib\mono\4.5`,
+  `etc\mono`), which the bottle has to hold; without it the program does not run and the loss is
+  said. Only 32-bit console programs are tested so far; WinForms, WPF, XNA and mixed C++/CLI
+  assemblies are not.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl

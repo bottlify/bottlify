@@ -1990,3 +1990,14 @@ format that may have no codec here (BC6H, BC7, signed BC4 and BC5). Another size
 from the first level to the nearest texel and its levels are averaged, where the format has a
 codec (texels of whole bytes, unsigned BC1 to BC5), and refused with a divergence where it has
 none. *2026-11-08.*
+
+**A235. A managed program runs under the bottle's Mono at `C:\Windows\Mono`, told to check for
+null references itself.** `mscoree.dll` is ours and does not carry a CLR: `_CorExeMain` loads Mono's
+own Windows build (`bin\libmono-2.0-x86.dll`) from that directory as an ordinary library and runs
+the process's assembly through Mono's embedding API (`mono_set_dirs`, `mono_jit_init_version` with
+v4.0.30319 whatever runtime the assembly names, `mono_domain_assembly_open`, `mono_jit_exec`),
+then ends the process with what Main returned; `_CorDllMain` answers TRUE for the managed libraries
+Mono maps. Before it starts, `explicit-null-checks` is added to the process's `MONO_DEBUG`: a read
+through a null pointer finds zeros here (A79), and Mono's JIT otherwise finds a null reference only
+by the fault such a read raises on Windows. A bottle without the runtime runs no managed program,
+as a machine without .NET runs none, and the loss is said. *2026-11-08.*

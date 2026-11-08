@@ -115,6 +115,8 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createMscoreeFunctions } from './mscoree/functions.js';
+import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
 import { createUrlMonikers } from './urlmon/monikers.js';
@@ -2683,6 +2685,9 @@ export function createWin32Module(){
                         park: ()=>bridge.park(),
                         handleType: (/** @type {number} */ handle)=>
                             kernel.handles.typeOf?.(handle) ?? null,
+                        standardFile: (/** @type {number} */ handle)=>Boolean(
+                            handle === HANDLE_STDOUT ? standardFiles?.output
+                                : handle === HANDLE_STDERR ? standardFiles?.error : undefined),
                         resolveHandle: (/** @type {number} */ handle,
                             /** @type {string | undefined} */ type)=>
                             kernel.handles.resolve(handle, type),
@@ -3880,6 +3885,79 @@ export function createWin32Module(){
                     return { ...d3dxLibraries(d3dx9),
                         ...d3dx10Libraries(d3dx9, { ...d3dxHost, compiler }) };
                 })(),
+
+                // A managed executable's entry, handed to the bottle's Mono runtime.
+                'mscoree.dll': createMscoreeFunctions({
+                    loadLibrary: async path=>{
+                        const name = heap.allocate(path.length + 1);
+                        writeMemory(name, encodeAnsi(`${path}\0`));
+                        try
+                        {
+                            return (await libraries['KERNEL32.dll'].LoadLibraryA.handler([name]))
+                                >>> 0;
+                        }
+                        finally
+                        {
+                            heap.free(name);
+                        }
+                    },
+                    procAddress: async(module, routine)=>{
+                        const name = heap.allocate(routine.length + 1);
+                        writeMemory(name, encodeAnsi(`${routine}\0`));
+                        try
+                        {
+                            return (await libraries['KERNEL32.dll'].GetProcAddress.handler(
+                                [module, name])) >>> 0;
+                        }
+                        finally
+                        {
+                            heap.free(name);
+                        }
+                    },
+                    callGuest: call=>bridge.callGuest(call),
+                    currentThread: ()=>kernel.currentThread(),
+                    heap,
+                    writeMemory,
+                    imagePath: ()=>modules.imagePath(),
+                    arguments: ()=>splitCommandLine(config?.commandLine
+                        ?? `"${modules.imagePath()}"`),
+                    exists: path=>Boolean(volume.stat(path)),
+                    getEnvironment: async variable=>{
+                        const name = heap.allocate(variable.length + 1);
+                        const value = heap.allocate(4096);
+                        writeMemory(name, encodeAnsi(`${variable}\0`));
+                        try
+                        {
+                            const length = (await libraries['KERNEL32.dll']
+                                .GetEnvironmentVariableA.handler([name, value, 4096])) >>> 0;
+                            return length === 0 || length >= 4096 ? null
+                                : decodeAnsi(readMemory(value, length));
+                        }
+                        finally
+                        {
+                            heap.free(name);
+                            heap.free(value);
+                        }
+                    },
+                    setEnvironment: async(variable, text)=>{
+                        const name = heap.allocate(variable.length + 1);
+                        const value = heap.allocate(text.length + 1);
+                        writeMemory(name, encodeAnsi(`${variable}\0`));
+                        writeMemory(value, encodeAnsi(`${text}\0`));
+                        try
+                        {
+                            return await libraries['KERNEL32.dll'].SetEnvironmentVariableA
+                                .handler([name, value]);
+                        }
+                        finally
+                        {
+                            heap.free(name);
+                            heap.free(value);
+                        }
+                    },
+                    exitProcess: code=>libraries['KERNEL32.dll'].ExitProcess.handler([code]),
+                    divergence: config?.divergence,
+                }),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
                     writeMemory }),
