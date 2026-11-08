@@ -215,6 +215,23 @@ test('D3DX10CreateTextureFromMemory resizes a file to the size asked, then makes
         assert.deepEqual(calls[0].desc.slice(0, 5), [16, 16, 5, 1, 78]);
         assert.deepEqual(calls[0].data.map(([, pitch])=>pitch), [64, 32, 16, 16, 16]);
 
+        // Vantage's ground height map: R8_UNORM asked as R32_FLOAT, each byte over 255.
+        view.setUint32(0x400, 0xffffffff, true);
+        view.setUint32(0x404, 0xffffffff, true);
+        view.setUint32(0x424, 41, true);
+        const height = dds10({ width: 2, height: 2, format: 61, bytes: 4 });
+        height.set([0, 51, 102, 255], 148);
+        memory.set(height, 0x8000);
+        calls.length = 0;
+        assert.equal(await fns.D3DX10CreateTextureFromMemory.handler([device, 0x8000,
+            height.length, 0x400, 0, 0x200, 0]), 0);
+        assert.deepEqual(calls[0].desc.slice(0, 5), [2, 2, 2, 1, 41]);
+        assert.deepEqual(calls[0].data.map(([, pitch])=>pitch), [8, 4]);
+        const texels = calls[0].data[0][0];
+        assert.deepEqual([0, 4, 8, 12].map(at=>view.getFloat32(texels + at, true)),
+            [0, Math.fround(0.2), Math.fround(0.4), 1]);
+        view.setUint32(0x424, 0xffffffff, true);
+
         // A size the file holds as a level is that level: BC5 16x16 with its whole chain
         // (256, 64, 16, 16, 16 bytes) asked as 8x8 starts at its second level.
         view.setUint32(0x400, 8, true);

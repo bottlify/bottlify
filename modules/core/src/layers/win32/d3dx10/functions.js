@@ -22,6 +22,7 @@ import {
     FMT, decodeAlphaBlock, decodeTexels, encodeAlphaBlock, encodeTexels, halve, keptAsIs,
     resample,
 } from '../d3dx9/pixels.js';
+import { convertTexels, converts } from './convert.js';
 import {
     DIMENSION, averagesBytes, dxgiLayout, halveTexels, isDxgiDds, readDxgiDds, resampleTexels,
     texelBytesOf,
@@ -530,12 +531,15 @@ export function createD3dx10Functions(host, version){
         }
         const format = native ? native.dxgi : dxgiOf(sample.format);
         const asked = given(info.format, format);
-        if (asked !== format && !(asked === DXGI.R8G8B8A8_UNORM && format === DXGI.B8G8R8A8_UNORM))
+        if (asked !== format && !converts(format, asked))
         {
             host.divergence?.(api, `answered E_FAIL: format ${asked} asked of a file held as`
-                + ` ${format}; this loader converts none but BGRA to RGBA`);
+                + ` ${format}; this loader converts between texels of 8, 16 and 32 bits only`);
             return E_FAIL;
         }
+        /** A level's bytes in the format asked. @param {Uint8Array} data @param {number} texels */
+        const inAsked = (data, texels)=>(asked === format ? data
+            : convertTexels(format, asked, data, texels));
         const first = Math.min(given(info.firstMip, 0), Math.max(0, image.mipLevels - 1));
         const width = Math.max(1, image.width >> first);
         const height = Math.max(1, image.height >> first);
@@ -576,12 +580,14 @@ export function createD3dx10Functions(host, version){
                 .slice(first, first + count);
             for (const slices of levels)
             {
-                const { rowBytes, rows } = pitchOf(format, slices[0].width, slices[0].height);
-                const bytes = new Uint8Array(rowBytes * rows * slices.length);
-                slices.forEach((slice, z)=>bytes.set(slice.data.subarray(0, rowBytes * rows),
-                    z * rowBytes * rows));
+                const { width: w, height: h } = slices[0];
+                const { rowBytes, rows } = pitchOf(format, w, h);
+                const { rowBytes: pitch, rows: lines } = pitchOf(asked, w, h);
+                const bytes = new Uint8Array(pitch * lines * slices.length);
+                slices.forEach((slice, z)=>bytes.set(inAsked(slice.data.subarray(0,
+                    rowBytes * rows), w * h), z * pitch * lines));
                 subresources.push(bytes);
-                pitches.push({ pitch: rowBytes, slice: rowBytes * rows });
+                pitches.push({ pitch, slice: pitch * lines });
             }
         }
         else
@@ -590,19 +596,8 @@ export function createD3dx10Functions(host, version){
             {
                 for (const level of chain)
                 {
-                    const { rowBytes, rows } = pitchOf(format, level.width, level.height);
-                    let data = level.data;
-                    if (asked !== format)
-                    {
-                        data = data.slice();
-                        for (let i = 0; i < data.length; i += 4)
-                        {
-                            const blue = data[i];
-                            data[i] = data[i + 2];
-                            data[i + 2] = blue;
-                        }
-                    }
-                    subresources.push(data);
+                    const { rowBytes, rows } = pitchOf(asked, level.width, level.height);
+                    subresources.push(inAsked(level.data, level.width * level.height));
                     pitches.push({ pitch: rowBytes, slice: rowBytes * rows });
                 }
             }
