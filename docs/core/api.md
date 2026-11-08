@@ -122,7 +122,7 @@ what every run uses.
 | `cpu.eager` | `true` with `cpu.cores` named, else `false` | `true` opens every executor before the program starts, `false` as threads want them. |
 | `cpu.placement` | `'spread'` | `'concentrate'`: every thread takes turns on the process's own executor, as on one processor. |
 | `cpu.gcNudge` | on where JavaScriptCore runs (Safari, every browser on iOS) | The threads that hold the guest's memory, and the graphics worker, make and drop an untouched buffer every 20 ms (64 MB, or a quarter of the guest's memory past 256 MB), which JavaScriptCore counts as allocated and so collects their garbage sooner; the engine's thread makes one between the guest's slices too. `false` turns it off, `true` on in any browser, `{ everyMs, bytes }` sets it. |
-| `cork.config` | | cork's own diagnostics and paths left out ([modules/cork/SETTINGS.md](../../modules/cork/SETTINGS.md)). `sharedMemory: false` keeps guest memory the engine's alone, as `compatible` does. |
+| `cork.config` | | cork's own diagnostics and paths left out ([cork settings](../cork/settings.md)). `sharedMemory: false` keeps guest memory the engine's alone, as `compatible` does. |
 | `cork.poolPerProcess` | the host's cores less the program's and two, at least 1 | The most translation workers of the run's pool one process gets. |
 | `win32.handleWords` | `true` | `false` leaves every WaitForSingleObject, ReleaseMutex, ReleaseSemaphore, SetEvent and ResetEvent to the host, with no answers in the guest. |
 | `graphics.guestCode` | `true` | `false` traps every Direct3D 8 and 9 call to the host: a fault that goes away with it is in the guest code that keeps the program's state, its calls in order and its reference counts in guest memory. |

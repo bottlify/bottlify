@@ -1,7 +1,5 @@
 # Bottlify: run Windows games and programs in the browser
 
-[По-русски](README.ru.md)
-
 **Play old PC games and run Windows programs in a web browser**, with no Windows, no install and
 no plugin. Try it at [bottlify.app](https://bottlify.app/).
 

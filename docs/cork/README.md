@@ -1,7 +1,5 @@
 # cork
 
-[По-русски](README.ru.md)
-
 Cork is a module that runs x86 programs, mostly 32-bit, in the browser. A browser cannot run x86
 machine code, so cork translates it into WebAssembly, and the browser compiles that for its own
 processor. That is why one build of Bottlify runs on x86 and on ARM alike. Translated code runs
@@ -290,7 +288,7 @@ eax 0x00000001  ecx 0x00000000  edx 0x00000000  ebx 0x00000000  esp 0x00ffffe4  
 | `--ram MiB` | Memory for the program (default 16, more if the image needs it). The stack starts at its top. |
 | `--max n` | Stop after about `n` instructions. |
 | `--set eax=1,ecx=2` | Registers before the start. |
-| `--config '<json>'` | Settings ([`SETTINGS.md`](../../modules/cork/SETTINGS.md)). |
+| `--config '<json>'` | Settings ([settings](settings.md)). |
 | `--json` | The report as one line of JSON. |
 
 The exit status: the program's own with `--linux`, 0 after a `hlt`, 1 for any other stop, 2 for a
@@ -367,7 +365,7 @@ The machine also has `load`, `read`, `reg` and `setReg` (the eight general regis
 (the translator behind it), `diagnostics()` and `dispose()`. `regionModule({ code, at, entry })`
 does what `cork translate` does, from code.
 
-Every threshold and size cork works with can be set: the list is in [`SETTINGS.md`](../../modules/cork/SETTINGS.md).
+Every threshold and size cork works with can be set: the list is in [settings](settings.md).
 
 `@bottlify/core` ships a built copy of cork, so this package is needed directly only to use cork on
 its own, or to load another build with `createApp({ cork: { moduleUrl } })`

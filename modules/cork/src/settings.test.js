@@ -5,8 +5,8 @@
  */
 
 /**
- * The settings cork takes and the tables of SETTINGS.md and SETTINGS.ru.md are
- * the same set, both ways. A setting the code reads and no table names is one
+ * The settings cork takes and the table of docs/cork/settings.md are the same
+ * set, both ways. A setting the code reads and no table names is one
  * nobody can find; a row whose setting nothing reads silently does nothing
  * (`long` stayed a row a week after the code that read it was gone). The
  * default a table gives is the runtime's: `callWindow` and `callSitesKept`
@@ -106,7 +106,7 @@ function documentedDefaults(doc){
     return found;
 }
 
-const DOCS = ['../SETTINGS.md', '../SETTINGS.ru.md'];
+const DOCS = ['../../../docs/cork/settings.md'];
 
 /** Settings a host wires that EngineConfig does not carry: not a person's to pass. */
 const WIRING = new Set(['sharedCode']);
@@ -116,7 +116,7 @@ test('the name pattern sees a setting with digits in it', ()=>{
     assert.ok(documentedDefaults(read(DOCS[0])).has('x87Shapes'), 'and among the documented');
 });
 
-test('every setting the runtime reads is in both tables, and in EngineConfig but the wiring',
+test('every setting the runtime reads is in the table, and in EngineConfig but the wiring',
     ()=>{
         const typedef = read('../../core/src/layers/cpu/engine.js');
         const names = [...runtimeReads()];
@@ -130,7 +130,7 @@ test('every setting the runtime reads is in both tables, and in EngineConfig but
             [], 'not in EngineConfig');
     });
 
-test('every config the core\'s host or createMachine reads is in both tables', ()=>{
+test('every config the core\'s host or createMachine reads is in the table', ()=>{
     const names = [...hostReads()];
     assert.ok(names.length > 8, `${names.length} host settings found`);
     for (const doc of DOCS)
@@ -140,15 +140,14 @@ test('every config the core\'s host or createMachine reads is in both tables', (
     }
 });
 
-test('every setting a table names is one something reads, and both tables name the same', ()=>{
+test('every setting the table names is one something reads', ()=>{
     const reads = new Set([...runtimeReads(), ...hostReads()]);
-    const [english, russian] = DOCS.map(doc=>[...documentedDefaults(read(doc)).keys()]);
+    const english = [...documentedDefaults(read(DOCS[0])).keys()];
     assert.ok(english.length > 40, `${english.length} settings documented`);
     assert.deepEqual(english.filter(name=>!reads.has(name)), [], 'documented, read by nothing');
-    assert.deepEqual([...russian].sort(), [...english].sort(), 'the two tables name the same');
 });
 
-test('every default SETTINGS.md and SETTINGS.ru.md give for a runtime setting is the runtime\'s',
+test('every default docs/cork/settings.md gives for a runtime setting is the runtime\'s',
     ()=>{
         const runtime = runtimeDefaults();
         for (const doc of DOCS)

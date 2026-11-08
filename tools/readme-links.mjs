@@ -52,7 +52,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url))
     }
     for (const dir of dirs)
     {
-        for (const name of ['README.md', 'README.ru.md'])
+        for (const name of ['README.md'])
         {
             const file = join(dir, name);
             if (!existsSync(file))

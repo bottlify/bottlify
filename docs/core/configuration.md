@@ -42,7 +42,7 @@ program runs on one executor, is told of one, and the cpu layer's diagnostics sa
 (`executorsRefused`). How threads are placed: [architecture.md](../architecture.md#execution-in-bottlify).
 
 cork's own settings (`cork.config`, `EngineConfig` in `src/layers/cpu/engine.js`) are in
-[modules/cork/SETTINGS.md](../../modules/cork/SETTINGS.md). The cpu layer sets `atomic` for a
+[cork settings](../cork/settings.md). The cpu layer sets `atomic` for a
 process whose threads run on more than one executor.
 
 ## Memory zones

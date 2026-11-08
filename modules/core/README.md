@@ -1,7 +1,5 @@
 # `@bottlify/core`
 
-[По-русски](README.ru.md)
-
 Runs an unchanged 32-bit Windows program in a browser tab. This package is the Windows the program
 sees: the system libraries, DirectX, OpenGL, sound, input and files, written from scratch on
 WebGPU, Web Audio and OPFS. Part of [Bottlify](https://github.com/bottlify/bottlify).

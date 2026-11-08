@@ -29,7 +29,7 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
 ## Where things are
 
-- `docs/architecture.md` (`.ru.md`) — how the whole thing works: threads, startup, cork, Win32,
+- `docs/architecture.md` — how the whole thing works: threads, startup, cork, Win32,
   graphics, sound, networking, storage.
 - `docs/core/` — `@bottlify/core`'s public contract: API, configuration, current limits. Kept
   current as work lands; written for someone outside the project.

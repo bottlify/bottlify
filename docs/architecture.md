@@ -1,7 +1,5 @@
 # Inside Bottlify
 
-Русская версия: [architecture.ru.md](architecture.ru.md).
-
 Paths without a prefix are relative to [`modules/`](../modules/) in bottlify; paths starting with `ui/` are
 relative to the root of bottlify-ui. Where a diagram and the code disagree, the code is right.
 
