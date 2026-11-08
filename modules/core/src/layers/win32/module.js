@@ -163,7 +163,8 @@ import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createClassTable } from './ole32/remote.js';
-import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
+import { createAutomationFunctions, OLEAUT32_ORDINALS, OLEPRO32_ORDINALS }
+    from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
@@ -4763,6 +4764,12 @@ export function createWin32Module(){
                 TransparentBlt: libraries['GDI32.dll'].GdiTransparentBlt,
             };
 
+            // olepro32.dll is oleaut32's pictures, fonts, colours and property
+            // frames under another name, every export forwarded there: an MFC
+            // application imports them from it by number.
+            libraries['OLEPRO32.dll'] = Object.fromEntries(Object.values(OLEPRO32_ORDINALS)
+                .map(name=>[name, libraries['OLEAUT32.dll'][name]]));
+
             // timeGetTime answers the milliseconds GetTickCount answers, off the
             // same clock and with the same wrap -- timeBeginPeriod changes nothing
             // here -- so where GetTickCount is the guest's own read of the clock
@@ -5089,6 +5096,7 @@ export function createWin32Module(){
                     // Automation is imported this way and no other: a program links
                     // it through numbers, with no name in the import table at all.
                     'OLEAUT32.dll': OLEAUT32_ORDINALS,
+                    'OLEPRO32.dll': OLEPRO32_ORDINALS,
                     // The one common-controls entry point the header exports by
                     // number: a framework's start-up calls it and nothing else.
                     'COMCTL32.dll': COMCTL32_ORDINALS,

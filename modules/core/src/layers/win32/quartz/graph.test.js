@@ -9,8 +9,8 @@ import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { registerQuartzClasses } from './graph.js';
 import {
-    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER2,
-    IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH, IID_IFILTER_MAPPER2,
+    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER, CLSID_FILTER_MAPPER2,
+    IID_IFILTER_MAPPER, IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH, IID_IFILTER_MAPPER2,
     IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT, IID_IMEDIA_EVENT_EX,
     IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING, IID_IVIDEO_WINDOW,
 } from './interfaces.js';
@@ -188,7 +188,8 @@ function call(object, iid, name, args = []){
 test('CoCreateInstance finds the filter graph under both of its class ids', ()=>{
     const registry = createComRegistry();
     registerQuartzClasses(registry, createHost());
-    for (const clsid of [CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER2])
+    for (const clsid of [CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER,
+        CLSID_FILTER_MAPPER2])
     {
         assert.equal(registry.isRegistered(clsid), true, clsid);
         assert.ok(registry.create(clsid), clsid);
@@ -859,3 +860,29 @@ test('a graph released after the film has finished closes the clip too', ()=>{
     object.release();
     assert.equal(clip.closed, true);
 });
+
+test('IFilterMapper takes a filter DLL\'s registration, and an instance gets a GUID of its own',
+    ()=>{
+        const { object, host } = createObject(CLSID_FILTER_MAPPER);
+        const methods = methodsOf(object, IID_IFILTER_MAPPER).slice(3);
+        assert.deepEqual(methods.map(entry=>entry.name), ['RegisterFilter',
+            'RegisterFilterInstance', 'RegisterPin', 'RegisterPinType', 'UnregisterFilter',
+            'UnregisterFilterInstance', 'UnregisterPin', 'EnumMatchingFilters']);
+        // A CLSID by value is four dwords: the name and the merit come after it.
+        assert.deepEqual(methods.map(entry=>entry.argBytes), [28, 28, 60, 56, 20, 20, 24, 88]);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilter',
+            [1, 2, 3, 4, 0x2000, 0x600000]), S_OK);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterPin',
+            [1, 2, 3, 4, 0x2000, 0, 1, 0, 0, 0, 0, 0, 0, 0x2010]), S_OK);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilterInstance',
+            [1, 2, 3, 4, 0x2000, OUT]), S_OK);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilterInstance',
+            [1, 2, 3, 4, 0x2000, OUT + 16]), S_OK);
+        const first = [0, 4, 8, 12].map(at=>host.i32(OUT + at));
+        const second = [0, 4, 8, 12].map(at=>host.i32(OUT + 16 + at));
+        assert.notDeepEqual(first, second, 'each instance its own id');
+        assert.equal((host.i32(OUT + 4) >>> 28) & 0xf, 4, 'a version 4 GUID');
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilterInstance',
+            [1, 2, 3, 4, 0x2000, 0]), E_POINTER);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'UnregisterFilter', [1, 2, 3, 4]), S_OK);
+    });

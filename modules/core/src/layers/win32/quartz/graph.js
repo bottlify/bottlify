@@ -37,7 +37,8 @@
  */
 
 import {
-    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER2,
+    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER, CLSID_FILTER_MAPPER2,
+    IFILTER_MAPPER_SLOTS, IID_IFILTER_MAPPER,
     IBASIC_AUDIO_SLOTS, IBASIC_VIDEO_SLOTS, IFILTER_GRAPH_SLOTS, IFILTER_MAPPER2_SLOTS,
     IGRAPH_BUILDER_SLOTS, IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH,
     IID_IFILTER_MAPPER2, IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT,
@@ -1511,6 +1512,44 @@ export function createQuartz(host){
     });
 
     /**
+     * IFilterMapper, the first one: what a filter DLL built on the SDK's base
+     * classes registers through when IFilterMapper2 is not there. As the
+     * second, a registration is accepted and forgotten; an instance asked for
+     * is given an id of its own, a new GUID, as quartz makes one.
+     *
+     * @type {Record<string, (state: null, args: number[]) => number>}
+     */
+    const firstMapper = {
+        RegisterFilter: ()=>S_OK,
+        /** HRESULT RegisterFilterInstance(CLSID clsid, LPCWSTR Name, CLSID *MRId) */
+        RegisterFilterInstance: (state, args)=>{
+            const out = args[5] >>> 0;
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            const id = globalThis.crypto.getRandomValues(new Uint8Array(16));
+            // Version 4 in Data3's high nibble (its second byte, little-endian),
+            // the RFC 4122 variant in Data4's first.
+            id[7] = (id[7] & 0x0f) | 0x40;
+            id[8] = (id[8] & 0x3f) | 0x80;
+            host.writeMemory(out, id);
+            return S_OK;
+        },
+        RegisterPin: ()=>S_OK,
+        RegisterPinType: ()=>S_OK,
+        UnregisterFilter: ()=>S_OK,
+        UnregisterFilterInstance: ()=>S_OK,
+        UnregisterPin: ()=>S_OK,
+    };
+
+    /** @returns {import('../ole32/objects.js').ComClassDefinition} */
+    const filterMapper1 = ()=>({
+        state: null,
+        interfaces: [describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper)],
+    });
+
+    /**
      * A film without COM (`Film`), or null in a build with no decoder, where
      * a device that plays one has nothing to play it with.
      *
@@ -1593,7 +1632,7 @@ export function createQuartz(host){
         };
     };
 
-    return { filterGraph, filterMapper2, tick, film };
+    return { filterGraph, filterMapper1, filterMapper2, tick, film };
 }
 
 /**
@@ -1620,5 +1659,6 @@ export function registerQuartzClasses(registry, host){
     registry.registerClass(CLSID_FILTER_GRAPH, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_GRAPH_NO_THREAD, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_MAPPER2, quartz.filterMapper2);
+    registry.registerClass(CLSID_FILTER_MAPPER, quartz.filterMapper1);
     return { tick: quartz.tick, film: quartz.film };
 }
