@@ -334,3 +334,16 @@ test('the processor\'s clock speed is the rate its time-stamp counter runs at', 
         .win32_processor;
     assert.deepEqual([processor.maxclockspeed[1], processor.currentclockspeed[1]], [3000, 3000]);
 });
+
+test('Win32_ComputerSystem is this machine: its name, its memory, its processors', ()=>{
+    // A system scanner reads the machine's model and memory here; with no
+    // instance it took the machine for one it could not describe.
+    const [system] = machineClasses({ physicalMemory: 512 << 20, processors: 4,
+        windows: WINDOWS_VERSIONS.winxp }).win32_computersystem;
+    assert.equal(system.name[1], 'BOTTLIFY');
+    assert.deepEqual(system.totalphysicalmemory, [21, String(512 << 20)], 'CIM_UINT64, a string');
+    assert.deepEqual([system.numberofprocessors[1], system.numberoflogicalprocessors[1]], [1, 4],
+        'one package, as Win32_Processor describes it');
+    assert.equal(system.systemtype[1], 'X86-based PC');
+    assert.equal(system.partofdomain[1], false);
+});

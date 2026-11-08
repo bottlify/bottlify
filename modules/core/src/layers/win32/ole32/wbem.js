@@ -8,9 +8,10 @@
  * WMI, as far as a program asking about its machine goes: CLSID_WbemLocator,
  * the namespace it connects to, and the instances of the classes programs read
  * to size themselves or to describe the machine in a report --
- * Win32_VideoController, Win32_SoundDevice, Win32_Processor, Win32_BIOS,
- * Win32_BaseBoard, the physical memory and its array, a slot and a disk. Every figure is the one
- * the machine gives the same program another way: the processor's CPUID and
+ * Win32_ComputerSystem, Win32_VideoController, Win32_SoundDevice,
+ * Win32_Processor, Win32_BIOS, Win32_BaseBoard, the physical memory and its
+ * array, a slot and a disk. Every figure is the one the machine gives the
+ * same program another way: the processor's CPUID and
  * speed, the physical memory GlobalMemoryStatus reports, the video memory
  * Direct3D's GetAvailableTextureMem reports, the computer's name.
  *
@@ -23,6 +24,7 @@
 import { createComObject } from './objects.js';
 import { DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE } from '../oleaut32/vartypes.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { USER_NAME } from '../advapi32/tokens.js';
 import { CPUID, PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
 import { SOUND_ADAPTER_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 
@@ -111,6 +113,20 @@ export const WBEM_SCHEMAS = Object.fromEntries(Object.entries({
         'ServicePackMajorVersion', 'ServicePackMinorVersion', 'SizeStoredInPagingFiles',
         'SuiteMask', 'SystemDevice', 'SystemDirectory', 'SystemDrive', 'TotalSwapSpaceSize',
         'TotalVirtualMemorySize', 'TotalVisibleMemorySize', 'Version', 'WindowsDirectory'],
+    // NumberOfLogicalProcessors came with XP's third service pack.
+    Win32_ComputerSystem: [...ELEMENT, 'AdminPasswordStatus', 'AutomaticResetBootOption',
+        'AutomaticResetCapability', 'BootOptionOnLimit', 'BootOptionOnWatchDog',
+        'BootROMSupported', 'BootupState', 'ChassisBootupState', 'CreationClassName',
+        'CurrentTimeZone', 'DaylightInEffect', 'DNSHostName', 'Domain', 'DomainRole',
+        'EnableDaylightSavingsTime', 'FrontPanelResetStatus', 'InfraredSupported',
+        'InitialLoadInfo', 'KeyboardPasswordStatus', 'LastLoadInfo', 'Manufacturer', 'Model',
+        'NameFormat', 'NetworkServerModeEnabled', 'NumberOfLogicalProcessors',
+        'NumberOfProcessors', 'OEMLogoBitmap', 'OEMStringArray', 'PartOfDomain', 'PauseAfterReset',
+        'PowerManagementCapabilities', 'PowerManagementSupported', 'PowerOnPasswordStatus',
+        'PowerState', 'PowerSupplyState', 'PrimaryOwnerContact', 'PrimaryOwnerName',
+        'ResetCapability', 'ResetCount', 'ResetLimit', 'Roles', 'SupportContactDescription',
+        'SystemStartupDelay', 'SystemStartupOptions', 'SystemStartupSetting', 'SystemType',
+        'ThermalState', 'TotalPhysicalMemory', 'UserName', 'WakeUpType', 'Workgroup'],
     Win32_VideoController: [...DEVICE, 'AcceleratorCapabilities', 'AdapterCompatibility',
         'AdapterDACType', 'AdapterRAM', 'CapabilityDescriptions', 'ColorTableEntries',
         'CurrentBitsPerPixel', 'CurrentHorizontalResolution', 'CurrentNumberOfColors',
@@ -216,6 +232,34 @@ export function machineClasses(
     } : {};
     return {
         ...system,
+        // The machine itself, as the computer's name, the memory and the
+        // processors are given elsewhere: one package Win32_Processor
+        // describes, a workgroup's workstation, the one user signed in.
+        win32_computersystem: [{
+            name: [CIM_STRING, COMPUTER_NAME],
+            caption: [CIM_STRING, COMPUTER_NAME],
+            description: [CIM_STRING, 'AT/AT COMPATIBLE'],
+            dnshostname: [CIM_STRING, COMPUTER_NAME],
+            creationclassname: [CIM_STRING, 'Win32_ComputerSystem'],
+            manufacturer: [CIM_STRING, 'Bottlify'],
+            model: [CIM_STRING, 'Bottlify Virtual Machine'],
+            systemtype: [CIM_STRING, 'X86-based PC'],
+            numberofprocessors: [CIM_UINT32, 1],
+            numberoflogicalprocessors: [CIM_UINT32, processors],
+            totalphysicalmemory: [CIM_UINT64, String(memory)],
+            domain: [CIM_STRING, 'WORKGROUP'],
+            workgroup: [CIM_STRING, 'WORKGROUP'],
+            partofdomain: [CIM_BOOLEAN, false],
+            domainrole: [CIM_UINT16, 0], // a standalone workstation
+            username: [CIM_STRING, `${COMPUTER_NAME}\\${USER_NAME}`],
+            primaryownername: [CIM_STRING, USER_NAME],
+            bootupstate: [CIM_STRING, 'Normal boot'],
+            powerstate: [CIM_UINT16, 0], // unknown
+            thermalstate: [CIM_UINT16, 3], // safe
+            powersupplystate: [CIM_UINT16, 3], // safe
+            wakeuptype: [CIM_UINT16, 6], // power switch
+            status: [CIM_STRING, 'OK'],
+        }],
         win32_videocontroller: [{
             adapterram: [CIM_UINT32, ADAPTER_RAM],
             name: [CIM_STRING, ADAPTER_NAME],
