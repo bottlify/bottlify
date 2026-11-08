@@ -77,7 +77,11 @@ function machine({ registers = {}, setRegisters, divergence } = {}){
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
     const { view, call } = machine({ registers: { esp: 0x8f00, ebp: 0x8f40 } });
     view.setUint32(0x8f00, 0x401234, true);
+    new Uint8Array(view.buffer).fill(0xee, 0x2000, 0x2000 + 0x2cc);
     assert.equal(call('RtlCaptureContext', 0x2000), 0);
+    assert.deepEqual([view.getUint32(0x2004, true), view.getUint32(0x2088, true),
+        view.getUint32(0x2000 + 0xcc, true)], [0xeeeeeeee, 0xeeeeeeee, 0xeeeeeeee],
+    'the debug and floating-point groups and the extended registers are not written');
     assert.equal(view.getUint32(0x2000, true), 0x10007, 'control, integer and segments');
     assert.equal(view.getUint32(0x2000 + 0xb8, true), 0x401234, 'EIP is the return address');
     assert.equal(view.getUint32(0x2000 + 0xc4, true), 0x8f08, 'ESP past it and the argument');

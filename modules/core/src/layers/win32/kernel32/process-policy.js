@@ -33,7 +33,9 @@ const CURRENT_PROCESS = 0xffffffff;
 
 /** CONTEXT_i386 with its control, integer and segment groups: RtlCaptureContext's set. */
 const CONTEXT_FULL_SEGMENTS = 0x00010007;
-const CONTEXT_BYTES = 0x2cc;
+/** The segment, integer and control fields: SegGs up to SegSs. */
+const CONTEXT_CAPTURED_FROM = 0x8c;
+const CONTEXT_CAPTURED_END = 0xcc;
 /** CONTEXT_i386's groups, each a bit beside the i386 one. */
 const CONTEXT_CONTROL = 0x1;
 const CONTEXT_INTEGER = 0x2;
@@ -197,12 +199,17 @@ export function createProcessPolicyFunctions(host){
      * it: EIP is the return address, ESP is past it and past the argument
      * the call pops. At a trap ESP points at the return address.
      *
+     * Only the flags and the groups they name are written, as Windows writes
+     * them: a caller may hold the context in less than its whole size (Mono
+     * keeps one in 0xcc bytes of its frame, up to the extended registers),
+     * and the bytes past those groups are its own.
+     *
      * @param {number} out
      */
     const captureContext = out=>{
         const registers = host.registers?.() ?? {};
         const esp = (registers.esp ?? 0) >>> 0;
-        const bytes = new Uint8Array(CONTEXT_BYTES);
+        const bytes = new Uint8Array(CONTEXT_CAPTURED_END);
         const view = new DataView(bytes.buffer);
         /** @param {number} offset @param {number | undefined} value */
         const put = (offset, value)=>view.setUint32(offset, (value ?? 0) >>> 0, true);
@@ -223,7 +230,9 @@ export function createProcessPolicyFunctions(host){
         put(0xc0, registers.eflags ?? 0x202);
         put(0xc4, esp + 8);
         put(0xc8, SELECTORS.DATA);
-        host.writeMemory(out, bytes);
+        host.writeMemory(out, bytes.subarray(0, 4));
+        host.writeMemory(out + CONTEXT_CAPTURED_FROM,
+            bytes.subarray(CONTEXT_CAPTURED_FROM, CONTEXT_CAPTURED_END));
     };
 
     /**
