@@ -173,6 +173,10 @@ import { createNtdllFunctions } from './ntdll/functions.js';
 import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
+import { createMfplatFunctions } from './mfplat/functions.js';
+import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
+    from './mfreadwrite/functions.js';
+import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 
 /**
@@ -1992,6 +1996,49 @@ export function createWin32Module(){
                 callerThread: ()=>bridge.callerThread(),
             };
             registerDplayClasses(com, dplayHost);
+
+            /** @param {string} text  NUL-ended UTF-16LE */
+            const wideText = text=>{
+                const bytes = new Uint8Array((text.length + 1) * 2);
+                for (let i = 0; i < text.length; i++)
+                {
+                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
+                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
+                }
+                return bytes;
+            };
+            // Media Foundation: its objects, and its reader's class factory,
+            // which a program reaches through COM as well as through exports.
+            const mediaFoundation = createMfplatFunctions({
+                readMemory, writeMemory, heap, vtables: comVtables,
+                objectAt: pointer=>bridge.interfaceObject(pointer),
+                callGuest: call=>bridge.callGuest(call),
+                callerThread: ()=>bridge.callerThread(),
+                divergence: config?.divergence,
+                // An event's value is any PROPVARIANT: ole32's to copy and clear.
+                propVariant: {
+                    copy: (dest, src)=>libraries['ole32.dll'].PropVariantCopy.handler([dest, src]),
+                    clear: at=>libraries['ole32.dll'].PropVariantClear.handler([at]),
+                },
+            });
+            const mfReadWrite = createMfReadWriteFunctions({
+                readMemory, writeMemory, divergence: config?.divergence,
+                // By the program's own rules for a path: its directory, its drive.
+                exists: async path=>{
+                    const name = heap.allocate((path.length + 1) * 2);
+                    writeMemory(name, wideText(path));
+                    try
+                    {
+                        return (await libraries['KERNEL32.dll'].GetFileAttributesW.handler([name])
+                            >>> 0) !== 0xffffffff;
+                    }
+                    finally
+                    {
+                        heap.free(name);
+                    }
+                },
+            });
+            com.registerClass(CLSID_MF_READ_WRITE_CLASS_FACTORY, mfReadWrite.factory);
 
             // JScript and VBScript, the Active Scripting engines a host -- an
             // installer's script, a page, a configuration tool -- asks COM for,
@@ -3957,6 +4004,57 @@ export function createWin32Module(){
                             `d3dx11_${version}.dll`,
                             createD3dx11Functions({ ...d3dxHost, compiler }, version)])) };
                 })(),
+
+                // Media Foundation's objects, its source reader refused, and the
+                // property system's PROPVARIANT helpers: what wine-mono's FAudio
+                // and FNA link.
+                'mfplat.dll': mediaFoundation.table,
+                'mfreadwrite.dll': mfReadWrite.table,
+                'propsys.dll': createPropsysFunctions({
+                    readMemory, writeMemory, heap,
+                    bstr: text=>{
+                        const at = heap.allocate((text.length + 1) * 2);
+                        writeMemory(at, wideText(text));
+                        try
+                        {
+                            return libraries['OLEAUT32.dll'].SysAllocString.handler([at]);
+                        }
+                        finally
+                        {
+                            heap.free(at);
+                        }
+                    },
+                    byteArray: bytes=>{
+                        const array = libraries['OLEAUT32.dll'].SafeArrayCreateVector.handler(
+                            [17, 0, bytes.length]) >>> 0;
+                        if (array !== 0 && bytes.length > 0)
+                        {
+                            // SAFEARRAY's pvData, twelve bytes in.
+                            writeMemory(memory.readU32(array + 12), bytes);
+                        }
+                        return array;
+                    },
+                    fileTimeToDate: async fileTime=>{
+                        const scratch = heap.allocate(16 + 8);
+                        try
+                        {
+                            const made = await libraries['KERNEL32.dll'].FileTimeToSystemTime
+                                .handler([fileTime, scratch]);
+                            if (made === 0 || await libraries['OLEAUT32.dll']
+                                .SystemTimeToVariantTime.handler([scratch, scratch + 16]) === 0)
+                            {
+                                return null;
+                            }
+                            const bytes = readMemory(scratch + 16, 8);
+                            return new DataView(bytes.buffer, bytes.byteOffset, 8)
+                                .getFloat64(0, true);
+                        }
+                        finally
+                        {
+                            heap.free(scratch);
+                        }
+                    },
+                }),
 
                 // A managed executable's entry, handed to the bottle's Mono runtime.
                 'mscoree.dll': createMscoreeFunctions({

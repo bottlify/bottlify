@@ -63,6 +63,12 @@ event, an error. Neither stops the program.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.
 - No capture: recording answers `DSERR_NODRIVER`.
+- Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
+  attributes, media types, memory buffers, samples and events are there, and `propsys`'s
+  PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader
+  (`MFCreateSourceReaderFromURL`, `MFCreateSourceReaderFromByteStream`) is refused and the loss
+  is said with the file's name: XNA's songs and videos through FNA (WMA, WMV) and FAudio's xWMA do
+  not play. Registering a transform is refused with `E_ACCESSDENIED`.
 
 ## Input
 
