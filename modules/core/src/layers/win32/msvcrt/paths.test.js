@@ -631,6 +631,20 @@ test('_findfirst lists "." and ".." first in a folder, as the FindFirstFile it w
     assert.notEqual(found().name, '..', 'then what the folder holds');
 });
 
+test('_wmktemp makes a wide template\'s name as _mktemp makes a narrow one', ()=>{
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: ()=>({ exists: false }), currentDirectory: ()=>'C:\\here' },
+    }));
+    const at = memory.putWide('tmpXXXXXX');
+    assert.equal(table._wmktemp.handler([at]), at);
+    assert.match(memory.wide(at), /^tmpa\d{5}$/);
+    const short = memory.putWide('tmpXX');
+    assert.equal(table._wmktemp.handler([short]), 0);
+    assert.equal(memory.wide(short), 'tmpXX');
+});
+
 test('_mktemp fills six closing X\'s with a free letter and digits, or answers null', ()=>{
     // Wine's msvcrt test_mktemp: five X's, a letter after them, no X's at all fail.
     const memory = fakeMemory();

@@ -972,6 +972,27 @@ export function createPathFunctions(host){
             },
         },
 
+        /** wchar_t *_wmktemp(wchar_t *template): `_mktemp` over a wide template. */
+        _wmktemp: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([template])=>{
+                if ((template >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return 0;
+                }
+                const name = uniqueName(readWide(template));
+                if (name === null)
+                {
+                    return 0;
+                }
+                writeWide(template, name);
+                return template;
+            },
+        },
+
         /**
          * char *tmpnam(char *str)
          *

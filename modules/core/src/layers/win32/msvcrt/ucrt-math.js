@@ -181,6 +181,26 @@ export function createUcrtMathFunctions(host){
         return Number.isNaN(x) ? x : Number.isFinite(x) ? x - whole : copySign(0, x);
     }, ONE_FLOAT);
 
+    /**
+     * long lround(double x), long lroundf(float x): rounded half away from
+     * zero into a long; a NaN or a value no long holds answers 0 with EDOM.
+     *
+     * @param {number} x
+     */
+    const roundToLong = x=>{
+        const rounded = roundAway(x);
+        if (!(rounded >= -2147483648 && rounded <= 2147483647))
+        {
+            host.errno(EDOM);
+            return 0;
+        }
+        return rounded | 0;
+    };
+    table.lround = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
+        handler: (/** @type {number[]} */ args)=>roundToLong(readDouble(args, 0)) };
+    table.lroundf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
+        handler: (/** @type {number[]} */ args)=>roundToLong(readSingle(args, 0)) };
+
     /** short _dclass(double x), short _fdclass(float x) */
     table._dclass = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
         handler: (/** @type {number[]} */ args)=>short(classOf(readDouble(args, 0))) };

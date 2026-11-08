@@ -236,3 +236,25 @@ test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
     assert.equal(ucrt.wcstoull, wideUnsigned);
     assert.equal(ucrt.strtoll, narrow);
 });
+
+test('lround and lroundf round half away from zero; a value no long holds is 0 and EDOM', ()=>{
+    /** @type {number[]} */
+    const errnos = [];
+    const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
+    const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
+        writeMemory: (/** @type {number} */ _at, /** @type {Uint8Array} */ bytes)=>
+            errnos.push(new DataView(bytes.buffer).getInt32(0, true)) })));
+    const words = (/** @type {number} */ x)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setFloat64(0, x, true);
+        return [view.getUint32(0, true), view.getUint32(4, true)];
+    };
+    assert.equal(ucrt.lround.handler(words(2.5)), 3);
+    assert.equal(ucrt.lround.handler(words(-2.5)), -3);
+    assert.equal(ucrt.lround.handler(words(1e12)), 0);
+    assert.deepEqual(errnos, [33], 'EDOM');
+    const single = new DataView(new ArrayBuffer(4));
+    single.setFloat32(0, -0.5, true);
+    assert.equal(ucrt.lroundf.handler([single.getUint32(0, true)]), -1);
+});
