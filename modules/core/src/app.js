@@ -406,6 +406,11 @@ const hashText = (hash, text)=>{
  *           registry laid over its own, as a reinstall would.
  * @property {string} [bundle.prefix]  Where in the volume the bundle appears.
  *           Defaults to the directory a game is installed into.
+ * @property {boolean} [bundle.evictOthers]  Whether, when the origin runs out of
+ *           room, other bottles' fetched blocks may be let go, the oldest first:
+ *           before the run (the origin kept under its budget) and once this
+ *           bottle has no blocks of its own older than two hours. On by default;
+ *           off, a full store says `storage-full` instead.
  * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
  *           when nothing is being read. On by default, and inert when there is
  *           nowhere durable to keep the blocks.
@@ -3064,7 +3069,8 @@ async function mountBundle({ options, events, translationStore }){
         { verifyIndex: expectIndex(options.bundle.indexSha256) });
 
     const blockStore = options.bundle.store === undefined ? 'local' : options.bundle.store;
-    if (blockStore === 'local')
+    const evictOthers = options.bundle.evictOthers !== false;
+    if (blockStore === 'local' && evictOthers)
     {
         // The origin's caches kept under its budget, the oldest let go: in the
         // background, as nothing of this run's own is touched.
@@ -3085,6 +3091,11 @@ async function mountBundle({ options, events, translationStore }){
         // Where the blocks have no store but the heap, the heaps' pool for them:
         // a read in flight keeps its blocks past it, and nothing else does.
         maxHeapBytes: HEAP_POOLS.blockCache,
+        evictOthers,
+        // Nothing left to let go: the run goes on with what it fetches in the
+        // heap, and the person is told there is no room, once.
+        onFull: reason=>events.emit('storage-full', {
+            bundle: options.bundle.id ?? options.id ?? 'bundle', reason }),
     });
 
     const source = createBundleSource({
@@ -3930,6 +3941,7 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
     'bundle-retry': 'warn',
     'bundle-prefetch-failed': 'warn',
     'bundle-unbacked': 'warn',
+    'storage-full': 'warn',
 });
 
 /**

@@ -17,10 +17,10 @@ const SEGMENT_BLOCKS = 1024;
  * the OPFS store it stands in for, and it keeps its files between cache
  * instances so a second session can be tested against a first.
  */
-function fakeStore(){
+function fakeStore({ now = /** @type {(() => number) | null} */ (null) } = {}){
     /** @type {Map<string, Uint8Array>} */
     const files = new Map();
-    /** When each file was last written, in writes: the OPFS store's `modified`. */
+    /** When each file was last written, by `now` or in writes: the OPFS store's `modified`. */
     /** @type {Map<string, number>} */
     const modified = new Map();
     let clock = 0;
@@ -30,7 +30,7 @@ function fakeStore(){
 
     /** @param {string} path @param {number} size */
     const grow = (path, size)=>{
-        modified.set(path, ++clock);
+        modified.set(path, now ? now() : ++clock);
         const held = files.get(path) ?? new Uint8Array(0);
         if (held.length >= size)
         {
@@ -70,7 +70,7 @@ function fakeStore(){
         },
         /** @param {string} path @param {number} size */
         truncate(path, size){
-            modified.set(path, ++clock);
+            modified.set(path, now ? now() : ++clock);
             files.set(path, new Uint8Array(size));
         },
         /** @param {string} path */
@@ -607,3 +607,65 @@ test('a refusal that is not for room lets nothing go', async()=>{
     assert.equal(store.files.has('old.pack.0'), true);
     assert.deepEqual(war.read(1, 16), new Uint8Array(16).fill(1), 'held in the heap');
 });
+
+test('a bottle\'s own blocks of the last two hours stay, and a full store says so once',
+    async()=>{
+        const store = fakeStore({ now: ()=>Date.now() });
+        /** @type {string[]} */
+        const told = [];
+        const cache = await createBlockCache({
+            store: roomFor(store, OPTIONS.blockCount * 8 + 2 * SPAN), ...OPTIONS,
+            segmentBytes: SPAN, onFull: reason=>told.push(reason) });
+        for (let index = 0; index < 9; index++)
+        {
+            await cache.put(index, new Uint8Array(16).fill(index));
+        }
+        assert.equal(store.files.has('war.pack.0'), true, 'its first segment is two hours young');
+        assert.deepEqual(told, ['quota'], 'no room, said once');
+        assert.deepEqual(cache.read(0, 16), new Uint8Array(16).fill(0));
+        assert.deepEqual(cache.read(8, 16), new Uint8Array(16).fill(8), 'the rest in the heap');
+        assert.deepEqual(cache.diagnostics().letGo, { segments: 0, bytes: 0 });
+    });
+
+test('a bottle lets its own old blocks go before another bottle\'s older ones', async()=>{
+    let time = 1000;
+    const store = fakeStore({ now: ()=>time });
+    const old = await createBlockCache({ store, ...OPTIONS, name: 'old', segmentBytes: SPAN });
+    for (let index = 0; index < 3; index++)
+    {
+        await old.put(index, new Uint8Array(16));
+    }
+    time = 2000;
+    const limit = 2 * OPTIONS.blockCount * 8 + 3 * SPAN;
+    const war = await createBlockCache({ store: roomFor(store, limit), ...OPTIONS,
+        segmentBytes: SPAN });
+    for (let index = 0; index < 7; index++)
+    {
+        await war.put(index, new Uint8Array(16).fill(index));
+    }
+    assert.equal(store.files.has('old.pack.0'), true, 'the other bottle\'s is older, and stays');
+    assert.equal(store.files.has('war.pack.0'), false, 'its own old segment went');
+    assert.deepEqual(war.read(6, 16), new Uint8Array(16).fill(6));
+});
+
+test('other bottles\' blocks stay when the person said so, and the store says it is full',
+    async()=>{
+        const store = fakeStore();
+        const old = await createBlockCache({ store, ...OPTIONS, name: 'old', segmentBytes: SPAN });
+        for (let index = 0; index < 3; index++)
+        {
+            await old.put(index, new Uint8Array(16));
+        }
+        /** @type {string[]} */
+        const told = [];
+        const war = await createBlockCache({ store: roomFor(store, 2 * OPTIONS.blockCount * 8
+            + 2 * SPAN), ...OPTIONS, segmentBytes: SPAN, evictOthers: false,
+        onFull: reason=>told.push(reason) });
+        for (let index = 0; index < 4; index++)
+        {
+            await war.put(index, new Uint8Array(16).fill(index));
+        }
+        assert.equal(store.files.has('old.pack.0'), true);
+        assert.deepEqual(told, ['quota']);
+        assert.deepEqual(war.read(3, 16), new Uint8Array(16).fill(3), 'held in the heap');
+    });
