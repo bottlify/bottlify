@@ -59,7 +59,7 @@ export function createRuntimeHosts(host){
     const writeU32 = (at, value)=>host.writeMemory(at >>> 0,
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     /** @param {number} at */
-    const wideAt = at=>((at >>> 0) === 0 ? null : host.readWideString(at >>> 0, 1024));
+    const wideAt = at=>((at >>> 0) === 0 ? null : host.readWideString(at >>> 0, 1024 * 2));
     /** @type {Set<string>} */
     const refused = new Set();
 

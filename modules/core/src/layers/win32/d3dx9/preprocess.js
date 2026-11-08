@@ -27,9 +27,12 @@
 /**
  * @typedef {Object} PreprocessOptions
  * @property {[string, string][]} [defines]  D3DXMACRO's names and definitions.
- * @property {(name: string, system: boolean, parent: string) =>
- *     Promise<string | null> | string | null} [include]
- *           A file's text, or null when it cannot be had.
+ * @property {((name: string, system: boolean, parent: string) =>
+ *     Promise<string | null> | string | null) & { close?: (name: string) => unknown }} [include]
+ *           A file's text, or null when it cannot be had; `close`, when it has
+ *           one, is told once the file and everything it included is read, as
+ *           ID3DInclude::Close is told -- the file's data stays the parent's
+ *           while its own includes are opened.
  */
 
 const IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/y;
@@ -424,6 +427,7 @@ export async function preprocessTracked(source, options = {}){
                 out.pop();
                 origins.pop();
                 const failed = await run(included, target[1] ?? target[2], depth + 1);
+                await options.include?.close?.(target[1] ?? target[2]);
                 if (failed)
                 {
                     return failed;

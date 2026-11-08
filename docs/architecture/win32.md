@@ -151,7 +151,9 @@ flowchart TD
 - **DirectX's redistributables** (`d3dx9_*` and the rest) are not part of the engine: a game brings
   them, through its installer's DirectX setup, which puts them in `C:\WINDOWS\system32\`, or as DLLs
   beside its `.exe`. A copy beside the `.exe` is loaded as the real DLL; for every other the
-  engine's table answers `d3dx9_*`, the copy in `system32` included.
+  engine's table answers `d3dx9_*`, `d3dx10_*` and `d3dx11_42`/`_43`, the copy in `system32`
+  included. D3DX 10 and 11 are one library over two devices: the image loaders make their
+  textures through the device's own creates, the compiles go to `D3DCompile`.
 
 Where to look in the code: [`core/src/layers/loader/internal/synth.js`](../../modules/core/src/layers/loader/internal/synth.js) (the image),
 [`core/src/layers/cpu/internal/thunks.js`](../../modules/core/src/layers/cpu/internal/thunks.js) (the stubs), [`core/src/layers/bridge/`](../../modules/core/src/layers/bridge/) (the bridge), the

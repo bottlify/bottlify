@@ -21,9 +21,11 @@
 - Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10, 11 and OpenGL in the graphics worker.
 - Direct3D 10's command ring, which Direct3D 11's immediate context shares, is i386 code: a
   64-bit process traps every device and context call. A deferred context's calls trap.
-- `D3DX10CompileFromMemory` has no shader model 4 compiler: it answers `E_FAIL` with an error
-  blob saying so. A program that ships its shaders compiled asks only for what its cache lacks.
-  `D3DX10SaveTextureToFile` answers `E_NOTIMPL`.
+- `D3DX10CompileFromMemory` and `D3DX11CompileFromMemory` (and `...FromFile`) compile through
+  the program's own `d3dcompiler_43.dll`; without one they answer `E_FAIL` with an error blob
+  saying so. A program that ships its shaders compiled asks only for what its cache lacks.
+  `D3DX10SaveTextureToFile`, `D3DX11SaveTextureToFile`, `D3DX11SaveTextureToMemory` and
+  `D3DX11LoadTextureFromTexture` answer `E_NOTIMPL`.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.

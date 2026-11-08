@@ -28,6 +28,7 @@ import {
     texelBytesOf,
 } from './dds10.js';
 import { createComObject } from '../ole32/objects.js';
+import { createDataLoaders } from './loaders.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -79,6 +80,8 @@ export const D3DX10_DEFAULT = 0xffffffff;
 export const D3DX10_FROM_FILE = 0xfffffffd;
 
 const UNKNOWN_RELEASE = 2;
+/** RT_RCDATA: where D3DX looks for a resource it is named. */
+const RT_RCDATA = 10;
 
 /** The DXGI formats a file's texels are made into, and what a row of blocks or texels takes. */
 const DXGI = Object.freeze({ B8G8R8A8_UNORM: 87, R8G8B8A8_UNORM: 28, BC1_UNORM: 71,
@@ -345,7 +348,8 @@ const resizedTo = (image, toWidth, toHeight)=>{
  * @property {(address: number) => number} [readU32]
  * @property {(address: number, value: number) => void} [writeU32]
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
+ * @property {{ publish: (object: any, interfaceId: string) => number,
+ *     unpublish?: (object: any, interfaceId: string) => boolean }} [vtables]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
@@ -353,6 +357,9 @@ const resizedTo = (image, toWidth, toHeight)=>{
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  * @property {() => Promise<number>} [compiler]
  *     Where this process's D3DCompile is (d3dcompiler_43's), or 0 for none.
+ * @property {(module: number, name: string | number, type: number)
+ *     => Uint8Array | null | Promise<Uint8Array | null>}
+ *     [resource]  a module's resource, by name or number, and type
  */
 
 /**
@@ -364,13 +371,36 @@ const resizedTo = (image, toWidth, toHeight)=>{
  */
 
 /**
+ * Which Direct3D a copy of the library works with: its functions' prefix, the
+ * device's creates by vtable slot, and the SDK version it checks a program's
+ * against. D3DX 10 and D3DX 11 are one library over two devices whose
+ * texture descriptions, image information and load information are laid out
+ * alike.
+ *
+ * @typedef {{ prefix: string, sdk: number, fileNotFound: number, device: {
+ *     CreateTexture1D: number,
+ *     CreateTexture2D: number, CreateTexture3D: number, CreateShaderResourceView: number } }}
+ *     D3dxProfile
+ */
+
+/** D3DX 10, over ID3D10Device. @type {D3dxProfile} */
+export const D3DX10_PROFILE = Object.freeze({ prefix: 'D3DX10', sdk: D3D10_SDK_VERSION,
+    // D3D10_ERROR_FILE_NOT_FOUND.
+    fileNotFound: 0x88790002 | 0,
+    device: { CreateTexture1D: DEVICE.CreateTexture1D, CreateTexture2D: DEVICE.CreateTexture2D,
+        CreateTexture3D: DEVICE.CreateTexture3D,
+        CreateShaderResourceView: DEVICE.CreateShaderResourceView } });
+
+/**
  * The library's own functions, with D3DX 9's mathematics laid under them by
  * the caller.
  *
  * @param {D3dx10Host} host
  * @param {number} version  the SDK version this copy of the library answers to
+ * @param {D3dxProfile} [profile]  the Direct3D it works with: D3DX 10's by default
  */
-export function createD3dx10Functions(host, version){
+export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
+    const { prefix } = profile;
     const { u32, putU32s, method, string } = createDeviceCalls(host);
     const blob = {
         id: IID_ID3D10BLOB,
@@ -632,8 +662,8 @@ export function createD3dx10Functions(host, version){
             });
             putU32s(block + descBytes, records);
             return await method(thread, device,
-                volume ? DEVICE.CreateTexture3D
-                    : linear ? DEVICE.CreateTexture1D : DEVICE.CreateTexture2D,
+                volume ? profile.device.CreateTexture3D
+                    : linear ? profile.device.CreateTexture1D : profile.device.CreateTexture2D,
                 [block, block + descBytes, out]);
         }
         finally
@@ -680,7 +710,7 @@ export function createD3dx10Functions(host, version){
                 if (view && result === S_OK)
                 {
                     const texture = u32(held);
-                    result = await method(thread, device, DEVICE.CreateShaderResourceView,
+                    result = await method(thread, device, profile.device.CreateShaderResourceView,
                         [texture, 0, out]);
                     await method(thread, texture, UNKNOWN_RELEASE, []);
                 }
@@ -709,6 +739,20 @@ export function createD3dx10Functions(host, version){
         }
         return bytes;
     };
+    /**
+     * A module's resource, as D3DX finds one: RT_RCDATA by name or number.
+     *
+     * @param {string} api @param {number} module @param {number} at @param {boolean} wide
+     */
+    const fromResource = (api, module, at, wide)=>async()=>{
+        const name = at === 0 ? null : at < 0x10000 ? at : string(at, wide, 256);
+        const bytes = name === null ? null : await host.resource?.(module, name, RT_RCDATA) ?? null;
+        if (!bytes)
+        {
+            host.divergence?.(api, `answered D3DX10_ERR_INVALID_DATA: no resource ${name}`);
+        }
+        return bytes;
+    };
 
     /**
      * D3DX10_IMAGE_INFO, as a file says it: Width, Height, Depth, ArraySize,
@@ -731,6 +775,99 @@ export function createD3dx10Functions(host, version){
             image.faces ? 6 : 1, image.mipLevels, image.faces ? MISC_TEXTURECUBE : 0,
             sample ? dxgiOf(sample.format) : dxgiOf(image.format),
             volume ? DIMENSION.TEXTURE3D : DIMENSION.TEXTURE2D, image.fileFormat]);
+    };
+
+    /**
+     * The include a compile from a file is given when the program gives none:
+     * every #include read from the directory of the file compiled, whichever
+     * file names it, as D3DX resolves them. An ID3DInclude published for the
+     * compile and given back after it.
+     *
+     * @param {string} source  the compiled file's path
+     * @returns {{ pointer: number, end: () => void } | null}
+     */
+    const fileInclude = source=>{
+        if (!host.vtables || !host.heap)
+        {
+            return null;
+        }
+        const heap = host.heap;
+        const cut = source.lastIndexOf('\\');
+        const directory = cut < 0 ? '' : source.slice(0, cut + 1);
+        /** @type {Set<number>} */
+        const held = new Set();
+        /**
+         * @param {any} _self
+         * @param {number[]} args
+         */
+        const open = async(_self, [, nameAt, , dataOut, bytesOut])=>{
+            const file = string(nameAt >>> 0, false, 260);
+            const path = /^([A-Za-z]:)?\\/.test(file) ? file : `${directory}${file}`;
+            const bytes = host.readFile ? await host.readFile(path) : null;
+            if (!bytes)
+            {
+                return E_FAIL;
+            }
+            const at = heap.allocate(Math.max(1, bytes.length));
+            if (!at)
+            {
+                return E_OUTOFMEMORY;
+            }
+            host.writeMemory(at, bytes);
+            held.add(at);
+            putU32s(dataOut >>> 0, [at]);
+            putU32s(bytesOut >>> 0, [bytes.length]);
+            return S_OK;
+        };
+        /**
+         * @param {any} _self
+         * @param {number[]} args
+         */
+        const close = (_self, [data])=>{
+            if (held.delete(data >>> 0))
+            {
+                heap.free(data >>> 0);
+            }
+            return S_OK;
+        };
+        /** @type {any} */
+        const object = { interfaceFor: (/** @type {string} */ id)=>(id === 'ID3DInclude'
+            ? record : null) };
+        const record = Object.freeze({ object, id: 'ID3DInclude', methods: [
+            /**
+             * HRESULT Open(D3D_INCLUDE_TYPE, LPCSTR pFileName, LPCVOID pParentData,
+             *     LPCVOID *ppData, UINT *pBytes)
+             */
+            { name: 'Open', argBytes: 24, invoke: open },
+            /** HRESULT Close(LPCVOID pData) */
+            { name: 'Close', argBytes: 8, invoke: close },
+        ] });
+        const pointer = host.vtables.publish(object, 'ID3DInclude') >>> 0;
+        return pointer === 0 ? null : { pointer, end: ()=>{
+            held.forEach(at=>heap.free(at));
+            held.clear();
+            host.vtables?.unpublish?.(object, 'ID3DInclude');
+        } };
+    };
+
+    /**
+     * D3DX10_IMAGE_INFO of bytes found, or why not.
+     *
+     * @param {string} api @param {Uint8Array | null} bytes @param {number} infoAt
+     * @param {number} hr
+     */
+    const imageInfo = (api, bytes, infoAt, hr)=>{
+        const image = imageOf(api, bytes);
+        if (typeof image === 'number')
+        {
+            return answer(hr, image);
+        }
+        if (infoAt === 0)
+        {
+            return answer(hr, E_INVALIDARG);
+        }
+        writeInfo(infoAt, image);
+        return answer(hr, S_OK);
     };
 
     /**
@@ -775,10 +912,10 @@ export function createD3dx10Functions(host, version){
             return answer(hrAt, hr | 0);
         }
         const entry = entryAt === 0 ? '' : string(entryAt, false, 256);
-        const profile = profileAt === 0 ? '' : string(profileAt, false, 32);
+        const target = profileAt === 0 ? '' : string(profileAt, false, 32);
         const reason = 'error X0000: this build has no HLSL compiler for'
-            + ` ${profile || 'this profile'} (${entry || 'no entry point'})`;
-        host.divergence?.('D3DX10CompileFromMemory', `refused ${profile} ${entry}: no shader`
+            + ` ${target || 'this profile'} (${entry || 'no entry point'})`;
+        host.divergence?.(`${prefix}CompileFromMemory`, `refused ${profile} ${entry}: no shader`
             + ' model 4 compiler');
         if (shaderOut !== 0)
         {
@@ -793,11 +930,12 @@ export function createD3dx10Functions(host, version){
     };
 
     return {
+        ...createDataLoaders(host, { prefix, fileNotFound: profile.fileNotFound, string }),
         /** BOOL D3DX10CheckVersion(UINT D3DSdkVersion, UINT D3DX10SdkVersion) */
-        D3DX10CheckVersion: {
+        [`${prefix}CheckVersion`]: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([d3d, d3dx])=>((d3d >>> 0) === D3D10_SDK_VERSION && (d3dx >>> 0) === version
+            handler: ([d3d, d3dx])=>((d3d >>> 0) === profile.sdk && (d3dx >>> 0) === version
                 ? 1 : 0),
         },
         /**
@@ -805,69 +943,146 @@ export function createD3dx10Functions(host, version){
          *     SIZE_T SrcDataSize, D3DX10_IMAGE_LOAD_INFO*, ID3DX10ThreadPump*,
          *     ID3D10Resource **ppTexture, HRESULT *pHResult)
          */
-        D3DX10CreateTextureFromMemory: {
+        [`${prefix}CreateTextureFromMemory`]: {
             argBytes: 28,
-            handler: loader('D3DX10CreateTextureFromMemory', false,
+            handler: loader(`${prefix}CreateTextureFromMemory`, false,
                 ([device, data, size, info, , out, hr])=>({ device, found: fromMemory(data, size),
                     info, out, hr })),
         },
         /** The same, the image from a file: (device, file, info, pump, ppTexture, pHResult) */
-        D3DX10CreateTextureFromFileA: {
+        [`${prefix}CreateTextureFromFileA`]: {
             argBytes: 24,
-            handler: loader('D3DX10CreateTextureFromFileA', false,
+            handler: loader(`${prefix}CreateTextureFromFileA`, false,
                 ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile('D3DX10CreateTextureFromFileA', file, false), info, out, hr })),
+                    found: fromFile(`${prefix}CreateTextureFromFileA`, file, false), info, out,
+                    hr })),
         },
-        D3DX10CreateTextureFromFileW: {
+        [`${prefix}CreateTextureFromFileW`]: {
             argBytes: 24,
-            handler: loader('D3DX10CreateTextureFromFileW', false,
+            handler: loader(`${prefix}CreateTextureFromFileW`, false,
                 ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile('D3DX10CreateTextureFromFileW', file, true), info, out, hr })),
+                    found: fromFile(`${prefix}CreateTextureFromFileW`, file, true), info, out,
+                    hr })),
         },
         /** The loaders above, a shader-resource view of the texture handed out instead. */
-        D3DX10CreateShaderResourceViewFromMemory: {
+        [`${prefix}CreateShaderResourceViewFromMemory`]: {
             argBytes: 28,
-            handler: loader('D3DX10CreateShaderResourceViewFromMemory', true,
+            handler: loader(`${prefix}CreateShaderResourceViewFromMemory`, true,
                 ([device, data, size, info, , out, hr])=>({ device, found: fromMemory(data, size),
                     info, out, hr })),
         },
-        D3DX10CreateShaderResourceViewFromFileA: {
+        [`${prefix}CreateShaderResourceViewFromFileA`]: {
             argBytes: 24,
-            handler: loader('D3DX10CreateShaderResourceViewFromFileA', true,
+            handler: loader(`${prefix}CreateShaderResourceViewFromFileA`, true,
                 ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile('D3DX10CreateShaderResourceViewFromFileA', file, false), info,
-                    out, hr })),
+                    found: fromFile(`${prefix}CreateShaderResourceViewFromFileA`, file, false),
+                    info, out, hr })),
         },
-        D3DX10CreateShaderResourceViewFromFileW: {
+        [`${prefix}CreateShaderResourceViewFromFileW`]: {
             argBytes: 24,
-            handler: loader('D3DX10CreateShaderResourceViewFromFileW', true,
+            handler: loader(`${prefix}CreateShaderResourceViewFromFileW`, true,
                 ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile('D3DX10CreateShaderResourceViewFromFileW', file, true), info,
+                    found: fromFile(`${prefix}CreateShaderResourceViewFromFileW`, file, true), info,
                     out, hr })),
         },
         /**
          * HRESULT D3DX10GetImageInfoFromMemory(LPCVOID pSrcData, SIZE_T SrcDataSize,
          *     ID3DX10ThreadPump*, D3DX10_IMAGE_INFO*, HRESULT *pHResult)
          */
-        D3DX10GetImageInfoFromMemory: {
+        [`${prefix}GetImageInfoFromMemory`]: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([data, size, , infoAt, hr])=>{
-                const image = imageOf('D3DX10GetImageInfoFromMemory',
-                    fromMemory(data >>> 0, size >>> 0)());
-                if (typeof image === 'number')
-                {
-                    return answer(hr, image);
-                }
-                if ((infoAt >>> 0) === 0)
-                {
-                    return answer(hr, E_INVALIDARG);
-                }
-                writeInfo(infoAt >>> 0, image);
-                return answer(hr, S_OK);
-            },
+            handler: ([data, size, , infoAt, hr])=>imageInfo(`${prefix}GetImageInfoFromMemory`,
+                fromMemory(data >>> 0, size >>> 0)(), infoAt >>> 0, hr >>> 0),
         },
-        D3DX10CompileFromMemory: { argBytes: 52, handler: compile },
+        /**
+         * HRESULT D3DX10GetImageInfoFromFile(LPCTSTR pSrcFile, ID3DX10ThreadPump*,
+         *     D3DX10_IMAGE_INFO *pSrcInfo, HRESULT *pHResult)
+         */
+        ...Object.fromEntries([false, true].map(wide=>{
+            const api = `${prefix}GetImageInfoFromFile${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 16, handler: async(/** @type {number[]} */ [file, ,
+                infoAt, hr])=>((file >>> 0) === 0 ? answer(hr, E_FAIL)
+                : imageInfo(api, await fromFile(api, file >>> 0, wide)(), infoAt >>> 0,
+                    hr >>> 0)) }];
+        })),
+        /**
+         * HRESULT D3DX10GetImageInfoFromResource(HMODULE, LPCTSTR pSrcResource,
+         *     ID3DX10ThreadPump*, D3DX10_IMAGE_INFO*, HRESULT*)
+         */
+        ...Object.fromEntries([false, true].map(wide=>{
+            const api = `${prefix}GetImageInfoFromResource${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 20, handler: async(/** @type {number[]} */ [module, name, ,
+                infoAt, hr])=>imageInfo(api, await fromResource(api, module >>> 0, name >>> 0,
+                wide)(), infoAt >>> 0, hr >>> 0) }];
+        })),
+        /**
+         * HRESULT D3DX10CreateTextureFromResource(device, HMODULE, LPCTSTR,
+         *     D3DX10_IMAGE_LOAD_INFO*, ID3DX10ThreadPump*, ID3D10Resource**, HRESULT*),
+         * and the shader-resource views made of one.
+         */
+        ...Object.fromEntries([false, true].flatMap(wide=>[false, true].map(view=>{
+            const api = `${prefix}Create${view ? 'ShaderResourceView' : 'Texture'}FromResource`
+                + `${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 28, handler: loader(api, view,
+                ([device, module, name, info, , out, hr])=>({ device,
+                    found: fromResource(api, module, name, wide), info, out, hr })) }];
+        }))),
+        [`${prefix}CompileFromMemory`]: { argBytes: 52, handler: compile },
+        /**
+         * HRESULT D3DX10CompileFromFile(LPCTSTR pSrcFile, const D3D10_SHADER_MACRO*,
+         *     LPD3D10INCLUDE, LPCSTR pFunctionName, LPCSTR pProfile, UINT Flags1, UINT Flags2,
+         *     ID3DX10ThreadPump*, ID3D10Blob **ppShader, ID3D10Blob **ppErrorMsgs,
+         *     HRESULT *pHResult)
+         *
+         * The file read and compiled as CompileFromMemory compiles its bytes, the
+         * file's own name the source's; a file that is not there is
+         * D3D10_ERROR_FILE_NOT_FOUND.
+         */
+        ...Object.fromEntries([false, true].map(wide=>{
+            const api = `${prefix}CompileFromFile${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 44, handler: async(/** @type {number[]} */ args)=>{
+                const [file, defines, include, entry, target, flags1, flags2, pump, shaderOut,
+                    errorsOut, hrAt] = args.map(a=>a >>> 0);
+                if (shaderOut !== 0)
+                {
+                    putU32s(shaderOut, [0]);
+                }
+                if (errorsOut !== 0)
+                {
+                    putU32s(errorsOut, [0]);
+                }
+                const path = file === 0 ? '' : string(file, wide, 260);
+                const bytes = file === 0 || !host.readFile ? null : await host.readFile(path);
+                if (!bytes)
+                {
+                    return answer(hrAt, profile.fileNotFound);
+                }
+                const heap = host.heap;
+                const source = heap?.allocate(bytes.length + 1) ?? 0;
+                const name = heap?.allocate(path.length + 1) ?? 0;
+                if (!heap || source === 0 || name === 0)
+                {
+                    return answer(hrAt, E_OUTOFMEMORY);
+                }
+                const files = include === 0 ? fileInclude(path) : null;
+                try
+                {
+                    host.writeMemory(source, bytes);
+                    host.writeMemory(name, Uint8Array.from([...path, '\0'],
+                        c=>c.charCodeAt(0) & 0xff));
+                    return await compile([source, bytes.length, name, defines,
+                        files ? files.pointer : include, entry, target, flags1, flags2, pump,
+                        shaderOut, errorsOut, hrAt]);
+                }
+                finally
+                {
+                    heap.free(source);
+                    heap.free(name);
+                    files?.end();
+                }
+            } }];
+        })),
         /**
          * HRESULT D3DX10UnsetAllDeviceObjects(ID3D10Device *pDevice)
          *
@@ -877,7 +1092,7 @@ export function createD3dx10Functions(host, version){
          * layout, the stream-output targets, the render targets and the
          * output and rasterizer states.
          */
-        D3DX10UnsetAllDeviceObjects: {
+        [`${prefix}UnsetAllDeviceObjects`]: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([device])=>{
@@ -928,7 +1143,7 @@ export function createD3dx10Functions(host, version){
          * the loader made them - a loaded file comes with its chain - so they
          * are left as they are, and said.
          */
-        D3DX10FilterTexture: {
+        [`${prefix}FilterTexture`]: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([texture])=>{
@@ -936,7 +1151,7 @@ export function createD3dx10Functions(host, version){
                 {
                     return E_INVALIDARG;
                 }
-                host.divergence?.('D3DX10FilterTexture',
+                host.divergence?.(`${prefix}FilterTexture`,
                     'the texture\'s levels are kept as loaded, not filtered again');
                 return S_OK;
             },
@@ -945,9 +1160,9 @@ export function createD3dx10Functions(host, version){
          * HRESULT D3DX10SaveTextureToFileA(ID3D10Resource*, D3DX10_IMAGE_FILE_FORMAT, LPCSTR):
          * refused; the texture's bytes are the GPU's and no read-back is made for it.
          */
-        D3DX10SaveTextureToFileA: refused('D3DX10SaveTextureToFileA', 12,
+        [`${prefix}SaveTextureToFileA`]: refused(`${prefix}SaveTextureToFileA`, 12,
             'refused: saving a Direct3D 10 texture to a file is not implemented'),
-        D3DX10SaveTextureToFileW: refused('D3DX10SaveTextureToFileW', 12,
+        [`${prefix}SaveTextureToFileW`]: refused(`${prefix}SaveTextureToFileW`, 12,
             'refused: saving a Direct3D 10 texture to a file is not implemented'),
     };
 }

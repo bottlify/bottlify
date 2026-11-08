@@ -170,7 +170,7 @@ export function createHostingFunctions(host){
     const writeWide = (at, text)=>host.writeMemory(at >>> 0,
         new Uint8Array(Uint16Array.from(`${text}\0`, unit=>unit.charCodeAt(0)).buffer));
     /** @param {number} at */
-    const wideAt = at=>((at >>> 0) === 0 ? null : host.readWideString(at >>> 0, 1024));
+    const wideAt = at=>((at >>> 0) === 0 ? null : host.readWideString(at >>> 0, 1024 * 2));
     /** @param {number} at */
     const guidAt = at=>readGuid(host, at >>> 0);
 

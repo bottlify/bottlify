@@ -95,6 +95,7 @@ export function createMscoreeFunctions(host){
         // on the thread that loaded it, with the shim's two routines for
         // marking that thread as the callback's.
         notifyLoaded: async(callback, info)=>{
+            const thread = host.currentThread();
             if (!callbacks)
             {
                 const module = await host.loadLibrary('mscoree.dll');
@@ -102,7 +103,7 @@ export function createMscoreeFunctions(host){
                     unset: await host.procAddress(module, 'CallbackThreadUnset') };
             }
             await host.callGuest({ entry: callback, args: [info, callbacks.set, callbacks.unset],
-                thread: host.currentThread() });
+                thread });
         },
         divergence: host.divergence,
     });

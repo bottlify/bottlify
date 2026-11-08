@@ -112,11 +112,14 @@ export function createCompilerSeam(deps){
 
     /**
      * The program's ID3DInclude as the preprocessor's include: Open (its first slot; the
-     * interface has no IUnknown) asked for the file, Close told after. The standard file
+     * interface has no IUnknown) asked for the file with the data of the file that includes
+     * it (NULL for the source itself), Close told once the file and everything it included
+     * is read. The standard file
      * include, (ID3DInclude*)1, would read the program's files, which nothing here can.
      *
      * @param {string} api @param {number} include
-     * @returns {((name: string, system: boolean) => Promise<string | null>) | undefined}
+     * @returns {(((name: string, system: boolean, parent: string) => Promise<string | null>)
+     *     & { close: (name: string) => Promise<void> }) | undefined}
      */
     const includer = (api, include)=>{
         if ((include >>> 0) === 0)
@@ -130,7 +133,17 @@ export function createCompilerSeam(deps){
             return undefined;
         }
         const thread = deps.currentThread?.();
-        return async(name, system)=>{
+        /**
+         * The files open now, innermost last, each with the data Open gave:
+         * a file's data is its includes' parent, and goes back by Close once
+         * the file is read.
+         *
+         * @type {{ name: string, data: number }[]}
+         */
+        const open = [];
+        const vtable = ()=>fields.readU32(include);
+        /** @param {string} name @param {boolean} system @param {string} parent */
+        const opened = async(name, system, parent)=>{
             const { allocate, free, callGuest } = deps;
             if (!allocate || !callGuest)
             {
@@ -147,24 +160,35 @@ export function createCompilerSeam(deps){
                 const dataOut = scratch + name.length + 1;
                 fields.writeU32(dataOut, 0);
                 fields.writeU32(dataOut + 4, 0);
-                const vtable = fields.readU32(include);
-                const answer = await callGuest({ entry: fields.readU32(vtable),
-                    args: [include, system ? 1 : 0, scratch, 0, dataOut, dataOut + 4], thread });
+                const from = [...open].reverse().find(file=>file.name === parent)?.data ?? 0;
+                const answer = await callGuest({ entry: fields.readU32(vtable()),
+                    args: [include, system ? 1 : 0, scratch, from, dataOut, dataOut + 4], thread });
                 const data = fields.readU32(dataOut);
                 if ((answer | 0) < 0 || data === 0)
                 {
                     return null;
                 }
-                const text = latin1(memory.readMemory(data, fields.readU32(dataOut + 4)));
-                await callGuest({ entry: fields.readU32(vtable + 4), args: [include, data],
-                    thread });
-                return text;
+                open.push({ name, data });
+                return latin1(memory.readMemory(data, fields.readU32(dataOut + 4)));
             }
             finally
             {
                 free?.(scratch);
             }
         };
+        return Object.assign(opened, {
+            /** @param {string} name */
+            close: async name=>{
+                const at = open.map(file=>file.name).lastIndexOf(name);
+                if (at < 0 || !deps.callGuest)
+                {
+                    return;
+                }
+                const [file] = open.splice(at, 1);
+                await deps.callGuest({ entry: fields.readU32(vtable() + 4),
+                    args: [include, file.data], thread });
+            },
+        });
     };
 
     /** @param {number[]} outs */

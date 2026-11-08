@@ -154,6 +154,7 @@ import { createWintrustFunctions } from './wintrust/functions.js';
 import { defaultTrustedRoots } from './wintrust/roots.js';
 import { createD3dxFunctions, d3dxVersionFunctions } from './d3dx9/functions.js';
 import { createD3dx10Functions } from './d3dx10/functions.js';
+import { createD3dx11Functions } from './d3dx11/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
 import { createNetbiosFunctions, createSensFunctions, createSessionNotificationFunctions,
@@ -281,6 +282,9 @@ const d3dxLibraries = table=>Object.fromEntries(Array.from({ length: 20 },
  * the same names (Wine's d3dx10_43.spec).
  */
 const D3DX10_SHARED = /^D3DX(Vec|Matrix|Quaternion|Plane|Color|Float|SH|FresnelTerm|IntersectTri|BoxBoundProbe|SphereBoundProbe|ComputeBounding|CreateMatrixStack|CpuOptimizations)/;
+
+/** The versions of the D3DX 11 helper library: the June 2010 SDK's and the one before. */
+const D3DX11_VERSIONS = [42, 43];
 
 /**
  * Every version of the D3DX 10 helper library, d3dx10_33 to d3dx10_43: D3DX
@@ -3939,7 +3943,10 @@ export function createWin32Module(){
                         }
                     })());
                     return { ...d3dxLibraries(d3dx9),
-                        ...d3dx10Libraries(d3dx9, { ...d3dxHost, compiler }) };
+                        ...d3dx10Libraries(d3dx9, { ...d3dxHost, compiler }),
+                        ...Object.fromEntries(D3DX11_VERSIONS.map(version=>[
+                            `d3dx11_${version}.dll`,
+                            createD3dx11Functions({ ...d3dxHost, compiler }, version)])) };
                 })(),
 
                 // A managed executable's entry, handed to the bottle's Mono runtime.
@@ -5093,7 +5100,8 @@ export function createWin32Module(){
                  * @returns {string[]}
                  */
                 redistributables: ()=>[...Object.keys(d3dxLibraries({})),
-                    ...Array.from({ length: 11 }, (_, i)=>`d3dx10_${33 + i}.dll`)],
+                    ...Array.from({ length: 11 }, (_, i)=>`d3dx10_${33 + i}.dll`),
+                    ...D3DX11_VERSIONS.map(version=>`d3dx11_${version}.dll`)],
 
                 /**
                  * What an undecorated export of a library is, when nothing else
