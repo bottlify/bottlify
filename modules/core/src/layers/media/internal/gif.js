@@ -5,12 +5,24 @@
  */
 
 /**
- * A GIF decoder (87a and 89a): the first frame, as an imaging codec hands a
- * still picture over. Its own colour table or the file's, its interlaced
- * rows put back in order, the graphic control extension's transparent index
- * made alpha 0. The frame is its own size: the logical screen around it, and
- * the frames after it, are an animation's, not a texture's.
+ * A GIF decoder (87a and 89a): every image of a file with its colour indices
+ * and table, as WIC's decoder hands frames out, and the first one as texels,
+ * as an imaging codec hands a still picture over. Its own colour table or the
+ * file's, its interlaced rows put back in order, the graphic control
+ * extension's transparent index made alpha 0. A frame is its own size: the
+ * logical screen around it is an animation's, not a texture's.
  */
+
+/**
+ * The colour table an image with none, in a file with none, is read with:
+ * black, white, then black, as many entries as the screen descriptor's size
+ * bits name though its table flag is clear - what Windows' GIF decoder gives
+ * such a file (Wine's gifformat test).
+ *
+ * @param {number} entries
+ */
+const defaultTable = entries=>Uint8Array.from({ length: entries * 3 },
+    (_, i)=>(i >= 3 && i < 6 ? 255 : 0));
 
 /** A GIF this decoder cannot read, with the reason. */
 export class GifError extends Error {}
@@ -128,12 +140,35 @@ function decodeLzw(data, minimum, count){
 }
 
 /**
- * The first frame of a GIF file.
+ * One image of a GIF file: where it sits on the logical screen, its colour
+ * indices row by row (interlaced rows put in order), the colour table it
+ * uses (its own or the file's, RGB triplets), its transparent index (-1 for
+ * none) and its texels.
+ *
+ * @typedef {Object} GifFrame
+ * @property {number} left
+ * @property {number} top
+ * @property {number} width
+ * @property {number} height
+ * @property {Uint8Array} indices
+ * @property {Uint8Array} table
+ * @property {boolean} local     whether the table is the frame's own
+ * @property {number} transparent
+ * @property {Uint8Array} rgba
+ */
+
+/**
+ * Every image of a GIF file, and its logical screen: its size, the file's
+ * own colour table (or null) and the one read without it, background index
+ * and pixel aspect byte (0 for square, else (aspect + 15) / 64 is a pixel's
+ * width over its height). A file whose trailer is missing ends with its last
+ * whole image.
  *
  * @param {Uint8Array} bytes
- * @returns {DecodedGif}
+ * @returns {{ width: number, height: number, global: Uint8Array | null,
+ *     fallback: Uint8Array, background: number, aspect: number, frames: GifFrame[] }}
  */
-export function decodeGif(bytes){
+export function decodeGifFrames(bytes){
     if (!isGif(bytes) || bytes.length < 13)
     {
         throw new GifError('not a GIF file');
@@ -156,7 +191,10 @@ export function decodeGif(bytes){
         global = bytes.subarray(at, at + size);
         at += size;
     }
+    const fallback = defaultTable(2 << (packed & 7));
     let transparent = -1;
+    /** @type {GifFrame[]} */
+    const frames = [];
     /** The data sub-blocks from `at`, joined; `at` moved past their terminator. */
     const blocks = ()=>{
         /** @type {Uint8Array[]} */
@@ -200,20 +238,22 @@ export function decodeGif(bytes){
         {
             throw new GifError(`a GIF block of kind 0x${kind.toString(16)}`);
         }
+        if (at + 9 > bytes.length)
+        {
+            break;
+        }
+        const left = u16(at);
+        const top = u16(at + 2);
         const width = u16(at + 4);
         const height = u16(at + 6);
         const flags = bytes[at + 8];
         at += 9;
-        let table = global;
+        let table = global ?? fallback;
         if (flags & 0x80)
         {
             const size = 3 << ((flags & 7) + 1);
             table = bytes.subarray(at, at + size);
             at += size;
-        }
-        if (!table)
-        {
-            throw new GifError('a GIF image with no colour table');
         }
         const minimum = bytes[at++];
         if (minimum < 2 || minimum > 8)
@@ -229,8 +269,10 @@ export function decodeGif(bytes){
                     (_, i)=>start + i * step))
             : Array.from({ length: height }, (_, i)=>i);
         const rgba = new Uint8Array(width * height * 4);
+        const ordered = new Uint8Array(width * height);
         const colours = table.length / 3;
         rows.forEach((y, line)=>{
+            ordered.set(indices.subarray(line * width, (line + 1) * width), y * width);
             for (let x = 0; x < width; x++)
             {
                 const index = indices[line * width + x];
@@ -245,7 +287,25 @@ export function decodeGif(bytes){
                 rgba[to + 3] = 255;
             }
         });
-        return { width, height, rgba };
+        frames.push({ left, top, width, height, indices: ordered, table,
+            local: (flags & 0x80) !== 0, transparent, rgba });
+        transparent = -1;
     }
-    throw new GifError('a GIF file with no image');
+    if (frames.length === 0)
+    {
+        throw new GifError('a GIF file with no image');
+    }
+    return { width: u16(6), height: u16(8), global, fallback, background: bytes[11],
+        aspect: bytes[12], frames };
+}
+
+/**
+ * The first frame of a GIF file.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {DecodedGif}
+ */
+export function decodeGif(bytes){
+    const [first] = decodeGifFrames(bytes).frames;
+    return { width: first.width, height: first.height, rgba: first.rgba };
 }

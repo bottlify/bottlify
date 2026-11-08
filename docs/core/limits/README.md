@@ -79,3 +79,21 @@ event, an error. Neither stops the program.
 - The bundle is read-only. What the program writes goes into the session, kept per `id`.
 - A file mapping is a copy: a view reads the file when it is made and writes it back when it is
   closed, so two views of one file do not see each other's writes.
+
+## Images (WIC)
+
+The Windows Imaging Component (`windowscodecs.dll`, `CLSID_WICImagingFactory`) decodes, converts
+and scales bitmaps for the program, .NET's WPF among them.
+
+- Decoders: BMP, PNG, ICO, GIF, JPEG and TIFF, each frame in the pixel format Windows' decoder
+  gives, except TIFF: its first image only, always as 32bppBGRA. DDS and JPEG XR are refused
+  (`WINCODEC_ERR_COMPONENTNOTFOUND`). A decoder reads its whole stream and decodes every frame
+  when it is initialized.
+- No encoders, no metadata (query readers and writers, metadata blocks, fast metadata encoders),
+  no colour transforms and no embedded ICC profiles: refused, and said once as a divergence.
+- The scaler's linear, cubic and Fant modes all average the source area under each pixel;
+  nearest neighbour is the pixel under its centre. Indexed formats scale by nearest neighbour.
+- Conversion covers the integer, float and half formats and CMYK (without colour management);
+  fixed-point, 32bppRGBE and n-channel formats are not converted.
+- The internal interfaces native WPF used on Windows (`IMILBitmap`, `IMILBitmapSource` and
+  kin) are not there.

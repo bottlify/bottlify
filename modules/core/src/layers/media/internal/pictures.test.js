@@ -49,8 +49,9 @@ for (const [name, picture] of Object.entries(PICTURES))
 test('a file cut short or of a kind not read is refused with the reason', ()=>{
     const gif = bytesOf(PICTURES.gif_plain.file);
     assert.throws(()=>decodeGif(gif.subarray(0, 12)), GifError);
-    assert.throws(()=>decodeGif(Uint8Array.of(0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0,
-        0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 1, 0, 0x3b)), /no colour table/);
+    // No colour table anywhere: the default one, index 0 black.
+    assert.deepEqual([...decodeGif(Uint8Array.of(0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0,
+        0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 1, 0, 0x3b)).rgba], [0, 0, 0, 255]);
     const tiff = bytesOf(PICTURES.tiff_rgb_raw.file);
     assert.throws(()=>decodeTiff(tiff.subarray(0, 12)), TiffError);
     assert.equal(isTiff(Uint8Array.of(0x49, 0x49, 0x2b, 0, 0, 0, 0, 0)), false, 'BigTIFF');

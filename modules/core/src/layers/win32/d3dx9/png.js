@@ -40,14 +40,37 @@ export class PngError extends Error {}
 export const isPng = bytes=>bytes.length >= 8 && SIGNATURE.every((b, i)=>bytes[i] === b);
 
 /**
- * @param {Uint8Array} bytes
- * @returns {{ width: number, height: number, format: number, bgra: Uint8Array }}
+ * A PNG file's pixels as the file holds them: its header's depth and colour
+ * type, every row unfiltered and put in place (Adam7 passes included), each
+ * `rowBytes` long and packed at the file's own bits a sample, most
+ * significant first and sixteen bits big-endian; the palette (PLTE's
+ * triplets), tRNS, and pHYs's pixels a metre where the file says them.
+ * WIC's PNG decoder hands these out in the format they are; D3DX's reader
+ * makes BGRA of them (`readPng`).
+ *
+ * @typedef {Object} PngPixels
+ * @property {number} width
+ * @property {number} height
+ * @property {number} depth   bits a sample
+ * @property {number} colour  the colour type
+ * @property {number} rowBytes
+ * @property {Uint8Array} pixels
+ * @property {Uint8Array | null} palette
+ * @property {Uint8Array | null} transparency
+ * @property {[number, number] | null} pixelsPerMetre
  */
-export function readPng(bytes){
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {PngPixels}
+ */
+export function readPngPixels(bytes){
     if (!isPng(bytes))
     {
         throw new PngError('not a PNG file');
     }
+    /** @type {[number, number] | null} */
+    let pixelsPerMetre = null;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /** @type {{ width: number, height: number, depth: number, colour: number, interlace: number } | null} */
     let header = null;
@@ -91,6 +114,11 @@ export function readPng(bytes){
         else if (type === 'tRNS')
         {
             transparency = body;
+        }
+        else if (type === 'pHYs' && length >= 9 && body[8] === 1)
+        {
+            const chunk = new DataView(body.buffer, body.byteOffset, body.byteLength);
+            pixelsPerMetre = [chunk.getUint32(0), chunk.getUint32(4)];
         }
         else if (type === 'IDAT')
         {
@@ -144,6 +172,60 @@ export function readPng(bytes){
         throw new PngError('a PNG whose image data is shorter than its rows');
     }
 
+    const rowBytes = rowBytesOf(width);
+    const pixels = new Uint8Array(rowBytes * height);
+    const pixelBytes = bitsPerPixel >> 3;
+    let offset = 0;
+    for (const pass of passes)
+    {
+        if (pass.w === 0 || pass.h === 0)
+        {
+            continue;
+        }
+        const passBytes = rowBytesOf(pass.w);
+        let previous = new Uint8Array(passBytes);
+        for (let y = 0; y < pass.h; y++)
+        {
+            const filter = raw[offset];
+            const row = raw.slice(offset + 1, offset + 1 + passBytes);
+            offset += 1 + passBytes;
+            unfilter(filter, row, previous, filterUnit);
+            previous = row;
+            const line = (pass.y0 + y * pass.dy) * rowBytes;
+            if (!header.interlace)
+            {
+                pixels.set(row, line);
+                continue;
+            }
+            for (let x = 0; x < pass.w; x++)
+            {
+                const px = pass.x0 + x * pass.dx;
+                if (pixelBytes)
+                {
+                    pixels.set(row.subarray(x * pixelBytes, (x + 1) * pixelBytes),
+                        line + px * pixelBytes);
+                    continue;
+                }
+                const from = x * bitsPerPixel;
+                const value = row[from >> 3] >> (8 - bitsPerPixel - (from & 7))
+                    & ((1 << bitsPerPixel) - 1);
+                const to = px * bitsPerPixel;
+                pixels[line + (to >> 3)] |= value << (8 - bitsPerPixel - (to & 7));
+            }
+        }
+    }
+    return { width, height, depth, colour, rowBytes, pixels, palette, transparency,
+        pixelsPerMetre };
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{ width: number, height: number, format: number, bgra: Uint8Array }}
+ */
+export function readPng(bytes){
+    const { width, height, depth, colour, rowBytes, pixels, palette, transparency } =
+        readPngPixels(bytes);
+    const samples = /** @type {number} */ (SAMPLES.get(colour));
     const bgra = new Uint8Array(width * height * 4);
     const maximum = (1 << depth) - 1;
     /** One sample of a row, at a sample index. @param {Uint8Array} row @param {number} index */
@@ -170,72 +252,56 @@ export function readPng(bytes){
                 | /** @type {Uint8Array} */ (transparency)[i + 1])
             : null;
 
-    let offset = 0;
-    for (const pass of passes)
+    for (let y = 0; y < height; y++)
     {
-        if (pass.w === 0 || pass.h === 0)
+        const row = pixels.subarray(y * rowBytes, (y + 1) * rowBytes);
+        for (let x = 0; x < width; x++)
         {
-            continue;
-        }
-        const rowBytes = rowBytesOf(pass.w);
-        let previous = new Uint8Array(rowBytes);
-        for (let y = 0; y < pass.h; y++)
-        {
-            const filter = raw[offset];
-            const row = raw.slice(offset + 1, offset + 1 + rowBytes);
-            offset += 1 + rowBytes;
-            unfilter(filter, row, previous, filterUnit);
-            previous = row;
-            for (let x = 0; x < pass.w; x++)
+            const out = (y * width + x) * 4;
+            const s = (/** @type {number} */ k)=>sampleAt(row, x * samples + k);
+            let r;
+            let g;
+            let b;
+            let a = 255;
+            if (colour === 3)
             {
-                const px = pass.x0 + x * pass.dx;
-                const py = pass.y0 + y * pass.dy;
-                const out = (py * width + px) * 4;
-                const s = (/** @type {number} */ k)=>sampleAt(row, x * samples + k);
-                let r;
-                let g;
-                let b;
-                let a = 255;
-                if (colour === 3)
-                {
-                    const index = s(0);
-                    const entries = /** @type {Uint8Array} */ (palette);
-                    r = entries[index * 3] ?? 0;
-                    g = entries[index * 3 + 1] ?? 0;
-                    b = entries[index * 3 + 2] ?? 0;
-                    a = transparency && index < transparency.length ? transparency[index] : 255;
-                }
-                else if (colour === 0 || colour === 4)
-                {
-                    r = g = b = eight(s(0));
-                    if (colour === 4)
-                    {
-                        a = eight(s(1));
-                    }
-                    else if (key && s(0) === key[0])
-                    {
-                        a = 0;
-                    }
-                }
-                else
-                {
-                    r = eight(s(0));
-                    g = eight(s(1));
-                    b = eight(s(2));
-                    if (colour === 6)
-                    {
-                        a = eight(s(3));
-                    }
-                    else if (key && s(0) === key[0] && s(1) === key[1] && s(2) === key[2])
-                    {
-                        a = 0;
-                    }
-                }
-                bgra[out] = b;
-                bgra[out + 1] = g;
-                bgra[out + 2] = r;
-                bgra[out + 3] = a;
+                const index = s(0);
+                const entries = /** @type {Uint8Array} */ (palette);
+                r = entries[index * 3] ?? 0;
+                g = entries[index * 3 + 1] ?? 0;
+                b = entries[index * 3 + 2] ?? 0;
+                a = transparency && index < transparency.length ? transparency[index] : 255;
             }
+            else if (colour === 0 || colour === 4)
+            {
+                r = g = b = eight(s(0));
+                if (colour === 4)
+                {
+                    a = eight(s(1));
+                }
+                else if (key && s(0) === key[0])
+                {
+                    a = 0;
+                }
+            }
+            else
+            {
+                r = eight(s(0));
+                g = eight(s(1));
+                b = eight(s(2));
+                if (colour === 6)
+                {
+                    a = eight(s(3));
+                }
+                else if (key && s(0) === key[0] && s(1) === key[1] && s(2) === key[2])
+                {
+                    a = 0;
+                }
+            }
+            bgra[out] = b;
+            bgra[out + 1] = g;
+            bgra[out + 2] = r;
+            bgra[out + 3] = a;
         }
     }
 

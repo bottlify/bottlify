@@ -102,6 +102,7 @@ import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerMsxmlClasses } from './msxml/dom.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
+import { createWindowscodecs, gdiPixels } from './windowscodecs/functions.js';
 import { registerJScriptClass } from './jscript/active-script.js';
 import { registerVBScriptClass } from './vbscript/active-script.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
@@ -1946,27 +1947,62 @@ export function createWin32Module(){
 
             // MSXML's DOMDocument, which a setup engine reads its configuration
             // with and a WiX bootstrapper its manifest.
+            /** A file's whole contents, or null for none. @param {string} path */
+            const readVolumeFile = async path=>{
+                const entry = volume.stat(path);
+                const node = entry && !entry.isDirectory
+                    ? volume.open(path, { read: true }) : null;
+                if (!entry || !node)
+                {
+                    return null;
+                }
+                try
+                {
+                    return await volume.read(node, 0, entry.size);
+                }
+                finally
+                {
+                    volume.close(node);
+                }
+            };
             registerMsxmlClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                readFile: async path=>{
-                    const entry = volume.stat(path);
-                    const node = entry && !entry.isDirectory
-                        ? volume.open(path, { read: true }) : null;
-                    if (!entry || !node)
-                    {
-                        return null;
-                    }
-                    try
-                    {
-                        return await volume.read(node, 0, entry.size);
-                    }
-                    finally
-                    {
-                        volume.close(node);
-                    }
-                },
+                readFile: readVolumeFile,
                 divergence: config?.divergence,
             });
+
+            /** What the imaging component reads and calls: COM, memory, files, GDI. */
+            const windowscodecsHost = ()=>{
+                /** @type {import('./windowscodecs/kit.js').CodecsHost} */
+                const codecsHost = {
+                    registry: com, vtables: comVtables, heap, readMemory, writeMemory,
+                    readWideString,
+                    objectAt: pointer=>bridge.interfaceObject(pointer),
+                    callGuest: call=>bridge.callGuest(call),
+                    currentThread: ()=>kernel.currentThread(),
+                    readFile: path=>readVolumeFile(path),
+                    readHandle: async handle=>{
+                        /** @type {{ path: string, node: any } | null} */
+                        let file;
+                        try
+                        {
+                            file = handles.resolve(handle, 'file') ?? null;
+                        }
+                        catch {
+                            return null;
+                        }
+                        const entry = file ? volume.stat(file.path) : null;
+                        return file && entry ? volume.read(file.node, 0, entry.size) : null;
+                    },
+                    // FILE_MAP_WRITE | FILE_MAP_READ: the bitmap's lock writes into it.
+                    mapSection: (section, offset, bytes)=>libraries['KERNEL32.dll'].MapViewOfFile
+                        .handler([section, 0x2 | 0x4, 0, offset, bytes]) >>> 0,
+                    divergence: config?.divergence,
+                };
+                return { ...codecsHost, ...gdiPixels(codecsHost, {
+                    gdi32: name=>libraries['GDI32.dll']?.[name],
+                    user32: name=>libraries['USER32.dll']?.[name] }) };
+            };
 
             // DxDiag's provider, which an installer asks which DirectX this is
             // and a configuration tool how much video memory there is.
@@ -4091,6 +4127,9 @@ export function createWin32Module(){
                 ]),
                 'DWrite.dll': createDwriteFunctions({ ...displayHost,
                     divergence: config?.divergence }),
+                // The Windows Imaging Component, which .NET's WPF decodes and
+                // converts every bitmap through (windowscodecs/).
+                'windowscodecs.dll': createWindowscodecs(windowscodecsHost()),
                 // The Steam client's side of a game's Steamworks calls, for the
                 // account the launcher signed in with (steamclient/): the
                 // library of the process's width, as the client installs both.
