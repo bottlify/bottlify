@@ -79,7 +79,8 @@ export function createDebugFunctions(host){
     /** @param {number} pointer @param {number} value */
     const writeU32 = (pointer, value)=>host.writeMemory(pointer >>> 0, dword(value));
 
-    return {
+    /** @type {Record<string, any>} */
+    const functions = {
         /**
          * VOID DbgBreakPoint(void)
          *
@@ -122,6 +123,41 @@ export function createDebugFunctions(host){
                 say.handler([buffer]);
                 host.free(buffer);
                 return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * ULONG DbgPrintEx(ULONG ComponentId, ULONG Level, PCSTR Format, ...)
+         *
+         * DbgPrint's message, whatever component and level it is filed under:
+         * the log keeps them all, as a debugger asking for all would.
+         */
+        DbgPrintEx: {
+            convention: 'cdecl',
+            argBytes: 12 + VARIADIC_SLOTS * 4,
+            /** @param {number[]} args */
+            handler: args=>functions.DbgPrint.handler(args.slice(2)),
+        },
+
+        /**
+         * ULONG DbgPrompt(PCCH Prompt, PCH Response, ULONG MaximumResponseLength)
+         *
+         * The prompt said, and no answer: no debugger is attached to type one,
+         * so the response is empty and its length 0.
+         */
+        DbgPrompt: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([prompt, response, most])=>{
+                if ((prompt >>> 0) !== 0)
+                {
+                    host.kernel32.OutputDebugStringA?.handler([prompt]);
+                }
+                if ((response >>> 0) !== 0 && (most >>> 0) !== 0)
+                {
+                    host.writeMemory(response >>> 0, new Uint8Array(1));
+                }
+                return 0;
             },
         },
 
@@ -237,4 +273,5 @@ export function createDebugFunctions(host){
         NtSystemDebugControl: refuse('NtSystemDebugControl',
             { argBytes: 24, answer: STATUS.NOT_IMPLEMENTED, why: 'there is no kernel debugger' }),
     };
+    return functions;
 }

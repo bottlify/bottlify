@@ -224,3 +224,15 @@ test('_W_Getdays widens the names _Getdays lists, the narrow list freed', ()=>{
     assert.equal(String.fromCharCode(...units.slice(0, units.indexOf(0))), ':Sun:Sunday');
     assert.deepEqual(called.at(-1), ['free', 0x3000]);
 });
+
+test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
+    const wide = { handler: ()=>1 };
+    const wideUnsigned = { handler: ()=>2 };
+    const narrow = { handler: ()=>3 };
+    const crt = /** @type {any} */ ({ _strtoi64: narrow, _strtoui64: narrow, _wcstoi64: wide,
+        _wcstoui64: wideUnsigned });
+    const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({}));
+    assert.equal(ucrt.wcstoll, wide);
+    assert.equal(ucrt.wcstoull, wideUnsigned);
+    assert.equal(ucrt.strtoll, narrow);
+});

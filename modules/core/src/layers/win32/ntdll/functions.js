@@ -30,6 +30,7 @@ import { createCountedStringFunctions } from './strings.js';
 import { createQueryFunctions } from './query.js';
 import { createImageFunctions } from './image.js';
 import { createIntegerFunctions } from './integer.js';
+import { createBitmapFunctions } from './bitmap.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
@@ -329,6 +330,8 @@ export function createNtdllFunctions(host){
         }),
 
         ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+
+        ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...createQueryFunctions({
             readMemory: host.readMemory,

@@ -705,9 +705,13 @@ export function createUcrtbaseFunctions(crt, host){
             },
         } : {},
 
-        /** long long strtoll(...) and unsigned long long strtoull(...): C99's names for them. */
+        /**
+         * long long strtoll(...), unsigned long long strtoull(...) and the wide
+         * wcstoll and wcstoull: C99's names for the 64-bit readings.
+         */
         strtoll: crt._strtoi64,
         strtoull: crt._strtoui64,
+        ...crt._wcstoi64 ? { wcstoll: crt._wcstoi64, wcstoull: crt._wcstoui64 } : {},
 
         /** void _lock_locales(void), void _unlock_locales(void): the locale never changes here. */
         _lock_locales: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
