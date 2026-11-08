@@ -34,7 +34,9 @@
     const data = JSON.parse(json.textContent ?? '{}');
     const COLOUR = { package: '#ffd166', layer: '#4cc9f0', library: '#8d99f5', cork: '#ff9f1c',
         thread: '#f72585', outside: '#80ed99' };
-    const SIZE = { package: 14, layer: 6, thread: 5, outside: 6, cork: 3, library: 1.2 };
+    const SIZE = { package: 6, layer: 3, thread: 2.5, outside: 3, cork: 1.6, library: 0.8 };
+    // The camera nearer its pivot than this is zoomed in: every point in view is named.
+    const ZOOMED = 420;
     const NAMED = new Set(['package', 'layer', 'thread', 'outside']);
 
     // Each step's arrows are lines of their own, curved off the structure's, so
@@ -54,12 +56,12 @@
         .showNavInfo(false)
         .graphData({ nodes: data.nodes, links })
         .nodeId('id')
-        .nodeVal(node=>(lit.has(node.id) ? Math.max(10, (SIZE[node.group] ?? 2) * 2)
+        .nodeVal(node=>(lit.has(node.id) ? Math.max(5, (SIZE[node.group] ?? 2) * 2)
             : SIZE[node.group] ?? 2))
         .nodeColor(node=>(lit.size && !lit.has(node.id) ? '#2c3340' : COLOUR[node.group] ?? '#ccc'))
         .nodeOpacity(0.95)
         .nodeResolution(16)
-        .nodeRelSize(6)
+        .nodeRelSize(4)
         .nodeLabel(node=>`<b>${node.label}</b><br>${node.about}`)
         .linkVisibility(link=>link.kind !== 'flow' || litLinks.has(link))
         .linkCurvature(link=>(link.kind === 'flow' ? 0.3 : 0))
@@ -83,7 +85,16 @@
         if (!fitted)
         {
             fitted = true;
-            graph.zoomToFit(900, 30);
+            // A part named in the address (`#core/win32`) is flown to instead.
+            const asked = by.get(decodeURIComponent(window.location.hash.slice(1)));
+            if (asked)
+            {
+                fly(asked);
+            }
+            else
+            {
+                graph.zoomToFit(900, 30);
+            }
         }
     });
 
@@ -98,7 +109,7 @@
 
     // The names: one tag per named point, moved to where the point projects.
     const layer = /** @type {HTMLElement} */ (box.querySelector('.g3-labels'));
-    // A small point is named only while a step lights it.
+    // A small point is named while a step lights it or the camera is zoomed in.
     const tags = new Map(data.nodes.map(node=>{
         const tag = document.createElement('span');
         tag.className = `g3-tag g3-${node.group}`;
@@ -109,6 +120,9 @@
     const place = ()=>{
         const camera = graph.camera();
         const e = camera.matrixWorld.elements;
+        const pivot = controls.target;
+        const zoomed = Math.hypot(camera.position.x - pivot.x, camera.position.y - pivot.y,
+            camera.position.z - pivot.z) < ZOOMED;
         for (const node of data.nodes)
         {
             const tag = tags.get(node.id);
@@ -123,8 +137,10 @@
             const ahead = -(dx * e[8] + dy * e[9] + dz * e[10]);
             const at = graph.graph2ScreenCoords(node.x, node.y, node.z);
             const far = Math.hypot(dx, dy, dz);
-            const named = NAMED.has(node.group) || lit.has(node.id);
-            tag.style.display = ahead > 0 && named ? '' : 'none';
+            const named = zoomed || NAMED.has(node.group) || lit.has(node.id);
+            const inside = at.x > -40 && at.y > -20 && at.x < box.clientWidth + 40
+                && at.y < box.clientHeight + 20;
+            tag.style.display = ahead > 0 && named && inside ? '' : 'none';
             tag.style.transform = `translate(${at.x}px, ${at.y}px) translate(-50%, -150%)`;
             tag.style.opacity = String(Math.max(0.25, Math.min(1, 420 / far)));
             tag.classList.toggle('dim', lit.size > 0 && !lit.has(node.id));
@@ -157,7 +173,7 @@
     /** @param {Point} node */
     const fly = node=>{
         controls.autoRotate = false;
-        const distance = 70;
+        const distance = 150;
         const ratio = 1 + distance / Math.max(1, Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0));
         graph.cameraPosition({ x: (node.x ?? 0) * ratio, y: (node.y ?? 0) * ratio,
             z: (node.z ?? 0) * ratio }, node, 1200);
@@ -254,10 +270,4 @@
             box.requestFullscreen?.();
         }
     });
-    // A part named in the address (`#core/win32`) opens with it.
-    const asked = by.get(decodeURIComponent(window.location.hash.slice(1)));
-    if (asked)
-    {
-        window.setTimeout(()=>fly(asked), 1500);
-    }
 })();
