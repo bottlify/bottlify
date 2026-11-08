@@ -1,4 +1,5 @@
 # Configuration
+<!-- covers: modules/core/src/app.js modules/core/src/layers/cpu/module.js modules/core/src/layers/kernel/module.js modules/core/src/layers/win32/module.js modules/core/src/layers/graphics/module.js modules/core/src/layers/audio/module.js -->
 
 What `createApp`'s nested options ([api.md](api.md)) set, layer by layer. Options that exist to
 rule something out while debugging are listed apart, under [Debugging](api.md#debugging); they are

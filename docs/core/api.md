@@ -1,4 +1,5 @@
 # API
+<!-- covers: modules/core/src/app.js modules/core/src/core.js -->
 
 ```js
 import { createApp } from '@bottlify/core';

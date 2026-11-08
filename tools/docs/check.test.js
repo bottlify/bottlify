@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { check } from './check.mjs';
+import { check, covered, stale } from './check.mjs';
 import { headings, links } from './markdown.mjs';
 
 /** @param {Record<string, string>} files */
@@ -56,6 +56,31 @@ test('a sound tree passes, and each kind of break is named', ()=>{
         assert.match(problems.join('\n'), /c\.md: no such file/);
         assert.match(problems.join('\n'), /gone\.md: no such file/);
         assert.match(problems.join('\n'), /docs\/stray\.md: not in docs\/README\.md/);
+    }
+    finally
+    {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('a page covers the code it links to and names, and is named when that code changes', ()=>{
+    const src = 'mod/core/src';
+    const root = tree({
+        'README.md': '',
+        'docs/README.md': '- [A](a.md)\n- [B](b.md)\n',
+        'docs/a.md': `# A\n<!-- covers: ${src}/api.js -->\nSee [the loader](../${src}/loader/) `
+            + 'and the package, a pointer only: [core](../mod/core/).\n',
+        'docs/b.md': `# B\n<!-- covers: ${src}/gone.js -->\n`,
+        [`${src}/api.js`]: '',
+        [`${src}/loader/pe.js`]: '',
+    });
+    try
+    {
+        assert.deepEqual(covered(root, 'docs/a.md').sort(), [`${src}/api.js`, `${src}/loader`]);
+        assert.deepEqual(stale(root, [`${src}/loader/pe.js`, `${src}/other.js`]),
+            [{ page: 'docs/a.md', files: [`${src}/loader/pe.js`] }]);
+        assert.deepEqual(stale(root, [`${src}/api.js`, 'docs/a.md']), [], 'the page changed too');
+        assert.match(check(root).join('\n'), /docs\/b\.md: covers mod\/core\/src\/gone\.js, which/);
     }
     finally
     {

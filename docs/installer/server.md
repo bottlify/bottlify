@@ -1,4 +1,5 @@
 # The bottle server's routes
+<!-- covers: modules/installer/src/server -->
 
 The server is private: an upload belongs to whoever owns the bottle, publishing it is a separate
 act, and a server with no token refuses to start. Every route is authenticated with the token:

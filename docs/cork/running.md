@@ -1,4 +1,5 @@
 # Running cork
+<!-- covers: modules/cork/bin -->
 
 From a terminal, with Node 22 or later (`npm ci` once at the repository's root):
 

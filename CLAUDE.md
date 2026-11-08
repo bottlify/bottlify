@@ -82,6 +82,14 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   error in the journal, counted and kept in `report()`, and the program goes on. A counter alone
   is not saying it. A departure from the specification made on purpose is an entry in
   `roadmap/decisions.md`; anything else is a bug to fix.
+- **A contract change updates its docs in the same commit.** A contract is what someone outside
+  sees: a public API or option, a module's `requires`, a Win32 function's behaviour, a limit, a
+  decision. A docs page covers the code it links to and what its `<!-- covers: ... -->` line
+  names; `node tools/docs/check.mjs --staged` (run by a hook before `git commit`) lists the pages
+  whose code is staged and they are not. Each one it names is updated, or is left because the
+  change is not a contract change. What can be read off the code is not written by hand: the
+  module graph and each layer's summary come from its `module.js` when `npm run docs` builds the
+  site, so a layer's opening comment (`<name> — what it is`) is its documentation.
 - **Comments say why**, not what; no changelog comments, no tombstones, no claims about titles we
   did not measure, no earlier projects or local paths in anything committed.
 - **A dash is a single hyphen** (` - `) in comments, commit messages and docs; never a double

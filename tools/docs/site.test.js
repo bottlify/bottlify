@@ -89,3 +89,9 @@ test('the site builds from docs/, and every link inside it leads to a page that 
         rmSync(out, { recursive: true, force: true });
     }
 });
+
+test('render leaves a comment out of the page', ()=>{
+    const html = render('# T\n<!-- covers: a.js\n  b.js -->\n\nText.\n');
+    assert.doesNotMatch(html, /covers/);
+    assert.match(html, /<p>Text\.<\/p>/);
+});

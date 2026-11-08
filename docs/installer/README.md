@@ -1,4 +1,5 @@
 # `@bottlify/installer`
+<!-- covers: modules/installer/src -->
 
 Make a bottle from a game's installer when all you have is `Setup.exe` or a disc image. This
 package is for whoever hosts the games; a player only opens the page and presses Start.

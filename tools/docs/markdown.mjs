@@ -183,6 +183,15 @@ export function render(text, { link = url=>url } = {}){
                     + `${escape(body.join('\n'))}</code></pre>`);
             continue;
         }
+        if (/^\s*<!--/.test(line))
+        {
+            // A comment is for whoever edits the page (`covers:`), not its reader.
+            while (!lines[i].includes('-->') && i + 1 < lines.length)
+            {
+                i++;
+            }
+            continue;
+        }
         const heading = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
         if (heading)
         {
