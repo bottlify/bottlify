@@ -394,7 +394,9 @@ const theirs = join(options.checkout, 'bundles', options.id);
 if (!existsSync(theirs))
 {
     mkdirSync(join(options.checkout, 'bundles'), { recursive: true });
-    symlinkSync(bundleDir, theirs, 'dir');
+    // A junction on Windows: a directory symlink there needs the right to
+    // make one (developer mode or an elevated shell), a junction does not.
+    symlinkSync(bundleDir, theirs, process.platform === 'win32' ? 'junction' : 'dir');
 }
 const args = [options.id, '--worker', '--run-seconds', String(options.runSeconds),
     '--wait', String(options.wait), ...route.args ?? [], ...options.extra];
