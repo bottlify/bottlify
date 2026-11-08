@@ -22,6 +22,7 @@
     "test:integration": "npm run test:integration -w @bottlify/core && npm run test:integration -w @bottlify/cork",
     "test:tools": "node --test --test-timeout=60000 \"tools/**/*.test.js\"",
     "check:boundaries": "npm run check:boundaries -w @bottlify/core && node tools/check-emit-options.mjs && node tools/check-budget-writes.mjs && node tools/check-lock-release.mjs && node tools/check-scan-windows.mjs && node tools/check-guest-pointers.mjs && node tools/check-wide-limits.mjs && node tools/check-wall-bounds.mjs && node tools/check-overlapped-layout.mjs && node tools/check-store-protocol.mjs && node tools/check-volume-spread.mjs && node tools/emit-digest.mjs --check && node tools/docs/check.mjs",
+    "docs": "node tools/docs/site.mjs",
     "cdp:probe": "node tools/cdp_test/cli.mjs probe",
     "cdp:shaders": "node tools/cdp_test/shader-gate.mjs",
     "cdp:tess": "node tools/cdp_test/tess-gate.mjs",

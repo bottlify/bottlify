@@ -5,7 +5,8 @@ to WebAssembly, and a Win32 and DirectX layer written in JavaScript answers its 
 WebAudio and OPFS. What it is for is in the [README](../README.md); these pages are how to use it
 and how it works.
 
-This list is the site's navigation: a page is reachable when it is listed here.
+<!-- This list is the site's navigation (tools/docs/site.mjs): a page is reachable when it is
+listed here. -->
 
 ## Using it
 

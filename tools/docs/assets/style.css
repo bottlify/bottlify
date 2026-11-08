@@ -1,0 +1,134 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+:root {
+    --bg: #fff; --fg: #1b2328; --muted: #5c6970; --line: #e2e6e8; --soft: #f4f6f7;
+    --accent: #2f6fd6; --code: #f4f6f7; --node: #fff; --hot: #e8f0fd;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #14181b; --fg: #e3e8eb; --muted: #97a3aa; --line: #2a3136; --soft: #1b2024;
+        --accent: #7aa7ff; --code: #1e2428; --node: #1b2024; --hot: #20324f;
+    }
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 72px; }
+body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 Inter, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+header {
+    position: sticky; top: 0; z-index: 5; display: flex; gap: 16px; align-items: center;
+    height: 56px; padding: 0 20px; background: var(--bg); border-bottom: 1px solid var(--line);
+}
+header .brand { font-weight: 700; color: var(--fg); }
+header .brand span { color: var(--muted); font-weight: 400; }
+header .search { margin-left: auto; position: relative; width: min(340px, 50vw); }
+header input {
+    width: 100%; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--soft); color: var(--fg); font: inherit; font-size: 14px;
+}
+#results {
+    position: absolute; right: 0; top: 40px; width: min(520px, 90vw); max-height: 70vh;
+    overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .15); display: none;
+}
+#results a { display: block; padding: 10px 14px; border-bottom: 1px solid var(--line); color: var(--fg); }
+#results a:hover, #results a.on { background: var(--hot); text-decoration: none; }
+#results small { display: block; color: var(--muted); }
+
+.layout {
+    display: grid; grid-template-columns: 260px minmax(0, 1fr) 220px;
+    max-width: 1400px; margin: 0 auto;
+}
+nav.side {
+    position: sticky; top: 56px; height: calc(100vh - 56px); overflow: auto;
+    padding: 20px 12px 40px 20px; border-right: 1px solid var(--line); font-size: 14px;
+}
+nav.side h4 {
+    margin: 18px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted);
+}
+nav.side ul { list-style: none; margin: 0; padding: 0; }
+nav.side ul ul { padding-left: 14px; }
+nav.side a { display: block; padding: 3px 8px; border-radius: 6px; color: var(--fg); }
+nav.side a.here { background: var(--hot); color: var(--accent); font-weight: 600; }
+
+main { padding: 28px 44px 80px; min-width: 0; }
+main h1 { font-size: 2em; line-height: 1.25; margin: 0 0 .6em; }
+main h2 { margin-top: 2em; padding-bottom: .25em; border-bottom: 1px solid var(--line); }
+.anchor { margin-left: .35em; color: var(--muted); opacity: 0; font-weight: 400; }
+h1:hover .anchor, h2:hover .anchor, h3:hover .anchor, h4:hover .anchor { opacity: 1; }
+code {
+    font: .88em/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    background: var(--code); padding: .1em .35em; border-radius: 4px;
+}
+pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow: auto; }
+pre code { padding: 0; background: none; }
+/* The diagrams carry their own light theme. */
+pre.mermaid {
+    background: #fff; border: 1px solid var(--line); text-align: center;
+    font: 13px/1.4 Inter, "Segoe UI", Helvetica, Arial, sans-serif; white-space: normal;
+}
+.table { overflow: auto; margin: 1em 0; }
+table { border-collapse: collapse; font-size: 14px; width: 100%; }
+th, td { border: 1px solid var(--line); padding: 6px 10px; vertical-align: top; text-align: left; }
+th { background: var(--soft); }
+img { max-width: 100%; }
+
+aside.toc {
+    position: sticky; top: 56px; height: calc(100vh - 56px); overflow: auto;
+    padding: 28px 16px; font-size: 13px;
+}
+aside.toc b { display: block; color: var(--muted); margin-bottom: 6px; }
+aside.toc a { display: block; color: var(--muted); padding: 2px 0; }
+aside.toc a.l3 { padding-left: 12px; }
+
+.pager {
+    display: flex; justify-content: space-between; gap: 16px; margin-top: 56px; padding-top: 20px;
+    border-top: 1px solid var(--line);
+}
+.pager a { flex: 1; padding: 12px 16px; border: 1px solid var(--line); border-radius: 8px; }
+.pager a.next { text-align: right; }
+.pager small { display: block; color: var(--muted); }
+.edit { margin-top: 24px; font-size: 13px; color: var(--muted); }
+
+svg.graph { max-width: 100%; height: auto; display: block; margin: 12px auto; }
+svg.graph .node { cursor: pointer; }
+svg.graph .node rect { fill: var(--node); stroke: var(--muted); stroke-width: 1.2; }
+svg.graph .node text { fill: var(--fg); font: 600 14px Inter, "Segoe UI", sans-serif; pointer-events: none; }
+svg.graph .node:hover rect, svg.graph .node.on rect { stroke: var(--accent); stroke-width: 2.4; }
+svg.graph .node.up rect { fill: var(--hot); }
+svg.graph .node.down rect { fill: var(--hot); stroke-dasharray: 4 3; }
+svg.graph .edge { fill: none; stroke: var(--muted); stroke-width: 1.2; opacity: .55; }
+svg.graph .edge.implied { display: none; }
+svg.graph .edge.on { display: inline; stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+svg.graph marker path { fill: var(--muted); }
+.layer-card {
+    border: 1px solid var(--line); border-radius: 10px; padding: 4px 20px 12px; margin: 16px 0;
+    background: var(--soft);
+}
+.legend { font-size: 14px; color: var(--muted); }
+
+@media (max-width: 1100px) {
+    .layout { grid-template-columns: 240px minmax(0, 1fr); }
+    aside.toc { display: none; }
+}
+.menu { display: none; cursor: pointer; font-size: 22px; line-height: 1; color: var(--fg); }
+@media (max-width: 760px) {
+    header { padding: 0 16px; gap: 12px; }
+    header .search { flex: 1; width: auto; }
+    header .brand span { display: none; }
+    .menu { display: block; }
+    .layout { display: block; }
+    nav.side { display: none; position: static; height: auto; border-right: 0;
+        border-bottom: 1px solid var(--line); }
+    #menu:checked ~ .layout nav.side { display: block; }
+    main { padding: 20px 16px 60px; }
+}
