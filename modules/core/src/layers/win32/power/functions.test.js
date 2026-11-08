@@ -71,3 +71,27 @@ test('the platform is a desktop on the Balanced scheme, which keeps no settings 
     assert.equal(new DataView(memory.buffer).getUint32(0x800, true), 0x381b4222);
     assert.equal(fns.PowerReadACValue.handler(), 2);
 });
+
+test('the XP-era scheme calls find no policy, and only Balanced can be made active', ()=>{
+    const m = machine();
+    const memory = new Uint8Array(0x100);
+    const power = createPowrprofFunctions({ ...m.host,
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            memory.slice(at, at + length) });
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([['ReadPwrScheme', [0, 0x20]],
+        ['WritePwrScheme', [0x10, 0, 0, 0x20]], ['DeletePwrScheme', [1]],
+        ['EnumPwrSchemes', [0x400000, 0]]]))
+    {
+        assert.equal(/** @type {any} */ (power)[name].handler(args), 0, name);
+    }
+    assert.equal(m.lastError(), 50, 'not supported');
+    assert.equal(power.CanUserWritePwrScheme.handler([]), 0);
+    memory.set(Uint8Array.of(0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41,
+        0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e), 0x40);
+    assert.equal(power.PowerSetActiveScheme.handler([0, 0x40]), 0, 'Balanced');
+    // High performance, {8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c}: not a scheme here.
+    memory.set(Uint8Array.of(0xda, 0x7f, 0x5e, 0x8c, 0xbf, 0xe8, 0x96, 0x4a,
+        0x9a, 0x85, 0xa6, 0xe2, 0x3a, 0x8c, 0x63, 0x5c), 0x60);
+    assert.equal(power.PowerSetActiveScheme.handler([0, 0x60]), 2);
+    assert.equal(power.PowerSetActiveScheme.handler([0, 0]), 87);
+});
