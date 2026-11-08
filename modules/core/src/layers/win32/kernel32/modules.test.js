@@ -516,3 +516,38 @@ test('DelayLoadFailureHook offers no stand-in, leaving the delay-load helper to 
     assert.equal(fns.DelayLoadFailureHook.argBytes, 8);
     assert.equal(fns.DelayLoadFailureHook.handler([0x1000, 0x2000]), 0);
 });
+
+test('an engine library loaded from another folder it stands in is that folder\'s file', ()=>{
+    // fusion.dll stands in a .NET runtime's folder (A237): loaded from there,
+    // it names that path; loaded by its bare name, the system folder.
+    const runtime = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\v4.0.30319';
+    const f = hostFor({ lookup: { 'fusion.dll': 0x7000 }, load: ()=>0x7000 });
+    const host = /** @type {any} */ (f.host);
+    host.alsoIn = (/** @type {string} */ name)=>(name === 'fusion.dll' ? [`${runtime}\\`] : []);
+    /** @type {string[]} */
+    const written = [];
+    host.writeMemory = (/** @type {number} */ _at, /** @type {Uint8Array} */ bytes)=>
+        written.push(String.fromCharCode(...bytes.subarray(0, bytes.length - 1)));
+    const fns = createModuleFunctions(f.host);
+    f.say(0x400000, `${runtime}\\fusion.dll`);
+    assert.equal(fns.LoadLibraryA.handler([0x400000]), 0x7000);
+    fns.GetModuleFileNameA.handler([0x7000, 0x1000, 260]);
+    assert.equal(written.at(-1), `${runtime}\\fusion.dll`);
+    const older = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\v2.0.50727';
+    host.alsoIn = ()=>[runtime, older];
+    f.say(0x400100, `${older}\\fusion.dll`);
+    fns.LoadLibraryA.handler([0x400100]);
+    fns.GetModuleFileNameA.handler([0x7000, 0x1000, 260]);
+    assert.equal(written.at(-1), `${older}\\fusion.dll`, 'the folder it was loaded from last');
+
+    const g = hostFor({ lookup: { 'fusion.dll': 0x7000 }, load: ()=>0x7000 });
+    const other = /** @type {any} */ (g.host);
+    other.alsoIn = host.alsoIn;
+    other.writeMemory = host.writeMemory;
+    const bare = createModuleFunctions(g.host);
+    g.say(0x400000, 'C:\\Elsewhere\\fusion.dll');
+    bare.LoadLibraryA.handler([0x400000]);
+    bare.GetModuleFileNameA.handler([0x7000, 0x1000, 260]);
+    assert.equal(written.at(-1), 'C:\\Windows\\System32\\fusion.dll',
+        'a folder it does not stand in names nothing');
+});

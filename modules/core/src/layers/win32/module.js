@@ -844,12 +844,14 @@ export function createWin32Module(){
                 .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             // Every file call's volume, with the engine's libraries standing in
             // their folders as files of their images (A41).
+            /** The runtime folders an engine library stands in too (A237). @param {string} name */
+            const alsoIn = name=>(RUNTIME_LIBRARIES.includes(name.toLowerCase())
+                ? runtimeDirectories('C:\\WINDOWS') : []);
             const volume = withSystemLibraries(
                 createVolume(filesystem, config?.fetchBlocks ?? null),
                 ()=>systemLibraryNames(),
                 { homeOf: libraryHome,
-                    alsoIn: name=>(RUNTIME_LIBRARIES.includes(name.toLowerCase())
-                        ? runtimeDirectories('C:\\WINDOWS') : []),
+                    alsoIn,
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
@@ -2877,6 +2879,7 @@ export function createWin32Module(){
                         setLastError: setError,
                         imagePath: ()=>modules.imagePath(),
                         libraryHome,
+                        alsoIn,
                         list: ()=>modules.list?.() ?? [],
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
