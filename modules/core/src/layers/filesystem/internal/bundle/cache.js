@@ -14,13 +14,21 @@
  * lot of a large game touches nearly all of it. So the blocks go to storage,
  * and what stays in memory is a fixed-size record of which ones are there.
  *
- * The blocks are written one after another into one file (`cacheFiles.pack`),
- * in the order they arrive, and a table (`cacheFiles.index`) gives each block's
- * offset there, or none: the file is as long as the blocks it holds, whichever
- * of the bundle they are. A slot from the index alone made the file as long as
- * the highest block read, and the browser counts a file's length against the
- * origin's quota (and on some file systems allocates it): a game that read
- * 1 437 of its 68 616 blocks across the bundle held its whole length on disk.
+ * The blocks are written one after another, in the order they arrive, into
+ * segments (`cacheFiles.segment`) of a fixed span each, and a table
+ * (`cacheFiles.index`) gives each block's place there, or none: a segment is as
+ * long as the blocks it holds, whichever of the bundle they are. A slot from the
+ * index alone made the file as long as the highest block read, and the browser
+ * counts a file's length against the origin's quota (and on some file systems
+ * allocates it): a game that read 1 437 of its 68 616 blocks across the bundle
+ * held its whole length on disk.
+ *
+ * Segments are what lets the oldest blocks go. A write the store refuses -- the
+ * origin's quota reached, the disk full -- removes the segment written longest
+ * ago, of whichever bundle, this one's own included but the one being written,
+ * and is tried again: a game larger than the room there is keeps its newest
+ * blocks rather than none, and the browser is not left to clear the origin
+ * whole, saved games with it. A segment another tab holds open stays.
  *
  * Each block goes in with a header of its own -- a mark, its index and its
  * length -- and a read checks it before the bytes go to a guest, so a table
@@ -45,16 +53,22 @@
  * mark, is discarded rather than trusted, and so is every file of the layouts
  * this one replaced.
  *
- * A store that fills up is a slower run, not a failed one: a block it refuses
- * is held in the heap, as where there is no store at all.
+ * A store that fills up with nothing left to let go is a slower run, not a
+ * failed one: a block it refuses is held in the heap, as where there is no
+ * store at all.
  */
 
 import { createOpfsStore } from '../opfs-store.js';
 import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
 /**
+ * `list` names everything the store holds, with when each file was last written:
+ * what a full store ages the segments of every bundle by. A store without it lets
+ * go of this cache's own segments alone.
+ *
  * @typedef {{ read: Function, write: Function, truncate: Function, stat: Function,
- *     open: Function, remove: Function, flush?: Function }} BlockStore
+ *     open: Function, remove: Function, flush?: Function,
+ *     list?: () => { path: string, directory: boolean, modified?: number }[] }} BlockStore
  */
 
 /**
@@ -102,35 +116,51 @@ const SEGMENT_BLOCKS = 1024;
 
 /**
  * The files of a cache, by its file name (`blockCacheName`, made safe), all at
- * the root of the origin's file system: the table, the blocks, and the order the
- * last run read in. `replaced` are the files of the layouts this one replaced
- * -- the one-file `.blocks` with its `.present` bitmap, the first appended
- * layout's `.slots` table, and the segments `.blocks.<k>` with their `.held`
- * bitmap -- which a cache that finds them drops.
+ * the root of the origin's file system: the table, the segments of blocks, and
+ * the order the last run read in. `replaced` are the files of the layouts this
+ * one replaced -- the one-file `.blocks` with its `.present` bitmap, the first
+ * appended layout's `.slots` table, the segments `.blocks.<k>` with their
+ * `.held` bitmap, and the one-file `.pack` -- which a cache that finds them drops.
  */
 export const cacheFiles = {
     /** @param {string} file */
     index: file=>`${file}.index`,
-    /** @param {string} file */
-    pack: file=>`${file}.pack`,
+    /** @param {string} file @param {number} n */
+    segment: (file, n)=>`${file}.pack.${n}`,
     /** @param {string} file */
     order: file=>`${file}.order`,
     /** @param {string} file @param {number} blockCount */
     replaced: (file, blockCount)=>[`${file}.blocks`, `${file}.present`, `${file}.slots`,
-        `${file}.held`, ...Array.from({ length: Math.ceil(blockCount / SEGMENT_BLOCKS) },
-            (_, k)=>`${file}.blocks.${k}`)],
+        `${file}.held`, `${file}.pack`, ...Array.from(
+            { length: Math.ceil(blockCount / SEGMENT_BLOCKS) }, (_, k)=>`${file}.blocks.${k}`)],
 };
 
-/** The pack file's own header: its mark and the layout's version, then room. */
+/** Any cache's segment, by its file name at the store's root. */
+const SEGMENT_FILE = /^([^\\/]+)\.pack\.(\d+)$/;
+
+/**
+ * The bytes a segment spans: enough that letting one go frees a useful amount,
+ * few enough that a game of tens of gigabytes keeps its segments' handles open
+ * (a guest read cannot wait for one) in a few hundred at most, and always room
+ * for a whole block.
+ *
+ * @param {number} blockSize
+ */
+export const segmentSpan = blockSize=>Math.max(128 << 20, 2 * blockSize + 1024);
+
+/** A segment's own header: its mark and the layout's version, then room. */
 const PACK_HEADER = 16;
-/** 'BPAK', the pack's mark. */
+/** 'BPAK', a segment's mark. */
 const PACK_MARK = 0x4b415042;
-const PACK_VERSION = 1;
+const PACK_VERSION = 2;
 /** A block's header in the pack: its mark, its index, its length, and a word of room. */
 const RECORD_HEADER = 16;
 /** 'BLK1', a block's mark. */
 const RECORD_MARK = 0x314b4c42;
-/** Bytes of the table a block takes: its offset in the pack as a double, 0 for none. */
+/**
+ * Bytes of the table a block takes: its place as a double, the segment's number
+ * times the span plus the offset in the segment, 0 for none.
+ */
 const ENTRY_BYTES = 8;
 
 /** The pack's header as a new pack starts with it. */
@@ -181,20 +211,47 @@ const recordIs = (header, index, length)=>{
 const tableBytes = blockCount=>blockCount * ENTRY_BYTES;
 
 /**
- * A table's offsets, every one inside a pack of `packSize` bytes or 0.
+ * A table's places as written, and the segments they name, every place not a
+ * whole number past a segment's header left out.
  *
- * @param {Uint8Array} bytes @param {number} blockCount @param {number} packSize
+ * @param {Uint8Array} bytes @param {number} blockCount @param {number} span
  */
-const tableOf = (bytes, blockCount, packSize)=>{
+const placesOf = (bytes, blockCount, span)=>{
     const table = new Float64Array(blockCount);
+    /** @type {Set<number>} */
+    const segments = new Set();
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
     for (let index = 0; index < blockCount; index++)
     {
         const at = view.getFloat64(index * ENTRY_BYTES, true);
-        table[index] = Number.isInteger(at) && at >= PACK_HEADER
-            && at + RECORD_HEADER <= packSize ? at : 0;
+        if (Number.isInteger(at) && at % span >= PACK_HEADER)
+        {
+            table[index] = at;
+            segments.add(Math.floor(at / span));
+        }
     }
-    return table;
+    return { table, segments };
+};
+
+/**
+ * Drops every place whose record would not fit in its segment as long as
+ * `sizeOf` says it is (0 for a segment not there); answers how many it dropped.
+ *
+ * @param {Float64Array} table @param {number} span
+ * @param {(n: number) => number} sizeOf
+ */
+const dropMissing = (table, span, sizeOf)=>{
+    let dropped = 0;
+    for (let index = 0; index < table.length; index++)
+    {
+        const at = table[index];
+        if (at !== 0 && at % span + RECORD_HEADER > sizeOf(Math.floor(at / span)))
+        {
+            table[index] = 0;
+            dropped++;
+        }
+    }
+    return dropped;
 };
 
 /**
@@ -214,15 +271,17 @@ export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
 const fileNameOf = name=>name.replace(/[^A-Za-z0-9._-]/g, '_');
 
 /**
- * A cache's table and its pack, read through the origin's file system without
- * opening anything for writing; null where it holds no table of this bundle's
- * size or no pack of this layout. A file that is not there is refused
- * (NotFoundError).
+ * A cache's table and its segments, read through the origin's file system
+ * without opening anything for writing; null where it holds no table of this
+ * bundle's size. A place in a segment not there, or not of this layout, is
+ * none. A file that is not there is refused (NotFoundError).
  *
- * @param {any} root @param {string} file @param {number} blockCount
- * @returns {Promise<{ table: Float64Array, pack: Blob } | null>}
+ * @param {any} root @param {string} file @param {number} blockCount @param {number} span
+ * @returns {Promise<{ table: Float64Array,
+ *     slice: (at: number, length: number) => Blob | null } | null>}
+ *     `slice`: the bytes at a place, null where its segment is too short
  */
-async function readCache(root, file, blockCount){
+async function readCache(root, file, blockCount, span){
     /** @param {string} name @returns {Promise<Blob | null>} */
     const fileOf = async name=>{
         try
@@ -234,14 +293,29 @@ async function readCache(root, file, blockCount){
         }
     };
     const index = await fileOf(cacheFiles.index(file));
-    const pack = await fileOf(cacheFiles.pack(file));
-    if (index === null || pack === null || index.size !== tableBytes(blockCount)
-        || !isPack(new Uint8Array(await pack.slice(0, PACK_HEADER).arrayBuffer())))
+    if (index === null || index.size !== tableBytes(blockCount))
     {
         return null;
     }
-    return { table: tableOf(new Uint8Array(await index.arrayBuffer()), blockCount, pack.size),
-        pack };
+    const { table, segments } = placesOf(new Uint8Array(await index.arrayBuffer()), blockCount,
+        span);
+    /** @type {Map<number, Blob>} */
+    const blobs = new Map();
+    for (const n of segments)
+    {
+        const blob = await fileOf(cacheFiles.segment(file, n));
+        if (blob !== null && isPack(new Uint8Array(await blob.slice(0, PACK_HEADER).arrayBuffer())))
+        {
+            blobs.set(n, blob);
+        }
+    }
+    dropMissing(table, span, n=>blobs.get(n)?.size ?? 0);
+    return { table, slice: (at, length)=>{
+        const blob = blobs.get(Math.floor(at / span));
+        const from = at % span;
+        return blob === undefined || from + length > blob.size ? null
+            : blob.slice(from, from + length);
+    } };
 }
 
 /**
@@ -253,14 +327,14 @@ async function readCache(root, file, blockCount){
  * @param {Object} options
  * @param {any} options.root  The origin's file system (`navigator.storage.getDirectory()`).
  * @param {string} options.id  The bundle's id, as the engine is given it.
- * @param {{ fingerprint: string, blockCount: number,
+ * @param {{ fingerprint: string, blockSize: number, blockCount: number,
  *     block: (index: number) => { packed: number, codec: number, length: number },
  *     translations: { firstBlock: number, blocks: number } | null }} options.bundle  Opened.
  * @returns {Promise<{ blocks: number, resident: number, bytes: number, residentBytes: number }>}
  */
 export async function bundleResidency({ root, id, bundle }){
     const cache = await readCache(root, fileNameOf(blockCacheName(id, bundle.fingerprint)),
-        bundle.blockCount);
+        bundle.blockCount, segmentSpan(bundle.blockSize));
     const seed = bundle.translations;
     const out = { blocks: 0, resident: 0, bytes: 0, residentBytes: 0 };
     for (let index = 0; index < bundle.blockCount; index++)
@@ -273,8 +347,8 @@ export async function bundleResidency({ root, id, bundle }){
         out.blocks++;
         out.bytes += packed;
         if (cache && cache.table[index] !== 0
-            && cache.table[index] + RECORD_HEADER + storedLength(bundle.block(index))
-                <= cache.pack.size)
+            && cache.slice(cache.table[index], RECORD_HEADER + storedLength(bundle.block(index)))
+                !== null)
         {
             out.resident++;
             out.residentBytes += packed;
@@ -324,7 +398,7 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
     };
     const bundle = await openBundle(once, decode);
     const cache = await readCache(root, fileNameOf(blockCacheName(id, bundle.fingerprint)),
-        bundle.blockCount);
+        bundle.blockCount, segmentSpan(bundle.blockSize));
     if (cache === null)
     {
         return null;
@@ -339,9 +413,10 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
         {
             continue;
         }
-        const offset = cache.table[at];
-        const header = offset === 0 ? new Uint8Array(0)
-            : new Uint8Array(await cache.pack.slice(offset, offset + RECORD_HEADER).arrayBuffer());
+        const place = cache.table[at];
+        const slice = place === 0 ? null : cache.slice(place, RECORD_HEADER);
+        const header = slice === null ? new Uint8Array(0)
+            : new Uint8Array(await slice.arrayBuffer());
         if (!recordIs(header, at, storedLength(bundle.block(at))))
         {
             return null;
@@ -359,10 +434,11 @@ export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
             }
             const block = bundle.block(at);
             const packed = storedLength(block);
-            const from = cache.table[at] + RECORD_HEADER;
-            // A block past the pack's end would come out short, not missing.
-            whole &&= cache.table[at] !== 0 && cache.pack.size >= from + packed;
-            parts.push(cache.pack.slice(from, from + packed));
+            // A block past its segment's end would come out short, not missing.
+            const part = cache.table[at] === 0 ? null
+                : cache.slice(cache.table[at] + RECORD_HEADER, packed);
+            whole &&= part !== null;
+            parts.push(part ?? new Blob([]));
             const laid = { ...record, offset, packed };
             if (block.codec === Codec.DEFLATE_RAW)
             {
@@ -486,6 +562,8 @@ const ORDER_LIMIT = 4096;
  * @param {number} options.blockCount
  * @param {number} [options.maxHeapBytes]  Bound on the fallback, when there is
  *                                         nowhere to put blocks but the heap.
+ * @param {number} [options.segmentBytes]  A segment's span (`segmentSpan`), for a
+ *     test to fill one with a few blocks; every reader of the cache uses the default.
  * @returns {Promise<any>}
  */
 export async function createBlockCache(options){
@@ -503,13 +581,23 @@ export async function createBlockCache(options){
 
     const file = fileNameOf(name);
     const indexPath = cacheFiles.index(file);
-    const packPath = cacheFiles.pack(file);
     const orderPath = cacheFiles.order(file);
+    const span = options.segmentBytes ?? segmentSpan(blockSize);
+    /** @param {number} n */
+    const segmentPath = n=>cacheFiles.segment(file, n);
+    /**
+     * Which of this cache's segments a path is, or -1 for another cache's or none.
+     *
+     * @param {string} path
+     */
+    const ownSegment = path=>{
+        const found = SEGMENT_FILE.exec(path);
+        return found !== null && found[1] === file ? Number(found[2]) : -1;
+    };
 
     try
     {
         await store.open(indexPath);
-        await store.open(packPath);
         await store.open(orderPath);
     }
     catch (e){
@@ -533,19 +621,24 @@ export async function createBlockCache(options){
         await Promise.resolve().then(()=>store.flush?.()).catch(()=>{});
     }
 
-    /** Bytes the pack holds as the store has them now: where the next block goes. */
-    const packSize = ()=>store.stat(packPath)?.size ?? 0;
+    /** Bytes a segment holds as the store has them now, 0 for one not there. @param {number} n */
+    const sizeOf = n=>store.stat(segmentPath(n))?.size ?? 0;
+    /** The whole table, written at once. @param {Float64Array} places */
+    const writeTable = places=>{
+        const bytes = new Uint8Array(tableBytes(blockCount));
+        const view = new DataView(bytes.buffer);
+        places.forEach((at, index)=>view.setFloat64(index * ENTRY_BYTES, at, true));
+        store.write(indexPath, 0, bytes);
+    };
     // A table of the wrong size belongs to a different bundle, or to a version
-    // of this one with different blocks; a pack without this layout's mark to
-    // another layout. Either way what the table names means something else, so
-    // both start again rather than being partly believed.
+    // of this one with different blocks: what it names means something else,
+    // so it starts again rather than being partly believed.
     const tableStat = store.stat(indexPath);
-    const believed = tableStat !== null && tableStat.size === tableBytes(blockCount)
-        && isPack(store.read(packPath, 0, PACK_HEADER));
-    /** Each block's offset in the pack, or 0. */
-    const table = believed
-        ? tableOf(store.read(indexPath, 0, tableBytes(blockCount)), blockCount, packSize())
-        : new Float64Array(blockCount);
+    const believed = tableStat !== null && tableStat.size === tableBytes(blockCount);
+    /** Each block's place, or 0. */
+    let table = new Float64Array(blockCount);
+    /** The segment blocks are written into, -1 before the first. */
+    let active = -1;
     /**
      * The order the last run first asked for its blocks in: what a filler
      * should bring in before anything else, because a start reads the same
@@ -556,16 +649,58 @@ export async function createBlockCache(options){
     let previous = [];
     if (believed)
     {
+        const places = placesOf(store.read(indexPath, 0, tableBytes(blockCount)), blockCount,
+            span);
+        table = places.table;
+        /** The segments of this layout that could be opened, by number, and their sizes. */
+        const sizes = new Map();
+        for (const n of places.segments)
+        {
+            if (store.stat(segmentPath(n)) === null)
+            {
+                continue;
+            }
+            try
+            {
+                // Each one opened now: a guest read cannot wait for a handle.
+                await store.open(segmentPath(n));
+                if (isPack(store.read(segmentPath(n), 0, PACK_HEADER)))
+                {
+                    sizes.set(n, sizeOf(n));
+                    active = Math.max(active, n);
+                }
+            }
+            catch {
+                // Held by another tab: its blocks are fetched again.
+            }
+        }
+        // A segment let go, by this cache or another's: its blocks are not here.
+        if (dropMissing(table, span, n=>sizes.get(n) ?? 0) > 0)
+        {
+            try
+            {
+                writeTable(table);
+            }
+            catch {
+                // The next run drops them again.
+            }
+        }
         const stored = store.read(orderPath, 0, ORDER_LIMIT * 4);
         previous = [...new Uint32Array(stored.buffer, stored.byteOffset, stored.length >> 2)]
             .filter(index=>index < blockCount);
     }
     else
     {
+        for (const one of store.list?.() ?? [])
+        {
+            if (ownSegment(one.path) >= 0)
+            {
+                store.remove(one.path);
+            }
+        }
         try
         {
-            store.truncate(packPath, 0);
-            store.write(packPath, 0, packHeader());
+            store.truncate(indexPath, 0);
             store.truncate(indexPath, tableBytes(blockCount));
             store.truncate(orderPath, 0);
         }
@@ -580,6 +715,87 @@ export async function createBlockCache(options){
         const entry = new Uint8Array(ENTRY_BYTES);
         new DataView(entry.buffer).setFloat64(0, table[index], true);
         store.write(indexPath, index * ENTRY_BYTES, entry);
+    };
+
+    /**
+     * Puts a record at the end of the segment being written, a new segment
+     * begun where it would not fit. Where a block goes is the end of the
+     * segment as the store has it at the write, read and written with nothing
+     * between: another cache of this bundle on the store puts its blocks after
+     * this one's.
+     *
+     * @param {number} index @param {Uint8Array} record
+     */
+    const place = async(index, record)=>{
+        /** Bytes left in segment `n`, -1 for one not begun. @param {number} n */
+        const room = n=>(n >= 0 && sizeOf(n) >= PACK_HEADER ? span - sizeOf(n) : -1);
+        while (room(active) < record.length)
+        {
+            const next = active + 1;
+            await store.open(segmentPath(next));
+            if (sizeOf(next) < PACK_HEADER)
+            {
+                store.write(segmentPath(next), 0, packHeader());
+            }
+            active = Math.max(active, next);
+        }
+        const at = sizeOf(active);
+        store.write(segmentPath(active), at, record);
+        table[index] = active * span + at;
+        writeEntry(index);
+    };
+
+    /** What letting segments go has freed, for the diagnostics. */
+    const letGo = { segments: 0, bytes: 0 };
+    /**
+     * Removes the segment written longest ago, of any bundle's cache on the
+     * store, this one's own included but the one being written and any begun
+     * after it; one another tab holds open is passed over, and so is one that
+     * holds nothing, as letting it go frees nothing. Answers whether one went.
+     */
+    const letOldestGo = async()=>{
+        const listed = store.list
+            ? store.list().filter(one=>!one.directory && SEGMENT_FILE.test(one.path))
+            : Array.from({ length: Math.max(active, 0) }, (_, n)=>({ path: segmentPath(n),
+                modified: n }));
+        const candidates = listed.filter(one=>(store.stat(one.path)?.size ?? 0) > PACK_HEADER
+            && (ownSegment(one.path) < 0 || ownSegment(one.path) < active))
+            .sort((one, other)=>(one.modified ?? 0) - (other.modified ?? 0)
+                || ownSegment(one.path) - ownSegment(other.path));
+        for (const one of candidates)
+        {
+            const n = ownSegment(one.path);
+            const bytes = store.stat(one.path)?.size ?? 0;
+            try
+            {
+                if (n < 0)
+                {
+                    // Opening it is what says no other tab holds it.
+                    await store.open(one.path);
+                }
+                else
+                {
+                    // The table first: never an entry naming a segment gone.
+                    for (let index = 0; index < blockCount; index++)
+                    {
+                        if (table[index] !== 0 && Math.floor(table[index] / span) === n)
+                        {
+                            table[index] = 0;
+                            writeEntry(index);
+                        }
+                    }
+                }
+                store.remove(one.path);
+                await store.flush?.();
+            }
+            catch {
+                continue;
+            }
+            letGo.segments++;
+            letGo.bytes += bytes;
+            return true;
+        }
+        return false;
     };
 
     /** This run's first demands, in order. @type {Set<number>} */
@@ -628,10 +844,11 @@ export async function createBlockCache(options){
             let record = null;
             try
             {
-                record = store.read(packPath, at, RECORD_HEADER + length);
+                record = store.read(segmentPath(Math.floor(at / span)), at % span,
+                    RECORD_HEADER + length);
             }
             catch {
-                // The pack gone, or its handle closed by a store of the
+                // The segment gone, or its handle closed by a store of the
                 // caller's with a smaller pool: the block is fetched again.
             }
             if (record === null || record.length !== RECORD_HEADER + length
@@ -653,30 +870,35 @@ export async function createBlockCache(options){
         },
 
         /**
-         * Asynchronous as the store's contract is; a block the store will not
-         * take is held in the heap for this run.
+         * Asynchronous as the store's contract is. A write past the room there
+         * is lets the oldest segment go and is tried again; a block the store
+         * will not take with nothing left to let go is held in the heap for
+         * this run.
          *
          * @param {number} index
          * @param {Uint8Array} bytes
          */
         async put(index, bytes){
-            try
+            const record = recordOf(index, bytes);
+            for (;;)
             {
-                // The end of the pack as the store has it now, read and
-                // written with nothing between: another cache of this bundle
-                // on the store puts its blocks after this one's.
-                const at = Math.max(PACK_HEADER, packSize());
-                store.write(packPath, at, recordOf(index, bytes));
-                table[index] = at;
-                writeEntry(index);
-            }
-            catch (e){
-                // Past the origin's quota, or a disk with no room: the run goes
-                // on with this block in the heap, and the next run fetches it.
-                full = /** @type {Error} */ (e).message;
-                table[index] = 0;
-                refused.put(index, bytes);
-                return;
+                try
+                {
+                    await place(index, record);
+                    return;
+                }
+                catch (e){
+                    full = /** @type {Error} */ (e).message;
+                    table[index] = 0;
+                    // Only a store out of room is helped by room: any other
+                    // refusal lets nothing go.
+                    if (/** @type {Error} */ (e).name !== 'QuotaExceededError'
+                        || !await letOldestGo())
+                    {
+                        refused.put(index, bytes);
+                        return;
+                    }
+                }
             }
         },
 
@@ -714,12 +936,18 @@ export async function createBlockCache(options){
                 resident += table[at] !== 0 ? 1 : 0;
             }
             const inHeap = refused.diagnostics();
+            let segments = 0;
+            for (let n = 0; n <= active; n++)
+            {
+                segments += sizeOf(n);
+            }
             // In the heap the table of which blocks are here and where, and what
-            // the store refused; the rest is on disk, the pack as long as what
-            // it holds.
+            // the store refused; the rest is on disk, each segment as long as
+            // what it holds. `letGo`: the segments a full store had let go.
             return { backed: true, resident: resident + inHeap.resident, blocks: blockCount,
-                heapBytes: table.byteLength + inHeap.heapBytes, diskBytes: packSize()
-                    + tableBytes(blockCount), ...full === null ? {} : { full } };
+                heapBytes: table.byteLength + inHeap.heapBytes, diskBytes: segments
+                    + tableBytes(blockCount), letGo: { ...letGo },
+                ...full === null ? {} : { full } };
         },
     };
 }

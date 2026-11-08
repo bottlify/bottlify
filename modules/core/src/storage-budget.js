@@ -9,8 +9,8 @@
  * (`navigator.storage.estimate()`, its quota, which each browser sets by the
  * system it runs on and the disk it has), less a share left for the run that
  * starts to write into. Past it, the caches go, the least recently written
- * first: a bundle's fetched blocks (`<name>.index`, `.pack` and `.order` at the
- * root, `cacheFiles` in `cache.js`) and a bundle's
+ * first: a bundle's fetched blocks (`<name>.index`, `.pack.<n>` and `.order` at
+ * the root, `cacheFiles` in `cache.js`) and a bundle's
  * translations (`cork/<name>.v<n>`). Both are made again by the next run
  * that needs them; a session -- the files a program wrote, its saved games --
  * is never touched. Neither are the caches of the
@@ -22,12 +22,13 @@ export const STORAGE_SHARE = 0.8;
 
 /**
  * A bundle's block cache's files, by the name the cache gives them -- its
- * table (`.index`), its blocks (`.pack`) and its order, and those of the
- * layouts it replaced, which go with them: the one-file `.blocks` with its
- * `.present` bitmap, the first appended layout's `.slots`, and the segments
- * `.blocks.<k>` with their `.held` bitmap (`cache.js`).
+ * table (`.index`), its segments of blocks (`.pack.<n>`) and its order, and
+ * those of the layouts it replaced, which go with them: the one-file `.blocks`
+ * with its `.present` bitmap, the first appended layout's `.slots`, the segments
+ * `.blocks.<k>` with their `.held` bitmap, and the one-file `.pack` (`cache.js`).
  */
-const BLOCK_FILE = /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|held|present|order|slots|index|pack)$/;
+const BLOCK_FILE =
+    /^(.+)\.(blocks(?:\.[0-9A-Za-z]+)?|pack(?:\.\d+)?|held|present|order|slots|index)$/;
 
 /** The files a cache believes its blocks by, removed before the blocks they name. */
 const BELIEVED = /\.(index|held)$/;
