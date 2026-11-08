@@ -812,12 +812,13 @@ export function createCodecs(host){
         read: async(_, at, count)=>(at >= length ? new Uint8Array(0)
             : host.readMemory((address + at) >>> 0, Math.min(count, length - at)).slice()),
         write: async(_, at, bytes)=>{
-            const fits = Math.max(0, Math.min(bytes.length, length - at));
-            if (fits > 0)
+            // Memory takes a write whole or not at all, a region's over it too.
+            if (at + bytes.length > length)
             {
-                host.writeMemory((address + at) >>> 0, bytes.subarray(0, fits));
+                throw new CodecError(STG_E_MEDIUMFULL, 'a write past the end of memory');
             }
-            return fits;
+            host.writeMemory((address + at) >>> 0, bytes);
+            return bytes.length;
         },
     });
 

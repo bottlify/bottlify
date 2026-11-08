@@ -527,8 +527,8 @@ function decodeJpegContainer(bytes){
 
 /**
  * A four-component JPEG as 32bppCMYK, as Windows' decoder gives it: Adobe
- * writes the inks inverted, and YCCK (transform 2) is the inverted inks'
- * YCbCr with black beside.
+ * writes the inks and black inverted, and YCCK (transform 2) holds the inks
+ * as YCbCr with inverted black beside.
  *
  * @param {Uint8Array} bytes @returns {DecodedImage}
  */
@@ -538,18 +538,15 @@ function jpegCmyk(bytes){
     const clamp = (/** @type {number} */ v)=>Math.max(0, Math.min(255, Math.round(v)));
     for (let i = 0; i < width * height; i++)
     {
-        let [c, m, y] = [samples[i * 4], samples[i * 4 + 1], samples[i * 4 + 2]];
-        if (transform === 2)
-        {
-            const luma = c;
-            const cb = m - 128;
-            const cr = y - 128;
-            [c, m, y] = [clamp(luma + 1.402 * cr), clamp(luma - 0.344136 * cb - 0.714136 * cr),
-                clamp(luma + 1.772 * cb)];
-        }
-        out[i * 4] = 255 - c;
-        out[i * 4 + 1] = 255 - m;
-        out[i * 4 + 2] = 255 - y;
+        const [a, b, d] = [samples[i * 4], samples[i * 4 + 1], samples[i * 4 + 2]];
+        // YCCK's colour, made RGB, is the inks themselves (Wine's jpegformat
+        // test: Y 132, Cb 196, Cr 34 give C 0, M 176, Y 252).
+        const inks = transform === 2
+            ? [clamp(a + 1.402 * (d - 128)),
+                clamp(a - 0.344136 * (b - 128) - 0.714136 * (d - 128)),
+                clamp(a + 1.772 * (b - 128))]
+            : [255 - a, 255 - b, 255 - d];
+        out.set(inks, i * 4);
         out[i * 4 + 3] = 255 - samples[i * 4 + 3];
     }
     return { frames: [{ width, height, format: pixelFormat('32bppCMYK'), pixels: out,
