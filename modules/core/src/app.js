@@ -9,6 +9,7 @@ import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
+import { watchedArgument } from './watch-arguments.js';
 import { frameDrops } from './frame-drops.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
@@ -6014,55 +6015,15 @@ async function buildApp(options){
             /** @param {number[]} _args @param {{ callerStack: number, freeStack: number }} frame */
             handler: (_args, frame)=>{
                 const esp = frame.callerStack >>> 0;
-                // Read now, while the arguments are still there: a name built
-                // on the caller's stack is gone by the time the answer comes.
-                /** @param {string | number} where */
-                const pointerOf = where=>{
-                    if (String(where).startsWith('@'))
-                    {
-                        // `@hex`: an address of its own, a program's global.
-                        return parseInt(String(where).slice(1), 16) >>> 0;
-                    }
-                    // ECX is untouched by the stub; EDX was spent on the trap
-                    // and sits in the block the stub saved, third from the top.
-                    return where === 'ecx'
-                        ? cpu.readReg32('ecx') >>> 0
-                        : where === 'edx'
-                            ? memory.readU32((frame.freeStack >>> 0) + 20) >>> 0
-                            : memory.readU32(esp + 4 + Number(where) * 4) >>> 0;
-                };
-                const named = strings.map(where=>{
-                    // `ecx*104` is the object's own bytes rather than a string,
-                    // `[ecx.88]*64` those of the object a field of it points
-                    // at, and `@hex` stands for an address of the program's
-                    // own: what a method was handed, read while it runs.
-                    const bytes = /^(\[)?(ecx|edx|\d+|@[0-9a-f]+)(?:\.(\d+)\])?\*(\d+)$/.exec(String(where));
-                    if (bytes)
-                    {
-                        let at = pointerOf(bytes[2]);
-                        if (bytes[1])
-                        {
-                            at = memory.readU32(at + Number(bytes[3])) >>> 0;
-                        }
-                        try
-                        {
-                            return `0x${at.toString(16)}:`
-                                + [...memory.readBytes(at, Number(bytes[4]))]
-                                    .map(b=>b.toString(16).padStart(2, '0')).join('');
-                        }
-                        catch {
-                            return `0x${at.toString(16)}:unmapped`;
-                        }
-                    }
-                    const pointer = pointerOf(where);
-                    try
-                    {
-                        return memory.readCString(pointer, 260);
-                    }
-                    catch {
-                        return `0x${pointer.toString(16)}`;
-                    }
-                });
+                // ECX is untouched by the stub; EDX was spent on the trap and
+                // sits in the block the stub saved, third from the top.
+                /** @type {import('./watch-arguments.js').WatchedCall} */
+                const call = { esp, ecx: cpu.readReg32('ecx') >>> 0,
+                    edx: memory.readU32((frame.freeStack >>> 0) + 20) >>> 0,
+                    readU32: at=>memory.readU32(at),
+                    readBytes: (at, length)=>memory.readBytes(at, length),
+                    readCString: (at, max)=>memory.readCString(at, max) };
+                const named = strings.map(where=>watchedArgument(where, call));
                 pending.push({ label, esp, returnTo: memory.readU32(esp), named,
                     thread: kernel.currentThread() });
                 memory.writeU32(esp, catcher());

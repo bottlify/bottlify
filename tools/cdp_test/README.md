@@ -260,7 +260,11 @@ cross-process COM calls S seconds in. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
 `--copy DIR TO` writes a directory of the volume out once the run is over:
-what a setup unpacked, for the audit below. `--network ws://127.0.0.1:8787/` puts the run
+what a setup unpacked, for the audit below. `--watch-import 'lib.dll!Name=0+$1*8'` prints
+each call a program makes to an import of a library of its own, as it returns, with the
+arguments read as it was made (`modules/core/src/watch-arguments.js`: strings, bytes
+through a pointer or a field, `$N*len` the stack itself, a double passed by value) - what a
+program hands a library and never shows, a benchmark's results before they are sent. `--network ws://127.0.0.1:8787/` puts the run
 on a relay's network and `--roots FILE` adds a PEM bundle to the trusted roots, as for
 game.mjs (`tools/relay-option.mjs`); launch-probe takes both too. The relay for a machine
 whose only way out is an HTTP proxy (a cloud container) is

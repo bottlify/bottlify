@@ -72,6 +72,12 @@
  *
  * `--debug-strings` prints what the programs say through OutputDebugString.
  *
+ * `--watch-import 'lib.dll!Name=0+$1*8'` stands a watch in front of an import
+ * (every one of a library's without `!Name`) and prints each call when it
+ * returns, with the arguments `=` names read as it was made (see
+ * modules/core/src/watch-arguments.js): what a program handed a library of
+ * its own, a result it never shows included. Repeatable.
+ *
  * `--windows win2000|winxp|win7|win10` is the Windows the machine is, over
  * the one a bundle's manifest names (XP when neither does).
  *
@@ -271,7 +277,31 @@ const steam = argv.includes('--steam')
         ...argv.includes('--steam-app')
             ? { appId: Number(argv[argv.indexOf('--steam-app') + 1]) } : {} }
     : null;
+/** `--watch-import` specs: a library, maybe one name, the arguments to read. */
+const importWatches = argv.flatMap((flag, index)=>{
+    if (flag !== '--watch-import')
+    {
+        return [];
+    }
+    const spec = argv[index + 1];
+    const equals = spec.indexOf('=');
+    const target = equals < 0 ? spec : spec.slice(0, equals);
+    const [library, name = null] = target.split('!');
+    return [{ library: library.toLowerCase(), name,
+        strings: equals < 0 ? [] : spec.slice(equals + 1).split('+').filter(Boolean)
+            .map(one=>(/^\d+$/.test(one) ? Number(one) : one)) }];
+});
+
 const app = await createApp({
+    ...importWatches.length > 0 ? {
+        watchImport: (/** @type {string} */ dll, /** @type {string | null} */ name)=>{
+            const asked = importWatches.find(one=>one.library === dll.toLowerCase()
+                && (one.name === null || one.name === name));
+            // Six words read: a watch forwards into the real function rather
+            // than returning, so the count needs to be no more than a reach.
+            return asked ? { args: 6, strings: asked.strings } : null;
+        },
+    } : {},
     win32: { ...network ? { network } : {},
         ...roots ? { trustedRoots: roots } : {}, ...steam ? { steam } : {} },
     executable: prefix.executable,
@@ -345,6 +375,9 @@ for (const name of ['process-create', 'process-child', 'process-started', 'proce
         JSON.stringify(event, (key, value)=>(key === 'error' && value
             ? String(value.stack ?? value).slice(0, 800) : value))?.slice(0, 900)));
 }
+
+app.on('guest-return', (/** @type {any} */ done)=>console.log(seconds(), 'watch', done.name,
+    JSON.stringify(done.strings ?? []), `-> 0x${(done.result >>> 0).toString(16)}`));
 
 // Bound and never called is ordinary -- a program imports far more than it
 // calls -- so these are counted and said once, at the end, per library.
