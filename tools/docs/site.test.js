@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render } from './markdown.mjs';
-import { build, graphSvg, htmlOf, navigation, rows, walkthrough } from './site.mjs';
+import { build, graphSvg, htmlOf, navigation, projectGraph, rows, walkthrough } from './site.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -111,4 +111,23 @@ test('a walkthrough: its parts, each step\'s arrows and parts under its heading'
     ]);
     assert.equal(walkthrough('# No walk\n'), null);
     assert.throws(()=>walkthrough(`${page}### 3. Odd\n<!-- step: page>gpu -->\n`), /names gpu/);
+});
+
+test('the project graph is read from the tree, and a line to no part fails', async()=>{
+    const block = 'node page | Page | The browser page.\nlink page > worker/engine\n';
+    const { nodes, links } = await projectGraph(ROOT, block);
+    const ids = new Set(nodes.map(node=>node.id));
+    for (const id of ['core', 'cork', 'core/win32', 'core/win32/user32', 'core/graphics/gdi',
+        'cork/emit', 'worker/engine', 'worker/translator', 'page'])
+    {
+        assert.ok(ids.has(id), `${id} is a part`);
+    }
+    assert.ok(!ids.has('core/win32/common') && !ids.has('core/cpu/internal'), 'workings left out');
+    const has = (/** @type {string} */ a, /** @type {string} */ b, /** @type {string} */ kind)=>
+        links.some(link=>link.source === a && link.target === b && link.kind === kind);
+    assert.ok(has('core/win32', 'core/bridge', 'requires'), 'a layer requires what its module says');
+    assert.ok(has('core/win32', 'core/win32/user32', 'holds'));
+    assert.ok(has('cork', 'worker/translator', 'holds'), 'a worker is held where its file is');
+    assert.ok(has('page', 'worker/engine', 'runs'));
+    await assert.rejects(projectGraph(ROOT, 'link page > core/gpu\n'), /reaches page|reaches core\/gpu/);
 });

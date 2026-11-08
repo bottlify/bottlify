@@ -27,6 +27,7 @@ listed here. -->
 
 - [Inside Bottlify](architecture/README.md)
 - [Hello world, step by step](architecture/hello-world.md)
+- [The project in 3D](architecture/graph.md)
 - [Threads](architecture/threads.md)
 - [Startup](architecture/startup.md)
 - [cork in the engine](architecture/cork.md)

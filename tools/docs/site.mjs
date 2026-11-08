@@ -20,7 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync,
     writeFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { pages } from './check.mjs';
+import { covered, pages } from './check.mjs';
 import { headings, prose, render } from './markdown.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -362,6 +362,184 @@ function walkPanel({ nodes, steps }){
         + `<script type="application/json" id="walk-data">${data}</script>`;
 }
 
+/** The 3D graph's library: one bundle, with its own copy of three.js inside. */
+const FORCE_GRAPH = 'https://cdn.jsdelivr.net/npm/3d-force-graph@1.79.1/dist/3d-force-graph.min.js';
+
+/** A layer's or cork's folders that are its workings, not a part a reader looks for. */
+const NOT_PARTS = new Set(['internal', 'common', 'testing']);
+
+/**
+ * @typedef {{ id: string, label: string, group: string, about: string, file: string | null,
+ *     pages?: { title: string, href: string }[] }} GraphNode
+ * @typedef {{ source: string, target: string, kind: string }} GraphLink
+ */
+
+/**
+ * The whole project as points and lines, read from the tree: the packages and
+ * what each depends on, the core's layers and what each requires, the folders
+ * inside each layer and inside cork, and the workers (`*.worker.js`). A page's
+ * `<!-- graph3d -->` block adds the parts outside the code (`node id | label |
+ * [path |] about`) and the lines the code does not say (`link a > b`); a line
+ * to a part that does not exist fails the build.
+ *
+ * @param {string} root
+ * @param {string} block  The text of the page's `graph3d` block.
+ * @returns {Promise<{ nodes: GraphNode[], links: GraphLink[] }>}
+ */
+export async function projectGraph(root, block){
+    /** @type {Map<string, GraphNode>} */
+    const nodes = new Map();
+    /** @type {Map<string, GraphLink>} */
+    const links = new Map();
+    const add = (/** @type {GraphNode} */ node)=>void nodes.set(node.id, node);
+    const connect = (/** @type {string} */ source, /** @type {string} */ target,
+        /** @type {string} */ kind)=>void links.set(`${source}>${target}`, { source, target, kind });
+    const folders = (/** @type {string} */ dir)=>existsSync(join(root, dir))
+        ? readdirSync(join(root, dir)).filter(name=>!NOT_PARTS.has(name)
+            && statSync(join(root, dir, name)).isDirectory()).sort()
+        : [];
+    for (const name of folders('modules'))
+    {
+        const file = join(root, 'modules', name, 'package.json');
+        if (!existsSync(file))
+        {
+            continue;
+        }
+        const pkg = JSON.parse(readFileSync(file, 'utf8'));
+        add({ id: name, label: pkg.name, group: 'package', about: pkg.description ?? '',
+            file: `modules/${name}` });
+        for (const dep of Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies }))
+        {
+            if (dep.startsWith('@bottlify/'))
+            {
+                connect(name, dep.slice('@bottlify/'.length), 'requires');
+            }
+        }
+    }
+    for (const layer of await layers(root))
+    {
+        const id = `core/${layer.name}`;
+        const dir = `${LAYERS}/${layer.name}`;
+        add({ id, label: layer.name, group: 'layer', about: layer.summary, file: dir });
+        connect('core', id, 'holds');
+        layer.requires.forEach(need=>connect(id, `core/${need}`, 'requires'));
+        for (const part of folders(dir))
+        {
+            add({ id: `${id}/${part}`, label: part, group: 'library',
+                about: `Part of the ${layer.name} layer.`, file: `${dir}/${part}` });
+            connect(id, `${id}/${part}`, 'holds');
+        }
+    }
+    for (const part of folders('modules/cork/src'))
+    {
+        add({ id: `cork/${part}`, label: part, group: 'cork', about: 'Part of the translator.',
+            file: `modules/cork/src/${part}` });
+        connect('cork', `cork/${part}`, 'holds');
+    }
+    const workers = (/** @type {string} */ dir)=>existsSync(join(root, dir))
+        ? readdirSync(join(root, dir)).filter(name=>name.endsWith('.worker.js'))
+            .map(name=>`${dir}/${name}`)
+        : [];
+    for (const file of [...workers('modules/core/src/host'), ...workers('modules/cork/src/runtime'),
+        ...readdirSync(join(root, LAYERS)).flatMap(layer=>workers(`${LAYERS}/${layer}/internal`))])
+    {
+        const name = posix.basename(file, '.worker.js');
+        add({ id: `worker/${name}`, label: `${name} thread`, group: 'thread',
+            about: `A worker of its own: ${file}.`, file });
+        // Held by the layer or the package its file is in.
+        const layer = file.startsWith(`${LAYERS}/`) ? file.split('/')[4] : null;
+        connect(layer ? `core/${layer}` : file.split('/')[1], `worker/${name}`, 'holds');
+    }
+    for (const line of block.split('\n').map(text=>text.trim()).filter(Boolean))
+    {
+        const node = /^node\s+(\S+)\s*\|(.*)$/.exec(line);
+        const link = /^link\s+(\S+)\s*>\s*(\S+)$/.exec(line);
+        if (node)
+        {
+            const fields = node[2].split('|').map(field=>field.trim());
+            const [label, file, about] = fields.length > 2 ? fields : [fields[0], null, fields[1]];
+            add({ id: node[1], label, group: 'outside', about: about ?? '', file });
+        }
+        else if (link)
+        {
+            connect(link[1], link[2], 'runs');
+        }
+        else if (!/^route\s/.test(line))
+        {
+            throw new Error(`graph3d: a line is "node id | label | about", "link a > b" or `
+                + `"route page.md": ${line}`);
+        }
+    }
+    for (const { source, target } of links.values())
+    {
+        for (const end of [source, target])
+        {
+            if (!nodes.has(end))
+            {
+                throw new Error(`graph3d: a line ${source} > ${target} reaches ${end}, which is `
+                    + 'no part of the project');
+            }
+        }
+    }
+    return { nodes: [...nodes.values()], links: [...links.values()] };
+}
+
+/**
+ * The 3D graph's body: the graph's box and its data, the route a walkthrough
+ * page takes through it (each step's arrows, as lines of their own), and every
+ * part's docs pages (those that cover its folder or file).
+ *
+ * @param {string} root
+ * @param {string} block
+ * @param {string} href  The graph page's path on the site.
+ */
+async function graph3dBody(root, block, href){
+    const graph = await projectGraph(root, block);
+    const known = new Set(graph.nodes.map(node=>node.id));
+    const route = /^\s*route\s+(\S+)/m.exec(block);
+    /** @type {{ title: string, hops: [string, string][], nodes: string[] }[]} */
+    const steps = [];
+    if (route)
+    {
+        const page = posix.join('docs/architecture', route[1]);
+        const walk = walkthrough(readFileSync(join(root, page), 'utf8'));
+        for (const step of walk?.steps ?? [])
+        {
+            for (const id of step.nodes)
+            {
+                if (!known.has(id))
+                {
+                    throw new Error(`${page}: step "${step.title}" names ${id}, which the project `
+                        + 'graph has no part for');
+                }
+            }
+            steps.push({ title: step.title, hops: step.edges, nodes: step.nodes });
+        }
+    }
+    const docs = pages(root, 'docs').map(page=>({ page, paths: covered(root, page),
+        title: headings(readFileSync(join(root, page), 'utf8')).find(h=>h.level === 1)?.text
+            .replace(/`/g, '') ?? page }));
+    for (const node of graph.nodes)
+    {
+        const file = node.file;
+        node.pages = file ? docs.filter(doc=>doc.paths.some(path=>path === file
+            || path.startsWith(`${file}/`) || file.startsWith(`${path}/`)))
+            .map(doc=>({ title: doc.title,
+                href: posix.relative(posix.dirname(href), htmlOf(doc.page)) }))
+            : [];
+    }
+    const data = JSON.stringify({ ...graph, steps, github: `${GITHUB}/tree/main/` })
+        .replace(/</g, '\\u003c');
+    return '<div class="graph3d" id="graph3d"><div class="g3-canvas"></div><div class="g3-labels"></div>'
+        + '<div class="g3-bar"><button type="button" data-act="play">&#9654; Play</button>'
+        + '<button type="button" data-act="back" aria-label="Previous step">&#8249;</button>'
+        + '<button type="button" data-act="next" aria-label="Next step">&#8250;</button>'
+        + '<span class="g3-caption" aria-live="polite">The hello world route</span>'
+        + '<button type="button" data-act="full" aria-label="Full screen">&#x26F6;</button></div>'
+        + '<div class="g3-card" hidden></div><noscript>The graph needs JavaScript.</noscript></div>'
+        + `<script type="application/json" id="graph3d-data">${data}</script>`;
+}
+
 /**
  * The module graph's page body: the graph, a card per layer, the data the
  * graph script reads.
@@ -542,15 +720,22 @@ export async function build(root, out){
             body = `${body.slice(0, cut)}${walkPanel(tour)}${body.slice(cut)}`;
         }
         const base = '../'.repeat(href.split('/').length - 1);
+        const block = /<!--\s*graph3d\s*\n([\s\S]*?)-->/.exec(text);
+        if (block)
+        {
+            body += await graph3dBody(root, block[1], href);
+        }
         const scripts = (/^```mermaid/m.test(text) ? MERMAID : '')
-            + (tour ? `<script src="${base}walk.js" defer></script>` : '');
+            + (tour ? `<script src="${base}walk.js" defer></script>` : '')
+            + (block ? `<script src="${FORCE_GRAPH}" defer></script>`
+                + `<script src="${base}graph3d.js" defer></script>` : '');
         page(href, title, body, { source, toc: heads, scripts });
         search.push(...searchEntries(text, href, title));
     }
     page('modules.html', 'Module graph', modulesBody(list),
         { scripts: '<script src="graph.js" defer></script>' });
 
-    for (const asset of ['style.css', 'search.js', 'graph.js', 'walk.js'])
+    for (const asset of ['style.css', 'search.js', 'graph.js', 'walk.js', 'graph3d.js'])
     {
         copyFileSync(join(ASSETS, asset), join(out, asset));
     }
