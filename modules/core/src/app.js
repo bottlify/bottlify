@@ -10188,8 +10188,34 @@ export async function createApp(options){
     const processIds = new WeakMap();
     /** @type {Set<Promise<unknown>>} */
     const servers = new Set();
-    /** @type {Set<any>} */
+    /** @type {Set<{ current: any, main: boolean, service: string | null }>} */
     const serving = new Set();
+    /** The services started in workers of their own, by process id. @type {Map<number, string>} */
+    const servicesAcross = new Map();
+    /**
+     * A service does not end when its last client lets go: it runs until the
+     * machine stops, and the end of the run's program is that. Each one still
+     * running is ended then, its control handler not told
+     * SERVICE_CONTROL_SHUTDOWN first.
+     */
+    const endServices = ()=>{
+        /** @param {string} service */
+        const said = service=>events.emit('divergence', { api: 'Services', detail: `the service`
+            + ` ${service} is ended with the run, without a shutdown control` });
+        for (const each of serving)
+        {
+            if (each.service)
+            {
+                said(each.service);
+                each.current.terminate(0);
+            }
+        }
+        for (const [id, service] of servicesAcross)
+        {
+            said(service);
+            reachable.get(id)?.terminate(0);
+        }
+    };
     /** @type {any} */
     let runOptionsNow;
     /** The machines of the run not yet retired. @type {Set<any>} */
@@ -10580,7 +10606,7 @@ export async function createApp(options){
         // A line of processes of its own: a server that starts a child and
         // waits on it, or hands over to another image, is run the way the
         // program the page started is.
-        const line = { current: server, main: false };
+        const line = { current: server, main: false, service: request.service ?? null };
         serving.add(line);
         noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
@@ -11145,6 +11171,10 @@ export async function createApp(options){
             }
             const { processId, mainThreadId } = newProcessIds();
             events.emit('process-server', { image: found.path, clsid: request.clsid });
+            if (request.service)
+            {
+                servicesAcross.set(processId, request.service);
+            }
             return new Promise(resolve=>{
                 startAcross({ readImage: path=>current.readImage(path),
                     sound: ()=>lendSound(current) },
@@ -11152,6 +11182,7 @@ export async function createApp(options){
                     : `${request.command.trim()} -Embedding`,
                 ...request.service ? { service: request.service } : {},
                 id: processId, threadId: mainThreadId }, null, ended=>{
+                    servicesAcross.delete(processId);
                     events.emit('process-server-exit', { image: found.path, code: ended.code });
                     resolve(ended.code);
                 });
@@ -11504,6 +11535,7 @@ export async function createApp(options){
             // write before they stop is its to keep.
             const ending = line.current;
             await classTable.ended(names.get(ending));
+            endServices();
             while (servers.size > 0)
             {
                 await Promise.allSettled([...servers]);
@@ -11545,6 +11577,7 @@ export async function createApp(options){
         }, null, ended=>{
             rootLibraries = ended.systemLibraries ?? [];
             current.ended(ended.diagnostics);
+            endServices();
         });
         while (besides.size > 0)
         {

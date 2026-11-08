@@ -82,7 +82,8 @@ const IMPORTS = {
     'ADVAPI32.dll': {
         undecorated: [
             'RegOpenKeyExA@20', 'RegQueryValueExA@24', 'RegCreateKeyExA@36', 'RegSetValueExA@24',
-            'RegCloseKey@4',
+            'RegCloseKey@4', 'StartServiceCtrlDispatcherA@4', 'RegisterServiceCtrlHandlerA@8',
+            'SetServiceStatus@8',
         ],
     },
     'ole32.dll': {
@@ -189,6 +190,7 @@ const PROGRAMS = [
     { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
     { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
     { name: 'com', source: 'com.c', cxx: false },
+    { name: 'comservice', source: 'comservice.c', cxx: false },
     { name: 'comlife', source: 'comlife.c', cxx: false },
     { name: 'marshal', source: 'marshal.c', cxx: false },
     { name: 'contexts', source: 'contexts.c', cxx: false },

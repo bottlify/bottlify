@@ -156,3 +156,38 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         assert.equal(lines.match(/ok {3}/g)?.length, 13, lines);
     });
 }
+
+for (const concurrency of /** @type {const} */ ([1, 2]))
+{
+    test('a class served by a service: COM starts the service for it, and the run ends with its'
+        + ` client, the service ended with it (concurrency ${concurrency})`,
+    { timeout: 120000 }, async t=>{
+        const program = new Uint8Array(await readFile(new URL('../test/fixtures/comservice.exe',
+            import.meta.url)));
+        const app = await createApp({
+            executable: program,
+            imagePath: 'C:\\App\\comservice.exe',
+            concurrency,
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\comservice.exe', bytes: program }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+            output.push(text));
+        /** @type {string[]} */
+        const said = [];
+        app.on('divergence', (/** @type {any} */ event)=>said.push(event.detail));
+        // The service never leaves on its own: the run ends because its
+        // client did, not because the service did.
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
+        const lines = output.join('');
+        assert.match(lines, /ok {3}service: class object registered/);
+        assert.match(lines, /ok {3}client: a call made in the service, its answer written back/);
+        assert.doesNotMatch(lines, /FAIL/);
+        assert.ok(said.some(detail=>/service BottlifyServed is ended with the run/.test(detail)),
+            said.join('\n'));
+    });
+}
