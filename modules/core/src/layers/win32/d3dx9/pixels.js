@@ -322,6 +322,71 @@ const luminance = (/** @type {number} */ r, /** @type {number} */ g, /** @type {
 const rgb565 = c=>[expand(c >> 11, 5), expand(c >> 5 & 63, 6), expand(c & 31, 5)];
 
 /**
+ * The sixteen values of an eight-byte block of two ends and 3-bit indices:
+ * DXT5's alpha, and each channel of BC4 and BC5. Ends in falling order give
+ * six steps between them, in rising order four and then 0 and 255.
+ *
+ * @param {Uint8Array} data @param {number} at
+ * @returns {number[]}
+ */
+export function decodeAlphaBlock(data, at){
+    const a0 = data[at];
+    const a1 = data[at + 1];
+    const levels = [a0, a1];
+    for (let k = 1; k < (a0 > a1 ? 7 : 5); k++)
+    {
+        levels.push(Math.round(a0 > a1 ? ((7 - k) * a0 + k * a1) / 7
+            : ((5 - k) * a0 + k * a1) / 5));
+    }
+    if (a0 <= a1)
+    {
+        levels.push(0, 255);
+    }
+    let bits = 0n;
+    for (let k = 5; k >= 0; k--)
+    {
+        bits = bits << 8n | BigInt(data[at + 2 + k]);
+    }
+    return Array.from({ length: 16 }, (_, k)=>levels[Number(bits >> BigInt(k * 3) & 7n)]);
+}
+
+/**
+ * Sixteen values into such a block: the largest and smallest as its ends,
+ * each value the nearest of the eight steps.
+ *
+ * @param {number[]} values @param {Uint8Array} out @param {number} at
+ */
+export function encodeAlphaBlock(values, out, at){
+    const a0 = Math.max(...values);
+    const a1 = Math.min(...values);
+    out[at] = a0;
+    out[at + 1] = a1;
+    const levels = [a0, a1];
+    for (let k = 1; k < 7; k++)
+    {
+        levels.push(((7 - k) * a0 + k * a1) / 7);
+    }
+    let bits = 0n;
+    values.forEach((value, k)=>{
+        let best = 0;
+        if (a0 !== a1)
+        {
+            levels.forEach((level, i)=>{
+                if (Math.abs(level - value) < Math.abs(levels[best] - value))
+                {
+                    best = i;
+                }
+            });
+        }
+        bits |= BigInt(best) << BigInt(k * 3);
+    });
+    for (let k = 0; k < 6; k++)
+    {
+        out[at + 2 + k] = Number(bits >> BigInt(k * 8) & 0xffn);
+    }
+}
+
+/**
  * @param {number} format @param {Uint8Array} data @param {number} width @param {number} height
  * @param {Uint8Array} out
  */
@@ -357,25 +422,7 @@ function decodeBlocks(format, data, width, height, out){
             }
             else if (format === FMT.DXT5 || format === FMT.DXT4)
             {
-                const a0 = data[at];
-                const a1 = data[at + 1];
-                const levels = [a0, a1];
-                for (let k = 1; k < (a0 > a1 ? 7 : 5); k++)
-                {
-                    levels.push(Math.round(a0 > a1 ? ((7 - k) * a0 + k * a1) / 7
-                        : ((5 - k) * a0 + k * a1) / 5));
-                }
-                if (a0 <= a1)
-                {
-                    levels.push(0, 255);
-                }
-                let bits = 0n;
-                for (let k = 5; k >= 0; k--)
-                {
-                    bits = bits << 8n | BigInt(data[at + 2 + k]);
-                }
-                alphas = Array.from({ length: 16 },
-                    (_, k)=>levels[Number(bits >> BigInt(k * 3) & 7n)]);
+                alphas = decodeAlphaBlock(data, at);
             }
             for (let k = 0; k < 16; k++)
             {
@@ -490,33 +537,7 @@ function encodeBlocks(format, bgra, width, height){
             }
             else if (format === FMT.DXT5 || format === FMT.DXT4)
             {
-                const a0 = Math.max(...texels.map(t=>t[3]));
-                const a1 = Math.min(...texels.map(t=>t[3]));
-                out[at] = a0;
-                out[at + 1] = a1;
-                const levels = [a0, a1];
-                for (let k = 1; k < 7; k++)
-                {
-                    levels.push(((7 - k) * a0 + k * a1) / 7);
-                }
-                let bits = 0n;
-                texels.forEach((t, k)=>{
-                    let best = 0;
-                    if (a0 !== a1)
-                    {
-                        levels.forEach((l, i)=>{
-                            if (Math.abs(l - t[3]) < Math.abs(levels[best] - t[3]))
-                            {
-                                best = i;
-                            }
-                        });
-                    }
-                    bits |= BigInt(best) << BigInt(k * 3);
-                });
-                for (let k = 0; k < 6; k++)
-                {
-                    out[at + 2 + k] = Number(bits >> BigInt(k * 8) & 0xffn);
-                }
+                encodeAlphaBlock(texels.map(t=>t[3]), out, at);
             }
         }
     }

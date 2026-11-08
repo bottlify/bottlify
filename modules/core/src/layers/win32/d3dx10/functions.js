@@ -18,7 +18,14 @@
 
 import { createDeviceCalls } from '../d3dx9/device.js';
 import { ImageError, readImage } from '../d3dx9/images.js';
-import { FMT, halve, isCompressed } from '../d3dx9/pixels.js';
+import {
+    FMT, decodeAlphaBlock, decodeTexels, encodeAlphaBlock, encodeTexels, halve, keptAsIs,
+    resample,
+} from '../d3dx9/pixels.js';
+import {
+    DIMENSION, averagesBytes, dxgiLayout, halveTexels, isDxgiDds, readDxgiDds, resampleTexels,
+    texelBytesOf,
+} from './dds10.js';
 import { createComObject } from '../ole32/objects.js';
 
 const S_OK = 0;
@@ -40,7 +47,7 @@ const D3D10_SDK_VERSION = 29;
  * table is `graphics/d3d10/slots.js`): the creates the loaders call, and the
  * setters D3DX10UnsetAllDeviceObjects calls.
  */
-const DEVICE = Object.freeze({ CreateTexture2D: 73, CreateTexture3D: 74,
+const DEVICE = Object.freeze({ CreateTexture1D: 72, CreateTexture2D: 73, CreateTexture3D: 74,
     CreateShaderResourceView: 75,
     VSSetConstantBuffers: 3, PSSetShaderResources: 4, PSSetShader: 5, PSSetSamplers: 6,
     VSSetShader: 7, PSSetConstantBuffers: 10, IASetInputLayout: 11, IASetVertexBuffers: 12,
@@ -74,11 +81,10 @@ const UNKNOWN_RELEASE = 2;
 
 /** The DXGI formats a file's texels are made into, and what a row of blocks or texels takes. */
 const DXGI = Object.freeze({ B8G8R8A8_UNORM: 87, R8G8B8A8_UNORM: 28, BC1_UNORM: 71,
-    BC2_UNORM: 74, BC3_UNORM: 77 });
+    BC2_UNORM: 74, BC3_UNORM: 77, R16_UNORM: 56, R16G16_UNORM: 35, R16G16B16A16_UNORM: 11,
+    R8G8_SNORM: 51, R8G8B8A8_SNORM: 31, R16G16_SNORM: 37 });
 
-/** D3D10_RESOURCE_DIMENSION, D3D10_BIND_SHADER_RESOURCE and D3D10_RESOURCE_MISC_TEXTURECUBE. */
-const DIMENSION_TEXTURE2D = 3;
-const DIMENSION_TEXTURE3D = 4;
+/** D3D10_BIND_SHADER_RESOURCE and D3D10_RESOURCE_MISC_TEXTURECUBE. */
 const BIND_SHADER_RESOURCE = 0x8;
 const MISC_TEXTURECUBE = 0x4;
 
@@ -99,6 +105,19 @@ const dxgiOf = format=>{
         case FMT.DXT4:
         case FMT.DXT5:
             return DXGI.BC3_UNORM;
+        // Held as the file has them, and laid out byte for byte as these are.
+        case FMT.L16:
+            return DXGI.R16_UNORM;
+        case FMT.G16R16:
+            return DXGI.R16G16_UNORM;
+        case FMT.A16B16G16R16:
+            return DXGI.R16G16B16A16_UNORM;
+        case FMT.V8U8:
+            return DXGI.R8G8_SNORM;
+        case FMT.Q8W8V8U8:
+            return DXGI.R8G8B8A8_SNORM;
+        case FMT.V16U16:
+            return DXGI.R16G16_SNORM;
         default:
             return DXGI.B8G8R8A8_UNORM;
     }
@@ -109,14 +128,213 @@ const dxgiOf = format=>{
  *
  * @param {number} format @param {number} width @param {number} height
  */
-const pitchOf = (format, width, height)=>{
-    if (format === DXGI.B8G8R8A8_UNORM || format === DXGI.R8G8B8A8_UNORM)
+const pitchOf = (format, width, height)=>/** @type {{ rowBytes: number, rows: number }} */ (
+    dxgiLayout(format, width, height));
+
+/**
+ * @typedef {import('../d3dx9/images.js').Image
+ *     | import('./dds10.js').DxgiImage} AnyImage
+ */
+
+/** @typedef {{ width: number, height: number, data: Uint8Array }} TexelLevel */
+
+/** The next level of BGRA texels, box-filtered. @param {TexelLevel} level @returns {TexelLevel} */
+const bgraSmaller = level=>{
+    const half = halve(level.data, level.width, level.height);
+    return { width: half.width, height: half.height, data: half.bgra };
+};
+
+/** The DXGI format a file holds, when it says one. @param {AnyImage} image */
+const nativeOf = image=>('dxgi' in image ? image : null);
+
+/** BC1, BC2 and BC3 (typeless, UNORM and sRGB) as the DXTn blocks they are laid out as. */
+const BLOCK_CODEC = new Map([[70, FMT.DXT1], [71, FMT.DXT1], [72, FMT.DXT1], [73, FMT.DXT3],
+    [74, FMT.DXT3], [75, FMT.DXT3], [76, FMT.DXT5], [77, FMT.DXT5], [78, FMT.DXT5]]);
+
+/** BC4 and BC5 (typeless and UNORM): channels a block, each eight bytes of DXT5's alpha. */
+const CHANNEL_BLOCKS = new Map([[79, 1], [80, 1], [82, 2], [83, 2]]);
+
+/**
+ * BC4 or BC5 blocks as texels of a byte a channel, or texels as blocks.
+ *
+ * @param {Uint8Array} data @param {number} width @param {number} height
+ * @param {number} channels @param {boolean} encode  texels into blocks
+ * @returns {Uint8Array}
+ */
+const channelBlocks = (data, width, height, channels, encode)=>{
+    const across = Math.max(1, Math.ceil(width / 4));
+    const down = Math.max(1, Math.ceil(height / 4));
+    const out = new Uint8Array(encode ? across * down * channels * 8 : width * height * channels);
+    for (let by = 0; by < down; by++)
     {
-        return { rowBytes: width * 4, rows: height };
+        for (let bx = 0; bx < across; bx++)
+        {
+            const at = (by * across + bx) * channels * 8;
+            for (let c = 0; c < channels; c++)
+            {
+                /** Where texel k of the block is, the edges repeated past the level. */
+                const texel = (/** @type {number} */ k, /** @type {boolean} */ clamp)=>{
+                    const x = bx * 4 + (k & 3);
+                    const y = by * 4 + (k >> 2);
+                    return clamp ? (Math.min(height - 1, y) * width + Math.min(width - 1, x))
+                        * channels + c : x < width && y < height ? (y * width + x) * channels + c
+                        : -1;
+                };
+                if (encode)
+                {
+                    encodeAlphaBlock(Array.from({ length: 16 }, (_, k)=>data[texel(k, true)]), out,
+                        at + c * 8);
+                    continue;
+                }
+                decodeAlphaBlock(data, at + c * 8).forEach((value, k)=>{
+                    const to = texel(k, false);
+                    if (to >= 0)
+                    {
+                        out[to] = value;
+                    }
+                });
+            }
+        }
     }
-    const block = format === DXGI.BC1_UNORM ? 8 : 16;
-    return { rowBytes: Math.max(1, Math.ceil(width / 4)) * block,
-        rows: Math.max(1, Math.ceil(height / 4)) };
+    return out;
+};
+
+/**
+ * @typedef {Object} NativeCodec  How a file's own DXGI levels are remade.
+ * @property {(level: TexelLevel, width: number, height: number) => Uint8Array} stretch
+ * @property {(level: TexelLevel) => TexelLevel} smaller  the next level down
+ * @property {boolean} nearest  whether both take the nearest texel rather than a filter
+ */
+
+/**
+ * The codec of a DXGI format: texels a whole number of bytes are stretched
+ * and halved byte for byte, BC1 to BC5 (unsigned) blocks through their
+ * texels and back; null for a format with neither (signed BC4 and BC5, BC6H,
+ * BC7, pairs, bits).
+ *
+ * @param {number} dxgi
+ * @returns {NativeCodec | null}
+ */
+const nativeCodec = dxgi=>{
+    const bytes = texelBytesOf(dxgi);
+    if (bytes)
+    {
+        return {
+            stretch: (level, width, height)=>resampleTexels(level.data, level.width,
+                level.height, width, height, bytes),
+            smaller: level=>halveTexels(level.data, level.width, level.height, bytes,
+                averagesBytes(dxgi)),
+            nearest: !averagesBytes(dxgi),
+        };
+    }
+    const channels = CHANNEL_BLOCKS.get(dxgi);
+    if (channels)
+    {
+        /** @param {TexelLevel} level */
+        const values = level=>channelBlocks(level.data, level.width, level.height, channels,
+            false);
+        return {
+            stretch: (level, width, height)=>channelBlocks(resampleTexels(values(level),
+                level.width, level.height, width, height, channels), width, height, channels,
+            true),
+            smaller: level=>{
+                const half = halveTexels(values(level), level.width, level.height, channels, true);
+                return { width: half.width, height: half.height,
+                    data: channelBlocks(half.data, half.width, half.height, channels, true) };
+            },
+            nearest: false,
+        };
+    }
+    const blocks = BLOCK_CODEC.get(dxgi);
+    if (blocks === undefined)
+    {
+        return null;
+    }
+    /** @param {TexelLevel} level */
+    const texels = level=>decodeTexels(blocks, level.data, level.width, level.height);
+    return {
+        stretch: (level, width, height)=>encodeTexels(blocks, resample(texels(level),
+            level.width, level.height, width, height), width, height),
+        smaller: level=>{
+            const half = halve(texels(level), level.width, level.height);
+            return { width: half.width, height: half.height,
+                data: encodeTexels(blocks, half.bgra, half.width, half.height) };
+        },
+        nearest: false,
+    };
+};
+
+/**
+ * A file in its own DXGI format made the size asked: each slice's top level
+ * stretched by its codec; the levels below are made from it.
+ *
+ * @param {import('./dds10.js').DxgiImage} image
+ * @param {number} toWidth @param {number} toHeight @param {NativeCodec} codec
+ * @returns {import('./dds10.js').DxgiImage}
+ */
+const nativeResizedTo = (image, toWidth, toHeight, codec)=>{
+    /** @type {import('./dds10.js').DxgiLevel[][]} */
+    const faces = (image.faces ?? [image.levels]).map(([top])=>[{ width: toWidth,
+        height: toHeight, format: 0, dxgi: image.dxgi, data: codec.stretch(top, toWidth,
+            toHeight) }]);
+    return { ...image, width: toWidth, height: toHeight, mipLevels: 1, levels: faces[0],
+        ...(image.faces ? { faces } : {}) };
+};
+
+/**
+ * A file's image from its level `skip` down: a size asked that the file holds
+ * as one of its levels is taken from there (decision A234).
+ *
+ * @template {AnyImage} T
+ * @param {T} image @param {number} skip
+ * @returns {T}
+ */
+const fromLevel = (image, skip)=>({ ...image, width: image.levels[skip].width,
+    height: image.levels[skip].height, mipLevels: image.mipLevels - skip,
+    levels: image.levels.slice(skip),
+    ...(image.faces ? { faces: image.faces.map(levels=>levels.slice(skip)) } : {}) });
+
+/**
+ * The level of a file sized as asked, below its first, or -1.
+ *
+ * @param {AnyImage} image @param {number} width @param {number} height
+ */
+const levelSized = (image, width, height)=>image.levels.findIndex((level, index)=>index > 0
+    && level.width === width && level.height === height);
+
+/**
+ * An image made the size asked, as D3DX 10 resizes a file before it makes the
+ * levels: each face's top level stretched to it, then its whole chain halved
+ * from there, put back in the file's own format where the file's level was
+ * held as it is (blocks, deep or signed texels).
+ *
+ * @param {import('../d3dx9/images.js').Image} image
+ * @param {number} toWidth @param {number} toHeight
+ * @returns {import('../d3dx9/images.js').Image}
+ */
+const resizedTo = (image, toWidth, toHeight)=>{
+    const faces = (image.faces ?? [image.levels]).map(levels=>{
+        const top = levels[0];
+        const own = keptAsIs(top.format);
+        let bgra = resample(own ? decodeTexels(top.format, top.data, top.width, top.height)
+            : top.data, top.width, top.height, toWidth, toHeight);
+        let width = toWidth;
+        let height = toHeight;
+        /** @type {import('../d3dx9/images.js').Level[]} */
+        const chain = [];
+        for (;;)
+        {
+            chain.push({ width, height, format: top.format,
+                data: own ? encodeTexels(top.format, bgra, width, height) : bgra });
+            if (width === 1 && height === 1)
+            {
+                return chain;
+            }
+            ({ bgra, width, height } = halve(bgra, width, height));
+        }
+    });
+    return { ...image, width: toWidth, height: toHeight, mipLevels: faces[0].length,
+        levels: faces[0], ...(image.faces ? { faces } : {}) };
 };
 
 /**
@@ -225,7 +443,7 @@ export function createD3dx10Functions(host, version){
      * The file's image, or the HRESULT a program gets for one this cannot read.
      *
      * @param {string} api @param {Uint8Array | null} bytes
-     * @returns {import('../d3dx9/images.js').Image | number}
+     * @returns {AnyImage | number}
      */
     const imageOf = (api, bytes)=>{
         if (!bytes)
@@ -234,7 +452,7 @@ export function createD3dx10Functions(host, version){
         }
         try
         {
-            return readImage(bytes);
+            return isDxgiDds(bytes) ? readDxgiDds(bytes) : readImage(bytes);
         }
         catch (e){
             if (e instanceof ImageError)
@@ -252,39 +470,54 @@ export function createD3dx10Functions(host, version){
      * a compressed file gives the levels it has).
      *
      * @param {import('../d3dx9/images.js').Level[]} held @param {number} count
-     * @returns {{ width: number, height: number, data: Uint8Array }[]}
+     * @param {(level: TexelLevel) => TexelLevel} [smaller]  the next level made of one
+     * @returns {TexelLevel[]}
      */
-    const levelsOf = (held, count)=>{
+    const levelsOf = (held, count, smaller = bgraSmaller)=>{
         /** @type {{ width: number, height: number, data: Uint8Array }[]} */
         const out = [];
         for (let level = 0; level < count; level++)
         {
             const own = held[level];
-            if (own)
-            {
-                out.push({ width: own.width, height: own.height, data: own.data });
-                continue;
-            }
-            const last = out[out.length - 1];
-            const half = halve(last.data, last.width, last.height);
-            out.push({ width: half.width, height: half.height, data: half.bgra });
+            out.push(own ? { width: own.width, height: own.height, data: own.data }
+                : smaller(out[out.length - 1]));
         }
         return out;
     };
+
+    /** DXGI formats whose levels or size were made by nearest texel, each said once. */
+    const nearestSaid = new Set();
 
     /**
      * The texture made on the device from an image: a 2D texture (six array
      * slices for a cube map) or a volume, its levels written as initial data.
      *
      * @param {string} api @param {number} device
-     * @param {import('../d3dx9/images.js').Image} image @param {LoadInfo} info
+     * @param {AnyImage} file @param {LoadInfo} info
      * @param {number} out  where the resource's pointer goes
      * @param {any} thread
      * @returns {Promise<number>}
      */
-    const make = async(api, device, image, info, out, thread)=>{
+    const make = async(api, device, file, info, out, thread)=>{
         const heap = /** @type {NonNullable<D3dx10Host['heap']>} */ (host.heap);
-        const volume = Boolean(image.depth && image.depth > 1);
+        const native = nativeOf(file);
+        const volume = native ? native.dimension === DIMENSION.TEXTURE3D
+            : Boolean(file.depth && file.depth > 1);
+        const toWidth = given(info.width, file.width);
+        const toHeight = given(info.height, file.height);
+        const sized = volume ? -1 : levelSized(file, toWidth, toHeight);
+        const resize = sized < 0 && (toWidth !== file.width || toHeight !== file.height);
+        const codec = native ? nativeCodec(native.dxgi) : null;
+        if (resize && (volume || (native && !codec)))
+        {
+            host.divergence?.(api, `answered E_FAIL: ${toWidth}x${toHeight} asked of a`
+                + ` ${file.width}x${file.height} ${volume ? 'volume' : `file of DXGI format`
+                + ` ${native?.dxgi}`}; this loader resizes neither`);
+            return E_FAIL;
+        }
+        const image = sized > 0 ? fromLevel(file, sized) : !resize ? file
+            : native && codec ? nativeResizedTo(native, toWidth, toHeight, codec)
+                : resizedTo(file, toWidth, toHeight);
         const faces = volume
             ? (image.volume ?? []).map(slices=>slices)
             : (image.faces ?? [image.levels]);
@@ -295,19 +528,12 @@ export function createD3dx10Functions(host, version){
                 + `${volume ? 'volume' : 'file'} of format ${image.format}, not read`);
             return D3DX10_ERR_INVALID_DATA;
         }
-        const format = dxgiOf(sample.format);
+        const format = native ? native.dxgi : dxgiOf(sample.format);
         const asked = given(info.format, format);
         if (asked !== format && !(asked === DXGI.R8G8B8A8_UNORM && format === DXGI.B8G8R8A8_UNORM))
         {
             host.divergence?.(api, `answered E_FAIL: format ${asked} asked of a file held as`
                 + ` ${format}; this loader converts none but BGRA to RGBA`);
-            return E_FAIL;
-        }
-        if (given(info.width, image.width) !== image.width
-            || given(info.height, image.height) !== image.height)
-        {
-            host.divergence?.(api, 'answered E_FAIL: a size other than the file\'s; this loader'
-                + ' does not resize');
             return E_FAIL;
         }
         const first = Math.min(given(info.firstMip, 0), Math.max(0, image.mipLevels - 1));
@@ -321,11 +547,25 @@ export function createD3dx10Functions(host, version){
         const fromFile = Math.max(1, image.mipLevels - first);
         const asks = info.mips === D3DX10_DEFAULT || info.mips === 0 ? full
             : info.mips === D3DX10_FROM_FILE ? fromFile : Math.min(full, info.mips);
-        const count = isCompressed(sample.format) || volume ? Math.min(asks, fromFile) : asks;
+        // Texels held as a classic file has them are not halved; a file's own
+        // DXGI levels are, by its format's codec, where there is one.
+        const count = (native && !codec) || (!native && keptAsIs(sample.format)) || volume
+            ? Math.min(asks, fromFile) : asks;
+        if (native && count < asks)
+        {
+            host.divergence?.(api, `${asks - count} levels below the file's last of DXGI format`
+                + ` ${format} are left out: this loader has no codec for it`);
+        }
+        if (codec?.nearest && (resize || count > fromFile) && !nearestSaid.has(format))
+        {
+            nearestSaid.add(format);
+            host.divergence?.(api, `levels or a size made of a file of DXGI format ${format} take`
+                + ' the nearest texel, not D3DX\'s filter');
+        }
         /** @type {{ width: number, height: number, data: Uint8Array }[][]} */
         const chains = volume
             ? []
-            : faces.map(levels=>levelsOf(levels.slice(first), count));
+            : faces.map(levels=>levelsOf(levels.slice(first), count, codec?.smaller));
         /** @type {Uint8Array[]} */
         const subresources = [];
         /** @type {{ pitch: number, slice: number }[]} */
@@ -380,10 +620,13 @@ export function createD3dx10Functions(host, version){
             const usage = given(info.usage, 0);
             const bind = given(info.bind, BIND_SHADER_RESOURCE);
             const cpu = given(info.cpu, 0);
-            const misc = given(info.misc, 0) | (image.faces ? MISC_TEXTURECUBE : 0);
+            const cube = native ? native.cube : Boolean(image.faces);
+            const misc = given(info.misc, 0) | (cube ? MISC_TEXTURECUBE : 0);
+            const linear = native?.dimension === DIMENSION.TEXTURE1D;
             putU32s(block, volume
                 ? [width, height, depth, count, asked, usage, bind, cpu, misc]
-                : [width, height, count, faces.length, asked, 1, 0, usage, bind, cpu, misc]);
+                : linear ? [width, count, faces.length, asked, usage, bind, cpu, misc]
+                    : [width, height, count, faces.length, asked, 1, 0, usage, bind, cpu, misc]);
             let at = block + descBytes + dataBytes;
             /** @type {number[]} */
             const records = [];
@@ -394,7 +637,8 @@ export function createD3dx10Functions(host, version){
             });
             putU32s(block + descBytes, records);
             return await method(thread, device,
-                volume ? DEVICE.CreateTexture3D : DEVICE.CreateTexture2D,
+                volume ? DEVICE.CreateTexture3D
+                    : linear ? DEVICE.CreateTexture1D : DEVICE.CreateTexture2D,
                 [block, block + descBytes, out]);
         }
         finally
@@ -475,15 +719,23 @@ export function createD3dx10Functions(host, version){
      * D3DX10_IMAGE_INFO, as a file says it: Width, Height, Depth, ArraySize,
      * MipLevels, MiscFlags, Format, ResourceDimension, ImageFileFormat.
      *
-     * @param {number} at @param {import('../d3dx9/images.js').Image} image
+     * @param {number} at @param {AnyImage} image
      */
     const writeInfo = (at, image)=>{
+        const native = nativeOf(image);
+        if (native)
+        {
+            putU32s(at, [native.width, native.height, native.depth ?? 1, native.arraySize,
+                native.mipLevels, native.cube ? MISC_TEXTURECUBE : 0, native.dxgi,
+                native.dimension, native.fileFormat]);
+            return;
+        }
         const volume = Boolean(image.depth && image.depth > 1);
         const sample = volume ? image.volume?.[0]?.[0] : image.levels[0];
         putU32s(at, [image.width, image.height, volume ? image.depth ?? 1 : 1,
             image.faces ? 6 : 1, image.mipLevels, image.faces ? MISC_TEXTURECUBE : 0,
             sample ? dxgiOf(sample.format) : dxgiOf(image.format),
-            volume ? DIMENSION_TEXTURE3D : DIMENSION_TEXTURE2D, image.fileFormat]);
+            volume ? DIMENSION.TEXTURE3D : DIMENSION.TEXTURE2D, image.fileFormat]);
     };
 
     /**

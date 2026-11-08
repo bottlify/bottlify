@@ -1980,3 +1980,13 @@ process on eight). Past 0x10000000 and the few megabytes above it, the bases a l
 often linked for, the heap gives the range up as it gives a library that cannot move its span, and
 the memory starts at 512 MiB on eight executors. A library linked to load inside the range cannot
 be loaded; one that can move is moved. *2026-11-07.*
+
+**A234. D3DX 10 asked for a size its file holds as a level takes that level.** A
+`D3DX10_IMAGE_LOAD_INFO` whose width and height are those of one of the file's levels below the
+first makes the texture of that level and the ones below it, as the file has them; D3DX 10
+filters the first level down to the size instead. The file's own levels are the same picture
+made by its author's tool, in any format, blocks included; filtering would mean decoding a
+format that may have no codec here (BC6H, BC7, signed BC4 and BC5). Another size is stretched
+from the first level to the nearest texel and its levels are averaged, where the format has a
+codec (texels of whole bytes, unsigned BC1 to BC5), and refused with a divergence where it has
+none. *2026-11-08.*
