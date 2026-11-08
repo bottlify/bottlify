@@ -1,7 +1,7 @@
 # `@bottlify/cork`
 
 Cork is the x86 processor of [Bottlify](https://github.com/bottlify/bottlify): it translates 32-bit
-x86 machine code into WebAssembly and runs it, in a browser or in Node. It knows nothing about
+x86 and 64-bit x86-64 machine code into WebAssembly and runs it, in a browser or in Node. It knows nothing about
 Windows; a system call, a port write or a fault stops it and hands control back to the caller.
 
 `@bottlify/core` already carries its own copy of cork. This package is for running x86 code without

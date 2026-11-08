@@ -1,6 +1,6 @@
 # cork
 
-Cork is a module that runs x86 programs, mostly 32-bit, in the browser. A browser cannot run x86
+Cork is a module that runs x86 programs, 32-bit and 64-bit (x86-64), in the browser. A browser cannot run x86
 machine code, so cork translates it into WebAssembly, and the browser compiles that for its own
 processor. That is why one build of Bottlify runs on x86 and on ARM alike. Translated code runs
 over twenty times faster than decoding every instruction again, and on average only three times

@@ -8,8 +8,9 @@ of Wine) and an x86-to-WebAssembly translator. The page opens an ordinary `.exe`
 runs as if Windows were around it, with a `C:` drive, a registry, windows, DirectX drawn through
 WebGPU, and sound.
 
-Supported: 32-bit programs, DirectDraw, Direct3D 7–10, OpenGL 1.1 with extensions, Vulkan,
-DirectSound, DirectMusic, video through DirectShow and networking through Winsock. Which games
+Supported: 32-bit programs, and 64-bit (x86-64) ones as far as
+[the limits](https://bottlify.app/docs/core/limits/) say; DirectDraw, Direct3D 7–11, OpenGL up to 4.6,
+Vulkan, DirectSound, DirectMusic, video through DirectShow and networking through Winsock. Which games
 and programs run: [the list](https://bottlify.app/docs/games.html).
 
 ## Why

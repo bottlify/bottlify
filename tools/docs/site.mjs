@@ -230,6 +230,139 @@ export function graphSvg(list){
 }
 
 /**
+ * @typedef {{ id: string, col: number, row: number, label: string }} WalkNode
+ * @typedef {{ anchor: string, title: string, nodes: string[], edges: [string, string][] }} WalkStep
+ */
+
+/**
+ * A walkthrough a page declares: its parts (`<!-- nodes` then `id col row label` a line) and,
+ * under a heading, the parts a step takes (`<!-- step: a>b, c -->`: an arrow from a to b, or a
+ * part alone). Null for a page that declares none. A step naming a part the page does not have
+ * fails the build.
+ *
+ * @param {string} text
+ * @returns {{ nodes: WalkNode[], steps: WalkStep[] } | null}
+ */
+export function walkthrough(text){
+    const declared = /<!--\s*nodes\s*\n([\s\S]*?)-->/.exec(text);
+    if (!declared)
+    {
+        return null;
+    }
+    const nodes = declared[1].split('\n').map(line=>line.trim()).filter(Boolean).map(line=>{
+        const match = /^(\S+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+        if (!match)
+        {
+            throw new Error(`a walkthrough part is "id column row label": ${line}`);
+        }
+        return { id: match[1], col: Number(match[2]), row: Number(match[3]), label: match[4] };
+    });
+    const known = new Set(nodes.map(node=>node.id));
+    const heads = headings(text);
+    /** @type {WalkStep[]} */
+    const steps = [];
+    let at = -1;
+    for (const line of prose(text))
+    {
+        if (/^(#{1,6})\s+(.+?)\s*#*\s*$/.test(line))
+        {
+            at++;
+            continue;
+        }
+        const step = /^<!--\s*step:(.*?)-->/.exec(line.trim());
+        if (!step)
+        {
+            continue;
+        }
+        const heading = heads[at];
+        if (!heading)
+        {
+            throw new Error(`a step before any heading: ${line}`);
+        }
+        /** @type {WalkStep} */
+        const entry = { anchor: heading.anchor, title: heading.text.replace(/`/g, ''), nodes: [],
+            edges: [] };
+        for (const item of step[1].split(',').map(part=>part.trim()).filter(Boolean))
+        {
+            const ends = item.split('>').map(part=>part.trim());
+            for (const id of ends)
+            {
+                if (!known.has(id))
+                {
+                    throw new Error(`step "${entry.title}" names ${id}, which no part is`);
+                }
+            }
+            if (ends.length === 2)
+            {
+                entry.edges.push([ends[0], ends[1]]);
+            }
+            entry.nodes.push(...ends.filter(id=>!entry.nodes.includes(id)));
+        }
+        steps.push(entry);
+    }
+    return { nodes, steps };
+}
+
+/**
+ * The walkthrough's panel: the parts in their grid, every arrow any step draws,
+ * and the controls; `walk.js` lights each step's parts and arrows.
+ *
+ * @param {{ nodes: WalkNode[], steps: WalkStep[] }} walk
+ */
+function walkPanel({ nodes, steps }){
+    const W = 150;
+    const H = 40;
+    const GX = 34;
+    const GY = 30;
+    const P = 8;
+    const cols = Math.max(...nodes.map(node=>node.col)) + 1;
+    const rowCount = Math.max(...nodes.map(node=>node.row)) + 1;
+    const width = cols * (W + GX) - GX + 2 * P;
+    const height = rowCount * (H + GY) - GY + 2 * P;
+    const by = new Map(nodes.map(node=>[node.id, node]));
+    const centre = (/** @type {string} */ id)=>{
+        const node = /** @type {WalkNode} */ (by.get(id));
+        return { x: P + node.col * (W + GX) + W / 2, y: P + node.row * (H + GY) + H / 2 };
+    };
+    // Where the line from a box's centre towards (dx, dy) leaves the box.
+    /** @param {{ x: number, y: number }} c @param {number} dx @param {number} dy */
+    const edgeOf = (c, dx, dy)=>{
+        const t = Math.min(dx ? (W / 2 + 3) / Math.abs(dx) : Infinity,
+            dy ? (H / 2 + 3) / Math.abs(dy) : Infinity);
+        return { x: c.x + dx * t, y: c.y + dy * t };
+    };
+    const keys = [...new Set(steps.flatMap(step=>step.edges.map(([a, b])=>`${a}>${b}`)))];
+    const arrows = keys.map(key=>{
+        const [a, b] = key.split('>');
+        const from = centre(a);
+        const to = centre(b);
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const start = edgeOf(from, dx, dy);
+        const end = edgeOf(to, -dx, -dy);
+        return `<line class="edge" data-key="${key}" x1="${start.x}" y1="${start.y}" `
+            + `x2="${end.x}" y2="${end.y}" marker-end="url(#walk-arrow)"/>`;
+    });
+    const boxes = nodes.map(node=>{
+        const c = centre(node.id);
+        return `<g class="node" data-id="${node.id}" tabindex="0" role="button">`
+            + `<rect x="${c.x - W / 2}" y="${c.y - H / 2}" width="${W}" height="${H}" rx="8"/>`
+            + `<text x="${c.x}" y="${c.y + 5}" text-anchor="middle">${escape(node.label)}</text></g>`;
+    });
+    const data = JSON.stringify(steps).replace(/</g, '\\u003c');
+    return '<div class="walk" id="walk"><div class="walk-bar">'
+        + '<button type="button" data-go="-1" aria-label="Previous step">&#8249; Back</button>'
+        + '<span class="walk-title" aria-live="polite"></span>'
+        + '<button type="button" data-go="1" aria-label="Next step">Next &#8250;</button></div>'
+        + `<svg class="walk-map" viewBox="0 0 ${width} ${height}" role="img" `
+        + 'aria-label="The parts of Bottlify a step takes"><defs><marker id="walk-arrow" '
+        + 'viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
+        + 'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>'
+        + `${arrows.join('')}${boxes.join('')}</svg></div>`
+        + `<script type="application/json" id="walk-data">${data}</script>`;
+}
+
+/**
  * The module graph's page body: the graph, a card per layer, the data the
  * graph script reads.
  *
@@ -398,17 +531,26 @@ export async function build(root, out){
         };
         const heads = headings(text);
         const title = heads.find(h=>h.level === 1)?.text.replace(/`/g, '') ?? source;
-        page(href, title, render(text, { link }), {
-            source,
-            toc: heads,
-            scripts: /^```mermaid/m.test(text) ? MERMAID : '',
-        });
+        let body = render(text, { link });
+        const tour = walkthrough(text);
+        if (tour && tour.steps.length)
+        {
+            // The panel goes right above the first step, and stays in view under the header
+            // while the steps scroll past it.
+            const at = body.indexOf(`id="${tour.steps[0].anchor}"`);
+            const cut = body.lastIndexOf('<', at);
+            body = `${body.slice(0, cut)}${walkPanel(tour)}${body.slice(cut)}`;
+        }
+        const base = '../'.repeat(href.split('/').length - 1);
+        const scripts = (/^```mermaid/m.test(text) ? MERMAID : '')
+            + (tour ? `<script src="${base}walk.js" defer></script>` : '');
+        page(href, title, body, { source, toc: heads, scripts });
         search.push(...searchEntries(text, href, title));
     }
     page('modules.html', 'Module graph', modulesBody(list),
         { scripts: '<script src="graph.js" defer></script>' });
 
-    for (const asset of ['style.css', 'search.js', 'graph.js'])
+    for (const asset of ['style.css', 'search.js', 'graph.js', 'walk.js'])
     {
         copyFileSync(join(ASSETS, asset), join(out, asset));
     }

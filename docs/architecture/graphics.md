@@ -11,7 +11,7 @@
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
 flowchart TB
   subgraph E1["Engine thread"]
-    D89["Direct3D 7, 8, 9, 10, OpenGL<br/>state and answers, no renderer"]
+    D89["Direct3D 7, 8, 9, 10, 11, OpenGL<br/>state and answers, no renderer"]
     D7["Vulkan<br/>still drawn here, through WebGPU"]
     SW["DirectDraw, GDI<br/>surfaces in program memory"]
   end

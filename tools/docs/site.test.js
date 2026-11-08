@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render } from './markdown.mjs';
-import { build, graphSvg, htmlOf, navigation, rows } from './site.mjs';
+import { build, graphSvg, htmlOf, navigation, rows, walkthrough } from './site.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -94,4 +94,21 @@ test('render leaves a comment out of the page', ()=>{
     const html = render('# T\n<!-- covers: a.js\n  b.js -->\n\nText.\n');
     assert.doesNotMatch(html, /covers/);
     assert.match(html, /<p>Text\.<\/p>/);
+});
+
+test('a walkthrough: its parts, each step\'s arrows and parts under its heading', ()=>{
+    const page = '# Run\n<!-- nodes\npage 0 0 Page\nengine 1 0 Engine thread\ncork 0 1 cork\n-->\n'
+        + '```\n### not a step\n```\n### 1. Start\n<!-- step: page>engine -->\nText.\n'
+        + '### 2. Run\n<!-- step: engine>cork, page -->\n';
+    const walk = walkthrough(page);
+    assert.deepEqual(walk?.nodes.map(node=>[node.id, node.col, node.row, node.label]),
+        [['page', 0, 0, 'Page'], ['engine', 1, 0, 'Engine thread'], ['cork', 0, 1, 'cork']]);
+    assert.deepEqual(walk?.steps, [
+        { anchor: '1-start', title: '1. Start', nodes: ['page', 'engine'],
+            edges: [['page', 'engine']] },
+        { anchor: '2-run', title: '2. Run', nodes: ['engine', 'cork', 'page'],
+            edges: [['engine', 'cork']] },
+    ]);
+    assert.equal(walkthrough('# No walk\n'), null);
+    assert.throws(()=>walkthrough(`${page}### 3. Odd\n<!-- step: page>gpu -->\n`), /names gpu/);
 });

@@ -116,6 +116,30 @@ svg.graph marker path { fill: var(--muted); }
 }
 .legend { font-size: 14px; color: var(--muted); }
 
+/* A walkthrough: the panel stays under the header while its steps scroll by. */
+.walk {
+    position: sticky; top: 56px; z-index: 3; margin: 12px -8px 8px; padding: 8px 8px 6px;
+    background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.walk-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.walk-bar button {
+    font: inherit; font-size: 14px; padding: 4px 12px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--soft); color: var(--fg); cursor: pointer;
+}
+.walk-bar button:hover { border-color: var(--accent); }
+.walk-title { flex: 1; text-align: center; font-weight: 600; font-size: 14px; }
+svg.walk-map { display: block; width: 100%; max-height: 34vh; }
+svg.walk-map .node { cursor: pointer; }
+svg.walk-map .node rect { fill: var(--node); stroke: var(--muted); stroke-width: 1.2; }
+svg.walk-map .node text { fill: var(--fg); font: 600 13px Inter, "Segoe UI", sans-serif; pointer-events: none; }
+svg.walk-map .edge { stroke: var(--muted); stroke-width: 1.2; opacity: 0; }
+svg.walk-map marker path { fill: var(--accent); }
+svg.walk-map.stepping .node { opacity: .35; transition: opacity .2s; }
+svg.walk-map.stepping .node.on { opacity: 1; }
+svg.walk-map .node.on rect { fill: var(--hot); stroke: var(--accent); stroke-width: 2.2; }
+svg.walk-map .edge.on { opacity: 1; stroke: var(--accent); stroke-width: 2.4; transition: opacity .2s; }
+main h3.current { color: var(--accent); }
+
 @media (max-width: 1100px) {
     .layout { grid-template-columns: 240px minmax(0, 1fr); }
     aside.toc { display: none; }
@@ -127,8 +151,11 @@ svg.graph marker path { fill: var(--muted); }
     header .brand span { display: none; }
     .menu { display: block; }
     .layout { display: block; }
-    nav.side { display: none; position: static; height: auto; border-right: 0;
-        border-bottom: 1px solid var(--line); }
+    /* Over the page wherever it is scrolled to, not at its top. */
+    nav.side { display: none; position: fixed; top: 56px; left: 0; right: 0; bottom: 0; z-index: 6;
+        height: auto; background: var(--bg); border-right: 0; padding-bottom: 80px; }
     #menu:checked ~ .layout nav.side { display: block; }
+    body:has(#menu:checked) { overflow: hidden; }
+    svg.walk-map { max-height: 26vh; }
     main { padding: 20px 16px 60px; }
 }

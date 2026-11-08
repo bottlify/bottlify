@@ -1,7 +1,7 @@
 # Bottlify documentation
 
-Bottlify runs unchanged Windows x86 programs in a browser tab: cork translates the program's x86 code
-to WebAssembly, and a Win32 and DirectX layer written in JavaScript answers its calls on WebGPU,
+Bottlify runs unchanged Windows programs, 32-bit and 64-bit, in a browser tab: cork translates the
+program's x86 or x86-64 code to WebAssembly, and a Win32 and DirectX layer written in JavaScript answers its calls on WebGPU,
 WebAudio and OPFS. What it is for is in the [README](../README.md); these pages are how to use it
 and how it works.
 
@@ -26,6 +26,7 @@ listed here. -->
 ## How it works
 
 - [Inside Bottlify](architecture/README.md)
+- [Hello world, step by step](architecture/hello-world.md)
 - [Threads](architecture/threads.md)
 - [Startup](architecture/startup.md)
 - [cork in the engine](architecture/cork.md)
