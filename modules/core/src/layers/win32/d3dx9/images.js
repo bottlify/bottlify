@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
+import { FMT, decodeTexels, isSupported, keptAsIs, layoutOf } from './pixels.js';
 import { PngError, isPng, readPng } from './png.js';
 import { decodeJpeg } from '../../media/internal/jpeg.js';
 
@@ -277,6 +277,10 @@ function ddsFormat(view){
     {
         return FMT.A8L8;
     }
+    if ((flags & DDPF.LUMINANCE) && bits === 16 && masks([0xffff, 0, 0]))
+    {
+        return FMT.L16;
+    }
     if ((flags & DDPF.ALPHA) && bits === 8)
     {
         return FMT.A8;
@@ -310,7 +314,11 @@ function readDds(bytes){
     const format = ddsFormat(new DataView(bytes.buffer, bytes.byteOffset + 76, 32));
     if (format === 0 || format === 0x30315844 /* DX10 */)
     {
-        throw new ImageError('a DDS pixel format this loader does not know');
+        const pf = new DataView(bytes.buffer, bytes.byteOffset + 76, 32);
+        const hex = (/** @type {number} */ at)=>`0x${pf.getUint32(at, true).toString(16)}`;
+        throw new ImageError('a DDS pixel format this loader does not know (flags '
+            + `${hex(4)}, FourCC ${hex(8)}, ${pf.getUint32(12, true)} bits, masks ${hex(16)} `
+            + `${hex(20)} ${hex(24)} ${hex(28)})`);
     }
     if (depth > 1)
     {
@@ -396,7 +404,7 @@ function readDds(bytes){
                 break;
             }
             const data = bytes.subarray(at, at + size);
-            levels.push(isCompressed(format)
+            levels.push(keptAsIs(format)
                 ? { width: w, height: h, format, data }
                 : { width: w, height: h, format: FMT.A8R8G8B8,
                     data: indexed ? throughPalette(data) : decodeTexels(format, data, w, h) });

@@ -36,6 +36,11 @@ test('the bytes of each layout are the documented ones', ()=>{
     assert.deepEqual([...encodeTexels(FMT.L8, Uint8Array.from([255, 255, 255, 9]), 1, 1)], [255]);
     assert.deepEqual([...encodeTexels(FMT.A8L8, Uint8Array.from([0, 0, 0, 77]), 1, 1)], [0, 77]);
     assert.deepEqual([...decodeTexels(FMT.A8, Uint8Array.from([40]), 1, 1)], [0, 0, 0, 40]);
+    // L16: the luminance stretched over sixteen bits, and narrowed back.
+    assert.deepEqual([...encodeTexels(FMT.L16, Uint8Array.from([255, 255, 255, 9]), 1, 1)],
+        [0xff, 0xff]);
+    assert.deepEqual([...decodeTexels(FMT.L16, Uint8Array.from([0x80, 0x80]), 1, 1)],
+        [128, 128, 128, 255]);
 });
 
 test('a DXT1 block decodes as the format describes, both of its modes', ()=>{

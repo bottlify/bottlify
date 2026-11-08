@@ -20,7 +20,7 @@
 export const FMT = Object.freeze({
     UNKNOWN: 0, R8G8B8: 20, A8R8G8B8: 21, X8R8G8B8: 22, R5G6B5: 23, X1R5G5B5: 24,
     A1R5G5B5: 25, A4R4G4B4: 26, A8: 28, X4R4G4B4: 30, A8B8G8R8: 32, X8B8G8R8: 33,
-    P8: 41, L8: 50, A8L8: 51,
+    P8: 41, L8: 50, A8L8: 51, L16: 81,
     DXT1: 0x31545844, DXT2: 0x32545844, DXT3: 0x33545844, DXT4: 0x34545844,
     DXT5: 0x35545844,
 });
@@ -29,12 +29,21 @@ export const FMT = Object.freeze({
 export const isCompressed = format=>format === FMT.DXT1 || format === FMT.DXT2
     || format === FMT.DXT3 || format === FMT.DXT4 || format === FMT.DXT5;
 
+/**
+ * Whether a file's level is held in its own format rather than the working
+ * form: a compressed one, and one with more than eight bits a channel, which
+ * the working form would cut. A texture of that same format takes it as it is.
+ *
+ * @param {number} format
+ */
+export const keptAsIs = format=>isCompressed(format) || format === FMT.L16;
+
 /** Bytes a texel takes, for the formats this module reads and writes uncompressed. */
 /** @type {Map<number, number>} */
 const TEXEL_BYTES = new Map([[FMT.R8G8B8, 3], [FMT.A8R8G8B8, 4], [FMT.X8R8G8B8, 4],
     [FMT.R5G6B5, 2], [FMT.X1R5G5B5, 2], [FMT.A1R5G5B5, 2], [FMT.A4R4G4B4, 2],
     [FMT.X4R4G4B4, 2], [FMT.A8, 1], [FMT.L8, 1], [FMT.A8L8, 2], [FMT.A8B8G8R8, 4],
-    [FMT.X8B8G8R8, 4]]);
+    [FMT.X8B8G8R8, 4], [FMT.L16, 2]]);
 
 /** @param {number} format */
 export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(format);
@@ -132,6 +141,9 @@ export function decodeTexels(format, data, width, height, palette){
                 r = g = b = data[at];
                 a = data[at + 1];
                 break;
+            case FMT.L16:
+                r = g = b = Math.round(view.getUint16(at, true) * 255 / 65535);
+                break;
             case FMT.P8: {
                 const entry = /** @type {Uint8Array} */ (palette).subarray(data[at] * 4);
                 r = entry[0];
@@ -208,6 +220,9 @@ export function encodeTexels(format, bgra, width, height){
             case FMT.A8L8:
                 out[at] = luminance(r, g, b);
                 out[at + 1] = a;
+                break;
+            case FMT.L16:
+                view.setUint16(at, luminance(r, g, b) * 257, true);
                 break;
             default:
                 throw new Error(`no encoder for format ${format}`);

@@ -145,6 +145,21 @@ test('an uncompressed DDS is named by its masks and read into texels', ()=>{
     assert.equal(readImage(Uint8Array.from([...luminance, 9])).format, FMT.L8);
 });
 
+test('a sixteen-bit luminance DDS is D3DFMT_L16, its texels kept whole', ()=>{
+    // 3DMark06's gloss maps: DDPF_LUMINANCE, sixteen bits, the red mask all of
+    // them. The working form has eight bits a channel, so the level is held as
+    // the file has it for a texture of the same format to take.
+    const header = ddsHeader({ width: 2, height: 1, pfFlags: 0x20000, bits: 16, r: 0xffff });
+    const image = readImage(Uint8Array.from([...header, 0x34, 0x12, 0xff, 0xff]));
+    assert.equal(image.format, FMT.L16);
+    assert.deepEqual(image.levels.map(l=>[l.format, ...l.data]),
+        [[FMT.L16, 0x34, 0x12, 0xff, 0xff]]);
+    const other = ddsHeader({ width: 1, height: 1, pfFlags: 0x20000, bits: 16, r: 0xff00 });
+    assert.throws(()=>readImage(Uint8Array.from([...other, 0, 0])),
+        /pixel format this loader does not know \(flags 0x20000, FourCC 0x0, 16 bits, masks 0xff00/,
+        'another sixteen-bit luminance is named, not taken for L16');
+});
+
 test('a palette-indexed DDS reads its texels through the palette, alpha from peFlags', ()=>{
     // DDPF_PALETTEINDEXED8, eight bits a texel, 256 entries of r, g, b and the alpha
     // Direct3D keeps in peFlags, between the header and the texels.

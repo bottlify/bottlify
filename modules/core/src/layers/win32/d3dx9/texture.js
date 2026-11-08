@@ -6,8 +6,9 @@
 
 import { DEVICE, SURFACE, TEXTURE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
 import { ImageError, bitmapFile, readImage } from './images.js';
-import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layoutOf, resample }
-    from './pixels.js';
+import {
+    FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, keptAsIs, layoutOf, resample,
+} from './pixels.js';
 
 /**
  * D3DX's texture loaders: an image file made into a texture, a cube texture
@@ -498,7 +499,8 @@ export function createTextureLoader(host){
             const fits = own && own.width === lw && own.height === lh;
             if (fits && own.format === target && colorKey === 0)
             {
-                // A compressed level already in the format asked for goes as it is.
+                // A compressed or deep level already in the format asked for
+                // goes as it is.
                 out.push(own.data);
                 previous = null;
                 continue;
@@ -507,7 +509,7 @@ export function createTextureLoader(host){
             let bgra;
             if (fits)
             {
-                bgra = isCompressed(own.format) ? decodeTexels(own.format, own.data, lw, lh)
+                bgra = keptAsIs(own.format) ? decodeTexels(own.format, own.data, lw, lh)
                     : own.data.slice();
             }
             else if (previous && level > 0)
@@ -518,7 +520,7 @@ export function createTextureLoader(host){
             else
             {
                 const top = held[0];
-                const texels = isCompressed(top.format)
+                const texels = keptAsIs(top.format)
                     ? decodeTexels(top.format, top.data, top.width, top.height) : top.data;
                 bgra = resample(texels, top.width, top.height, lw, lh);
             }
@@ -864,7 +866,7 @@ export function createTextureLoader(host){
                 return D3DERR_INVALIDCALL;
             }
             const first = image.levels[0];
-            picked = { left, top, width: first.width, texels: isCompressed(first.format)
+            picked = { left, top, width: first.width, texels: keptAsIs(first.format)
                 ? decodeTexels(first.format, first.data, first.width, first.height)
                 : first.data };
             return { format: FMT.A8R8G8B8, width: right - left, height: bottom - top };
