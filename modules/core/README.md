@@ -39,7 +39,7 @@ faster.
 - [Getting started, serving a bottle, modes, sound](https://github.com/bottlify/bottlify/blob/main/docs/core/README.md)
 - [API](https://github.com/bottlify/bottlify/blob/main/docs/core/api.md),
   [configuration](https://github.com/bottlify/bottlify/blob/main/docs/core/configuration.md),
-  [limits](https://github.com/bottlify/bottlify/blob/main/docs/core/limits.md)
-- [How it works](https://github.com/bottlify/bottlify/blob/main/docs/architecture.md)
+  [limits](https://github.com/bottlify/bottlify/blob/main/docs/core/limits/README.md)
+- [How it works](https://github.com/bottlify/bottlify/blob/main/docs/architecture/README.md)
 
 MPL-2.0; components distributed with it are listed in `THIRD-PARTY-NOTICES.md`.

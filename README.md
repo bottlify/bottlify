@@ -36,7 +36,7 @@ Audio, OPFS), and programs need no rewriting for it.
   of a game's installer, run unchanged inside the engine.
 
 How the whole thing works (threads, startup, translation, Win32, graphics, sound, networking,
-storage) is in [the architecture](docs/architecture.md). Embedding `@bottlify/core`: [its API,
+storage) is in [the architecture](docs/architecture/README.md). Embedding `@bottlify/core`: [its API,
 configuration and limits](docs/core/README.md). Plans are in [`roadmap/`](roadmap/README.md).
 
 ## Building and testing

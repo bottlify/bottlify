@@ -39,7 +39,7 @@ opened is kept in the translation store so the next run opens as many at its sta
 own executor answers every call the others make, and keeps itself for those answers while a thread
 is pinned to its processor: another executor plays that processor. Without shared memory the
 program runs on one executor, is told of one, and the cpu layer's diagnostics say why
-(`executorsRefused`). How threads are placed: [architecture.md](../architecture.md#execution-in-bottlify).
+(`executorsRefused`). How threads are placed: [execution in Bottlify](../architecture/cork.md#execution-in-bottlify).
 
 cork's own settings (`cork.config`, `EngineConfig` in `src/layers/cpu/engine.js`) are in
 [cork settings](../cork/settings.md). The cpu layer sets `atomic` for a

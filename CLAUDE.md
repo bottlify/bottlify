@@ -29,11 +29,12 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
 ## Where things are
 
-- `docs/architecture.md` — how the whole thing works: threads, startup, cork, Win32,
-  graphics, sound, networking, storage.
-- `docs/core/` — `@bottlify/core`'s public contract: API, configuration, current limits. Kept
-  current as work lands; written for someone outside the project.
-- `docs/cork/README.md` — the translator and its runtime.
+- `docs/` — the documentation, one short page per question; `docs/README.md` lists every page
+  and is the site's navigation (`tools/docs/check.mjs` fails on a page it does not list or a link
+  that leads nowhere). `docs/architecture/` is how the whole thing works (threads, startup, cork,
+  Win32, graphics, sound, networking, storage); `docs/core/` is `@bottlify/core`'s public
+  contract (API, configuration, limits), written for someone outside the project;
+  `docs/cork/` is the translator. A module's own `README.md` is its npm page and stays short.
 - `roadmap/README.md` — the index of the plans: `x64.md`, `direct3d.md` (Direct3D 11 and 12),
   `opengl.md` (OpenGL 2.0 to 4.x), and `decisions.md` (behaviour chosen rather than derived from a
   specification).

@@ -7,7 +7,7 @@
 - **[`decisions.md`](decisions.md):** behaviour chosen rather than derived from a specification.
 - **[`negative-results.md`](negative-results.md):** what was measured and did not pay.
 
-How the engine works today is in [`docs/architecture.md`](../docs/architecture.md).
+How the engine works today is in [`docs/architecture/`](../docs/architecture/README.md).
 
 The `00-*` files beside these are local working notes, not in git (`.gitignore` excludes
 `roadmap/00-*`).
