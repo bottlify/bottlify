@@ -72,6 +72,8 @@
  *
  * `--debug-strings` prints what the programs say through OutputDebugString.
  *
+ * `--type 'text@S'` types text into whatever has the focus S seconds in.
+ *
  * `--watch-import 'lib.dll!Name=0+$1*8'` stands a watch in front of an import
  * (every one of a library's without `!Name`) and prints each call when it
  * returns, with the arguments `=` names read as it was made (see
@@ -485,6 +487,32 @@ for (const { what, at } of all('--key').map(timed))
         setTimeout(()=>app.input.send({ kind: 'key', code: what, down: false }), 150);
     }, at * 1000);
 }
+// `--type 'text@S'`: text typed into whatever has the focus from S seconds
+// on, a character every 150 ms, each the key's press, its character and its
+// release, the way the page's keyboard delivers one.
+/** @param {string} character */
+const codeOf = character=>(/[a-z]/i.test(character) ? `Key${character.toUpperCase()}`
+    : /\d/.test(character) ? `Digit${character}`
+        : ({ '-': 'Minus', ' ': 'Space', '.': 'Period', ',': 'Comma', '/': 'Slash' })[character]
+            ?? null);
+for (const spec of all('--type'))
+{
+    const at = spec.lastIndexOf('@');
+    const text = spec.slice(0, at);
+    [...text].forEach((character, index)=>setTimeout(()=>{
+        const code = codeOf(character);
+        if (code)
+        {
+            app.input.send({ kind: 'key', code, down: true });
+        }
+        app.input.send({ kind: 'text', text: character });
+        if (code)
+        {
+            setTimeout(()=>app.input.send({ kind: 'key', code, down: false }), 60);
+        }
+    }, Number(spec.slice(at + 1)) * 1000 + index * 150));
+}
+
 // Clicks go through the input layer's route (`app.input.route`), a step every
 // 150 ms: a pointer a program keeps by relative motion is pushed into the
 // corner first and moved from there, and a dialog's button sees a press and a
