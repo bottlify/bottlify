@@ -75,8 +75,9 @@ import {
 import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
-    DIRECTX_RELEASES, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, REG_EXPAND_SZ,
-    REG_SZ, createHive, shellFolderDirectories, shellFolders,
+    DIRECTX_RELEASES, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+    MACHINE_ENVIRONMENT, REG_EXPAND_SZ, REG_SZ, createHive, shellFolderDirectories,
+    shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -3613,7 +3614,16 @@ export function createWin32Module(){
                     ...createUrlmonFunctions({ windows: windows.name,
                         readU32: address=>memory.readU32(address),
                         writeU32: (address, value)=>memory.writeU32(address, value),
-                        writeMemory }),
+                        writeMemory, readMemory,
+                        // INTERNET_MAX_URL_LENGTH characters, in bytes.
+                        readWideString: address=>readWideString(address, 2084 * 2),
+                        allocate: bytes=>heap.allocate(bytes),
+                        contentType: extension=>{
+                            const key = hive.open(hive.root(HKEY_CLASSES_ROOT), extension);
+                            const value = key ? hive.getValue(key, 'Content Type') : null;
+                            return value ? new TextDecoder('utf-16le').decode(value.data)
+                                .replace(/\0[^]*$/, '') || null : null;
+                        } }),
                     // A control that loads its content by URL - Flash Player
                     // names its movie so even on the local disk.
                     ...createUrlMonikers({
