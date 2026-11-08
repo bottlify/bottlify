@@ -180,6 +180,21 @@ main h3.current { color: var(--accent); }
     float: right; margin-top: 6px; border: 0; background: none; color: #97a3aa; font-size: 20px;
     cursor: pointer;
 }
+.g3-legend {
+    position: absolute; right: 12px; bottom: 12px; z-index: 2; margin: 0; padding: 8px 12px;
+    list-style: none; font-size: 12px; line-height: 1.7; border-radius: 8px;
+    background: rgba(16, 21, 30, .8); border: 1px solid #39465a;
+}
+.g3-legend li::before {
+    content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px;
+    border-radius: 50%; background: currentColor; vertical-align: -1px;
+}
+.g3-legend .g3-package { color: #ffd166; } .g3-legend .g3-layer { color: #4cc9f0; }
+.g3-legend .g3-ours { color: #06d6a0; } .g3-legend .g3-cork { color: #ff9f1c; }
+.g3-legend .g3-thread { color: #f72585; } .g3-legend .g3-windows { color: #7c86b8; }
+.g3-legend .g3-outside { color: #b8f2c6; }
+.g3-tag.g3-ours { color: #7ff0cf; } .g3-tag.g3-cork { color: #ffc46b; }
+@media (max-width: 760px) { .g3-legend { display: none; } }
 .g3-failed { display: flex; align-items: center; justify-content: center; }
 .graph3d .scene-tooltip { color: #e3e8eb; font-size: 13px; max-width: 280px; }
 
