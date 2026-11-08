@@ -93,6 +93,9 @@ test('FindMimeFromData: the data\'s signature, then the proposal, then the exten
     const m = mime();
     assert.equal(m.call(0, [0x89, 0x50, 0x4e, 0x47, 13, 10, 0x1a, 10], 0), 0);
     assert.equal(m.answer(), 'image/x-png', 'urlmon\'s own name for PNG data');
+    assert.equal(m.call(0, [0x89, 0x50, 0x4e, 0x47, 13, 10, 0x1a, 10], m.wide(0x200, 'text/plain')),
+        0);
+    assert.equal(m.answer(), 'image/x-png', 'the data\'s signature over a proposal');
     assert.equal(m.call(0, [...'hello'].map(c=>c.charCodeAt(0)), m.wide(0x200, 'text/css')), 0);
     assert.equal(m.answer(), 'text/css', 'text no signature names takes the proposal');
     assert.equal(m.call(m.wide(0x100, 'pack://application:,,,/a/b.PNG?x=1'), [], 0), 0);
