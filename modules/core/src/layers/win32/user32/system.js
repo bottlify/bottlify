@@ -541,6 +541,11 @@ const CDS_UPDATEREGISTRY = 0x1;
 const CDS_NORESET = 0x10000000;
 /** What every top-level window hears when the display's mode moves. */
 const WM_DISPLAYCHANGE = 0x007e;
+/**
+ * How long the system's WM_DISPLAYCHANGE broadcast waits for each window
+ * before going on, as a send with SMTO_ABORTIFHUNG does.
+ */
+export const DISPLAY_CHANGE_WAIT_MS = 2000;
 /** DEVMODE's display orientation field, and the orientation every display here has. */
 const DM_DISPLAYORIENTATION = 0x00000080;
 const DMDO_DEFAULT = 0;
@@ -2089,7 +2094,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     /**
      * The display set to a size, and every top-level window told when it
      * moved, before the call returns, as Windows sends it (WM_DISPLAYCHANGE:
-     * the depth, and the size in the low and high words).
+     * the depth, and the size in the low and high words). A window whose
+     * thread does not answer is waited for DISPLAY_CHANGE_WAIT_MS, not for
+     * ever: a thread blocked outside its message loop holds no mode change.
      *
      * @param {number} width @param {number} height
      * @returns {number | Promise<number>}
@@ -2102,7 +2109,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         screen.width = width;
         screen.height = height;
         return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
-            ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0), ()=>DISP_CHANGE_SUCCESSFUL);
+            ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0, false, DISPLAY_CHANGE_WAIT_MS),
+        ()=>DISP_CHANGE_SUCCESSFUL);
     };
 
     /**

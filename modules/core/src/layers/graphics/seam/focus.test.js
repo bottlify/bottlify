@@ -58,8 +58,8 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
         GetWindowThreadProcessId: ([hwnd])=>/** @type {Record<number, number>} */ (threads)[hwnd]
             ?? 1,
         // A broadcast reaches the focus window's procedure, among the others.
-        SendMessageA: ([, message, wParam, lParam])=>Number(nested?.([FOCUS, message, wParam,
-            lParam]) ?? 0),
+        SendMessageTimeoutA: ([, message, wParam, lParam])=>Number(nested?.([FOCUS, message,
+            wParam, lParam]) ?? 0),
         ChangeDisplaySettingsA: ()=>0,
         GetSystemMetrics: ([index])=>screen[index] ?? 0,
         IsIconic: ()=>(iconic ? 1 : 0),
@@ -273,15 +273,17 @@ test('a reset shows a device window hidden since, and places it at the new mode'
 test('a mode the device sets is broadcast, and loses that device nothing', ()=>{
     const { windows, device, calls } = harness();
     windows.take(device, { ...HOW, mode: { bitsPerPixel: 32 } });
-    const told = calls.find(([name])=>name === 'SendMessageA');
-    assert.deepEqual(told?.[1], [0xffff, 0x7e, 32, (480 << 16 | 640) >>> 0],
-        'WM_DISPLAYCHANGE to every window: the depth, the size');
+    const told = calls.find(([name])=>name === 'SendMessageTimeoutA');
+    assert.deepEqual(told?.[1], [0xffff, 0x7e, 32, (480 << 16 | 640) >>> 0, 2, 2000, 0],
+        'WM_DISPLAYCHANGE to every window: the depth, the size; a window that does not answer'
+        + ' is waited for two seconds, as SMTO_ABORTIFHUNG');
     assert.equal(device.deviceState, STATES.OK);
     assert.ok(calls.some(([name, args])=>name === 'CallWindowProcA' && args[2] === 0x7e),
         'the program hears it');
     calls.length = 0;
     windows.take(device, { ...HOW, created: false });
-    assert.equal(calls.some(([name])=>name === 'SendMessageA'), false, 'the same mode: nothing');
+    assert.equal(calls.some(([name])=>name === 'SendMessageTimeoutA'), false,
+        'the same mode: nothing');
 });
 
 test('an extended device is told its window is covered while the activation is gone, and'
@@ -302,7 +304,7 @@ test('an extended device is told its window is covered while the activation is g
     calls.length = 0;
     send(0x1c, 1);
     assert.equal(device.occluded, false);
-    assert.deepEqual(calls.find(([name])=>name === 'SendMessageA')?.[1],
+    assert.deepEqual(calls.find(([name])=>name === 'SendMessageTimeoutA')?.[1].slice(0, 4),
         [0xffff, 0x7e, 16, (480 << 16 | 640) >>> 0], 'its mode set again, and told');
     assert.equal(device.deviceState, STATES.OK);
     send(0x1c, 0);

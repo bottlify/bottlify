@@ -7,7 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
-import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
+import {
+    DEVMODEA, DM_PELSHEIGHT, DM_PELSWIDTH, MSG, RECT, WNDCLASSA, WNDCLASSEXA,
+} from './structs.js';
 import { createWindowFunctions, endEllipsis, watchDispatch } from './windows.js';
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -7652,4 +7654,40 @@ test('a window goes inside another process\'s window, and both ask the tree acro
     assert.equal(first.fns.SetParent.handler([child, mine]), 0);
     assert.equal(second.fns.SetParent.handler([mine, 0]), child);
     assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), mine);
+});
+
+test('a mode change does not wait for ever on a window whose thread takes no messages', async()=>{
+    // The system's WM_DISPLAYCHANGE broadcast waits two seconds for each
+    // window, as a send with SMTO_ABORTIFHUNG: a COM server's apartment
+    // window, its thread blocked outside any message loop, held a full-screen
+    // device's creation for good.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    let clock = 0;
+    const { fns, memory, tick } = setup({ caller, now: ()=>clock });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+    // A thread that has looked at its queue takes what is sent to it there.
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+
+    caller.current = main;
+    memory.putU32s(TEXT_BUFFER, new Array(40).fill(0));
+    memory.putU32s(TEXT_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    memory.putU32s(TEXT_BUFFER + DEVMODEA.dmPelsWidth, [800, 600]);
+    const answer = fns.ChangeDisplaySettingsA.handler([TEXT_BUFFER, 0]);
+    assert.ok(answer instanceof Promise, 'the worker\'s window is waited for');
+    let done = false;
+    answer.then(()=>{
+        done = true;
+    });
+    await tick();
+    clock = 1999;
+    await tick();
+    assert.equal(done, false, 'for two seconds');
+    clock = 2000;
+    await tick();
+    await tick();
+    assert.equal(await answer, 0, 'DISP_CHANGE_SUCCESSFUL, then');
 });

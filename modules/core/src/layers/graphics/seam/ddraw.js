@@ -179,6 +179,13 @@ const DDENUMSURFACES_DOESEXIST = 0x00000010;
 
 /** A message to every top-level window, and the one that tells them the display's size. */
 const HWND_BROADCAST = 0xffff;
+const SMTO_ABORTIFHUNG = 0x0002;
+/**
+ * How long a mode's WM_DISPLAYCHANGE waits for each window, as the system's
+ * own broadcast does (user32 DISPLAY_CHANGE_WAIT_MS): a thread that does not
+ * answer holds no mode change.
+ */
+const DISPLAY_CHANGE_WAIT_MS = 2000;
 const WM_DISPLAYCHANGE = 0x007e;
 
 /** The window DirectDraw makes for a device: its class and title, a popup, shown. */
@@ -1155,8 +1162,9 @@ export function createDirectDrawSeam(
         const size = ((mode.height & 0xffff) << 16 | (mode.width & 0xffff)) >>> 0;
         const sized = changed && window !== 0 ? user32?.('SetWindowPos')?.handler([window, 0, 0, 0,
             mode.width, mode.height, SWP_NOZORDER | SWP_NOACTIVATE]) : 0;
-        return andThen(sized, ()=>(changed ? user32?.('SendMessageA')?.handler([HWND_BROADCAST,
-            WM_DISPLAYCHANGE, display.bitsPerPixel ?? 32, size]) ?? 0 : 0));
+        return andThen(sized, ()=>(changed ? user32?.('SendMessageTimeoutA')?.handler([
+            HWND_BROADCAST, WM_DISPLAYCHANGE, display.bitsPerPixel ?? 32, size, SMTO_ABORTIFHUNG,
+            DISPLAY_CHANGE_WAIT_MS, 0]) ?? 0 : 0));
     };
 
     /**

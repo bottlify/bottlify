@@ -3309,7 +3309,7 @@ test('a level the first generation set on an object leaves the mode set when a l
         {
             assert.deepEqual([h.display.width, h.display.height], [16, 16]);
             assert.deepEqual(sized.map(([, args])=>args.slice(1, 6)), [[0, 0, 0, 16, 16]]);
-            const told = calls.findIndex(([name, args])=>name === 'SendMessageA'
+            const told = calls.findIndex(([name, args])=>name === 'SendMessageTimeoutA'
                 && args[1] === 0x7e);
             assert.ok(told > calls.indexOf(sized[0]), 'sized before the windows hear of it');
         }

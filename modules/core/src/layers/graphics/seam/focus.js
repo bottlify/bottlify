@@ -67,6 +67,13 @@ const SW_RESTORE = 9;
 const HWND_TOPMOST = 0xffffffff;
 const HWND_NOTOPMOST = 0xfffffffe;
 const HWND_BROADCAST = 0xffff;
+const SMTO_ABORTIFHUNG = 0x0002;
+/**
+ * How long a mode's WM_DISPLAYCHANGE waits for each window, as the system's
+ * own broadcast does (user32 DISPLAY_CHANGE_WAIT_MS): a thread that does not
+ * answer holds no mode change.
+ */
+const DISPLAY_CHANGE_WAIT_MS = 2000;
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
 const SWP_NOSIZE = 0x0001;
@@ -288,8 +295,9 @@ export function createFocusWindows({ user32, procedure, cover, states }){
             one.setting = false;
             return answer;
         };
-        return andThen(call('SendMessageA', [HWND_BROADCAST, WM_DISPLAYCHANGE, mode.bitsPerPixel,
-            ((one.size.height & 0xffff) << 16 | one.size.width & 0xffff) >>> 0]), set);
+        return andThen(call('SendMessageTimeoutA', [HWND_BROADCAST, WM_DISPLAYCHANGE,
+            mode.bitsPerPixel, ((one.size.height & 0xffff) << 16 | one.size.width & 0xffff) >>> 0,
+            SMTO_ABORTIFHUNG, DISPLAY_CHANGE_WAIT_MS, 0]), set);
     };
 
     /**
