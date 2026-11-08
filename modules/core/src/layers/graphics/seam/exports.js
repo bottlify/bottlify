@@ -207,6 +207,9 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *     device calls on its windows (`focus.js`)
  * @param {(name: string, handler: (args: number[]) => unknown) => number} [deps.procedure]
  *        A window procedure of the host's, as a guest address.
+ * @param {<T>(thread: unknown, fn: () => T) => T} [deps.answering]
+ *        Runs `fn` as the call of `thread`, for what the device's windows hear
+ *        after a wait.
  * @param {(hwnd: number) => void} [deps.cover]
  *        Makes a window the one a full-screen device presents into, its frame
  *        taking no room.
@@ -239,6 +242,7 @@ export function createGraphicsLibraries(
         presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
         guestTraps = [], pointerSize = 4, floatResult, events, sharedHandles, user32, procedure,
+        answering,
         cover,
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -383,7 +387,8 @@ export function createGraphicsLibraries(
     const guestAllocateCode = guestCode ? allocateCode : undefined;
     // A full-screen device's windows, Direct3D 8's and 9's alike.
     const focus = user32 && procedure
-        ? createFocusWindows({ user32, procedure, cover, states: DEVICE_STATE })
+        ? createFocusWindows({ user32, procedure, cover, states: DEVICE_STATE, currentThread,
+            answering })
         : null;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
@@ -448,6 +453,7 @@ export function createGraphicsLibraries(
         user32,
         focus,
         procedure,
+        answering,
     }));
 
     /** What a program has actually asked us to make, for a report. */

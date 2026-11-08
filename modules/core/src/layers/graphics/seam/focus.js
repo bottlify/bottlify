@@ -82,19 +82,6 @@ const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 const SWP_SHOWWINDOW = 0x0040;
 
-/** @param {unknown} value @param {(answer: any) => any} then */
-const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
-    ? /** @type {Promise<unknown>} */ (value).then(then) : then(value));
-
-/**
- * Calls one after another, each waited for when it answers with a promise.
- *
- * @param {(() => unknown)[]} steps
- * @returns {unknown}
- */
-const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
-    andThen(before, ()=>step()), undefined);
-
 /**
  * @typedef {Object} FocusDevice
  * @property {(restorable?: boolean) => void} injectDeviceLoss
@@ -131,10 +118,38 @@ const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
  *        Makes a window the one a full-screen device presents into: its frame
  *        takes no room.
  * @param {{ LOST: string, NOT_RESET: string, OK: string }} deps.states
+ * @param {() => unknown} [deps.currentThread]  whose call is being handled now
+ * @param {<T>(thread: unknown, fn: () => T) => T} [deps.answering]
+ *        Runs `fn` as the call of `thread`: what the windows hear after a wait
+ *        goes to procedures on that thread, not on whoever runs then.
  */
-export function createFocusWindows({ user32, procedure, cover, states }){
+export function createFocusWindows({ user32, procedure, cover, states, currentThread, answering }){
     /** @param {string} name @param {number[]} args */
     const call = (name, args)=>user32(name)?.handler(args) ?? 0;
+    /**
+     * `then` once `value` is there; when it waited, as the call of the thread
+     * whose call it was, since a message the windows are sent then runs that
+     * thread's procedures.
+     *
+     * @param {unknown} value @param {(answer: any) => any} then
+     */
+    const andThen = (value, then)=>{
+        if (typeof (/** @type {any} */ (value))?.then !== 'function')
+        {
+            return then(value);
+        }
+        const thread = currentThread?.() ?? null;
+        return /** @type {Promise<unknown>} */ (value).then(answer=>(thread && answering
+            ? answering(thread, ()=>then(answer)) : then(answer)));
+    };
+    /**
+     * Calls one after another, each waited for when it answers with a promise.
+     *
+     * @param {(() => unknown)[]} steps
+     * @returns {unknown}
+     */
+    const inTurn = steps=>steps.reduce((/** @type {unknown} */ before, step)=>
+        andThen(before, ()=>step()), undefined);
 
     /** The devices full screen on each focus window, and its procedure before. */
     /** @type {Map<number, { original: number, devices: Set<Held>, filtering: number }>} */

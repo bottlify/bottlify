@@ -1231,6 +1231,8 @@ export function createGraphicsModule(){
                 procedure: (/** @type {string} */ name,
                     /** @type {(args: number[]) => unknown} */ handler)=>
                     bridge.register(`<${name}>`, { argBytes: 16, handler }),
+                answering: (/** @type {unknown} */ thread, /** @type {() => any} */ fn)=>
+                    bridge.answering(thread, fn),
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.
                 processHeapAllocate: (/** @type {number} */ bytes)=>

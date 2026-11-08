@@ -410,6 +410,9 @@ const S3TC_OF_FOURCC = Object.freeze({
  *          => Promise<number>} [deps.callGuest]
  * @param {() => any} [deps.currentThread]
  *        The bridge's way into guest code, for the enumerations.
+ * @param {<T>(thread: unknown, fn: () => T) => T} [deps.answering]
+ *        Runs `fn` as the call of `thread`, for what the windows hear of a
+ *        mode once the window placed in it has been told.
  * @param {{ allocate: (bytes: number) => number }} [deps.scratch]
  *        Guest memory for the descriptor a callback is shown. One block is
  *        taken and reused: a descriptor is the callback's to read while it
@@ -463,7 +466,7 @@ export function createDirectDrawSeam(
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
-        aroundCall, windowClient, user32, focus, procedure },
+        aroundCall, windowClient, user32, focus, procedure, answering },
 )
 {
     const fields = createFields(memory);
@@ -1162,9 +1165,15 @@ export function createDirectDrawSeam(
         const size = ((mode.height & 0xffff) << 16 | (mode.width & 0xffff)) >>> 0;
         const sized = changed && window !== 0 ? user32?.('SetWindowPos')?.handler([window, 0, 0, 0,
             mode.width, mode.height, SWP_NOZORDER | SWP_NOACTIVATE]) : 0;
-        return andThen(sized, ()=>(changed ? user32?.('SendMessageTimeoutA')?.handler([
+        // Told after a wait, it is still the setter's call: the procedures it
+        // runs on that thread are run as that call.
+        const thread = currentThread?.() ?? null;
+        const waited = typeof (/** @type {any} */ (sized))?.then === 'function';
+        /** @param {() => unknown} fn */
+        const asCaller = fn=>(waited && thread && answering ? answering(thread, fn) : fn());
+        return andThen(sized, ()=>(changed ? asCaller(()=>user32?.('SendMessageTimeoutA')?.handler([
             HWND_BROADCAST, WM_DISPLAYCHANGE, display.bitsPerPixel ?? 32, size, SMTO_ABORTIFHUNG,
-            DISPLAY_CHANGE_WAIT_MS, 0]) ?? 0 : 0));
+            DISPLAY_CHANGE_WAIT_MS, 0]) ?? 0) : 0));
     };
 
     /**

@@ -2273,9 +2273,9 @@ test('OleTranslateColor makes an OLE_COLOR a COLORREF by its high byte', ()=>{
     host = fakeHost();
     fx = createAutomationFunctions(/** @type {any} */ ({ ...host,
         user32: (/** @type {string} */ name)=>(name === 'GetSysColor'
-            ? { handler: ([index])=>0x00c0c0c0 + index } : undefined),
+            ? { handler: (/** @type {number[]} */ [index])=>0x00c0c0c0 + index } : undefined),
         gdi32: (/** @type {string} */ name)=>(name === 'GetPaletteEntries'
-            ? { handler: ([, index])=>(index < 16 ? 1 : 0) } : undefined),
+            ? { handler: (/** @type {number[]} */ [, index])=>(index < 16 ? 1 : 0) } : undefined),
     }));
     assert.equal(OLEAUT32_ORDINALS[421], 'OleTranslateColor');
     const translate = (/** @type {number} */ color, palette = 0)=>{

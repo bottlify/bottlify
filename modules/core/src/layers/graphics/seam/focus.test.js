@@ -445,3 +445,48 @@ test('an exclusive DirectDraw window is put back above the others every 1.5 seco
     released.windows.release(released.device);
     assert.equal(released.timers.size, 0, 'nor does an object gone');
 });
+
+test('what the windows hear after the device waited is sent as the call of the thread that made'
+    + ' the device', async()=>{
+    // Activating the focus window waits for the activation messages; the
+    // mode's broadcast after it runs procedures on the device's thread, which
+    // is no longer the one on the processor by then.
+    /** @type {unknown} */
+    let current = 'caller';
+    /** @type {unknown[]} */
+    const broadcastAs = [];
+    const windows = createFocusWindows({
+        user32: name=>({ handler: ()=>{
+            if (name === 'SetForegroundWindow')
+            {
+                return Promise.resolve(1).then(()=>{
+                    current = null;
+                    return 1;
+                });
+            }
+            if (name === 'SendMessageTimeoutA')
+            {
+                broadcastAs.push(current);
+            }
+            return name === 'GetWindowLongA' ? 0x10000000 : 1;
+        } }),
+        procedure: ()=>STUB,
+        states: STATES,
+        currentThread: ()=>current,
+        answering: (thread, fn)=>{
+            const before = current;
+            current = thread;
+            try
+            {
+                return fn();
+            }
+            finally
+            {
+                current = before;
+            }
+        },
+    });
+    const device = { deviceState: STATES.OK, injectDeviceLoss: ()=>{} };
+    await windows.take(device, { ...HOW, mode: { bitsPerPixel: 32 } });
+    assert.deepEqual(broadcastAs, ['caller']);
+});
