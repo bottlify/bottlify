@@ -21,8 +21,9 @@ export function dds10(shape){
     const view = new DataView(file.buffer);
     file.set([0x44, 0x44, 0x53, 0x20]);
     view.setUint32(4, 124, true);
-    // DDSD_HEIGHT | DDSD_WIDTH only, as Vantage's files have it: no mip-count flag.
-    view.setUint32(8, 0x6, true);
+    // DDSD_HEIGHT | DDSD_WIDTH only, as Vantage's files have it: no mip-count flag;
+    // DDS_DEPTH for a volume.
+    view.setUint32(8, 0x6 | (depth > 0 ? 0x800000 : 0), true);
     view.setUint32(12, height, true);
     view.setUint32(16, width, true);
     view.setUint32(24, depth, true);

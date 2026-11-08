@@ -1981,15 +1981,13 @@ often linked for, the heap gives the range up as it gives a library that cannot 
 the memory starts at 512 MiB on eight executors. A library linked to load inside the range cannot
 be loaded; one that can move is moved. *2026-11-07.*
 
-**A234. D3DX 10 asked for a size its file holds as a level takes that level.** A
-`D3DX10_IMAGE_LOAD_INFO` whose width and height are those of one of the file's levels below the
-first makes the texture of that level and the ones below it, as the file has them; D3DX 10
-filters the first level down to the size instead. The file's own levels are the same picture
-made by its author's tool, in any format, blocks included; filtering would mean decoding a
-format that may have no codec here (BC6H, BC7, signed BC4 and BC5). Another size is stretched
-from the first level to the nearest texel and its levels are averaged, where the format has a
-codec (texels of whole bytes, unsigned BC1 to BC5), and refused with a divergence where it has
-none. *2026-11-08.*
+**A234. D3DX 10 asked for a size its file holds as a level takes that level, where the format
+has no codec here.** D3DX 10 and 11 filter the first level down to a size asked; this loader does
+so for every format it reads and writes (texels of whole-byte, packed, signed and float channels,
+BC1 to BC5). For one it does not (BC6H, BC7, signed BC4 and BC5, pairs, R1), a size the file holds
+as one of its levels takes that level and the ones below as the file has them, the file's own
+levels being the same picture made by its author's tool; any other size is refused with
+`E_FAIL` and said. *2026-11-08.*
 
 **A235. A managed program runs under the bottle's Mono at `C:\Windows\Mono`, told to check for
 null references itself.** `mscoree.dll` is ours and does not carry a CLR: `_CorExeMain` loads Mono's
@@ -2001,3 +1999,14 @@ Mono maps. Before it starts, `explicit-null-checks` is added to the process's `M
 through a null pointer finds zeros here (A79), and Mono's JIT otherwise finds a null reference only
 by the fault such a read raises on Windows. A bottle without the runtime runs no managed program,
 as a machine without .NET runs none, and the loss is said. *2026-11-08.*
+
+**A236. D3DX 10's TRIANGLE filter is a tent, and its blocks are made by our own BC encoder.**
+Wine's d3dx11 tests measured D3DX's filters on Windows: POINT (a 16.16 fixed-point step), BOX
+(two by two, half rounding up) and LINEAR (the four texels around each centre, wrapping at the
+edges) are reproduced, LINEAR to within one in the last bit where a texel falls exactly half way.
+TRIANGLE is a tent as wide as the scale: Windows' own filter weighs its neighbours otherwise, and
+its numbers are not derived from a published algorithm. A level of blocks that is not whole
+blocks, and any level made or converted into BC1 to BC5, is encoded by this loader's encoder,
+whose endpoints and indices differ from Windows' where several encodings come equally close. The
+sRGB curve is the power 2.2 the tests show, held to 0 to 1; Windows reads a float above 1 past
+the end of its table. *2026-11-08.*

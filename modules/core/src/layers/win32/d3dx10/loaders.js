@@ -42,6 +42,33 @@ const RT_RCDATA = 10;
 const LOADER_ID = 'ID3DXDataLoader';
 
 /**
+ * An object of a table that is not COM -- no IUnknown, its last method
+ * Destroy, which ends it -- published, or 0. D3DX's data loaders and
+ * processors are such objects, each kind one table.
+ *
+ * @param {Pick<LoaderHost, 'vtables'>} host @param {string} id  the table's name
+ * @param {{ name: string, argBytes: number,
+ *     invoke: (self: any, args: number[]) => number | Promise<number> }[]} methods
+ *     every method but Destroy, in the table's order
+ * @param {() => void} end  what Destroy lets go
+ * @returns {number}
+ */
+export function publishBare(host, id, methods, end){
+    /** @type {any} */
+    const object = {
+        interfaceFor: (/** @type {string} */ asked)=>(asked === id ? record : null),
+    };
+    const record = Object.freeze({ object, id, methods: [...methods,
+        /** HRESULT Destroy() */
+        { name: 'Destroy', argBytes: 4, invoke: ()=>{
+            end();
+            host.vtables?.unpublish?.(object, id);
+            return S_OK;
+        } }] });
+    return host.vtables?.publish(object, id) ?? 0;
+}
+
+/**
  * @param {LoaderHost} host
  * @param {{ prefix: string, fileNotFound: number,
  *     string: (address: number, wide: boolean, max: number) => string }} how
@@ -82,23 +109,12 @@ export function createDataLoaders(host, how){
             }
             return S_OK;
         };
-        /** @type {any} */
-        const object = {
-            interfaceFor: (/** @type {string} */ id)=>(id === LOADER_ID ? record : null),
-        };
-        const record = Object.freeze({ object, id: LOADER_ID, methods: [
+        const pointer = publishBare(host, LOADER_ID, [
             /** HRESULT Load() */
             { name: 'Load', argBytes: 4, invoke: ()=>state.load() },
             /** HRESULT Decompress(void **ppData, SIZE_T *pcBytes) */
             { name: 'Decompress', argBytes: 12, invoke: decompress },
-            /** HRESULT Destroy() */
-            { name: 'Destroy', argBytes: 4, invoke: ()=>{
-                state.end?.();
-                host.vtables?.unpublish?.(object, LOADER_ID);
-                return S_OK;
-            } },
-        ] });
-        const pointer = host.vtables?.publish(object, LOADER_ID) ?? 0;
+        ], ()=>state.end?.());
         if (!pointer)
         {
             state.end?.();

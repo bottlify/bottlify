@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { createD3dx10Functions } from './functions.js';
 import { DIMENSION } from './dds10.js';
 import { dds10 } from './dds10.fixture.js';
+import { D3DX11_PROFILE } from '../d3dx11/functions.js';
 
 /**
  * Guest memory, a bump heap, and a device whose vtable's slot N holds N, so
@@ -89,26 +90,29 @@ test('D3DX10CreateTextureFromMemory makes a 2D texture with the full chain throu
     assert.equal(calls.length, 1);
     assert.equal(calls[0].slot, 73);
     // Width, Height, MipLevels, ArraySize, Format, SampleDesc, Usage, BindFlags, CPU, Misc.
-    assert.deepEqual(calls[0].desc, [4, 2, 3, 1, 87, 1, 0, 0, 0x8, 0, 0]);
+    // A8R8G8B8 is made R8G8B8A8, as D3DX 10 makes every classic 32-bit colour.
+    assert.deepEqual(calls[0].desc, [4, 2, 3, 1, 28, 1, 0, 0, 0x8, 0, 0]);
     assert.deepEqual(calls[0].data.map(([, pitch])=>pitch), [16, 8, 4]);
     // Each level's texels after the one before's: 4x2, then the halved 2x1 and 1x1.
     assert.deepEqual(calls[0].data.map(([at])=>at - calls[0].data[0][0]), [0, 32, 40]);
 });
 
-test('D3DX10GetImageInfoFromMemory says a DX10 DDS file\'s own DXGI format', ()=>{
+test('D3DX10GetImageInfoFromMemory says a DX10 DDS file\'s own DXGI format', async()=>{
     // 3DMark Vantage's lookup table: 256x1 R8_UNORM, no mip-count flag.
     const { host, view, memory } = machine();
     const fns = createD3dx10Functions(host, 34);
     const file = dds10({ width: 256, format: 61, bytes: 256 });
     memory.set(file, 0x8000);
-    assert.equal(fns.D3DX10GetImageInfoFromMemory.handler([0x8000, file.length, 0, 0x300, 0]), 0);
+    assert.equal(await fns.D3DX10GetImageInfoFromMemory.handler([0x8000, file.length, 0, 0x300,
+        0]), 0);
     // Width, Height, Depth, ArraySize, MipLevels, MiscFlags, Format, ResourceDimension, IFF.
     assert.deepEqual(Array.from({ length: 9 }, (_, i)=>view.getUint32(0x300 + i * 4, true)),
         [256, 1, 1, 1, 1, 0, 61, 3, 4]);
 
     const cubes = dds10({ width: 1, height: 1, format: 10, misc: 0x4, bytes: 48 });
     memory.set(cubes, 0x8000);
-    assert.equal(fns.D3DX10GetImageInfoFromMemory.handler([0x8000, cubes.length, 0, 0x300, 0]), 0);
+    assert.equal(await fns.D3DX10GetImageInfoFromMemory.handler([0x8000, cubes.length, 0, 0x300,
+        0]), 0);
     assert.deepEqual(Array.from({ length: 9 }, (_, i)=>view.getUint32(0x300 + i * 4, true)),
         [1, 1, 1, 6, 1, 0x4, 10, 3, 4], 'a cube: six slices, TEXTURECUBE');
 });
@@ -145,14 +149,21 @@ test('D3DX10CreateTextureFromMemory makes a DX10 DDS texture in the file\'s form
     assert.deepEqual([...memory.subarray(second, second + 4)], [3, 5, 11, 13]);
     assert.deepEqual(said, [], 'averaging bytes is the box filter for R8');
 
-    // BC7 with one level: no codec makes its levels, and that is said.
+    // BC7 is D3DX 11's: D3DX 10 does not read it; D3DX 11 keeps the one level the file has,
+    // no codec making the others, and that is said.
     const blocks = dds10({ width: 8, height: 8, format: 98, bytes: 64 });
     memory.set(blocks, 0x8000);
     calls.length = 0;
     assert.equal(await fns.D3DX10CreateTextureFromMemory.handler([device, 0x8000, blocks.length,
-        0, 0, 0x200, 0]), 0);
+        0, 0, 0x200, 0]) >>> 0, 0x80004005);
+    // deepEqual above narrowed `said` to never[]; the array is the same.
+    const heard = /** @type {string[]} */ (said);
+    const eleven = createD3dx10Functions({ ...host, divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>heard.push(`${api}: ${detail}`) }, 43, D3DX11_PROFILE);
+    assert.equal(await eleven.D3DX11CreateTextureFromMemory.handler([device, 0x8000,
+        blocks.length, 0, 0, 0x200, 0]), 0);
     assert.equal(calls[0].desc[2], 1, 'the one level the file has');
-    assert.match(said.join('\n'), /3 levels below the file's last of DXGI format 98/);
+    assert.match(said.join('\n'), /3 levels of format 98 left out/);
 
     // A 1D file is a 1D texture: Width, MipLevels, ArraySize, Format, Usage, Bind, CPU, Misc.
     const line = dds10({ width: 8, format: 61, dimension: DIMENSION.TEXTURE1D, mips: 4,
@@ -176,15 +187,16 @@ test('D3DX10CreateTextureFromMemory resizes a file to the size asked, then makes
         const file = dds(4, 2);
         memory.set(file, 0x8000);
         // D3DX10_IMAGE_LOAD_INFO: Width 8, Height 4, the rest D3DX10_DEFAULT.
-        for (let i = 0; i < 13; i++)
+        for (let i = 0; i < 12; i++)
         {
             view.setUint32(0x400 + i * 4, 0xffffffff, true);
         }
+        view.setUint32(0x430, 0, true);
         view.setUint32(0x400, 8, true);
         view.setUint32(0x404, 4, true);
         assert.equal(await fns.D3DX10CreateTextureFromMemory.handler([device, 0x8000,
             file.length, 0x400, 0, 0x200, 0]), 0);
-        assert.deepEqual(calls[0].desc.slice(0, 5), [8, 4, 4, 1, 87]);
+        assert.deepEqual(calls[0].desc.slice(0, 5), [8, 4, 4, 1, 28]);
         assert.deepEqual(calls[0].data.map(([, pitch])=>pitch), [32, 16, 8, 4]);
         const top = calls[0].data[0][0];
         assert.deepEqual([...memory.subarray(top, top + 4)], [0x7f, 0x7f, 0x7f, 0x7f],
@@ -232,8 +244,8 @@ test('D3DX10CreateTextureFromMemory resizes a file to the size asked, then makes
             [0, Math.fround(0.2), Math.fround(0.4), 1]);
         view.setUint32(0x424, 0xffffffff, true);
 
-        // A size the file holds as a level is that level: BC5 16x16 with its whole chain
-        // (256, 64, 16, 16, 16 bytes) asked as 8x8 starts at its second level.
+        // A size the file holds as a level is filtered down from the first all the same,
+        // as D3DX does: BC5 16x16 with its whole chain asked as 8x8.
         view.setUint32(0x400, 8, true);
         view.setUint32(0x404, 8, true);
         const chain = dds10({ width: 16, height: 16, format: 83, mips: 5, bytes: 368 });
@@ -242,8 +254,6 @@ test('D3DX10CreateTextureFromMemory resizes a file to the size asked, then makes
         assert.equal(await fns.D3DX10CreateTextureFromMemory.handler([device, 0x8000,
             chain.length, 0x400, 0, 0x200, 0]), 0);
         assert.deepEqual(calls[0].desc.slice(0, 5), [8, 8, 4, 1, 83]);
-        assert.deepEqual(calls[0].data.map(([at])=>memory[at]), [0, 64, 80, 96],
-            'the file\'s levels from 8x8 down, as they are');
 
         // BC5 8x8 of one level asked as 4x4: through its two channels and back. Red's
         // blocks have ends 200 and 40, green's 100 and 40, every index 0: all texels
@@ -264,16 +274,28 @@ test('D3DX10CreateTextureFromMemory resizes a file to the size asked, then makes
         assert.deepEqual([memory[made], memory[made + 1], memory[made + 8], memory[made + 9]],
             [200, 200, 100, 100], 'one value a block: both ends hold it, each channel its own');
 
-        // BC7 has no codec here: refused, and said.
+        // BC7 has no codec here: a size its file holds as a level takes that level
+        // (decision A234); any other is refused, and said.
+        const eleven = createD3dx10Functions({ ...host, divergence: (/** @type {string} */ api,
+            /** @type {string} */ detail)=>said.push(`${api}: ${detail}`) }, 43, D3DX11_PROFILE);
+        view.setUint32(0x400, 4, true);
+        view.setUint32(0x404, 4, true);
+        const levels = dds10({ width: 8, height: 8, format: 98, mips: 2, bytes: 80 });
+        memory.set(levels, 0x8000);
+        calls.length = 0;
+        assert.equal(await eleven.D3DX11CreateTextureFromMemory.handler([device, 0x8000,
+            levels.length, 0x400, 0, 0x200, 0]), 0);
+        assert.deepEqual(calls[0].desc.slice(0, 5), [4, 4, 1, 1, 98]);
+        assert.equal(memory[calls[0].data[0][0]], 64, 'the file\'s second level as it is');
         view.setUint32(0x400, 8, true);
         const blocks = dds10({ width: 4, height: 4, format: 98, bytes: 16 });
         memory.set(blocks, 0x8000);
-        assert.equal(await fns.D3DX10CreateTextureFromMemory.handler([device, 0x8000,
+        assert.equal(await eleven.D3DX11CreateTextureFromMemory.handler([device, 0x8000,
             blocks.length, 0x400, 0, 0x200, 0]) >>> 0, 0x80004005);
-        assert.match(said.join('\n'), /8x4 asked of a 4x4 file of DXGI format 98/);
+        assert.match(said.join('\n'), /format 98 made format 98 or another size: this loader has/);
     });
 
-test('a file held in its own deep or signed format is made in the DXGI format laid out as it',
+test('a file held in its own deep format is made in the DXGI format laid out as it',
     async()=>{
         const { host, device, calls, memory } = machine();
         const fns = createD3dx10Functions(host, 34);
@@ -286,7 +308,7 @@ test('a file held in its own deep or signed format is made in the DXGI format la
         assert.equal(await fns.D3DX10CreateTextureFromMemory.handler([device, 0x8000,
             file.length, 0, 0, 0x200, 0]), 0);
         assert.equal(calls[0].desc[4], 35, 'DXGI_FORMAT_R16G16_UNORM');
-        assert.equal(calls[0].desc[2], 1, 'its one level, not halved as if it were BGRA');
+        assert.equal(calls[0].desc[2], 2, 'its chain made through its own texels');
     });
 
 test('D3DX10CompileFromMemory with no compiler refuses, with an error blob and the HRESULT',
@@ -342,7 +364,7 @@ test('D3DX10UnsetAllDeviceObjects unbinds through the device\'s own setters', as
     // VS, PS and GS: constant buffers, resources, samplers, shader; then the
     // input assembler, stream output, the output merger and the rasterizer.
     assert.deepEqual(slots, [3, 19, 20, 7, 10, 4, 6, 5, 16, 22, 23, 17, 12, 13, 11, 27, 24, 25,
-        26, 29]);
+        26, 29, 21]);
     assert.equal(await fns.D3DX10UnsetAllDeviceObjects.handler([0]) >>> 0, 0x80070057);
 });
 

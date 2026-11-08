@@ -5,26 +5,13 @@
  */
 
 /**
- * DDS files in a DXGI format, as D3DX 10 reads them. One with the DX10 header
- * extension has, after the classic 124-byte header (pixel format FourCC
- * "DX10"), DDS_HEADER_DXT10 -- dxgiFormat, resourceDimension, miscFlag,
- * arraySize, miscFlags2; a classic one may name a DXGI format by its FourCC
- * (ATI2 is BC5). Then come the texels in that format, each array slice (six
- * faces a cube) its whole mip chain, a volume each level's slices one after
- * another. D3DX 10 keeps the file's DXGI format as it is.
+ * DXGI formats as D3DX 10 lays their texels out: a row's bytes and the rows of
+ * a level, and the halving of a level of whole-byte channels. The files
+ * themselves are read by `image10.js`.
  */
 
-import { IFF, ImageError } from '../d3dx9/images.js';
-
-const DDS_MAGIC = 0x20534444;
-const FOURCC_DX10 = 0x30315844;
-const DDPF_FOURCC = 0x4;
-const HEADER_BYTES = 128;
-const EXTENSION_BYTES = 20;
-
-/** D3D10_RESOURCE_DIMENSION, and D3D10_RESOURCE_MISC_TEXTURECUBE. */
+/** D3D10_RESOURCE_DIMENSION. */
 export const DIMENSION = Object.freeze({ TEXTURE1D: 2, TEXTURE2D: 3, TEXTURE3D: 4 });
-const MISC_TEXTURECUBE = 0x4;
 
 /**
  * Bytes a texel takes, by DXGI_FORMAT, for the formats D3D 10 and 10.1 know
@@ -72,14 +59,6 @@ export function dxgiLayout(format, width, height){
 }
 
 /**
- * Bytes a texel of a DXGI format takes, or 0 for one laid out in blocks,
- * pairs or bits, whose texels are not each their own bytes.
- *
- * @param {number} format
- */
-export const texelBytesOf = format=>sizeIn(TEXEL_RANGES, format);
-
-/**
  * The formats each of whose bytes is a channel of its own, unsigned and
  * normalised: averaging bytes averages the colours.
  */
@@ -88,29 +67,6 @@ const BYTE_CHANNELS = new Set([27, 28, 29, 30, 48, 49, 50, 60, 61, 62, 65, 87, 8
 
 /** Whether a format's levels are made by averaging bytes. @param {number} format */
 export const averagesBytes = format=>BYTE_CHANNELS.has(format);
-
-/**
- * A level stretched to another size, each texel the one its centre falls
- * on, `bytes` a texel.
- *
- * @param {Uint8Array} data @param {number} width @param {number} height
- * @param {number} toWidth @param {number} toHeight @param {number} bytes
- * @returns {Uint8Array}
- */
-export function resampleTexels(data, width, height, toWidth, toHeight, bytes){
-    const out = new Uint8Array(toWidth * toHeight * bytes);
-    for (let y = 0; y < toHeight; y++)
-    {
-        const sy = Math.min(height - 1, Math.floor((y + 0.5) * height / toHeight));
-        for (let x = 0; x < toWidth; x++)
-        {
-            const sx = Math.min(width - 1, Math.floor((x + 0.5) * width / toWidth));
-            const from = (sy * width + sx) * bytes;
-            out.set(data.subarray(from, from + bytes), (y * toWidth + x) * bytes);
-        }
-    }
-    return out;
-}
 
 /**
  * The next smaller level, `bytes` a texel: each byte the average of the two
@@ -151,154 +107,10 @@ export function halveTexels(data, width, height, bytes, average){
  * @typedef {import('../d3dx9/images.js').Level & { dxgi: number }} DxgiLevel
  * @typedef {import('../d3dx9/images.js').Image & {
  *     dxgi: number, dimension: number, cube: boolean, arraySize: number,
- *     levels: DxgiLevel[], faces?: DxgiLevel[][], volume?: DxgiLevel[][] }} DxgiImage
+ *     levels: DxgiLevel[], faces?: DxgiLevel[][], volume?: DxgiLevel[][],
+ *     converted?: boolean, extent?: number }} DxgiImage
  *   `faces` holds every array slice (a cube's six faces each slice) when
- *   there is more than one; `arraySize` counts them.
+ *   there is more than one; `arraySize` counts them. `converted`: the file's
+ *   texels were laid out otherwise and made the DXGI format's. `extent`, of a
+ *   DDS file's headers read alone: where its texels end.
  */
-
-/** A FourCC as a little-endian word. @param {string} text */
-const fourCC = text=>[...text].reduce((word, c, i)=>word | c.charCodeAt(0) << i * 8, 0) >>> 0;
-
-/**
- * Classic DDS FourCCs that name a DXGI format outright, as D3DX 10 reads
- * them: 3Dc's and BC4/BC5's codes, the packed pairs, and the D3DFORMAT
- * numbers of the deep and float formats.
- */
-const LEGACY_FOURCC = new Map([[fourCC('ATI1'), 80], [fourCC('BC4U'), 80], [fourCC('BC4S'), 81],
-    [fourCC('ATI2'), 83], [fourCC('BC5U'), 83], [fourCC('BC5S'), 84], [fourCC('RGBG'), 68],
-    [fourCC('GRGB'), 69], [36, 11], [110, 13], [111, 54], [112, 34], [113, 10], [114, 41],
-    [115, 16], [116, 2]]);
-
-const DDSD_MIPMAPCOUNT = 0x20000;
-const DDSCAPS2_CUBEMAP = 0x200;
-const DDSCAPS2_ALL_FACES = 0xfc00;
-const DDSCAPS2_VOLUME = 0x200000;
-
-/** @param {Uint8Array} bytes */
-const fourCCOf = bytes=>{
-    if (bytes.length < HEADER_BYTES)
-    {
-        return 0;
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    return view.getUint32(0, true) === DDS_MAGIC && (view.getUint32(80, true) & DDPF_FOURCC) !== 0
-        ? view.getUint32(84, true) : 0;
-};
-
-/**
- * Whether a DDS file is read in a DXGI format of its own: one with the DX10
- * extension, or a classic one whose FourCC names a DXGI format.
- *
- * @param {Uint8Array} bytes
- */
-export function isDxgiDds(bytes){
-    const code = fourCCOf(bytes);
-    return code === FOURCC_DX10 || LEGACY_FOURCC.has(code);
-}
-
-/**
- * Such a file's image, its levels in the file's DXGI format.
- *
- * @param {Uint8Array} bytes
- * @returns {DxgiImage}
- */
-export function readDxgiDds(bytes){
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const extended = fourCCOf(bytes) === FOURCC_DX10;
-    if (bytes.length < HEADER_BYTES + (extended ? EXTENSION_BYTES : 0))
-    {
-        throw new ImageError('a DDS file shorter than its headers');
-    }
-    const caps2 = view.getUint32(112, true);
-    let dxgi;
-    let dimension;
-    let cube;
-    let slices = 1;
-    if (extended)
-    {
-        let misc;
-        [dxgi, dimension, misc, slices] = [0, 4, 8, 12].map(at=>view.getUint32(HEADER_BYTES + at,
-            true));
-        cube = (misc & MISC_TEXTURECUBE) !== 0;
-    }
-    else
-    {
-        dxgi = /** @type {number} */ (LEGACY_FOURCC.get(view.getUint32(84, true)));
-        dimension = (caps2 & DDSCAPS2_VOLUME) ? DIMENSION.TEXTURE3D : DIMENSION.TEXTURE2D;
-        cube = (caps2 & DDSCAPS2_CUBEMAP) !== 0;
-        if (cube && (caps2 & DDSCAPS2_ALL_FACES) !== DDSCAPS2_ALL_FACES)
-        {
-            throw new ImageError('a cube map without all six faces');
-        }
-    }
-    if (dimension < DIMENSION.TEXTURE1D || dimension > DIMENSION.TEXTURE3D)
-    {
-        throw new ImageError(`a DX10 DDS of resource dimension ${dimension}`);
-    }
-    if (!dxgiLayout(dxgi, 1, 1))
-    {
-        throw new ImageError(`a DX10 DDS of DXGI format ${dxgi}, which this loader does not`
-            + ' lay out');
-    }
-    const width = Math.max(1, view.getUint32(16, true));
-    const height = dimension === DIMENSION.TEXTURE1D ? 1 : Math.max(1, view.getUint32(12, true));
-    const depth = dimension === DIMENSION.TEXTURE3D ? Math.max(1, view.getUint32(24, true)) : 1;
-    // A DX10 file's count is read as written (its writers leave DDSD_MIPMAPCOUNT
-    // off as often as on); a classic one's only with the flag, as D3DX 9 reads it.
-    const counted = extended || (view.getUint32(8, true) & DDSD_MIPMAPCOUNT) !== 0;
-    const mipLevels = counted ? Math.max(1, view.getUint32(28, true)) : 1;
-    const arraySize = dimension === DIMENSION.TEXTURE3D ? 1
-        : Math.max(1, slices) * (cube ? 6 : 1);
-    if (cube && dimension !== DIMENSION.TEXTURE2D)
-    {
-        throw new ImageError('a DX10 DDS cube map that is not two-dimensional');
-    }
-    let at = HEADER_BYTES + (extended ? EXTENSION_BYTES : 0);
-    /** @param {number} size */
-    const take = size=>{
-        if (at + size > bytes.length)
-        {
-            throw new ImageError('a DDS file cut short');
-        }
-        const data = bytes.subarray(at, at + size);
-        at += size;
-        return data;
-    };
-    /** @param {number} level */
-    const sizeOf = level=>{
-        const w = Math.max(1, width >> level);
-        const h = Math.max(1, height >> level);
-        const { rowBytes, rows } = /** @type {{ rowBytes: number, rows: number }} */ (
-            dxgiLayout(dxgi, w, h));
-        return { w, h, size: rowBytes * rows };
-    };
-    const base = { fileFormat: IFF.DDS, width, height, format: 0, mipLevels, dxgi, dimension,
-        cube, arraySize };
-    if (dimension === DIMENSION.TEXTURE3D)
-    {
-        /** @type {DxgiLevel[][]} */
-        const volume = [];
-        for (let level = 0; level < mipLevels; level++)
-        {
-            const { w, h, size } = sizeOf(level);
-            const count = Math.max(1, depth >> level);
-            volume.push(Array.from({ length: count }, ()=>({ width: w, height: h, format: 0, dxgi,
-                data: take(size) })));
-        }
-        return { ...base, depth, levels: [], volume };
-    }
-    /** @type {DxgiLevel[][]} */
-    const chains = [];
-    for (let slice = 0; slice < arraySize; slice++)
-    {
-        /** @type {DxgiLevel[]} */
-        const chain = [];
-        for (let level = 0; level < mipLevels; level++)
-        {
-            const { w, h, size } = sizeOf(level);
-            chain.push({ width: w, height: h, format: 0, dxgi, data: take(size) });
-        }
-        chains.push(chain);
-    }
-    return { ...base, levels: chains[0], ...(arraySize > 1 ? { faces: chains } : {}) };
-}

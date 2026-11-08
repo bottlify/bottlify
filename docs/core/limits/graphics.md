@@ -26,6 +26,11 @@
   saying so. A program that ships its shaders compiled asks only for what its cache lacks.
   `D3DX10SaveTextureToFile`, `D3DX11SaveTextureToFile`, `D3DX11SaveTextureToMemory` and
   `D3DX11LoadTextureFromTexture` answer `E_NOTIMPL`.
+- D3DX 10 and 11 read DDS (classic and DX10), BMP, PNG, JPEG, GIF and TIFF (strips, plain,
+  LZW or PackBits); a JPEG XR file is refused with `E_FAIL`, as some Windows installs refuse it.
+  BC6H and BC7 files are loaded as they are: a size or format asked of them that their file does
+  not hold is refused. Filtered sizes and re-made blocks can differ from Windows' in the last bit
+  (decision A236). `D3DX10CreateThreadPump` is not made: a program passes its own pump or none.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.

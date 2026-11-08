@@ -17,18 +17,12 @@
  */
 
 import { createDeviceCalls } from '../d3dx9/device.js';
-import { ImageError, readImage } from '../d3dx9/images.js';
-import {
-    FMT, decodeAlphaBlock, decodeTexels, encodeAlphaBlock, encodeTexels, halve, keptAsIs,
-    resample,
-} from '../d3dx9/pixels.js';
-import { convertTexels, converts } from './convert.js';
-import {
-    DIMENSION, averagesBytes, dxgiLayout, halveTexels, isDxgiDds, readDxgiDds, resampleTexels,
-    texelBytesOf,
-} from './dds10.js';
+import { ImageError } from '../d3dx9/images.js';
+import { NotRead, readImage10 } from './image10.js';
+import { D3DX10_DEFAULT, planTexture } from './load.js';
+import { DIMENSION } from './dds10.js';
 import { createComObject } from '../ole32/objects.js';
-import { createDataLoaders } from './loaders.js';
+import { createDataLoaders, publishBare } from './loaders.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -56,6 +50,7 @@ const DEVICE = Object.freeze({ CreateTexture1D: 72, CreateTexture2D: 73, CreateT
     IASetIndexBuffer: 13, GSSetConstantBuffers: 16, GSSetShader: 17, VSSetShaderResources: 19,
     VSSetSamplers: 20, GSSetShaderResources: 22, GSSetSamplers: 23, OMSetRenderTargets: 24,
     OMSetBlendState: 25, OMSetDepthStencilState: 26, SOSetTargets: 27, RSSetState: 29,
+    SetPredication: 21,
 });
 
 /** Each shader stage's constant buffers, resources, samplers and shader. */
@@ -75,272 +70,17 @@ const SAMPLER_SLOTS = 16;
 const VERTEX_BUFFER_SLOTS = 16;
 const STREAM_OUTPUT_SLOTS = 4;
 const RENDER_TARGET_SLOTS = 8;
-
-export const D3DX10_DEFAULT = 0xffffffff;
-export const D3DX10_FROM_FILE = 0xfffffffd;
+const DXGI_FORMAT_R32_UINT = 42;
 
 const UNKNOWN_RELEASE = 2;
 /** RT_RCDATA: where D3DX looks for a resource it is named. */
 const RT_RCDATA = 10;
 
-/** The DXGI formats a file's texels are made into, and what a row of blocks or texels takes. */
-const DXGI = Object.freeze({ B8G8R8A8_UNORM: 87, R8G8B8A8_UNORM: 28, BC1_UNORM: 71,
-    BC2_UNORM: 74, BC3_UNORM: 77, R16_UNORM: 56, R16G16_UNORM: 35, R16G16B16A16_UNORM: 11,
-    R8G8_SNORM: 51, R8G8B8A8_SNORM: 31, R16G16_SNORM: 37 });
-
-/** D3D10_BIND_SHADER_RESOURCE and D3D10_RESOURCE_MISC_TEXTURECUBE. */
-const BIND_SHADER_RESOURCE = 0x8;
+/** D3D10_RESOURCE_MISC_TEXTURECUBE. */
 const MISC_TEXTURECUBE = 0x4;
-
-/**
- * The DXGI format a file's level is held in: its blocks as they are, or
- * the BGRA texels the reader makes of every other format.
- *
- * @param {number} format  the level's D3DFORMAT
- */
-const dxgiOf = format=>{
-    switch (format)
-    {
-        case FMT.DXT1:
-            return DXGI.BC1_UNORM;
-        case FMT.DXT2:
-        case FMT.DXT3:
-            return DXGI.BC2_UNORM;
-        case FMT.DXT4:
-        case FMT.DXT5:
-            return DXGI.BC3_UNORM;
-        // Held as the file has them, and laid out byte for byte as these are.
-        case FMT.L16:
-            return DXGI.R16_UNORM;
-        case FMT.G16R16:
-            return DXGI.R16G16_UNORM;
-        case FMT.A16B16G16R16:
-            return DXGI.R16G16B16A16_UNORM;
-        case FMT.V8U8:
-            return DXGI.R8G8_SNORM;
-        case FMT.Q8W8V8U8:
-            return DXGI.R8G8B8A8_SNORM;
-        case FMT.V16U16:
-            return DXGI.R16G16_SNORM;
-        default:
-            return DXGI.B8G8R8A8_UNORM;
-    }
-};
-
-/**
- * A row's bytes and the rows of a level, in the DXGI format.
- *
- * @param {number} format @param {number} width @param {number} height
- */
-const pitchOf = (format, width, height)=>/** @type {{ rowBytes: number, rows: number }} */ (
-    dxgiLayout(format, width, height));
-
-/**
- * @typedef {import('../d3dx9/images.js').Image
- *     | import('./dds10.js').DxgiImage} AnyImage
- */
-
-/** @typedef {{ width: number, height: number, data: Uint8Array }} TexelLevel */
-
-/** The next level of BGRA texels, box-filtered. @param {TexelLevel} level @returns {TexelLevel} */
-const bgraSmaller = level=>{
-    const half = halve(level.data, level.width, level.height);
-    return { width: half.width, height: half.height, data: half.bgra };
-};
-
-/** The DXGI format a file holds, when it says one. @param {AnyImage} image */
-const nativeOf = image=>('dxgi' in image ? image : null);
-
-/** BC1, BC2 and BC3 (typeless, UNORM and sRGB) as the DXTn blocks they are laid out as. */
-const BLOCK_CODEC = new Map([[70, FMT.DXT1], [71, FMT.DXT1], [72, FMT.DXT1], [73, FMT.DXT3],
-    [74, FMT.DXT3], [75, FMT.DXT3], [76, FMT.DXT5], [77, FMT.DXT5], [78, FMT.DXT5]]);
-
-/** BC4 and BC5 (typeless and UNORM): channels a block, each eight bytes of DXT5's alpha. */
-const CHANNEL_BLOCKS = new Map([[79, 1], [80, 1], [82, 2], [83, 2]]);
-
-/**
- * BC4 or BC5 blocks as texels of a byte a channel, or texels as blocks.
- *
- * @param {Uint8Array} data @param {number} width @param {number} height
- * @param {number} channels @param {boolean} encode  texels into blocks
- * @returns {Uint8Array}
- */
-const channelBlocks = (data, width, height, channels, encode)=>{
-    const across = Math.max(1, Math.ceil(width / 4));
-    const down = Math.max(1, Math.ceil(height / 4));
-    const out = new Uint8Array(encode ? across * down * channels * 8 : width * height * channels);
-    for (let by = 0; by < down; by++)
-    {
-        for (let bx = 0; bx < across; bx++)
-        {
-            const at = (by * across + bx) * channels * 8;
-            for (let c = 0; c < channels; c++)
-            {
-                /** Where texel k of the block is, the edges repeated past the level. */
-                const texel = (/** @type {number} */ k, /** @type {boolean} */ clamp)=>{
-                    const x = bx * 4 + (k & 3);
-                    const y = by * 4 + (k >> 2);
-                    return clamp ? (Math.min(height - 1, y) * width + Math.min(width - 1, x))
-                        * channels + c : x < width && y < height ? (y * width + x) * channels + c
-                        : -1;
-                };
-                if (encode)
-                {
-                    encodeAlphaBlock(Array.from({ length: 16 }, (_, k)=>data[texel(k, true)]), out,
-                        at + c * 8);
-                    continue;
-                }
-                decodeAlphaBlock(data, at + c * 8).forEach((value, k)=>{
-                    const to = texel(k, false);
-                    if (to >= 0)
-                    {
-                        out[to] = value;
-                    }
-                });
-            }
-        }
-    }
-    return out;
-};
-
-/**
- * @typedef {Object} NativeCodec  How a file's own DXGI levels are remade.
- * @property {(level: TexelLevel, width: number, height: number) => Uint8Array} stretch
- * @property {(level: TexelLevel) => TexelLevel} smaller  the next level down
- * @property {boolean} nearest  whether both take the nearest texel rather than a filter
- */
-
-/**
- * The codec of a DXGI format: texels a whole number of bytes are stretched
- * and halved byte for byte, BC1 to BC5 (unsigned) blocks through their
- * texels and back; null for a format with neither (signed BC4 and BC5, BC6H,
- * BC7, pairs, bits).
- *
- * @param {number} dxgi
- * @returns {NativeCodec | null}
- */
-const nativeCodec = dxgi=>{
-    const bytes = texelBytesOf(dxgi);
-    if (bytes)
-    {
-        return {
-            stretch: (level, width, height)=>resampleTexels(level.data, level.width,
-                level.height, width, height, bytes),
-            smaller: level=>halveTexels(level.data, level.width, level.height, bytes,
-                averagesBytes(dxgi)),
-            nearest: !averagesBytes(dxgi),
-        };
-    }
-    const channels = CHANNEL_BLOCKS.get(dxgi);
-    if (channels)
-    {
-        /** @param {TexelLevel} level */
-        const values = level=>channelBlocks(level.data, level.width, level.height, channels,
-            false);
-        return {
-            stretch: (level, width, height)=>channelBlocks(resampleTexels(values(level),
-                level.width, level.height, width, height, channels), width, height, channels,
-            true),
-            smaller: level=>{
-                const half = halveTexels(values(level), level.width, level.height, channels, true);
-                return { width: half.width, height: half.height,
-                    data: channelBlocks(half.data, half.width, half.height, channels, true) };
-            },
-            nearest: false,
-        };
-    }
-    const blocks = BLOCK_CODEC.get(dxgi);
-    if (blocks === undefined)
-    {
-        return null;
-    }
-    /** @param {TexelLevel} level */
-    const texels = level=>decodeTexels(blocks, level.data, level.width, level.height);
-    return {
-        stretch: (level, width, height)=>encodeTexels(blocks, resample(texels(level),
-            level.width, level.height, width, height), width, height),
-        smaller: level=>{
-            const half = halve(texels(level), level.width, level.height);
-            return { width: half.width, height: half.height,
-                data: encodeTexels(blocks, half.bgra, half.width, half.height) };
-        },
-        nearest: false,
-    };
-};
-
-/**
- * A file in its own DXGI format made the size asked: each slice's top level
- * stretched by its codec; the levels below are made from it.
- *
- * @param {import('./dds10.js').DxgiImage} image
- * @param {number} toWidth @param {number} toHeight @param {NativeCodec} codec
- * @returns {import('./dds10.js').DxgiImage}
- */
-const nativeResizedTo = (image, toWidth, toHeight, codec)=>{
-    /** @type {import('./dds10.js').DxgiLevel[][]} */
-    const faces = (image.faces ?? [image.levels]).map(([top])=>[{ width: toWidth,
-        height: toHeight, format: 0, dxgi: image.dxgi, data: codec.stretch(top, toWidth,
-            toHeight) }]);
-    return { ...image, width: toWidth, height: toHeight, mipLevels: 1, levels: faces[0],
-        ...(image.faces ? { faces } : {}) };
-};
-
-/**
- * A file's image from its level `skip` down: a size asked that the file holds
- * as one of its levels is taken from there (decision A234).
- *
- * @template {AnyImage} T
- * @param {T} image @param {number} skip
- * @returns {T}
- */
-const fromLevel = (image, skip)=>({ ...image, width: image.levels[skip].width,
-    height: image.levels[skip].height, mipLevels: image.mipLevels - skip,
-    levels: image.levels.slice(skip),
-    ...(image.faces ? { faces: image.faces.map(levels=>levels.slice(skip)) } : {}) });
-
-/**
- * The level of a file sized as asked, below its first, or -1.
- *
- * @param {AnyImage} image @param {number} width @param {number} height
- */
-const levelSized = (image, width, height)=>image.levels.findIndex((level, index)=>index > 0
-    && level.width === width && level.height === height);
-
-/**
- * An image made the size asked, as D3DX 10 resizes a file before it makes the
- * levels: each face's top level stretched to it, then its whole chain halved
- * from there, put back in the file's own format where the file's level was
- * held as it is (blocks, deep or signed texels).
- *
- * @param {import('../d3dx9/images.js').Image} image
- * @param {number} toWidth @param {number} toHeight
- * @returns {import('../d3dx9/images.js').Image}
- */
-const resizedTo = (image, toWidth, toHeight)=>{
-    const faces = (image.faces ?? [image.levels]).map(levels=>{
-        const top = levels[0];
-        const own = keptAsIs(top.format);
-        let bgra = resample(own ? decodeTexels(top.format, top.data, top.width, top.height)
-            : top.data, top.width, top.height, toWidth, toHeight);
-        let width = toWidth;
-        let height = toHeight;
-        /** @type {import('../d3dx9/images.js').Level[]} */
-        const chain = [];
-        for (;;)
-        {
-            chain.push({ width, height, format: top.format,
-                data: own ? encodeTexels(top.format, bgra, width, height) : bgra });
-            if (width === 1 && height === 1)
-            {
-                return chain;
-            }
-            ({ bgra, width, height } = halve(bgra, width, height));
-        }
-    });
-    return { ...image, width: toWidth, height: toHeight, mipLevels: faces[0].length,
-        levels: faces[0], ...(image.faces ? { faces } : {}) };
-};
-
+/** "DDS ", and the bytes of its headers with the DX10 one. */
+const DDS_MAGIC = 0x20534444;
+const DDS_HEADERS = 148;
 /**
  * @typedef {Object} D3dx10Host
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -360,14 +100,6 @@ const resizedTo = (image, toWidth, toHeight)=>{
  * @property {(module: number, name: string | number, type: number)
  *     => Uint8Array | null | Promise<Uint8Array | null>}
  *     [resource]  a module's resource, by name or number, and type
- */
-
-/**
- * What a load is asked for, D3DX10_IMAGE_LOAD_INFO's fields; every one
- * D3DX10_DEFAULT when the program passes none.
- *
- * @typedef {{ width: number, height: number, depth: number, firstMip: number, mips: number,
- *     usage: number, bind: number, cpu: number, misc: number, format: number }} LoadInfo
  */
 
 /**
@@ -452,187 +184,66 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         return hr;
     };
 
-    /** @param {number} at @returns {LoadInfo} */
+    /**
+     * D3DX10_IMAGE_LOAD_INFO's fields, every one D3DX10_DEFAULT when the
+     * program passes none, and pSrcInfo, where the file's information goes.
+     *
+     * @param {number} at
+     * @returns {{ info: import('./load.js').LoadInfo, srcInfo: number }}
+     */
     const loadInfoAt = at=>{
         if ((at >>> 0) === 0)
         {
-            return { width: D3DX10_DEFAULT, height: D3DX10_DEFAULT, depth: D3DX10_DEFAULT,
-                firstMip: D3DX10_DEFAULT, mips: D3DX10_DEFAULT, usage: D3DX10_DEFAULT,
-                bind: D3DX10_DEFAULT, cpu: D3DX10_DEFAULT, misc: D3DX10_DEFAULT,
-                format: D3DX10_DEFAULT };
+            return { info: { width: D3DX10_DEFAULT, height: D3DX10_DEFAULT,
+                depth: D3DX10_DEFAULT, firstMip: D3DX10_DEFAULT, mips: D3DX10_DEFAULT,
+                usage: D3DX10_DEFAULT, bind: D3DX10_DEFAULT, cpu: D3DX10_DEFAULT,
+                misc: D3DX10_DEFAULT, format: D3DX10_DEFAULT, filter: D3DX10_DEFAULT,
+                mipFilter: D3DX10_DEFAULT }, srcInfo: 0 };
         }
-        const [width, height, depth, firstMip, mips, usage, bind, cpu, misc, format] =
-            Array.from({ length: 10 }, (_, i)=>u32(at + i * 4));
-        return { width, height, depth, firstMip, mips, usage, bind, cpu, misc, format };
+        const [width, height, depth, firstMip, mips, usage, bind, cpu, misc, format, filter,
+            mipFilter, srcInfo] = Array.from({ length: 13 }, (_, i)=>u32(at + i * 4));
+        return { info: { width, height, depth, firstMip, mips, usage, bind, cpu, misc, format,
+            filter, mipFilter }, srcInfo };
     };
 
-    /** @param {number} asked @param {number} fallback */
-    const given = (asked, fallback)=>(asked === D3DX10_DEFAULT || asked === D3DX10_FROM_FILE
-        ? fallback : asked);
-
     /**
-     * The file's image, or the HRESULT a program gets for one this cannot read.
+     * The file's image as D3DX 10 reads it, or the HRESULT a program gets for
+     * one it cannot read: E_FAIL, said where Windows would have read it.
      *
-     * @param {string} api @param {Uint8Array | null} bytes
-     * @returns {AnyImage | number}
+     * @param {string} api @param {Uint8Array} bytes @param {boolean} headerOnly
+     * @returns {import('./dds10.js').DxgiImage | number}
      */
-    const imageOf = (api, bytes)=>{
-        if (!bytes)
-        {
-            return D3DX10_ERR_INVALID_DATA;
-        }
+    const imageOf = (api, bytes, headerOnly)=>{
         try
         {
-            return isDxgiDds(bytes) ? readDxgiDds(bytes) : readImage(bytes);
+            return readImage10(bytes, { bc6and7: profile.prefix === 'D3DX11', headerOnly });
         }
         catch (e){
+            if (e instanceof NotRead)
+            {
+                host.divergence?.(api, `answered E_FAIL: ${e.message}`);
+            }
             if (e instanceof ImageError)
             {
-                host.divergence?.(api, `answered D3DX10_ERR_INVALID_DATA: ${e.message}`);
-                return D3DX10_ERR_INVALID_DATA;
+                return E_FAIL;
             }
             throw e;
         }
     };
 
     /**
-     * Each level the texture is made with, in its format: the file's own, and
-     * below the file's last one, its texels halved (blocks are not made again:
-     * a compressed file gives the levels it has).
+     * A planned texture made on the device: its description and its levels'
+     * bytes as initial data, given to the device's own create.
      *
-     * @param {import('../d3dx9/images.js').Level[]} held @param {number} count
-     * @param {(level: TexelLevel) => TexelLevel} [smaller]  the next level made of one
-     * @returns {TexelLevel[]}
-     */
-    const levelsOf = (held, count, smaller = bgraSmaller)=>{
-        /** @type {{ width: number, height: number, data: Uint8Array }[]} */
-        const out = [];
-        for (let level = 0; level < count; level++)
-        {
-            const own = held[level];
-            out.push(own ? { width: own.width, height: own.height, data: own.data }
-                : smaller(out[out.length - 1]));
-        }
-        return out;
-    };
-
-    /** DXGI formats whose levels or size were made by nearest texel, each said once. */
-    const nearestSaid = new Set();
-
-    /**
-     * The texture made on the device from an image: a 2D texture (six array
-     * slices for a cube map) or a volume, its levels written as initial data.
-     *
-     * @param {string} api @param {number} device
-     * @param {AnyImage} file @param {LoadInfo} info
+     * @param {number} device @param {import('./load.js').Plan} plan
      * @param {number} out  where the resource's pointer goes
      * @param {any} thread
      * @returns {Promise<number>}
      */
-    const make = async(api, device, file, info, out, thread)=>{
+    const create = async(device, plan, out, thread)=>{
         const heap = /** @type {NonNullable<D3dx10Host['heap']>} */ (host.heap);
-        const native = nativeOf(file);
-        const volume = native ? native.dimension === DIMENSION.TEXTURE3D
-            : Boolean(file.depth && file.depth > 1);
-        const toWidth = given(info.width, file.width);
-        const toHeight = given(info.height, file.height);
-        const sized = volume ? -1 : levelSized(file, toWidth, toHeight);
-        const resize = sized < 0 && (toWidth !== file.width || toHeight !== file.height);
-        const codec = native ? nativeCodec(native.dxgi) : null;
-        if (resize && (volume || (native && !codec)))
-        {
-            host.divergence?.(api, `answered E_FAIL: ${toWidth}x${toHeight} asked of a`
-                + ` ${file.width}x${file.height} ${volume ? 'volume' : `file of DXGI format`
-                + ` ${native?.dxgi}`}; this loader resizes neither`);
-            return E_FAIL;
-        }
-        const image = sized > 0 ? fromLevel(file, sized) : !resize ? file
-            : native && codec ? nativeResizedTo(native, toWidth, toHeight, codec)
-                : resizedTo(file, toWidth, toHeight);
-        const faces = volume
-            ? (image.volume ?? []).map(slices=>slices)
-            : (image.faces ?? [image.levels]);
-        const sample = volume ? image.volume?.[0]?.[0] : faces[0]?.[0];
-        if (!sample)
-        {
-            host.divergence?.(api, 'answered D3DX10_ERR_INVALID_DATA: a '
-                + `${volume ? 'volume' : 'file'} of format ${image.format}, not read`);
-            return D3DX10_ERR_INVALID_DATA;
-        }
-        const format = native ? native.dxgi : dxgiOf(sample.format);
-        const asked = given(info.format, format);
-        if (asked !== format && !converts(format, asked))
-        {
-            host.divergence?.(api, `answered E_FAIL: format ${asked} asked of a file held as`
-                + ` ${format}; this loader converts between texels of 8, 16 and 32 bits only`);
-            return E_FAIL;
-        }
-        /** A level's bytes in the format asked. @param {Uint8Array} data @param {number} texels */
-        const inAsked = (data, texels)=>(asked === format ? data
-            : convertTexels(format, asked, data, texels));
-        const first = Math.min(given(info.firstMip, 0), Math.max(0, image.mipLevels - 1));
-        const width = Math.max(1, image.width >> first);
-        const height = Math.max(1, image.height >> first);
-        const depth = volume ? Math.max(1, /** @type {number} */ (image.depth) >> first) : 1;
-        const full = Math.floor(Math.log2(Math.max(width, height, depth))) + 1;
-        // A file's blocks are not made again: a compressed file gives the levels
-        // it holds. D3DX 10 makes the full chain for D3DX10_DEFAULT; texels are
-        // halved for the levels a file lacks.
-        const fromFile = Math.max(1, image.mipLevels - first);
-        const asks = info.mips === D3DX10_DEFAULT || info.mips === 0 ? full
-            : info.mips === D3DX10_FROM_FILE ? fromFile : Math.min(full, info.mips);
-        // Texels held as a classic file has them are not halved; a file's own
-        // DXGI levels are, by its format's codec, where there is one.
-        const count = (native && !codec) || (!native && keptAsIs(sample.format)) || volume
-            ? Math.min(asks, fromFile) : asks;
-        if (native && count < asks)
-        {
-            host.divergence?.(api, `${asks - count} levels below the file's last of DXGI format`
-                + ` ${format} are left out: this loader has no codec for it`);
-        }
-        if (codec?.nearest && (resize || count > fromFile) && !nearestSaid.has(format))
-        {
-            nearestSaid.add(format);
-            host.divergence?.(api, `levels or a size made of a file of DXGI format ${format} take`
-                + ' the nearest texel, not D3DX\'s filter');
-        }
-        /** @type {{ width: number, height: number, data: Uint8Array }[][]} */
-        const chains = volume
-            ? []
-            : faces.map(levels=>levelsOf(levels.slice(first), count, codec?.smaller));
-        /** @type {Uint8Array[]} */
-        const subresources = [];
-        /** @type {{ pitch: number, slice: number }[]} */
-        const pitches = [];
-        if (volume)
-        {
-            const levels = /** @type {import('../d3dx9/images.js').Level[][]} */ (image.volume)
-                .slice(first, first + count);
-            for (const slices of levels)
-            {
-                const { width: w, height: h } = slices[0];
-                const { rowBytes, rows } = pitchOf(format, w, h);
-                const { rowBytes: pitch, rows: lines } = pitchOf(asked, w, h);
-                const bytes = new Uint8Array(pitch * lines * slices.length);
-                slices.forEach((slice, z)=>bytes.set(inAsked(slice.data.subarray(0,
-                    rowBytes * rows), w * h), z * pitch * lines));
-                subresources.push(bytes);
-                pitches.push({ pitch, slice: pitch * lines });
-            }
-        }
-        else
-        {
-            for (const chain of chains)
-            {
-                for (const level of chain)
-                {
-                    const { rowBytes, rows } = pitchOf(asked, level.width, level.height);
-                    subresources.push(inAsked(level.data, level.width * level.height));
-                    pitches.push({ pitch: rowBytes, slice: rowBytes * rows });
-                }
-            }
-        }
-        const total = subresources.reduce((sum, bytes)=>sum + bytes.length, 0);
+        const { subresources } = plan;
+        const total = subresources.reduce((sum, { data })=>sum + data.length, 0);
         const descBytes = 0x2c;
         const dataBytes = subresources.length * 12;
         const block = heap.allocate(descBytes + dataBytes + total);
@@ -642,28 +253,26 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         }
         try
         {
-            const usage = given(info.usage, 0);
-            const bind = given(info.bind, BIND_SHADER_RESOURCE);
-            const cpu = given(info.cpu, 0);
-            const cube = native ? native.cube : Boolean(image.faces);
-            const misc = given(info.misc, 0) | (cube ? MISC_TEXTURECUBE : 0);
-            const linear = native?.dimension === DIMENSION.TEXTURE1D;
-            putU32s(block, volume
-                ? [width, height, depth, count, asked, usage, bind, cpu, misc]
-                : linear ? [width, count, faces.length, asked, usage, bind, cpu, misc]
-                    : [width, height, count, faces.length, asked, 1, 0, usage, bind, cpu, misc]);
+            const { width, height, depth, mips, arraySize, format, usage, bind, cpu, misc } = plan;
+            putU32s(block, plan.dimension === DIMENSION.TEXTURE3D
+                ? [width, height, depth, mips, format, usage, bind, cpu, misc]
+                : plan.dimension === DIMENSION.TEXTURE1D
+                    ? [width, mips, arraySize, format, usage, bind, cpu, misc]
+                    : [width, height, mips, arraySize, format, 1, 0, usage, bind, cpu, misc]);
             let at = block + descBytes + dataBytes;
             /** @type {number[]} */
             const records = [];
-            subresources.forEach((bytes, i)=>{
-                host.writeMemory(at, bytes);
-                records.push(at, pitches[i].pitch, pitches[i].slice);
-                at += bytes.length;
-            });
+            for (const { data, pitch, slice } of subresources)
+            {
+                host.writeMemory(at, data);
+                records.push(at, pitch, slice);
+                at += data.length;
+            }
             putU32s(block + descBytes, records);
             return await method(thread, device,
-                volume ? profile.device.CreateTexture3D
-                    : linear ? profile.device.CreateTexture1D : profile.device.CreateTexture2D,
+                plan.dimension === DIMENSION.TEXTURE3D ? profile.device.CreateTexture3D
+                    : plan.dimension === DIMENSION.TEXTURE1D ? profile.device.CreateTexture1D
+                        : profile.device.CreateTexture2D,
                 [block, block + descBytes, out]);
         }
         finally
@@ -673,109 +282,350 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
     };
 
     /**
-     * A loader: the image from where the call says, the texture made of it,
-     * and with `view`, a shader-resource view of the whole texture made in its
-     * place, the texture's own reference given back.
+     * D3DX10_IMAGE_INFO, as a file says it: Width, Height, Depth, ArraySize,
+     * MipLevels, MiscFlags (only the cube flag), Format, ResourceDimension,
+     * ImageFileFormat.
      *
-     * @param {string} api @param {boolean} view
-     * @param {(args: number[]) => { device: number, found: () => Uint8Array | null
-     *     | Promise<Uint8Array | null>, info: number, out: number, hr: number }} parse
+     * @param {number} at @param {import('./dds10.js').DxgiImage} image
      */
-    const loader = (api, view, parse)=>(/** @type {number[]} */ args)=>{
-        const { device, found, info, out, hr } = parse(args.map(a=>a >>> 0));
-        if (out !== 0)
-        {
-            putU32s(out, [0]);
-        }
-        if (device === 0 || out === 0 || !host.callGuest || !host.heap)
-        {
-            return answer(hr, E_INVALIDARG);
-        }
-        const thread = host.currentThread?.();
-        return (async()=>{
-            const image = imageOf(api, await found());
-            if (typeof image === 'number')
-            {
-                return answer(hr, image);
-            }
-            const heap = /** @type {NonNullable<D3dx10Host['heap']>} */ (host.heap);
-            const held = view ? heap.allocate(4) : out;
-            if (held === 0)
-            {
-                return answer(hr, E_OUTOFMEMORY);
-            }
-            try
-            {
-                let result = await make(api, device, image, loadInfoAt(info), held, thread);
-                if (view && result === S_OK)
-                {
-                    const texture = u32(held);
-                    result = await method(thread, device, profile.device.CreateShaderResourceView,
-                        [texture, 0, out]);
-                    await method(thread, texture, UNKNOWN_RELEASE, []);
-                }
-                return answer(hr, result);
-            }
-            finally
-            {
-                if (view)
-                {
-                    heap.free(held);
-                }
-            }
-        })();
+    const writeInfo = (at, image)=>{
+        putU32s(at, [image.width, image.height, image.depth ?? 1, image.arraySize,
+            image.mipLevels, image.cube ? MISC_TEXTURECUBE : 0, image.dxgi, image.dimension,
+            image.fileFormat]);
     };
 
-    /** @param {number} data @param {number} size */
-    const fromMemory = (data, size)=>()=>(data === 0 || size === 0 ? null
-        : host.readMemory(data, size).slice());
-    /** @param {string} api @param {number} at @param {boolean} wide */
-    const fromFile = (api, at, wide)=>async()=>{
-        const path = string(at, wide, 260);
-        const bytes = host.readFile ? await host.readFile(path) : null;
-        if (!bytes)
+    /**
+     * Where a call's file comes from, as D3DX's loaders take it: an argument
+     * the loader cannot be made of is answered at once (`early`, pHResult
+     * left as it is), a file the loader then fails to read is answered as
+     * the load's result (`hr`, pHResult written too).
+     *
+     * @typedef {{ bytes: Uint8Array } | { early: number } | { hr: number }} Found
+     */
+
+    /**
+     * The program's bytes; with `headerOnly`, a DDS file's headers alone, as
+     * D3DX reads no further for its information (the size a program gives is
+     * not checked against the texels).
+     *
+     * @param {number} data @param {number} size @param {boolean} [headerOnly]
+     * @returns {Found}
+     */
+    const fromMemory = (data, size, headerOnly = false)=>{
+        if (data === 0)
         {
-            host.divergence?.(api, `answered D3DX10_ERR_INVALID_DATA: no file ${path}`);
+            return { early: E_FAIL };
         }
-        return bytes;
+        if (size < 4 || u32(data) !== DDS_MAGIC)
+        {
+            return { bytes: host.readMemory(data, size).slice() };
+        }
+        const headers = host.readMemory(data, Math.min(size, DDS_HEADERS)).slice();
+        if (headerOnly)
+        {
+            return { bytes: headers };
+        }
+        // A DDS file is read to where its texels end, as D3DX reads it: a program
+        // may say it is longer than it is.
+        let extent = size;
+        try
+        {
+            extent = Math.min(size, readImage10(headers, { headerOnly: true,
+                bc6and7: true }).extent ?? size);
+        }
+        catch (e){
+            if (!(e instanceof ImageError))
+            {
+                throw e;
+            }
+        }
+        return { bytes: host.readMemory(data, extent).slice() };
+    };
+
+    /** @param {number} at @param {boolean} wide @returns {Promise<Found>} */
+    const fromFile = async(at, wide)=>{
+        if (at === 0)
+        {
+            return { early: E_FAIL };
+        }
+        const bytes = host.readFile ? await host.readFile(string(at, wide, 260)) : null;
+        return bytes ? { bytes } : { hr: profile.fileNotFound };
     };
     /**
      * A module's resource, as D3DX finds one: RT_RCDATA by name or number.
      *
-     * @param {string} api @param {number} module @param {number} at @param {boolean} wide
+     * @param {number} module @param {number} at @param {boolean} wide
+     * @returns {Promise<Found>}
      */
-    const fromResource = (api, module, at, wide)=>async()=>{
+    const fromResource = async(module, at, wide)=>{
         const name = at === 0 ? null : at < 0x10000 ? at : string(at, wide, 256);
         const bytes = name === null ? null : await host.resource?.(module, name, RT_RCDATA) ?? null;
-        if (!bytes)
-        {
-            host.divergence?.(api, `answered D3DX10_ERR_INVALID_DATA: no resource ${name}`);
-        }
-        return bytes;
+        return bytes ? { bytes } : { early: D3DX10_ERR_INVALID_DATA };
     };
 
     /**
-     * D3DX10_IMAGE_INFO, as a file says it: Width, Height, Depth, ArraySize,
-     * MipLevels, MiscFlags, Format, ResourceDimension, ImageFileFormat.
+     * Where a call's file is, for a loader object a thread pump is handed:
+     * the loader's creating function and its arguments.
      *
-     * @param {number} at @param {AnyImage} image
+     * @typedef {{ kind: 'Memory', args: number[] } | { kind: 'File' | 'Resource',
+     *     wide: boolean, args: number[] }} Source
      */
-    const writeInfo = (at, image)=>{
-        const native = nativeOf(image);
-        if (native)
+
+    /** @type {Record<string, any>} */
+    const loaders = createDataLoaders(host, { prefix, fileNotFound: profile.fileNotFound,
+        string });
+
+    /** @param {Source} source @param {boolean} [headerOnly] @returns {Promise<Found>} */
+    const found = (source, headerOnly)=>(source.kind === 'Memory' ? Promise.resolve(fromMemory(
+        source.args[0], source.args[1], headerOnly))
+        : source.kind === 'File' ? fromFile(source.args[0], source.wide)
+            : fromResource(source.args[0], source.args[1], source.wide));
+
+    /**
+     * The work handed to a thread pump, as D3DX hands it: a loader of the
+     * source and a processor, given to the pump's AddWorkItem with where the
+     * result and the object go; the pump's answer is the call's.
+     *
+     * @param {any} thread @param {number} pump @param {Source} source
+     * @param {(out: number) => number} makeProcessor
+     * @param {number} hr @param {number} out
+     */
+    const pumped = async(thread, pump, source, makeProcessor, hr, out)=>{
+        const heap = /** @type {NonNullable<D3dx10Host['heap']>} */ (host.heap);
+        const pair = heap.allocate(8);
+        if (pair === 0)
         {
-            putU32s(at, [native.width, native.height, native.depth ?? 1, native.arraySize,
-                native.mipLevels, native.cube ? MISC_TEXTURECUBE : 0, native.dxgi,
-                native.dimension, native.fileFormat]);
-            return;
+            return E_OUTOFMEMORY;
         }
-        const volume = Boolean(image.depth && image.depth > 1);
-        const sample = volume ? image.volume?.[0]?.[0] : image.levels[0];
-        putU32s(at, [image.width, image.height, volume ? image.depth ?? 1 : 1,
-            image.faces ? 6 : 1, image.mipLevels, image.faces ? MISC_TEXTURECUBE : 0,
-            sample ? dxgiOf(sample.format) : dxgiOf(image.format),
-            volume ? DIMENSION.TEXTURE3D : DIMENSION.TEXTURE2D, image.fileFormat]);
+        try
+        {
+            const name = `${prefix}CreateAsync${source.kind}Loader`
+                + `${source.kind === 'Memory' ? '' : source.wide ? 'W' : 'A'}`;
+            const made = await loaders[name].handler([...source.args, pair]) | 0;
+            if (made !== S_OK)
+            {
+                return made;
+            }
+            const processor = makeProcessor(pair + 4) | 0;
+            if (processor !== S_OK)
+            {
+                return processor;
+            }
+            // ID3DX10ThreadPump::AddWorkItem(loader, processor, pHResult, ppDeviceObject).
+            return await method(thread, pump, 3, [u32(pair), u32(pair + 4), hr, out]);
+        }
+        finally
+        {
+            heap.free(pair);
+        }
     };
+
+    const PROCESSOR_ID = 'ID3DXDataProcessor';
+
+    /**
+     * A data processor published (ID3DX10DataProcessor, not COM): Process
+     * reads the file's bytes, CreateDeviceObject makes its object of them.
+     *
+     * @param {(bytes: Uint8Array) => number} process
+     * @param {(object: number, thread: any) => number | Promise<number>} makeObject
+     * @param {number} out
+     */
+    const publishProcessor = (process, makeObject, out)=>{
+        const pointer = publishBare(host, PROCESSOR_ID, [
+            /** HRESULT Process(void *pData, SIZE_T cBytes) */
+            { name: 'Process', argBytes: 12, invoke: (_self, [data, size])=>
+                ((data >>> 0) === 0 || (size >>> 0) === 0 ? E_FAIL
+                    : process(host.readMemory(data >>> 0, size >>> 0).slice())) },
+            /** HRESULT CreateDeviceObject(void **ppDataObject) */
+            { name: 'CreateDeviceObject', argBytes: 8, invoke: (_self, [object])=>
+                makeObject(object >>> 0, host.currentThread?.()) },
+        ], ()=>{});
+        if (pointer === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        putU32s(out, [pointer]);
+        return S_OK;
+    };
+
+    /**
+     * The texture (or with `view`, a shader-resource view of it) made of an
+     * image, its pointer written to `out`.
+     *
+     * @param {string} api @param {number} device @param {boolean} view
+     * @param {import('./dds10.js').DxgiImage} image
+     * @param {{ info: import('./load.js').LoadInfo, srcInfo: number }} load
+     * @param {number} out @param {any} thread
+     */
+    const deviceObject = async(api, device, view, image, load, out, thread)=>{
+        const plan = planTexture(image, load.info, detail=>host.divergence?.(api, detail));
+        return 'hr' in plan ? plan.hr : planned(device, view, plan, out, thread);
+    };
+
+    /**
+     * The texture (or with `view`, a shader-resource view of it) made of a
+     * plan, its pointer written to `out`.
+     *
+     * @param {number} device @param {boolean} view @param {import('./load.js').Plan} plan
+     * @param {number} out @param {any} thread
+     */
+    const planned = async(device, view, plan, out, thread)=>{
+        const heap = /** @type {NonNullable<D3dx10Host['heap']>} */ (host.heap);
+        const held = view ? heap.allocate(4) : out;
+        if (held === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        try
+        {
+            let result = await create(device, plan, held, thread);
+            if (view && result === S_OK)
+            {
+                const texture = u32(held);
+                result = await method(thread, device, profile.device.CreateShaderResourceView,
+                    [texture, 0, out]);
+                await method(thread, texture, UNKNOWN_RELEASE, []);
+            }
+            return result;
+        }
+        finally
+        {
+            if (view)
+            {
+                heap.free(held);
+            }
+        }
+    };
+
+    /**
+     * A processor making a texture (or view) of the bytes it is given, with
+     * the load information it was made with.
+     *
+     * @param {string} api @param {number} device @param {boolean} view
+     * @param {{ info: import('./load.js').LoadInfo, srcInfo: number }} load
+     * @param {number} out
+     */
+    const textureProcessor = (api, device, view, load, out)=>{
+        /** @type {import('./load.js').Plan | null} */
+        let plan = null;
+        return publishProcessor(bytes=>{
+            const image = imageOf(api, bytes, false);
+            if (typeof image === 'number')
+            {
+                return image;
+            }
+            if (load.srcInfo !== 0)
+            {
+                writeInfo(load.srcInfo, image);
+            }
+            // The load information is checked as the file is processed; the
+            // device checks the rest when the texture is made.
+            const made = planTexture(image, load.info, detail=>host.divergence?.(api, detail));
+            if ('hr' in made)
+            {
+                return made.hr;
+            }
+            plan = made;
+            return S_OK;
+        }, (object, thread)=>(!plan || object === 0 ? E_FAIL
+            : planned(device, view, plan, object, thread)), out);
+    };
+
+    /**
+     * A texture-creating call: the device and out-pointer checked, the source
+     * found, the image read and the texture (or view) made; or all of it
+     * handed to the thread pump the program passes.
+     *
+     * @param {string} api @param {boolean} view
+     * @param {(args: number[]) => { device: number, source: Source, info: number, pump: number,
+     *     out: number, hr: number }} parse
+     */
+    const loader = (api, view, parse)=>async(/** @type {number[]} */ args)=>{
+        const { device, source, info, pump, out, hr } = parse(args.map(a=>a >>> 0));
+        if (device === 0 || out === 0 || !host.callGuest || !host.heap)
+        {
+            return E_INVALIDARG;
+        }
+        const thread = host.currentThread?.();
+        const load = loadInfoAt(info);
+        if (pump !== 0)
+        {
+            return pumped(thread, pump, source,
+                at=>textureProcessor(api, device, view, load, at), hr, out);
+        }
+        const file = await found(source);
+        if ('early' in file)
+        {
+            return file.early;
+        }
+        if ('hr' in file)
+        {
+            return answer(hr, file.hr);
+        }
+        const image = imageOf(api, file.bytes, false);
+        if (typeof image === 'number')
+        {
+            return answer(hr, image);
+        }
+        if (load.srcInfo !== 0)
+        {
+            writeInfo(load.srcInfo, image);
+        }
+        return answer(hr, await deviceObject(api, device, view, image, load, out, thread));
+    };
+
+    /**
+     * An image's information, read from the header alone where the file is a
+     * DDS; or the work handed to the thread pump the program passes.
+     *
+     * @param {string} api @param {Source} source @param {number} pump
+     * @param {number} infoAt @param {number} hr
+     */
+    const imageInfo = async(api, source, pump, infoAt, hr)=>{
+        if (pump !== 0 && host.callGuest && host.heap)
+        {
+            return pumped(host.currentThread?.(), pump, source, at=>infoProcessor(api, infoAt, at),
+                hr, 0);
+        }
+        const file = await found(source, true);
+        if ('early' in file)
+        {
+            return file.early;
+        }
+        if ('hr' in file)
+        {
+            return answer(hr, file.hr);
+        }
+        const image = imageOf(api, file.bytes, true);
+        if (typeof image === 'number')
+        {
+            return answer(hr, image);
+        }
+        if (infoAt !== 0)
+        {
+            writeInfo(infoAt, image);
+        }
+        return answer(hr, S_OK);
+    };
+
+    /**
+     * A processor writing the information of the bytes it is given; it makes
+     * no device object.
+     *
+     * @param {string} api @param {number} infoAt @param {number} out
+     */
+    const infoProcessor = (api, infoAt, out)=>publishProcessor(bytes=>{
+        const image = imageOf(api, bytes, true);
+        if (typeof image === 'number')
+        {
+            return image;
+        }
+        if (infoAt !== 0)
+        {
+            writeInfo(infoAt, image);
+        }
+        return S_OK;
+    }, ()=>S_OK, out);
 
     /**
      * The include a compile from a file is given when the program gives none:
@@ -851,26 +701,6 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
     };
 
     /**
-     * D3DX10_IMAGE_INFO of bytes found, or why not.
-     *
-     * @param {string} api @param {Uint8Array | null} bytes @param {number} infoAt
-     * @param {number} hr
-     */
-    const imageInfo = (api, bytes, infoAt, hr)=>{
-        const image = imageOf(api, bytes);
-        if (typeof image === 'number')
-        {
-            return answer(hr, image);
-        }
-        if (infoAt === 0)
-        {
-            return answer(hr, E_INVALIDARG);
-        }
-        writeInfo(infoAt, image);
-        return answer(hr, S_OK);
-    };
-
-    /**
      * Refused, saying why: what this build has no counterpart of.
      *
      * @param {string} api @param {number} argBytes @param {string} why
@@ -930,7 +760,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
     };
 
     return {
-        ...createDataLoaders(host, { prefix, fileNotFound: profile.fileNotFound, string }),
+        ...loaders,
         /** BOOL D3DX10CheckVersion(UINT D3DSdkVersion, UINT D3DX10SdkVersion) */
         [`${prefix}CheckVersion`]: {
             argBytes: 8,
@@ -941,81 +771,23 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         /**
          * HRESULT D3DX10CreateTextureFromMemory(ID3D10Device*, LPCVOID pSrcData,
          *     SIZE_T SrcDataSize, D3DX10_IMAGE_LOAD_INFO*, ID3DX10ThreadPump*,
-         *     ID3D10Resource **ppTexture, HRESULT *pHResult)
+         *     ID3D10Resource **ppTexture, HRESULT *pHResult), and the
+         * shader-resource view made of one
          */
-        [`${prefix}CreateTextureFromMemory`]: {
-            argBytes: 28,
-            handler: loader(`${prefix}CreateTextureFromMemory`, false,
-                ([device, data, size, info, , out, hr])=>({ device, found: fromMemory(data, size),
-                    info, out, hr })),
-        },
+        ...Object.fromEntries([false, true].map(view=>{
+            const api = `${prefix}Create${view ? 'ShaderResourceView' : 'Texture'}FromMemory`;
+            return [api, { argBytes: 28, handler: loader(api, view,
+                ([device, data, size, info, pump, out, hr])=>({ device,
+                    source: { kind: 'Memory', args: [data, size] }, info, pump, out, hr })) }];
+        })),
         /** The same, the image from a file: (device, file, info, pump, ppTexture, pHResult) */
-        [`${prefix}CreateTextureFromFileA`]: {
-            argBytes: 24,
-            handler: loader(`${prefix}CreateTextureFromFileA`, false,
-                ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile(`${prefix}CreateTextureFromFileA`, file, false), info, out,
-                    hr })),
-        },
-        [`${prefix}CreateTextureFromFileW`]: {
-            argBytes: 24,
-            handler: loader(`${prefix}CreateTextureFromFileW`, false,
-                ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile(`${prefix}CreateTextureFromFileW`, file, true), info, out,
-                    hr })),
-        },
-        /** The loaders above, a shader-resource view of the texture handed out instead. */
-        [`${prefix}CreateShaderResourceViewFromMemory`]: {
-            argBytes: 28,
-            handler: loader(`${prefix}CreateShaderResourceViewFromMemory`, true,
-                ([device, data, size, info, , out, hr])=>({ device, found: fromMemory(data, size),
-                    info, out, hr })),
-        },
-        [`${prefix}CreateShaderResourceViewFromFileA`]: {
-            argBytes: 24,
-            handler: loader(`${prefix}CreateShaderResourceViewFromFileA`, true,
-                ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile(`${prefix}CreateShaderResourceViewFromFileA`, file, false),
-                    info, out, hr })),
-        },
-        [`${prefix}CreateShaderResourceViewFromFileW`]: {
-            argBytes: 24,
-            handler: loader(`${prefix}CreateShaderResourceViewFromFileW`, true,
-                ([device, file, info, , out, hr])=>({ device,
-                    found: fromFile(`${prefix}CreateShaderResourceViewFromFileW`, file, true), info,
-                    out, hr })),
-        },
-        /**
-         * HRESULT D3DX10GetImageInfoFromMemory(LPCVOID pSrcData, SIZE_T SrcDataSize,
-         *     ID3DX10ThreadPump*, D3DX10_IMAGE_INFO*, HRESULT *pHResult)
-         */
-        [`${prefix}GetImageInfoFromMemory`]: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([data, size, , infoAt, hr])=>imageInfo(`${prefix}GetImageInfoFromMemory`,
-                fromMemory(data >>> 0, size >>> 0)(), infoAt >>> 0, hr >>> 0),
-        },
-        /**
-         * HRESULT D3DX10GetImageInfoFromFile(LPCTSTR pSrcFile, ID3DX10ThreadPump*,
-         *     D3DX10_IMAGE_INFO *pSrcInfo, HRESULT *pHResult)
-         */
-        ...Object.fromEntries([false, true].map(wide=>{
-            const api = `${prefix}GetImageInfoFromFile${wide ? 'W' : 'A'}`;
-            return [api, { argBytes: 16, handler: async(/** @type {number[]} */ [file, ,
-                infoAt, hr])=>((file >>> 0) === 0 ? answer(hr, E_FAIL)
-                : imageInfo(api, await fromFile(api, file >>> 0, wide)(), infoAt >>> 0,
-                    hr >>> 0)) }];
-        })),
-        /**
-         * HRESULT D3DX10GetImageInfoFromResource(HMODULE, LPCTSTR pSrcResource,
-         *     ID3DX10ThreadPump*, D3DX10_IMAGE_INFO*, HRESULT*)
-         */
-        ...Object.fromEntries([false, true].map(wide=>{
-            const api = `${prefix}GetImageInfoFromResource${wide ? 'W' : 'A'}`;
-            return [api, { argBytes: 20, handler: async(/** @type {number[]} */ [module, name, ,
-                infoAt, hr])=>imageInfo(api, await fromResource(api, module >>> 0, name >>> 0,
-                wide)(), infoAt >>> 0, hr >>> 0) }];
-        })),
+        ...Object.fromEntries([false, true].flatMap(wide=>[false, true].map(view=>{
+            const api = `${prefix}Create${view ? 'ShaderResourceView' : 'Texture'}FromFile`
+                + `${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 24, handler: loader(api, view,
+                ([device, file, info, pump, out, hr])=>({ device,
+                    source: { kind: 'File', wide, args: [file] }, info, pump, out, hr })) }];
+        }))),
         /**
          * HRESULT D3DX10CreateTextureFromResource(device, HMODULE, LPCTSTR,
          *     D3DX10_IMAGE_LOAD_INFO*, ID3DX10ThreadPump*, ID3D10Resource**, HRESULT*),
@@ -1025,9 +797,63 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             const api = `${prefix}Create${view ? 'ShaderResourceView' : 'Texture'}FromResource`
                 + `${wide ? 'W' : 'A'}`;
             return [api, { argBytes: 28, handler: loader(api, view,
-                ([device, module, name, info, , out, hr])=>({ device,
-                    found: fromResource(api, module, name, wide), info, out, hr })) }];
+                ([device, module, name, info, pump, out, hr])=>({ device,
+                    source: { kind: 'Resource', wide, args: [module, name] }, info, pump, out,
+                    hr })) }];
         }))),
+        /**
+         * HRESULT D3DX10GetImageInfoFromMemory(LPCVOID pSrcData, SIZE_T SrcDataSize,
+         *     ID3DX10ThreadPump*, D3DX10_IMAGE_INFO*, HRESULT *pHResult)
+         */
+        [`${prefix}GetImageInfoFromMemory`]: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([data, size, pump, infoAt, hr])=>imageInfo(
+                `${prefix}GetImageInfoFromMemory`, { kind: 'Memory', args: [data >>> 0,
+                    size >>> 0] }, pump >>> 0, infoAt >>> 0, hr >>> 0),
+        },
+        /**
+         * HRESULT D3DX10GetImageInfoFromFile(LPCTSTR pSrcFile, ID3DX10ThreadPump*,
+         *     D3DX10_IMAGE_INFO *pSrcInfo, HRESULT *pHResult)
+         */
+        ...Object.fromEntries([false, true].map(wide=>{
+            const api = `${prefix}GetImageInfoFromFile${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 16, handler: (/** @type {number[]} */ [file, pump,
+                infoAt, hr])=>imageInfo(api, { kind: 'File', wide, args: [file >>> 0] },
+                pump >>> 0, infoAt >>> 0, hr >>> 0) }];
+        })),
+        /**
+         * HRESULT D3DX10GetImageInfoFromResource(HMODULE, LPCTSTR pSrcResource,
+         *     ID3DX10ThreadPump*, D3DX10_IMAGE_INFO*, HRESULT*)
+         */
+        ...Object.fromEntries([false, true].map(wide=>{
+            const api = `${prefix}GetImageInfoFromResource${wide ? 'W' : 'A'}`;
+            return [api, { argBytes: 20, handler: (/** @type {number[]} */ [module, name, pump,
+                infoAt, hr])=>imageInfo(api, { kind: 'Resource', wide, args: [module >>> 0,
+                name >>> 0] }, pump >>> 0, infoAt >>> 0, hr >>> 0) }];
+        })),
+        /**
+         * HRESULT D3DX10CreateAsyncTextureInfoProcessor(D3DX10_IMAGE_INFO*,
+         *     ID3DX10DataProcessor **ppDataProcessor)
+         */
+        [`${prefix}CreateAsyncTextureInfoProcessor`]: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([infoAt, out])=>((out >>> 0) === 0 ? E_INVALIDARG
+                : infoProcessor(`${prefix}CreateAsyncTextureInfoProcessor`, infoAt >>> 0,
+                    out >>> 0)),
+        },
+        /**
+         * HRESULT D3DX10CreateAsyncTextureProcessor(ID3D10Device*, D3DX10_IMAGE_LOAD_INFO*,
+         *     ID3DX10DataProcessor**), and the one that makes a shader-resource view
+         */
+        ...Object.fromEntries([false, true].map(view=>{
+            const api = `${prefix}CreateAsync${view ? 'ShaderResourceView' : 'Texture'}Processor`;
+            return [api, { argBytes: 12, handler: (/** @type {number[]} */ [device, info, out])=>
+                ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.heap ? E_INVALIDARG
+                    : textureProcessor(api, device >>> 0, view, loadInfoAt(info >>> 0),
+                        out >>> 0)) }];
+        })),
         [`${prefix}CompileFromMemory`]: { argBytes: 52, handler: compile },
         /**
          * HRESULT D3DX10CompileFromFile(LPCTSTR pSrcFile, const D3D10_SHADER_MACRO*,
@@ -1089,8 +915,10 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
          * Every object bound to the device unbound, through the device's own
          * methods (ID3D10Device's slots): each stage's constant buffers,
          * resources, samplers and shader, the input assembler's buffers and
-         * layout, the stream-output targets, the render targets and the
-         * output and rasterizer states.
+         * layout, the stream-output targets, the render targets, the output
+         * and rasterizer states and the predicate; each left as Windows leaves
+         * it (Wine's d3dx10 test): an index format of R32_UINT, a sample mask
+         * of 0, stream-output offsets of -1.
          */
         [`${prefix}UnsetAllDeviceObjects`]: {
             argBytes: 4,
@@ -1101,12 +929,15 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                     return E_INVALIDARG;
                 }
                 const thread = host.currentThread?.();
-                const nulls = host.heap.allocate(RESOURCE_SLOTS * 4);
+                const nulls = host.heap.allocate(RESOURCE_SLOTS * 4 + STREAM_OUTPUT_SLOTS * 4);
                 if (nulls === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
                 host.writeMemory(nulls, new Uint8Array(RESOURCE_SLOTS * 4));
+                // Stream output's offsets: -1, append, as a target unbound reads.
+                const appended = nulls + RESOURCE_SLOTS * 4;
+                host.writeMemory(appended, new Uint8Array(STREAM_OUTPUT_SLOTS * 4).fill(0xff));
                 /** @param {number} slot @param {number[]} rest */
                 const call = (slot, ...rest)=>method(thread, device, slot, rest);
                 try
@@ -1120,14 +951,15 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                     }
                     await call(DEVICE.IASetVertexBuffers, 0, VERTEX_BUFFER_SLOTS, nulls, nulls,
                         nulls);
-                    await call(DEVICE.IASetIndexBuffer, 0, 0, 0);
+                    await call(DEVICE.IASetIndexBuffer, 0, DXGI_FORMAT_R32_UINT, 0);
                     await call(DEVICE.IASetInputLayout, 0);
-                    await call(DEVICE.SOSetTargets, STREAM_OUTPUT_SLOTS, nulls, nulls);
+                    await call(DEVICE.SOSetTargets, STREAM_OUTPUT_SLOTS, nulls, appended);
                     await call(DEVICE.OMSetRenderTargets, RENDER_TARGET_SLOTS, nulls, 0);
-                    // A blend factor of zeros, the mask every sample.
-                    await call(DEVICE.OMSetBlendState, 0, nulls, 0xffffffff);
+                    // A blend factor of zeros, and a sample mask of none.
+                    await call(DEVICE.OMSetBlendState, 0, nulls, 0);
                     await call(DEVICE.OMSetDepthStencilState, 0, 0);
                     await call(DEVICE.RSSetState, 0);
+                    await call(DEVICE.SetPredication, 0, 0);
                     return S_OK;
                 }
                 finally
