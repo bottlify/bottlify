@@ -2675,6 +2675,7 @@ export function createWin32Module(){
                         setLastError: setError,
                         registers: ()=>Object.fromEntries([...registerNames, 'eflags']
                             .map(name=>[name, cpuRegisters.read(name)])),
+                        setRegisters,
                         divergence: config?.divergence,
                     }),
                     ...createLocaleFunctions({

@@ -34,6 +34,17 @@ const CURRENT_PROCESS = 0xffffffff;
 /** CONTEXT_i386 with its control, integer and segment groups: RtlCaptureContext's set. */
 const CONTEXT_FULL_SEGMENTS = 0x00010007;
 const CONTEXT_BYTES = 0x2cc;
+/** CONTEXT_i386's groups, each a bit beside the i386 one. */
+const CONTEXT_CONTROL = 0x1;
+const CONTEXT_INTEGER = 0x2;
+const CONTEXT_FLOATING_POINT = 0x8;
+const CONTEXT_EXTENDED_REGISTERS = 0x20;
+/** Where each register a context restores stands in it, by group. */
+const CONTEXT_INTEGERS = /** @type {const} */ ([['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4],
+    ['edx', 0xa8], ['ecx', 0xac], ['eax', 0xb0]]);
+const CONTEXT_CONTROLS = /** @type {const} */ ([['ebp', 0xb4], ['eip', 0xb8], ['eflags', 0xc0],
+    ['esp', 0xc4]]);
+const STATUS_ACCESS_VIOLATION = 0xc0000005;
 
 /** JOBOBJECTINFOCLASS, the classes a 32-bit process sets or reads, and their sizes. */
 const JOB = Object.freeze({
@@ -135,6 +146,9 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
  * @property {number} [processId]  This process's id, which a job's id list names.
+ * @property {(values: Record<string, number>) => void} [setRegisters]  The running
+ *           thread's registers, EIP and ESP among them: where it goes on from.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /** @param {ProcessPolicyHost} host */
@@ -374,6 +388,48 @@ export function createProcessPolicyFunctions(host){
         return count;
     };
 
+    /**
+     * NTSTATUS NtContinue(PCONTEXT ContextRecord, BOOLEAN TestAlert)
+     *
+     * The thread goes on from the context, as a handler's continue
+     * does: the groups its flags name are put back (control: EBP,
+     * EIP, EFLAGS, ESP; integer: the rest), every other register is
+     * left as the call found it. A runtime that unwinds by itself
+     * (Mono's) captures a context, unwinds to it and continues here. A
+     * null context is refused; the floating-point state a context holds
+     * is not put back, and that is said.
+     */
+    const ntContinue = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([context])=>{
+            const at = context >>> 0;
+            if (at === 0 || !host.setRegisters)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+            const flags = readDword(at);
+            /** @type {Record<string, number>} */
+            const values = {};
+            for (const [group, fields] of /** @type {const} */ ([
+                [CONTEXT_INTEGER, CONTEXT_INTEGERS], [CONTEXT_CONTROL, CONTEXT_CONTROLS]]))
+            {
+                for (const [name, offset] of (flags & group) === 0 ? [] : fields)
+                {
+                    values[name] = readDword(at + offset);
+                }
+            }
+            if ((flags & (CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS)) !== 0)
+            {
+                host.divergence?.('NtContinue',
+                    'the floating-point registers of a context are not put back');
+            }
+            host.setRegisters(values);
+            // EAX is what the call answers, so the context's is the answer.
+            return values.eax ?? (host.registers?.().eax ?? 0) >>> 0;
+        },
+    };
+
     /** A thread's cycles: its processor time at the processor's rate. @param {any} thread */
     const cyclesOf = thread=>BigInt(Math.round((thread?.cpuMs ?? 0) * PROCESSOR.mhz * 1000));
 
@@ -390,6 +446,8 @@ export function createProcessPolicyFunctions(host){
                     captureContext(out >>> 0);
                     return 0;
                 },
+                // ntdll's, which goes on from what this captured.
+                natives: { NtContinue: ntContinue },
             },
 
             /**

@@ -140,6 +140,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
  *   timeout note on WaitForMultipleObjects.
  * @property {(code: number) => void} [setLastError]
  * @property {() => Record<string, number>} [registers]  the running thread's
+ * @property {(values: Record<string, number>) => void} [setRegisters]  the running
+ *           thread's, where it goes on from (NtContinue)
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {import('./changes.js').WatchedVolume} [volume]
  *           The volume, for the directories a change notification watches;
@@ -614,6 +616,8 @@ export function createSyncFunctions(host){
             setLastError: host.setLastError,
             currentThread: host.currentThread,
             registers: host.registers,
+            setRegisters: host.setRegisters,
+            divergence: host.divergence,
             pointerSize: host.pointerSize,
             processId: host.processId,
             threadOf,
