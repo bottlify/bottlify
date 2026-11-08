@@ -378,6 +378,18 @@ for (const name of ['process-create', 'process-child', 'process-started', 'proce
             ? String(value.stack ?? value).slice(0, 800) : value))?.slice(0, 900)));
 }
 
+// What the programs write to their consoles, a line at a time: a console
+// program's own account of what it did.
+let pendingOutput = '';
+app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>{
+    const lines = (pendingOutput + text).split(/\r?\n/);
+    pendingOutput = lines.pop() ?? '';
+    for (const line of lines)
+    {
+        console.log(seconds(), 'OUT', line);
+    }
+});
+
 app.on('guest-return', (/** @type {any} */ done)=>console.log(seconds(), 'watch', done.name,
     JSON.stringify(done.strings ?? []), `-> 0x${(done.result >>> 0).toString(16)}`));
 

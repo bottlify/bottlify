@@ -139,8 +139,8 @@ const STARTF_USESTDHANDLES = 0x00000100;
  * Where dwFlags, hStdOutput and hStdError sit in STARTUPINFOA and W alike;
  * in a 64-bit process, whose three strings and four handles are eight bytes.
  */
-const STARTUP = Object.freeze({ flags: 44, output: 60, error: 64 });
-const STARTUP64 = Object.freeze({ flags: 60, output: 88, error: 96 });
+const STARTUP = Object.freeze({ flags: 44, input: 56, output: 60, error: 64 });
+const STARTUP64 = Object.freeze({ flags: 60, input: 80, output: 88, error: 96 });
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -780,6 +780,34 @@ export function createSpawnFunctions(host){
     };
 
     /**
+     * The pipe ends a STARTUPINFO hands the child as its standard handles,
+     * when it hands any and the child inherits them: the child's
+     * GetStdHandle answers those numbers, and what it writes to its output
+     * is the parent's to read. A file is `standardFiles`'s.
+     *
+     * @param {number} startup @param {{ handle: number }[]} inherited
+     * @returns {{ input?: number, output?: number, error?: number } | undefined}
+     */
+    const standardPipes = (startup, inherited)=>{
+        if (startup === 0 || (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) === 0)
+        {
+            return undefined;
+        }
+        const held = new Set(inherited.map(one=>one.handle >>> 0));
+        /** @type {{ input?: number, output?: number, error?: number }} */
+        const out = {};
+        for (const which of /** @type {const} */ (['input', 'output', 'error']))
+        {
+            const handle = readDword(startup + STARTUP_[which]) >>> 0;
+            if (held.has(handle))
+            {
+                out[which] = handle;
+            }
+        }
+        return Object.keys(out).length > 0 ? out : undefined;
+    };
+
+    /**
      * The handles a STARTUPINFOEX's PROC_THREAD_ATTRIBUTE_HANDLE_LIST names,
      * or null where none does: then every inheritable handle is inherited.
      *
@@ -833,8 +861,11 @@ export function createSpawnFunctions(host){
             host.setLastError(refused);
             return 0;
         }
+        const inheritedHandles = inherit && host.inheritedHandles
+            ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [];
         const made = record(named ?? '', line, flags, directory, {
             standardFiles: standardFiles(startup >>> 0),
+            standardHandles: standardPipes(startup >>> 0, inheritedHandles),
             // What the child's GetStartupInfo answers: values, since the child
             // may be built on another thread from what crosses to it.
             startup: (startup >>> 0) === 0 ? null : readStartupInfo(
@@ -850,8 +881,7 @@ export function createSpawnFunctions(host){
             // The handles it inherits, under the numbers this process has
             // them by: the pipes' ends, which every process of the run on this
             // thread holds alike. A child in a worker of its own takes none.
-            inheritedHandles: inherit && host.inheritedHandles
-                ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [],
+            inheritedHandles,
         });
         if (!made)
         {

@@ -544,6 +544,17 @@ test('a running process reports that it is still running', ()=>{
 
     assert.equal(fns.GetExitCodeProcess.handler([0x10, 0x200]), 0, 'and no such process exists');
     assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+
+    // Its own process by a real handle, as DuplicateHandle of (HANDLE)-1 makes
+    // one, and a child that has not ended: still running, as .NET's Process
+    // asks before it answers anything of itself.
+    host.handles.set(0x14, { kind: 'process', current: true });
+    host.handles.set(0x18, { kind: 'process', exitCode: null });
+    host.handles.set(0x1c, { kind: 'process', exitCode: 3 });
+    assert.deepEqual([0x14, 0x18, 0x1c].map(handle=>{
+        fns.GetExitCodeProcess.handler([handle, 0x200]);
+        return host.view.getUint32(0x200, true);
+    }), [STILL_ACTIVE, STILL_ACTIVE, 3]);
 });
 
 test('the native machine is the one GetSystemInfo reports, with no 64-bit system beneath',

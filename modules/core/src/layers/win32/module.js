@@ -1127,6 +1127,9 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
+            // Its pipe handles close with it, as all of a process's handles do.
+            endTasks.push(()=>pipes.processEnded());
+
             // The pipe ends a parent started this process with, under the
             // numbers it has them by and told this one on its command line.
             for (const inherited of config?.inheritedHandles ?? [])
@@ -2246,6 +2249,7 @@ export function createWin32Module(){
                         // MB_OK | MB_SYSTEMMODAL, the box a hard error raises.
                         messageBox: text=>libraries['USER32.dll']?.MessageBoxA
                             ?.handler([0, text, 0, 0x1000]) ?? 0,
+                        standardHandles: config?.standardHandles,
                     }),
                     ...createThreadingFunctions({
                         pointerSize,

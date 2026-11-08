@@ -34,3 +34,13 @@ test('FatalAppExitA shows its message, then ends the process as ExitProcess(0) d
         end: code=>`ended ${code}` });
     assert.equal(quiet.FatalAppExitA.handler([0, 0x4000]), 'ended 0', 'with no box to show');
 });
+
+test('GetStdHandle answers the pipe ends a parent handed, and the console for the rest', ()=>{
+    const fns = createConsoleFunctions({ write: ()=>{}, exit: ()=>{}, park: ()=>'parked',
+        standardHandles: { output: 0x8c } });
+    // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE.
+    assert.deepEqual([-10, -11, -12].map(which=>fns.GetStdHandle.handler([which >>> 0])),
+        [1, 0x8c, 3]);
+    assert.equal(fns.SetStdHandle.handler([-11 >>> 0, 0x40]), 1);
+    assert.equal(fns.GetStdHandle.handler([-11 >>> 0]), 0x40, 'a program\'s own redirection wins');
+});

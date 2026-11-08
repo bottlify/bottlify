@@ -1550,9 +1550,11 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                // A process with no code yet is running: the program's own, by
+                // a real handle (DuplicateHandle of (HANDLE)-1), or a child.
                 const bytes = new Uint8Array(4);
-                new DataView(bytes.buffer).setUint32(
-                    0, child ? child.exitCode : STILL_ACTIVE, true);
+                new DataView(bytes.buffer).setUint32(0, child && !child.current
+                    ? child.exitCode ?? STILL_ACTIVE : STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
                 return 1;
             },

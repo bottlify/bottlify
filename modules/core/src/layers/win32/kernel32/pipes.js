@@ -1339,6 +1339,19 @@ export function createNamedPipes(host){
             end.retain();
             inheritable.set(handle >>> 0, true);
         },
+
+        /**
+         * The process has ended: every pipe handle it held is closed, as
+         * Windows closes a process's handles, so an end it shared with
+         * another process goes with its last handle -- a parent reading the
+         * output a child inherited reads to its end when the child exits.
+         */
+        processEnded(){
+            for (const handle of [...inheritable.keys()])
+            {
+                closed(handle, endOf(handle));
+            }
+        },
     };
 }
 

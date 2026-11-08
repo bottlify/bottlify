@@ -335,6 +335,8 @@ const hashText = (hash, text)=>{
  * @property {{ handle: number, type: string, object: any }[]} [inheritedHandles]
  *           The handles a child inherits from its parent on this thread, under
  *           the parent's numbers: pipe ends.
+ * @property {{ input?: number, output?: number, error?: number }} [standardHandles]
+ *           Which of those its parent's STARTUPINFO made its standard handles.
  * @property {number} [parentProcessId]  The process that started this one, 0 for none.
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
@@ -5096,6 +5098,7 @@ async function buildApp(options){
             standardFiles: options.standardFiles,
             // The handles a parent's CreateProcess handed down (pipe ends).
             inheritedHandles: options.inheritedHandles,
+            standardHandles: options.standardHandles,
             startup: options.startup,
             // A child's variables, as its parent handed them on; absent, the
             // machine's own.
@@ -11186,6 +11189,7 @@ export async function createApp(options){
         // Inherited handles are objects of this thread's and do not cross.
         const values = { ...asked };
         delete values.inheritedHandles;
+        delete values.standardHandles;
         const request = { ...values, standardFiles: asked.standardFiles && Object.fromEntries(
             Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
         startAcross({
@@ -11350,6 +11354,7 @@ export async function createApp(options){
                         standardFiles: request.standardFiles,
                         // Objects, which only a child on this thread can hold.
                         inheritedHandles: request.inheritedHandles,
+                        standardHandles: request.standardHandles,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,

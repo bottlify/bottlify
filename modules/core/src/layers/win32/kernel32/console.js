@@ -34,6 +34,9 @@ export const HANDLE_STDERR = 3;
  * @property {(text: number) => any} [messageBox]
  *           Shows the ANSI text at that address in a system-modal box and
  *           answers once it is dismissed.
+ * @property {{ input?: number, output?: number, error?: number }} [standardHandles]
+ *           The pipe ends a parent's STARTUPINFO made this process's standard
+ *           handles, under the numbers it inherited them by.
  */
 
 /**
@@ -62,15 +65,16 @@ export function createConsoleFunctions(host){
      */
     const redirected = new Map();
 
+    const given = host.standardHandles ?? {};
     /** @param {number} which @returns {number} the default for a standard handle */
     const standard = which=>{
         switch (which | 0){
             case STD_INPUT_HANDLE:
-                return HANDLE_STDIN;
+                return given.input ?? HANDLE_STDIN;
             case STD_OUTPUT_HANDLE:
-                return HANDLE_STDOUT;
+                return given.output ?? HANDLE_STDOUT;
             case STD_ERROR_HANDLE:
-                return HANDLE_STDERR;
+                return given.error ?? HANDLE_STDERR;
             default:
                 return 0xffffffff; // INVALID_HANDLE_VALUE
         }

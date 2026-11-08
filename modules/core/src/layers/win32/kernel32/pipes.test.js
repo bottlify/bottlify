@@ -502,6 +502,25 @@ test('a handle made inheritable is one a child gets, and only those the list nam
     assert.ok(client > 0, 'the instance the child holds still listens');
 });
 
+test('a child\'s inherited end closes when the child ends: its reader reads to the end', ()=>{
+    // .NET's Process reads a redirected child's output until the pipe breaks,
+    // which is when the last write handle -- the child's -- is gone.
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX);
+    const client = p.client();
+    p.pipes.setInheritable(client, true);
+    const child = processOn(new Map(), 2);
+    const entry = p.pipes.inherited([client])[0];
+    child.handles.set(entry.handle, { type: 'pipe', object: entry.object });
+    child.pipes.adopted(entry.handle, entry.object);
+    p.pipes.closed(client, entry.object);
+    assert.equal(child.write(entry.handle, 'out'), 1);
+    child.pipes.processEnded();
+    assert.equal(p.read(server, 10), 1, 'what the child wrote is still read');
+    assert.equal(p.read(server, 10), 0);
+    assert.equal(p.error(), ERROR_BROKEN_PIPE, 'and then the end of it');
+});
+
 test('a wait on an end\'s handle is a wait on its pending operations, as on a file', ()=>{
     const p = processOn(new Map());
     const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);

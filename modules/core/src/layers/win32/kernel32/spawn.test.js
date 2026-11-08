@@ -840,6 +840,28 @@ test('a STARTUPINFO\'s output and error files are handed to the child, the paren
         'without the flag the child keeps the console');
 });
 
+test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', ()=>{
+    // .NET's Process with RedirectStandardOutput reads what the child writes
+    // to the pipe it handed it; the child wrote to the console instead.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\dxinfo.exe'] }));
+    host.inheritedHandles = ()=>[{ handle: 0x8c, type: 'pipe', object: {} },
+        { handle: 0x94, type: 'pipe', object: {} }];
+    const fns = createSpawnFunctions(host);
+    const startup = 0x400;
+    host.view.setUint32(startup + 44, 0x100, true); // STARTF_USESTDHANDLES
+    host.view.setUint32(startup + 56, 0x90, true);  // not inherited: the console stays
+    host.view.setUint32(startup + 60, 0x8c, true);
+    host.view.setUint32(startup + 64, 0x94, true);
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'dxinfo.exe'), 0, 0, 1, 0, 0, 0, startup, 0]), 1);
+    assert.deepEqual(pending(host).standardHandles, { output: 0x8c, error: 0x94 });
+
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'dxinfo.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
+    assert.equal(host.requests.at(-1).standardHandles, undefined,
+        'bInheritHandles FALSE: nothing is inherited, the console stays');
+});
+
 test('this process and its children are in the interactive session, and no other id is', ()=>{
     // Wine's kernel32 process.c test_session_info.
     const host = fakeHost();
