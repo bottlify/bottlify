@@ -122,3 +122,10 @@
 - `maxFps` is the display rate a program's vertical sync keeps to; the presenter is given no
   scheduler of its own, so a program presenting without vertical sync reaches the canvas as fast
   as it presents.
+- DirectWrite's system fonts are gdi32's outline faces, each a TrueType file made from the font
+  engine's measurements with a glyph for each character (`roadmap/decisions.md` A238). Text
+  formats and layouts (`CreateTextFormat`, `CreateTextLayout`, typography, trimming signs) and
+  glyph outlines (`GetGlyphRunOutline`) answer `E_NOTIMPL`. Shaping makes a glyph a character, with
+  no OpenType features; a face loaded from a file is measured but not drawn. A font a program adds
+  from memory through gdi32 is no DirectWrite face, and only `IDWriteFactory` (no
+  `IDWriteFactory1` and later) is there.

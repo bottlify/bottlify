@@ -2010,3 +2010,23 @@ blocks, and any level made or converted into BC1 to BC5, is encoded by this load
 whose endpoints and indices differ from Windows' where several encodings come equally close. The
 sRGB curve is the power 2.2 the tests show, held to 0 to 1; Windows reads a float above 1 past
 the end of its table. *2026-11-08.*
+
+**A238. DirectWrite's system fonts are gdi32's outline faces, written as TrueType tables, and a
+glyph is a character.** No font file ships, so the system collection holds the faces gdi32 draws
+(its table without the bitmap faces and the substitutes), each family with the faces Windows
+ships of it (Tahoma regular and bold, so an italic Tahoma is an oblique simulation), at
+`C:\WINDOWS\Fonts\<name>.ttf` through the local file loader. Each face's file is made from what
+the font engine measures of it at 128 pixels, in 2048 units to the em: 'cmap' (every character of
+the Basic Multilingual Plane but the surrogates to the glyph of its own number), 'head', 'hhea',
+'hmtx' (a long metric for each glyph up to U+024F; DirectWrite's own advances are measured for
+every glyph), 'maxp', 'name', 'OS/2' and 'post', so metrics, glyph indices and TryGetFontTable
+read tables like any file's; there is no 'glyf', no 'GSUB' and no 'GPOS'. Without an engine
+(node) the measurements are estimates of Arial's and Courier New's proportions. Shaping is a
+glyph a character, mirrored in right to left runs: no ligatures, no reordering, no OpenType
+features. Bidi levels follow the Unicode algorithm's strong, number and explicit embedding rules
+without isolates or bracket pairs; line breaks follow UAX #14 for spaces, hyphens and
+break-after characters, brackets, mandatory breaks and ideographs. A run is drawn from the
+browser's glyphs, as GDI's text is; a face a program loads from a file is measured from its own
+tables but has no rasteriser, and its texture is empty, said as a loss. Text formats, text
+layouts, typography, trimming signs and glyph outlines are refused with `E_NOTIMPL`, and said.
+*2026-11-08.*

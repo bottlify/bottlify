@@ -56,7 +56,7 @@ import { createMappingFunctions } from './kernel32/mapping.js';
 import { createMailslots } from './kernel32/mailslots.js';
 import { createNamedPipes } from './kernel32/pipes.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
-import { createFileTimeFunctions } from './kernel32/filetime.js';
+import { createFileTimeFunctions, msToFileTime } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
 import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
@@ -128,8 +128,9 @@ import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createDhcpFunctions, createWinhttpFunctions } from './winhttp/functions.js';
 import { createCombaseFunctions } from './combase/functions.js';
-import { createDwmapiFunctions, createDwriteFunctions, createSessionInformationFunctions,
+import { createDwmapiFunctions, createSessionInformationFunctions,
     createShcoreFunctions, DWMAPI_ORDINALS } from './display/functions.js';
+import { createDwriteFunctions } from './dwrite/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
@@ -4089,8 +4090,41 @@ export function createWin32Module(){
                         handler: (/** @type {number[]} */ [handle])=>((handle >>> 0) === 0
                             ? (setError(ERROR_INVALID_HANDLE), 0) : 1) }],
                 ]),
-                'DWrite.dll': createDwriteFunctions({ ...displayHost,
-                    divergence: config?.divergence }),
+                // DirectWrite's fonts are gdi32's faces, measured and drawn by
+                // the same engine GDI's text is.
+                'DWrite.dll': createDwriteFunctions({ readMemory, writeMemory, heap,
+                    vtables: comVtables, objectAt: pointer=>bridge.interfaceObject(pointer),
+                    callGuest: call=>bridge.callGuest(call),
+                    currentThread: ()=>kernel.currentThread(),
+                    readFile: async path=>{
+                        const entry = volume.stat(path);
+                        const node = entry && !entry.isDirectory
+                            ? volume.open(path, { read: true }) : null;
+                        if (!entry || !node)
+                        {
+                            return null;
+                        }
+                        try
+                        {
+                            return await volume.read(node, 0, entry.size);
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
+                    fpu: floatResults || null, divergence: config?.divergence,
+                    modified: path=>{
+                        const entry = volume.stat(path);
+                        return entry ? msToFileTime(entry.modified ?? 0) : null;
+                    },
+                    measure: {
+                        metrics: font=>config?.graphics?.fontMetrics?.(font) ?? null,
+                        textWidth: (font, text)=>config?.graphics?.textWidth?.(font, text)
+                            ?? null,
+                        glyph: (code, font)=>config?.graphics?.glyph?.(code, font) ?? null,
+                    },
+                    gdi: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0 }),
                 // The Steam client's side of a game's Steamworks calls, for the
                 // account the launcher signed in with (steamclient/): the
                 // library of the process's width, as the client installs both.

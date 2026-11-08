@@ -155,6 +155,12 @@ flowchart TD
   included. D3DX 10 and 11 are one library over two devices: the image loaders make their
   textures through the device's own creates, the compiles go to `D3DCompile`.
 
+- **DirectWrite** (`DWrite.dll`) is a table of the engine's over the same faces gdi32 draws:
+  the system collection's files are TrueType tables written from the font engine's measurements,
+  a program's own files and loaders are read through their streams, and a glyph run is drawn
+  from the browser's glyphs as GDI's text is. A bitmap render target is a gdi32 memory context
+  with a DIB section ([`core/src/layers/win32/dwrite/`](../../modules/core/src/layers/win32/dwrite/)).
+
 Where to look in the code: [`core/src/layers/loader/internal/synth.js`](../../modules/core/src/layers/loader/internal/synth.js) (the image),
 [`core/src/layers/cpu/internal/thunks.js`](../../modules/core/src/layers/cpu/internal/thunks.js) (the stubs), [`core/src/layers/bridge/`](../../modules/core/src/layers/bridge/) (the bridge), the
 tables in `core/src/layers/win32/<dll>/`, the search order in [`core/src/app.js`](../../modules/core/src/app.js)
