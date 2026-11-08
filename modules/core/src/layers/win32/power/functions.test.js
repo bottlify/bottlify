@@ -85,7 +85,7 @@ test('the XP-era scheme calls find no policy, and only Balanced can be made acti
         assert.equal(/** @type {any} */ (power)[name].handler(args), 0, name);
     }
     assert.equal(m.lastError(), 50, 'not supported');
-    assert.equal(power.CanUserWritePwrScheme.handler([]), 0);
+    assert.equal(power.CanUserWritePwrScheme.handler(), 0);
     memory.set(Uint8Array.of(0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41,
         0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e), 0x40);
     assert.equal(power.PowerSetActiveScheme.handler([0, 0x40]), 0, 'Balanced');
