@@ -28,6 +28,7 @@ import {
     FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
 } from './faces.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { DISPLAY_DEVICE_NAME } from '../devices.js';
 import {
     BITMAP,
     BITMAPINFOHEADER,
@@ -309,6 +310,25 @@ const STATUS_NOT_SUPPORTED = 0xc00000bb;
 /** The one display adapter's kernel-mode handle and LUID (D3DKMTOpenAdapterFromDeviceName). */
 const KMT_ADAPTER = 0x40000001;
 const KMT_ADAPTER_LUID = 0x00001001;
+
+/**
+ * Whether CreateDC's or CreateIC's driver and device name the display: the
+ * driver "DISPLAY", the display's device name (as EnumDisplayDevices gives
+ * it) or none, and the device that device name or none -- not both none.
+ * Anything else is a printer or a display there is not.
+ *
+ * @param {string} driver @param {string} device
+ */
+const namesDisplay = (driver, device)=>{
+    const named = driver.toUpperCase();
+    const which = device.toUpperCase();
+    if (named === '')
+    {
+        return which === DISPLAY_DEVICE_NAME || which === 'DISPLAY';
+    }
+    return (named === 'DISPLAY' || named === DISPLAY_DEVICE_NAME)
+        && (which === '' || which === DISPLAY_DEVICE_NAME);
+};
 
 /** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
 /** ExtCreatePen's style word: the line style, and whether the pen is geometric. */
@@ -1250,6 +1270,11 @@ export function createGdiFunctions(host){
         return text;
     };
 
+    /** CreateDC's and CreateIC's names: NULL is none. @param {number} address */
+    const ansiName = address=>((address >>> 0) === 0 ? '' : host.readCString(address >>> 0, 32));
+    /** @param {number} address */
+    const wideName = address=>((address >>> 0) === 0 ? '' : wideText(address >>> 0, 32));
+
     /**
      * CreatePen and CreatePenIndirect: see CreatePen.
      *
@@ -2016,6 +2041,8 @@ export function createGdiFunctions(host){
     let stockBitmap = 0;
     /** D3DKMTQueryAdapterInfo's refusal, said once. */
     let kmtInfoSaid = false;
+    /** D3DKMTEscape's refusal, said once. */
+    let kmtEscapeSaid = false;
     /**
      * The 1-by-1 monochrome bitmap: what CreateBitmap and CreateCompatibleBitmap
      * answer for a zero width or height, and what every memory DC has selected
@@ -2427,26 +2454,16 @@ export function createGdiFunctions(host){
         CreateDCA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? host.readCString(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? host.readCString(device >>> 0, 32) : '';
-                if (named.toUpperCase() !== 'DISPLAY')
-                {
-                    return 0;
-                }
-                return createContext(0, 'display').hdc;
-            },
+            handler: ([driver, device])=>(namesDisplay(ansiName(driver), ansiName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /** HDC CreateDCW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateDCA in wide text */
         CreateDCW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
-                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
-            },
+            handler: ([driver, device])=>(namesDisplay(wideName(driver), wideName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /**
@@ -2459,22 +2476,16 @@ export function createGdiFunctions(host){
         CreateICA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? host.readCString(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? host.readCString(device >>> 0, 32) : '';
-                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
-            },
+            handler: ([driver, device])=>(namesDisplay(ansiName(driver), ansiName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /** HDC CreateICW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateICA in wide text */
         CreateICW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
-                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
-            },
+            handler: ([driver, device])=>(namesDisplay(wideName(driver), wideName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /**
@@ -2560,6 +2571,52 @@ export function createGdiFunctions(host){
                     kmtInfoSaid = true;
                     host.divergence?.('D3DKMTQueryAdapterInfo', 'the adapter\'s kernel-mode'
                         + ' information is not kept here: STATUS_NOT_SUPPORTED');
+                }
+                return STATUS_NOT_SUPPORTED;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTOpenAdapterFromHdc(D3DKMT_OPENADAPTERFROMHDC *desc)
+         *
+         * The adapter behind a display DC: hDc in, hAdapter, AdapterLuid and
+         * VidPnSourceId out. A memory DC has no adapter behind it.
+         */
+        D3DKMTOpenAdapterFromHdc: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                const dc = (desc >>> 0) === 0 ? null : dcOf(readU32s(host, desc, 1)[0]);
+                if (!dc || dc.kind === 'memory')
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                writeU32s(host, desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0, 0]);
+                return 0;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTEscape(const D3DKMT_ESCAPE *desc)
+         *
+         * Private data for the display driver, which a driver reads by its
+         * own rules: no driver here takes any, so every escape to the open
+         * adapter is STATUS_NOT_SUPPORTED, said once -- what a program asking
+         * another vendor's driver is told.
+         */
+        D3DKMTEscape: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if ((desc >>> 0) === 0 || readU32s(host, desc, 1)[0] !== KMT_ADAPTER)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if (!kmtEscapeSaid)
+                {
+                    kmtEscapeSaid = true;
+                    host.divergence?.('D3DKMTEscape', 'no display driver here takes private'
+                        + ' escapes: STATUS_NOT_SUPPORTED');
                 }
                 return STATUS_NOT_SUPPORTED;
             },

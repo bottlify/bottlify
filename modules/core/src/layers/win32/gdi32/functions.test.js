@@ -340,6 +340,22 @@ test('CreateDCA opens the display and nothing else, and DeleteDC closes it', ()=
     assert.equal(fns.DeleteDC.handler([display]), 1);
     assert.equal(fns.DeleteDC.handler([display]), 0);
 
+    // The display by the device name EnumDisplayDevices gives, as driver or device.
+    memory.putString(FACE_NAME, '\\\\.\\display1');
+    for (const args of [[0, FACE_NAME], [FACE_NAME, 0], [FACE_NAME, FACE_NAME]])
+    {
+        const named = fns.CreateDCA.handler([...args, 0, 0]);
+        assert.equal(fns.GetDeviceCaps.handler([named, BITSPIXEL]), 32, `${args}`);
+        assert.equal(fns.DeleteDC.handler([named]), 1);
+    }
+    memory.putString(FACE_NAME + 0x40, 'DISPLAY');
+    const both = fns.CreateDCA.handler([FACE_NAME + 0x40, FACE_NAME, 0, 0]);
+    assert.equal(fns.DeleteDC.handler([both]), 1, 'DISPLAY and its device');
+    memory.putString(FACE_NAME, '\\\\.\\DISPLAY2');
+    assert.equal(fns.CreateDCA.handler([0, FACE_NAME, 0, 0]), 0, 'a display there is not');
+    assert.equal(fns.CreateDCA.handler([FACE_NAME + 0x40, FACE_NAME, 0, 0]), 0);
+    assert.equal(fns.CreateICA.handler([0, FACE_NAME, 0, 0]), 0);
+
     memory.putString(FACE_NAME, 'WINSPOOL');
     assert.equal(fns.CreateDCA.handler([FACE_NAME, 0, 0, 0]), 0, 'there is no printer');
     assert.equal(fns.CreateDCA.handler([0, 0, 0, 0]), 0);
@@ -365,6 +381,12 @@ test('CreateDCW opens the display from a wide name', ()=>{
     const display = fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]);
     assert.equal(fns.GetDeviceCaps.handler([display, BITSPIXEL]), 32);
     assert.equal(fns.DeleteDC.handler([display]), 1);
+    wide('\\\\.\\DISPLAY1');
+    const named = fns.CreateDCW.handler([0, FACE_NAME, 0, 0]);
+    assert.equal(fns.GetDeviceCaps.handler([named, BITSPIXEL]), 32, 'by its device name');
+    assert.equal(fns.DeleteDC.handler([named]), 1);
+    const information = fns.CreateICW.handler([0, FACE_NAME, 0, 0]);
+    assert.equal(fns.DeleteDC.handler([information]), 1);
     wide('WINSPOOL');
     assert.equal(fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]), 0);
     assert.equal(fns.CreateDCW.handler([0, 0, 0, 0]), 0);
@@ -2435,6 +2457,40 @@ test('D3DKMT opens the one adapter by name, closes it, and keeps no kernel infor
     assert.equal(fns.D3DKMTCloseAdapter.handler([0x2200]), 0);
     view.setUint32(0x2200, 7, true);
     assert.equal(fns.D3DKMTCloseAdapter.handler([0x2200]), 0xc000000d, 'not an adapter');
+});
+
+test('D3DKMT opens the adapter behind a display DC, and refuses its escapes', ()=>{
+    const { fns, memory, said } = withErrors();
+    const view = new DataView(memory.bytes.buffer);
+    const DESC = 0x2000;
+    memory.putString(FACE_NAME, '\\\\.\\DISPLAY1');
+    const display = fns.CreateDCA.handler([0, FACE_NAME, 0, 0]);
+    const plain = fns.CreateCompatibleDC.handler([display]);
+    assert.equal(fns.D3DKMTOpenAdapterFromHdc.handler([0]), 0xc000000d);
+    view.setUint32(DESC, plain, true);
+    assert.equal(fns.D3DKMTOpenAdapterFromHdc.handler([DESC]), 0xc000000d,
+        'no adapter behind a memory DC');
+    view.setUint32(DESC, display, true);
+    view.setUint32(DESC + 16, 0xdead, true);
+    assert.equal(fns.D3DKMTOpenAdapterFromHdc.handler([DESC]), 0);
+    const adapter = view.getUint32(DESC + 4, true);
+    assert.notEqual(adapter, 0);
+    assert.notEqual(view.getUint32(DESC + 8, true), 0, 'a LUID');
+    assert.equal(view.getUint32(DESC + 16, true), 0, 'the first video present source');
+
+    // D3DKMT_ESCAPE: hAdapter, hDevice, Type, Flags, pPrivateDriverData, size, hContext.
+    const ESCAPE = 0x2100;
+    assert.equal(fns.D3DKMTEscape.handler([0]), 0xc000000d);
+    view.setUint32(ESCAPE, 7, true);
+    assert.equal(fns.D3DKMTEscape.handler([ESCAPE]), 0xc000000d, 'not an adapter');
+    view.setUint32(ESCAPE, adapter, true);
+    view.setUint32(ESCAPE + 16, 0x2200, true);
+    view.setUint32(ESCAPE + 20, 0x218, true);
+    assert.equal(fns.D3DKMTEscape.handler([ESCAPE]), 0xc00000bb, 'STATUS_NOT_SUPPORTED');
+    assert.equal(fns.D3DKMTEscape.handler([ESCAPE]), 0xc00000bb);
+    assert.equal(said.filter(line=>line.startsWith('D3DKMTEscape')).length, 1, 'said once');
+    view.setUint32(0x2300, adapter, true);
+    assert.equal(fns.D3DKMTCloseAdapter.handler([0x2300]), 0);
 });
 
 test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels', ()=>{

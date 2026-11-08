@@ -56,7 +56,7 @@ import { readText, textBytes } from './unicode.js';
 import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
-import { VIDEO_ADAPTER_NAME } from '../devices.js';
+import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
@@ -243,13 +243,6 @@ const DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x00000001;
 const DISPLAY_DEVICE_PRIMARY_DEVICE = 0x00000004;
 const DISPLAY_DEVICE_ACTIVE = 0x20000000;
 
-/**
- * The one adapter's name, spelled the way the drawing layer's adapter
- * identifier spells it too: a program told the name here and the name there
- * has to be told the same one twice, or the two halves of its display do not
- * meet.
- */
-const DISPLAY_ADAPTER_NAME = '\\\\.\\DISPLAY1';
 
 /**
  * The identity a monitor that never reported one is listed under: the class
@@ -2142,13 +2135,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const adapter = device === null;
-        const named = device !== null && device.toUpperCase() === DISPLAY_ADAPTER_NAME;
+        const named = device !== null && device.toUpperCase() === DISPLAY_DEVICE_NAME;
         if ((index >>> 0) !== 0 || (!adapter && !named))
         {
             return 0;
         }
         const who = adapter
-            ? { name: DISPLAY_ADAPTER_NAME, description: VIDEO_ADAPTER_NAME,
+            ? { name: DISPLAY_DEVICE_NAME, description: VIDEO_ADAPTER_NAME,
                 flags: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE,
                 id: '' }
             : { name: '', description: 'Default Monitor',

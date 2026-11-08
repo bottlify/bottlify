@@ -22,6 +22,7 @@
 import { DIRECTX_RELEASES } from '../advapi32/registry.js';
 import { createComObject } from './objects.js';
 import { ADAPTER_NAME, ADAPTER_RAM } from './wbem.js';
+import { DISPLAY_DEVICE_NAME } from '../devices.js';
 
 export const CLSID_DXDIAG_PROVIDER = '{A65B8071-3BFE-4213-9A5B-491DA4461CA7}';
 export const IID_IDXDIAG_PROVIDER = '{9C6B4CB0-23F8-49CC-A3ED-45A55000A6D2}';
@@ -98,7 +99,7 @@ function displayDevice(screen){
     pair('szTestResultD3D8', 'Not run');
     pair('szTestResultD3D9', 'Not run');
     return {
-        szDeviceName: text('\\\\.\\DISPLAY1'),
+        szDeviceName: text(DISPLAY_DEVICE_NAME),
         szDescription: text(ADAPTER_NAME),
         szKeyDeviceID: text('Enum\\PCI\\VEN_0000&DEV_0000'),
         szKeyDeviceKey: text('System\\CurrentControlSet\\Control\\Video\\0000'),

@@ -14,3 +14,5 @@
 
 export const VIDEO_ADAPTER_NAME = 'Bottlify WebGPU Video Adapter';
 export const SOUND_ADAPTER_NAME = 'Bottlify Sound Adapter';
+/** The one display's device name: EnumDisplayDevices, CreateDC, DxDiag. */
+export const DISPLAY_DEVICE_NAME = '\\\\.\\DISPLAY1';
