@@ -160,6 +160,19 @@ test('a sixteen-bit luminance DDS is D3DFMT_L16, its texels kept whole', ()=>{
         'another sixteen-bit luminance is named, not taken for L16');
 });
 
+test('a DDS named A16B16G16R16 by its FourCC field keeps its sixteen-bit texels', ()=>{
+    // 3DMark06's Canyon Flight cube maps; the FourCC field carries the
+    // D3DFORMAT number for a format FourCC has no name for.
+    const header = ddsHeader({ width: 1, height: 1, pfFlags: 0x4, fourCC: FMT.A16B16G16R16 });
+    const texel = [1, 2, 3, 4, 5, 6, 7, 8];
+    const image = readImage(Uint8Array.from([...header, ...texel]));
+    assert.equal(image.format, FMT.A16B16G16R16);
+    assert.deepEqual([...image.levels[0].data], texel);
+    const masked = ddsHeader({ width: 1, height: 1, pfFlags: 0x40, bits: 32, r: 0xffff,
+        g: 0xffff0000 });
+    assert.equal(readImage(Uint8Array.from([...masked, 0, 0, 0, 0])).format, FMT.G16R16);
+});
+
 test('a palette-indexed DDS reads its texels through the palette, alpha from peFlags', ()=>{
     // DDPF_PALETTEINDEXED8, eight bits a texel, 256 entries of r, g, b and the alpha
     // Direct3D keeps in peFlags, between the header and the texels.

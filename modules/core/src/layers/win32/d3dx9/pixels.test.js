@@ -41,6 +41,13 @@ test('the bytes of each layout are the documented ones', ()=>{
         [0xff, 0xff]);
     assert.deepEqual([...decodeTexels(FMT.L16, Uint8Array.from([0x80, 0x80]), 1, 1)],
         [128, 128, 128, 255]);
+    // G16R16 and A16B16G16R16: red in the low word, each channel sixteen bits.
+    assert.deepEqual([...encodeTexels(FMT.G16R16, red, 1, 1)], [0xff, 0xff, 0, 0]);
+    assert.deepEqual([...encodeTexels(FMT.A16B16G16R16, red, 1, 1)],
+        [0xff, 0xff, 0, 0, 0, 0, 0x80, 0x80]);
+    assert.deepEqual([...decodeTexels(FMT.A16B16G16R16,
+        Uint8Array.from([0, 0, 0xff, 0xff, 0, 0x80, 0xff, 0xff]), 1, 1)], [128, 255, 0, 255],
+    'b, g, r, a');
 });
 
 test('a DXT1 block decodes as the format describes, both of its modes', ()=>{

@@ -240,6 +240,10 @@ function ddsFormat(view){
             {
                 return FMT.X8B8G8R8;
             }
+            if (masks([0xffff, 0xffff0000, 0]))
+            {
+                return FMT.G16R16;
+            }
         }
         if (bits === 24 && masks([0xff0000, 0xff00, 0xff]))
         {

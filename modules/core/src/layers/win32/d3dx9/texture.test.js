@@ -336,11 +336,11 @@ test('D3DXLoadSurfaceFromSurface between two surfaces of one compressed format a
 
 test('D3DXLoadSurfaceFromSurface copies a format it has no codec for into the same format and'
     + ' size, and refuses it any other way, said', async()=>{
-    // 3DMark06 copies its G16R16 lookup surfaces this way.
-    const G16R16 = 34;
+    // A2R10G10B10: no codec here, four bytes a texel.
+    const A2R10G10B10 = 35;
     const { textures, loader, surface, memory, diverged } = rig();
-    const source = surface(2, 1, G16R16);
-    const dest = surface(2, 1, G16R16);
+    const source = surface(2, 1, A2R10G10B10);
+    const dest = surface(2, 1, A2R10G10B10);
     const texels = [1, 2, 3, 4, 5, 6, 7, 8];
     memory.set(texels, textures.get(source).data);
     assert.equal(await loader.loadSurface([dest, 0, 0, source, 0, 0, 1, 0]), 0);
@@ -348,7 +348,7 @@ test('D3DXLoadSurfaceFromSurface copies a format it has no codec for into the sa
     assert.deepEqual([...memory.subarray(at, at + 8)], texels, 'byte for byte');
     const other = surface(2, 1, FMT.A8R8G8B8);
     assert.equal(await loader.loadSurface([other, 0, 0, source, 0, 0, 1, 0]), 0x8876086c);
-    assert.match(diverged.join(' | '), /format 34 2x1 into format 21 2x1 is not a copy/);
+    assert.match(diverged.join(' | '), /format 35 2x1 into format 21 2x1 is not a copy/);
 });
 
 test('D3DXLoadSurfaceFromMemory reads the source rectangle of an image at its pitch into a'

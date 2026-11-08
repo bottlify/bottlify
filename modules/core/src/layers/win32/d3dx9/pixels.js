@@ -20,7 +20,7 @@
 export const FMT = Object.freeze({
     UNKNOWN: 0, R8G8B8: 20, A8R8G8B8: 21, X8R8G8B8: 22, R5G6B5: 23, X1R5G5B5: 24,
     A1R5G5B5: 25, A4R4G4B4: 26, A8: 28, X4R4G4B4: 30, A8B8G8R8: 32, X8B8G8R8: 33,
-    P8: 41, L8: 50, A8L8: 51, L16: 81,
+    G16R16: 34, A16B16G16R16: 36, P8: 41, L8: 50, A8L8: 51, L16: 81,
     DXT1: 0x31545844, DXT2: 0x32545844, DXT3: 0x33545844, DXT4: 0x34545844,
     DXT5: 0x35545844,
 });
@@ -36,14 +36,15 @@ export const isCompressed = format=>format === FMT.DXT1 || format === FMT.DXT2
  *
  * @param {number} format
  */
-export const keptAsIs = format=>isCompressed(format) || format === FMT.L16;
+export const keptAsIs = format=>isCompressed(format) || format === FMT.L16
+    || format === FMT.G16R16 || format === FMT.A16B16G16R16;
 
 /** Bytes a texel takes, for the formats this module reads and writes uncompressed. */
 /** @type {Map<number, number>} */
 const TEXEL_BYTES = new Map([[FMT.R8G8B8, 3], [FMT.A8R8G8B8, 4], [FMT.X8R8G8B8, 4],
     [FMT.R5G6B5, 2], [FMT.X1R5G5B5, 2], [FMT.A1R5G5B5, 2], [FMT.A4R4G4B4, 2],
     [FMT.X4R4G4B4, 2], [FMT.A8, 1], [FMT.L8, 1], [FMT.A8L8, 2], [FMT.A8B8G8R8, 4],
-    [FMT.X8B8G8R8, 4], [FMT.L16, 2]]);
+    [FMT.X8B8G8R8, 4], [FMT.L16, 2], [FMT.G16R16, 4], [FMT.A16B16G16R16, 8]]);
 
 /** @param {number} format */
 export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(format);
@@ -51,14 +52,13 @@ export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(forma
 /**
  * Formats this module has no codec for, by the bytes a texel takes: a level
  * of one is copied row by row into a surface of the same format and size, as
- * D3DX copies it, and goes no other way. G16R16, A2B10G10R10, A16B16G16R16,
- * A2R10G10B10, V8U8, Q8W8V8U8, V16U16, R16F, G16R16F, A16B16G16R16F, R32F,
- * G32R32F, A32B32G32R32F.
+ * D3DX copies it, and goes no other way. A2B10G10R10, A2R10G10B10, V8U8,
+ * Q8W8V8U8, V16U16, R16F, G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F.
  *
  * @type {Map<number, number>}
  */
-const COPIED_BYTES = new Map([[34, 4], [31, 4], [36, 8], [35, 4], [60, 2], [63, 4], [64, 4],
-    [111, 2], [112, 4], [113, 8], [114, 4], [115, 8], [116, 16]]);
+const COPIED_BYTES = new Map([[31, 4], [35, 4], [60, 2], [63, 4], [64, 4], [111, 2], [112, 4],
+    [113, 8], [114, 4], [115, 8], [116, 16]]);
 
 /**
  * Whether a level of this format can be copied into a surface of the same
@@ -89,6 +89,8 @@ export function layoutOf(format, width, height){
 
 /** @param {number} value @param {number} bits */
 const expand = (value, bits)=>Math.round(value * 255 / ((1 << bits) - 1));
+/** A sixteen-bit channel in eight. @param {number} value */
+const narrow = value=>Math.round(value * 255 / 65535);
 /** @param {number} value @param {number} bits */
 const reduce = (value, bits)=>Math.round(value * ((1 << bits) - 1) / 255);
 
@@ -163,7 +165,18 @@ export function decodeTexels(format, data, width, height, palette){
                 a = data[at + 1];
                 break;
             case FMT.L16:
-                r = g = b = Math.round(view.getUint16(at, true) * 255 / 65535);
+                r = g = b = narrow(view.getUint16(at, true));
+                break;
+            // Red in the low word, then green (and blue and alpha), each sixteen bits.
+            case FMT.G16R16:
+                r = narrow(view.getUint16(at, true));
+                g = narrow(view.getUint16(at + 2, true));
+                break;
+            case FMT.A16B16G16R16:
+                r = narrow(view.getUint16(at, true));
+                g = narrow(view.getUint16(at + 2, true));
+                b = narrow(view.getUint16(at + 4, true));
+                a = narrow(view.getUint16(at + 6, true));
                 break;
             case FMT.P8: {
                 const entry = /** @type {Uint8Array} */ (palette).subarray(data[at] * 4);
@@ -244,6 +257,16 @@ export function encodeTexels(format, bgra, width, height){
                 break;
             case FMT.L16:
                 view.setUint16(at, luminance(r, g, b) * 257, true);
+                break;
+            case FMT.G16R16:
+                view.setUint16(at, r * 257, true);
+                view.setUint16(at + 2, g * 257, true);
+                break;
+            case FMT.A16B16G16R16:
+                view.setUint16(at, r * 257, true);
+                view.setUint16(at + 2, g * 257, true);
+                view.setUint16(at + 4, b * 257, true);
+                view.setUint16(at + 6, a * 257, true);
                 break;
             default:
                 throw new Error(`no encoder for format ${format}`);
