@@ -551,6 +551,26 @@ export function createFocusWindows({ user32, procedure, cover, states, currentTh
         },
 
         /**
+         * The window a full-screen device holds the screen with, while it has
+         * the activation; zero when none does. Its picture is the screen: a
+         * desktop composed of the windows' GDI surfaces would put the window's
+         * own surface, black, in its place.
+         *
+         * @returns {number}
+         */
+        screen(){
+            let window = 0;
+            for (const one of held.values())
+            {
+                if (!one.away)
+                {
+                    window = one.window;
+                }
+            }
+            return window;
+        },
+
+        /**
          * The device's last release: its focus window's procedure given back.
          *
          * @param {FocusDevice} device

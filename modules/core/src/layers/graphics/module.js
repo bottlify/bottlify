@@ -1496,6 +1496,20 @@ export function createGraphicsModule(){
                         presentPrimary(held.surface, held.window, true);
                         return;
                     }
+                    // A full-screen Direct3D device's picture is the screen too,
+                    // and it lives on the GPU, not in guest memory: the desktop
+                    // composed over it put the device window's own surface,
+                    // black, between its frames -- a loading screen flickering
+                    // at every paint. While it holds the screen its last frame
+                    // stays. The ceiling: a window drawn over it is not seen.
+                    const covering = state.seam?.screenHeld?.() ?? 0;
+                    const covered = covering && `0x${(covering >>> 0).toString(16)}`;
+                    if (covered && !win32.applicationDeactivated?.()
+                        && (win32.windows?.() ?? []).some(
+                            (/** @type {ListedWindow} */ listed)=>listed.hwnd === covered))
+                    {
+                        return;
+                    }
                     const screen = screens.screen();
                     if (screen)
                     {

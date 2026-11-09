@@ -490,3 +490,19 @@ test('what the windows hear after the device waited is sent as the call of the t
     await windows.take(device, { ...HOW, mode: { bitsPerPixel: 32 } });
     assert.deepEqual(broadcastAs, ['caller']);
 });
+
+test('the screen is held by a full-screen device\'s window while it has the activation', ()=>{
+    const { windows, device, send } = harness();
+    assert.equal(windows.screen(), 0, 'no device, no holder');
+    windows.take(device, HOW);
+    assert.equal(windows.screen(), DEVICE_WINDOW);
+    send(0x1c, 0);
+    assert.equal(windows.screen(), 0, 'deactivated, the desktop is the screen again');
+    send(0x1c, 1);
+    assert.equal(windows.screen(), DEVICE_WINDOW, 'activated again');
+    windows.take(device, { ...HOW, fullscreen: false });
+    assert.equal(windows.screen(), 0, 'reset windowed');
+    windows.take(device, HOW);
+    windows.release(device);
+    assert.equal(windows.screen(), 0, 'released');
+});
