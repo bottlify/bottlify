@@ -42,6 +42,7 @@ import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
     SYNC_FLAG, decodeSm4,
 } from './sm4.js';
+import { DOUBLE_HELPERS } from './wgsl-doubles.js';
 
 /** Every register file is thirty-two bit patterns, four to a register. */
 const REG = 'vec4<u32>';
@@ -247,6 +248,23 @@ export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
  * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
  */
 export const HELPERS = Object.freeze({
+    ...DOUBLE_HELPERS,
+    // How fast a cube's face coordinates move, d(minor / major), for a
+    // coordinate c moving by d; the major axis is the longest, x before y
+    // before z on a tie, as the face selection takes it.
+    cubeFaceSlope: {
+        needs: [],
+        text: [
+            'fn cubeFaceSlope(c: vec3<f32>, d: vec3<f32>) -> vec2<f32> {',
+            '    let a = abs(c);',
+            '    var major = c.z; var moved = d.z; var minor = c.xy; var slid = d.xy;',
+            '    if (a.x >= a.y && a.x >= a.z) {'
+                + ' major = c.x; moved = d.x; minor = c.yz; slid = d.yz; }',
+            '    else if (a.y >= a.z) { major = c.y; moved = d.y; minor = c.xz; slid = d.xz; }',
+            '    return (slid * major - minor * moved) / (major * major);',
+            '}',
+        ],
+    },
     // Direct3D's standard sample positions, in sixteenths of a pixel from
     // its centre; an index past the count is at the centre.
     samplePosition: {
@@ -362,6 +380,8 @@ export const HELPERS = Object.freeze({
  *     by input register, as its declarations give it (D3D10_SB_INTERPOLATION_MODE).
  * @property {boolean} [rasterizerSamples]  Whether the body reads the rasterizer's sample
  *     count (`sampleinfo`, `samplepos` of the rasterizer), `rasterSamples` at link.
+ * @property {number[]} [unboundInterfaces]  Interface slots a call reached with no class
+ *     instance bound: the call does nothing, which the caller says.
  * @property {string[]} unsupported                Opcode names with no translation.
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
  * @property {number[]} threadGroup                A compute shader's group, x by y by z.
@@ -469,6 +489,11 @@ const floatLiteral = value=>
  * its outputs are written into.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
+ * `interfaces` is the class instance bound at each interface slot: the
+ * function table (ft#) of its class for that pointer, and the four words its
+ * `this` reads. A slot with none makes a call through it do nothing, and is
+ * listed in `unboundInterfaces`.
+ *
  * `samplerBias` is the MipLODBias of the sampler bound at each slot that has
  * one: WebGPU's samplers have none, so the shader adds it to every level it
  * samples by. `constantSizes`: the registers a constant buffer read at a
@@ -479,7 +504,8 @@ const floatLiteral = value=>
  *     stencil?: readonly number[], uavFormats?: Readonly<Record<number, string>>,
  *     tokens?: Uint32Array,
  *     outputName?: string, samplerBias?: Readonly<Record<number, number>>,
- *     constantSizes?: Readonly<Record<number, number>> }} [options]
+ *     constantSizes?: Readonly<Record<number, number>>,
+ *     interfaces?: readonly ({ table: number, data: readonly number[] } | null)[] }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
@@ -654,6 +680,8 @@ export function translateShader(container, options = {}){
                 return `${REG}(gsInstance).${swizzle}`;
             case OPERAND.INDEXABLE_TEMP:
                 return `x${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
+            case OPERAND.THIS_POINTER:
+                return `${thisPointer(operand)}.${swizzle}`;
             case OPERAND.CONSTANT_BUFFER:
                 if (operand.indices[1]?.relative)
                 {
@@ -675,6 +703,11 @@ export function translateShader(container, options = {}){
                 return `csLocal.${swizzle}`;
             case OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED:
                 return `${REG}(csFlat).${swizzle}`;
+            case OPERAND.IMMEDIATE64:
+                // A double's dwords, low first; one double is both halves.
+                return `${REG}(${(operand.immediate.length === 2
+                    ? [...operand.immediate, ...operand.immediate] : operand.immediate)
+                    .map(u32Literal).join(', ')})`;
             case OPERAND.IMMEDIATE32:
                 if (operand.immediate.length === 1)
                 {
@@ -974,6 +1007,153 @@ export function translateShader(container, options = {}){
     };
 
     /**
+     * A double source's four dwords, two doubles, its modifier applied to
+     * each one's sign bit.
+     *
+     * @param {import('./sm4.js').Operand} operand
+     */
+    const doubleSource = operand=>{
+        const bits = untyped(operand);
+        const signs = `${REG}(0u, 0x80000000u, 0u, 0x80000000u)`;
+        switch (operand.modifier)
+        {
+            case MODIFIER.NEG:
+                return `(${bits} ^ ${signs})`;
+            case MODIFIER.ABS:
+                return `(${bits} & ~${signs})`;
+            case MODIFIER.ABSNEG:
+                return `(${bits} | ${signs})`;
+            default:
+                return bits;
+        }
+    };
+
+    /** @param {import('./sm4.js').Operand} operand  Each held once, as doubles. */
+    const heldDouble = operand=>{
+        const name = held();
+        emit(`let ${name} = ${doubleSource(operand)};`);
+        return name;
+    };
+
+    /** @param {number} half  0 for the double in .xy, 1 for the one in .zw */
+    const halfOf = half=>(half === 0 ? 'xy' : 'zw');
+
+    /**
+     * An instruction whose result is doubles: .xy, .zw or both, each the
+     * double in the same place of the swizzled sources. `dmovc`'s condition
+     * is a dword a double: x for the first, y for the second.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const doubleResult = instruction=>{
+        const [target, ...sources] = instruction.operands;
+        const opcode = instruction.opcode;
+        const condition = opcode === OPCODE.DMOVC ? held() : null;
+        if (condition)
+        {
+            emit(`let ${condition} = ${u(sources[0])};`);
+        }
+        const [a, b, c] = (condition ? sources.slice(1) : sources).map(heldDouble);
+        const entry = { [OPCODE.DADD]: 'dblAdd', [OPCODE.DMUL]: 'dblMul', [OPCODE.DDIV]: 'dblDiv',
+            [OPCODE.DRCP]: 'dblDiv', [OPCODE.DFMA]: 'dblFma', [OPCODE.DMIN]: 'dblCompare',
+            [OPCODE.DMAX]: 'dblCompare' }[opcode];
+        if (entry)
+        {
+            need(entry);
+        }
+        if (instruction.saturate)
+        {
+            need('dblCompare');
+        }
+        /** @param {number} half */
+        const one = half=>{
+            const at = halfOf(half);
+            /** @type {Record<number, () => string>} */
+            const ways = {
+                [OPCODE.DADD]: ()=>`dblAdd(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMUL]: ()=>`dblMul(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DDIV]: ()=>`dblDiv(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DRCP]: ()=>`dblDiv(vec2<u32>(0u, 0x3ff00000u), ${a}.${at})`,
+                [OPCODE.DFMA]: ()=>`dblFma(${a}.${at}, ${b}.${at}, ${c}.${at})`,
+                [OPCODE.DMIN]: ()=>`dblMin(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMAX]: ()=>`dblMax(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMOV]: ()=>`${a}.${at}`,
+                [OPCODE.DMOVC]: ()=>`select(${b}.${at}, ${a}.${at},`
+                    + ` ${condition}.${COMPONENT[half]} != 0u)`,
+            };
+            const value = ways[opcode]();
+            return instruction.saturate ? `dblSaturate(${value})` : value;
+        };
+        const halves = [(target.mask & 0x3) !== 0, (target.mask & 0xc) !== 0];
+        store(target, `${REG}(${halves.map((wanted, half)=>(wanted ? one(half)
+            : 'vec2<u32>(0u)')).join(', ')})`);
+    };
+
+    /**
+     * An instruction of doubles whose result is a dword each: the first
+     * component the mask writes takes the first double, the second the
+     * second.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const wordsOfDoubles = instruction=>{
+        const [target, ...sources] = instruction.operands;
+        const opcode = instruction.opcode;
+        const [a, b] = sources.map(heldDouble);
+        need(opcode === OPCODE.DTOF || opcode === OPCODE.DTOI || opcode === OPCODE.DTOU
+            ? 'dblConvert' : 'dblCompare');
+        /** @param {string} test */
+        const all = test=>`select(0u, 0xffffffffu, ${test})`;
+        /** @param {number} half */
+        const one = half=>{
+            const at = halfOf(half);
+            switch (opcode)
+            {
+                case OPCODE.DEQ:
+                    return all(`dblEqual(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DNE:
+                    return all(`!dblEqual(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DLT:
+                    return all(`dblLess(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DGE:
+                    return all(`!(dblNan(${a}.${at}) || dblNan(${b}.${at})`
+                        + ` || dblLess(${a}.${at}, ${b}.${at}))`);
+                case OPCODE.DTOF:
+                    return instruction.saturate
+                        ? `bitcast<u32>(clamp(bitcast<f32>(dblToFloat(${a}.${at})), 0.0, 1.0))`
+                        : `dblToFloat(${a}.${at})`;
+                case OPCODE.DTOI:
+                    return `dblToInt(${a}.${at})`;
+                default:
+                    return `dblToUint(${a}.${at})`;
+            }
+        };
+        let written = 0;
+        store(target, `${REG}(${COMPONENT.map((_, place)=>((target.mask & (1 << place)) === 0
+            ? '0u' : one(written++))).join(', ')})`);
+    };
+
+    /**
+     * A double from a dword: x makes the double in .xy, y the one in .zw.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const doublesOfWords = instruction=>{
+        const [target, source] = instruction.operands;
+        need('dblConvert');
+        const words = held();
+        const opcode = instruction.opcode;
+        emit(`let ${words} = ${opcode === OPCODE.FTOD ? (modifiedRead(source)
+            ? `bitcast<${REG}>(${f(source)})` : u(source))
+            : opcode === OPCODE.ITOD ? `bitcast<${REG}>(${i(source)})` : u(source)};`);
+        const convert = { [OPCODE.FTOD]: 'dblFromFloat', [OPCODE.ITOD]: 'dblFromInt',
+            [OPCODE.UTOD]: 'dblFromUint' }[opcode];
+        const halves = [(target.mask & 0x3) !== 0, (target.mask & 0xc) !== 0];
+        store(target, `${REG}(${halves.map((wanted, half)=>(wanted
+            ? `${convert}(${words}.${COMPONENT[half]})` : 'vec2<u32>(0u)')).join(', ')})`);
+    };
+
+    /**
      * Two-destination integer multiplies and divides: the destination that is
      * `null` is simply not stored.
      *
@@ -999,12 +1179,13 @@ export function translateShader(container, options = {}){
     };
 
     /**
-     * The subroutines after the main program, by label. A call is translated
-     * by writing the subroutine's body where the call is: Shader Model 4
-     * forbids recursion, so every call graph unrolls, and the body then works
-     * on the caller's registers as the hardware's does.
+     * The subroutines after the main program, by label (`l3`) or function
+     * body (`fb3`). A call is translated by writing the subroutine's body
+     * where the call is: Shader Model 4 and 5 forbid recursion, so every call
+     * graph unrolls, and the body then works on the caller's registers as the
+     * hardware's does.
      *
-     * @type {Map<number, import('./sm4.js').Instruction[]>}
+     * @type {Map<string, import('./sm4.js').Instruction[]>}
      */
     const subroutines = new Map();
     const firstLabel = instructions.findIndex(entry=>entry.opcode === OPCODE.LABEL);
@@ -1015,13 +1196,112 @@ export function translateShader(container, options = {}){
         if (entry.opcode === OPCODE.LABEL)
         {
             subroutine = [];
-            subroutines.set(entry.operands[0]?.indices[0]?.value ?? -1, subroutine);
+            const named = entry.operands[0];
+            subroutines.set(`${named?.type === OPERAND.FUNCTION_BODY ? 'fb' : 'l'}`
+                + `${named?.indices[0]?.value ?? -1}`, subroutine);
             continue;
         }
         subroutine.push(entry);
     }
-    /** @type {Set<number>} */
+    /** @type {Set<string>} */
     const calling = new Set();
+
+    /**
+     * Class linkage. A function table lists one body for each call site; an
+     * interface pointer (fp#, an array of them) lists the tables of the
+     * classes it may hold; `fcall fp#[i][site]` calls the bound instance's
+     * table's body for that site. Which class each pointer holds, and the
+     * four words of its `this`, are known only when the shader is bound, so
+     * the shader is translated for them (`options.interfaces`, by slot) and
+     * each call is the one body written in place. The slots follow the
+     * pointers in the order they are declared, an array taking one each.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const functionTables = new Map();
+    /** @type {Map<number, { slot: number, size: number, sites: number, tables: number[] }>} */
+    const interfacePointers = new Map();
+    let interfaceSlots = 0;
+
+    /** @param {import('./sm4.js').Operand} operand  this[#], as four words. */
+    const thisPointer = operand=>{
+        const instances = options.interfaces;
+        if (!instances)
+        {
+            result.unsupported.push('a this pointer, with no class instances given');
+            return `${REG}(0u)`;
+        }
+        /** @param {number} slot */
+        const words = slot=>`${REG}(${(instances[slot]?.data ?? [0, 0, 0, 0])
+            .map(u32Literal).join(', ')})`;
+        const index = operand.indices[0];
+        if (!index?.relative)
+        {
+            return words(index?.value ?? 0);
+        }
+        const count = Math.max(instances.length, 1);
+        return `array<${REG}, ${count}>(${Array.from({ length: count }, (_, slot)=>words(slot))
+            .join(', ')})[min(${indexExpression(operand, 0)}, ${count - 1}u)]`;
+    };
+
+    /**
+     * `fcall`: the body the instance bound at each slot the call may reach
+     * selects, a switch on the array index where it is computed.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const interfaceCall = instruction=>{
+        const [pointer] = instruction.operands;
+        const declared = interfacePointers.get(pointer?.indices[0]?.value ?? -1);
+        const site = instruction.callSite ?? 0;
+        if (!declared)
+        {
+            unsupported('an interface call through an undeclared pointer');
+            return;
+        }
+        if (!options.interfaces)
+        {
+            unsupported('an interface call, with no class instances given');
+            return;
+        }
+        /** @param {number} element */
+        const callAt = element=>{
+            const slot = declared.slot + element;
+            const instance = options.interfaces?.[slot];
+            if (!instance)
+            {
+                result.unboundInterfaces = [...new Set([...result.unboundInterfaces ?? [], slot])];
+                return;
+            }
+            const table = functionTables.get(instance.table);
+            if (!declared.tables.includes(instance.table) || !table)
+            {
+                unsupported(`class instance table ${instance.table} at slot ${slot}, which its`
+                    + ' interface does not take');
+                return;
+            }
+            callSubroutine(`fb${table[site] ?? -1}`);
+        };
+        const index = pointer.indices[1];
+        if (!index?.relative)
+        {
+            callAt(index?.value ?? 0);
+            return;
+        }
+        emit(`switch (${indexExpression(pointer, 1)}) {`);
+        depth++;
+        for (let element = 0; element < declared.size; element++)
+        {
+            emit(`case ${element}u: {`);
+            depth++;
+            callAt(element);
+            depth--;
+            emit('}');
+        }
+        emit('default: {}');
+        depth--;
+        emit('}');
+    };
 
     /**
      * The switches being written. A run of `case`s with nothing between them
@@ -1077,12 +1357,12 @@ export function translateShader(container, options = {}){
         }
     };
 
-    /** @param {number} index */
+    /** @param {string} index  `l<n>` or `fb<n>` */
     const callSubroutine = index=>{
         const body = subroutines.get(index);
         if (!body)
         {
-            unsupported(`a call to label ${index}, which the program does not have`);
+            unsupported(`a call to ${index}, which the program does not have`);
             return;
         }
         if (calling.has(index))
@@ -1440,6 +1720,33 @@ export function translateShader(container, options = {}){
                 }
                 break;
 
+            // --- doubles (wgsl-doubles.js) ---
+            case OPCODE.DADD:
+            case OPCODE.DMUL:
+            case OPCODE.DDIV:
+            case OPCODE.DRCP:
+            case OPCODE.DFMA:
+            case OPCODE.DMIN:
+            case OPCODE.DMAX:
+            case OPCODE.DMOV:
+            case OPCODE.DMOVC:
+                doubleResult(instruction);
+                break;
+            case OPCODE.DEQ:
+            case OPCODE.DNE:
+            case OPCODE.DLT:
+            case OPCODE.DGE:
+            case OPCODE.DTOF:
+            case OPCODE.DTOI:
+            case OPCODE.DTOU:
+                wordsOfDoubles(instruction);
+                break;
+            case OPCODE.FTOD:
+            case OPCODE.ITOD:
+            case OPCODE.UTOD:
+                doublesOfWords(instruction);
+                break;
+
             // --- moves ---
             // A move copies bits; a source modifier makes it a float's move.
             case OPCODE.MOV:
@@ -1712,12 +2019,32 @@ export function translateShader(container, options = {}){
                 break;
             }
             case OPCODE.CALL:
-                callSubroutine(dest.indices[0]?.value ?? -1);
+                callSubroutine(`l${dest.indices[0]?.value ?? -1}`);
+                break;
+            case OPCODE.DCL_FUNCTION_BODY:
+                break;
+            case OPCODE.DCL_FUNCTION_TABLE: {
+                const [index, count] = instruction.extra;
+                functionTables.set(index, instruction.extra.slice(2, 2 + count));
+                break;
+            }
+            case OPCODE.DCL_INTERFACE: {
+                // fp#, the call sites, the array's size over the count of
+                // tables, then the tables.
+                const [index, sites, shape] = instruction.extra;
+                const size = Math.max(shape >>> 16, 1);
+                interfacePointers.set(index, { slot: interfaceSlots, size, sites,
+                    tables: instruction.extra.slice(3, 3 + (shape & 0xffff)) });
+                interfaceSlots += size;
+                break;
+            }
+            case OPCODE.INTERFACE_CALL:
+                interfaceCall(instruction);
                 break;
             case OPCODE.CALLC:
                 emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) {`);
                 depth++;
-                callSubroutine(a.indices[0]?.value ?? -1);
+                callSubroutine(`l${a.indices[0]?.value ?? -1}`);
                 depth--;
                 emit('}');
                 break;
@@ -1898,6 +2225,102 @@ export function translateShader(container, options = {}){
                 store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
                     ? `select(${kept}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
                     : kept);
+                break;
+            }
+            case OPCODE.LOD: {
+                // WGSL has no query of the level of detail, so it is reckoned
+                // as the specification defines it: the longer of the two
+                // screen-space footprints in texels of level 0, its log2,
+                // plus the sampler's bias; x held to the texture's levels,
+                // y not. The sampler's MinLOD and MaxLOD are not seen here,
+                // so x is held to the levels alone.
+                const [target, coordinate, resource, sampler] = instruction.operands;
+                if (!isPixel)
+                {
+                    unsupported('lod outside a pixel shader');
+                    break;
+                }
+                const texture = textureOf(resource.indices[0].value);
+                if (!texture || texture.multisampled
+                    || texture.dimension === RESOURCE_DIMENSION.BUFFER
+                    || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
+                    || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY)
+                {
+                    unsupported('lod on an undeclared or unsupported texture');
+                    break;
+                }
+                const name = `t${texture.slot}`;
+                const at = held();
+                emit(`let ${at} = ${f(coordinate)};`);
+                const size = `textureDimensions(${name}, 0)`;
+                const dimension = texture.dimension;
+                // The footprint along each axis, in texels, for a derivative.
+                const footprint = dimension === RESOURCE_DIMENSION.TEXTURE1D
+                    || dimension === RESOURCE_DIMENSION.TEXTURE1DARRAY
+                    ? (/** @type {string} */ slope)=>
+                        `vec2<f32>(${slope}(${at}.x) * f32(${size}.x), 0.0)`
+                    : dimension === RESOURCE_DIMENSION.TEXTURE2D
+                    || dimension === RESOURCE_DIMENSION.TEXTURE2DARRAY
+                        ? (/** @type {string} */ slope)=>
+                            `${slope}(${at}.xy) * vec2<f32>(${size})`
+                        : dimension === RESOURCE_DIMENSION.TEXTURE3D
+                            ? (/** @type {string} */ slope)=>
+                                `${slope}(${at}.xyz) * vec3<f32>(${size})`
+                            // A cube's face spans [-1, 1] of the minor axes
+                            // over the major one: half the face's size a unit.
+                            : (/** @type {string} */ slope)=>(need('cubeFaceSlope'),
+                            `cubeFaceSlope(${at}.xyz, ${slope}(${at}.xyz))`
+                                + ` * (0.5 * f32(${size}.x))`);
+                const dx = held();
+                const dy = held();
+                emit(`let ${dx} = ${footprint('dpdx')};`);
+                emit(`let ${dy} = ${footprint('dpdy')};`);
+                const bias = options.samplerBias?.[sampler.indices[0].value] ?? 0;
+                const raw = held();
+                emit(`let ${raw} = 0.5 * log2(max(dot(${dx}, ${dx}), dot(${dy}, ${dy})))`
+                    + `${bias ? ` + ${floatLiteral(bias)}` : ''};`);
+                store(target, `bitcast<vec4<u32>>(vec4<f32>(clamp(${raw}, 0.0,`
+                    + ` f32(textureNumLevels(${name}) - 1u)), ${raw}, 0.0, 0.0))`
+                    + `.${swizzleText(resource.swizzle)}`);
+                break;
+            }
+            case OPCODE.EVAL_CENTROID:
+            case OPCODE.EVAL_SAMPLE_INDEX:
+            case OPCODE.EVAL_SNAPPED: {
+                // WGSL interpolates an input only where it is declared, so an
+                // input is carried to another point of the pixel along its
+                // screen-space slopes: v + dpdx(v) * dx + dpdy(v) * dy, from
+                // where the input was interpolated. A pixel drawn whole has
+                // its centroid at its centre, which is where it is taken.
+                const [target, input, where] = instruction.operands;
+                if (!isPixel)
+                {
+                    unsupported(`${instruction.name} outside a pixel shader`);
+                    break;
+                }
+                if (instruction.opcode === OPCODE.EVAL_CENTROID)
+                {
+                    store(target, sat ? fromFloat(f(input), true) : moved(input));
+                    break;
+                }
+                const value = held();
+                const offset = held();
+                emit(`let ${value} = ${f(input)};`);
+                if (instruction.opcode === OPCODE.EVAL_SAMPLE_INDEX)
+                {
+                    result.rasterizerSamples = true;
+                    need('samplePosition');
+                    emit(`let ${offset} = samplePosition(rasterSamples, ${u(where)}.x);`);
+                }
+                else
+                {
+                    // Two signed four-bit sixteenths of a pixel, in the low
+                    // bits of x and y.
+                    emit(`let ${offset} = vec2<f32>((${i(where)}.xy << vec2<u32>(28u))`
+                        + ' >> vec2<u32>(28u)) / 16.0;');
+                }
+                store(target, fromFloat(`${value} + dpdx(${value}) * ${offset}.x`
+                    + ` + dpdy(${value}) * ${offset}.y`, sat));
                 break;
             }
             case OPCODE.SAMPLE_INFO:

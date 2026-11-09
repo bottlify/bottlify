@@ -134,16 +134,29 @@ export const lu = (...values)=>({
     immediate: values.map(value=>value >>> 0),
 });
 
+/** @param {number[]} values one or two doubles @returns {AsmOperand} */
+export const dl = (...values)=>({
+    type: OPERAND.IMMEDIATE64,
+    indices: [],
+    immediate: values.flatMap(value=>{
+        const words = new DataView(new ArrayBuffer(8));
+        words.setFloat64(0, value, true);
+        return [words.getUint32(0, true), words.getUint32(4, true)];
+    }),
+});
+
 /** @param {AsmOperand} operand @param {boolean} destination */
 function encodeOperand(operand, destination){
     /** @type {number[]} */
     const words = [];
-    const isImmediate = operand.type === OPERAND.IMMEDIATE32;
+    const isImmediate = operand.type === OPERAND.IMMEDIATE32
+        || operand.type === OPERAND.IMMEDIATE64;
     let token = 0;
     if (isImmediate)
     {
+        // A dword or a double is one component; four dwords or two doubles four.
         const count = /** @type {number[]} */ (operand.immediate).length;
-        token |= count === 1 ? 1 : 2;
+        token |= count === (operand.type === OPERAND.IMMEDIATE64 ? 2 : 1) ? 1 : 2;
     }
     else if (operand.type === OPERAND.SAMPLER && operand.swizzle)
     {
@@ -152,7 +165,8 @@ function encodeOperand(operand, destination){
             | (COMPONENT_INDEX[/** @type {'x'|'y'|'z'|'w'} */ (operand.swizzle[0])] << 4);
     }
     else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER
-        || operand.type === OPERAND.LABEL)
+        || operand.type === OPERAND.LABEL || operand.type === OPERAND.FUNCTION_BODY
+        || operand.type === OPERAND.INTERFACE)
     {
         // None names a component: a sampler or a label is one thing and null
         // is nothing.
@@ -220,6 +234,7 @@ function encodeOperand(operand, destination){
  * @property {number} opcode
  * @property {AsmOperand[]} [operands]
  * @property {number[]} [extra]        Trailing dwords: a system value, a return type.
+ * @property {number[]} [leading]      Dwords before the operands: `fcall`'s call site.
  * @property {number} [control]        Bits 11..23 of the opcode token.
  * @property {boolean} [saturate]
  * @property {boolean} [nonZero]
@@ -236,6 +251,7 @@ function encodeInstruction(instruction){
     const destinations = instruction.destinations ?? 1;
     /** @type {number[]} */
     const words = [];
+    words.push(...(instruction.leading ?? []));
     operands.forEach((operand, index)=>{
         words.push(...encodeOperand(operand, index < destinations));
     });
@@ -284,6 +300,19 @@ export const sampleInfo = (dest, resource, integer = false)=>
     op(OPCODE.SAMPLE_INFO, [dest, resource], integer ? { control: 1 } : {});
 /** @param {AsmOperand} dest @param {AsmOperand} resource @param {AsmOperand} index */
 export const samplePos = (dest, resource, index)=>op(OPCODE.SAMPLE_POS, [dest, resource, index]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler
+ */
+export const lod = (dest, coordinate, texture, sampler)=>
+    op(OPCODE.LOD, [dest, coordinate, texture, sampler]);
+/** @param {AsmOperand} dest @param {AsmOperand} input */
+export const evalCentroid = (dest, input)=>op(OPCODE.EVAL_CENTROID, [dest, input]);
+/** @param {AsmOperand} dest @param {AsmOperand} input @param {AsmOperand} index */
+export const evalSampleIndex = (dest, input, index)=>
+    op(OPCODE.EVAL_SAMPLE_INDEX, [dest, input, index]);
+/** @param {AsmOperand} dest @param {AsmOperand} input @param {AsmOperand} offset */
+export const evalSnapped = (dest, input, offset)=>op(OPCODE.EVAL_SNAPPED, [dest, input, offset]);
 export const movc = arithmetic(OPCODE.MOVC);
 export const add = arithmetic(OPCODE.ADD);
 export const mul = arithmetic(OPCODE.MUL);
@@ -324,6 +353,25 @@ export const ftou = arithmetic(OPCODE.FTOU);
 export const roundNe = arithmetic(OPCODE.ROUND_NE);
 export const roundNi = arithmetic(OPCODE.ROUND_NI);
 export const umin = arithmetic(OPCODE.UMIN);
+export const dadd = arithmetic(OPCODE.DADD);
+export const dmul = arithmetic(OPCODE.DMUL);
+export const ddiv = arithmetic(OPCODE.DDIV);
+export const drcp = arithmetic(OPCODE.DRCP);
+export const dfma = arithmetic(OPCODE.DFMA);
+export const dmin = arithmetic(OPCODE.DMIN);
+export const dmax = arithmetic(OPCODE.DMAX);
+export const dmov = arithmetic(OPCODE.DMOV);
+export const dmovc = arithmetic(OPCODE.DMOVC);
+export const deq = arithmetic(OPCODE.DEQ);
+export const dne = arithmetic(OPCODE.DNE);
+export const dlt = arithmetic(OPCODE.DLT);
+export const dge = arithmetic(OPCODE.DGE);
+export const dtof = arithmetic(OPCODE.DTOF);
+export const dtoi = arithmetic(OPCODE.DTOI);
+export const dtou = arithmetic(OPCODE.DTOU);
+export const ftod = arithmetic(OPCODE.FTOD);
+export const itod = arithmetic(OPCODE.ITOD);
+export const utod = arithmetic(OPCODE.UTOD);
 export const umax = arithmetic(OPCODE.UMAX);
 
 /** @param {AsmOperand} dest @param {AsmOperand[]} sources */
@@ -425,8 +473,35 @@ const labelOperand = index=>({ type: OPERAND.LABEL, indices: [index] });
 export const label = index=>op(OPCODE.LABEL, [labelOperand(index)], { destinations: 0 });
 /** @param {number} index */
 export const call = index=>op(OPCODE.CALL, [labelOperand(index)], { destinations: 0 });
+/** @param {number} index  Where function body `index` begins: `label fb#`. */
+export const functionBody = index=>op(OPCODE.LABEL,
+    [{ type: OPERAND.FUNCTION_BODY, indices: [index] }], { destinations: 0 });
+/** @param {number} index */
+export const dclFunctionBody = index=>op(OPCODE.DCL_FUNCTION_BODY, [], { extra: [index] });
+/** @param {number} index @param {number[]} bodies  One for each call site. */
+export const dclFunctionTable = (index, bodies)=>op(OPCODE.DCL_FUNCTION_TABLE, [],
+    { extra: [index, bodies.length, ...bodies] });
+/**
+ * `dcl_interface fp#[size][sites] = { tables }`.
+ *
+ * @param {number} index @param {number} size @param {number} sites @param {number[]} tables
+ */
+export const dclInterface = (index, size, sites, tables)=>op(OPCODE.DCL_INTERFACE, [],
+    { extra: [index, sites, ((size << 16) | tables.length) >>> 0, ...tables] });
+/**
+ * `fcall fp#[element][site]`.
+ *
+ * @param {number} site @param {number} pointer @param {number} element
+ * @param {AsmOperand} [relative]  Added to the element.
+ */
+export const fcall = (site, pointer, element, relative)=>op(OPCODE.INTERFACE_CALL,
+    [{ type: OPERAND.INTERFACE, indices: [pointer, element], ...(relative ? { relative } : {}) }],
+    { destinations: 0, leading: [site] });
+/** @param {number} index @param {string} [components] */
+export const thisPointer = (index, components)=>
+    register(OPERAND.THIS_POINTER, [index], components);
 /** @param {AsmOperand} condition @param {number} index */
-export const callcNz = (condition, index)=>op(OPCODE.CALLC, [condition, labelOperand(index)],
+export const callcNz =(condition, index)=>op(OPCODE.CALLC, [condition, labelOperand(index)],
     { nonZero: true, destinations: 0 });
 /** @param {AsmOperand} selector */
 export const switchOn = selector=>op(OPCODE.SWITCH, [selector], { destinations: 0 });

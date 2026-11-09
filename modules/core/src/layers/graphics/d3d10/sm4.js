@@ -220,10 +220,34 @@ export const OPCODE = Object.freeze({
     IMM_ATOMIC_UMAX: 188,
     IMM_ATOMIC_UMIN: 189,
     SYNC: 190,
+    // Double precision: two dwords a value, .xy and .zw of a register, low
+    // dword first; 210-217 are the extended set (D3D11_OPTIONS).
+    DADD: 191,
+    DMAX: 192,
+    DMIN: 193,
+    DMUL: 194,
+    DEQ: 195,
+    DGE: 196,
+    DLT: 197,
+    DNE: 198,
+    DMOV: 199,
+    DMOVC: 200,
+    DTOF: 201,
+    FTOD: 202,
     EVAL_SNAPPED: 203,
     EVAL_SAMPLE_INDEX: 204,
     EVAL_CENTROID: 205,
     DCL_GS_INSTANCE_COUNT: 206,
+    ABORT: 207,
+    DEBUG_BREAK: 208,
+    DDIV: 210,
+    DFMA: 211,
+    DRCP: 212,
+    MSAD: 213,
+    DTOI: 214,
+    DTOU: 215,
+    ITOD: 216,
+    UTOD: 217,
 });
 
 /** The name each opcode number prints as, for a divergence or a dump. */
@@ -248,7 +272,13 @@ export const OPERAND = Object.freeze({
     NULL: 13,
     RASTERIZER: 14,
     OUTPUT_COVERAGE_MASK: 15,
-    // Shader Model 5: the tessellation stages' own, then the rest.
+    // Shader Model 5: class linkage (fb#, ft#, fp#, this[#]), the
+    // tessellation stages' own, then the rest.
+    FUNCTION_BODY: 17,
+    FUNCTION_TABLE: 18,
+    INTERFACE: 19,
+    FUNCTION_INPUT: 20,
+    FUNCTION_OUTPUT: 21,
     OUTPUT_CONTROL_POINT_ID: 22,
     INPUT_FORK_INSTANCE_ID: 23,
     INPUT_JOIN_INSTANCE_ID: 24,
@@ -256,6 +286,7 @@ export const OPERAND = Object.freeze({
     OUTPUT_CONTROL_POINT: 26,
     INPUT_PATCH_CONSTANT: 27,
     INPUT_DOMAIN_POINT: 28,
+    THIS_POINTER: 29,
     UNORDERED_ACCESS_VIEW: 30,
     THREAD_GROUP_SHARED_MEMORY: 31,
     INPUT_THREAD_ID: 32,
@@ -360,6 +391,8 @@ export const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
  * @property {number[]} [customData] The payload of a customdata block.
  * @property {number[]} [offset]   A sample's immediate texel offset (`aoffimmi`), u, v
  *                                  and w, from its extended token; absent for none.
+ * @property {number} [callSite]  `fcall`'s: which of a function table's bodies it calls,
+ *                                  the dword before its interface operand.
  * @property {number} length        In dwords, this instruction and its operands.
  */
 
@@ -422,7 +455,8 @@ export function decodeOperand(tokens, at){
     }
     else if (type === OPERAND.IMMEDIATE64)
     {
-        const count = (componentCount === 0 ? 1 : componentCount) * 2;
+        // One double, or two (a vec4 of dwords): never four.
+        const count = componentCount === 0 || componentCount === 1 ? 2 : 4;
         for (let index = 0; index < count; index++)
         {
             immediate.push(tokens[next++]);
@@ -570,6 +604,8 @@ export function decodeSm4(tokens){
             }
         }
 
+        // `fcall` names the call site before its operand.
+        const callSite = opcode === OPCODE.INTERFACE_CALL && next < end ? tokens[next++] : null;
         const wanted = OPERAND_COUNT[opcode] ?? Infinity;
         /** @type {Operand[]} */
         const operands = [];
@@ -590,6 +626,7 @@ export function decodeSm4(tokens){
             extra: [...extendedTokens, ...Array.from(tokens.subarray(next, end))],
             length: end - at,
             ...(offset && offset.some(Boolean) ? { offset } : {}),
+            ...(callSite === null ? {} : { callSite }),
         });
         at = end;
     }

@@ -2396,7 +2396,7 @@ test('a shader with an instruction that has no translation refuses its draws by 
                 dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
                 dclSampler(0),
                 dclOutput(o(0)),
-                { opcode: 108, operands: [o(0), r(0), t(0), s(0)] },
+                { opcode: 213, operands: [o(0), r(0), r(1), r(2)] },
                 ret(),
             ],
         }), ps), S_OK, 'the create accepts it: the refusal is the draw\'s');
@@ -2407,7 +2407,7 @@ test('a shader with an instruction that has no translation refuses its draws by 
         assert.deepEqual([h.device.diagnostics().skipped.untranslatable,
             h.device.diagnostics().skipped.pipeline], [1, 0],
         'counted as untranslatable, apart from a pipeline the GPU refused');
-        assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
+        assert.ok(h.divergences.some(line=>line.includes('msad')), h.divergences.join('\n'));
         assert.ok(h.divergences.some(line=>line.includes('lost: a draw was skipped')),
             'a draw not made is a loss, not a warning');
     });

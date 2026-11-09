@@ -601,8 +601,8 @@ export function D3D11CreateDeviceAndSwapChain(adapter, driverType, software, fla
 /**
  * D3D11_FEATURE_*'s answers, by the structure the program hands in: what
  * this device does past its level. Its views are emulated, so a command
- * list is the runtime's and not the driver's; WebGPU has no doubles, no
- * minimum precision and no tiling to say; a 10.x level runs no compute.
+ * list is the runtime's and not the driver's; WebGPU has no minimum
+ * precision and no tiling to say; a 10.x level runs no compute.
  *
  * @param {number} feature @param {Uint8Array} input @param {number} level
  * @param {any} device  for a format's support
@@ -617,8 +617,8 @@ function featureSupport(feature, input, level, device){
     {
         case 0: // THREADING: concurrent creates, driver command lists
             return bytesOf([1, 0]);
-        case 1: // DOUBLES
-            return bytesOf([0]);
+        case 1: // DOUBLES: worked out in integers (wgsl-doubles.js), at shader model 5
+            return bytesOf([level >= 0xb000 ? 1 : 0]);
         case 2: { // FORMAT_SUPPORT: the format, then what it supports
             /** @type {{ support?: number }} */
             const held = {};
