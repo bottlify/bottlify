@@ -1233,14 +1233,25 @@ export function createScheduler(options){
      * @param {any[]} remotes
      */
     const freeTarget = remotes=>{
-        const live = threads.filter(thread=>thread.state !== ThreadState.TERMINATED);
-        if (!live.some(thread=>pinnedTo(thread) === 0))
+        // Asked at every turn: the threads walked, not filtered into lists.
+        const here = playedBy(0);
+        let anyFree = false;
+        let pinnedHere = false;
+        for (const thread of threads)
+        {
+            if (thread.state === ThreadState.TERMINATED)
+            {
+                continue;
+            }
+            const pin = pinnedTo(thread);
+            anyFree ||= pin === 0;
+            pinnedHere ||= here !== 0 && pin === here;
+        }
+        if (!anyFree)
         {
             return 0;
         }
-        const here = playedBy(0);
-        if (here !== 0 && remotes.some(remote=>remote.index === here)
-            && !live.some(thread=>pinnedTo(thread) === here))
+        if (here !== 0 && remotes.some(remote=>remote.index === here) && !pinnedHere)
         {
             return here;
         }
@@ -1248,8 +1259,15 @@ export function createScheduler(options){
         let named = Infinity;
         for (const remote of remotes)
         {
-            const count = live.filter(thread=>thread.affinityMask !== undefined
-                && (thread.affinityMask >>> remote.index & 1) === 1).length;
+            let count = 0;
+            for (const thread of threads)
+            {
+                if (thread.state !== ThreadState.TERMINATED && thread.affinityMask !== undefined
+                    && (thread.affinityMask >>> remote.index & 1) === 1)
+                {
+                    count++;
+                }
+            }
             if (count < named)
             {
                 best = remote.index;
@@ -1358,8 +1376,21 @@ export function createScheduler(options){
      * not start a second time elsewhere meanwhile.
      */
     const runnable = ()=>{
-        const elsewhere = new Set([...placed.values()].map(on=>on.thread));
-        return elsewhere.size === 0 ? ready() : ready().filter(thread=>!elsewhere.has(thread));
+        // Asked at every turn: the few placed walked, not copied into a set.
+        if (placed.size === 0)
+        {
+            return ready();
+        }
+        return ready().filter(thread=>{
+            for (const on of placed.values())
+            {
+                if (on.thread === thread)
+                {
+                    return false;
+                }
+            }
+            return true;
+        });
     };
 
     /**
@@ -1719,7 +1750,8 @@ export function createScheduler(options){
         while (candidates.length > 0 && (here === null || free.length > 0))
         {
             const next = pick(candidates);
-            candidates = candidates.filter(thread=>thread !== next);
+            // A fresh list (`runnable`): the one taken goes from it in place.
+            candidates.splice(candidates.indexOf(next), 1);
             const home = keptHere(next) ? 0 : homeOf(next, remotes);
             const remote = free.find(one=>one.index === home);
             if (home === 0 && here === null)
