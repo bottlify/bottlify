@@ -153,7 +153,8 @@ for (const window of [2 ** 33, 2 ** 34])
         assert.equal(view.getBigUint64(layout.regs + 9 * 8, true), sum, 'pushed and popped');
         assert.equal(new DataView(ram.buffer).getBigUint64(data, true), sum, 'RIP-relative');
         assert.equal(new DataView(ram.buffer).getBigUint64(stack - 8, true), sum, 'the stack');
-        for (const [at, why] of [[window - 8, 'the closed last page'], [window, 'past the window']])
+        for (const [at, why] of /** @type {[number, string][]} */ ([[window - 8, 'the closed last page'],
+            [window, 'past the window']]))
         {
             // mov rax, [rcx]
             new Uint8Array(ram.buffer).set([0x48, 0x8b, 0x01], code);
