@@ -37,6 +37,9 @@
  */
 export const FETCHED_PIECE_BYTES = 8 << 20;
 
+/** How many times a read or write fetches the blocks it misses before it fails (`fetchedAgain`). */
+export const MISS_FETCHES = 4;
+
 const CHANGE_FILE_NAME = 0x001;
 const CHANGE_DIR_NAME = 0x002;
 const CHANGE_ATTRIBUTES = 0x004;
@@ -100,6 +103,59 @@ export function createVolume(fs, fetchBlocks = null){
     };
 
     /**
+     * An operation done again after its miss: the blocks the miss named
+     * fetched, then the operation again, and again fetched while it misses,
+     * up to `MISS_FETCHES` fetches. A block fetched can be gone before the
+     * operation comes back for it: a cache in the heap keeps 64 MiB and
+     * another thread's reads landing between the fetch and the retry push the
+     * oldest blocks out, and a read that waited on another read's request
+     * finds nothing when that request failed. Each fetch makes the blocks the
+     * newest the cache holds, so a second rarely misses; one that misses
+     * every time is a fetch that does not deliver, and the operation fails
+     * saying so.
+     *
+     * @template T
+     * @param {() => T} operation
+     * @param {{ blocks: any[] }} miss
+     * @param {string} what  For the failure: what was not done.
+     * @returns {Promise<T>}
+     */
+    const fetchedAgain = async(operation, miss, what)=>{
+        const fetch = /** @type {(blocks: any[]) => Promise<void>} */ (fetchBlocks);
+        for (let fetches = 1; ; fetches++)
+        {
+            await fetch(miss.blocks);
+            try
+            {
+                return operation();
+            }
+            catch (e){
+                const again = /** @type {any} */ (e);
+                if (again?.code !== 'BLOCK_MISS')
+                {
+                    throw again;
+                }
+                if (fetches >= MISS_FETCHES)
+                {
+                    throw new Error(`${what}: ${again.blocks.length} blocks still absent`
+                        + ` after ${fetches} fetches`, { cause: e });
+                }
+                miss = again;
+            }
+        }
+    };
+
+    /**
+     * @param {any} node @param {number} offset @param {number} length
+     * @param {{ blocks: any[] }} miss
+     * @returns {Promise<Uint8Array>}
+     */
+    const fetchedRead = (node, offset, length, miss)=>fetchedAgain(()=>{
+        fs.seek(node, offset, SeekFrom.BEGIN);
+        return fs.read(node, length);
+    }, miss, `${length} bytes at ${offset} not read`);
+
+    /**
      * A read too large to fetch whole, fetched and copied a piece at a time.
      *
      * The blocks a read needs must all be resident when it copies them, and
@@ -107,13 +163,12 @@ export function createVolume(fs, fetchBlocks = null){
      * program mapping a 241 MiB archive whole fetched every block, found the
      * first ones evicted by the last and was told the map failed. A piece
      * holds a fraction of that bound, so its fetch cannot evict itself; each
-     * piece keeps the one retry a read has.
+     * piece is fetched as a read is (`fetchedRead`).
      *
      * @param {any} node @param {number} offset @param {number} length
      * @returns {Promise<Uint8Array>}
      */
     const readInPieces = async(node, offset, length)=>{
-        const fetch = /** @type {(blocks: any[]) => Promise<void>} */ (fetchBlocks);
         /** @type {Uint8Array[]} */
         const pieces = [];
         let total = 0;
@@ -132,9 +187,7 @@ export function createVolume(fs, fetchBlocks = null){
                 {
                     throw miss;
                 }
-                await fetch(miss.blocks);
-                fs.seek(node, offset + total, SeekFrom.BEGIN);
-                piece = fs.read(node, wanted);
+                piece = await fetchedRead(node, offset + total, wanted, miss);
             }
             pieces.push(piece);
             total += piece.length;
@@ -512,13 +565,7 @@ export function createVolume(fs, fetchBlocks = null){
                 }
                 if (length <= FETCHED_PIECE_BYTES)
                 {
-                    return fetchBlocks(miss.blocks).then(()=>{
-                        fs.seek(node, offset, SeekFrom.BEGIN);
-                        // One retry, not a loop: the miss named every absent
-                        // block, so a second miss means the fetch did not
-                        // deliver and looping would only hide that.
-                        return fs.read(node, length);
-                    });
+                    return fetchedRead(node, offset, length, miss);
                 }
                 return readInPieces(node, offset, length);
             }
@@ -559,8 +606,8 @@ export function createVolume(fs, fetchBlocks = null){
                 // The guest's buffer may change while it is parked; what it
                 // asked to write is what it passed at the call.
                 const held = bytes.slice();
-                // One retry, as read: the miss named every absent block.
-                return fetchBlocks(miss.blocks).then(()=>this.write(node, offset, held));
+                return fetchedAgain(()=>this.write(node, offset, held), miss,
+                    `${held.length} bytes at ${offset} not written`);
             }
         },
 

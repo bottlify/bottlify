@@ -450,7 +450,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Keeps the SECURITY_ATTRIBUTES' descriptor CreateFile or CreateDirectory
  *           was given as the new object's security. A no-op when absent.
  * @property {(code: number) => void} setLastError
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {(record: { path: string, error: number, access: number, share: number,
  *     disposition: number, flags: number }) => void} [openRefused]  told of every open
  *     CreateFile or NtCreateFile refused, with the error and what was asked
@@ -3509,7 +3509,10 @@ export function createFileFunctions(host){
                     return deliver(/** @type {any} */ (bytes));
                 }
                 const owner = host.currentThread?.() ?? null;
-                return /** @type {any} */ (bytes).then(deliver, ()=>{
+                return /** @type {any} */ (bytes).then(deliver, (/** @type {any} */ e)=>{
+                    // The program gets no bytes and goes on: a loss, said.
+                    host.divergence?.('ReadFile', `${length >>> 0} bytes of ${file.path} at ${at}`
+                        + ` not read: ${e?.message ?? e}`, 'loss');
                     // A read that fails once the thread is parked answers FALSE
                     // long after the error slot was last written, and whatever
                     // is in it belongs to some other call. A caller reading a
