@@ -73,8 +73,8 @@ function shader(constants, types){
     return new Uint8Array([...head, ...bytes, ...end]);
 }
 
-/** @param {Uint8Array} [code] */
-function machine(code = shader()){
+/** @param {Uint8Array} [code] @param {{ drive?: boolean }} [options] */
+function machine(code = shader(), options = {}){
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
     let free = 0x4000;
@@ -101,22 +101,36 @@ function machine(code = shader()){
             published.push(object);
             return 0x300;
         } },
-        callGuest: ({ entry, args })=>{
-            const [, , data, count] = args;
-            const integer = entry === 96 || entry === 98 || entry === 111 || entry === 113;
-            calls.push({ slot: entry, args, data: Array.from({ length: count * 4 }, (_, i)=>
-                (integer ? view.getInt32(data + i * 4, true)
-                    : view.getFloat32(data + i * 4, true))) });
+        callGuest: call=>{
+            record(call);
             return Promise.resolve(0);
         },
+        // The bridge's steps, run at once as the bridge runs them in the slice.
+        ...options.drive ? { drive: (/** @type {any} */ steps)=>{
+            let next = steps.next();
+            while (!next.done)
+            {
+                record(next.value);
+                next = steps.next(0);
+            }
+            return next.value;
+        } } : {},
     });
+    /** @param {{ entry: number, args: number[] }} call */
+    function record({ entry, args }){
+        const [, , data, count] = args;
+        const integer = entry === 96 || entry === 98 || entry === 111 || entry === 113;
+        calls.push({ slot: entry, args, data: Array.from({ length: count * 4 }, (_, i)=>
+            (integer ? view.getInt32(data + i * 4, true)
+                : view.getFloat32(data + i * 4, true))) });
+    }
     memory.set(code, 0x1000);
     /** @param {string} text */
     const put = (text, at = 0x3000)=>{
         memory.set([...new TextEncoder().encode(text), 0], at);
         return at;
     };
-    return { memory, view, tables, published, calls, DEVICE, put };
+    return { memory, view, tables, published, calls, DEVICE, put, record };
 }
 
 test('a shader\'s constants come out of its CTAB comment, by name and by register', ()=>{
@@ -214,3 +228,133 @@ test('a name in two register sets is set in both, as a model 3 loop count needs 
     assert.deepEqual(m.calls.map(c=>[c.slot, c.args[1], c.data[0]]), [[94, 0, 7], [96, 0, 7]],
         'SetVertexShaderConstantF and SetVertexShaderConstantI');
 });
+
+test('the gate: a setter driven in the slice makes the calls and answers promises make',
+    async()=>{
+    // Seeded random setters, down both paths: the device must be told the same.
+        let seed = 1234567;
+        const random = ()=>{
+            seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+            return seed / 2 ** 32;
+        };
+        const plan = Array.from({ length: 60 }, ()=>({
+            method: ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetFloat', 'SetDefaults',
+                'SetVectorArray'][Math.floor(random() * 6)],
+            name: ['WorldViewProj', 'Color', 'Lights', 'Missing'][Math.floor(random() * 4)],
+            values: Array.from({ length: 16 }, ()=>Math.round(random() * 2000 - 1000) / 8),
+        }));
+        /** @param {boolean} drive */
+        const run = async drive=>{
+            const m = machine(shader(), { drive });
+            m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]);
+            const [table] = m.published;
+            const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+            const answers = [];
+            for (const step of plan)
+            {
+                new Float32Array(m.memory.buffer, 0x2000, 16).set(step.values);
+                const method = methods.find((/** @type {any} */ one)=>one.name === step.method);
+                const bits = new Uint32Array(Float32Array.of(step.values[0]).buffer)[0];
+                const named = m.put(step.name);
+                const args = step.method === 'SetDefaults' ? [m.DEVICE]
+                    : step.method === 'SetFloat' ? [m.DEVICE, named, bits]
+                        : step.method === 'SetVectorArray' ? [m.DEVICE, named, 0x2000, 2]
+                            : [m.DEVICE, named, 0x2000];
+                answers.push((await method.invoke(table, args)) >>> 0);
+            }
+            return { answers, calls: m.calls.map(c=>[c.slot, c.args[1], c.args[3], c.data]) };
+        };
+        const driven = await run(true);
+        const promised = await run(false);
+        assert.ok(driven.calls.length > 20, 'the plan reached the device');
+        assert.deepEqual(driven, promised);
+    });
+
+test('the gate: the table\'s methods in the guest answer and call the device as the host\'s',
+    async()=>{
+    // A matrix by columns and one given three registers of four, by rows in an
+    // array, a scalar, a vector array, a sampler, and a loop count with its twin.
+        const constants = [['WorldViewProj', 2, 0, 4, 0, 0], ['Color', 2, 4, 1, 1, 0],
+            ['Lights', 2, 5, 2, 2, 1], ['Diffuse', 3, 0, 1, 3, 0], ['Bones', 2, 7, 9, 4, 0],
+            ['Scale', 2, 16, 1, 5, 0], ['Short', 2, 17, 3, 0, 0], ['limit', 2, 20, 1, 6, 1],
+            ['limit', 1, 0, 1, 6, 0]];
+        const types = [[3, 3, 4, 4, 1], [1, 3, 1, 4, 1], [1, 3, 1, 4, 2], [4, 12, 1, 1, 1],
+            [2, 3, 3, 4, 3], [0, 3, 1, 1, 1], [0, 2, 1, 1, 1]];
+        const names = ['WorldViewProj', 'Color', 'Lights', 'Diffuse', 'Bones', 'Scale', 'Short',
+            'limit', 'Lights[1]', 'Missing'];
+        let seed = 7654321;
+        const random = ()=>{
+            seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+            return seed / 2 ** 32;
+        };
+        const plan = Array.from({ length: 400 }, ()=>({
+            method: ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetFloat', 'GetConstantDesc',
+                'GetConstantElement', 'SetDefaults'][Math.floor(random() * 7)],
+            name: names[Math.floor(random() * names.length)],
+            how: Math.floor(random() * 6),
+            index: Math.floor(random() * 4),
+            values: Array.from({ length: 16 }, ()=>Math.round(random() * 2000 - 1000) / 8),
+        }));
+        const sources = await import('./constants-setters.js');
+        /** @param {boolean} guest */
+        const run = async guest=>{
+            const m = machine(shader(constants, types), { drive: true });
+            m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]);
+            const [table] = m.published;
+            m.view.setUint32(0x304, table.guestState(), true);
+            const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+            const method = (/** @type {string} */ name)=>methods.find((/** @type {any} */ one)=>
+                one.name === name);
+            const answers = [];
+            let handed = 0;
+            for (const step of plan)
+            {
+                new Float32Array(m.memory.buffer, 0x2000, 16).set(step.values);
+                const named = m.put(step.name);
+                // A handle the host handed out, an element's, a name, or none.
+                const handle = step.how < 2 ? method('GetConstantByName').invoke(table, [0, named])
+                    : step.how === 2 ? method('GetConstantElement').invoke(table,
+                        [method('GetConstantByName').invoke(table, [0, named]), step.index])
+                        : step.how === 3 ? 0 : named;
+                const bits = new Uint32Array(Float32Array.of(step.values[0]).buffer)[0];
+                const args = step.method === 'SetDefaults' ? [step.how === 3 ? 0 : m.DEVICE]
+                    : step.method === 'GetConstantDesc' ? [handle, 0x2800, 0x2840]
+                        : step.method === 'GetConstantElement' ? [handle, step.index]
+                            : step.method === 'SetFloat' ? [m.DEVICE, handle, bits]
+                                : [m.DEVICE, handle, 0x2000];
+                m.memory.fill(0, 0x2800, 0x2850);
+                const host = ()=>{
+                    handed++;
+                    return method(step.method).invoke(table, args);
+                };
+                const answer = guest ? /** @type {any} */ (sources)[step.method]({
+                    u32: (/** @type {number} */ at)=>m.view.getUint32(at, true),
+                    setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+                        m.view.setUint32(at, value >>> 0, true),
+                    callStd: (/** @type {number} */ entry, /** @type {number[]} */ ...rest)=>{
+                        m.record({ entry, args: rest });
+                        return 0;
+                    },
+                    host,
+                }, 0x300, ...args) : host();
+                let said = (await answer) >>> 0;
+                if (step.method === 'GetConstantElement' && said !== 0)
+                {
+                    // Where a handle is differs as the host's setters take blocks
+                    // off the heap; what it names is what is compared.
+                    method('GetConstantDesc').invoke(table, [said, 0x2800, 0]);
+                    said = 1;
+                }
+                answers.push([said, [...m.memory.subarray(0x2800, 0x2850)]]);
+            }
+            return { answers, calls: m.calls.map(c=>[c.slot, c.args[1], c.args[3], c.data]),
+                handed };
+        };
+        const guest = await run(true);
+        const host = await run(false);
+        assert.ok(host.calls.length > 100, 'the plan reached the device');
+        // Names, twins, samplers and shapes a setter does not take go to the host.
+        assert.ok(plan.length - guest.handed > 40,
+            `the guest answered its own: ${plan.length - guest.handed}`);
+        assert.deepEqual({ ...guest, handed: 0 }, { ...host, handed: 0 });
+    });

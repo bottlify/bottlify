@@ -1,5 +1,7 @@
 # The browser harness
 
+[DIAGNOSING.md](DIAGNOSING.md) is the order to look in when a run is slow, flickers or stops.
+
 Everything a title needs before it draws (its files, its threads, its
 registry) can be answered in Node. The moment it asks for a device, only a
 browser can answer, and so only a browser can say what the title does next.
@@ -160,7 +162,10 @@ workers answer nothing to a direct attach.
 | `eval.mjs` | the value of an expression in the launcher tab (`window.__bottlify__` is the engine) | `node tools/cdp_test/live/eval.mjs "<expression>"` |
 | `audio-watch.mjs` | four times a second, with the clock: laps replayed, silence held, blocks starved, writer skips, late guest threads: what a crackle was | `node tools/cdp_test/live/audio-watch.mjs` |
 | `memory-watch.mjs` | every five seconds: the tab's private memory and each worker's JS heap | `node tools/cdp_test/live/memory-watch.mjs` |
-| `worker-profile.mjs` | the engine worker's time: idle, GC, top functions, and every pause outside guest code with when it began | `node tools/cdp_test/live/worker-profile.mjs [seconds] [minMs]` |
+| `worker-profile.mjs` | a worker's time (the engine's, or `graphics`, `executor`, `translator`): idle, GC, top functions, and every pause outside guest code with when it began | `node tools/cdp_test/live/worker-profile.mjs [seconds] [minMs] [worker]` |
+| `phases.mjs` | what the run did over the next N seconds rather than since it began: frames presented, the engine's phases (guest, trap, idle-host, yield) and the host calls that took the most time, as differences of two readings | `node tools/cdp_test/live/phases.mjs [seconds] [windows] [top]` |
+| `gc-trace.mjs` | every collection of every thread over N seconds from V8's own trace: minor and full, why each ran, the pauses, and the global sum V8 schedules full collections by against its limit | `node tools/cdp_test/live/gc-trace.mjs [seconds]` |
+| `cast.mjs` | every frame the tab composed, as JPEGs with their times and sizes: a flicker a screenshot misses, and the canvas a screenshot shows black | `node tools/cdp_test/live/cast.mjs [seconds] [dir]` |
 | `worker-allocations.mjs` | what the engine worker allocates, garbage included: MiB/s and the functions that allocate most, with their callers, which is what a collector pause pays for | `node tools/cdp_test/live/worker-allocations.mjs [seconds] [top]` |
 | `allocations.mjs` | which functions of the engine worker allocate the most, garbage included | `node tools/cdp_test/live/allocations.mjs [seconds]` |
 | `big-buffers.mjs` | every backing store over a size in a worker (the engine's, or `graphics`, `executor`, `translator`), what holds it, and the whole heap summed by kind; snapshots of any size | `node tools/cdp_test/live/big-buffers.mjs [minMB] [worker]` |

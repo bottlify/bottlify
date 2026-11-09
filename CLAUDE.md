@@ -143,7 +143,8 @@ attribution are first-class.
 
 - **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` lists every
   instrument and live switch (the live ones attach to a running game without pausing it); read it
-  first and use what is there. An instrument made for a hunt that a later one could use goes into
+  first and use what is there; `tools/cdp_test/DIAGNOSING.md` is the order to look in when a run is
+  slow, flickers or stops. An instrument made for a hunt that a later one could use goes into
   `tools/` and onto that list in the same change, not into a scratch folder.
 - **One restart carries the whole hunt.** Before asking a person to restart a game, put every
   switch, counter and dump the hunt could need into that one build, and check on the running

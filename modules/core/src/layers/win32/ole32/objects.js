@@ -70,6 +70,10 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  *     The object belongs to something that is no caller -- an apartment's
  *     context -- and lives as long as that does: its count is only its
  *     callers', from zero, and reaching zero again frees nothing.
+ * @property {{ address: number, read: () => number, write: (value: number) => void }} [count]
+ *     A word of guest memory to keep the count in, for an object the program
+ *     counts thousands of times a frame: the guest's AddRef and Release take
+ *     every reference but the first and the last there, with no host call.
  */
 
 /**
@@ -84,6 +88,7 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {string} clsid
  * @property {any} state
  * @property {number} refCount
+ * @property {() => number} [countCell]  The guest word the count is kept in, 0 for none.
  * @property {boolean} destroyed
  * @property {(id: string) => ComInterface | null} interfaceFor
  * @property {(id: string) => ComInterface | null} queryInterface
@@ -172,8 +177,25 @@ export function createComObject(clsid, definition){
     /** @type {Map<string, ComInterface>} */
     const published = new Map();
     // One reference, held by whoever asked for the object: a class factory hands
-    // back an object that is already alive, and the caller releases it.
-    let refCount = definition.owned ? 0 : 1;
+    // back an object that is already alive, and the caller releases it. Kept
+    // in a word of guest memory where the definition gives one, so that the
+    // guest's AddRef and Release (`bridge/internal/vtable.js`) count without
+    // coming here but for the first reference and the last.
+    const cell = definition.count ?? null;
+    let held = definition.owned ? 0 : 1;
+    cell?.write(held);
+    const count = ()=>(cell ? cell.read() : held);
+    /** @param {number} value */
+    const setCount = value=>{
+        if (cell)
+        {
+            cell.write(value);
+        }
+        else
+        {
+            held = value;
+        }
+    };
     let destroyed = false;
 
     /** @type {ComObject} */
@@ -181,8 +203,9 @@ export function createComObject(clsid, definition){
         clsid,
         state: definition.state ?? null,
         get refCount(){
-            return refCount;
+            return count();
         },
+        countCell: ()=>(cell && !destroyed ? cell.address : 0),
         get destroyed(){
             return destroyed;
         },
@@ -240,23 +263,25 @@ export function createComObject(clsid, definition){
                 // would have kept it alive was released before this call.
                 throw new Error(`AddRef on a released object of class ${clsid}`);
             }
-            refCount++;
-            return refCount;
+            const next = count() + 1;
+            setCount(next);
+            return next;
         },
 
         release(){
-            if (destroyed || (definition.owned && refCount === 0))
+            if (destroyed || (definition.owned && count() === 0))
             {
                 return 0;
             }
-            refCount--;
+            const left = count() - 1;
+            setCount(left);
             if (definition.owned)
             {
-                return refCount;
+                return left;
             }
-            if (refCount > 0)
+            if (left > 0)
             {
-                return refCount;
+                return left;
             }
             destroyed = true;
             published.clear();
