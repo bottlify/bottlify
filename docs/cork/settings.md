@@ -27,7 +27,7 @@ shipped program to change.
 | `cacheBytes` | 256 MiB | The wasm bytes of the modules running regions are in, past which those gone longest without running are let go (0: no ceiling); the core sets a ceiling only on the iOS path below. |
 | `crossTailCalls`, `dispatch`, `callDepth` | `true`, `false`, `CallStack.LIMIT` (256) | HACK until iOS ships [WebKit PR #76671](https://github.com/WebKit/WebKit/pull/76671): iOS 27 kills the page on a tail call into another instance ([WebKit bug 325447](https://bugs.webkit.org/show_bug.cgi?id=325447)) and overflows a 512 KB worker stack, so the core gives an iPhone `crossTailCalls: false`, `dispatch: true` and `callDepth: 64`. |
 
-The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and `cork.poolDriver`
+The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolCapacity`, `cork.poolWindowMs` and `cork.poolDriver`
 beside `config`, and `quantum` and `executors` on `createApp`: see
 [`docs/core/configuration.md`](../../docs/core/configuration.md#cpu).
 

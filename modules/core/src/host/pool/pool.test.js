@@ -12,7 +12,7 @@ import { createTranslatorPool } from './pool.js';
  * A pool over workers that are cells and records: the test says how busy each
  * was, and reads what the pool told the processes.
  */
-function fakePool(perProcess = 4){
+function fakePool(perProcess = 4, extra = {}){
     let clock = 0;
     /** @type {{ posts: any[], busy: Int32Array | null, epoch: number, terminated: boolean }[]} */
     const workers = [];
@@ -23,6 +23,7 @@ function fakePool(perProcess = 4){
         now: ()=>clock,
         windowMs: 1e9,
         driver: { trialWindows: 2 },
+        ...extra,
         open: async()=>{
             const worker = { posts: /** @type {any[]} */ ([]),
                 busy: /** @type {Int32Array | null} */ (null), epoch: 0, terminated: false };
@@ -43,16 +44,20 @@ function fakePool(perProcess = 4){
             };
         },
     });
-    /** @param {number} id */
-    const add = id=>{
+    /** By process: the milliseconds it emitted on its own thread, as `demand` answers. */
+    const demands = new Map();
+    /** @param {number} id @param {boolean} [says]  whether it answers `demand` */
+    const add = (id, says = false)=>{
         const record = { lent: /** @type {number[]} */ ([]), recalled: /** @type {number[]} */ ([]) };
         seen.set(id, record);
+        demands.set(id, 0);
         return pool.addProcess(id, {
             lend: (port, token)=>{
                 port.close();
                 record.lent.push(token);
             },
             recall: token=>record.recalled.push(token),
+            ...says ? { demand: ()=>demands.get(id) ?? 0 } : {},
         });
     };
     /**
@@ -76,7 +81,53 @@ function fakePool(perProcess = 4){
         // A worker opened for a join is lent a turn later.
         await new Promise(resolve=>setImmediate(resolve));
     };
-    return { pool, workers, seen, add, window };
+    /**
+     * A window in which each process's workers were busy for these shares, by
+     * process, in the order the pool lent them to it.
+     * @param {number} ms @param {Record<number, number[]>} byProcess
+     */
+    const windowOf = async(ms, byProcess)=>{
+        for (const [id, shares] of Object.entries(byProcess))
+        {
+            const tokens = seen.get(Number(id))?.lent ?? [];
+            const recalled = new Set(seen.get(Number(id))?.recalled ?? []);
+            const live = tokens.filter(token=>!recalled.has(token));
+            shares.forEach((share, i)=>{
+                const busy = workers[workerOfToken(live[i])]?.busy;
+                if (busy)
+                {
+                    Atomics.add(busy, 0, Math.round(share * ms * 10));
+                    Atomics.add(busy, 1, Math.round(share * ms));
+                }
+            });
+        }
+        clock += ms;
+        pool.tick();
+        await new Promise(resolve=>setImmediate(resolve));
+        await new Promise(resolve=>setImmediate(resolve));
+    };
+    /** Which opened worker a token was lent through, by the order of the serve posts. */
+    const workerOfToken = (/** @type {number | undefined} */ token)=>{
+        if (token === undefined)
+        {
+            return -1;
+        }
+        // Each lend posts `serve` to its worker and then hands the process a token, one
+        // after another: the token-th serve post is the token's worker.
+        let n = 0;
+        for (const [index, worker] of workers.entries())
+        {
+            for (const message of worker.posts)
+            {
+                if (message.serve && ++n === token)
+                {
+                    return index;
+                }
+            }
+        }
+        return -1;
+    };
+    return { pool, workers, seen, add, window, windowOf, demands };
 }
 
 test('a process is lent a worker at its start, and more while its workers are busy', async()=>{
@@ -159,6 +210,85 @@ test('a batch under way counts in the window it runs in, not only once it is don
         Atomics.store(/** @type {Int32Array} */ (first.busy), 2, Math.round(began));
         await window(250, [0]);
         assert.equal(seen.get(1)?.lent.length, 2, 'it was busy: a second joins');
+    }
+    finally
+    {
+        pool.dispose();
+    }
+});
+
+test('the run has no more workers than its capacity, however many processes stand: one past'
+    + ' it waits, and a worker one gives back goes to it', async()=>{
+    const { pool, workers, seen, add } = fakePool(4, { capacity: 2 });
+    try
+    {
+        await add(1);
+        await add(2);
+        await add(3);
+        assert.equal(workers.length, 2, 'two opened, not three');
+        assert.deepEqual(pool.diagnostics().byProcess, { 1: 1, 2: 1, 3: 0 });
+        assert.equal(pool.diagnostics().waiting, 1);
+        pool.removeProcess(1);
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(seen.get(3)?.lent.length, 1, 'the third takes the one the first left');
+        assert.equal(workers.length, 2, 'still two');
+    }
+    finally
+    {
+        pool.dispose();
+    }
+});
+
+test('a process idle past its rest gives back its first worker, sleepers past one are closed,'
+    + ' and it is lent one again once it emits on its own thread', async()=>{
+    const { pool, workers, seen, add, windowOf, demands } = fakePool(4,
+        { capacity: 4, restAfterMs: 2000 });
+    try
+    {
+        await add(1, true);
+        await add(2, true);
+        await add(3, true);
+        assert.equal(workers.length, 3);
+        // The first two wait on something; the third translates. Idle from the
+        // first window's end, they rest 2 s after it.
+        for (let n = 0; n < 5; n++)
+        {
+            await windowOf(500, { 1: [0], 2: [0], 3: [0.5] });
+        }
+        assert.equal(seen.get(1)?.recalled.length, 1, 'its first, after 2 s idle');
+        assert.equal(seen.get(2)?.recalled.length, 1);
+        assert.equal(seen.get(3)?.recalled.length, 0, 'the busy one keeps its');
+        assert.deepEqual(pool.diagnostics().byProcess, { 1: 0, 2: 0, 3: 1 });
+        assert.equal(workers.filter(one=>one.terminated).length, 1,
+            'one sleeper kept, the other closed');
+        assert.equal(pool.diagnostics().workers, 2);
+        // Idle and saying nothing: no worker comes back.
+        await windowOf(500, { 3: [0.5] });
+        assert.equal(seen.get(1)?.lent.length, 1);
+        // It emitted on its own thread: it wants one, and the sleeper is lent.
+        demands.set(1, 40);
+        await windowOf(500, { 3: [0.5] });
+        assert.equal(seen.get(1)?.lent.length, 2, 'lent again');
+        assert.equal(workers.length, 3, 'the sleeper, not a new one');
+        assert.ok(pool.diagnostics().journal.some(one=>one.kind === 'rest'));
+        assert.ok(pool.diagnostics().journal.some(one=>one.kind === 'lend'));
+    }
+    finally
+    {
+        pool.dispose();
+    }
+});
+
+test('a process that cannot say what it emitted keeps its first worker', async()=>{
+    const { pool, seen, add, windowOf } = fakePool(4, { restAfterMs: 1000 });
+    try
+    {
+        await add(1);
+        for (let n = 0; n < 6; n++)
+        {
+            await windowOf(500, { 1: [0] });
+        }
+        assert.equal(seen.get(1)?.recalled.length, 0);
     }
     finally
     {

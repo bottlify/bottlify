@@ -5346,6 +5346,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         },
         seedRecords,
         attachTranslator,
+        /** The milliseconds emitted on this thread, ever: work no worker took. */
+        translatedHere: ()=>counts.emitMs,
         detachTranslator,
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the

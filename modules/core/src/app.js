@@ -123,6 +123,9 @@ const hashText = (hash, text)=>{
  * @property {number} [cork.poolPerProcess]  Workers of the run's translation pool at most
  *     for one process: the host's processors less the program's cores and two, at least one
  *     (`translatorsBeside`). A test of the pool's lending sets it.
+ * @property {number} [cork.poolCapacity]  Workers of the run's translation pool at most for
+ *     every process together: the host's processors less two, at least one
+ *     (`translatorsInRun`). A process whose workers sat idle 5 s gives back its first.
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -1830,14 +1833,28 @@ async function openTranslationPool(options){
     {
         return null;
     }
+    const host = globalThis.navigator?.hardwareConcurrency ?? 4;
     return createTranslatorPool({
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
             executors: options.cpu?.cores,
             sharedMemory: options.cork?.config?.sharedMemory,
-        }), globalThis.navigator?.hardwareConcurrency ?? 4),
+        }), host),
+        capacity: cork.poolCapacity ?? translatorsInRun(host),
     });
 }
+
+/**
+ * How many translation workers the whole run keeps at most, however many
+ * processes stand: the host's cores less the two the graphics worker and the
+ * browser's own threads take, and never fewer than one. Windows shares its
+ * processors among every process there is; a worker a process kept while it
+ * waited on a pipe was a heap of some 55 MB doing nothing -- sixteen
+ * scanners of a benchmark's system information held sixteen.
+ *
+ * @param {number} host  the host's (`navigator.hardwareConcurrency`)
+ */
+export const translatorsInRun = host=>Math.max(1, Math.floor(host) - 2);
 
 /**
  * How many translators the pool lends a process at most: the host's cores the
@@ -8897,6 +8914,12 @@ async function buildApp(options){
             }
         },
 
+        /**
+         * The milliseconds the translator emitted on this process's own
+         * thread, ever: what it did with no worker to send a batch to.
+         */
+        translatedHere: ()=>cpu.translatedHere?.() ?? 0,
+
         /** @param {number} token */
         recallTranslator(token){
             const adapter = lentTranslators.get(token);
@@ -10351,6 +10374,7 @@ export async function createApp(options){
         translationPool?.addProcess(id, {
             lend: (port, token)=>built.lendTranslator(port, token),
             recall: token=>built.recallTranslator(token),
+            demand: ()=>built.translatedHere(),
         }).catch(()=>{});
         return built;
     };

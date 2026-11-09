@@ -73,7 +73,9 @@
   transport the page handed in (`win32.network`). The run's diagnostics are the program's tables as
   it last answered (its `log` with phases and frames, and `audio`, as with one process), with the
   engine thread's own journal and sound output beside them as `system-log` and `system-audio`.
-- The run's translation workers are a pool. On a machine
+- The run's translation workers are a pool of at most the host's cores less two for every process
+  together, as Windows shares its processors: a process past them, or one that rested (its
+  workers idle 5 s), translates on its own thread until a worker is free. On a machine
   whose cores a loading game already keeps busy (four cores, measured), a second worker makes
   loading slower, and the pool gives it back after its trial; the gain is for machines with cores
   to spare and has not been measured on one yet. Only translation runs in the pool so far: bundle

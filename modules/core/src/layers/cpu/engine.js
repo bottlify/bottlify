@@ -602,6 +602,8 @@ export function engineContractProblem(engineModule, url){
  *     by the host's pool: it takes batches of its own once it has answered its first message.
  * @property {(adapter: TranslatorPort) => void} [detachTranslator]  The same worker asked
  *     back: it takes no batch from then on, and goes once the one it holds is answered.
+ * @property {() => number} [translatedHere]  The milliseconds emitted on the
+ *     machine's own thread, ever: what a pool reads as a process wanting a worker
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
  * @property {(address: number, size: number, own?: boolean) => void} stored  A write over
  *     `[address, address + size)`: the regions made of a byte it changed go; `own` when it is

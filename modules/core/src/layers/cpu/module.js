@@ -845,6 +845,18 @@ export function createCpuModule(){
                 },
 
                 /**
+                 * The milliseconds this machine's translator emitted on its own
+                 * thread, ever (`translatedHere` of the engine): a pool reads a
+                 * rise as a process that wants a worker. Zero before the
+                 * translator is up, or where it cannot say.
+                 *
+                 * @returns {number}
+                 */
+                translatedHere(){
+                    return state.cork?.translatedHere?.() ?? 0;
+                },
+
+                /**
                  * The same worker asked back: it takes no batch from now on, and
                  * goes once the one it holds is answered.
                  *

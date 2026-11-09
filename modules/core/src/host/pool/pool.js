@@ -5,19 +5,26 @@
  */
 
 /**
- * The run's pool of translation workers. Each process
- * has a worker of the pool from its start to its exit; more join it while its
- * translation lags and leave when it subsides, as the driver decides
- * (`driver.js`). A worker works for one process at a time, over a port of
- * its own: the pool hands one end to the worker and the other to the process,
- * whose runtime takes it as a translator (`attachTranslator`) and gives it
- * back when asked (`detachTranslator`). A worker that works for no process
- * sleeps in the pool, holding nothing of any process -- what translation
- * keeps is the process's arena, not the worker's.
+ * The run's pool of translation workers, at most `capacity` for the whole run
+ * (the host's cores), as Windows shares its processors among however many
+ * processes there are. A process is lent a worker at its start where one is
+ * free; more join it while its translation lags and leave when it subsides, as
+ * the driver decides (`driver.js`). A process whose workers sat idle for
+ * `restAfterMs` -- one waiting on a pipe, a service between requests -- gives
+ * back its first too, and translates on its own thread until it is lent one
+ * again: when it says it emitted there (`PoolProcess.demand`), as soon as a
+ * worker is free. A process that cannot say keeps its first to its exit. A
+ * worker works for one process at a time, over a port of its own: the pool
+ * hands one end to the worker and the other to the process, whose runtime takes
+ * it as a translator (`attachTranslator`) and gives it back when asked
+ * (`detachTranslator`). A worker that works for no process sleeps in the pool,
+ * holding nothing of any process -- what translation keeps is the process's
+ * arena, not the worker's -- and one sleeper is kept: the others go, each a
+ * heap of its own (some 55 MB in a browser).
  *
- * Each worker adds the microseconds it works to a cell of shared memory, so
- * the driver reads how busy each was over a window without asking. Every
- * decision is kept in the pool's journal.
+ * Each worker adds the microseconds it works to a cell of shared memory, so the
+ * driver reads how busy each was over a window without asking. Every decision
+ * is kept in the pool's journal.
  */
 
 import { createDriverState, decide } from './driver.js';
@@ -34,6 +41,9 @@ import { createDriverState, decide } from './driver.js';
  *     process's end of a worker's; the token names it when it is asked back
  * @property {(token: number) => void} recall  the worker named by the token is
  *     asked back: the runtime takes no batch through it from then on
+ * @property {() => number} [demand]  the milliseconds it has emitted on its own
+ *     thread, ever: a rise while it has no worker asks for one. Without it the
+ *     process keeps its first worker to its exit.
  */
 
 /**
@@ -48,27 +58,41 @@ import { createDriverState, decide } from './driver.js';
  * @property {number} share  its busy share of the last window
  * @property {number | null} process  the process it works for, or null
  * @property {number} token
+ * @property {boolean} promised  taken for a process and not lent yet
  */
 
 /**
- * @param {{ open: () => Promise<PoolWorker>, perProcess: number, windowMs?: number,
- *     now?: () => number, journalSize?: number,
+ * @param {{ open: () => Promise<PoolWorker>, perProcess: number, capacity?: number,
+ *     windowMs?: number, restAfterMs?: number, now?: () => number, journalSize?: number,
  *     driver?: Partial<import('./driver.js').DriverSettings> }} options
  *     open: a new translation worker; perProcess: workers at most for one process (the
- *     host's concurrency); windowMs: how often the driver reads the workers
+ *     host's concurrency); capacity: workers at most for the run (perProcess when not given);
+ *     windowMs: how often the driver reads the workers; restAfterMs: how long a process's
+ *     workers sit idle before it gives back its first
  */
-export function createTranslatorPool({ open, perProcess, windowMs = 500,
-    now = ()=>performance.now(), journalSize = 256, driver = {} })
+export function createTranslatorPool({ open, perProcess, capacity, windowMs = 500,
+    restAfterMs = 5000, now = ()=>performance.now(), journalSize = 256, driver = {} })
 {
+    const most = Math.max(1, capacity ?? perProcess);
+    /** A share this low is a worker with nothing to do, as the driver counts it. */
+    const idleShare = driver.idleBelow ?? 0.02;
     /** @type {PoolEntry[]} */
     const entries = [];
-    /** By process: how it is reached, and its workers, its first first. */
-    /** @type {Map<number, { reach: PoolProcess, workers: PoolEntry[], joining: number }>} */
+    /**
+     * By process: how it is reached, its workers (its first first), the
+     * workers opening for it, since when all of them were idle, whether it
+     * waits for one, and its demand as last read.
+     *
+     * @type {Map<number, { reach: PoolProcess, workers: PoolEntry[], joining: number,
+     *     idleSince: number | null, wanting: boolean, demandSeen: number,
+     *     started: boolean }>}
+     */
     const processes = new Map();
     const state = createDriverState();
     /** @type {{ at: number, kind: string, process: number, workers: number }[]} */
     const journal = [];
-    const counts = { opened: 0, joins: 0, leaves: 0, lent: 0 };
+    const counts = { opened: 0, joins: 0, leaves: 0, lent: 0, rests: 0, closed: 0,
+        refused: 0 };
     let tokens = 0;
     let disposed = false;
     /** @type {ReturnType<typeof setInterval> | null} */
@@ -94,19 +118,40 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
         }
     };
 
-    /** A worker no process has, or a new one. @returns {Promise<PoolEntry>} */
+    /** Workers opening, counted against the run's capacity before they are there. */
+    let opening = 0;
+    /**
+     * A worker no process has, or a new one while the run has fewer than its
+     * capacity; null when it has them all at work.
+     *
+     * @returns {Promise<PoolEntry | null>}
+     */
     const take = async()=>{
-        const idle = entries.find(entry=>entry.process === null);
+        const idle = entries.find(entry=>entry.process === null && !entry.promised);
         if (idle !== undefined)
         {
             return idle;
         }
-        const worker = await open();
+        if (entries.length + opening >= most)
+        {
+            counts.refused++;
+            return null;
+        }
+        opening++;
+        let worker;
+        try
+        {
+            worker = await open();
+        }
+        finally
+        {
+            opening--;
+        }
         const cell = new SharedArrayBuffer(16);
         worker.post({ busy: { buffer: cell, index: 0, epoch } }, []);
         /** @type {PoolEntry} */
         const entry = { worker, busy: new Int32Array(cell), seen: 0, emitted: 0, share: 0,
-            process: null, token: 0 };
+            process: null, token: 0, promised: false };
         entries.push(entry);
         counts.opened++;
         return entry;
@@ -114,11 +159,14 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
 
     /** @param {PoolEntry} entry @param {number} id */
     const lend = (entry, id)=>{
+        entry.promised = false;
         const at = processes.get(id);
         if (at === undefined || disposed)
         {
             return;
         }
+        at.wanting = false;
+        at.idleSince = null;
         const channel = new MessageChannel();
         entry.process = id;
         entry.token = ++tokens;
@@ -146,17 +194,54 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
         entry.process = null;
     };
 
-    /** Idle workers past the pool's ceiling go: perProcess × the processes, at least one. */
+    /** Sleeping workers past one go: each holds a heap of its own. */
     const trim = ()=>{
-        const ceiling = Math.max(1, perProcess * processes.size);
-        for (let i = entries.length - 1; i >= 0 && entries.length > ceiling; i--)
+        let kept = 0;
+        for (let i = 0; i < entries.length; i++)
         {
-            if (entries[i].process === null)
+            if (entries[i].process !== null || entries[i].promised)
             {
-                entries[i].worker.terminate();
-                entries.splice(i, 1);
+                continue;
             }
+            if (kept === 0)
+            {
+                kept++;
+                continue;
+            }
+            entries[i].worker.terminate();
+            entries.splice(i, 1);
+            i--;
+            counts.closed++;
         }
+    };
+
+    /**
+     * A worker for a process with none, where one is free: it is lent at once,
+     * or the process waits for the next free one.
+     *
+     * @param {number} id
+     */
+    const lendFirst = id=>{
+        const at = processes.get(id);
+        if (at === undefined || at.joining > 0)
+        {
+            return Promise.resolve();
+        }
+        at.joining++;
+        at.wanting = true;
+        return take().then(entry=>{
+            at.joining--;
+            if (entry === null)
+            {
+                return;
+            }
+            entry.promised = true;
+            lend(entry, id);
+            note(at.started ? 'lend' : 'start', id);
+            at.started = true;
+        }, ()=>{
+            at.joining--;
+        });
     };
 
     /** One window: how busy each process's workers were, and what the driver decides. */
@@ -182,13 +267,56 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
                 return entry.share;
             });
             // A worker still opening for it has not worked yet: the process is
-            // sampled again once it is there.
-            if (joining === 0)
+            // sampled again once it is there. One with none is not the driver's.
+            if (joining === 0 && shares.length > 0)
             {
                 samples.push({ id, shares, rate: emitted / span * 1000 });
             }
         }
-        for (const decision of decide(state, samples, ended, { perProcess, ...driver }))
+        // Rests and wants: a process whose workers all sat idle long enough
+        // gives back its first too; one with none that emitted on its own
+        // since the last look asks for one.
+        for (const [id, at] of processes)
+        {
+            const demand = at.reach.demand;
+            if (demand === undefined)
+            {
+                if (at.workers.length === 0 && at.joining === 0)
+                {
+                    at.wanting = true;
+                }
+                continue;
+            }
+            if (at.workers.length === 0)
+            {
+                const value = demand();
+                if (value > at.demandSeen)
+                {
+                    at.wanting = true;
+                }
+                at.demandSeen = value;
+                continue;
+            }
+            if (at.joining > 0 || at.workers.some(entry=>entry.share >= idleShare))
+            {
+                at.idleSince = null;
+                continue;
+            }
+            at.idleSince ??= ended;
+            if (ended - at.idleSince >= restAfterMs)
+            {
+                for (const entry of [...at.workers])
+                {
+                    giveBack(entry);
+                }
+                at.idleSince = null;
+                at.demandSeen = demand();
+                counts.rests++;
+                note('rest', id);
+            }
+        }
+        for (const decision of decide(state, samples, ended,
+            { perProcess, capacity: most, ...driver }))
         {
             const id = decision.process;
             const at = processes.get(id);
@@ -202,8 +330,12 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
                 at.joining++;
                 take().then(entry=>{
                     at.joining--;
-                    lend(entry, id);
-                    note('join', id);
+                    if (entry !== null)
+                    {
+                        entry.promised = true;
+                        lend(entry, id);
+                        note('join', id);
+                    }
                 }, ()=>{
                     at.joining--;
                 });
@@ -218,6 +350,14 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
                 note('leave', id);
             }
         }
+        for (const [id, at] of processes)
+        {
+            if (at.wanting && at.workers.length === 0)
+            {
+                lendFirst(id);
+            }
+        }
+        trim();
     };
 
     return {
@@ -231,12 +371,11 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
             {
                 return;
             }
-            processes.set(id, { reach, workers: [], joining: 0 });
+            processes.set(id, { reach, workers: [], joining: 0, idleSince: null, wanting: true,
+                demandSeen: 0, started: false });
             timer ??= setInterval(tick, windowMs);
             /** @type {any} */ (timer).unref?.();
-            const entry = await take();
-            lend(entry, id);
-            note('start', id);
+            await lendFirst(id);
         },
         /**
          * A process is over: its workers go back to the pool, and those past
@@ -254,6 +393,14 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
                 entry.process = null;
             }
             processes.delete(id);
+            // A worker it gave back goes to one that waits for it.
+            for (const [other, each] of processes)
+            {
+                if (each.wanting && each.workers.length === 0)
+                {
+                    lendFirst(other);
+                }
+            }
             state.lowSince.delete(id);
             note('exit', id);
             trim();
@@ -268,7 +415,9 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
         diagnostics(){
             return {
                 workers: entries.length,
+                capacity: most,
                 idle: entries.filter(entry=>entry.process === null).length,
+                waiting: [...processes.values()].filter(at=>at.workers.length === 0).length,
                 byProcess: Object.fromEntries([...processes].map(([id, { workers }])=>
                     [id, workers.length])),
                 ...counts,
