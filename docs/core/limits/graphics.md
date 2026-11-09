@@ -21,6 +21,9 @@
 - Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10, 11 and OpenGL in the graphics worker.
 - Direct3D 10's command ring, which Direct3D 11's immediate context shares, is i386 code: a
   64-bit process traps every device and context call. A deferred context's calls trap.
+- Shader model 5's doubles are exact (rounded to nearest, denormals kept) but worked out in
+  integers, so much slower than floats. A shader's interfaces are translated for the class
+  instances bound with it, but none can be made yet: `CreateClassInstance` answers `E_NOTIMPL`.
 - `D3DX10CompileFromMemory` and `D3DX11CompileFromMemory` (and `...FromFile`) compile through
   the program's own `d3dcompiler_43.dll`; without one they answer `E_FAIL` with an error blob
   saying so. A program that ships its shaders compiled asks only for what its cache lacks.

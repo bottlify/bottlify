@@ -172,6 +172,15 @@ test('fcall names its call site before its interface operand; class linkage decl
     assert.equal(table.operands.length, 0);
 });
 
+test('a double immediate of four components is two doubles, four dwords', ()=>{
+    // dmov r0.xyzw, d(1.0, 2.0); ret
+    const [move, after] = decodeSm4(new Uint32Array([0x080000c7, 0x001000f2, 0, 0x00005002,
+        0, 0x3ff00000, 0, 0x40000000, 0x0100003e]));
+    assert.equal(move.name, 'dmov');
+    assert.deepEqual(move.operands[1].immediate, [0, 0x3ff00000, 0, 0x40000000]);
+    assert.equal(after.opcode, OPCODE.RET);
+});
+
 test('the double opcodes are named, the extended set too', ()=>{
     assert.equal(decodeSm4(new Uint32Array([0x010000bf]))[0].name, 'dadd');
     assert.equal(decodeSm4(new Uint32Array([0x010000d2]))[0].name, 'ddiv');

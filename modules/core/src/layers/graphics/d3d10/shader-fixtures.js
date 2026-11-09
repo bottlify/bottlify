@@ -134,16 +134,29 @@ export const lu = (...values)=>({
     immediate: values.map(value=>value >>> 0),
 });
 
+/** @param {number[]} values one or two doubles @returns {AsmOperand} */
+export const dl = (...values)=>({
+    type: OPERAND.IMMEDIATE64,
+    indices: [],
+    immediate: values.flatMap(value=>{
+        const words = new DataView(new ArrayBuffer(8));
+        words.setFloat64(0, value, true);
+        return [words.getUint32(0, true), words.getUint32(4, true)];
+    }),
+});
+
 /** @param {AsmOperand} operand @param {boolean} destination */
 function encodeOperand(operand, destination){
     /** @type {number[]} */
     const words = [];
-    const isImmediate = operand.type === OPERAND.IMMEDIATE32;
+    const isImmediate = operand.type === OPERAND.IMMEDIATE32
+        || operand.type === OPERAND.IMMEDIATE64;
     let token = 0;
     if (isImmediate)
     {
+        // A dword or a double is one component; four dwords or two doubles four.
         const count = /** @type {number[]} */ (operand.immediate).length;
-        token |= count === 1 ? 1 : 2;
+        token |= count === (operand.type === OPERAND.IMMEDIATE64 ? 2 : 1) ? 1 : 2;
     }
     else if (operand.type === OPERAND.SAMPLER && operand.swizzle)
     {
@@ -340,6 +353,25 @@ export const ftou = arithmetic(OPCODE.FTOU);
 export const roundNe = arithmetic(OPCODE.ROUND_NE);
 export const roundNi = arithmetic(OPCODE.ROUND_NI);
 export const umin = arithmetic(OPCODE.UMIN);
+export const dadd = arithmetic(OPCODE.DADD);
+export const dmul = arithmetic(OPCODE.DMUL);
+export const ddiv = arithmetic(OPCODE.DDIV);
+export const drcp = arithmetic(OPCODE.DRCP);
+export const dfma = arithmetic(OPCODE.DFMA);
+export const dmin = arithmetic(OPCODE.DMIN);
+export const dmax = arithmetic(OPCODE.DMAX);
+export const dmov = arithmetic(OPCODE.DMOV);
+export const dmovc = arithmetic(OPCODE.DMOVC);
+export const deq = arithmetic(OPCODE.DEQ);
+export const dne = arithmetic(OPCODE.DNE);
+export const dlt = arithmetic(OPCODE.DLT);
+export const dge = arithmetic(OPCODE.DGE);
+export const dtof = arithmetic(OPCODE.DTOF);
+export const dtoi = arithmetic(OPCODE.DTOI);
+export const dtou = arithmetic(OPCODE.DTOU);
+export const ftod = arithmetic(OPCODE.FTOD);
+export const itod = arithmetic(OPCODE.ITOD);
+export const utod = arithmetic(OPCODE.UTOD);
 export const umax = arithmetic(OPCODE.UMAX);
 
 /** @param {AsmOperand} dest @param {AsmOperand[]} sources */

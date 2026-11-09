@@ -2713,6 +2713,21 @@ test('a shader model 4 program that reads raw memory is refused below level 11, 
     assert.equal(made(0xa000, solidPixelShader([1, 0, 0, 1])), S_OK);
 });
 
+test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0, not at 10.x',
+    ()=>{
+        /** @param {number} level */
+        const doubles = level=>{
+            /** @type {any} */
+            const out = { wantDevice: true };
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            const answer = out.device.CheckFeatureSupport(1, new Uint8Array(4));
+            out.device.release();
+            return [answer.hr, answer.data[0]];
+        };
+        assert.deepEqual(doubles(0xb000), [S_OK, 1]);
+        assert.deepEqual(doubles(0xa100), [S_OK, 0]);
+    });
+
 test('a texture made shared is opened by another device of the same root over the same'
     + ' bytes, by the kind of handle it was made for (test_shared_resource)', async()=>{
     const options = {};

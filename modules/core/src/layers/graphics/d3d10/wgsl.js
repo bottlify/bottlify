@@ -42,6 +42,7 @@ import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
     SYNC_FLAG, decodeSm4,
 } from './sm4.js';
+import { DOUBLE_HELPERS } from './wgsl-doubles.js';
 
 /** Every register file is thirty-two bit patterns, four to a register. */
 const REG = 'vec4<u32>';
@@ -247,6 +248,7 @@ export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
  * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
  */
 export const HELPERS = Object.freeze({
+    ...DOUBLE_HELPERS,
     // How fast a cube's face coordinates move, d(minor / major), for a
     // coordinate c moving by d; the major axis is the longest, x before y
     // before z on a tie, as the face selection takes it.
@@ -701,6 +703,11 @@ export function translateShader(container, options = {}){
                 return `csLocal.${swizzle}`;
             case OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED:
                 return `${REG}(csFlat).${swizzle}`;
+            case OPERAND.IMMEDIATE64:
+                // A double's dwords, low first; one double is both halves.
+                return `${REG}(${(operand.immediate.length === 2
+                    ? [...operand.immediate, ...operand.immediate] : operand.immediate)
+                    .map(u32Literal).join(', ')})`;
             case OPERAND.IMMEDIATE32:
                 if (operand.immediate.length === 1)
                 {
@@ -997,6 +1004,153 @@ export function translateShader(container, options = {}){
         }
         HELPERS[name].needs.forEach(need);
         result.helpers.push(name);
+    };
+
+    /**
+     * A double source's four dwords, two doubles, its modifier applied to
+     * each one's sign bit.
+     *
+     * @param {import('./sm4.js').Operand} operand
+     */
+    const doubleSource = operand=>{
+        const bits = untyped(operand);
+        const signs = `${REG}(0u, 0x80000000u, 0u, 0x80000000u)`;
+        switch (operand.modifier)
+        {
+            case MODIFIER.NEG:
+                return `(${bits} ^ ${signs})`;
+            case MODIFIER.ABS:
+                return `(${bits} & ~${signs})`;
+            case MODIFIER.ABSNEG:
+                return `(${bits} | ${signs})`;
+            default:
+                return bits;
+        }
+    };
+
+    /** @param {import('./sm4.js').Operand} operand  Each held once, as doubles. */
+    const heldDouble = operand=>{
+        const name = held();
+        emit(`let ${name} = ${doubleSource(operand)};`);
+        return name;
+    };
+
+    /** @param {number} half  0 for the double in .xy, 1 for the one in .zw */
+    const halfOf = half=>(half === 0 ? 'xy' : 'zw');
+
+    /**
+     * An instruction whose result is doubles: .xy, .zw or both, each the
+     * double in the same place of the swizzled sources. `dmovc`'s condition
+     * is a dword a double: x for the first, y for the second.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const doubleResult = instruction=>{
+        const [target, ...sources] = instruction.operands;
+        const opcode = instruction.opcode;
+        const condition = opcode === OPCODE.DMOVC ? held() : null;
+        if (condition)
+        {
+            emit(`let ${condition} = ${u(sources[0])};`);
+        }
+        const [a, b, c] = (condition ? sources.slice(1) : sources).map(heldDouble);
+        const entry = { [OPCODE.DADD]: 'dblAdd', [OPCODE.DMUL]: 'dblMul', [OPCODE.DDIV]: 'dblDiv',
+            [OPCODE.DRCP]: 'dblDiv', [OPCODE.DFMA]: 'dblFma', [OPCODE.DMIN]: 'dblCompare',
+            [OPCODE.DMAX]: 'dblCompare' }[opcode];
+        if (entry)
+        {
+            need(entry);
+        }
+        if (instruction.saturate)
+        {
+            need('dblCompare');
+        }
+        /** @param {number} half */
+        const one = half=>{
+            const at = halfOf(half);
+            /** @type {Record<number, () => string>} */
+            const ways = {
+                [OPCODE.DADD]: ()=>`dblAdd(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMUL]: ()=>`dblMul(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DDIV]: ()=>`dblDiv(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DRCP]: ()=>`dblDiv(vec2<u32>(0u, 0x3ff00000u), ${a}.${at})`,
+                [OPCODE.DFMA]: ()=>`dblFma(${a}.${at}, ${b}.${at}, ${c}.${at})`,
+                [OPCODE.DMIN]: ()=>`dblMin(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMAX]: ()=>`dblMax(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMOV]: ()=>`${a}.${at}`,
+                [OPCODE.DMOVC]: ()=>`select(${b}.${at}, ${a}.${at},`
+                    + ` ${condition}.${COMPONENT[half]} != 0u)`,
+            };
+            const value = ways[opcode]();
+            return instruction.saturate ? `dblSaturate(${value})` : value;
+        };
+        const halves = [(target.mask & 0x3) !== 0, (target.mask & 0xc) !== 0];
+        store(target, `${REG}(${halves.map((wanted, half)=>(wanted ? one(half)
+            : 'vec2<u32>(0u)')).join(', ')})`);
+    };
+
+    /**
+     * An instruction of doubles whose result is a dword each: the first
+     * component the mask writes takes the first double, the second the
+     * second.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const wordsOfDoubles = instruction=>{
+        const [target, ...sources] = instruction.operands;
+        const opcode = instruction.opcode;
+        const [a, b] = sources.map(heldDouble);
+        need(opcode === OPCODE.DTOF || opcode === OPCODE.DTOI || opcode === OPCODE.DTOU
+            ? 'dblConvert' : 'dblCompare');
+        /** @param {string} test */
+        const all = test=>`select(0u, 0xffffffffu, ${test})`;
+        /** @param {number} half */
+        const one = half=>{
+            const at = halfOf(half);
+            switch (opcode)
+            {
+                case OPCODE.DEQ:
+                    return all(`dblEqual(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DNE:
+                    return all(`!dblEqual(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DLT:
+                    return all(`dblLess(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DGE:
+                    return all(`!(dblNan(${a}.${at}) || dblNan(${b}.${at})`
+                        + ` || dblLess(${a}.${at}, ${b}.${at}))`);
+                case OPCODE.DTOF:
+                    return instruction.saturate
+                        ? `bitcast<u32>(clamp(bitcast<f32>(dblToFloat(${a}.${at})), 0.0, 1.0))`
+                        : `dblToFloat(${a}.${at})`;
+                case OPCODE.DTOI:
+                    return `dblToInt(${a}.${at})`;
+                default:
+                    return `dblToUint(${a}.${at})`;
+            }
+        };
+        let written = 0;
+        store(target, `${REG}(${COMPONENT.map((_, place)=>((target.mask & (1 << place)) === 0
+            ? '0u' : one(written++))).join(', ')})`);
+    };
+
+    /**
+     * A double from a dword: x makes the double in .xy, y the one in .zw.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const doublesOfWords = instruction=>{
+        const [target, source] = instruction.operands;
+        need('dblConvert');
+        const words = held();
+        const opcode = instruction.opcode;
+        emit(`let ${words} = ${opcode === OPCODE.FTOD ? (modifiedRead(source)
+            ? `bitcast<${REG}>(${f(source)})` : u(source))
+            : opcode === OPCODE.ITOD ? `bitcast<${REG}>(${i(source)})` : u(source)};`);
+        const convert = { [OPCODE.FTOD]: 'dblFromFloat', [OPCODE.ITOD]: 'dblFromInt',
+            [OPCODE.UTOD]: 'dblFromUint' }[opcode];
+        const halves = [(target.mask & 0x3) !== 0, (target.mask & 0xc) !== 0];
+        store(target, `${REG}(${halves.map((wanted, half)=>(wanted
+            ? `${convert}(${words}.${COMPONENT[half]})` : 'vec2<u32>(0u)')).join(', ')})`);
     };
 
     /**
@@ -1564,6 +1718,33 @@ export function translateShader(container, options = {}){
                         result.immediateConstants.push(data.slice(row, row + 4));
                     }
                 }
+                break;
+
+            // --- doubles (wgsl-doubles.js) ---
+            case OPCODE.DADD:
+            case OPCODE.DMUL:
+            case OPCODE.DDIV:
+            case OPCODE.DRCP:
+            case OPCODE.DFMA:
+            case OPCODE.DMIN:
+            case OPCODE.DMAX:
+            case OPCODE.DMOV:
+            case OPCODE.DMOVC:
+                doubleResult(instruction);
+                break;
+            case OPCODE.DEQ:
+            case OPCODE.DNE:
+            case OPCODE.DLT:
+            case OPCODE.DGE:
+            case OPCODE.DTOF:
+            case OPCODE.DTOI:
+            case OPCODE.DTOU:
+                wordsOfDoubles(instruction);
+                break;
+            case OPCODE.FTOD:
+            case OPCODE.ITOD:
+            case OPCODE.UTOD:
+                doublesOfWords(instruction);
                 break;
 
             // --- moves ---

@@ -455,7 +455,8 @@ export function decodeOperand(tokens, at){
     }
     else if (type === OPERAND.IMMEDIATE64)
     {
-        const count = (componentCount === 0 ? 1 : componentCount) * 2;
+        // One double, or two (a vec4 of dwords): never four.
+        const count = componentCount === 0 || componentCount === 1 ? 2 : 4;
         for (let index = 0; index < count; index++)
         {
             immediate.push(tokens[next++]);

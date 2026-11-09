@@ -36,7 +36,8 @@ import {
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
     rasterizer, sampleInfo, samplePos, dclInputPsSgv, lod, evalCentroid, evalSampleIndex,
     evalSnapped, dclFunctionBody, dclFunctionTable, dclInterface, fcall, functionBody,
-    thisPointer,
+    thisPointer, dadd, dmul, dfma, drcp, dmovc, dmax, dmov, dl, deq, dge, dne, dlt, dtof, dtoi,
+    dtou, ftod, itod, utod,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
     atomicIadd, dclGlobalFlags, dclIndexRange, oMask, vCoverage, dclUavTyped, ldUavTyped,
@@ -1388,6 +1389,57 @@ test('fcall writes the body the bound instance\'s table names for the call site;
         ['an interface call, with no class instances given']);
     assert.deepEqual(linked([fcall(0, 0, 0)], [{ table: 7, data: [0, 0, 0, 0] }]).unsupported,
         ['class instance table 7 at slot 0, which its interface does not take']);
+});
+
+test('a double instruction works on .xy and .zw as doubles, the source swizzled first, a'
+    + ' modifier on each double\'s sign; only the doubles the mask writes are worked', ()=>{
+    const both = translate([dadd(r(0), r(1, 'zwxy'), modified(r(2), MODIFIER.NEG))]);
+    assert.deepEqual(both.unsupported, []);
+    assert.ok(both.helpers.includes('dblAdd') && both.helpers.indexOf('u64')
+        < both.helpers.indexOf('dblAdd'), 'the helpers, callees first');
+    assert.equal(bodyOf(both), [
+        'let held0 = r1.zwxy;',
+        'let held1 = (r2.xyzw ^ vec4<u32>(0u, 0x80000000u, 0u, 0x80000000u));',
+        'r0 = vec4<u32>(dblAdd(held0.xy, held1.xy), dblAdd(held0.zw, held1.zw));',
+    ].join('\n'));
+    assert.match(emitted([dmul(r(0, 'zw'), modified(r(1), MODIFIER.ABS), r(2))]),
+        /held2 = vec4<u32>\(vec2<u32>\(0u\), dblMul\(held0\.zw, held1\.zw\)\);\nr0\.z = held2\.z;\nr0\.w = held2\.w;/);
+    assert.match(emitted([dfma(r(0, 'xy'), r(1), r(2), r(3))]),
+        /dblFma\(held0\.xy, held1\.xy, held2\.xy\), vec2<u32>\(0u\)\)/);
+    assert.match(emitted([drcp(r(0), r(1))]), /dblDiv\(vec2<u32>\(0u, 0x3ff00000u\), held0\.zw\)/);
+    assert.match(emitted([dmovc(r(0), r(1), r(2), r(3))]),
+        /select\(held2\.xy, held1\.xy, held0\.x != 0u\), select\(held2\.zw, held1\.zw, held0\.y != 0u\)/);
+    assert.match(bodyOf(translate([{ ...dmax(r(0), r(1), r(2)), saturate: true }])),
+        /dblSaturate\(dblMax\(held0\.xy, held1\.xy\)\)/);
+    assert.equal(emitted([dmov(r(0), dl(1, -2))]),
+        'let held0 = vec4<u32>(0u, 1072693248u, 0u, 3221225472u);\n'
+        + 'r0 = vec4<u32>(held0.xy, held0.zw);');
+});
+
+test('a double comparison or conversion to a dword writes the first double to the mask\'s first'
+    + ' component, the second to its second; a dword makes a double by place', ()=>{
+    assert.match(emitted([deq(r(0, 'yw'), r(1), r(2))]),
+        /vec4<u32>\(0u, select\(0u, 0xffffffffu, dblEqual\(held0\.xy, held1\.xy\)\), 0u, select\(0u, 0xffffffffu, dblEqual\(held0\.zw, held1\.zw\)\)\)/);
+    assert.match(emitted([dge(r(0, 'x'), r(1), r(2))]),
+        /!\(dblNan\(held0\.xy\) \|\| dblNan\(held1\.xy\) \|\| dblLess\(held0\.xy, held1\.xy\)\)/);
+    assert.match(emitted([dne(r(0, 'x'), r(1), r(2))]), /!dblEqual\(held0\.xy, held1\.xy\)/);
+    assert.match(emitted([dlt(r(0, 'z'), r(1), r(2))]),
+        /vec4<u32>\(0u, 0u, select\(0u, 0xffffffffu, dblLess\(held0\.xy, held1\.xy\)\), 0u\)/);
+    const converted = translate([dtof(r(0, 'xy'), r(1)), dtoi(r(2, 'x'), r(1, 'zwzw')),
+        dtou(r(3, 'x'), r(1))]);
+    assert.ok(converted.helpers.includes('dblConvert'));
+    assert.match(bodyOf(converted),
+        /vec4<u32>\(dblToFloat\(held0\.xy\), dblToFloat\(held0\.zw\), 0u, 0u\)/);
+    assert.match(bodyOf(converted), /dblToInt\(held\d\.xy\)/);
+    assert.match(bodyOf(converted), /dblToUint\(held\d\.xy\)/);
+    assert.equal(emitted([ftod(r(0), r(1, 'yxzw'))]),
+        'let held0 = r1.yxzw;\nr0 = vec4<u32>(dblFromFloat(held0.x), dblFromFloat(held0.y));');
+    assert.match(emitted([itod(r(0, 'zw'), r(1))]),
+        /vec4<u32>\(vec2<u32>\(0u\), dblFromInt\(held0\.y\)\)/);
+    assert.match(emitted([utod(r(0, 'xy'), r(1))]),
+        /vec4<u32>\(dblFromUint\(held0\.x\), vec2<u32>\(0u\)\)/);
+    assert.match(emitted([ftod(r(0), modified(r(1), MODIFIER.NEG))]),
+        /let held0 = bitcast<vec4<u32>>\(\(-bitcast<vec4<f32>>\(r1\.xyzw\)\)\);/);
 });
 
 test('sampleinfo and samplepos read the rasterizer\'s sample count, fixed at link, or the'
