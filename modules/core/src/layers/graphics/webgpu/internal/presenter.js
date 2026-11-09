@@ -445,7 +445,7 @@ export function createPresenter(options = {}){
      * @typedef {{ backend: (() => any) | null,
      *     readMemory: (address: number, length: number) => Uint8Array,
      *     windowMemory?: (address: number, length: number) => Uint8Array,
-     *     claims: Map<number, () => unknown>, live: boolean }} Attachment
+     *     claims: Map<number, () => unknown>, live: boolean, source?: number }} Attachment
      */
     /** @type {Attachment[]} the construction's own first, the newest last */
     const attachments = [{
@@ -737,6 +737,8 @@ export function createPresenter(options = {}){
         });
         counters.uploads++;
         counters.bytes += needed;
+        const by = from.source === undefined ? 'unnamed' : String(from.source);
+        uploadsFrom[by] = (uploadsFrom[by] ?? 0) + 1;
         // Nothing recorded rides on it: the cuts the renderers made are
         // counted by their own frames.
         const frame = using.beginFrame({ cut: null });
@@ -887,6 +889,8 @@ export function createPresenter(options = {}){
     const layers = new Map();
     /** @type {Record<string, number>} frames shown or kept, by the process that drew them */
     const framesFrom = {};
+    /** @type {Record<string, number>} pictures uploaded from guest memory, by whose machine */
+    const uploadsFrom = {};
     /** @type {{ texture: any, width: number, height: number, format: string } | null} */
     let composed = null;
 
@@ -976,7 +980,7 @@ export function createPresenter(options = {}){
      * more than one process has a window showing, else the base picture.
      */
     const reshow = ()=>{
-        if (!options.windows || !gpu || !queue || !screen || layers.size === 0)
+        if (!options.windows || !gpu || !queue || layers.size === 0)
         {
             return;
         }
@@ -1007,7 +1011,10 @@ export function createPresenter(options = {}){
     const show = frame=>{
         const from = frame.source === undefined ? 'unnamed' : String(frame.source >>> 0);
         framesFrom[from] = (framesFrom[from] ?? 0) + 1;
-        if (frame.source === undefined || !options.windows || !gpu || !queue || !screen)
+        // Composed wherever there is a GPU: a page with no canvas of its
+        // own -- a harness reading the frames back -- is handed the composed
+        // screen as a canvas would be shown it, not each process's in turn.
+        if (frame.source === undefined || !options.windows || !gpu || !queue)
         {
             showNow(frame);
             return;
@@ -1099,14 +1106,15 @@ export function createPresenter(options = {}){
          * claimed are no longer its GPU's.
          *
          * @param {{ backend: () => any, readMemory: (address: number, length: number)
-         *     => Uint8Array, windowMemory?: (address: number, length: number) => Uint8Array }} deps
+         *     => Uint8Array, windowMemory?: (address: number, length: number) => Uint8Array,
+         *     source?: number }} deps  `source`, the machine's process, counts its uploads
          *     `windowMemory`, where the machine has one, is the bytes themselves
          *     rather than a copy: a present reads the surface through it at once.
          */
-        attach({ backend: accessor, readMemory: reader, windowMemory }){
+        attach({ backend: accessor, readMemory: reader, windowMemory, source }){
             /** @type {Attachment} */
             const own = { backend: accessor, readMemory: reader, windowMemory, claims: new Map(),
-                live: true };
+                live: true, source };
             attachments.push(own);
             return {
                 ...machineView(own),
@@ -1209,6 +1217,7 @@ export function createPresenter(options = {}){
                 // Whose frames reached the canvas copy, by process, and whose
                 // pictures are kept to compose the screen of.
                 framesFrom: { ...framesFrom },
+                uploadsFrom: { ...uploadsFrom },
                 layers: [...layers.keys()],
                 composes: Boolean(options.windows),
                 shownBy: { ...shownBy },

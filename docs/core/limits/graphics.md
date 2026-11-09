@@ -5,7 +5,10 @@
   screen from each process's newest picture, the topmost last; the canvas takes the size of the
   foreground window's process's picture. A process's picture is what it presented last, whole: a
   windowed Direct3D device's back buffer is placed at the screen's corner rather than in its
-  window, and the windows of a process that has presented nothing show what is under them.
+  window, and the windows of a process that has presented nothing show what is under them. A
+  DXGI swap chain's window that is full screen, or windowed with its client area over the whole
+  screen and no window over it, keeps the swap chain's frames on the screen when GDI paints the
+  desktop; a smaller windowed swap chain's frames are replaced by the desktop at each paint.
 - No Direct3D 12. Direct3D 11 makes devices at feature levels 11.0, 10.1 and 10.0; a program
   that asks only for 11.1 or the 9.x levels is refused. Its deferred contexts record calls that
   the immediate context plays (`DriverCommandLists` is false). A context state
