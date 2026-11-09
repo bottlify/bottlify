@@ -5,15 +5,18 @@
  */
 
 /**
- * The run's pool of translation workers, at most `capacity` for the whole run
- * (the host's cores), as Windows shares its processors among however many
- * processes there are. A process is lent a worker at its start where one is
- * free; more join it while its translation lags and leave when it subsides, as
- * the driver decides (`driver.js`). A process whose workers sat idle for
- * `restAfterMs` -- one waiting on a pipe, a service between requests -- gives
- * back its first too, and translates on its own thread until it is lent one
- * again: when it says it emitted there (`PoolProcess.demand`), as soon as a
- * worker is free. A process that cannot say keeps its first to its exit. A
+ * The run's pool of translation workers. A process is lent its first worker at
+ * its start, whatever the run holds: one left waiting for a lend interprets
+ * nearly all it runs (a 3DMark06 CPU test thread on an executor the pool had no
+ * worker for ran at 59 M instructions a second, against 1182 M with one). More
+ * join it while its translation lags and leave when it subsides, as the driver
+ * decides (`driver.js`), while the run has fewer than `capacity` (the host's
+ * cores): those only speed translation up, and the cores are shared among
+ * however many processes there are, as Windows shares its processors. A
+ * process whose workers sat idle for `restAfterMs` -- one waiting on a pipe, a
+ * service between requests -- gives back its first too, and translates on its
+ * own thread until it is lent one again: when it says it emitted there
+ * (`PoolProcess.demand`). A process that cannot say keeps its first to its exit. A
  * worker works for one process at a time, over a port of its own: the pool
  * hands one end to the worker and the other to the process, whose runtime takes
  * it as a translator (`attachTranslator`) and gives it back when asked
@@ -66,7 +69,8 @@ import { createDriverState, decide } from './driver.js';
  *     windowMs?: number, restAfterMs?: number, now?: () => number, journalSize?: number,
  *     driver?: Partial<import('./driver.js').DriverSettings> }} options
  *     open: a new translation worker; perProcess: workers at most for one process (the
- *     host's concurrency); capacity: workers at most for the run (perProcess when not given);
+ *     host's concurrency); capacity: workers the run holds at most before one joins a
+ *     process (perProcess when not given); a process's first is lent past it;
  *     windowMs: how often the driver reads the workers; restAfterMs: how long a process's
  *     workers sit idle before it gives back its first
  */
@@ -121,18 +125,20 @@ export function createTranslatorPool({ open, perProcess, capacity, windowMs = 50
     /** Workers opening, counted against the run's capacity before they are there. */
     let opening = 0;
     /**
-     * A worker no process has, or a new one while the run has fewer than its
-     * capacity; null when it has them all at work.
+     * A worker no process has, or a new one: for a process's first always, for
+     * one joining while the run has fewer than its capacity; null when it has
+     * them all at work.
      *
+     * @param {boolean} first
      * @returns {Promise<PoolEntry | null>}
      */
-    const take = async()=>{
+    const take = async first=>{
         const idle = entries.find(entry=>entry.process === null && !entry.promised);
         if (idle !== undefined)
         {
             return idle;
         }
-        if (entries.length + opening >= most)
+        if (!first && entries.length + opening >= most)
         {
             counts.refused++;
             return null;
@@ -216,8 +222,7 @@ export function createTranslatorPool({ open, perProcess, capacity, windowMs = 50
     };
 
     /**
-     * A worker for a process with none, where one is free: it is lent at once,
-     * or the process waits for the next free one.
+     * A worker for a process with none: a free one, or one opened for it.
      *
      * @param {number} id
      */
@@ -229,7 +234,7 @@ export function createTranslatorPool({ open, perProcess, capacity, windowMs = 50
         }
         at.joining++;
         at.wanting = true;
-        return take().then(entry=>{
+        return take(true).then(entry=>{
             at.joining--;
             if (entry === null)
             {
@@ -328,7 +333,7 @@ export function createTranslatorPool({ open, perProcess, capacity, windowMs = 50
             {
                 counts.joins++;
                 at.joining++;
-                take().then(entry=>{
+                take(false).then(entry=>{
                     at.joining--;
                     if (entry !== null)
                     {

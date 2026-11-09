@@ -98,16 +98,19 @@ async function twoLoops(){
 }
 
 test('a process\'s other executors are lent workers of the pool, as its own is, and open no'
-    + ' translator of their own', { timeout: 120000 }, async t=>{
+    + ' translator of their own: each its first, past the run\'s capacity', { timeout: 120000 },
+async t=>{
+    // A capacity of one: the process's own executor takes it, and the other,
+    // left waiting for a lend, would interpret its whole loop.
     const app = await createApp({ executable: await twoLoops(), cpu: { cores: 2, eager: true },
-        cork: { poolPerProcess: 2, poolCapacity: 2,
+        cork: { poolPerProcess: 2, poolCapacity: 1,
             config: { worker: true, hotThreshold: 50 } } });
     t.after(()=>app.dispose());
     assert.equal(await app.run({ timeoutMs: 90000 }), 0);
     const pool = app.translationPool();
     const lentTo = new Set(pool.journal.filter((/** @type {any} */ one)=>one.kind === 'start')
         .map((/** @type {any} */ one)=>one.process));
-    assert.ok([...lentTo].some(id=>id < 0),
-        `an executor was lent one: ${JSON.stringify(pool.journal)}`);
-    assert.ok(pool.workers <= 2, `${pool.workers} workers, the run's capacity`);
+    assert.ok([...lentTo].some(id=>id < 0) && [...lentTo].some(id=>id > 0),
+        `the process and an executor were each lent one: ${JSON.stringify(pool.journal)}`);
+    assert.ok(pool.workers <= 2, `${pool.workers} workers: a first for each, none joined`);
 });

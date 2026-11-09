@@ -217,21 +217,27 @@ test('a batch under way counts in the window it runs in, not only once it is don
     }
 });
 
-test('the run has no more workers than its capacity, however many processes stand: one past'
-    + ' it waits, and a worker one gives back goes to it', async()=>{
-    const { pool, workers, seen, add } = fakePool(4, { capacity: 2 });
+test('a process is lent its first worker past the run\'s capacity; none joins past it, and'
+    + ' one joins again once the run has room', async()=>{
+    const { pool, workers, seen, add, windowOf } = fakePool(4, { capacity: 2 });
     try
     {
         await add(1);
         await add(2);
         await add(3);
-        assert.equal(workers.length, 2, 'two opened, not three');
-        assert.deepEqual(pool.diagnostics().byProcess, { 1: 1, 2: 1, 3: 0 });
-        assert.equal(pool.diagnostics().waiting, 1);
-        pool.removeProcess(1);
-        await new Promise(resolve=>setImmediate(resolve));
-        assert.equal(seen.get(3)?.lent.length, 1, 'the third takes the one the first left');
-        assert.equal(workers.length, 2, 'still two');
+        assert.equal(workers.length, 3, 'a first for each: one waiting for a lend interprets');
+        assert.deepEqual(pool.diagnostics().byProcess, { 1: 1, 2: 1, 3: 1 });
+        assert.equal(pool.diagnostics().waiting, 0);
+        await windowOf(500, { 1: [1], 2: [0], 3: [0] });
+        await windowOf(500, { 1: [1], 2: [0], 3: [0] });
+        assert.equal(seen.get(1)?.lent.length, 1, 'busy, and no worker joins past the capacity');
+        pool.removeProcess(2);
+        pool.removeProcess(3);
+        assert.equal(pool.diagnostics().workers, 2, 'one in use and one sleeper');
+        await windowOf(500, { 1: [1] });
+        await windowOf(500, { 1: [1] });
+        assert.equal(seen.get(1)?.lent.length, 2, 'the sleeper joins it');
+        assert.equal(workers.length, 3, 'and none was opened for that');
     }
     finally
     {
