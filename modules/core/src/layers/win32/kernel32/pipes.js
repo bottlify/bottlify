@@ -96,6 +96,14 @@ const PREFIXES = ['\\\\.\\pipe\\', '\\\\?\\pipe\\'];
 /** The run's table keys pipes under this, which no event or mutex name begins with. */
 const TABLE_PREFIX = 'pipe:';
 
+/**
+ * Where a read across a link is finished as NtReadFile's (`acrossOf`): its
+ * bytes, and its status block. No memory is behind either; the op's writes
+ * there are kept.
+ */
+const ACROSS_BUFFER = 1;
+const ACROSS_STATUS = 2;
+
 /** A name read whole, as Windows reads it: 256 characters is a pipe name's limit. */
 const NAME_BYTES = 520;
 
@@ -134,7 +142,55 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  *           Finishes an OVERLAPPED: its status, its count, its event, the port.
  * @property {(event: number) => void} [setEvent]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {PipesAcross | null} [across]  where the ends a process in a worker of
+ *     its own was started with are served (`EndAcross`), by their numbers
  */
+
+/**
+ * The run's side of the ends a process across a link holds, asked by the
+ * number the process has each by.
+ *
+ * @typedef {Object} PipesAcross
+ * @property {(id: number, length: number) => AcrossAnswer | Promise<AcrossAnswer>} read
+ * @property {(id: number, bytes: Uint8Array) => AcrossAnswer} write
+ * @property {(id: number, size: number) => AcrossAnswer} peek
+ * @property {(id: number) => number} cancel
+ * @property {(id: number) => void} close
+ */
+
+/**
+ * A pipe end this process holds and another thread serves: its number there,
+ * what it can do, and the handles onto it here.
+ *
+ * @typedef {Object} StandIn
+ * @property {true} standIn
+ * @property {number} id
+ * @property {'server' | 'client'} side
+ * @property {boolean} canRead
+ * @property {boolean} canWrite
+ * @property {boolean} messages
+ * @property {number} refs
+ * @property {() => void} retain
+ */
+
+/**
+ * The stand-in of an end served across a link, as `EndAcross.describe`
+ * described it; no handle holds it until one is adopted onto it.
+ *
+ * @param {number} id
+ * @param {{ side: 'server' | 'client', canRead: boolean, canWrite: boolean,
+ *     messages: boolean }} described
+ * @returns {StandIn}
+ */
+export function pipeStandIn(id, described){
+    /** @type {StandIn} */
+    const standIn = { standIn: true, id, side: described.side, canRead: described.canRead,
+        canWrite: described.canWrite, messages: described.messages, refs: 0,
+        retain(){
+            standIn.refs++;
+        } };
+    return standIn;
+}
 
 /**
  * @typedef {Object} Pipe
@@ -179,6 +235,36 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  * @property {any} [signal]  the event a wait on its handle waits on, made when first
  *     waited on: set while no operation of it is pending, as a file object is
  * @property {() => void} retain  one more handle onto it
+ * @property {() => EndAcross} across  the end served to a process in a worker of its own
+ */
+
+/**
+ * What a call on an end across a link answers: its status, and the bytes a
+ * read or a peek got (a part of a message is STATUS_BUFFER_OVERFLOW, with
+ * its bytes).
+ *
+ * @typedef {Object} AcrossAnswer
+ * @property {number} status
+ * @property {Uint8Array} [bytes]
+ * @property {number} [count]  what a write wrote
+ * @property {number} [total]  a peek's bytes waiting
+ * @property {number} [left]  a peek's rest of the message at the front
+ */
+
+/**
+ * An end held by a process in a worker of its own, served where the end is:
+ * that process holds a stand-in under the same number (`standIn`) and asks
+ * here for each read, write and peek. A read that must wait is queued among
+ * the end's readers like any process's, and its answer is the promise.
+ *
+ * @typedef {Object} EndAcross
+ * @property {(length: number) => AcrossAnswer | Promise<AcrossAnswer>} read
+ * @property {(bytes: Uint8Array) => AcrossAnswer} write
+ * @property {(size: number) => AcrossAnswer} peek
+ * @property {() => { side: 'server' | 'client', canRead: boolean, canWrite: boolean,
+ *     messages: boolean, readMessages: boolean }} describe
+ * @property {() => number} cancel  ends its waiting reads, cancelled: how many
+ * @property {() => void} release  its handle closed: cancels, then lets the end go
  */
 
 /**
@@ -257,7 +343,23 @@ export function createNamedPipes(host){
         }
         try
         {
-            return host.handles.resolve(handle >>> 0, 'pipe');
+            const object = host.handles.resolve(handle >>> 0, 'pipe');
+            return object?.standIn ? null : object;
+        }
+        catch {
+            return null;
+        }
+    };
+    /** @param {number} handle @returns {StandIn | null} */
+    const standInOf = handle=>{
+        if (!host.across || (host.handles.typeOf?.(handle >>> 0) ?? 'pipe') !== 'pipe')
+        {
+            return null;
+        }
+        try
+        {
+            const object = host.handles.resolve(handle >>> 0, 'pipe');
+            return object?.standIn ? object : null;
         }
         catch {
             return null;
@@ -309,6 +411,7 @@ export function createNamedPipes(host){
             retain(){
                 end.refs++;
             },
+            across: ()=>acrossOf(end),
         };
         return end;
     };
@@ -540,6 +643,130 @@ export function createNamedPipes(host){
         {
             table.delete(pipe.key);
         }
+    };
+
+    /**
+     * An end served across a link (`EndAcross`). Its reads that wait are ops
+     * whose process is the promise: what `serve` writes for them is kept, and
+     * what wakes them answers it. The end's own event is the kernel's here.
+     *
+     * @param {End} end
+     * @returns {EndAcross}
+     */
+    const acrossOf = end=>{
+        /** @type {Set<Op>} */
+        const waiting = new Set();
+        return {
+            read(length){
+                if (!end.canRead)
+                {
+                    return { status: STATUS.ACCESS_DENIED };
+                }
+                const got = end.readers.length === 0 ? take(end, length >>> 0) : null;
+                if (got)
+                {
+                    return { status: got.status, bytes: got.bytes };
+                }
+                const why = blocked(end, false);
+                if (why !== null)
+                {
+                    return { status: why };
+                }
+                if (end.nowait)
+                {
+                    return { status: STATUS_PIPE_LISTENING };
+                }
+                return new Promise(resolve=>{
+                    let bytes = new Uint8Array(0);
+                    // Finished as NtReadFile's is: the bytes at `buffer`, the
+                    // status and count at `out`, the status as the wake's.
+                    /** @type {Op} */
+                    const op = { kind: 'read', thread: null, handle: 0, overlapped: 0,
+                        buffer: ACROSS_BUFFER, length: length >>> 0, out: ACROSS_STATUS,
+                        native: true, end, ctx: { modes: new Map(), host: /** @type {any} */ ({
+                            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
+                                if (at === ACROSS_BUFFER)
+                                {
+                                    bytes = data.slice();
+                                }
+                            },
+                            kernel: {
+                                setEvent: (/** @type {any} */ event)=>kernel.setEvent?.(event),
+                                wake: (/** @type {any} */ thread, /** @type {number} */ status)=>{
+                                    void thread;
+                                    waiting.delete(op);
+                                    resolve({ status: status >>> 0, bytes });
+                                },
+                            },
+                        }) } };
+                    waiting.add(op);
+                    end.readers.push(op);
+                    if (end.signal)
+                    {
+                        kernel.resetEvent?.(end.signal);
+                    }
+                });
+            },
+            write(bytes){
+                if (!end.canWrite)
+                {
+                    return { status: STATUS.ACCESS_DENIED };
+                }
+                const why = blocked(end, true);
+                if (why !== null)
+                {
+                    return { status: why === STATUS_PIPE_BROKEN ? STATUS_PIPE_CLOSING : why };
+                }
+                const peer = /** @type {End} */ (peerOf(end));
+                if (bytes.length > 0 || end.instance.pipe.messages)
+                {
+                    peer.inbox.push({ bytes: bytes.slice(), at: 0 });
+                }
+                serve(peer);
+                return { status: STATUS.SUCCESS, count: bytes.length };
+            },
+            peek(size){
+                const why = blocked(end, false);
+                if (why !== null && end.inbox.length === 0)
+                {
+                    return { status: why };
+                }
+                const front = end.inbox[0];
+                const visible = end.readMessages && front ? front.bytes.subarray(front.at) : null;
+                const total = available(end);
+                const copied = Math.min(visible ? visible.length : total, size >>> 0);
+                const bytes = new Uint8Array(copied);
+                let at = 0;
+                for (const message of end.inbox)
+                {
+                    if (at === copied)
+                    {
+                        break;
+                    }
+                    const part = message.bytes.subarray(message.at,
+                        message.at + Math.min(copied - at, message.bytes.length - message.at));
+                    bytes.set(part, at);
+                    at += part.length;
+                    if (end.readMessages)
+                    {
+                        break;
+                    }
+                }
+                return { status: STATUS.SUCCESS, bytes, total,
+                    left: end.instance.pipe.messages && front
+                        ? front.bytes.length - front.at - (visible ? copied : 0) : 0 };
+            },
+            describe: ()=>({ side: end.side, canRead: end.canRead, canWrite: end.canWrite,
+                messages: end.instance.pipe.messages, readMessages: end.readMessages }),
+            cancel: ()=>abort(end, op=>waiting.has(op)),
+            release(){
+                abort(end, op=>waiting.has(op));
+                if (--end.refs <= 0 && !end.closed)
+                {
+                    closeEnd(end);
+                }
+            },
+        };
     };
 
     /**
@@ -795,6 +1022,107 @@ export function createNamedPipes(host){
     };
 
     /**
+     * A read of an end served across a link: asked there, and answered here
+     * when it comes -- the bytes into the buffer, the count and the status
+     * where the call wants them, a waiting call's thread woken as the promise
+     * it was answered with settles.
+     *
+     * @param {StandIn} standIn @param {number} handle @param {number} buffer
+     * @param {number} length @param {number} out @param {number} overlapped
+     * @param {boolean} native
+     */
+    const readAcross = (standIn, handle, buffer, length, out, overlapped, native)=>{
+        const across = /** @type {PipesAcross} */ (host.across);
+        if (!standIn.canRead)
+        {
+            return native ? STATUS.ACCESS_DENIED : fail(ERROR_ACCESS_DENIED);
+        }
+        if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+        {
+            return native ? STATUS.ACCESS_VIOLATION : fail(ERROR_NOACCESS);
+        }
+        const thread = host.currentThread();
+        /** @param {AcrossAnswer} got */
+        const into = got=>{
+            const count = got.bytes?.length ?? 0;
+            if (count > 0)
+            {
+                host.writeMemory(buffer >>> 0, /** @type {Uint8Array} */ (got.bytes));
+            }
+            return count;
+        };
+        const asked = across.read(standIn.id, length >>> 0);
+        if (overlapped !== 0)
+        {
+            overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+            void Promise.resolve(asked).then(got=>{
+                host.completed?.(handle, into(got), overlapped, got.status);
+            });
+            return native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
+        }
+        /** @param {AcrossAnswer} got */
+        const answered = got=>{
+            const count = into(got);
+            if (native)
+            {
+                writeDword(out, got.status);
+                writeDword(out + 4, count);
+                return got.status;
+            }
+            writeDwordIf(out, count);
+            host.setLastErrorFor(thread, got.status === STATUS.SUCCESS ? ERROR_SUCCESS
+                : toDosError(got.status));
+            return got.status === STATUS.SUCCESS ? 1 : 0;
+        };
+        return typeof (/** @type {any} */ (asked)).then === 'function'
+            ? /** @type {Promise<AcrossAnswer>} */ (asked).then(answered)
+            : answered(/** @type {AcrossAnswer} */ (asked));
+    };
+
+    /**
+     * A write to an end served across a link: it finishes there at once, as
+     * every pipe write does.
+     *
+     * @param {StandIn} standIn @param {number} handle @param {number} buffer
+     * @param {number} length @param {number} out @param {number} overlapped
+     * @param {boolean} native
+     */
+    const writeAcross = (standIn, handle, buffer, length, out, overlapped, native)=>{
+        if (!standIn.canWrite)
+        {
+            return native ? STATUS.ACCESS_DENIED : fail(ERROR_ACCESS_DENIED);
+        }
+        const count = length >>> 0;
+        if ((buffer >>> 0) === 0 && count !== 0)
+        {
+            return native ? STATUS.ACCESS_VIOLATION : fail(ERROR_NOACCESS);
+        }
+        const got = /** @type {PipesAcross} */ (host.across).write(standIn.id,
+            count === 0 ? new Uint8Array(0) : host.readMemory(buffer >>> 0, count).slice());
+        if (got.status !== STATUS.SUCCESS)
+        {
+            return native ? got.status : fail(got.status === STATUS_PIPE_CLOSING ? ERROR_NO_DATA
+                : toDosError(got.status));
+        }
+        if (overlapped !== 0 && host.completed)
+        {
+            const modes = ctx.modes.get(handle) ?? 0;
+            host.completed(handle, count, overlapped, STATUS.SUCCESS, {
+                port: (modes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0,
+                event: (modes & FILE_SKIP_SET_EVENT_ON_HANDLE) !== 0 });
+        }
+        if (native)
+        {
+            writeDword(out, STATUS.SUCCESS);
+            writeDword(out + 4, count);
+            return STATUS.SUCCESS;
+        }
+        writeDwordIf(out, count);
+        host.setLastError(ERROR_SUCCESS);
+        return 1;
+    };
+
+    /**
      * ReadFile's and NtReadFile's way in: the answer, or null for a handle
      * that is no pipe end.
      *
@@ -803,7 +1131,13 @@ export function createNamedPipes(host){
      */
     const read = (handle, buffer, length, out, native = false, overlapped = 0)=>{
         const end = endOf(handle);
-        return end ? startRead(end, handle >>> 0, buffer, length, out >>> 0,
+        if (end)
+        {
+            return startRead(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
+                native);
+        }
+        const standIn = standInOf(handle);
+        return standIn ? readAcross(standIn, handle >>> 0, buffer, length, out >>> 0,
             overlapped >>> 0, native) : null;
     };
 
@@ -815,7 +1149,13 @@ export function createNamedPipes(host){
      */
     const write = (handle, buffer, length, out, native = false, overlapped = 0)=>{
         const end = endOf(handle);
-        return end ? startWrite(end, handle >>> 0, buffer, length, out >>> 0,
+        if (end)
+        {
+            return startWrite(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
+                native);
+        }
+        const standIn = standInOf(handle);
+        return standIn ? writeAcross(standIn, handle >>> 0, buffer, length, out >>> 0,
             overlapped >>> 0, native) : null;
     };
 
@@ -830,7 +1170,9 @@ export function createNamedPipes(host){
         const end = endOf(handle);
         if (!end)
         {
-            return null;
+            // Every read of this process waits there on its one handle.
+            const standIn = standInOf(handle);
+            return standIn ? /** @type {PipesAcross} */ (host.across).cancel(standIn.id) : null;
         }
         return abort(end, op=>op.ctx === ctx && op.handle === (handle >>> 0)
             && (which.overlapped === undefined || op.overlapped === which.overlapped)
@@ -846,6 +1188,14 @@ export function createNamedPipes(host){
     const closed = (handle, object)=>{
         inheritable.delete(handle >>> 0);
         ctx.modes.delete(handle >>> 0);
+        if (object?.standIn)
+        {
+            if (--object.refs <= 0)
+            {
+                host.across?.close(object.id);
+            }
+            return;
+        }
         if (!object || object.instance?.server === undefined || typeof object.retain !== 'function')
         {
             return;
@@ -1181,6 +1531,8 @@ export function createNamedPipes(host){
 
     /** Numbers the unnamed pipes CreatePipe makes, the run's way Windows numbers them. */
     let anonymousCount = 0;
+    /** Whether a wait on an end served across a link was said to fail. */
+    let waitAcrossSaid = false;
 
     return {
         functions,
@@ -1196,6 +1548,12 @@ export function createNamedPipes(host){
             const end = endOf(handle);
             if (!end)
             {
+                if (standInOf(handle) && !waitAcrossSaid)
+                {
+                    waitAcrossSaid = true;
+                    host.divergence?.('WaitForSingleObject', 'a wait on a pipe end its parent'
+                        + ' serves from another thread fails with ERROR_INVALID_HANDLE');
+                }
                 return null;
             }
             end.signal ??= kernel.createEvent({ manualReset: true,
@@ -1259,6 +1617,24 @@ export function createNamedPipes(host){
          */
         peek([handle, buffer, size, copiedOut, total, left]){
             const end = endOf(handle);
+            const standIn = end ? null : standInOf(handle);
+            if (standIn)
+            {
+                const got = /** @type {PipesAcross} */ (host.across).peek(standIn.id, size >>> 0);
+                if (got.status !== STATUS.SUCCESS)
+                {
+                    return fail(toDosError(got.status));
+                }
+                const bytes = got.bytes ?? new Uint8Array(0);
+                if ((buffer >>> 0) !== 0 && bytes.length > 0)
+                {
+                    host.writeMemory(buffer >>> 0, bytes);
+                }
+                writeDwordIf(copiedOut, bytes.length);
+                writeDwordIf(total, got.total ?? 0);
+                writeDwordIf(left, got.left ?? 0);
+                return 1;
+            }
             if (!end)
             {
                 return null;
@@ -1327,7 +1703,8 @@ export function createNamedPipes(host){
         },
 
         /** Whether a handle is a pipe end. @param {number} handle */
-        isPipe: (/** @type {number} */ handle)=>endOf(handle) !== null,
+        isPipe: (/** @type {number} */ handle)=>endOf(handle) !== null
+            || standInOf(handle) !== null,
 
         /**
          * A pipe end handed to this process at its start (inherited) is one
@@ -1349,7 +1726,7 @@ export function createNamedPipes(host){
         processEnded(){
             for (const handle of [...inheritable.keys()])
             {
-                closed(handle, endOf(handle));
+                closed(handle, endOf(handle) ?? standInOf(handle));
             }
         },
     };

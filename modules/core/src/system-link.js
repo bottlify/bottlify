@@ -127,6 +127,22 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
             },
         },
         objects: remoteObjects(ask),
+        // The pipe ends its parent started it with, served where the parent
+        // holds them (`pipes.js`'s `EndAcross`): a read that waits is waited
+        // on as the network is, its thread parked and the link looked at.
+        pipes: {
+            /** @param {number} id @param {number} length */
+            read: (id, length)=>(call ? call('pipes', 'read', [id, length])
+                : ask('pipes', 'read', [id, length])),
+            /** @param {number} id @param {Uint8Array} bytes */
+            write: (id, bytes)=>ask('pipes', 'write', [id, bytes]),
+            /** @param {number} id @param {number} size */
+            peek: (id, size)=>ask('pipes', 'peek', [id, size]),
+            /** @param {number} id */
+            cancel: id=>ask('pipes', 'cancel', [id]),
+            /** @param {number} id */
+            close: id=>ask('pipes', 'close', [id]),
+        },
         // The run's class table (`com-link.js`): what the process exports
         // is delivered to it in its handlers, and what it calls in another
         // process is waited on as the network is.

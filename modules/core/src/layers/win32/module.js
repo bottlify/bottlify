@@ -524,6 +524,7 @@ export function createWin32Module(){
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
              *     objects?: any, fileSecurity?: Map<string, any>,
              *     processTables?: Map<number, any>,
+             *     pipes?: import('./kernel32/pipes.js').PipesAcross,
              *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')
              *         .createSharedViews> } | null} */
             const system = config?.system ?? null;
@@ -1154,6 +1155,8 @@ export function createWin32Module(){
                 // A process in a worker of its own holds stand-ins of the
                 // run's objects, never the objects a pipe's ends are.
                 remote: Boolean(system?.objects),
+                // Where the ends its parent started it with are served, then.
+                across: system?.pipes ?? null,
                 processId,
                 completed: (file, transferred, overlapped, status, skip)=>
                     ports.completed(file, transferred, overlapped, status, skip),

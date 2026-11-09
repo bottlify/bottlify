@@ -68,6 +68,8 @@ import { programInPlaceOf, systemProgramImage } from './layers/win32/programs/ta
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
 import { createSharedViews } from './layers/win32/kernel32/shared-views.js';
+import { pipeStandIn } from './layers/win32/kernel32/pipes.js';
+import { pipeHandlers } from './system-pipes.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
@@ -339,6 +341,11 @@ const hashText = (hash, text)=>{
  *           the parent's numbers: pipe ends.
  * @property {{ input?: number, output?: number, error?: number }} [standardHandles]
  *           Which of those its parent's STARTUPINFO made its standard handles.
+ * @property {{ handle: number, side: 'server' | 'client', canRead: boolean, canWrite: boolean,
+ *     messages: boolean }[]} [pipeEnds]
+ *           The pipe ends a child in a worker of its own inherits, under the
+ *           parent's numbers: served where the parent holds them, across the
+ *           link (`system.pipes`), and held here as stand-ins.
  * @property {number} [parentProcessId]  The process that started this one, 0 for none.
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
@@ -5127,8 +5134,10 @@ async function buildApp(options){
             system: options.system,
             processId: options.processId,
             standardFiles: options.standardFiles,
-            // The handles a parent's CreateProcess handed down (pipe ends).
-            inheritedHandles: options.inheritedHandles,
+            // The handles a parent's CreateProcess handed down (pipe ends):
+            // the ends themselves on this thread, stand-ins of them across.
+            inheritedHandles: options.inheritedHandles ?? options.pipeEnds?.map(end=>({
+                handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
             standardHandles: options.standardHandles,
             startup: options.startup,
             // A child's variables, as its parent handed them on; absent, the
@@ -10914,6 +10923,9 @@ export async function createApp(options){
             call: (method, args)=>link.call('com', method, args),
             launch: serverAcross,
         });
+        // The pipe ends it inherits, served here, where its parent holds them.
+        const { dispose: forgetPipes, described: pipeEnds, pipes } =
+            pipeHandlers(request.inheritedHandles);
         const { dispose: forgetObjects, ...objects } = objectHandlers({
             table: system.namedObjects,
             wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
@@ -10922,6 +10934,7 @@ export async function createApp(options){
                 (target, method, args)=>link.callWaiting(target, method, args)),
             ...objects,
             com: com.handlers,
+            pipes,
             // The run's translation store, which only this thread can hold open.
             ...translationStore ? storeHandlers(translationStore) : {},
             process: {
@@ -11047,6 +11060,9 @@ export async function createApp(options){
                         standardFiles: request.standardFiles && Object.fromEntries(
                             Object.entries(request.standardFiles).filter(([, file])=>file)
                                 .map(([which, file])=>[which, { path: file.path }])),
+                        // Its pipe ends by number, and which are its standard handles.
+                        pipeEnds,
+                        standardHandles: request.standardHandles,
                         // The run tells the player the game is over, once.
                         exitNotice: false,
                         log: { categories: options.log?.categories,
@@ -11068,6 +11084,7 @@ export async function createApp(options){
             standingAcross.delete(asked);
             translationPool?.removeProcess(request.id);
             forgetObjects();
+            forgetPipes();
             await com.gone();
             link.close();
             await answering;
