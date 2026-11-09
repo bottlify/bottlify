@@ -49,6 +49,12 @@ const PDH_NO_DATA = 0x800007d5;
 const BALANCED = Uint8Array.of(0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41,
     0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e);
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_MORE_DATA = 234;
+const ERROR_NO_MORE_ITEMS = 259;
+/** POWER_DATA_ACCESSOR's enumerations: schemes, subgroups, settings. */
+const ACCESS_SCHEME = 16;
+const ACCESS_SUBGROUP = 17;
+const ACCESS_INDIVIDUAL_SETTING = 18;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** POWER_PLATFORM_ROLE's PlatformRoleDesktop. */
@@ -72,6 +78,28 @@ export function createPowrprofFunctions(host){
             return 0;
         },
     });
+
+    /**
+     * Bytes into a caller's buffer of the size it says: no buffer asks the
+     * size, one too small is ERROR_MORE_DATA, and the size taken is written.
+     *
+     * @param {Uint8Array} bytes @param {number} buffer @param {number} size
+     */
+    const answerBytes = (bytes, buffer, size)=>{
+        const room = host.readMemory
+            ? new DataView(host.readMemory(size >>> 0, 4).slice().buffer).getUint32(0, true) : 0;
+        host.writeMemory(size >>> 0, dword(bytes.length));
+        if ((buffer >>> 0) === 0)
+        {
+            return ERROR_SUCCESS;
+        }
+        if (room < bytes.length)
+        {
+            return ERROR_MORE_DATA;
+        }
+        host.writeMemory(buffer >>> 0, bytes);
+        return ERROR_SUCCESS;
+    };
 
     return {
         /** POWER_PLATFORM_ROLE PowerDeterminePlatformRoleEx(ULONG Version): a desktop. */
@@ -112,6 +140,63 @@ export function createPowrprofFunctions(host){
          */
         PowerReadACValue: { argBytes: 28, handler: ()=>ERROR_FILE_NOT_FOUND },
         PowerReadDCValue: { argBytes: 28, handler: ()=>ERROR_FILE_NOT_FOUND },
+
+        /**
+         * DWORD PowerEnumerate(HKEY RootPowerKey, const GUID *SchemeGuid,
+         *     const GUID *SubGroupOfPowerSettingsGuid, POWER_DATA_ACCESSOR AccessFlags,
+         *     ULONG Index, UCHAR *Buffer, DWORD *BufferSize)
+         *
+         * The schemes are Balanced alone; it has no subgroups or settings,
+         * as PowerReadACValue finds none. No buffer asks the size; a buffer
+         * too small is ERROR_MORE_DATA with the size written.
+         */
+        PowerEnumerate: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([, , , access, index, buffer, size])=>{
+                if ((size >>> 0) === 0 || ![ACCESS_SCHEME, ACCESS_SUBGROUP,
+                    ACCESS_INDIVIDUAL_SETTING].includes(access >>> 0))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                if ((access >>> 0) !== ACCESS_SCHEME || (index >>> 0) !== 0)
+                {
+                    return ERROR_NO_MORE_ITEMS;
+                }
+                return answerBytes(BALANCED, buffer, size);
+            },
+        },
+
+        /**
+         * DWORD PowerReadFriendlyName(HKEY RootPowerKey, const GUID *SchemeGuid,
+         *     const GUID *SubGroupOfPowerSettingsGuid, const GUID *PowerSettingGuid,
+         *     PUCHAR Buffer, LPDWORD BufferSize)
+         *
+         * "Balanced" for the scheme, as a wide string with its terminator;
+         * any other scheme, and every subgroup and setting, is not there.
+         */
+        PowerReadFriendlyName: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, scheme, subgroup, setting, buffer, size])=>{
+                if ((size >>> 0) === 0 || (scheme >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const named = host.readMemory?.(scheme >>> 0, 16);
+                if ((subgroup >>> 0) !== 0 || (setting >>> 0) !== 0 || !named
+                    || !named.every((byte, at)=>byte === BALANCED[at]))
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                const text = 'Balanced\0';
+                const bytes = new Uint8Array(text.length * 2);
+                [...text].forEach((char, at)=>{
+                    bytes[at * 2] = char.charCodeAt(0);
+                });
+                return answerBytes(bytes, buffer, size);
+            },
+        },
 
         /** BOOLEAN GetActivePwrScheme(PUINT puiID): scheme 0, the only one. */
         GetActivePwrScheme: {

@@ -83,6 +83,12 @@ event, an error. Neither stops the program.
   with knows only its handle. Identifiers are answered by GUID for properties, patterns, events
   and control types; text attributes, landmarks, annotations, changes and styles answer 0.
 
+## Displays
+
+- The one display monitor is one physical monitor (`dxva2`'s monitor configuration API), a
+  "Generic PnP Monitor" with no DDC/CI: its brightness, contrast and other settings cannot be
+  read or set (`ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA`).
+
 ## Network
 
 - No raw TCP or UDP. Sockets go through the relay over WebSocket; without `network` only the

@@ -226,10 +226,10 @@ export function createSystemColors(){
     };
 }
 
-/** MonitorFromRect and friends answer with this, there being one display. */
 /** What SetClassWord answers for the atom, or a word past the extra bytes. */
 const ERROR_INVALID_INDEX = 1413;
-const PRIMARY_MONITOR = 0x00010001;
+/** MonitorFromRect and friends answer with this, there being one display. */
+export const PRIMARY_MONITOR = 0x00010001;
 const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
 
