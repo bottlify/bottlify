@@ -108,6 +108,7 @@
     "src/layers/win32/programs/dxsetup.js",
     "src/layers/win32/programs/msiexec.js",
     "src/layers/win32/programs/notepad.js",
+    "src/layers/win32/programs/reg.js",
     "src/layers/win32/programs/regsvr32.js",
     "src/layers/win32/programs/rundll32.js",
     "src/layers/win32/programs/table.js",

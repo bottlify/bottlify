@@ -1106,6 +1106,16 @@ class LockedAccess {
         this.wrote = false;
     }
 
+    /** As new, over `memory`: one access serves every attempt. @param {BlockMemory} memory */
+    reset(memory){
+        this.memory = memory;
+        this.address = -1;
+        this.size = 0;
+        this.old = 0;
+        this.value = 0;
+        this.wrote = false;
+    }
+
     /** @param {number} address @param {number} size */
     read(address, size){
         if (this.address < 0)
@@ -1161,16 +1171,27 @@ function lockedStep(instruction){
             }
         };
     }
+    // A locked instruction runs millions of times in a program that counts
+    // references and takes critical sections: a snapshot and an access made
+    // per run were most of what a worker's collector had to clear. One of each
+    // serves every run, since an instruction never runs inside itself.
+    /** @type {Uint32Array | null} */
+    let registers = null;
+    const access = new LockedAccess(/** @type {any} */ (null));
     return state=>{
         const memory = /** @type {BlockMemory} */ (/** @type {unknown} */ (state.memory));
         // `interpret` moved eip and the count before the step; `evaluate` moves them itself.
         const eip = state.eip;
         const retired = state.retired;
-        const registers = state.reg.slice();
+        if (registers === null || registers.length !== state.reg.length)
+        {
+            registers = new Uint32Array(state.reg.length);
+        }
+        registers.set(state.reg);
         const eflags = state.eflags;
         for (;;)
         {
-            const access = new LockedAccess(memory);
+            access.reset(memory);
             state.memory = /** @type {any} */ (access);
             try
             {

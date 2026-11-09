@@ -4527,6 +4527,8 @@ export function createShadow(deps){
     const flagWord = new Uint32Array(1);
     const flagBytes = new Uint8Array(flagWord.buffer);
 
+    /** What settleUnlocked read: the two counts, a word of room, the ring. */
+    const settledWords = new Uint32Array(3 + SHADOW.RING_CAPACITY);
     /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
     let commandReader = null;
 
@@ -4539,16 +4541,21 @@ export function createShadow(deps){
      */
     const settleUnlocked = heads=>{
         const count = Math.min(heads, SHADOW.RING_CAPACITY);
-        const words = readWords(address + SHADOW.LOCK_CALLS, 3 + count).slice();
-        if (words.length < 3 + count)
+        const read = readWords(address + SHADOW.LOCK_CALLS, 3 + count);
+        if (read.length < 3 + count)
         {
             // No memory to read -- a machine that has stopped.
             return;
         }
+        // Copied before the writes below change what was read, into a buffer
+        // kept for it: this runs at every sync, and a copy each was garbage.
+        settledWords.set(read);
+        const words = settledWords;
         lockCalls = words[0];
         unlockCalls = words[1];
-        for (const buffer of words.subarray(3))
+        for (let at = 3; at < 3 + count; at++)
         {
+            const buffer = words[at];
             deps.writeMemory(buffer + BUFFER.QUEUED, ZERO_WORD);
             const level = levels.get(buffer);
             if (level)

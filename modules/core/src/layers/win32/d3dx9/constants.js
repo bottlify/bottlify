@@ -244,6 +244,28 @@ export function createConstantTableObjects(host){
     };
     const dword = (/** @type {number} */ value)=>Uint8Array.of(value & 0xff, value >> 8 & 0xff,
         value >> 16 & 0xff, value >>> 24);
+    // A program asks for a constant's description and sets its values every
+    // frame, for every constant: an answer put together from arrays made per
+    // field was most of what the engine thread collected. The bytes go out
+    // through these, which writeMemory copies at once.
+    const descBytes = new Uint8Array(48);
+    const descWords = new DataView(descBytes.buffer);
+    /** @param {number[]} values @returns {Uint8Array} */
+    const words = values=>{
+        values.forEach((value, i)=>descWords.setUint32(i * 4, value >>> 0, true));
+        return descBytes.subarray(0, values.length * 4);
+    };
+    let scratch = new DataView(new ArrayBuffer(256));
+    /** A scratch of at least this many bytes. @param {number} length */
+    const scratchOf = length=>{
+        if (scratch.byteLength < length)
+        {
+            scratch = new DataView(new ArrayBuffer(Math.max(length, scratch.byteLength * 2)));
+        }
+        return scratch;
+    };
+    /** Each constant's twins in its table, found once. @type {WeakMap<Constant, Constant[]>} */
+    const twinsOf = new WeakMap();
     const f32Word = new Uint32Array(1);
     const f32View = new Float32Array(f32Word.buffer);
     const f32 = (/** @type {number} */ address)=>{
@@ -360,9 +382,15 @@ export function createConstantTableObjects(host){
     const store = (table, device, constant, values, thread)=>{
         // fxc gives a model 3 loop's int count a second entry of the same name in the integer
         // registers, which rep reads, beside the float one arithmetic reads: both are set.
-        const twins = constant && table.constants.includes(constant)
-            ? table.constants.filter(one=>one !== constant && one.name === constant.name
-                && one.set !== constant.set) : [];
+        let twins = constant ? twinsOf.get(constant) : [];
+        if (constant && !twins)
+        {
+            twins = table.constants.includes(constant)
+                ? table.constants.filter(one=>one !== constant && one.name === constant.name
+                    && one.set !== constant.set) : [];
+            twinsOf.set(constant, twins);
+        }
+        twins ??= [];
         if (twins.length === 0)
         {
             return storeSet(table, device, constant, values, thread);
@@ -393,7 +421,7 @@ export function createConstantTableObjects(host){
         }
         // Floats for the float registers; integers four to a register for the
         // integer ones; one BOOL a register for the boolean ones.
-        const bytes = new DataView(new ArrayBuffer(count * 16));
+        const bytes = scratchOf(count * 16);
         const units = constant.set === SET.BOOL ? count : count * 4;
         for (let i = 0; i < units; i++)
         {
@@ -408,12 +436,12 @@ export function createConstantTableObjects(host){
                     : Math.trunc(value), true);
             }
         }
-        const data = host.heap.allocate(bytes.byteLength);
+        const data = host.heap.allocate(count * 16);
         if (data === 0)
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(data, new Uint8Array(bytes.buffer));
+        host.writeMemory(data, new Uint8Array(bytes.buffer, 0, count * 16));
         const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
         const entry = u32(u32(device) + slot * 4);
         const free = ()=>host.heap?.free(data);
@@ -494,8 +522,8 @@ export function createConstantTableObjects(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const table = tableOf(object);
-                host.writeMemory(out >>> 0, Uint8Array.of(...dword(table.creatorAt),
-                    ...dword(table.version), ...dword(table.constants.length)));
+                host.writeMemory(out >>> 0, words([table.creatorAt, table.version,
+                    table.constants.length]));
                 return D3D_OK;
             } },
             /** HRESULT GetConstantDesc(D3DXHANDLE, D3DXCONSTANT_DESC *pDesc, UINT *pCount) */
@@ -511,11 +539,10 @@ export function createConstantTableObjects(host){
                         ? 4 * constant.elements
                         : 4 * Math.max(constant.rows, 1) * Math.max(constant.columns, 1)
                             * constant.elements;
-                    host.writeMemory(out >>> 0, Uint8Array.of(...[constant.nameAt, constant.set,
+                    host.writeMemory(out >>> 0, words([constant.nameAt, constant.set,
                         constant.index, constant.count, constant.cls, constant.type,
                         constant.rows, constant.columns, constant.elements,
-                        constant.members.length, numbers, constant.defaultAt]
-                        .flatMap(value=>[...dword(value)])));
+                        constant.members.length, numbers, constant.defaultAt]));
                 }
                 if ((countAt >>> 0) !== 0)
                 {

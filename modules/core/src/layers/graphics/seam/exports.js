@@ -229,7 +229,7 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *                       swapBuffers: (hdc: number) => boolean | Promise<boolean>,
  *                       entry: (name: string) => ((args: number[]) => number) | null },
  *             diagnostics: () => any,
- *             shadow: () => any }}
+ *             shadow: () => any, screenHeld: () => number }}
  */
 export function createGraphicsLibraries(
     { graphics, only, memory, publishInterface, unpublishInterface, screen, gdi, present,
@@ -974,5 +974,8 @@ export function createGraphicsLibraries(
          * report prints it beside the crossings it stands in for.
          */
         shadow: ()=>d3d9?.shadow() ?? d3d8?.shadow() ?? null,
+
+        /** The window a full-screen Direct3D 8 or 9 device holds the screen with, or 0. */
+        screenHeld: ()=>focus?.screen() ?? 0,
     };
 }
