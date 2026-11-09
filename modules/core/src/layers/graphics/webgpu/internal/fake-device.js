@@ -129,13 +129,48 @@ const unrenderable = (format, features)=>{
     return `${format} is not a renderable format on this device`;
 };
 
+/** WebGPU's default limits on a texture's size, what a device has unless made with more. */
+export const DEFAULT_LIMITS = Object.freeze({ maxTextureDimension1D: 8192,
+    maxTextureDimension2D: 8192, maxTextureDimension3D: 2048, maxTextureArrayLayers: 256 });
+
+/**
+ * Why a texture of this size is past a device's limits, or null.
+ *
+ * @param {string} dimension
+ * @param {{ width: number, height: number, depthOrArrayLayers: number }} size
+ * @param {Record<string, number>} limits
+ */
+function sizeRefusal(dimension, size, limits){
+    const [largest, layers] = dimension === '1d'
+        ? [limits.maxTextureDimension1D, 1]
+        : dimension === '3d'
+            ? [limits.maxTextureDimension3D, limits.maxTextureDimension3D]
+            : [limits.maxTextureDimension2D, limits.maxTextureArrayLayers];
+    if (Math.max(size.width, size.height) > largest || size.depthOrArrayLayers > layers)
+    {
+        return `${size.width}x${size.height}x${size.depthOrArrayLayers} (${dimension})`
+            + ` exceeds the device's ${largest} a side and ${layers} layers`;
+    }
+    return null;
+}
+
 /**
  * Why WebGPU refuses a texture descriptor, or null.
  *
  * @param {any} descriptor @param {Set<string>} features
+ * @param {Record<string, number>} [limits]
  */
-export function textureRefusal(descriptor, features){
+export function textureRefusal(descriptor, features, limits = DEFAULT_LIMITS){
     const { format } = descriptor;
+    const size = Array.isArray(descriptor.size)
+        ? { width: descriptor.size[0], height: descriptor.size[1] ?? 1,
+            depthOrArrayLayers: descriptor.size[2] ?? 1 }
+        : { height: 1, depthOrArrayLayers: 1, ...descriptor.size };
+    const tooLarge = sizeRefusal(descriptor.dimension ?? '2d', size, limits);
+    if (tooLarge)
+    {
+        return tooLarge;
+    }
     if (TIER1_FORMATS.has(format) && !features.has('texture-formats-tier1'))
     {
         return `${format} needs texture-formats-tier1`;
@@ -238,14 +273,15 @@ export function pipelineRefusal(descriptor, features){
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
  *           occlusionSamples?: (index: number) => number,
  *           workDone?: boolean, features?: string[], pipelineDelayMs?: number,
- *           quiet?: boolean }} [options]
+ *           quiet?: boolean, limits?: Record<string, number> }} [options]
  *        `occlusionSamples` is what the occlusion query at each slot of a query
  *        set resolves to, standing in for the rasteriser; zero when absent.
  *        `workDone` gives the queue an `onSubmittedWorkDone` whose answers the
  *        test decides: the device finishes submits, in order, only when told
  *        to (`finish`). Without it the queue has none, as a double that
  *        cannot say when anything is done should not pretend to.
- *        `features` are the optional features the device says it was made with.
+ *        `features` are the optional features the device says it was made with,
+ *        `limits` the limits it was made with past WebGPU's defaults.
  *        `quiet` keeps no log of calls and does no more per call than a
  *        device that renders must: what a buffer or texture holds is still
  *        kept, so read-backs answer, but nothing a test would look at. For a
@@ -296,6 +332,8 @@ export function createFakeDevice(options = {}){
     let nextId = 0;
     /** The optional features the device was made with. */
     const features = new Set(options.features ?? []);
+    /** The limits the device was made with: WebGPU's defaults unless a test raises them. */
+    const limits = Object.freeze({ ...DEFAULT_LIMITS, ...options.limits });
 
     /** @param {string} kind @param {any} extra @returns {any} */
     const object = (kind, extra = {})=>({ kind, id: `${kind}-${nextId++}`, ...extra });
@@ -312,7 +350,7 @@ export function createFakeDevice(options = {}){
 
     /** @param {any} descriptor */
     const createTexture = descriptor=>{
-        const textureRefused = textureRefusal(descriptor, features);
+        const textureRefused = textureRefusal(descriptor, features, limits);
         if (textureRefused)
         {
             refuse(`createTexture: ${textureRefused}`);
@@ -734,6 +772,7 @@ export function createFakeDevice(options = {}){
     const device = {
         calls,
         features,
+        limits,
         /** @param {string} type @param {(event: any) => void} listener */
         addEventListener(type, listener){
             if (type === 'uncapturederror')

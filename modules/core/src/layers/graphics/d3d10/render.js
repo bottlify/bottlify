@@ -66,6 +66,7 @@ import {
 import { DOMAIN_ENTRIES, FIRST_PATCH_LIST, createTessellation } from './tessellation.js';
 import { GEOMETRY_DRAW_ENTRIES, createGeometry } from './geometry.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
+import { textureBreach } from '../webgpu/features.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { SYSTEM_VALUE } from './dxbc.js';
@@ -696,9 +697,86 @@ export function createRenderer(services){
         const backing = held.resource ? backingOf(held.resource) : null;
         const level = backing?.layout?.levels?.[0];
         return `${dumpName(held.resource, 't')}:${backing?.layout?.format ?? '?'}`
-            + `:${level?.width ?? '?'}x${level?.height ?? '?'}`;
+            + `:${level?.width ?? '?'}x${level?.height ?? '?'}${dumpContent(backing)}`;
     };
+    /**
+     * How much of a resource's host copy is not zero, sampled at 4096 points:
+     * a texture sampled black because it never got its texels shows `nz=0`.
+     * A target drawn on the GPU alone shows its host copy, not its drawing.
+     *
+     * @param {any} backing
+     */
+    const dumpContent = backing=>{
+        const bytes = backing?.bytes;
+        if (!bytes?.length || backing.layout?.format?.startsWith('depth'))
+        {
+            return '';
+        }
+        const points = Math.min(4096, bytes.length);
+        let set = 0;
+        for (let point = 0; point < points; point++)
+        {
+            set += bytes[Math.floor(point * bytes.length / points)] !== 0 ? 1 : 0;
+        }
+        return `:nz=${Math.round(set * 100 / points)}%`;
+    };
+    /**
+     * The first eight floats of each constant buffer a stage reads, so a dump
+     * shows the factors a pass is scaled by.
+     *
+     * @param {any} stage
+     */
+    const dumpConstants = stage=>(stage?.constantBuffers ?? []).flatMap(
+        (/** @type {any} */ buffer, /** @type {number} */ slot)=>{
+            const bytes = buffer ? backingOf(buffer)?.bytes : null;
+            if (!bytes)
+            {
+                return [];
+            }
+            const floats = new Float32Array(bytes.slice(0, Math.min(8, bytes.length >> 2) * 4)
+                .buffer);
+            return [` cb${slot}=${[...floats].map(value=>+value.toPrecision(4)).join(',')}`];
+        }).join('');
+    /** The shaders a dump has written out, so each is written once. */
+    let dumpShown = new WeakSet();
+    /**
+     * A shader's WGSL body the first time a dump names it, as lines before
+     * the draw's, so a dump says what a pass computes as well as what it reads.
+     *
+     * @param {any} shader @param {string} kind
+     */
+    const dumpShader = (shader, kind)=>{
+        if (!shader || dumpShown.has(shader) || !dumpLines)
+        {
+            return;
+        }
+        dumpShown.add(shader);
+        const made = /** @type {import('./wgsl.js').TranslatedShader} */ (translationOf(shader));
+        dumpLines.push(`shader ${dumpName(shader, kind)}: in ${made.inputs.map(
+            input=>`${input.name}${input.index}@v${input.register}`).join(' ')} out ${
+            made.outputs.map(output=>`${output.name}${output.index}@o${output.register}`)
+                .join(' ')}\n${made.body.filter(line=>typeof line === 'string').join('\n')}`);
+    };
+    /**
+     * The first sixteen floats a draw's vertices start at in each bound
+     * vertex buffer.
+     *
+     * @param {PipelineSnapshot} pipeline @param {number} first
+     */
+    const dumpVertices = (pipeline, first)=>pipeline.vertexBuffers.flatMap((buffer, slot)=>{
+        const bytes = buffer ? backingOf(buffer)?.bytes : null;
+        if (!bytes)
+        {
+            return [];
+        }
+        const from = Math.min(bytes.length, (pipeline.vertexOffsets[slot] ?? 0)
+            + first * (pipeline.vertexStrides[slot] ?? 0));
+        const end = Math.min(bytes.length, from + 64);
+        const floats = new Float32Array(bytes.slice(from, from + ((end - from) & ~3)).buffer);
+        return [` vb${slot}=${[...floats].map(value=>+value.toPrecision(4)).join(',')}`];
+    }).join('');
     const dumpStarts = ()=>{
+        dumpShown = new WeakSet();
         dumpLines = liveDump !== null && liveDump.dumpFrames > 0 ? [] : null;
     };
 
@@ -939,6 +1017,16 @@ export function createRenderer(services){
      * @param {any} descriptor
      */
     const madeTexture = descriptor=>{
+        // Direct3D 11 holds 2048 array layers and 16384 texels a side;
+        // WebGPU's devices from 256 layers and 8192.
+        const past = textureBreach(descriptor.size, descriptor.dimension ?? '2d',
+            name=>backend?.limit?.(name));
+        if (past)
+        {
+            lose(`a ${descriptor.format} texture of ${past} cannot be made on this device; it is`
+                + ' kept in memory and never drawn with');
+            return null;
+        }
         try
         {
             return createTexture(descriptor);
@@ -4843,6 +4931,9 @@ export function createRenderer(services){
                 const { vs, gs, ps } = pipeline.stages;
                 const count = draw.indexCount !== undefined ? `indexed ${draw.indexCount}`
                     : draw.vertexCount ?? 'auto';
+                dumpShader(vs?.shader, 'vs');
+                dumpShader(gs?.shader, 'gs');
+                dumpShader(ps?.shader, 'ps');
                 dumpLines.push(`draw ${count} x${draw.instanceCount ?? 1}`
                     + ` topology=${pipeline.topology} vs=${dumpName(vs?.shader, 'vs')}`
                     + ` gs=${dumpName(gs?.shader, 'gs')} ps=${dumpName(ps?.shader, 'ps')}`
@@ -4854,7 +4945,18 @@ export function createRenderer(services){
                         .join(' ')}]`
                     + ` vp=${viewport ? `${viewport.TopLeftX},${viewport.TopLeftY}`
                         + `+${viewport.Width}x${viewport.Height}` : '-'}`
-                    + ` blend=${pipeline.blendState ? 'set' : 'default'}`);
+                    + ` blend=${pipeline.blendState ? blendTargetsOf(pipeline.blendState).targets
+                        .slice(0, Math.max(1, pipeline.renderTargets.reduce(
+                            (/** @type {number} */ bound, /** @type {any} */ view,
+                                /** @type {number} */ slot)=>(view ? slot + 1 : bound), 0)))
+                        .map((/** @type {any} */ target)=>`${target.BlendEnable
+                            ? `${target.SrcBlend}/${target.DestBlend}/${target.BlendOp}`
+                            + `,${target.SrcBlendAlpha}/${target.DestBlendAlpha}`
+                            + `/${target.BlendOpAlpha}` : 'off'}:m${target.RenderTargetWriteMask}`)
+                        .join(' ') + ` factor=${[...pipeline.blendFactor].join(',')}`
+                        : 'default'}${dumpConstants(ps)}${dumpConstants(vs).replace(/ cb/g, ' vcb')}`
+                    + dumpVertices(pipeline, draw.indexCount !== undefined ? draw.baseVertex ?? 0
+                        : draw.startVertex ?? 0));
             }
             twinUses = new Map();
             // A geometry shader runs, and streams out, whether or not the draw

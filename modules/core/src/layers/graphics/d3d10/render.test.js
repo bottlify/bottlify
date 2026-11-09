@@ -1053,6 +1053,20 @@ test('a frame is written down on asking: each clear and draw a line, handed over
     const h = harness({ liveDump });
     const { device } = h;
     bindTriangle(h, [[-1, -1, 0, 1], [3, -1, 0, 1], [-1, 3, 0, 1]], [1, 0, 0, 1]);
+    /** @type {{ resource?: any }} */
+    const constants = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    { pSysMem: floatBytes([0.5, 0, 0, 1]) }, constants), S_OK);
+    device.PSSetConstantBuffers(0, [constants.resource]);
+    /** @type {{ state?: any }} */
+    const blend = {};
+    assert.equal(device.CreateBlendState({ AlphaToCoverageEnable: false,
+        BlendEnable: [true, false, false, false, false, false, false, false],
+        SrcBlend: 5, DestBlend: 6, BlendOp: 1, SrcBlendAlpha: 2, DestBlendAlpha: 1,
+        BlendOpAlpha: 1, RenderTargetWriteMask: [15, 15, 15, 15, 15, 15, 15, 15] }, blend),
+    S_OK);
+    device.OMSetBlendState(blend.state, [0.25, 0.5, 0.75, 1], 0xffffffff);
     const frame = ()=>{
         device.ClearRenderTargetView(h.renderTargetView, [0, 0, 1, 1]);
         device.Draw(3, 0);
@@ -1064,9 +1078,15 @@ test('a frame is written down on asking: each clear and draw a line, handed over
     frame();
     frame();
     assert.equal(handed.length, 1);
-    const { lines } = handed[0];
-    assert.match(lines[0], /^clear t\d+:\S+:8x8 colour=0,0,1,1$/);
-    assert.match(lines[1], /^draw 3 x1 topology=\d+ vs=vs\d+ gs=- ps=ps\d+ rt=\[t\d+:\S+:8x8\]/);
+    const shaders = handed[0].lines.filter(line=>line.startsWith('shader '));
+    assert.equal(shaders.length, 2, 'each shader once, before the draw that first uses it');
+    assert.match(shaders[1], /^shader ps\d+: in .* out SV_TARGET0@o0\n/);
+    const lines = handed[0].lines.filter(line=>!line.startsWith('shader '));
+    assert.match(lines[0], /^clear t\d+:\S+:8x8:nz=0% colour=0,0,1,1$/);
+    assert.match(lines[1],
+        /^draw 3 x1 topology=\d+ vs=vs\d+ gs=- ps=ps\d+ rt=\[t\d+:\S+:8x8:nz=\d+%\]/);
+    assert.match(lines[1], / blend=5\/6\/1,2\/1\/1:m15 factor=0\.25,0\.5,0\.75,1 cb0=0\.5,0,0,1 vb0=-1,-1,0,1,3,-1,0,1,-1,3,0,1$/,
+        'the blend, its factor and the constants the pixel shader is given');
     assert.match(lines.at(-1) ?? '', /^frame \d+: presents back buffer t\d+:/);
     assert.equal(liveDump.dumpFrames, 0);
 });
@@ -3186,4 +3206,33 @@ test('a multisampled render target can be read by the shader that resolves it, w
     const made = h.gpu.of('createTexture').at(-1);
     assert.equal(made.descriptor.sampleCount, 4);
     assert.ok((made.descriptor.usage & 0x04) !== 0, 'TEXTURE_BINDING');
+});
+
+test('a texture past the device\'s limits is never asked of it: it is lost, and the frames it'
+    + ' is used in are drawn', async()=>{
+    for (const layers of [256, 2048])
+    {
+        const h = harness({ fake: { limits: { maxTextureArrayLayers: layers } } });
+        const { device } = h;
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, ArraySize: 768,
+            Format: DXGI_FORMAT.R32_FLOAT,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET }, null, texture),
+        S_OK);
+        /** @type {{ view?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTargetView(texture.resource, null, target), S_OK);
+        device.ClearRenderTargetView(target.view, [1, 0, 0, 0]);
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        device.Draw(3, 0);
+        await h.present();
+        const made = h.gpu.of('createTexture').some((/** @type {any} */ call)=>
+            call.descriptor.size.depthOrArrayLayers === 768);
+        assert.equal(made, layers >= 768, `with ${layers} layers a texture`);
+        assert.deepEqual(h.gpu.errors, [], 'no frame refused');
+        assert.equal(h.divergences.some(line=>line.includes('lost: a r32float texture of 2x2x768,'
+            + ' past its 8192 texels a side and 256 layers cannot be made')), layers < 768);
+        assert.equal(h.gpu.count('draw'), 1, 'the back buffer is drawn');
+    }
 });

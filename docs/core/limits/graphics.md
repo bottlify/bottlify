@@ -17,7 +17,10 @@
   has `indirect-first-instance`. A constant
   buffer offset (`*SetConstantBuffers1`) is ignored and the whole buffer bound
   (`ConstantBufferOffsetting` is false); a logic operation in a blend state and a forced sample
-  count in a rasterizer state are refused; `ClearView` of rectangles is not made.
+  count in a rasterizer state are refused; `ClearView` of rectangles is not made. A texture past
+  the GPU device's own limits (texels a side, array layers: from 8192 and 256 on WebGPU, 16384
+  and 2048 in Direct3D 11) is made and kept in memory but never drawn with or into, and said
+  once as a loss.
 - Vulkan draws on the engine thread; Direct3D 7, 8, 9, 10, 11 and OpenGL in the graphics worker.
 - Direct3D 10's command ring, which Direct3D 11's immediate context shares, is i386 code: a
   64-bit process traps every device and context call. A deferred context's calls trap.

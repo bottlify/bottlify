@@ -916,6 +916,20 @@ export function createBackend(options){
         },
 
         /**
+         * A limit the device was made with (`maxTextureArrayLayers`, ...), or
+         * null where the device does not say: what a renderer checks a
+         * description against before the device refuses it, and with it the
+         * frame it was made in.
+         *
+         * @param {string} name
+         * @returns {number | null}
+         */
+        limit(name){
+            const value = device.limits?.[name];
+            return typeof value === 'number' ? value : null;
+        },
+
+        /**
          * What has been recorded so far is cut off and queued for replay as
          * one frame -- at a present, or at a flush or read-back that sends
          * the recording before one. Renames after this retire backings that
