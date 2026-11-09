@@ -30,7 +30,8 @@
   LZW or PackBits); a JPEG XR file is refused with `E_FAIL`, as some Windows installs refuse it.
   BC6H and BC7 files are loaded as they are: a size or format asked of them that their file does
   not hold is refused. Filtered sizes and re-made blocks can differ from Windows' in the last bit
-  (decision A236). `D3DX10CreateThreadPump` is not made: a program passes its own pump or none.
+  (decision A236). `D3DX10CreateThreadPump` and `D3DX11CreateThreadPump` make one IO thread and
+  two processing threads when the program leaves the counts to D3DX.
 - OpenGL keeps a texture's data only where it draws, in the graphics worker, and lets a level's
   texels go once the device holds them (a compressed level keeps its blocks). `glGetTexImage`
   reads black, as `glReadPixels` on a device does, and says so as a divergence.

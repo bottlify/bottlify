@@ -1547,6 +1547,62 @@ export function createWin32Module(){
                 park: thread=>bridge.park(thread),
             });
 
+            /**
+             * A thread of the program's that runs work the host hands it, in
+             * turn: a D3DX thread pump's IO and processing stages, which call
+             * the program's loaders and processors from threads that are not
+             * the caller's, as D3DX's own threads do. Each job is a host
+             * routine on that thread, free to call guest code there.
+             *
+             * @param {string} name
+             */
+            const serviceThread = name=>{
+                const notices = createNoticeThread({
+                    name,
+                    reason: `${name} work`,
+                    trap: `<${name}>`,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    writeMemory,
+                    register: (trapName, fn)=>bridge.register(trapName, fn),
+                    /** @param {{ entry: number, name: string }} options */
+                    createThread: options=>{
+                        const thread = kernel.createThread(options);
+                        threadMade(thread);
+                        return thread;
+                    },
+                    currentThread: ()=>kernel.currentThread(),
+                    /** @param {any} thread @param {string} reason */
+                    block: (thread, reason)=>kernel.block(thread, reason),
+                    /** @param {any} thread @param {number} result */
+                    wake: (thread, result)=>kernel.wake(thread, result),
+                    /** @param {any} thread */
+                    park: thread=>bridge.park(thread),
+                });
+                return {
+                    /** @param {(thread: any) => Promise<void>} job */
+                    run: job=>{
+                        const id = nextServiceJob++;
+                        serviceJobs.set(id, job);
+                        serviceJobStub ||= bridge.register('<service-job>', {
+                            argBytes: 4,
+                            /** @param {number[]} args */
+                            handler: ([at])=>{
+                                const owed = serviceJobs.get(at >>> 0);
+                                serviceJobs.delete(at >>> 0);
+                                return owed ? owed(kernel.currentThread()).then(()=>0) : 0;
+                            },
+                        });
+                        notices.deliver(serviceJobStub, [id]);
+                    },
+                };
+            };
+            /** The jobs handed to service threads and not yet run, by number. */
+            /** @type {Map<number, (thread: any) => Promise<void>>} */
+            const serviceJobs = new Map();
+            let nextServiceJob = 1;
+            let serviceJobStub = 0;
+
             // Multimedia timers fire on a thread of their own, like the notices
             // above, but the kernel's clock is what wakes it.
             const mmTimers = createTimerService({
@@ -4010,6 +4066,7 @@ export function createWin32Module(){
                         callGuest: call=>bridge.callGuest(call),
                         drive: steps=>bridge.drive(steps),
                         currentThread: ()=>kernel.currentThread(),
+                        serviceThread,
                         // The FromFile and FromResource functions read the same
                         // volume and modules the program does; SaveToFile writes it.
                         readFile: async path=>{

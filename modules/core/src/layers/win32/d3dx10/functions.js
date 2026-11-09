@@ -23,6 +23,7 @@ import { D3DX10_DEFAULT, planTexture } from './load.js';
 import { DIMENSION } from './dds10.js';
 import { createComObject } from '../ole32/objects.js';
 import { createDataLoaders, publishBare } from './loaders.js';
+import { createThreadPumps } from './pump.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -97,6 +98,8 @@ const DDS_HEADERS = 148;
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  * @property {() => Promise<number>} [compiler]
  *     Where this process's D3DCompile is (d3dcompiler_43's), or 0 for none.
+ * @property {(name: string) => { run: (job: (thread: any) => Promise<void>) => void }}
+ *     [serviceThread]  a thread of the program's a thread pump's stage runs on
  * @property {(module: number, name: string | number, type: number)
  *     => Uint8Array | null | Promise<Uint8Array | null>}
  *     [resource]  a module's resource, by name or number, and type
@@ -761,6 +764,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
 
     return {
         ...loaders,
+        ...createThreadPumps(host, prefix),
         /** BOOL D3DX10CheckVersion(UINT D3DSdkVersion, UINT D3DX10SdkVersion) */
         [`${prefix}CheckVersion`]: {
             argBytes: 8,

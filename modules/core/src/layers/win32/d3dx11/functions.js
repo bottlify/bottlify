@@ -37,6 +37,7 @@ export const D3DX11_PROFILE = Object.freeze({ prefix: 'D3DX11', sdk: D3D11_SDK_V
 const EXPORTS = new Set(['CheckVersion', 'CompileFromFileA', 'CompileFromFileW',
     'CompileFromMemory', 'CreateAsyncFileLoaderA', 'CreateAsyncFileLoaderW',
     'CreateAsyncMemoryLoader', 'CreateAsyncResourceLoaderA', 'CreateAsyncResourceLoaderW',
+    'CreateThreadPump',
     'CreateShaderResourceViewFromFileA', 'CreateShaderResourceViewFromFileW',
     'CreateShaderResourceViewFromMemory', 'CreateShaderResourceViewFromResourceA',
     'CreateShaderResourceViewFromResourceW', 'CreateTextureFromFileA', 'CreateTextureFromFileW',
