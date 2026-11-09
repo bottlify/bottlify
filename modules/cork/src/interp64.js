@@ -17,15 +17,16 @@
  * is the 32-bit tier's (`BlockMemory`): the same page flags, the same faults
  * with the address an access could not reach, the same notes of a store into
  * translated code. An address at or past 4 GiB lies outside the window and
- * faults.
+ * faults; past 8 or 16 GiB in a wide layout, whose RAM is a memory of its own
+ * (`WideMemory`).
  */
 
 import { MODE_64, decode } from './decode/decoder.js';
 import { BlockMemory } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
 import { evaluate64, freshX87 } from './ir64.js';
-
-const WINDOW = 1n << 32n;
+import { WINDOW } from './runtime/layout.js';
+import { WideMemory } from './wide-memory.js';
 
 /**
  * Long mode's view of the 32-bit tier's memory: BigInt addresses and values,
@@ -33,15 +34,19 @@ const WINDOW = 1n << 32n;
  * is written, so a store that faults on its second page writes nothing.
  */
 class WindowMemory {
-    /** @param {BlockMemory} memory @param {{ faultEip: number }} owner */
-    constructor(memory, owner){
+    /**
+     * @param {BlockMemory | WideMemory} memory @param {{ faultEip: number }} owner
+     * @param {number} window
+     */
+    constructor(memory, owner, window){
         this.memory = memory;
         this.owner = owner;
+        this.window = BigInt(window);
     }
 
     /** @param {bigint} address @param {number} size */
     place(address, size){
-        if (address + BigInt(size) > WINDOW)
+        if (address + BigInt(size) > this.window)
         {
             throw new Fault(13, this.owner.faultEip);
         }
@@ -95,8 +100,9 @@ class BlockState64 {
      * @param {((address: number, size: number) => void) | null} onCodeWrite
      * @param {(() => bigint) | undefined} rdtsc
      * @param {import('./ir64.js').State64['ports']} ports
+     * @param {WebAssembly.Memory} [ram]  a wide layout's RAM (`ramMemory`)
      */
-    constructor(memory, layout, onCodeWrite, rdtsc, ports){
+    constructor(memory, layout, onCodeWrite, rdtsc, ports, ram){
         if (layout.bits !== 64)
         {
             throw new Error('cork: the long-mode interpreter runs over a 64-bit layout');
@@ -108,8 +114,14 @@ class BlockState64 {
         this.rip = this.view.getBigUint64(layout.eip, true);
         this.rflags = this.view.getUint32(layout.eflags, true);
         this.faultEip = 0;
-        this.blockMemory = new BlockMemory(memory, layout, onCodeWrite, this);
-        this.memory = new WindowMemory(this.blockMemory, this);
+        if (layout.ramMemory !== undefined && ram === undefined)
+        {
+            throw new Error('cork: a wide layout\'s state is given its RAM\'s memory');
+        }
+        this.blockMemory = ram === undefined ? new BlockMemory(memory, layout, onCodeWrite, this)
+            : new WideMemory(memory, ram, layout, onCodeWrite, this);
+        this.window = layout.window ?? WINDOW;
+        this.memory = new WindowMemory(this.blockMemory, this, this.window);
         this.halted = false;
         this.retired = 0;
         /** @type {number[]} */
@@ -211,7 +223,7 @@ class BlockState64 {
 /**
  * A long-mode state over cork's 64-bit state block (`blockState` for 64 bits).
  *
- * @param {{ memory: WebAssembly.Memory,
+ * @param {{ memory: WebAssembly.Memory, ram?: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
  *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'],
@@ -219,9 +231,9 @@ class BlockState64 {
  *     and `readThrough` as `blockState`'s
  */
 export function blockState64(what){
-    const { memory, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0,
+    const { memory, ram, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0,
         readThrough = [] } = what;
-    const state = new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports);
+    const state = new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports, ram);
     state.blockMemory.zeroReadsBelow = zeroReadsBelow;
     state.blockMemory.readThrough = readThrough;
     return state;
@@ -246,7 +258,7 @@ export function interpret64(state, budget, options = {}){
     const memory = state.blockMemory;
     /** @param {number} address */
     const fetch = address=>{
-        if (address >= 2 ** 32)
+        if (address >= state.window)
         {
             throw new Fault(14, Number(state.rip));
         }

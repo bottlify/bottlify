@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ownLayout, pagesFor, pageFlagsAt, sharedLayout, windowBits, PAGE, LOW_STATE,
+import { ownLayout, pagesFor, pageFlagsAt, codeRangesAt, sharedLayout, windowBits, PAGE, LOW_STATE,
     tablesSize } from './layout.js';
 
 const GiB = 2 ** 30;
@@ -36,7 +36,8 @@ for (const window of [8 * GiB, 16 * GiB])
             assert.equal(/** @type {any} */ (layout)[field], /** @type {any} */ (long)[field], field);
         }
         assert.equal(pageFlagsAt(layout), PAGE);
-        assert.equal(layout.tables, PAGE + window / 4096, 'a flag byte per page of the window');
+        assert.equal(codeRangesAt(layout), PAGE + window / 4096, 'a flag byte per page');
+        assert.equal(layout.tables, PAGE + window / 4096 * 3, 'two granule bytes per page');
         assert.equal(pagesFor(layout, tablesSize(layout)),
             Math.ceil((layout.tables + tablesSize(layout)) / PAGE), 'memory 0 holds no RAM');
         assert.equal(sharedLayout(layout).pageFlags, PAGE, 'the process\'s flags shared');
