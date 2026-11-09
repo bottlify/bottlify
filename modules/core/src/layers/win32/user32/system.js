@@ -5993,11 +5993,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([key])=>host.asyncKeyState?.(key >>> 0) ?? 0,
         },
 
-        /** SHORT GetKeyState(int nVirtKey) */
+        /**
+         * SHORT GetKeyState(int nVirtKey)
+         *
+         * The thread's synchronous state: each key and button as of the last
+         * input message the thread took (`messages.js`), the keys as they
+         * are until it takes one. GetAsyncKeyState is the keys as they are.
+         */
         GetKeyState: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
+            handler: ([key])=>host.queue?.syncedKeyState?.(key >>> 0)
+                ?? host.keyState?.(key >>> 0) ?? 0,
         },
 
         /**
@@ -6017,7 +6024,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(state >>> 0, host.keyboardState?.() ?? new Uint8Array(256));
+                host.writeMemory(state >>> 0, host.queue?.syncedKeyboard?.()
+                    ?? host.keyboardState?.() ?? new Uint8Array(256));
                 return 1;
             },
         },
@@ -6038,7 +6046,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.setKeyboardState?.(host.readMemory(state >>> 0, 256));
+                const bytes = host.readMemory(state >>> 0, 256);
+                host.queue?.setSyncedKeyboard?.(bytes);
+                host.setKeyboardState?.(bytes);
                 return 1;
             },
         },

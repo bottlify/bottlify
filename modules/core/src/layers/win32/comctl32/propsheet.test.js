@@ -284,15 +284,16 @@ function setup({ modal = false, guest = false } = {}){
     };
     const memory = fakeMemory();
     const handles = fakeHandles();
-    const queue = createMessageQueue();
+    /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
+    const keysDown = new Set();
+    // The queue's thread state starts from the keys as they are, as user32's does.
+    const queue = createMessageQueue({ keyState: key=>(keysDown.has(key) ? 0x8000 : 0) });
     const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
     /** Every procedure and callback the program has, by address. @type {Map<number, Procedure>} */
     const procedures = new Map();
     let nextProcedure = PROCEDURES;
     let heapNext = HEAP;
     let stringNext = STRINGS;
-    /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
-    const keysDown = new Set();
     /** What the window manager hands the machine, a modal loop among it. @type {any} */
     let windowService = null;
     /** @param {number} bytes */
