@@ -5507,6 +5507,13 @@ export function createWin32Module(){
                     + `${share >>> 0}, disposition ${disposition >>> 0}`),
 
                 /**
+                 * This process's pipe handles and what is at the other end: a
+                 * reader that never sees the pipe broken is a handle onto the
+                 * other end still open somewhere, and this says how many.
+                 */
+                pipes: ()=>pipes.describe(),
+
+                /**
                  * Which threads are parked on a completion port, and for how long.
                  *
                  * A program whose workers are all waiting for a packet looks exactly
@@ -5780,6 +5787,7 @@ export function createWin32Module(){
                     heap: current ? current.heap().diagnostics() : null,
                     mappings: current ? current.mappings() : null,
                     refusedOpens: current ? current.refusedOpens() : [],
+                    pipes: current ? current.pipes() : [],
                     windows: current ? current.windows() : [],
                     windowProcedures: current ? current.windowProcedures() : [],
                     exitCode: current ? current.exitCode() : null,

@@ -1298,6 +1298,30 @@ export function createNamedPipes(host){
         },
 
         /**
+         * Each of this process's pipe handles, one line: its name or that it
+         * is anonymous, its side, the handles onto it and onto the other end
+         * in every process, whether the other end is gone, the reads waiting
+         * and the bytes unread.
+         *
+         * @returns {string[]}
+         */
+        describe(){
+            return [...inheritable.keys()].flatMap(handle=>{
+                const end = endOf(handle);
+                if (!end)
+                {
+                    return [];
+                }
+                const peer = peerOf(end);
+                const unread = end.inbox.reduce((sum, one)=>sum + one.bytes.length - one.at, 0);
+                return [`${handle} ${end.instance.pipe.name ?? 'anonymous'} ${end.side}`
+                    + ` refs=${end.refs} peer=${peer ? `${peer.refs}${peer.closed ? ' closed' : ''}`
+                        : 'none'} state=${end.instance.state} readers=${end.readers.length}`
+                    + ` unread=${unread}`];
+            });
+        },
+
+        /**
          * This process's pipe handles a child it starts inherits: the
          * inheritable ones, or of those the ones the attribute list names.
          *

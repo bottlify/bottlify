@@ -536,3 +536,20 @@ test('a wait on an end\'s handle is a wait on its pending operations, as on a fi
     assert.equal(signal.signalled, true, 'and done');
     assert.equal(p.pipes.waitable(0x9999), null);
 });
+
+test('describe says of each handle what is at the other end, and when it is gone', ()=>{
+    const p = processOn(new Map());
+    const server = p.server();
+    const client = p.client();
+    p.write(client, 'abc');
+    p.as('p:reader');
+    assert.deepEqual(p.pipes.describe(), [
+        `${server} ${NAME} server refs=1 peer=1 state=connected readers=0 unread=3`,
+        `${client} ${NAME} client refs=1 peer=1 state=connected readers=0 unread=0`]);
+    p.read(server, 3);
+    assert.equal(p.read(client, 1), 'parked');
+    p.pipes.closed(server, p.handles.get(server)?.object);
+    assert.deepEqual(p.pipes.describe(), [
+        `${client} ${NAME} client refs=1 peer=0 closed state=connected readers=0 unread=0`],
+    'the server gone, the waiting read woken with the pipe broken');
+});
