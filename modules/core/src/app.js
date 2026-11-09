@@ -10641,7 +10641,9 @@ export async function createApp(options){
         const line = { current: server, main: false, service: request.service ?? null };
         serving.add(line);
         const listed = { id: ids.processId, image: found.path, beside: /** @type {true} */ (true),
-            diagnostics: ()=>line.current.diagnostics() };
+            diagnostics: ()=>line.current.diagnostics(),
+            read: (/** @type {number} */ address, /** @type {number} */ length)=>
+                line.current.debug.read(address, length) };
         standingBeside.add(listed);
         noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
@@ -10702,7 +10704,8 @@ export async function createApp(options){
      * their memory, and a list without it says the run has one process.
      *
      * @type {Set<{ image: string, id: number, beside: true,
-     *     diagnostics: () => Promise<any> }>}
+     *     diagnostics: () => Promise<any>,
+     *     read: (address: number, length: number) => Uint8Array }>}
      */
     const standingBeside = new Set();
 
@@ -10893,6 +10896,25 @@ export async function createApp(options){
                     const child = [...standingAcross, ...standingBeside].find(each=>each.id === id);
                     return child ? child.diagnostics()
                         : Promise.reject(new Error(`no process ${id} stands`));
+                },
+                /**
+                 * Bytes of a process's memory by its id, the first's or one
+                 * running beside it: an OVERLAPPED a program polls, a buffer it
+                 * waits on.
+                 *
+                 * @param {number} id @param {number} address @param {number} length
+                 */
+                readOf: (id, address, length)=>{
+                    if (id === (options.processId ?? FIRST_PROCESS_ID))
+                    {
+                        return speaking.debug.read(address, length);
+                    }
+                    const child = [...standingBeside].find(each=>each.id === id);
+                    if (!child)
+                    {
+                        throw new Error(`no process ${id} stands beside`);
+                    }
+                    return child.read(address, length);
                 } };
         }
     };
@@ -11471,7 +11493,9 @@ export async function createApp(options){
                 child.terminate(reach.code);
             }
             const listed = { id: request.id, image: request.imagePath, beside: /** @type {true} */ (true),
-                diagnostics: ()=>line.current.diagnostics() };
+                diagnostics: ()=>line.current.diagnostics(),
+                read: (/** @type {number} */ address, /** @type {number} */ length)=>
+                    line.current.debug.read(address, length) };
             standingBeside.add(listed);
             let code = -1;
             try

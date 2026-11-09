@@ -553,3 +553,22 @@ test('describe says of each handle what is at the other end, and when it is gone
         `${client} ${NAME} client refs=1 peer=0 closed state=connected readers=0 unread=0`],
     'the server gone, the waiting read woken with the pipe broken');
 });
+
+test('a handle opened without FILE_FLAG_OVERLAPPED reads as a synchronous call, OVERLAPPED or not',
+    ()=>{
+        // An OVERLAPPED on a synchronous handle gives its offset and takes its
+        // status: the read waits for the bytes and says the count where the
+        // call asked, which a program that polls that count waits on.
+        const p = processOn(new Map());
+        const server = p.server();
+        const client = p.client();
+        const overlapped = 0x6000;
+        p.as('p:reader');
+        assert.equal(p.read(server, 1, overlapped), 'parked', 'it waits, not pending');
+        p.write(client, 'x');
+        assert.deepEqual(p.woken.at(-1), { thread: 'p:reader', result: 1 });
+        assert.equal(p.u32(COUNT), 1, 'the count, where the call asked');
+        assert.deepEqual([p.u32(overlapped), p.u32(overlapped + 4)], [0, 1],
+            'the status and the count in the OVERLAPPED');
+        assert.equal(p.text(1), 'x');
+    });
