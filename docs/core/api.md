@@ -110,7 +110,7 @@ what every run uses.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `log` | none | `{ categories?, capacity?, bytes? }`: call areas recorded from the first instruction, each at its level (`off`, `error`, `warn`, `info`, `debug`, `trace`): `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`, `call.hook`, `input.press`, `input.message`; and the journal's size, `capacity` records and `bytes` of ring (1 MiB). A thread's calls that repeat in a loop of up to 8 are written until the loop has gone round twice, then counted. |
+| `log` | none | `{ categories?, capacity?, bytes?, shaders? }`: call areas recorded from the first instruction, each at its level (`off`, `error`, `warn`, `info`, `debug`, `trace`): `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`, `call.hook`, `input.press`, `input.message`; and the journal's size, `capacity` records and `bytes` of ring (1 MiB). A thread's calls that repeat in a loop of up to 8 are written until the loop has gone round twice, then counted. `shaders` (off) writes a line for each shader a program compiles, with its defines; a shader that fails to compile is written with its source either way. |
 | `traceStrings` | `false` | Keep the text an argument points at in the journal. |
 | `profileCalls` | `false` | Time every host call as a phase of its own. |
 | `sampleJs` | `false` | Run the browser's JavaScript sampler on the engine's thread in 2 s windows; its top functions are the `js` diagnostics table. Needs `Document-Policy: js-profiling` ([README.md](README.md)) and the engine on a window's thread: Chrome offers the sampler to no worker, so with the engine in one the table says it is not measured. |
