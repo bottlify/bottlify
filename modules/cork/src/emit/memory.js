@@ -144,6 +144,9 @@ export const ramAlways = layout=>layout.ramFloor ?? layout.ramSize;
  */
 export const ram = (e, offset = 0)=>({ guest: true, offset: e.layout.ramBase + offset });
 
+/** A guest access's memarg at a wasm offset already counting RAM's place (`ram`). @param {number} offset */
+export const ramAt = offset=>({ guest: true, offset });
+
 /**
  * Whether the current instruction's access goes untested, its address wrapped
  * into RAM. Outside `precise` an instruction that only reads is not tested: the
@@ -1857,7 +1860,14 @@ export function emitGroupChecks(e, checks, at = -1){
             // the sum of the registers' low halves, as the accesses' own
             // addresses are (`emitAddress`), which the host computes once.
             groupSum(e, group, start, true);
-            b.i64const(32n).op(I64.shrU).localSet(Local.t64);
+            if (e.guest !== null)
+            {
+                // A wide window's: the sum's high half where its pages' flags are
+                // (`pageIndex`), and past the window rather than past 4 GiB.
+                b.localTee(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+                b.localGet(Local.t64);
+            }
+            b.i64const(BigInt(windowBits(e.layout))).op(I64.shrU).localSet(Local.t64);
             groupSum(e, group, start, false);
             b.localSet(Local.addr);
             b.localGet(Local.t64).op(I64.wrap);
@@ -1886,7 +1896,7 @@ export function emitGroupChecks(e, checks, at = -1){
         // pages and the stores' granules looked at.
         const stores = group.list.some(access=>access.store);
         const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
-        b.localGet(Local.addr).i32const(12).op(I32.shrU);
+        pageIndex(e);
         loadFlags(e, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
         if (e.width.bits === 64)
         {
@@ -1912,12 +1922,12 @@ export function emitGroupChecks(e, checks, at = -1){
             e.openGuard('pastZeroPage', EMPTY);
         }
         const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
-        b.localGet(Local.addr).i32const(group.width - 1).i32const(first[0]).i32const(first[1])
-            .call(e.context.windowHit);
+        b.localGet(Local.addr).widenGuest().i32const(group.width - 1).i32const(first[0])
+            .i32const(first[1]).call(e.context.windowHit);
         for (const [from, to] of more)
         {
-            b.localGet(Local.addr).i32const(from).op(I32.add)
-                .localGet(Local.addr).i32const(to).op(I32.add)
+            b.localGet(Local.addr).i32const(from).op(I32.add).widenGuest()
+                .localGet(Local.addr).i32const(to).op(I32.add).widenGuest()
                 .call(e.context.spanHit).op(I32.or);
         }
         leaveIf('window');
@@ -2210,8 +2220,13 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             }
             b.i64const(BigInt(from)).op(I64.add).localTee(Local.t64)
                 .localGet(Local.t64).i64const(BigInt(width - 1)).op(I64.add).op(I64.or)
-                .i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+                .i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap).op(I32.or);
             b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
+            if (e.guest !== null)
+            {
+                // A wide window's pages are found by the whole address (`pageIndex`).
+                b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+            }
         }
         else
         {
@@ -2259,12 +2274,7 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
         const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
         const reach = [0, Math.min(4096, width - 1), width - 1];
         reach.forEach((at, k)=>{
-            b.localGet(Local.addr);
-            if (at !== 0)
-            {
-                b.i32const(at).op(I32.add);
-            }
-            b.i32const(12).op(I32.shrU);
+            pageIndex(e, at);
             loadFlags(e, table, 'i32_8u');
             if (k > 0)
             {
@@ -2289,7 +2299,7 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
                 {
                     b.i32const(at).op(I32.add);
                 }
-                b.call(e.context.codeHit).drop();
+                b.widenGuest().call(e.context.codeHit).drop();
             }
             b.end();
             b.localGet(Local.pflags);
@@ -2308,7 +2318,8 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
         }
         b.localTee(Local.t64).i64const(BigInt(range.lo + Math.min(0, span))).op(I64.add)
             .localGet(Local.t64).i64const(BigInt(range.hi + Math.max(0, span))).op(I64.add)
-            .op(I64.or).i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+            .op(I64.or).i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap)
+            .op(I32.or);
     }
     b.op(I32.eqz);
 }

@@ -13,6 +13,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import v8 from 'node:v8';
 import { gunzipSync } from 'node:zlib';
 import { ownLayout, pageFlagsAt, pagesFor, tablesSize } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
@@ -23,6 +24,7 @@ import {
     WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, createWasmInterpreter,
 } from '../interp-wasm.js';
 import { translatesLong } from '../emit/long-ops.js';
+import { memory64 } from '../wasm/features.js';
 
 export const CORPUS = JSON.parse(gunzipSync(readFileSync(new URL('../x64-corpus.json.gz',
     import.meta.url))).toString('utf8'));
@@ -58,35 +60,51 @@ export function fill(seed, size){
  * A machine with the corpus's data and code areas open and every other page closed.
  *
  * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
- *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[] }} [options]
+ *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
+ *     high?: number, codeHigh?: number }} [options]
  *     `closed`: pages of the code area closed too, by address; `config`: the runtime's
  *     settings over the runner's; `tiered`: what no region holds runs on the interpreter tier
  *     in wasm (`createWasmInterpreter`), `interp64.js` taking what it hands back; `ramSize`:
  *     the RAM past the code area, 1 GiB for one a power of two (the translator's reads
- *     wrapped with one `and`, a struct's field reads off one wrapped sum)
+ *     wrapped with one `and`, a struct's field reads off one wrapped sum); `window`: a wide
+ *     window's bytes (`wideLayout`), its RAM a memory of its own; `high`: how far past its
+ *     place the data area lies, and the registers pointing into it (`load`); `codeHigh`: the
+ *     code area's, which translated code takes only below 4 GiB so far
  */
 export function machine({ config = {}, trapPort = undefined, tiered = false,
-    makeRunner = null, ramSize = CORPUS.codeAt + 0x100000, closed = [] } = {})
+    makeRunner = null, ramSize = CORPUS.codeAt + 0x100000, closed = [], window = undefined,
+    high = 0, codeHigh = 0 } = {})
 {
-    const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
+    if (window !== undefined)
+    {
+        v8.setFlagsFromString('--experimental-wasm-memory64');
+    }
+    const layout = window === undefined ? ownLayout({ ramSize, ramBase: 0, bits: 64 })
+        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
         tablesSize(layout) + (tiered ? WASM_INTERPRETER_AREA : 0)) });
-    const flags = new Uint8Array(memory.buffer, pageFlagsAt(layout), 1 << 20);
+    const ram = window === undefined ? undefined : memory64(window);
+    const flags = new Uint8Array(memory.buffer, pageFlagsAt(layout), (window ?? 2 ** 32) / 4096);
     flags.fill(PageFlag.INACCESSIBLE);
-    for (const [at, size] of [[CORPUS.dataAt, CORPUS.dataSize], [CORPUS.codeAt, CORPUS.codeSize]])
+    for (const [at, size, by] of [[CORPUS.dataAt, CORPUS.dataSize, high],
+        [CORPUS.codeAt, CORPUS.codeSize, codeHigh]])
     {
-        flags.fill(0, at >>> 12, (at + size) >>> 12);
+        flags.fill(0, (at + by) / 4096, (at + by + size) / 4096);
     }
     for (const at of closed)
     {
-        flags[at >>> 12] = PageFlag.INACCESSIBLE;
+        flags[(at + codeHigh) / 4096] = PageFlag.INACCESSIBLE;
+    }
+    if (tiered && window !== undefined)
+    {
+        throw new Error('long machine: no wasm interpreter tier over a wide window yet');
     }
     const tier = tiered ? createWasmInterpreter({ memory, layout,
         area: layout.tables + tablesSize(layout),
         statics: layout.regs + WASM_INTERPRETER_STATICS_AT, hotThreshold: 1, trapPort,
         parkBase: 0 }) : null;
     const runner = makeRunner !== null ? makeRunner(memory, layout, tier)
-        : createRuntimeRunner64({ memory, layout, tier,
+        : createRuntimeRunner64({ memory, ram, layout, tier,
             config: { ...config, ...(trapPort === undefined ? {} : { trapPort }) } });
     /** The writes to ports other than the trap port, each port and value. @type {number[][]} */
     const writes = [];
@@ -96,9 +114,10 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
         /** @param {number} port @param {number} size @param {number} value */
         write: (port, size, value)=>writes.push([port, size, value]),
     };
-    const state = blockState64({ memory, layout, ports,
+    const state = blockState64({ memory, ram, layout, ports,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
-    return { layout, memory, state, runner, writes, view: new DataView(memory.buffer) };
+    return { layout, memory, ram, high, codeHigh, state, runner, writes,
+        view: new DataView(memory.buffer) };
 }
 
 /**
@@ -404,20 +423,27 @@ export function stacked(instructions, seed, count){
  * @param {ReturnType<typeof machine>} m @param {any} one
  */
 export function load(m, one){
-    const { layout, memory, view } = m;
+    const { layout, memory, view, high, codeHigh } = m;
     const bytes = new Uint8Array(memory.buffer);
+    // The areas past their places, in the RAM's own memory where it has one.
+    const ram = new Uint8Array((m.ram ?? memory).buffer);
+    const codeAt = CORPUS.codeAt + codeHigh;
     const code = Buffer.from(one.code, 'hex');
-    bytes.fill(0, CORPUS.codeAt, CORPUS.codeAt + CORPUS.codeSize);
-    bytes.set(code, CORPUS.codeAt);
+    ram.fill(0, codeAt, codeAt + CORPUS.codeSize);
+    ram.set(code, codeAt);
     const disp = CORPUS.codeSize - 8 - (code.length + 6);
-    bytes.set([0xff, 0x25, disp & 0xff, disp >>> 8 & 0xff, disp >>> 16 & 0xff, disp >>> 24],
-        CORPUS.codeAt + code.length);
-    view.setBigUint64(CORPUS.codeAt + CORPUS.codeSize - 8, BigInt(EXIT), true);
-    bytes.set(fill(one.seed, CORPUS.dataSize), CORPUS.dataAt);
+    ram.set([0xff, 0x25, disp & 0xff, disp >>> 8 & 0xff, disp >>> 16 & 0xff, disp >>> 24],
+        codeAt + code.length);
+    new DataView(ram.buffer).setBigUint64(codeAt + CORPUS.codeSize - 8, BigInt(EXIT), true);
+    ram.set(fill(one.seed, CORPUS.dataSize), CORPUS.dataAt + high);
+    // A register pointing into an area points into it where it lies.
+    const moved = (/** @type {bigint} */ value)=>[[CORPUS.dataAt, CORPUS.dataSize, high],
+        [CORPUS.codeAt, CORPUS.codeSize, codeHigh]].reduce((at, [from, size, by])=>(
+        value >= BigInt(from) && value < BigInt(from + size) ? value + BigInt(by) : at), value);
     one.regs.forEach((/** @type {string} */ value, /** @type {number} */ i)=>{
-        view.setBigUint64(layout.regs + i * 8, BigInt(`0x${value}`), true);
+        view.setBigUint64(layout.regs + i * 8, moved(BigInt(`0x${value}`)), true);
     });
-    view.setBigUint64(layout.eip, BigInt(CORPUS.codeAt), true);
+    view.setBigUint64(layout.eip, BigInt(codeAt), true);
     view.setUint32(layout.eflags, one.flags | 0x202, true);
     view.setUint32(layout.mxcsr, one.mxcsr ?? 0x1f80, true);
     bytes.set(one.xmm ?? fill(one.seed ^ CORPUS.xmmSeed, 256), layout.xmm);
@@ -477,7 +503,8 @@ export function run(m, translated, budget = 7){
             throw e;
         }
         state.syncOut();
-        fault = error.eip === EXIT ? 'exit' : `${error.vector}@${(error.eip ?? 0) - CORPUS.codeAt}`;
+        fault = error.eip === EXIT ? 'exit'
+            : `${error.vector}@${(error.eip ?? 0) - CORPUS.codeAt - m.codeHigh}`;
     }
     const bytes = new Uint8Array(memory.buffer);
     return {
@@ -500,7 +527,8 @@ export function run(m, translated, budget = 7){
             + [layout.x87Top, layout.x87Empty, layout.x87Control, layout.x87Control + 1,
                 layout.x87Status, layout.x87Status + 1]
                 .map(at=>bytes[at].toString(16)).join(','),
-        data: Buffer.from(bytes.subarray(CORPUS.dataAt, CORPUS.dataAt + CORPUS.dataSize))
+        data: Buffer.from(new Uint8Array((m.ram ?? memory).buffer).subarray(CORPUS.dataAt + m.high,
+            CORPUS.dataAt + m.high + CORPUS.dataSize))
             .toString('base64'),
     };
 }
@@ -510,20 +538,23 @@ export function run(m, translated, budget = 7){
  *
  * @param {any[]} cases
  * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
- *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[] }} [options]
+ *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
+ *     high?: number, codeHigh?: number }} [options]
  *     `budget`: each translated run's; `closed` both machines'; the rest the translated
  *     machine's (`machine`)
  */
 export function compare(cases, { budget = 7, ...options } = {}){
     const translatedMachine = machine(options);
-    const interpretedMachine = machine({ closed: options.closed });
+    const interpretedMachine = machine({ closed: options.closed, window: options.window,
+        high: options.high, codeHigh: options.codeHigh });
     /** @type {string[]} */
     const failures = [];
     let exits = 0;
     for (const one of cases)
     {
         // A fresh translation per case: the code area is rewritten in place.
-        translatedMachine.runner.invalidate(CORPUS.codeAt, CORPUS.codeSize);
+        translatedMachine.runner.invalidate(CORPUS.codeAt + translatedMachine.codeHigh,
+            CORPUS.codeSize);
         load(translatedMachine, one);
         load(interpretedMachine, one);
         const translated = run(translatedMachine, true, budget);

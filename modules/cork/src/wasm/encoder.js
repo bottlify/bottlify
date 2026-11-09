@@ -170,6 +170,27 @@ const FLOAT_VIEW = new DataView(FLOAT_BYTES.buffer);
 /** v128 memory access, as SIMD opcodes: `v128.load` and `v128.store`. */
 const SIMD_LOAD = 0;
 const SIMD_STORE = 11;
+/** `v128.and`. */
+const SIMD_AND = 78;
+/**
+ * The lane and zero-extending vector accesses by opcode as a wide window
+ * makes them (`Body.simdScalar`): the scalar access, whether it stores, and
+ * the splat (with the bytes of its first lane kept, `zero`) or the lane's
+ * replace or extract.
+ * @type {Map<number, { kind: string, store: boolean, zero?: number, lane: number }>}
+ */
+const SIMD_SCALAR = new Map([
+    [92, { kind: 'i32', store: false, zero: 4, lane: 17 }],
+    [93, { kind: 'i64', store: false, zero: 8, lane: 18 }],
+    [84, { kind: 'i32_8u', store: false, lane: 23 }],
+    [85, { kind: 'i32_16u', store: false, lane: 26 }],
+    [86, { kind: 'i32', store: false, lane: 28 }],
+    [87, { kind: 'i64', store: false, lane: 30 }],
+    [88, { kind: 'i32_8', store: true, lane: 22 }],
+    [89, { kind: 'i32_16', store: true, lane: 25 }],
+    [90, { kind: 'i32', store: true, lane: 27 }],
+    [91, { kind: 'i64', store: true, lane: 29 }],
+]);
 
 /**
  * An instruction stream, with the block nesting checked as it is written.
@@ -440,11 +461,50 @@ export class Body {
      *     guest?: boolean }} memarg  align as its log2; `guest` as `load`'s
      */
     simdMem(opcode, { align, offset, lane, memory, guest = false }){
+        const scalar = SIMD_SCALAR.get(opcode);
+        if (guest && this.guest !== null && scalar !== undefined)
+        {
+            return this.simdScalar(opcode, scalar, offset, lane ?? 0);
+        }
         // A lane's load or store, and a whole store, take the vector above the address.
         memory = guest ? this.guestAddress(lane !== undefined || opcode === SIMD_STORE
             ? ValType.v128 : undefined, memory) : memory;
         this.byte(0xfd).u32(opcode).memarg(align, offset, memory);
         return lane === undefined ? this : this.byte(lane);
+    }
+
+    /**
+     * A wide window's lane and zero-extending vector access as the scalar access
+     * and the lane operation it comes to: V8 12 (node 22) reads a `load64_zero`,
+     * `load32_zero` or lane load from a `memory64` memory at a computed address
+     * past 4 GiB as zeros, where its scalar loads read the bytes there.
+     *
+     * @param {number} opcode @param {{ kind: string, store: boolean, zero?: number,
+     *     lane: number }} scalar  the access, and the splat or the lane's replace or
+     *     extract @param {number} offset @param {number} lane
+     */
+    simdScalar(opcode, scalar, offset, lane){
+        const wide = /** @type {NonNullable<Body['guest']>} */ (this.guest);
+        const type = scalar.kind.startsWith('i64') ? ValType.i64 : ValType.i32;
+        if (scalar.zero !== undefined)
+        {
+            // A splat of the value, its first lane kept.
+            const mask = new Array(16).fill(0).fill(0xff, 0, scalar.zero);
+            this.load(/** @type {keyof typeof LOADS} */ (scalar.kind), { offset, guest: true });
+            return this.simd(scalar.lane).v128const(mask).simd(SIMD_AND);
+        }
+        const held = wide.scratch(ValType.v128);
+        this.localSet(held);
+        if (scalar.store)
+        {
+            this.localGet(held).simd(scalar.lane).byte(lane);
+            return this.store(/** @type {keyof typeof STORES} */ (scalar.kind),
+                { offset, guest: true });
+        }
+        const value = wide.scratch(type);
+        this.load(/** @type {keyof typeof LOADS} */ (scalar.kind), { offset, guest: true })
+            .localSet(value);
+        return this.localGet(held).localGet(value).simd(scalar.lane).byte(lane);
     }
 
     /**

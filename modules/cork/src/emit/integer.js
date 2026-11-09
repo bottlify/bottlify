@@ -33,7 +33,7 @@ import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
-    wrapsRead, wrapMask, ramAlways, ram,
+    wrapsRead, wrapMask, ramAlways, ram, ramAt,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -2280,11 +2280,24 @@ function windowed(e, operand, store){
     if (!moved)
     {
         const disp = operand.disp ?? 0;
-        if (disp < 0 || disp + size > 2 ** 32)
+        if (disp < 0 || disp + size > (e.layout.window ?? 2 ** 32))
         {
             e.exitBefore(e.current.eip, Exit.FAULT, 13);
         }
         b.i32const(disp | 0).localSet(Local.addr);
+        if (e.guest !== null)
+        {
+            // A wide window's: the constant's high half, past 4 GiB for an image there.
+            b.i64const(BigInt(disp) & -(2n ** 32n)).localSet(e.guest.high);
+        }
+        return false;
+    }
+    if (e.guest !== null && e.memPlan?.access != null)
+    {
+        // A wide window's access a window test covered: its whole address, whose
+        // high half the access takes (`Body.guest`) -- the high half the test left
+        // is its group's, and a block tests its groups before any access of them.
+        windowAddress(e, ()=>emitAddress64(e, operand));
         return false;
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)
@@ -2533,14 +2546,14 @@ function orderedLoad(e, size){
     const offset = e.layout.ramBase;
     if (size === 1)
     {
-        b.localGet(Local.addr).atomic(`load_${storeKind(size)}`, { offset });
+        b.localGet(Local.addr).atomic(`load_${storeKind(size)}`, ramAt(offset));
         return;
     }
     b.localGet(Local.addr).i32const(size - 1).op(I32.and);
     e.openGuard('misread', ValType.i32);
-    b.localGet(Local.addr).load(loadKind(size), { offset });
+    b.localGet(Local.addr).load(loadKind(size), ramAt(offset));
     b.else();
-    b.localGet(Local.addr).atomic(`load_${storeKind(size)}`, { offset });
+    b.localGet(Local.addr).atomic(`load_${storeKind(size)}`, ramAt(offset));
     e.close();
 }
 
@@ -2557,7 +2570,7 @@ function orderedStore(e, size, pushValue){
     {
         b.localGet(Local.addr);
         pushValue();
-        b.atomic(`store_${storeKind(size)}`, { offset });
+        b.atomic(`store_${storeKind(size)}`, ramAt(offset));
         return;
     }
     const value = e.orderedLocal();
@@ -2565,9 +2578,9 @@ function orderedStore(e, size, pushValue){
     b.localSet(value);
     b.localGet(Local.addr).i32const(size - 1).op(I32.and);
     e.openGuard('miswrite', EMPTY);
-    b.localGet(Local.addr).localGet(value).store(storeKind(size), { offset });
+    b.localGet(Local.addr).localGet(value).store(storeKind(size), ramAt(offset));
     b.else();
-    b.localGet(Local.addr).localGet(value).atomic(`store_${storeKind(size)}`, { offset });
+    b.localGet(Local.addr).localGet(value).atomic(`store_${storeKind(size)}`, ramAt(offset));
     e.close();
 }
 
@@ -2625,7 +2638,7 @@ export function readOp(e, operand){
                 orderedLoad(e, operand.size);
                 return;
             }
-            b.load(loadKind(operand.size), { offset: readAddress(e, operand) });
+            b.load(loadKind(operand.size), ramAt(readAddress(e, operand)));
             return;
         default:
             throw new Error(`emit: cannot read a ${operand.kind} operand`);
@@ -2665,7 +2678,7 @@ export function writeOp(e, operand, pushValue, exact = false){
             {
                 const offset = accessAddress(e, operand);
                 pushValue();
-                b.store(storeKind(operand.size), { offset });
+                b.store(storeKind(operand.size), ramAt(offset));
             }
             return;
         default:
@@ -4874,13 +4887,13 @@ function bulkScan(e, instruction){
     if (cmps)
     {
         b.localGet(Local.addr).localGet(Local.t1).op(I32.add)
-            .load(loadKind(size), { offset: ramBase });
+            .load(loadKind(size), ramAt(ramBase));
     }
     else
     {
         b.localGet(Local.count);
     }
-    b.localGet(Local.addr).load(loadKind(size), { offset: ramBase });
+    b.localGet(Local.addr).load(loadKind(size), ramAt(ramBase));
     // repe stops on a difference, repne on an equal pair.
     b.op(prefixes.rep ? I32.ne : I32.eq);
     b.brIf(e.depthOf('stops'));

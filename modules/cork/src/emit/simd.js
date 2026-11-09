@@ -31,7 +31,7 @@ import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
 import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
 import { prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
-import { checkAccess, noteStore, ram } from './memory.js';
+import { checkAccess, noteStore, ram, ramAt } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
 import { atState } from './bases.js';
 
@@ -193,7 +193,7 @@ function emitForm(e, instruction, flagsLive){
                         return true;
                     }
                     prepareAddress(e, src);
-                    b.load(double ? 'f64' : 'f32', { offset: readAddress(e, src) });
+                    b.load(double ? 'f64' : 'f32', ramAt(readAddress(e, src)));
                     const low = e.lowLocal(reg, double);
                     b.localSet(low);
                     oweLow(e, reg, low, double, 'zero');
@@ -1993,7 +1993,7 @@ function pushLow(e, operand, double, again = false){
     {
         prepareAddress(e, operand);
     }
-    b.load(double ? 'f64' : 'f32', { offset: readAddress(e, operand) });
+    b.load(double ? 'f64' : 'f32', ramAt(readAddress(e, operand)));
 }
 
 /**

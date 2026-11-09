@@ -61,7 +61,7 @@ import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
 import { prepare, readAddress, writeReg } from './integer.js';
-import { PRECISION, noteStore, ram } from './memory.js';
+import { PRECISION, noteStore, ram, ramAt } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
 import { atState } from './bases.js';
@@ -3140,7 +3140,7 @@ export function emitX87(e, instruction, flagsLive){
                     // The float the double would be promoted from; a NaN keeps its bits
                     // here and is quieted where it leaves through the double.
                     prepare(e, src);
-                    b.load('f32', { offset: readAddress(e, src) }).localSet(singleOf(e, into));
+                    b.load('f32', ramAt(readAddress(e, src))).localSet(singleOf(e, into));
                     pushFloat(false);
                 }
                 return finish();
@@ -3165,7 +3165,7 @@ export function emitX87(e, instruction, flagsLive){
             guard();
             prepare(e, src);
             b.load(src.size === 2 ? 'i64_16s' : src.size === 4 ? 'i64_32s' : 'i64',
-                { offset: readAddress(e, src) });
+                ramAt(readAddress(e, src)));
             if (src.size === 8 && x.tracksExact)
             {
                 // The quadword beside the double it rounds to, for a quadword
@@ -3784,7 +3784,7 @@ export function emitX87(e, instruction, flagsLive){
                 else
                 {
                     prepare(e, src);
-                    b.load('f32', { offset: readAddress(e, src) });
+                    b.load('f32', ramAt(readAddress(e, src)));
                 }
                 b.localSet(theirs);
                 const [a, c] = reversed ? [theirs, mine] : [mine, theirs];
@@ -3836,7 +3836,7 @@ export function emitX87(e, instruction, flagsLive){
             else if (op.startsWith('fi'))
             {
                 prepare(e, src);
-                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: readAddress(e, src) });
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', ramAt(readAddress(e, src)));
                 b.op(F64.convertI32S);
             }
             else
@@ -3884,7 +3884,7 @@ export function emitX87(e, instruction, flagsLive){
             {
                 guard();
                 prepare(e, src);
-                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: readAddress(e, src) });
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', ramAt(readAddress(e, src)));
                 b.op(F64.convertI32S).localSet(x.temp2);
             }
             else if (op === 'ftst')
@@ -4289,15 +4289,15 @@ function rawSignalling(e, operand){
     const offset = e.layout.ramBase;
     if (operand.size === 4)
     {
-        b.localGet(Local.addr).load('i32', { offset }).i32const(0x7fc00000).op(I32.and)
+        b.localGet(Local.addr).load('i32', ramAt(offset)).i32const(0x7fc00000).op(I32.and)
             .i32const(0x7f800000).op(I32.eq);
-        b.localGet(Local.addr).load('i32', { offset }).i32const(0x3fffff).op(I32.and)
+        b.localGet(Local.addr).load('i32', ramAt(offset)).i32const(0x3fffff).op(I32.and)
             .i32const(0).op(I32.ne).op(I32.and);
         return;
     }
-    b.localGet(Local.addr).load('i64', { offset }).i64const(0x7ff8000000000000n).op(I64.and)
+    b.localGet(Local.addr).load('i64', ramAt(offset)).i64const(0x7ff8000000000000n).op(I64.and)
         .i64const(0x7ff0000000000000n).op(I64.eq);
-    b.localGet(Local.addr).load('i64', { offset }).i64const(0x0007ffffffffffffn).op(I64.and)
+    b.localGet(Local.addr).load('i64', ramAt(offset)).i64const(0x0007ffffffffffffn).op(I64.and)
         .i64const(0n).op(I64.ne).op(I32.and);
 }
 
@@ -4358,7 +4358,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
     {
         // f32 -> f64 quiets a signalling NaN keeping its payload, as the
         // processor's own conversion does; an f64 load keeps the bits.
-        b.load(operand.size === 4 ? 'f32' : 'f64', { offset: readAddress(e, operand) });
+        b.load(operand.size === 4 ? 'f32' : 'f64', ramAt(readAddress(e, operand)));
         if (operand.size === 4)
         {
             b.op(F64.promoteF32);
