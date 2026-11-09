@@ -61,7 +61,7 @@ import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
 import { prepare, readAddress, writeReg } from './integer.js';
-import { PRECISION, noteStore } from './memory.js';
+import { PRECISION, noteStore, ram } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
 import { atState } from './bases.js';
@@ -3218,7 +3218,7 @@ export function emitX87(e, instruction, flagsLive){
                     prepare(e, dst);
                     noteStore(e, 4);
                     b.localGet(Local.addr).localGet(x.single[from])
-                        .store('f32', { offset: e.layout.ramBase });
+                        .store('f32', ram(e));
                 }
                 if (op === 'fstp')
                 {
@@ -3286,7 +3286,7 @@ export function emitX87(e, instruction, flagsLive){
                     exact();
                     b.select();
                 }
-                b.store('i64', { offset: e.layout.ramBase });
+                b.store('i64', ram(e));
                 if (!clear || checkNaN)
                 {
                     exact();
@@ -3311,7 +3311,7 @@ export function emitX87(e, instruction, flagsLive){
                 prepare(e, dst);
                 noteStore(e, 8);
                 b.localGet(Local.addr).localGet(x.shadow[localOf(0)])
-                    .store('i64', { offset: e.layout.ramBase });
+                    .store('i64', ram(e));
                 b.else();
                 b.localGet(st(0));
                 orIndefinite();
@@ -3469,7 +3469,7 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fldcw':
             prepare(e, src ?? dst);
-            b.localGet(Local.addr).load('i32_16u', { offset: e.layout.ramBase })
+            b.localGet(Local.addr).load('i32_16u', ram(e))
                 .localSet(Local.x87Control);
             x.controlWritten = true;
             x.checkedPrecision = -1;
@@ -4043,14 +4043,14 @@ export function emitX87(e, instruction, flagsLive){
                 prepare(e, dst);
                 noteStore(e, 2);
                 b.localGet(Local.addr).localGet(Local.t1)
-                    .store('i32_16', { offset: e.layout.ramBase });
+                    .store('i32_16', ram(e));
             }
             return finish();
         case 'fnstcw':
             prepare(e, dst);
             noteStore(e, 2);
             b.localGet(Local.addr).localGet(Local.x87Control)
-                .store('i32_16', { offset: e.layout.ramBase });
+                .store('i32_16', ram(e));
             return finish();
         case 'fnstenv': case 'fnsave':
         {
@@ -4069,12 +4069,11 @@ export function emitX87(e, instruction, flagsLive){
             }
             prepare(e, { ...dst, size: save ? 108 : 28 });
             noteStore(e, save ? 108 : 28);
-            const ram = e.layout.ramBase;
             b.localGet(Local.addr).localGet(Local.x87Control).i32const(0xffff0000 | 0)
-                .op(I32.or).store('i32', { offset: ram });
+                .op(I32.or).store('i32', ram(e));
             b.localGet(Local.addr).localGet(Local.x87Status).i32const(~0x3800).op(I32.and)
                 .i32const((state.top << 11) | (0xffff0000 | 0)).op(I32.or)
-                .store('i32', { offset: ram + 4 });
+                .store('i32', ram(e, 4));
             // The tag word, two bits per physical register: valid 0, zero 1,
             // special (infinite or NaN) 2, empty 3.
             b.i32const(0xffff0000 | 0).localSet(Local.t1);
@@ -4093,17 +4092,17 @@ export function emitX87(e, instruction, flagsLive){
                 b.select();
                 b.i32const(2 * k).op(I32.shl).localGet(Local.t1).op(I32.or).localSet(Local.t1);
             }
-            b.localGet(Local.addr).localGet(Local.t1).store('i32', { offset: ram + 8 });
-            b.localGet(Local.addr).i32const(0).store('i32', { offset: ram + 12 });
-            b.localGet(Local.addr).i32const(0).store('i32', { offset: ram + 16 });
-            b.localGet(Local.addr).i32const(0).store('i32', { offset: ram + 20 });
-            b.localGet(Local.addr).i32const(0xffff0000 | 0).store('i32', { offset: ram + 24 });
+            b.localGet(Local.addr).localGet(Local.t1).store('i32', ram(e, 8));
+            b.localGet(Local.addr).i32const(0).store('i32', ram(e, 12));
+            b.localGet(Local.addr).i32const(0).store('i32', ram(e, 16));
+            b.localGet(Local.addr).i32const(0).store('i32', ram(e, 20));
+            b.localGet(Local.addr).i32const(0xffff0000 | 0).store('i32', ram(e, 24));
             if (save)
             {
                 for (let i = 0; i < 8; i++)
                 {
                     b.localGet(st(i));
-                    b.localGet(Local.addr).i32const(ram + 28 + 10 * i).op(I32.add);
+                    b.localGet(Local.addr).i32const(e.layout.ramBase + 28 + 10 * i).op(I32.add);
                     b.call(/** @type {number} */ (e.context.f64ToF80));
                 }
                 b.i32const(0).localSet(Local.x87Top);
@@ -4124,15 +4123,14 @@ export function emitX87(e, instruction, flagsLive){
             // entry hash enters compiled for whatever the top now is.
             const restore = op === 'frstor';
             prepare(e, { ...(src ?? dst), size: restore ? 108 : 28 });
-            const ram = e.layout.ramBase;
-            b.localGet(Local.addr).load('i32_16u', { offset: ram }).localSet(Local.x87Control);
+            b.localGet(Local.addr).load('i32_16u', ram(e)).localSet(Local.x87Control);
             x.controlWritten = true;
             x.checkedPrecision = -1;
-            b.localGet(Local.addr).load('i32_16u', { offset: ram + 4 }).localSet(Local.t1);
+            b.localGet(Local.addr).load('i32_16u', ram(e, 4)).localSet(Local.t1);
             b.localGet(Local.t1).i32const(~0x3800).op(I32.and).localSet(Local.x87Status);
             b.localGet(Local.t1).i32const(11).op(I32.shrU).i32const(7).op(I32.and)
                 .localSet(Local.x87Top);
-            b.localGet(Local.addr).load('i32_16u', { offset: ram + 8 }).localSet(Local.t2);
+            b.localGet(Local.addr).load('i32_16u', ram(e, 8)).localSet(Local.t2);
             b.i32const(0).localSet(Local.x87Empty);
             for (let k = 0; k < 8; k++)
             {
@@ -4148,7 +4146,7 @@ export function emitX87(e, instruction, flagsLive){
                 {
                     b.i32const(k).localGet(Local.x87Top).op(I32.sub).i32const(7).op(I32.and)
                         .i32const(10).op(I32.mul);
-                    b.localGet(Local.addr).op(I32.add).i32const(ram + 28).op(I32.add);
+                    b.localGet(Local.addr).op(I32.add).i32const(e.layout.ramBase + 28).op(I32.add);
                     b.call(/** @type {number} */ (e.context.f80ToF64));
                     b.localSet(x.base + state.slot[k]);
                     // The MMX view too: a region with MMX writes its mm locals
@@ -4395,7 +4393,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
     {
         // All-ones exponent with the quiet bit clear first (an infinity or a
         // signalling NaN), one compare on the common path; the fraction after.
-        b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.t2);
+        b.localGet(Local.addr).load('i32', ram(e)).localSet(Local.t2);
         b.localGet(Local.t2).i32const(0x7fc00000).op(I32.and).i32const(0x7f800000).op(I32.eq);
         e.openGuard('signalling', EMPTY);
         b.localGet(Local.t2).i32const(0x3fffff).op(I32.and);
@@ -4407,7 +4405,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
         b.localGet(Local.t2).op(0xbe).op(F64.promoteF32); // f32.reinterpret_i32
         return;
     }
-    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localSet(Local.t64);
+    b.localGet(Local.addr).load('i64', ram(e)).localSet(Local.t64);
     b.localGet(Local.t64).i64const(0x7ff8000000000000n).op(I64.and)
         .i64const(0x7ff0000000000000n).op(I64.eq);
     e.openGuard('signalling', EMPTY);
@@ -4481,17 +4479,17 @@ function storeFloat(e, operand, pushValue){
         b.localGet(Local.x87Status).i32const(Status.UE).op(I32.or).localSet(Local.x87Status);
         e.close();
         b.localGet(Local.addr).localGet(e.x87.temp).op(F32.demoteF64)
-            .store('f32', { offset: e.layout.ramBase });
+            .store('f32', ram(e));
         return;
     }
     b.localGet(Local.addr);
     pushValue();
     if (operand.size === 4)
     {
-        b.op(F32.demoteF64).store('f32', { offset: e.layout.ramBase });
+        b.op(F32.demoteF64).store('f32', ram(e));
         return;
     }
-    b.store('f64', { offset: e.layout.ramBase });
+    b.store('f64', ram(e));
 }
 
 /**
@@ -4617,7 +4615,7 @@ function storeInt(e, operand, local, truncate){
         b.localGet(Local.t64).i64const(MAGIC_BITS - BigInt(limit)).op(I64.sub)
             .i64const(BigInt(2 * limit)).op(I64.ltU);
         b.select();
-        b.store(operand.size === 2 ? 'i32_16' : 'i32', { offset: e.layout.ramBase });
+        b.store(operand.size === 2 ? 'i32_16' : 'i32', ram(e));
         return;
     }
     if (e.context.precise !== true)
@@ -4636,7 +4634,7 @@ function storeInt(e, operand, local, truncate){
         inRange();
         b.select();
         b.store(wide ? 'i64' : operand.size === 2 ? 'i32_16' : 'i32',
-            { offset: e.layout.ramBase });
+            ram(e));
         return;
     }
     inRange();
@@ -4646,23 +4644,23 @@ function storeInt(e, operand, local, truncate){
     b.localGet(Local.addr);
     if (operand.size === 8)
     {
-        b.i64const(-0x8000000000000000n).store('i64', { offset: e.layout.ramBase });
+        b.i64const(-0x8000000000000000n).store('i64', ram(e));
     }
     else
     {
         b.i32const(operand.size === 2 ? 0x8000 : -0x80000000)
-            .store(operand.size === 2 ? 'i32_16' : 'i32', { offset: e.layout.ramBase });
+            .store(operand.size === 2 ? 'i32_16' : 'i32', ram(e));
     }
     b.else();
     b.localGet(Local.addr).localGet(rounded);
     if (operand.size === 8)
     {
-        b.op(TRUNC_SAT_I64[0], [TRUNC_SAT_I64[1]]).store('i64', { offset: e.layout.ramBase });
+        b.op(TRUNC_SAT_I64[0], [TRUNC_SAT_I64[1]]).store('i64', ram(e));
     }
     else
     {
         b.op(TRUNC_SAT_I32[0], [TRUNC_SAT_I32[1]])
-            .store(operand.size === 2 ? 'i32_16' : 'i32', { offset: e.layout.ramBase });
+            .store(operand.size === 2 ? 'i32_16' : 'i32', ram(e));
     }
     e.close();
 }

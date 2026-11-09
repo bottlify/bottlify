@@ -136,6 +136,15 @@ export function wrapMask(b, layout){
 export const ramAlways = layout=>layout.ramFloor ?? layout.ramSize;
 
 /**
+ * The memarg of an access to the guest's RAM at the i32 address on the stack
+ * (`offset` past it): RAM's place in the memory, and `guest`, which a wide
+ * window's body (`Body.guest`) takes to its own memory past 4 GiB.
+ *
+ * @param {E} e @param {number} [offset]
+ */
+export const ram = (e, offset = 0)=>({ guest: true, offset: e.layout.ramBase + offset });
+
+/**
  * Whether the current instruction's access goes untested, its address wrapped
  * into RAM. Outside `precise` an instruction that only reads is not tested: the
  * one page flag a read can find is INACCESSIBLE, which only the pages past RAM

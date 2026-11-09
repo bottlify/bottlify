@@ -157,6 +157,13 @@ const ATOMICS = Object.freeze(Object.fromEntries(
         .flatMap(([operation, base])=>[[`${operation}_i32`, [base, 2]],
             [`${operation}_i64`, [base + 1, 3]], [`${operation}_i32_8`, [base + 2, 0]],
             [`${operation}_i32_16`, [base + 3, 1]]])));
+/**
+ * The type of the value a store of `kind` writes: `i32_8` an i32, `f64` an f64.
+ *
+ * @param {string} kind
+ */
+const valueOf = kind=>(kind.startsWith('i64') ? ValType.i64 : kind.startsWith('f32')
+    ? ValType.f32 : kind.startsWith('f64') ? ValType.f64 : ValType.i32);
 /** A float constant's little-endian bytes, written here and copied out. */
 const FLOAT_BYTES = new Uint8Array(8);
 const FLOAT_VIEW = new DataView(FLOAT_BYTES.buffer);
@@ -213,6 +220,14 @@ export class Body {
         /** @type {Set<number> | null} */
         this.must = null;
         this.mustDepth = -1;
+        /**
+         * A wide window's guest accesses (cork's `wideLayout`), when given: an
+         * access marked `guest` goes to `memory`, a `memory64` one, at the i32
+         * address it was given widened and or-ed with the i64 local `high`, the
+         * value a store writes kept meanwhile in `scratch(type)`.
+         * @type {{ memory: number, high: number, scratch: (type: number) => number } | null}
+         */
+        this.guest = null;
     }
 
     /** Whether the body reads or writes a local. @param {number} index */
@@ -421,12 +436,43 @@ export class Body {
      * lane index.
      *
      * @param {number} opcode
-     * @param {{ align: number, offset: number, lane?: number, memory?: number }} memarg  align
-     *     as its log2
+     * @param {{ align: number, offset: number, lane?: number, memory?: number,
+     *     guest?: boolean }} memarg  align as its log2; `guest` as `load`'s
      */
-    simdMem(opcode, { align, offset, lane, memory }){
+    simdMem(opcode, { align, offset, lane, memory, guest = false }){
+        // A lane's load or store, and a whole store, take the vector above the address.
+        memory = guest ? this.guestAddress(lane !== undefined || opcode === SIMD_STORE
+            ? ValType.v128 : undefined, memory) : memory;
         this.byte(0xfd).u32(opcode).memarg(align, offset, memory);
         return lane === undefined ? this : this.byte(lane);
+    }
+
+    /**
+     * A guest access's address made the wide window's (`guest`), the i32 below
+     * the `above` value (none for a load) widened and its high half put in;
+     * answers the memory the access goes to. 4 GiB's guest leaves it as it is.
+     *
+     * @param {number | undefined} above  the type of the value over the address
+     * @param {number | undefined} memory
+     * @returns {number | undefined}
+     */
+    guestAddress(above, memory){
+        const wide = this.guest;
+        if (wide === null)
+        {
+            return memory;
+        }
+        const scratch = above === undefined ? -1 : wide.scratch(above);
+        if (scratch >= 0)
+        {
+            this.localSet(scratch);
+        }
+        this.op(0xad).localGet(wide.high).op(0x84);
+        if (scratch >= 0)
+        {
+            this.localGet(scratch);
+        }
+        return wide.memory;
     }
 
     unreachable(){
@@ -565,20 +611,24 @@ export class Body {
 
     /**
      * @param {keyof typeof LOADS} kind
-     * @param {{ offset?: number, align?: number, memory?: number }} [options]  `align` as
-     *     log2, natural by default; `memory` the module's memory, the first by default.
+     * @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options]
+     *     `align` as log2, natural by default; `memory` the module's memory, the first by
+     *     default; `guest` for an access to the guest's RAM at an i32 address, which a wide
+     *     window makes its own (`guestAddress`)
      */
-    load(kind, { offset = 0, align, memory } = {}){
+    load(kind, { offset = 0, align, memory, guest = false } = {}){
         const [opcode, natural] = LOADS[kind];
+        memory = guest ? this.guestAddress(undefined, memory) : memory;
         return this.byte(opcode).memarg(align ?? natural, offset, memory);
     }
 
     /**
      * @param {keyof typeof STORES} kind
-     * @param {{ offset?: number, align?: number, memory?: number }} [options]
+     * @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options]
      */
-    store(kind, { offset = 0, align, memory } = {}){
+    store(kind, { offset = 0, align, memory, guest = false } = {}){
         const [opcode, natural] = STORES[kind];
+        memory = guest ? this.guestAddress(valueOf(kind), memory) : memory;
         return this.byte(opcode).memarg(align ?? natural, offset, memory);
     }
 
@@ -586,15 +636,23 @@ export class Body {
      * An atomic access (`ATOMICS`): sequentially consistent, and a trap where
      * the address is not a multiple of its width -- the caller tests that first.
      *
-     * @param {string} kind @param {{ offset?: number, memory?: number }} [options]
+     * @param {string} kind
+     * @param {{ offset?: number, memory?: number, guest?: boolean }} [options]
      */
-    atomic(kind, { offset = 0, memory } = {}){
+    atomic(kind, { offset = 0, memory, guest = false } = {}){
         const entry = ATOMICS[/** @type {keyof typeof ATOMICS} */ (kind)];
         if (entry === undefined)
         {
             throw new Error(`encoder: no such atomic (${kind})`);
         }
+        if (guest && this.guest !== null && kind.startsWith('cmpxchg'))
+        {
+            // Two values over the address: no wide window's code makes one yet.
+            throw new Error(`encoder: ${kind} into a wide window's RAM`);
+        }
         const [opcode, natural] = entry;
+        memory = guest ? this.guestAddress(kind.startsWith('load') ? undefined
+            : valueOf(kind.replace(/^[a-z]+_/, '')), memory) : memory;
         return this.byte(0xfe).u32(opcode).memarg(natural, offset, memory);
     }
 
@@ -603,13 +661,15 @@ export class Body {
         return this.byte(0xfe).u32(0x03).byte(0);
     }
 
-    /** @param {{ offset?: number, align?: number, memory?: number }} [options] */
-    loadV128({ offset = 0, align = 4, memory } = {}){
+    /** @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options] */
+    loadV128({ offset = 0, align = 4, memory, guest = false } = {}){
+        memory = guest ? this.guestAddress(undefined, memory) : memory;
         return this.byte(0xfd).u32(SIMD_LOAD).memarg(align, offset, memory);
     }
 
-    /** @param {{ offset?: number, align?: number, memory?: number }} [options] */
-    storeV128({ offset = 0, align = 4, memory } = {}){
+    /** @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options] */
+    storeV128({ offset = 0, align = 4, memory, guest = false } = {}){
+        memory = guest ? this.guestAddress(ValType.v128, memory) : memory;
         return this.byte(0xfd).u32(SIMD_STORE).memarg(align, offset, memory);
     }
 

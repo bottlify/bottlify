@@ -459,13 +459,20 @@ export function prepareModule(m, layout, features, memory = {},
     // module is given holds: the host's compiler then knows a constant address
     // inside it in bounds, and compares a word there in place, where with one
     // page it loaded the word as well (a switch's table entry, x64).
-    const ramPages = Math.ceil(((layout.ramBase ?? 0) + (layout.ramFloor ?? layout.ramSize))
-        / 65536);
+    const ramPages = layout.ramMemory !== undefined ? 1
+        : Math.ceil(((layout.ramBase ?? 0) + (layout.ramFloor ?? layout.ramSize)) / 65536);
     m.importMemory('env', 'memory', {
         min: Math.max(1, Math.min(ramPages, memory.maxPages ?? ramPages)),
         ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
+    if (layout.window !== undefined)
+    {
+        // A wide window's RAM, the module's memory 1 (`ramMemory`): made whole, so its
+        // size is its import's.
+        m.importMemory('env', 'ram', { min: layout.window / 65536, max: layout.window / 65536,
+            shared: memory.shared ?? false, index64: true });
+    }
     const bases = importBases(m, layout);
     const hashed = hash && features.tailCalls;
     if (hashed)
@@ -548,11 +555,15 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.precise = true;
     }
-    else if (looseStacks && undoLog !== true)
+    // A loose stack's access takes rsp's low half for its address, which a wide
+    // window's stack past 4 GiB is not.
+    else if (looseStacks && undoLog !== true && layout.window === undefined)
     {
         context.looseStacks = true;
     }
-    if (checkReads)
+    // A wide window tests every read: a read wrapped into RAM, or folded off a
+    // wrapped sum, reckons with RAM the size of its 32-bit address.
+    if (checkReads || layout.window !== undefined)
     {
         context.checkReads = true;
     }

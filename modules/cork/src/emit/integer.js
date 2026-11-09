@@ -33,7 +33,7 @@ import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
-    wrapsRead, wrapMask, ramAlways,
+    wrapsRead, wrapMask, ramAlways, ram,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -693,7 +693,7 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localSet(Local.addr);
             checkAccess(e, 1);
             b.localGet(registerLocal(e, 0)).i32const(0xffffff00).op(I32.and);
-            b.localGet(Local.addr).load('i32_8u', { offset: e.layout.ramBase }).op(I32.or);
+            b.localGet(Local.addr).load('i32_8u', ram(e)).op(I32.or);
             b.localSet(registerLocal(e, 0));
             return true;
         }
@@ -748,9 +748,9 @@ export function emitInstruction(e, instruction, flagsLive){
             prepare(e, dst);
             noteStore(e, 6);
             b.localGet(Local.addr).i32const(table.limit)
-                .store('i32_16', { offset: e.layout.ramBase });
+                .store('i32_16', ram(e));
             b.localGet(Local.addr).i32const(table.base | 0)
-                .store('i32', { offset: e.layout.ramBase + 2 });
+                .store('i32', ram(e, 2));
             return true;
         }
         case 'sldt':
@@ -1064,7 +1064,7 @@ export function emitInstruction(e, instruction, flagsLive){
                     // A run of pops reads each off esp as the run found it,
                     // which moves once, at the last (`stackRun`).
                     b.localGet(registerLocal(e, 4))
-                        .load('i32', { offset: e.layout.ramBase + run.offset }).localSet(popped);
+                        .load('i32', ram(e, run.offset)).localSet(popped);
                     if (run.last)
                     {
                         addStack(e, run.moves);
@@ -1073,7 +1073,7 @@ export function emitInstruction(e, instruction, flagsLive){
                     return true;
                 }
                 b.localGet(Local.addr).load(dst.size === 8 ? 'i64'
-                    : dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
+                    : dst.size === 2 ? 'i32_16u' : 'i32', ram(e))
                     .localSet(popped);
                 if (dst.kind === 'mem')
                 {
@@ -1110,7 +1110,7 @@ export function emitInstruction(e, instruction, flagsLive){
             for (let r = 7; r >= 0; r--)
             {
                 b.localGet(registerLocal(e, 4))
-                    .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase });
+                    .load(size === 2 ? 'i32_16u' : 'i32', ram(e));
                 if (r === 4)
                 {
                     b.drop();
@@ -1146,7 +1146,7 @@ export function emitInstruction(e, instruction, flagsLive){
             e.materialise();
             stackAccess(e, size);
             b.localGet(Local.addr)
-                .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
+                .load(size === 2 ? 'i32_16u' : 'i32', ram(e))
                 .i32const(writable).op(I32.and);
             b.localGet(Local.flags).i32const(~writable).op(I32.and).op(I32.or)
                 .i32const(2).op(I32.or);
@@ -1341,7 +1341,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 return true;
             }
             stackAccess(e, 4);
-            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase })
+            b.localGet(Local.addr).load('i32', ram(e))
                 .localSet(Local.eip);
             b.localGet(registerLocal(e, 4))
                 .i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
@@ -1380,7 +1380,7 @@ export function emitInstruction(e, instruction, flagsLive){
             checkAccess(e, size);
             b.localGet(Local.addr).i32const(size).op(I32.add).localSet(registerLocal(e, 4));
             b.localGet(Local.addr)
-                .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase });
+                .load(size === 2 ? 'i32_16u' : 'i32', ram(e));
             writeReg(e, 5, size, false);
             return true;
         case 'enter':
@@ -1772,7 +1772,7 @@ function returnLong(e, instruction){
     const [dst] = instruction.operands;
     const popped = 8 + (dst ? /** @type {number} */ (dst.value) : 0);
     stackAccess(e, 8);
-    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localTee(Local.t64b)
+    b.localGet(Local.addr).load('i64', ram(e)).localTee(Local.t64b)
         .op(I64.wrap).localSet(Local.eip);
     for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
     {
@@ -1818,11 +1818,11 @@ function leaveLong(e, size){
     b.localGet(Local.addr);
     if (size === 2)
     {
-        b.load('i32_16u', { offset: e.layout.ramBase });
+        b.load('i32_16u', ram(e));
     }
     else
     {
-        b.load('i64', { offset: e.layout.ramBase });
+        b.load('i64', ram(e));
     }
     writeReg(e, 5, size, false, true);
 }
@@ -2617,7 +2617,7 @@ export function readOp(e, operand){
         case 'mem':
             if (operand.size === 8)
             {
-                b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase });
+                b.localGet(Local.addr).load('i64', ram(e));
                 return;
             }
             if (ordered(e, operand))
@@ -2654,7 +2654,7 @@ export function writeOp(e, operand, pushValue, exact = false){
             {
                 b.localGet(Local.addr);
                 pushValue();
-                b.store('i64', { offset: e.layout.ramBase });
+                b.store('i64', ram(e));
                 return;
             }
             if (ordered(e, operand))
@@ -2834,7 +2834,7 @@ export function push(e, size, pushValue){
             noteStore(e, size);
         }
         b.localGet(Local.addr).localGet(size === 8 ? Local.t64b : Local.t2)
-            .store(size === 8 ? 'i64' : storeKind(size), { offset: e.layout.ramBase });
+            .store(size === 8 ? 'i64' : storeKind(size), ram(e));
         addStack(e, -size);
         return;
     }
@@ -2848,7 +2848,7 @@ export function push(e, size, pushValue){
         // A run of pushes stores each below esp as the run found it, which
         // moves once, at the last (`stackRun`).
         b.localGet(run.base).localGet(Local.t2)
-            .store(storeKind(size), { offset: e.layout.ramBase + run.offset });
+            .store(storeKind(size), ram(e, run.offset));
         if (run.last)
         {
             b.localGet(run.base).localSet(registerLocal(e, 4));
@@ -2862,7 +2862,7 @@ export function push(e, size, pushValue){
         noteStore(e, size);
     }
     b.localGet(Local.addr).localGet(Local.t2)
-        .store(storeKind(size), { offset: e.layout.ramBase });
+        .store(storeKind(size), ram(e));
     b.localGet(Local.addr).localSet(registerLocal(e, 4));
 }
 
@@ -4429,8 +4429,8 @@ function cmpxchg8b(e, instruction, flagsLive){
     const { b } = e;
     const [dst] = instruction.operands;
     prepare(e, dst);
-    b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.t1);
-    b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase + 4 }).localSet(Local.t2);
+    b.localGet(Local.addr).load('i32', ram(e)).localSet(Local.t1);
+    b.localGet(Local.addr).load('i32', ram(e, 4)).localSet(Local.t2);
     if (flagsLive)
     {
         e.eagerWrite(ZF);
@@ -4446,10 +4446,10 @@ function cmpxchg8b(e, instruction, flagsLive){
     noteStore(e, 8);
     b.localGet(Local.addr);
     getReg32(e, 3);
-    b.store('i32', { offset: e.layout.ramBase });
+    b.store('i32', ram(e));
     b.localGet(Local.addr);
     getReg32(e, 1);
-    b.store('i32', { offset: e.layout.ramBase + 4 });
+    b.store('i32', ram(e, 4));
     if (flagsLive)
     {
         b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
@@ -4481,8 +4481,8 @@ function cmpxchg16b(e, instruction, flagsLive){
     e.openGuard('misaligned', EMPTY);
     e.exitBefore(e.current.eip, Exit.FAULT, 13);
     e.close();
-    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase }).localSet(low);
-    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase + 8 }).localSet(high);
+    b.localGet(Local.addr).load('i64', ram(e)).localSet(low);
+    b.localGet(Local.addr).load('i64', ram(e, 8)).localSet(high);
     if (flagsLive)
     {
         e.eagerWrite(ZF);
@@ -4492,9 +4492,9 @@ function cmpxchg16b(e, instruction, flagsLive){
     b.op(I32.and);
     e.openIf('equal', EMPTY);
     noteStore(e, 16);
-    b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', { offset: e.layout.ramBase });
+    b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', ram(e));
     b.localGet(Local.addr).localGet(registerLocal(e, 1))
-        .store('i64', { offset: e.layout.ramBase + 8 });
+        .store('i64', ram(e, 8));
     if (flagsLive)
     {
         b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
@@ -5001,7 +5001,7 @@ function stringInstruction(e, instruction){
         }
         checkAccess(e, size, { counted, window: long });
         b.localGet(Local.addr).load(size === 8 ? 'i64' : loadKind(size),
-            { offset: e.layout.ramBase });
+            ram(e));
     };
     /**
      * A checked store at the pointer of the value `pushValue` pushes.
@@ -5020,7 +5020,7 @@ function stringInstruction(e, instruction){
         noteStore(e, size);
         b.localGet(Local.addr);
         pushValue();
-        b.store(size === 8 ? 'i64' : storeKind(size), { offset: e.layout.ramBase });
+        b.store(size === 8 ? 'i64' : storeKind(size), ram(e));
     };
     /** The accumulator's low `size` bytes, as `readOp` has them. */
     const accumulator = ()=>readOp(e, /** @type {Operand} */ ({ kind: 'reg', reg: 0, size }));
@@ -5171,7 +5171,7 @@ function casesByEntry(e){
         e.close();
         e.markArm();
         const target = table.entries[arms[k]];
-        b.i32const(table.address + 4 * arms[k]).load('i32', { offset: e.layout.ramBase })
+        b.i32const(table.address + 4 * arms[k]).load('i32', ram(e))
             .i32const(target | 0).op(I32.eq);
         e.openIf('case');
         e.jumpTo(target);

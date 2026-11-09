@@ -367,3 +367,30 @@ test('a second memory, memory64, read and written past 4 GiB beside the first', 
     assert.equal(new DataView(state.buffer).getUint32(0, true), 0xc0ffee);
     assert.equal(new DataView(ram.buffer).getUint32(high + 4, true), 0xc0ffef);
 });
+
+test('a guest access in a wide window: the i32 address widened by the high local', ()=>{
+    v8.setFlagsFromString('--experimental-wasm-memory64');
+    const ram = memory64(2 ** 33);
+    const at = 2 ** 32 + 0x5000;
+    new DataView(ram.buffer).setUint32(at, 0x1234567, true);
+    const m = new ModuleBuilder();
+    m.importMemory('env', 'state', { min: 1 });
+    m.importMemory('env', 'ram', { min: 2 ** 17, max: 2 ** 17, index64: true });
+    const type = m.type({ params: [ValType.i32, ValType.i64], results: [ValType.i32] });
+    // ram[a + 4] = ram[a] + 1 (i32); ram[a + 16] as v128 = ram[a] as v128; answers ram[a]
+    const b = new Body();
+    b.guest = { memory: 1, high: 1, scratch: t=>(t === ValType.i32 ? 2 : 3) };
+    b.localGet(0).localGet(0).load('i32', { guest: true }).i32const(1).op(0x6a)
+        .store('i32', { offset: 4, guest: true })
+        .localGet(0).localGet(0).loadV128({ guest: true }).storeV128({ offset: 16, guest: true })
+        .localGet(0).load('i32', { guest: true });
+    m.function(type, [ValType.i32, ValType.v128], b.toBytes(), { exportAs: 'f' });
+    const state = new WebAssembly.Memory({ initial: 1 });
+    const { f } = /** @type {any} */ (instantiate(m, { env: { state, ram } }));
+    assert.equal(f(at % 2 ** 32, 2n ** 32n), 0x1234567);
+    const view = new DataView(ram.buffer);
+    assert.equal(view.getUint32(at + 4, true), 0x1234568);
+    assert.equal(view.getUint32(at + 20, true), 0x1234568, 'the vector went past 4 GiB too');
+    assert.equal(new Body().load('i32', { guest: true }).length, 3,
+        'a 4 GiB window\'s guest access is a plain one');
+});
