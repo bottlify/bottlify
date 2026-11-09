@@ -95,6 +95,9 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  * @property {GuestStorage} [guest]  Where a resource the program maps keeps the bytes a
  *     map hands out: guest memory, so a map is an address and no copy.
  * @property {number} [featureLevel]  The device's D3D_FEATURE_LEVEL (10_0 without one).
+ * @property {{ dumpFrames: number, written?: (lines: string[], frame: number) => void }} [liveDump]
+ *     Frames to write down from now on, on asking (`app.debug.dumpFrames`): each draw,
+ *     clear and dispatch a line, the frame handed over when the count runs out.
  */
 
 /**
@@ -653,6 +656,51 @@ export function createRenderer(services){
      * @type {Map<any, any>}
      */
     const pendingClears = new Map();
+
+    const liveDump = services.liveDump ?? null;
+    /**
+     * The frame being written down (`liveDump`), a line a draw, clear and
+     * dispatch, or null while nobody asked; and what names each shader and
+     * texture in it, numbered as first seen.
+     *
+     * @type {string[] | null}
+     */
+    let dumpLines = null;
+    /** @type {WeakMap<object, string>} */
+    const dumpNames = new WeakMap();
+    let dumpNamed = 0;
+    /** @param {any} object @param {string} kind */
+    const dumpName = (object, kind)=>{
+        if (!object)
+        {
+            return '-';
+        }
+        let name = dumpNames.get(object);
+        if (!name)
+        {
+            name = `${kind}${++dumpNamed}`;
+            dumpNames.set(object, name);
+        }
+        return name;
+    };
+    /** A view in a dump line: its texture, format and size. @param {any} view */
+    const dumpView = view=>{
+        if (!view)
+        {
+            return '-';
+        }
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view.GetResource?.(held);
+        held.resource?.release?.();
+        const backing = held.resource ? backingOf(held.resource) : null;
+        const level = backing?.layout?.levels?.[0];
+        return `${dumpName(held.resource, 't')}:${backing?.layout?.format ?? '?'}`
+            + `:${level?.width ?? '?'}x${level?.height ?? '?'}`;
+    };
+    const dumpStarts = ()=>{
+        dumpLines = liveDump !== null && liveDump.dumpFrames > 0 ? [] : null;
+    };
 
     const counters = {
         frames: 0,
@@ -4496,6 +4544,7 @@ export function createRenderer(services){
             {
                 return;
             }
+            dumpLines?.push(`clear ${dumpView(view)} colour=${[...color].join(',')}`);
             throughTwins(()=>{
                 // A clear writes every texel of every slice the view names.
                 const count = view?.range?.count ?? 1;
@@ -4591,6 +4640,8 @@ export function createRenderer(services){
             {
                 return;
             }
+            dumpLines?.push(`dispatch ${dumpName(pipeline.stages.cs.shader, 'cs')}`
+                + ` groups=${Array.isArray(groups) ? groups.join('x') : 'indirect'}`);
             const shader = pipeline.stages.cs.shader;
             if (!shader)
             {
@@ -4785,6 +4836,25 @@ export function createRenderer(services){
             if (!backend)
             {
                 return;
+            }
+            if (dumpLines)
+            {
+                const viewport = pipeline.viewports?.[0];
+                const { vs, gs, ps } = pipeline.stages;
+                const count = draw.indexCount !== undefined ? `indexed ${draw.indexCount}`
+                    : draw.vertexCount ?? 'auto';
+                dumpLines.push(`draw ${count} x${draw.instanceCount ?? 1}`
+                    + ` topology=${pipeline.topology} vs=${dumpName(vs?.shader, 'vs')}`
+                    + ` gs=${dumpName(gs?.shader, 'gs')} ps=${dumpName(ps?.shader, 'ps')}`
+                    + ` rt=[${pipeline.renderTargets.map(dumpView).join(' ')
+                        .replace(/( -)+$/, '')}]`
+                    + ` ds=${dumpView(pipeline.depthStencilView)}`
+                    + ` srv=[${(ps?.shaderResources ?? []).flatMap((/** @type {any} */ view,
+                        /** @type {number} */ slot)=>(view ? [`${slot}:${dumpView(view)}`] : []))
+                        .join(' ')}]`
+                    + ` vp=${viewport ? `${viewport.TopLeftX},${viewport.TopLeftY}`
+                        + `+${viewport.Width}x${viewport.Height}` : '-'}`
+                    + ` blend=${pipeline.blendState ? 'set' : 'default'}`);
             }
             twinUses = new Map();
             // A geometry shader runs, and streams out, whether or not the draw
@@ -5160,6 +5230,17 @@ export function createRenderer(services){
                 return chain;
             }
             counters.frames++;
+            if (dumpLines && liveDump)
+            {
+                dumpLines.push(`frame ${counters.frames - 1}: presents back buffer`
+                    + ` ${dumpName(backBuffer, 't')}:${backingOf(backBuffer).layout.format}`);
+                liveDump.dumpFrames--;
+                if (liveDump.dumpFrames <= 0)
+                {
+                    liveDump.written?.(dumpLines, counters.frames - 1);
+                }
+            }
+            dumpStarts();
             geometryPasses?.endFrame();
             const room = tessellation?.endFrame();
             if (room)

@@ -141,6 +141,8 @@ const PREDICATE_QUERIES = new Set([
  * @property {boolean} [formatsTier1]  Whether the GPU has texture-formats-tier1: the
  *     16-bit normalised formats, and the snorm ones as targets. Absent, taken as so.
  * @property {boolean} [rg11b10Renderable]  Whether it draws into R11G11B10_FLOAT.
+ * @property {{ dumpFrames: number, written?: (lines: string[], frame: number) => void }} [liveDump]
+ *     Frames the renderer writes down on asking (`app.debug.dumpFrames`).
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a swap chain's present queues; what it answers is
  *     what the present waits on before it answers the program.
@@ -740,6 +742,7 @@ export function createDevice(options = {}){
         rg11b10Renderable: options.rg11b10Renderable,
         guest: options.guest,
         featureLevel: options.featureLevel,
+        liveDump: options.liveDump,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */

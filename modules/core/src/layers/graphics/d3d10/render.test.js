@@ -98,7 +98,8 @@ function guestMemory(){
  *           depthClipControl?: boolean, sampleCount?: number, format?: number,
  *           fake?: Parameters<typeof createFakeDevice>[0],
  *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued,
- *           guest?: import('./render.js').GuestStorage }} [options]
+ *           guest?: import('./render.js').GuestStorage,
+ *           liveDump?: import('./render.js').RenderServices['liveDump'] }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice(options.fake);
@@ -132,6 +133,7 @@ function harness(options = {}){
             depthClipControl: options.depthClipControl,
             frameQueued: options.frameQueued,
             guest: options.guest,
+            liveDump: options.liveDump,
         }), S_OK);
     const device = deviceOut.device;
     const swapChain = chainOut.swapChain;
@@ -1040,6 +1042,34 @@ async()=>{
 });
 
 // --- resource traffic ---
+
+test('a frame is written down on asking: each clear and draw a line, handed over at the present'
+    + ' that ends the count', ()=>{
+    /** @type {{ lines: string[], frame: number }[]} */
+    const handed = [];
+    const liveDump = { dumpFrames: 0,
+        written: (/** @type {string[]} */ lines, /** @type {number} */ frame)=>
+            handed.push({ lines, frame }) };
+    const h = harness({ liveDump });
+    const { device } = h;
+    bindTriangle(h, [[-1, -1, 0, 1], [3, -1, 0, 1], [-1, 3, 0, 1]], [1, 0, 0, 1]);
+    const frame = ()=>{
+        device.ClearRenderTargetView(h.renderTargetView, [0, 0, 1, 1]);
+        device.Draw(3, 0);
+        assert.equal(h.swapChain.Present(0, 0), S_OK);
+    };
+    frame();
+    assert.equal(handed.length, 0, 'nobody asked');
+    liveDump.dumpFrames = 1;
+    frame();
+    frame();
+    assert.equal(handed.length, 1);
+    const { lines } = handed[0];
+    assert.match(lines[0], /^clear t\d+:\S+:8x8 colour=0,0,1,1$/);
+    assert.match(lines[1], /^draw 3 x1 topology=\d+ vs=vs\d+ gs=- ps=ps\d+ rt=\[t\d+:\S+:8x8\]/);
+    assert.match(lines.at(-1) ?? '', /^frame \d+: presents back buffer t\d+:/);
+    assert.equal(liveDump.dumpFrames, 0);
+});
 
 test('a 16-bit normalised texture on a GPU without texture-formats-tier1 is kept in floats of its'
     + ' codes', ()=>{

@@ -128,8 +128,8 @@ export function serveGraphics(scope, deps){
     let ledger = null;
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
-     * Direct3D 8 and 9 device here writes its next frames down while this is
-     * above zero.
+     * Direct3D 8, 9, 10 and 11 device and OpenGL context here writes its next
+     * frames down while this is above zero.
      */
     /** The frozen frame's timer (`freeze`), while one runs. @type {ReturnType<typeof setInterval> | undefined} */
     let frozen;
@@ -552,6 +552,7 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D10(createDirect3D10, {
                 ...options,
+                liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 createTexture: (/** @type {any} */ descriptor)=>device.createTexture(descriptor),
