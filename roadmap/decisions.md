@@ -2053,3 +2053,18 @@ browser's glyphs, as GDI's text is; a face a program loads from a file is measur
 tables but has no rasteriser, and its texture is empty, said as a loss. Text formats, text
 layouts, typography, trimming signs and glyph outlines are refused with `E_NOTIMPL`, and said.
 *2026-11-08.*
+
+**A240. The WebBrowser control navigates and draws nothing.** Internet Explorer's control
+(`CLSID_WebBrowser` and its version 1 class, in ieframe.dll and shdocvw.dll) is made, takes its
+client site, reads the site's ambient properties, makes the three windows IE makes in the site's
+window ("Shell Embedding", "Shell DocObject View", "Internet Explorer_Server"), activates in
+place and UI-activates through the site, frame and document window, is moved and deactivated. A
+navigation runs as IE's does: the ready state goes to loading, BeforeNavigate2 is fired (a sink
+may cancel), the download begins and ends at once (to the container's command target when it has
+one, else DownloadComplete), then from the control window's message loop NavigateComplete2,
+TitleChange and DocumentComplete come, with the location, title (the address), history and ready
+state kept. There is no HTML engine: the page is not drawn (the server window shows the white of
+an empty page) and there is no document, so `get_Document` answers NULL and the document's
+commands (`QueryStatusWB`, `ExecWB`) E_UNEXPECTED, as IE answers before a document is there. The
+page not drawn is said as a loss once for each address. The class's type information is its
+coclass attributes alone; the InternetExplorer application object is not there. *2026-11-09.*
