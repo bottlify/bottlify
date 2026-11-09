@@ -1289,6 +1289,26 @@ test('a shader ending just short of the end of its memory is read without readin
     h.release(root);
 });
 
+test('a shader whose def holds a literal that looks like a comment is read to its end', ()=>{
+    // 3DMark06's sun light: def c16, 0.5, 0, 16, 9.999998, and 9.999998 is
+    // 0x411ffffe, a "comment" of 16671 tokens to a scan that took any word for one.
+    const h = seamed({ caps: { pixelShaderVersion: { major: 3, minor: 0 } } });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const at = 0x3000;
+    h.box.services.writeMemory(at, new Uint8Array(Uint32Array.from([
+        versionToken(SHADER_KIND.PIXEL, 3, 0),
+        0x05000051, 0xa00f0010, 0x3f000000, 0, 0x41800000, 0x411ffffe,
+        0x02000001, 0x800f0800, 0xa0e40010,
+        END_TOKEN,
+    ]).buffer));
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreatePixelShader', [at, out]), D3D_OK);
+    assert.equal(h.release(h.box.memory.readU32(out)), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a shader on a device that runs none is refused with the pointer cleared', ()=>{
     const h = seamed({ caps: { pixelShaderVersion: { major: 0, minor: 0 } } });
     const root = h.create();

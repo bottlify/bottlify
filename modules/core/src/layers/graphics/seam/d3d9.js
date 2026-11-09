@@ -69,10 +69,10 @@ import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, EX_SURFACE_USAGE, PALETTE_BYTES }
     from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
-import { END_TOKEN } from '../d3d9/shader.js';
 import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, refreshRatesOf, registryMode }
     from '../../win32/user32/display.js';
 import { scanWindows } from '../../win32/common/scan-windows.js';
+import { functionLength } from '../../win32/common/shader-tokens.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { cursorMoved } from './d3d8.js';
@@ -691,10 +691,10 @@ export function createDirect3D9Seam(
 
     /**
      * A shader's tokens, read up to its end token. The stream carries no
-     * length, so it is scanned a window at a time (`scanWindows`: none reaches
-     * past the region the tokens end in, which may be the last thing the
-     * program allocated); a comment's own length is honoured, since one may
-     * contain anything.
+     * length, so it is walked an instruction at a time (`functionLength`) over
+     * windows read as the walk reaches them (`scanWindows`: none reaches past
+     * the region the tokens end in, which may be the last thing the program
+     * allocated).
      *
      * @param {number} pointer
      * @returns {Uint32Array | null}
@@ -702,36 +702,26 @@ export function createDirect3D9Seam(
     const readTokens = pointer=>{
         /** @type {number[]} */
         const tokens = [];
-        let skip = 0;
         const windows = scanWindows({ readMemory: memory.windowMemory ?? memory.readMemory },
             pointer, 4);
-        for (const piece of windows)
-        {
-            if (tokens.length >= MAX_SHADER_DWORDS)
+        /** @param {number} at */
+        const token = at=>{
+            while (at >= tokens.length)
             {
-                return null;
-            }
-            const chunk = dwordsOf(piece, piece.length >>> 2);
-            for (const token of chunk)
-            {
-                tokens.push(token);
-                if (skip > 0)
+                const next = windows.next();
+                if (next.done)
                 {
-                    skip--;
-                    continue;
+                    return undefined;
                 }
-                if (tokens.length > 1 && (token & 0xffff) === 0xfffe)
+                for (const word of dwordsOf(next.value, next.value.length >>> 2))
                 {
-                    skip = (token >>> 16) & 0x7fff;
-                    continue;
-                }
-                if (token === END_TOKEN)
-                {
-                    return Uint32Array.from(tokens);
+                    tokens.push(word >>> 0);
                 }
             }
-        }
-        return null;
+            return tokens[at];
+        };
+        const length = functionLength(token, MAX_SHADER_DWORDS);
+        return length === 0 ? null : Uint32Array.from(tokens.slice(0, length));
     };
 
     /**

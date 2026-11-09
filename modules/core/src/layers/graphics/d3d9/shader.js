@@ -35,6 +35,7 @@
  */
 
 import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { functionLength } from '../../win32/common/shader-tokens.js';
 
 /** The two shader kinds, as the version token's high word spells them. */
 export const SHADER_KIND = Object.freeze({ VERTEX: 'vertex', PIXEL: 'pixel' });
@@ -513,21 +514,8 @@ function constantLimits(kind, major, minor){
  * @returns {Uint32Array}
  */
 export function functionOf(tokens){
-    let length = tokens.length;
-    for (let at = 1; at < tokens.length; at++)
-    {
-        const token = tokens[at] >>> 0;
-        if ((token & 0xffff) === COMMENT_OPCODE)
-        {
-            at += (token >>> 16) & 0x7fff;
-            continue;
-        }
-        if (token === END_TOKEN)
-        {
-            length = at + 1;
-            break;
-        }
-    }
+    const length = functionLength(at=>(at < tokens.length ? tokens[at] >>> 0 : undefined))
+        || tokens.length;
     return Uint32Array.from({ length }, (_, at)=>tokens[at] >>> 0);
 }
 

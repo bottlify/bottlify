@@ -60,7 +60,7 @@ import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { PRESENTATION_INTERVALS, TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
-import { END_TOKEN } from '../d3d9/shader.js';
+import { functionLength } from '../../win32/common/shader-tokens.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
     commandCode, compiledAt, createShadow, settledAfter, depthStencilMirror, renderTargetMirror,
@@ -1345,9 +1345,8 @@ export function createDirect3D8Seam(
         count);
 
     /**
-     * A shader function's tokens, read to its end token. The stream carries
-     * no length; a comment's own length is honoured, since one may hold
-     * anything.
+     * A shader function's tokens, read to its end token: the stream carries no
+     * length, so it is walked an instruction at a time (`functionLength`).
      *
      * @param {number} pointer
      * @returns {Uint32Array | null}
@@ -1355,25 +1354,15 @@ export function createDirect3D8Seam(
     const readFunction = pointer=>{
         /** @type {number[]} */
         const tokens = [];
-        let skip = 0;
-        while (tokens.length < MAX_SHADER_DWORDS)
-        {
-            const token = fields.readU32(pointer + tokens.length * 4);
-            tokens.push(token);
-            if (skip > 0)
+        // Read in order, every token: a walk steps over a comment's.
+        const length = functionLength(at=>{
+            while (tokens.length <= at)
             {
-                skip--;
+                tokens.push(fields.readU32(pointer + tokens.length * 4) >>> 0);
             }
-            else if (tokens.length > 1 && (token & 0xffff) === 0xfffe)
-            {
-                skip = (token >>> 16) & 0x7fff;
-            }
-            else if (token === END_TOKEN)
-            {
-                return Uint32Array.from(tokens);
-            }
-        }
-        return null;
+            return tokens[at];
+        }, MAX_SHADER_DWORDS);
+        return length === 0 ? null : Uint32Array.from(tokens.slice(0, length));
     };
 
     /**

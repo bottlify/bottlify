@@ -56,6 +56,7 @@ import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
 import { assembleShader, disassembleShader } from './shader-asm.js';
+import { MOST_TOKENS, functionLength } from '../common/shader-tokens.js';
 import * as inGuest from './inguest.js';
 import * as matrix from './inguest-matrix.js';
 import * as vector from './inguest-vector.js';
@@ -928,26 +929,24 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                // The length is in the stream: up to the end token, stepping over the
-                // comment blocks, whose data may hold that word, at most 1 MiB.
-                const words = [u32(shader >>> 0)];
-                for (let at = (shader >>> 0) + 4; words.length < 262144; at += 4)
+                // The length is in the stream: up to the end token, walked an
+                // instruction at a time.
+                /** @type {number[]} */
+                const words = [];
+                const length = functionLength(at=>{
+                    while (words.length <= at)
+                    {
+                        words.push(u32((shader >>> 0) + words.length * 4));
+                    }
+                    return words[at];
+                });
+                if (length === 0)
                 {
-                    const word = u32(at);
-                    words.push(word);
-                    if (word === 0x0000ffff)
-                    {
-                        break;
-                    }
-                    if ((word & 0xffff) === 0xfffe)
-                    {
-                        for (let n = word >>> 16 & 0x7fff; n > 0 && words.length < 262144; n--)
-                        {
-                            at += 4;
-                            words.push(u32(at));
-                        }
-                    }
+                    host.divergence?.('D3DXDisassembleShader', 'refused: no shader function'
+                        + ` ends within ${MOST_TOKENS} tokens at 0x${(shader >>> 0).toString(16)}`);
+                    return D3DERR_INVALIDCALL;
                 }
+                words.length = length;
                 let listing;
                 try
                 {

@@ -712,6 +712,15 @@ test('a vertex shader is made from guest memory and hands its tokens back as the
     assert.equal(h.device(device, 'SetVertexShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
     assert.equal(h.device(device, 'GetVertexShaderConstant', [0, 0, 1]), D3DERR_INVALIDCALL);
 
+    // A def literal that looks like a comment (9.999998 is 0x411ffffe) is a literal.
+    const defined = [0xfffe0101, 0x00000051, 0xa00f0005, 0x411ffffe, 0x0000ffff, 0, 0,
+        0x00000001, 0xc00f0000, 0x90e40000, 0x0000ffff];
+    write(0x7200, [...defined, 0xdeadbeef]);
+    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7200, out, 0]), D3D_OK);
+    assert.equal(h.device(device, 'GetVertexShaderFunction', [h.fields.readU32(out), 0, size]),
+        D3D_OK);
+    assert.equal(h.fields.readU32(size), defined.length * 4);
+
     // What is not a shader.
     assert.equal(h.device(device, 'CreateVertexShader', [0, 0x7100, out, 0]),
         D3DERR_INVALIDCALL, 'no declaration');

@@ -5227,8 +5227,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {{ shader?: any }} out
      */
     const createShaderObject = (kind, supported, tokens, out)=>{
-        if (!tokens || !out)
+        if (!out)
         {
+            return D3DERR_INVALIDCALL;
+        }
+        if (!tokens)
+        {
+            report(`create:${kind}:unread`, `a ${kind} shader was refused: no function that`
+                + ' ends in an end token could be read where the program pointed');
             return D3DERR_INVALIDCALL;
         }
         const hr = validateShader(tokens, kind, supported);
