@@ -25,6 +25,7 @@ import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64 } from './flags.js';
 import { Local, STATE_PARAMS } from './region.js';
 import { registerLocal } from './width.js';
+import { ramAt } from './memory.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 
@@ -344,7 +345,7 @@ export function emitIndexedCopyAtOnce(e, block, loop, doneLabel, emitCompare, pr
         {
             b.localGet(turns).op(I32.add).i32const(1).op(I32.sub);
         }
-        b.load('i32_8u', { offset: ram }).op(I64.extendU).localSet(registerLocal(e, loop.value));
+        b.load('i32_8u', ramAt(ram)).op(I64.extendU).localSet(registerLocal(e, loop.value));
     }
     b.localGet(turns).op(I64.extendU).i64const(BigInt(step)).op(I64.mul).localGet(index)
         .op(I64.add).localSet(index);
@@ -425,8 +426,8 @@ function copyRun(e, to, from, bytes, at, left, size){
     b.localGet(bytes).localSet(left);
     const word = ()=>{
         b.localGet(to).localGet(at).op(I32.add);
-        b.localGet(from).localGet(at).op(I32.add).load('i64', { offset: ram, align: 0 });
-        b.store('i64', { offset: ram, align: 0 });
+        b.localGet(from).localGet(at).op(I32.add).load('i64', { ...ramAt(ram), align: 0 });
+        b.store('i64', { ...ramAt(ram), align: 0 });
         b.localGet(at).i32const(8).op(I32.add).localSet(at);
         b.localGet(left).i32const(8).op(I32.sub).localSet(left);
     };
@@ -456,8 +457,8 @@ function copyRun(e, to, from, bytes, at, left, size){
         b.localGet(left).i32const(step).op(I32.and);
         e.openIf('copyRest');
         b.localGet(to).localGet(at).op(I32.add);
-        b.localGet(from).localGet(at).op(I32.add).load(load, { offset: ram, align: 0 });
-        b.store(store, { offset: ram, align: 0 });
+        b.localGet(from).localGet(at).op(I32.add).load(load, { ...ramAt(ram), align: 0 });
+        b.store(store, { ...ramAt(ram), align: 0 });
         if (step > 1)
         {
             b.localGet(at).i32const(step).op(I32.add).localSet(at);

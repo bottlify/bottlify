@@ -31,7 +31,7 @@ import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
 import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
 import { prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
-import { checkAccess, noteStore } from './memory.js';
+import { checkAccess, noteStore, ram, ramAt } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
 import { atState } from './bases.js';
 
@@ -193,7 +193,7 @@ function emitForm(e, instruction, flagsLive){
                         return true;
                     }
                     prepareAddress(e, src);
-                    b.load(double ? 'f64' : 'f32', { offset: readAddress(e, src) });
+                    b.load(double ? 'f64' : 'f32', ramAt(readAddress(e, src)));
                     const low = e.lowLocal(reg, double);
                     b.localSet(low);
                     oweLow(e, reg, low, double, 'zero');
@@ -205,7 +205,7 @@ function emitForm(e, instruction, flagsLive){
                     prepareAddress(e, dst, true);
                     noteStore(e, width);
                     b.localGet(Local.addr).localGet(held.local)
-                        .store(double ? 'f64' : 'f32', { offset: e.layout.ramBase });
+                        .store(double ? 'f64' : 'f32', ram(e));
                     return true;
                 }
             }
@@ -237,7 +237,7 @@ function emitForm(e, instruction, flagsLive){
                 b.localGet(Local.addr);
                 readV(e, src, 16);
                 b.simdMem(SIMD.store64Lane,
-                    { align: 3, offset: e.layout.ramBase, lane: high ? 1 : 0 });
+                    { ...ram(e), align: 3, lane: high ? 1 : 0 });
                 return true;
             }
             if (src.kind === 'mem')
@@ -246,7 +246,7 @@ function emitForm(e, instruction, flagsLive){
                 b.localGet(Local.addr);
                 readV(e, dst, 16);
                 b.simdMem(SIMD.load64Lane,
-                    { align: 3, offset: e.layout.ramBase, lane: high ? 1 : 0 });
+                    { ...ram(e), align: 3, lane: high ? 1 : 0 });
                 writeV(e, dst, null);
                 return true;
             }
@@ -390,12 +390,12 @@ function emitForm(e, instruction, flagsLive){
             noteStore(e, 4);
             b.localGet(Local.addr);
             atState(e.context, b).load('i32', { offset: e.layout.mxcsr });
-            b.store('i32', { offset: e.layout.ramBase });
+            b.store('i32', ram(e));
             return true;
         case 'ldmxcsr':
             prepareAddress(e, dst);
             atState(e.context, b);
-            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase });
+            b.localGet(Local.addr).load('i32', ram(e));
             b.store('i32', { offset: e.layout.mxcsr });
             return true;
         case 'movq':
@@ -454,11 +454,11 @@ function emitForm(e, instruction, flagsLive){
             b.localGet(Local.addr);
             if (whole)
             {
-                b.simdMem(SIMD.load, { align: 4, offset: e.layout.ramBase });
+                b.simdMem(SIMD.load, { ...ram(e), align: 4 });
             }
             else
             {
-                b.simdMem(SIMD.load64Zero, { align: 3, offset: e.layout.ramBase });
+                b.simdMem(SIMD.load64Zero, { ...ram(e), align: 3 });
             }
             readV(e, src, 16);
             b.i32const(7);
@@ -466,11 +466,11 @@ function emitForm(e, instruction, flagsLive){
             simd(SIMD.bitselect);
             if (whole)
             {
-                b.simdMem(SIMD.store, { align: 4, offset: e.layout.ramBase });
+                b.simdMem(SIMD.store, { ...ram(e), align: 4 });
             }
             else
             {
-                b.simdMem(SIMD.store64Lane, { align: 3, offset: e.layout.ramBase, lane: 0 });
+                b.simdMem(SIMD.store64Lane, { ...ram(e), align: 3, lane: 0 });
             }
             return true;
         }
@@ -1461,7 +1461,7 @@ function emitExtension(e, instruction, flagsLive){
             b.localGet(Local.addr);
             readV(e, src, 16);
             b.simdMem(size === 1 ? SIMD.store8Lane : size === 2 ? SIMD.store16Lane
-                : SIMD.store32Lane, { align: 0, offset: e.layout.ramBase, lane });
+                : SIMD.store32Lane, { ...ram(e), align: 0, lane });
             return true;
         }
         case 'pinsrb': case 'pinsrd':
@@ -1482,7 +1482,7 @@ function emitExtension(e, instruction, flagsLive){
             if (src.kind === 'mem')
             {
                 prepareAddress(e, src);
-                b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase });
+                b.localGet(Local.addr).load('i32', ram(e));
             }
             else
             {
@@ -1772,21 +1772,21 @@ function readV(e, operand, width){
     b.localGet(Local.addr);
     if (width === 16)
     {
-        b.simdMem(SIMD.load, { align: 4, offset: e.layout.ramBase });
+        b.simdMem(SIMD.load, { ...ram(e), align: 4 });
     }
     else if (width === 8)
     {
-        b.simdMem(SIMD.load64Zero, { align: 3, offset: e.layout.ramBase });
+        b.simdMem(SIMD.load64Zero, { ...ram(e), align: 3 });
     }
     else if (width === 2)
     {
         // A word into a zero vector's first lane (pmovsxbq's and pmovzxbq's source).
         b.v128const(new Array(16).fill(0));
-        b.simdMem(SIMD.load16Lane, { align: 1, offset: e.layout.ramBase, lane: 0 });
+        b.simdMem(SIMD.load16Lane, { ...ram(e), align: 1, lane: 0 });
     }
     else
     {
-        b.simdMem(SIMD.load32Zero, { align: 2, offset: e.layout.ramBase });
+        b.simdMem(SIMD.load32Zero, { ...ram(e), align: 2 });
     }
 }
 
@@ -1822,15 +1822,15 @@ function writeV(e, operand, pushValue, width = 16){
     }
     if (width === 16)
     {
-        b.simdMem(SIMD.store, { align: 4, offset: e.layout.ramBase });
+        b.simdMem(SIMD.store, { ...ram(e), align: 4 });
     }
     else if (width === 8)
     {
-        b.simdMem(SIMD.store64Lane, { align: 3, offset: e.layout.ramBase, lane: 0 });
+        b.simdMem(SIMD.store64Lane, { ...ram(e), align: 3, lane: 0 });
     }
     else
     {
-        b.simdMem(SIMD.store32Lane, { align: 2, offset: e.layout.ramBase, lane: 0 });
+        b.simdMem(SIMD.store32Lane, { ...ram(e), align: 2, lane: 0 });
     }
 }
 
@@ -1843,7 +1843,7 @@ function readM(e, operand){
         return;
     }
     prepareAddress(e, operand);
-    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase });
+    b.localGet(Local.addr).load('i64', ram(e));
 }
 
 /**
@@ -1882,7 +1882,7 @@ function writeM(e, operand, pushValue){
         b.localGet(Local.addr);
         b.localGet(Local.t64);
     }
-    b.store('i64', { offset: e.layout.ramBase });
+    b.store('i64', ram(e));
 }
 
 /**
@@ -1993,7 +1993,7 @@ function pushLow(e, operand, double, again = false){
     {
         prepareAddress(e, operand);
     }
-    b.load(double ? 'f64' : 'f32', { offset: readAddress(e, operand) });
+    b.load(double ? 'f64' : 'f32', ramAt(readAddress(e, operand)));
 }
 
 /**

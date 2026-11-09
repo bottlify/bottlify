@@ -172,9 +172,15 @@ export function translatorWorkerUrl(){
  * @param {EngineEnv & { features?: ReturnType<typeof probeFeatures> }} env
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
-export function createCorkRuntime({ memory, layout, sharedLayout = undefined, config = {}, read,
-    readBytes, imports, features, now: nowMs = ()=>performance.now() })
+export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefined, config = {},
+    read, readBytes, imports, features, now: nowMs = ()=>performance.now() })
 {
+    // The memory holding guest RAM: a wide window's own (`ramMemory`), else the one memory.
+    if ((layout.ramMemory !== undefined) !== (ram !== undefined))
+    {
+        throw new Error('cork: a wide window\'s RAM is its own memory, given with it');
+    }
+    const ramOf = ram ?? memory;
     const settings = {
         maxRegionBlocks: 128, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
@@ -544,7 +550,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             const module = new WebAssembly.Module(
                 /** @type {Uint8Array<ArrayBuffer>} */ (buildHelpersModule(layout, sharedMemory)));
-            helperInstance = new WebAssembly.Instance(module, { env: { memory } }).exports;
+            helperInstance = new WebAssembly.Instance(module,
+                { env: { memory, ...ram === undefined ? {} : { ram } } }).exports;
         }
         return /** @type {any} */ (helperInstance);
     };
@@ -1208,7 +1215,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         if (cachedBytes === null || cachedBytes.buffer.byteLength === 0
             || cachedBytes.length < layout.ramBase + end)
         {
-            cachedBytes = new Uint8Array(memory.buffer);
+            cachedBytes = new Uint8Array(ramOf.buffer);
         }
         return cachedBytes.length < layout.ramBase + end ? null
             : cachedBytes.subarray(layout.ramBase + address, layout.ramBase + end);
@@ -2402,7 +2409,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 : new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (module));
             const instance = new WebAssembly.Instance(compiled, {
                 env: {
-                    memory, trap: imports.trap,
+                    memory, ...ram === undefined ? {} : { ram }, trap: imports.trap,
                     rdtsc: imports.rdtsc ?? (()=>0n),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     ...baseGlobals,
@@ -3269,8 +3276,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                     // shared too, and cannot be transferred to the translator.
                     // A page forming read past the memory -- an import slot that
                     // names nowhere -- read as zeros there, and is zeros here.
-                    copies.set(page, at + 4096 <= memory.buffer.byteLength
-                        ? new Uint8Array(memory.buffer, at, 4096).slice() : new Uint8Array(4096));
+                    copies.set(page, at + 4096 <= ramOf.buffer.byteLength
+                        ? new Uint8Array(ramOf.buffer, at, 4096).slice() : new Uint8Array(4096));
                 }
             }
         }
@@ -5182,7 +5189,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             // Looked at whatever the run left by: a rep that stored into code and
             // ran out of budget on a later page in bulk leaves by the budget, and
             // the run that finishes it stores no code of its own.
-            if (kind === 'stale' || view().getUint32(layout.tables + Tables.STALE_END, true) !== 0)
+            if (kind === 'stale' || pages.staleSize() !== 0)
             {
                 // Every page the run's stores into code reached, from the
                 // lowest of them to the highest.

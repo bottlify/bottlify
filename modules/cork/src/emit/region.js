@@ -459,13 +459,20 @@ export function prepareModule(m, layout, features, memory = {},
     // module is given holds: the host's compiler then knows a constant address
     // inside it in bounds, and compares a word there in place, where with one
     // page it loaded the word as well (a switch's table entry, x64).
-    const ramPages = Math.ceil(((layout.ramBase ?? 0) + (layout.ramFloor ?? layout.ramSize))
-        / 65536);
+    const ramPages = layout.ramMemory !== undefined ? 1
+        : Math.ceil(((layout.ramBase ?? 0) + (layout.ramFloor ?? layout.ramSize)) / 65536);
     m.importMemory('env', 'memory', {
         min: Math.max(1, Math.min(ramPages, memory.maxPages ?? ramPages)),
         ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
+    if (layout.window !== undefined)
+    {
+        // A wide window's RAM, the module's memory 1 (`ramMemory`): made whole, so its
+        // size is its import's.
+        m.importMemory('env', 'ram', { min: layout.window / 65536, max: layout.window / 65536,
+            shared: memory.shared ?? false, index64: true });
+    }
     const bases = importBases(m, layout);
     const hashed = hash && features.tailCalls;
     if (hashed)
@@ -506,7 +513,7 @@ export function prepareModule(m, layout, features, memory = {},
     const {
         materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder, spanHit,
         windowHit,
-    } = importHelpers(m, width.bits === 64);
+    } = importHelpers(m, width.bits === 64, layout.window !== undefined);
     /** @type {ModuleContext} */
     const context = {
         m, width, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
@@ -548,11 +555,15 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.precise = true;
     }
-    else if (looseStacks && undoLog !== true)
+    // A loose stack's access takes rsp's low half for its address, which a wide
+    // window's stack past 4 GiB is not.
+    else if (looseStacks && undoLog !== true && layout.window === undefined)
     {
         context.looseStacks = true;
     }
-    if (checkReads)
+    // A wide window tests every read: a read wrapped into RAM, or folded off a
+    // wrapped sum, reckons with RAM the size of its 32-bit address.
+    if (checkReads || layout.window !== undefined)
     {
         context.checkReads = true;
     }
@@ -1115,6 +1126,22 @@ export class RegionEmitter {
         // for each of its bytes, rather than doubling up to it.
         this.b = new Body(Math.min(1 << 16, 2 ** Math.ceil(Math.log2(Math.max(64,
             (region.bytes ?? 0) * 16)))));
+        /**
+         * A wide window's guest accesses (`Body.guest`), each body's; its locals
+         * made at their first use (`wideLocal`). Null in 4 GiB.
+         */
+        const emitter = this;
+        this.guest = this.layout.ramMemory === undefined ? null : {
+            memory: this.layout.ramMemory,
+            get high(){
+                return emitter.wideLocal(ValType.i64, 'high');
+            },
+            /** @param {number} type */
+            scratch: type=>emitter.wideLocal(type, 'scratch'),
+        };
+        this.b.guest = this.guest;
+        /** The wide window's locals by use and type (`wideLocal`). @type {Map<string, number>} */
+        this.wideLocals = new Map();
         /** @type {Map<number, number>} */
         this.labels = new Map(this.region.blocks.map((block, index)=>[block.start, index]));
         /** By block start, its index in the region as formed, for a diagnostic build's marks. */
@@ -1552,6 +1579,25 @@ export class RegionEmitter {
             this.localTypes.push(ValType.i32);
         }
         return this.runLocal;
+    }
+
+    /**
+     * A wide window's local of `type` for `use` (`guest`): the i64 high half of
+     * the access's address, or the value a store holds while its address is
+     * widened. Made at its first use, as the region's other lazy locals.
+     *
+     * @param {number} type @param {'high' | 'scratch'} use
+     */
+    wideLocal(type, use){
+        const key = `${use}${type}`;
+        let local = this.wideLocals.get(key);
+        if (local === undefined)
+        {
+            local = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(type);
+            this.wideLocals.set(key, local);
+        }
+        return local;
     }
 
     /** The i32 local a read's wrapped sum is kept in (`folded`). */
@@ -2129,6 +2175,7 @@ export class RegionEmitter {
         {
             const { at, kind, regs, x87, site, record, point, chained } = one;
             const b = this.b = new Body();
+            b.guest = this.guest;
             if (kind === 'exit')
             {
                 b.br(/** @type {number} */ (one.depth) + /** @type {number} */ (point?.entry));

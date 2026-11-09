@@ -1095,19 +1095,15 @@ function simd(instruction, state){
     }
     // The 32-bit model over a view: the same vector registers, MXCSR, flags
     // and memory, the general registers' low halves.
+    const narrow = narrowMemory(state);
     const view = /** @type {import('./ir.js').EvalState} */ (/** @type {unknown} */ ({
         reg: Uint32Array.from(state.r, value=>Number(value & 0xffffffffn)),
         xmm: state.xmm,
         mxcsr: state.mxcsr,
         eflags: state.rflags,
-        memory: {
-            read: (/** @type {number} */ at, /** @type {number} */ size)=>
-                Number(state.memory.read(BigInt(at), size)),
-            write: (/** @type {number} */ at, /** @type {number} */ size, /** @type {number} */ value)=>
-                state.memory.write(BigInt(at), size, BigInt(value >>> 0)),
-        },
+        memory: narrow.memory,
     }));
-    if (!evaluateSimd(instruction, view, operand=>Number(operandAddress64(state, operand))))
+    if (!evaluateSimd(instruction, view, narrow.address))
     {
         throw new Unsupported(op, instruction.eip);
     }
@@ -1130,18 +1126,14 @@ function simd(instruction, state){
  */
 function x87(instruction, state){
     const unit = state.loadX87?.() ?? /** @type {X87State} */ (state.x87);
+    const narrow = narrowMemory(state);
     const view = /** @type {import('./ir.js').EvalState} */ (/** @type {unknown} */ ({
         ...unit,
         reg: Uint32Array.from(state.r, value=>Number(value & 0xffffffffn)),
         eflags: state.rflags,
-        memory: {
-            read: (/** @type {number} */ at, /** @type {number} */ size)=>
-                Number(state.memory.read(BigInt(at), size)),
-            write: (/** @type {number} */ at, /** @type {number} */ size, /** @type {number} */ value)=>
-                state.memory.write(BigInt(at), size, BigInt(value >>> 0)),
-        },
+        memory: narrow.memory,
     }));
-    if (!evaluateX87(instruction, view, operand=>Number(operandAddress64(state, operand))))
+    if (!evaluateX87(instruction, view, narrow.address))
     {
         throw new Unsupported(instruction.op, instruction.eip);
     }
@@ -1202,20 +1194,16 @@ function mmx(instruction, state){
         state.storeX87?.(unit);
         return;
     }
+    const narrow = narrowMemory(state);
     const view = /** @type {import('./ir.js').EvalState} */ (/** @type {unknown} */ ({
         ...unit,
         reg: Uint32Array.from(state.r, value=>Number(value & 0xffffffffn)),
         xmm: state.xmm,
         mxcsr: state.mxcsr,
         eflags: state.rflags,
-        memory: {
-            read: (/** @type {number} */ at, /** @type {number} */ size)=>
-                Number(state.memory.read(BigInt(at), size)),
-            write: (/** @type {number} */ at, /** @type {number} */ size, /** @type {number} */ value)=>
-                state.memory.write(BigInt(at), size, BigInt(value >>> 0)),
-        },
+        memory: narrow.memory,
     }));
-    if (!evaluateSimd(instruction, view, operand=>Number(operandAddress64(state, operand))))
+    if (!evaluateSimd(instruction, view, narrow.address))
     {
         throw new Unsupported(op, instruction.eip);
     }
@@ -1298,4 +1286,33 @@ function floatToQuadword(value, mode){
         return -(1n << 63n);
     }
     return BigInt(whole);
+}
+
+/**
+ * The 32-bit model's memory over long mode's (`evaluateSimd`, `evaluateX87`), and
+ * the operand addresses it is given: it reckons an access's parts in 32 bits
+ * (`>>> 0`), so each part is put back in the 4 GiB block of the operand's own
+ * address, which a wide window's (`wideLayout`) may lie past 4 GiB.
+ * ponytail: a part across a 4 GiB line lands in the block below it; the model in
+ * 64 bits when a program keeps a vector across one.
+ *
+ * @param {State64} state
+ */
+function narrowMemory(state){
+    let block = 0;
+    const at = (/** @type {number} */ address)=>BigInt(block + (address >>> 0));
+    return {
+        address: (/** @type {import('./decode/decoder.js').Operand} */ operand)=>{
+            const full = Number(operandAddress64(state, operand));
+            block = full - (full >>> 0);
+            return full;
+        },
+        memory: {
+            read: (/** @type {number} */ address, /** @type {number} */ size)=>
+                Number(state.memory.read(at(address), size)),
+            write: (/** @type {number} */ address, /** @type {number} */ size,
+                /** @type {number} */ value)=>state.memory.write(at(address), size,
+                BigInt(value >>> 0)),
+        },
+    };
 }

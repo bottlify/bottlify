@@ -58,6 +58,12 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [ramFloor]   A growing memory's (cork's `ownLayout`): the RAM it always
  *     holds; translated code wraps an untested read by the mask in its `wrap` word.
  * @property {number} [wrap]       Where that mask lies: the RAM the memory holds now, less one.
+ * @property {number} [window]     Long mode's address space when larger than 4 GiB: 8 or 16 GiB.
+ * @property {number} [ramMemory]  Cork's own, with `window`: the module's memory that holds guest
+ *     RAM, a `memory64` one (1), its address 0 the guest's; the state and tables stay in memory 0.
+ * @property {number} [staleSpan]  Cork's own, with `window`: the span the stores into code reached
+ *     since the runtime last looked, as two quadwords (the first byte complemented, one past the
+ *     last), in place of the tables' 32-bit one.
  * @property {number} [hashShift]  The entry hash's slot is `(eip * 0x9e3779b1) >>> hashShift`
  *     (16, a hash of 2^16 slots, when absent).
  * @property {number} regs         8 × i32 (eax ecx edx ebx esp ebp esi edi); 16 × i64 at 64.
@@ -109,6 +115,8 @@ export function engineContractProblem(engineModule, url){
  *
  * @typedef {Object} EngineEnv
  * @property {WebAssembly.Memory} memory  The layer's memory.
+ * @property {WebAssembly.Memory} [ram]  Cork's own: a wide window's RAM, its own `memory64` memory
+ *     (`StateLayout.ramMemory`).
  * @property {StateLayout} layout
  * @property {StateLayout} [sharedLayout]  Cork's own: the process's shared layout
  *     (`sharedLayout`), translations are made for where it has several executors -- the same

@@ -27,22 +27,23 @@ import { features as probeFeatures } from '../wasm/features.js';
  * region holds, from translated code's misses as from here, as the core's host
  * installs it (`interpretWith`); what it stops for answered as the host answers it.
  *
- * @param {{ memory: WebAssembly.Memory,
+ * @param {{ memory: WebAssembly.Memory, ram?: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     config?: Record<string, unknown>, defaultNaNNegative?: boolean,
  *     tier?: import('../../../core/src/layers/cpu/engine.js').WasmInterpreter | null }} settings
  *     `defaultNaNNegative`: the float code as for that host (false: an arm64 one), the
- *     host's own unless given
+ *     host's own unless given; `ram`: a wide window's RAM (`ramMemory`)
  */
-export function createRuntimeRunner64({ memory, layout, config = {}, defaultNaNNegative = undefined,
-    tier = null })
+export function createRuntimeRunner64({ memory, ram, layout, config = {},
+    defaultNaNNegative = undefined, tier = null })
 {
     const flagsAt = pageFlagsAt(layout);
     const bytes = ()=>new Uint8Array(memory.buffer);
+    const ramBytes = ()=>new Uint8Array((ram ?? memory).buffer);
     const view = ()=>new DataView(memory.buffer);
     /** @param {number} address */
-    const read = address=>((bytes()[flagsAt + (address >>> 12)] & PageFlag.INACCESSIBLE) === 0
-        ? bytes()[layout.ramBase + address] : 0);
+    const read = address=>((bytes()[flagsAt + Math.floor(address / 4096)]
+        & PageFlag.INACCESSIBLE) === 0 ? ramBytes()[layout.ramBase + address] : 0);
     /** The state the current run is of, whose `trapped` a trap goes on. @type {any} */
     let current = null;
     const stats = { translated: 0, interpreted: 0, exits: 0, stepped: 0, tiered: 0, traps: 0 };
@@ -53,7 +54,7 @@ export function createRuntimeRunner64({ memory, layout, config = {}, defaultNaNN
     const exact = (defaultNaNNegative ?? probeFeatures().defaultNaNNegative)
         || 'exactNaN' in config ? {} : { exactNaN: true };
     const runtime = createCorkRuntime({
-        memory, layout,
+        memory, ram, layout,
         ...defaultNaNNegative === undefined ? {}
             : { features: { ...probeFeatures(), defaultNaNNegative } },
         config: { feed: 'slice', precise: true, hotThreshold: 1, missThreshold: 1,

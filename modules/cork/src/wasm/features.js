@@ -94,3 +94,28 @@ export function features(){
 }
 
 export { ValType };
+
+/**
+ * A `memory64` memory of `bytes`, made whole (`initial` = `maximum`): a shared
+ * one of 16 GiB is refused growing from a page and made at its size. The JS
+ * API asks for it as `address: 'i64'` with BigInt sizes (the standard, as
+ * Chrome takes it) or as `index: 'i64'` with numbers (node 22, behind
+ * `--experimental-wasm-memory64`); the first the engine takes is made.
+ *
+ * @param {number} bytes  a multiple of a wasm page
+ * @param {boolean} [shared]
+ * @returns {WebAssembly.Memory}
+ */
+export function memory64(bytes, shared = false){
+    const pages = bytes / 65536;
+    try
+    {
+        return new WebAssembly.Memory(/** @type {any} */ ({ address: 'i64', shared,
+            initial: BigInt(pages), maximum: BigInt(pages) }));
+    }
+    catch (e){
+        void e;
+        return new WebAssembly.Memory(/** @type {any} */ ({ index: 'i64', shared,
+            initial: pages, maximum: pages }));
+    }
+}

@@ -22,7 +22,7 @@ import { registerLocal } from './width.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
-import { Tables, codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
+import { Tables, codeRangesAt, pageFlagsAt, windowBits } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { I32, I64 } from './flags.js';
 import { Exit, Local } from './region.js';
@@ -136,6 +136,18 @@ export function wrapMask(b, layout){
 export const ramAlways = layout=>layout.ramFloor ?? layout.ramSize;
 
 /**
+ * The memarg of an access to the guest's RAM at the i32 address on the stack
+ * (`offset` past it): RAM's place in the memory, and `guest`, which a wide
+ * window's body (`Body.guest`) takes to its own memory past 4 GiB.
+ *
+ * @param {E} e @param {number} [offset]
+ */
+export const ram = (e, offset = 0)=>({ guest: true, offset: e.layout.ramBase + offset });
+
+/** A guest access's memarg at a wasm offset already counting RAM's place (`ram`). @param {number} offset */
+export const ramAt = offset=>({ guest: true, offset });
+
+/**
  * Whether the current instruction's access goes untested, its address wrapped
  * into RAM. Outside `precise` an instruction that only reads is not tested: the
  * one page flag a read can find is INACCESSIBLE, which only the pages past RAM
@@ -225,26 +237,28 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
     const table = pageFlagsAt(e.layout);
     const noting = store && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? STORE_FLAGS : 0);
-    b.localGet(Local.addr).i32const(12).op(I32.shrU);
+    pageIndex(e);
     loadFlags(e, table, size > 1 ? 'i32_16u' : 'i32_8u')
         .localTee(Local.pflags).i32const(size > 1 ? bits * 0x01010101 : bits).op(I32.and);
     if (window)
     {
-        b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+        beyond(e);
+        b.op(I32.or);
     }
     e.openGuard('flagged', EMPTY);
     if (window)
     {
-        b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+        beyond(e);
         e.openGuard('beyond', EMPTY);
         faultHere(e, counted);
         e.close();
     }
     if (size > 1)
     {
-        b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
-        b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
+        pageIndex(e);
+        b.load('i32_8u', { offset: table });
+        pageIndex(e, size - 1);
+        b.load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
     }
     // A read inside the guest's first page reads the RAM's zeros there (`zeroPage`),
     // as a window of them does (`emitGroupChecks`).
@@ -311,8 +325,8 @@ export function noteStore(e, size){
     {
         // A state save (fsave, fnstenv): its access was checked at the
         // operand's size, so its last page's flags are read here.
-        b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
+        pageIndex(e, size - 1);
+        b.load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
     }
     // The next page's flag too: a wide access's halfword holds it.
     b.i32const(STORE_FLAGS * 0x01010101).op(I32.and);
@@ -331,15 +345,17 @@ function noteCodeStore(e, size){
     // To the granule: the page's flag and then its range, for the store's
     // first byte, its last, and one byte in every granule between -- a state
     // save (`fnsave`) spans several.
-    b.localGet(Local.addr).call(e.context.codeHit);
+    b.localGet(Local.addr).widenGuest().call(e.context.codeHit);
     const granule = 1 << Tables.CODE_GRANULE_SHIFT;
     for (let at = granule; at < size - 1; at += granule)
     {
-        b.localGet(Local.addr).i32const(at).op(I32.add).call(e.context.codeHit).op(I32.or);
+        b.localGet(Local.addr).i32const(at).op(I32.add).widenGuest()
+            .call(e.context.codeHit).op(I32.or);
     }
     if (size > 1)
     {
-        b.localGet(Local.addr).i32const(size - 1).op(I32.add).call(e.context.codeHit).op(I32.or);
+        b.localGet(Local.addr).i32const(size - 1).op(I32.add).widenGuest()
+            .call(e.context.codeHit).op(I32.or);
     }
     e.openGuard('code', EMPTY);
     b.i32const(1).localSet(Local.stale);
@@ -347,6 +363,25 @@ function noteCodeStore(e, size){
     // into code more than once before the exit after it -- a `rep movs` or
     // `rep stos` element after element, page after page; `pushad` across two
     // pages -- and every page each store reached is code to drop.
+    if (e.layout.staleSpan !== undefined)
+    {
+        // A wide window's span, as quadwords at a place of its own.
+        const span = e.layout.staleSpan;
+        const higher64 = (/** @type {() => void} */ value, /** @type {number} */ offset)=>{
+            b.i32const(0);
+            value();
+            b.i32const(0).load('i64', { offset });
+            value();
+            b.i32const(0).load('i64', { offset }).op(I64.gtU);
+            b.select().store('i64', { offset });
+        };
+        higher64(()=>b.localGet(Local.addr).widenGuest().i64const(-1n).op(I64.xor), span);
+        higher64(()=>b.localGet(Local.addr).widenGuest().i64const(BigInt(size)).op(I64.add),
+            span + 8);
+        e.close();
+        e.staleCheck = true;
+        return;
+    }
     const low = e.layout.tables + Tables.STALE_LOW;
     const end = e.layout.tables + Tables.STALE_END;
     // Unsigned maxima of the complemented lowest byte and of the end, each
@@ -379,12 +414,21 @@ function noteCodeStore(e, size){
  * @returns {number} the function index
  */
 export function addCodeHitHelper(m, layout, shared = false){
-    const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+    // A wide window's address is its i64 one (`Body.widenGuest`).
+    const wide = layout.window !== undefined;
+    const type = m.type({ params: [wide ? ValType.i64 : ValType.i32], results: [ValType.i32] });
     const b = new Body();
     const flags = pageFlagsAt(layout);
     const ranges = codeRangesAt(layout);
     // local 1: the page; local 2: the granule; local 3: the page's flags
-    b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
+    if (wide)
+    {
+        b.localGet(0).i64const(12n).op(I64.shrU).op(I64.wrap).localSet(1);
+    }
+    else
+    {
+        b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
+    }
     b.localGet(1).load('i32_8u', { offset: flags }).localTee(3)
         .i32const(PageFlag.WATCH).op(I32.and);
     b.if(EMPTY);
@@ -417,7 +461,12 @@ export function addCodeHitHelper(m, layout, shared = false){
     b.if(EMPTY);
     b.i32const(0).op(0x0f); // return
     b.end();
-    b.localGet(0).i32const(Tables.CODE_GRANULE_SHIFT).op(I32.shrU)
+    b.localGet(0);
+    if (wide)
+    {
+        b.op(I64.wrap);
+    }
+    b.i32const(Tables.CODE_GRANULE_SHIFT).op(I32.shrU)
         .i32const(0xfff >>> Tables.CODE_GRANULE_SHIFT).op(I32.and).localSet(2);
     b.localGet(2).localGet(1).i32const(1).op(I32.shl).load('i32_8u', { offset: ranges })
         .op(I32.geU);
@@ -433,14 +482,22 @@ export function addCodeHitHelper(m, layout, shared = false){
  * it and at `hi`, so one byte of every granule the bytes lie in.
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m @param {number} codeHit
+ * @param {boolean} [wide]  a wide window's, its addresses i64 (`addCodeHitHelper`)
  * @returns {number} the function index
  */
-export function addSpanHitHelper(m, codeHit){
-    const type = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
+export function addSpanHitHelper(m, codeHit, wide = false){
+    const address = wide ? ValType.i64 : ValType.i32;
+    const ops = wide ? I64 : I32;
+    const type = m.type({ params: [address, address], results: [ValType.i32] });
     const b = new Body();
     // local 2: the granules past `lo` still to look at, counted rather than
     // compared, so a span that wraps at 4 GiB ends.
-    b.localGet(1).localGet(0).op(I32.sub).i32const(5).op(I32.shrU).localSet(2);
+    b.localGet(1).localGet(0).op(ops.sub);
+    if (wide)
+    {
+        b.op(I64.wrap);
+    }
+    b.i32const(5).op(I32.shrU).localSet(2);
     b.loop(EMPTY);
     b.localGet(0).call(codeHit);
     b.if(EMPTY);
@@ -448,7 +505,16 @@ export function addSpanHitHelper(m, codeHit){
     b.end();
     b.localGet(2);
     b.if(EMPTY);
-    b.localGet(0).i32const(32).op(I32.add).localSet(0);
+    b.localGet(0);
+    if (wide)
+    {
+        b.i64const(32n);
+    }
+    else
+    {
+        b.i32const(32);
+    }
+    b.op(ops.add).localSet(0);
     b.localGet(2).i32const(1).op(I32.sub).localSet(2);
     b.br(1);
     b.end();
@@ -471,12 +537,40 @@ export function addSpanHitHelper(m, codeHit){
  */
 export function addWindowHitHelper(m, layout, spanHit){
     const i32 = ValType.i32;
-    const type = m.type({ params: [i32, i32, i32, i32], results: [i32] });
+    // A wide window's address is its i64 one, the offsets past it i32 still.
+    const wide = layout.window !== undefined;
+    const type = m.type({ params: [wide ? ValType.i64 : i32, i32, i32, i32], results: [i32] });
     const b = new Body();
     const flags = pageFlagsAt(layout);
-    b.localGet(0).i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
-    b.localGet(0).localGet(1).op(I32.add).i32const(12).op(I32.shrU)
-        .load('i32_8u', { offset: flags });
+    /** The address and `offset`, the local of one past it, added. @param {number} [offset] */
+    const past = offset=>{
+        b.localGet(0);
+        if (offset !== undefined)
+        {
+            b.localGet(offset);
+            if (wide)
+            {
+                b.op(I64.extendU);
+            }
+            b.op(wide ? I64.add : I32.add);
+        }
+    };
+    /** The page of the address past it by the local `offset`. @param {number} [offset] */
+    const page = offset=>{
+        past(offset);
+        if (wide)
+        {
+            b.i64const(12n).op(I64.shrU).op(I64.wrap);
+        }
+        else
+        {
+            b.i32const(12).op(I32.shrU);
+        }
+    };
+    page();
+    b.load('i32_8u', { offset: flags });
+    page(1);
+    b.load('i32_8u', { offset: flags });
     b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
     b.if(EMPTY);
     b.i32const(1).op(0x0f); // return
@@ -485,8 +579,8 @@ export function addWindowHitHelper(m, layout, spanHit){
     b.if(EMPTY);
     b.i32const(0).op(0x0f); // return
     b.end();
-    b.localGet(0).localGet(2).op(I32.add);
-    b.localGet(0).localGet(3).op(I32.add);
+    past(2);
+    past(3);
     b.call(spanHit);
     return m.function(type, [], b.toBytes());
 }
@@ -1870,7 +1964,14 @@ export function emitGroupChecks(e, checks, at = -1){
             // the sum of the registers' low halves, as the accesses' own
             // addresses are (`emitAddress`), which the host computes once.
             groupSum(e, group, start, true);
-            b.i64const(32n).op(I64.shrU).localSet(Local.t64);
+            if (e.guest !== null)
+            {
+                // A wide window's: the sum's high half where its pages' flags are
+                // (`pageIndex`), and past the window rather than past 4 GiB.
+                b.localTee(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+                b.localGet(Local.t64);
+            }
+            b.i64const(BigInt(windowBits(e.layout))).op(I64.shrU).localSet(Local.t64);
             groupSum(e, group, start, false);
             b.localSet(Local.addr);
             b.localGet(Local.t64).op(I64.wrap);
@@ -1899,7 +2000,7 @@ export function emitGroupChecks(e, checks, at = -1){
         // pages and the stores' granules looked at.
         const stores = group.list.some(access=>access.store);
         const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
-        b.localGet(Local.addr).i32const(12).op(I32.shrU);
+        pageIndex(e);
         loadFlags(e, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
         if (e.width.bits === 64)
         {
@@ -1925,12 +2026,12 @@ export function emitGroupChecks(e, checks, at = -1){
             e.openGuard('pastZeroPage', EMPTY);
         }
         const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
-        b.localGet(Local.addr).i32const(group.width - 1).i32const(first[0]).i32const(first[1])
-            .call(e.context.windowHit);
+        b.localGet(Local.addr).widenGuest().i32const(group.width - 1).i32const(first[0])
+            .i32const(first[1]).call(e.context.windowHit);
         for (const [from, to] of more)
         {
-            b.localGet(Local.addr).i32const(from).op(I32.add)
-                .localGet(Local.addr).i32const(to).op(I32.add)
+            b.localGet(Local.addr).i32const(from).op(I32.add).widenGuest()
+                .localGet(Local.addr).i32const(to).op(I32.add).widenGuest()
                 .call(e.context.spanHit).op(I32.or);
         }
         leaveIf('window');
@@ -2223,8 +2324,13 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             }
             b.i64const(BigInt(from)).op(I64.add).localTee(Local.t64)
                 .localGet(Local.t64).i64const(BigInt(width - 1)).op(I64.add).op(I64.or)
-                .i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+                .i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap).op(I32.or);
             b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
+            if (e.guest !== null)
+            {
+                // A wide window's pages are found by the whole address (`pageIndex`).
+                b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+            }
         }
         else
         {
@@ -2272,12 +2378,7 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
         const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
         const reach = [0, Math.min(4096, width - 1), width - 1];
         reach.forEach((at, k)=>{
-            b.localGet(Local.addr);
-            if (at !== 0)
-            {
-                b.i32const(at).op(I32.add);
-            }
-            b.i32const(12).op(I32.shrU);
+            pageIndex(e, at);
             loadFlags(e, table, 'i32_8u');
             if (k > 0)
             {
@@ -2302,7 +2403,7 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
                 {
                     b.i32const(at).op(I32.add);
                 }
-                b.call(e.context.codeHit).drop();
+                b.widenGuest().call(e.context.codeHit).drop();
             }
             b.end();
             b.localGet(Local.pflags);
@@ -2321,7 +2422,8 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
         }
         b.localTee(Local.t64).i64const(BigInt(range.lo + Math.min(0, span))).op(I64.add)
             .localGet(Local.t64).i64const(BigInt(range.hi + Math.max(0, span))).op(I64.add)
-            .op(I64.or).i64const(32n).op(I64.shrU).op(I64.wrap).op(I32.or);
+            .op(I64.or).i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap)
+            .op(I32.or);
     }
     b.op(I32.eqz);
 }
@@ -2390,6 +2492,44 @@ export function stackAccess(e, size){
 export function windowAddress(e, pushAddress){
     pushAddress();
     e.b.localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
+    if (e.guest !== null)
+    {
+        e.b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+    }
+}
+
+/**
+ * Pushes, as an i32, whether the address in `t64` lies past the window: its
+ * bits from the window's (`windowBits`, 32 for 4 GiB) on.
+ *
+ * @param {E} e
+ */
+function beyond(e){
+    e.b.localGet(Local.t64).i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap);
+}
+
+/**
+ * Pushes the index of the page holding `addr` + `delta`, its byte in the page
+ * flags. A wide window's counts the pages below the address's high half
+ * (`Body.guest`): one index for the window, as its flags are one table.
+ * ponytail: an access across a 4 GiB line of a wide window finds its last byte's
+ * page in the block below the line; an i64 sum of the whole address when a program
+ * keeps data across one.
+ *
+ * @param {E} e @param {number} [delta]
+ */
+export function pageIndex(e, delta = 0){
+    const { b } = e;
+    b.localGet(Local.addr);
+    if (delta !== 0)
+    {
+        b.i32const(delta).op(I32.add);
+    }
+    b.i32const(12).op(I32.shrU);
+    if (e.guest !== null)
+    {
+        b.localGet(e.guest.high).i64const(12n).op(I64.shrU).op(I64.wrap).op(I32.or);
+    }
 }
 
 /**
@@ -2403,7 +2543,7 @@ function windowTest(e, size, counted){
     const { b } = e;
     b.localGet(Local.t64).localGet(Local.t64).i64const(BigInt(Math.max(size, 1) - 1))
         .op(I64.add).op(I64.or)
-        .i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+        .i64const(BigInt(windowBits(e.layout))).op(I64.shrU).i64const(0n).op(I64.ne);
     e.openGuard('window', EMPTY);
     faultHere(e, counted);
     e.close();

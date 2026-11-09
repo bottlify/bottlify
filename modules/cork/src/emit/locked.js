@@ -34,7 +34,7 @@ import { CF, ZF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind } from './flags.js';
 import { Local } from './region.js';
-import { checkAccess, noteStore } from './memory.js';
+import { checkAccess, noteStore, ramAt } from './memory.js';
 import { emitAddress, mask, prepare, readOp, writeOp, writeReg } from './integer.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
@@ -106,10 +106,10 @@ function swapLoop(e, size, old, next){
     const { b } = e;
     const offset = e.layout.ramBase;
     e.openLoop('locked');
-    b.localGet(Local.addr).atomic(`load_${width(size)}`, { offset }).localSet(old);
+    b.localGet(Local.addr).atomic(`load_${width(size)}`, ramAt(offset)).localSet(old);
     b.localGet(Local.addr).localGet(old);
     next();
-    b.atomic(`cmpxchg_${width(size)}`, { offset });
+    b.atomic(`cmpxchg_${width(size)}`, ramAt(offset));
     b.localGet(old).op(I32.ne);
     b.brIf(e.depthOf('locked'));
     e.close();
@@ -134,7 +134,7 @@ function unaligned(e, size, old, next){
     e.openIf('inQword', EMPTY);
     e.openLoop('qwordLocked');
     qword();
-    b.atomic('load_i64', { offset }).localSet(Local.t64);
+    b.atomic('load_i64', ramAt(offset)).localSet(Local.t64);
     b.localGet(Local.t64);
     shift();
     b.op(I64.shrU).op(I64.wrap).i32const(allBits(size)).op(I32.and).localSet(old);
@@ -151,15 +151,15 @@ function unaligned(e, size, old, next){
     }
     shift();
     b.op(I64.shl).op(I64.or);
-    b.atomic('cmpxchg_i64', { offset });
+    b.atomic('cmpxchg_i64', ramAt(offset));
     b.localGet(Local.t64).op(I64.ne);
     b.brIf(e.depthOf('qwordLocked'));
     e.close();
     b.op(ELSE);
-    b.localGet(Local.addr).load(plainLoad(size), { offset }).localSet(old);
+    b.localGet(Local.addr).load(plainLoad(size), ramAt(offset)).localSet(old);
     b.localGet(Local.addr);
     next();
-    b.store(plainStore(size), { offset });
+    b.store(plainStore(size), ramAt(offset));
     e.close();
 }
 
@@ -190,7 +190,7 @@ export function emitLocked(e, instruction, flagsLive){
     const native = (kind, operand, old)=>()=>{
         b.localGet(Local.addr);
         operand();
-        b.atomic(`${kind}_${width(size)}`, { offset }).localSet(old);
+        b.atomic(`${kind}_${width(size)}`, ramAt(offset)).localSet(old);
     };
     switch (op)
     {
@@ -370,7 +370,7 @@ export function emitLocked(e, instruction, flagsLive){
             };
             swap(e, size, Local.op2, next, ()=>{
                 b.localGet(Local.addr).localGet(Local.op1).localGet(Local.t2);
-                b.atomic(`cmpxchg_${width(size)}`, { offset }).localSet(Local.op2);
+                b.atomic(`cmpxchg_${width(size)}`, ramAt(offset)).localSet(Local.op2);
             });
             b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
             mask(e, size);
@@ -391,19 +391,19 @@ export function emitLocked(e, instruction, flagsLive){
             b.localGet(Local.addr).i32const(7).op(I32.and);
             e.openGuard('splitLock', EMPTY);
             // Across two qwords: a plain read and, if it matched, a plain write.
-            b.localGet(Local.addr).load('i64', { offset }).localSet(Local.t64);
+            b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
             b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
             e.openIf('plainEqual', EMPTY);
             b.localGet(Local.addr);
             b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
             b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
-            b.store('i64', { offset });
+            b.store('i64', ramAt(offset));
             e.close();
             b.op(ELSE);
             b.localGet(Local.addr).localGet(Local.t64b);
             b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
             b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
-            b.atomic('cmpxchg_i64', { offset }).localSet(Local.t64);
+            b.atomic('cmpxchg_i64', ramAt(offset)).localSet(Local.t64);
             e.close();
             if (flagsLive)
             {

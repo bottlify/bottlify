@@ -13,7 +13,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { STATE_BLOCK_SIZE_64, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import v8 from 'node:v8';
 import { Fault } from './ir.js';
+import { memory64 } from './wasm/features.js';
 import { blockState64, interpret64 } from './interp64.js';
 
 const TRAP_PORT = 0xb077;
@@ -121,3 +123,46 @@ test('a jump begins a run the host is asked about', ()=>{
     // The first run, then the loop's back edge taken twice before the host says stop.
     assert.deepEqual(steps, [[0, false], [15, true], [15, true]]);
 });
+
+for (const window of [2 ** 33, 2 ** 34])
+{
+    test(`a ${window / 2 ** 30} GiB window: code, stack and data past 4 GiB, RAM apart`, ()=>{
+        v8.setFlagsFromString('--experimental-wasm-memory64');
+        // Where a 64-bit image without relocations asks to be (0x140000000), the stack past it.
+        const code = 0x140001000;
+        const stack = 0x150000000;
+        const data = code + PROGRAM.length / 2 - 8;
+        const layout = ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
+        const ram = memory64(window);
+        new Uint8Array(ram.buffer).set(Buffer.from(PROGRAM, 'hex'), code);
+        const view = new DataView(memory.buffer);
+        view.setBigUint64(layout.regs + 4 * 8, BigInt(stack), true);
+        view.setBigUint64(layout.eip, BigInt(code), true);
+        view.setUint32(layout.eflags, 0x202, true);
+        view.setUint32(layout.mxcsr, 0x1f80, true);
+        // The window's last page is closed, as a host keeps it.
+        new Uint8Array(memory.buffer, layout.pageFlags)[window / 4096 - 1] = 1;
+        const state = blockState64({ memory, ram, layout, ports: { trapPort: TRAP_PORT,
+            read: ()=>0, write: ()=>{} } });
+        state.syncIn();
+        assert.equal(interpret64(state, 1000), 2 + 15 + 7);
+        state.syncOut();
+        assert.deepEqual(state.trapped, [7]);
+        const sum = 0x1122334455667788n + 5n + 4n + 3n + 2n + 1n;
+        assert.equal(view.getBigUint64(layout.regs + 9 * 8, true), sum, 'pushed and popped');
+        assert.equal(new DataView(ram.buffer).getBigUint64(data, true), sum, 'RIP-relative');
+        assert.equal(new DataView(ram.buffer).getBigUint64(stack - 8, true), sum, 'the stack');
+        for (const [at, why] of /** @type {[number, string][]} */ ([[window - 8, 'the closed last page'],
+            [window, 'past the window']]))
+        {
+            // mov rax, [rcx]
+            new Uint8Array(ram.buffer).set([0x48, 0x8b, 0x01], code);
+            view.setBigUint64(layout.regs + 8, BigInt(at), true);
+            view.setBigUint64(layout.eip, BigInt(code), true);
+            state.syncIn();
+            assert.throws(()=>interpret64(state, 10),
+                error=>error instanceof Fault && error.vector === 13, why);
+        }
+    });
+}
