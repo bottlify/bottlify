@@ -513,7 +513,7 @@ export function prepareModule(m, layout, features, memory = {},
     const {
         materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder, spanHit,
         windowHit,
-    } = importHelpers(m, width.bits === 64);
+    } = importHelpers(m, width.bits === 64, layout.window !== undefined);
     /** @type {ModuleContext} */
     const context = {
         m, width, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,

@@ -115,6 +115,8 @@ export function engineContractProblem(engineModule, url){
  *
  * @typedef {Object} EngineEnv
  * @property {WebAssembly.Memory} memory  The layer's memory.
+ * @property {WebAssembly.Memory} [ram]  Cork's own: a wide window's RAM, its own `memory64` memory
+ *     (`StateLayout.ramMemory`).
  * @property {StateLayout} layout
  * @property {StateLayout} [sharedLayout]  Cork's own: the process's shared layout
  *     (`sharedLayout`), translations are made for where it has several executors -- the same

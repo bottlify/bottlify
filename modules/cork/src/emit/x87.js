@@ -2761,7 +2761,8 @@ export function emitX87(e, instruction, flagsLive){
             {
                 b.localGet(c);
             }
-            b.i32const(0).i32const(0).call(/** @type {number} */ (e.context.x87Invalid)).drop();
+            b.i32const(0).widenGuest().i32const(0)
+                .call(/** @type {number} */ (e.context.x87Invalid)).drop();
         }
     };
     /**
@@ -3052,11 +3053,11 @@ export function emitX87(e, instruction, flagsLive){
             }
             if (memory === null)
             {
-                b.i32const(0).i32const(0);
+                b.i32const(0).widenGuest().i32const(0);
             }
             else
             {
-                b.localGet(Local.addr).i32const(memory.size);
+                b.localGet(Local.addr).widenGuest().i32const(memory.size);
             }
             b.call(/** @type {number} */ (e.context.x87Invalid));
             b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
@@ -3348,7 +3349,7 @@ export function emitX87(e, instruction, flagsLive){
             setStatus(Status.IE);
             e.close();
             b.localGet(x.temp2);
-            b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add);
+            b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add).widenGuest();
             b.call(/** @type {number} */ (e.context.f64ToBcd));
             popN(1);
             return finish();
@@ -4102,7 +4103,8 @@ export function emitX87(e, instruction, flagsLive){
                 for (let i = 0; i < 8; i++)
                 {
                     b.localGet(st(i));
-                    b.localGet(Local.addr).i32const(e.layout.ramBase + 28 + 10 * i).op(I32.add);
+                    b.localGet(Local.addr).i32const(e.layout.ramBase + 28 + 10 * i).op(I32.add)
+                        .widenGuest();
                     b.call(/** @type {number} */ (e.context.f64ToF80));
                 }
                 b.i32const(0).localSet(Local.x87Top);
@@ -4146,7 +4148,8 @@ export function emitX87(e, instruction, flagsLive){
                 {
                     b.i32const(k).localGet(Local.x87Top).op(I32.sub).i32const(7).op(I32.and)
                         .i32const(10).op(I32.mul);
-                    b.localGet(Local.addr).op(I32.add).i32const(e.layout.ramBase + 28).op(I32.add);
+                    b.localGet(Local.addr).op(I32.add).i32const(e.layout.ramBase + 28).op(I32.add)
+                        .widenGuest();
                     b.call(/** @type {number} */ (e.context.f80ToF64));
                     b.localSet(x.base + state.slot[k]);
                     // The MMX view too: a region with MMX writes its mm locals
@@ -4347,7 +4350,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
     prepare(e, operand);
     if (mode === 'unchecked' && operand.size === 10)
     {
-        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add)
+        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add).widenGuest()
             .call(/** @type {number} */ (e.context.f80ToF64));
         return;
     }
@@ -4385,7 +4388,7 @@ function loadFloatValue(e, operand, mode = 'checked'){
     // Not in the 80-bit format, which the SDM's FLD loads as it is.
     if (operand.size === 10)
     {
-        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add)
+        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add).widenGuest()
             .call(/** @type {number} */ (e.context.f80ToF64));
         return;
     }
@@ -4445,7 +4448,7 @@ function storeFloat(e, operand, pushValue){
     if (operand.size === 10)
     {
         pushValue();
-        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add);
+        b.localGet(Local.addr).i32const(e.layout.ramBase).op(I32.add).widenGuest();
         b.call(/** @type {number} */ (e.context.f64ToF80));
         return;
     }
@@ -4789,10 +4792,13 @@ function noteEvent(e, slot, first){
  */
 export function addInvalidHelper(m, layout){
     const type = m.type({
-        params: [ValType.f64, ValType.f64, ValType.i32, ValType.i32], results: [ValType.i32],
+        // A wide window's address is its i64 one, into the RAM's own memory.
+        params: [ValType.f64, ValType.f64, layout.window === undefined ? ValType.i32 : ValType.i64,
+            ValType.i32], results: [ValType.i32],
     });
     const b = new Body();
     const offset = layout.ramBase;
+    const memory = layout.ramMemory;
     const at = layout.nanFirst ?? -1;
     b.localGet(0).localGet(0).op(F64.eq).localGet(1).localGet(1).op(F64.eq).op(I32.and);
     b.if(EMPTY);
@@ -4824,17 +4830,17 @@ export function addInvalidHelper(m, layout){
     b.end();
     b.localGet(3).i32const(4).op(I32.eq);
     b.if(EMPTY);
-    b.localGet(2).load('i32', { offset }).i32const(0x7fc00000).op(I32.and)
+    b.localGet(2).load('i32', { offset, memory }).i32const(0x7fc00000).op(I32.and)
         .i32const(0x7f800000).op(I32.eq);
-    b.localGet(2).load('i32', { offset }).i32const(0x3fffff).op(I32.and)
+    b.localGet(2).load('i32', { offset, memory }).i32const(0x3fffff).op(I32.and)
         .i32const(0).op(I32.ne).op(I32.and);
     b.op(0x0f);
     b.end();
     b.localGet(3).i32const(8).op(I32.eq);
     b.if(EMPTY);
-    b.localGet(2).load('i64', { offset }).i64const(0x7ff8000000000000n).op(I64.and)
+    b.localGet(2).load('i64', { offset, memory }).i64const(0x7ff8000000000000n).op(I64.and)
         .i64const(0x7ff0000000000000n).op(I64.eq);
-    b.localGet(2).load('i64', { offset }).i64const(0x0007ffffffffffffn).op(I64.and)
+    b.localGet(2).load('i64', { offset, memory }).i64const(0x0007ffffffffffffn).op(I64.and)
         .i64const(0n).op(I64.ne).op(I32.and);
     b.op(0x0f);
     b.end();
@@ -4997,15 +5003,17 @@ export function addRoundHelper(m){
  * and go with the rounding of the conversion.
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @param {number} [memory]  a wide window's RAM (`ramMemory`), its addresses i64
  * @returns {{ f80ToF64: number, f64ToF80: number }}
  */
-export function addF80Helpers(m){
+export function addF80Helpers(m, memory){
+    const address = memory === undefined ? ValType.i32 : ValType.i64;
     const f80ToF64 = (()=>{
-        const type = m.type({ params: [ValType.i32], results: [ValType.f64] });
+        const type = m.type({ params: [address], results: [ValType.f64] });
         // locals: 0 address; 1 mantissa (i64); 2 signExponent (i32); 3 value (f64); 4 e (i32)
         const b = new Body();
-        b.localGet(0).load('i64', { offset: 0 }).localSet(1);
-        b.localGet(0).load('i32_16u', { offset: 8 }).localSet(2);
+        b.localGet(0).load('i64', { offset: 0, memory }).localSet(1);
+        b.localGet(0).load('i32_16u', { offset: 8, memory }).localSet(2);
         b.block(EMPTY);
         // infinity or NaN
         b.localGet(2).i32const(0x7fff).op(I32.and).i32const(0x7fff).op(I32.eq);
@@ -5052,7 +5060,7 @@ export function addF80Helpers(m){
             b.toBytes());
     })();
     const f64ToF80 = (()=>{
-        const type = m.type({ params: [ValType.f64, ValType.i32], results: [] });
+        const type = m.type({ params: [ValType.f64, address], results: [] });
         // locals: 0 value; 1 address; 2 bits (i64); 3 fraction (i64); 4 e (i32); 5 mantissa (i64);
         // 6 signExponent (i32); 7 lz (i32)
         const b = new Body();
@@ -5089,8 +5097,8 @@ export function addF80Helpers(m){
             .localSet(5);
         b.localGet(6).localGet(4).i32const(15360).op(I32.add).op(I32.or).localSet(6);
         b.end();
-        b.localGet(1).localGet(5).store('i64', { offset: 0 });
-        b.localGet(1).localGet(6).store('i32_16', { offset: 8 });
+        b.localGet(1).localGet(5).store('i64', { offset: 0, memory });
+        b.localGet(1).localGet(6).store('i32_16', { offset: 8, memory });
         return m.function(type, [ValType.i64, ValType.i64, ValType.i32, ValType.i64, ValType.i32,
             ValType.i32], b.toBytes());
     })();
@@ -5105,10 +5113,12 @@ export function addF80Helpers(m){
  * value is already rounded by the control word by the caller.
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @param {number} [memory]  a wide window's RAM (`ramMemory`), its addresses i64
  * @returns {number} the function index
  */
-export function addBcdHelper(m){
-    const type = m.type({ params: [ValType.f64, ValType.i32], results: [] });
+export function addBcdHelper(m, memory){
+    const type = m.type({ params: [ValType.f64, memory === undefined ? ValType.i32 : ValType.i64],
+        results: [] });
     // locals: 0 value, 1 address, 2 bits (i64), 3 sign (i32), 4 magnitude (f64),
     // 5 rest (i64), 6 packed (i64), 7 index (i32), 8 digit (i64), 9 high (i64)
     const b = new Body();
@@ -5121,10 +5131,10 @@ export function addBcdHelper(m){
     b.localGet(4).localGet(4).op(F64.ne);
     b.op(I32.or);
     b.if(EMPTY);
-    b.localGet(1).i64const(0n).store('i64', { offset: 0 });
-    b.localGet(1).i32const(0xc0).store('i32_8', { offset: 7 });
-    b.localGet(1).i32const(0xff).store('i32_8', { offset: 8 });
-    b.localGet(1).i32const(0xff).store('i32_8', { offset: 9 });
+    b.localGet(1).i64const(0n).store('i64', { offset: 0, memory });
+    b.localGet(1).i32const(0xc0).store('i32_8', { offset: 7, memory });
+    b.localGet(1).i32const(0xff).store('i32_8', { offset: 8, memory });
+    b.localGet(1).i32const(0xff).store('i32_8', { offset: 9, memory });
     b.return();
     b.end();
     b.localGet(4).op(0xb0).localSet(5); // i64.trunc_f64_s
@@ -5148,9 +5158,9 @@ export function addBcdHelper(m){
     b.br(0);
     b.end();
     b.end();
-    b.localGet(1).localGet(6).store('i64', { offset: 0 });
-    b.localGet(1).localGet(9).op(I64.wrap).store('i32_8', { offset: 8 });
-    b.localGet(1).localGet(3).i32const(7).op(I32.shl).store('i32_8', { offset: 9 });
+    b.localGet(1).localGet(6).store('i64', { offset: 0, memory });
+    b.localGet(1).localGet(9).op(I64.wrap).store('i32_8', { offset: 8, memory });
+    b.localGet(1).localGet(3).i32const(7).op(I32.shl).store('i32_8', { offset: 9, memory });
     return m.function(type,
         [ValType.i64, ValType.i32, ValType.f64, ValType.i64, ValType.i64, ValType.i32,
             ValType.i64, ValType.i64], b.toBytes());

@@ -46,10 +46,10 @@ export const HELPER_NAMES = Object.freeze([
  */
 export function defineHelpers(m, layout, shared = false){
     const materialise = addMaterialiseHelper(m, layout.bits === 64);
-    const { f80ToF64, f64ToF80 } = addF80Helpers(m);
+    const { f80ToF64, f64ToF80 } = addF80Helpers(m, layout.ramMemory);
     const round = addRoundHelper(m);
     const codeHit = addCodeHitHelper(m, layout, shared);
-    const f64ToBcd = addBcdHelper(m);
+    const f64ToBcd = addBcdHelper(m, layout.ramMemory);
     const x87Invalid = addInvalidHelper(m, layout);
     const remainder = addRemainderHelper(m);
     const spanHit = addSpanHitHelper(m, codeHit, layout.window !== undefined);
@@ -70,6 +70,12 @@ export function defineHelpers(m, layout, shared = false){
 export function buildHelpersModule(layout, memory = {}){
     const m = new ModuleBuilder();
     m.importMemory('env', 'memory', { min: 1, max: memory.maxPages, shared: memory.shared });
+    if (layout.window !== undefined)
+    {
+        // A wide window's RAM, memory 1 (`ramMemory`), which the x87 helpers read and write.
+        m.importMemory('env', 'ram', { min: layout.window / 65536, max: layout.window / 65536,
+            shared: memory.shared, index64: true });
+    }
     const helpers = defineHelpers(m, layout, memory.shared === true);
     for (const name of HELPER_NAMES)
     {
@@ -84,34 +90,36 @@ export function buildHelpersModule(layout, memory = {}){
  *
  * @param {ModuleBuilder} m
  * @param {boolean} [wide]  long mode's: the flag record's result and operands are i64
+ * @param {boolean} [window]  a wide window's (`wideLayout`): a guest address is i64
  * @returns {{ materialise: number, f80ToF64: number, f64ToF80: number,
  *     round: number, codeHit: number, f64ToBcd: number, x87Invalid: number,
  *     remainder: number, spanHit: number, windowHit: number }}
  */
-export function importHelpers(m, wide = false){
+export function importHelpers(m, wide = false, window = false){
     const i32 = ValType.i32;
     const f64 = ValType.f64;
     const value = wide ? ValType.i64 : i32;
+    const guest = window ? ValType.i64 : i32;
     const materialise = m.importFunction('env', 'materialise',
         m.type({ params: [i32, value, value, value, i32, i32], results: [i32] }));
     const f80ToF64 = m.importFunction('env', 'f80ToF64',
-        m.type({ params: [i32], results: [f64] }));
+        m.type({ params: [guest], results: [f64] }));
     const f64ToF80 = m.importFunction('env', 'f64ToF80',
-        m.type({ params: [f64, i32], results: [] }));
+        m.type({ params: [f64, guest], results: [] }));
     const round = m.importFunction('env', 'round',
         m.type({ params: [f64, i32], results: [f64] }));
     const codeHit = m.importFunction('env', 'codeHit',
-        m.type({ params: [i32], results: [i32] }));
+        m.type({ params: [guest], results: [i32] }));
     const f64ToBcd = m.importFunction('env', 'f64ToBcd',
-        m.type({ params: [f64, i32], results: [] }));
+        m.type({ params: [f64, guest], results: [] }));
     const x87Invalid = m.importFunction('env', 'x87Invalid',
-        m.type({ params: [f64, f64, i32, i32], results: [i32] }));
+        m.type({ params: [f64, f64, guest, i32], results: [i32] }));
     const remainder = m.importFunction('env', 'remainder',
         m.type({ params: [f64, f64, i32], results: [f64, i32] }));
     const spanHit = m.importFunction('env', 'spanHit',
-        m.type({ params: [i32, i32], results: [i32] }));
+        m.type({ params: [guest, guest], results: [i32] }));
     const windowHit = m.importFunction('env', 'windowHit',
-        m.type({ params: [i32, i32, i32, i32], results: [i32] }));
+        m.type({ params: [guest, i32, i32, i32], results: [i32] }));
     return {
         materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder,
         spanHit, windowHit,
