@@ -614,9 +614,12 @@ const SAVED_RBP = /** @type {import('../decode/decoder.js').Operand} */ ({
  *     the tree of blocks taking windows, and the values it follows
  * @typedef {{ checks: Group[], access: Access | null, size: number, store: boolean,
  *     used: boolean }} Planned
- * @typedef {{ blocks: Map<number, Planned>[], entry: Group[][], inherit: number[] }} RegionPlan
+ * @typedef {{ blocks: Map<number, Planned>[], entry: Group[][], inherit: number[],
+ *     skips: (Set<number> | undefined)[] }} RegionPlan
  *     per block: its instructions' plans, the windows tested when it is entered
- *     other than from the block it takes them from, and that block (-1 for none)
+ *     other than from the block it takes them from, that block (-1 for none), and
+ *     the blocks further up its chain whose jumps into it pass its test too
+ *     (`passersBy`)
  * @typedef {{ base: number, index: number, scale: number, disp: number, size: number,
  *     store: boolean }} Place
  * @typedef {Map<number, { group: Growing, access: Access }[]>} Joined
@@ -804,7 +807,9 @@ export function planRegion(blocks, options = {}){
         returns = new Map(), reach = true, masked = false, long = false } = options;
     const word = long ? 8 : 4;
     const regs = long ? 16 : 8;
-    const inherit = reach ? inheritance(blocks, entry, backward, heads, returns)
+    /** @type {{ into?: number[][] }} */
+    const ways = {};
+    const inherit = reach ? inheritance(blocks, entry, backward, heads, returns, ways)
         : blocks.map(()=>-1);
     // Most blocks take nothing and give nothing: what each keeps is made
     // only when it has something to keep.
@@ -855,11 +860,16 @@ export function planRegion(blocks, options = {}){
             }
         }
     };
+    /** By block, its depth in the tree of blocks taking windows. */
+    const depths = new Array(blocks.length).fill(0);
+    /** @type {Values[]} by block, what the registers hold at its end */
+    const ends = [];
     /**
      * @param {number} s @param {Values} values @param {Map<number, Growing>} open
      * @param {number} depth
      */
     const walk = (s, values, open, depth)=>{
+        depths[s] = depth;
         if (depth > 0)
         {
             split(values, depth);
@@ -925,6 +935,7 @@ export function planRegion(blocks, options = {}){
             }
             effect(ins, values, false, word);
         }
+        ends[s] = copyValues(values);
         // The last child goes on with the values and groups themselves:
         // nothing after it needs them.
         const kids = children[s] ?? [];
@@ -999,7 +1010,94 @@ export function planRegion(blocks, options = {}){
             slot.store = pairs.some(({ access })=>access.store);
         }
     }));
-    return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit };
+    const skips = ways.into === undefined ? []
+        : passersBy({ blocks, inherit, into: ways.into, entries, depths, ends, joined, kept,
+            backward });
+    return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit, skips };
+}
+
+/**
+ * The instructions that may reach the host and come back into the function:
+ * a call, a port write, an interrupt -- after which the pages' flags may not
+ * be what a test found.
+ */
+export const HOST_OPS = new Set(['call', 'out', 'outs', 'in', 'ins', 'int', 'int1', 'int3',
+    'into', 'syscall', 'sysenter', 'hlt']);
+
+/**
+ * By block, the blocks above the one it takes windows from whose jumps into it
+ * go past its entry test as that one's way in does. A block a branch reaches
+ * both straight from a block and through the blocks after it -- `lea esi, [esp
+ * + 0x10]`, `jl`, `lea esi, [esp + 0x3c]`, then `mov edi, [esi]`, as `std::min`
+ * on references compiles -- took its windows from the last of them and tested
+ * them again on the branch, at every step of 3DMark06's path search. The branch
+ * goes past the test where its block is on the chain the windows came down
+ * (each block taking from the one before), and every access the test covers
+ * lies, by what the registers hold at the branch, inside a group already tested
+ * at that block or above it: `[esi]` with esi `esp + 0x10` inside the stack's
+ * group that `mov [esp + 0x10], esi` began. The blocks between reach no host
+ * (whose call may change the pages' flags) and hold no x87 instruction (the
+ * stack's shape is the chain's at the block's start).
+ *
+ * @param {{ blocks: import('../region.js').Block[], inherit: number[], into: number[][],
+ *     entries: Group[][], depths: number[], ends: Values[], joined: (Joined | undefined)[],
+ *     kept: Set<Growing>, backward: boolean }} plan
+ * @returns {(Set<number> | undefined)[]}
+ */
+function passersBy(plan){
+    const { blocks, inherit, into, entries, depths, ends, joined, kept, backward } = plan;
+    /** @type {(Set<number> | undefined)[]} */
+    const skips = [];
+    /** @type {(boolean | undefined)[]} */
+    const plain = [];
+    /** Whether a block reaches no host and holds no x87 instruction. @param {number} c */
+    const quiet = c=>(plain[c] ??= !blocks[c].instructions.some(ins=>HOST_OPS.has(ins.op)
+        || isX87Opcode(ins.opcode)));
+    /**
+     * Whether every access a window covers lies, from what the registers hold at
+     * block p's end, inside a group tested at p or above.
+     * @param {Group} window @param {number} p
+     */
+    const covered = (window, p)=>{
+        const at = ends[p];
+        if (at === undefined || window.index >= 0 || window.base < 0)
+        {
+            return false;
+        }
+        const sym = at.sym[window.base];
+        const moved = at.delta[window.base];
+        return window.list.every(({ block, i, off, size })=>{
+            const pairs = joined[block]?.get(i);
+            return pairs !== undefined && pairs.some(({ group })=>kept.has(group)
+                && group.index < 0 && group.baseSym === sym && group.depth <= depths[p]
+                && moved + off >= group.lo && moved + off + size <= group.hi);
+        });
+    };
+    entries.forEach((windows, t)=>{
+        if (windows.length === 0 || inherit[t] < 0)
+        {
+            return;
+        }
+        for (const way of into[t])
+        {
+            const p = way >> 1;
+            if ((way & 1) === 0 || p === inherit[t] || p === t || loopsOnto(blocks[p])
+                || (p > t && !backward))
+            {
+                continue;
+            }
+            let c = inherit[t];
+            while (c >= 0 && c !== p && quiet(c))
+            {
+                c = inherit[c];
+            }
+            if (c === p && windows.every(window=>covered(window, p)))
+            {
+                (skips[t] ??= new Set()).add(p);
+            }
+        }
+    });
+    return skips;
 }
 
 /**
@@ -1067,9 +1165,11 @@ export function planBlock(instructions){
  * @param {boolean} backward @param {Set<number>} heads
  * @param {Map<number, number[]>} returns  by ret block's start: the return
  *     addresses it jumps to inside the region
+ * @param {{ into?: number[][] }} [out]  given, each block's ways in, as `2 * p + 1` for
+ *     one from block p that carries windows and `2 * p` for one that does not
  * @returns {number[]}
  */
-function inheritance(blocks, entry, backward, heads, returns){
+function inheritance(blocks, entry, backward, heads, returns, out = undefined){
     const count = blocks.length;
     /** @type {number[]} */
     const inherit = new Array(count).fill(-1);
@@ -1089,6 +1189,10 @@ function inheritance(blocks, entry, backward, heads, returns){
     // for one that does not.
     /** @type {number[][]} */
     const into = blocks.map(()=>[]);
+    if (out !== undefined)
+    {
+        out.into = into;
+    }
     /** @param {number} p @param {number | undefined} target @param {boolean} carries */
     const edge = (p, target, carries)=>{
         const s = target === undefined ? undefined : index.get(target);
