@@ -4965,6 +4965,20 @@ export function createRenderer(services){
             {
                 return;
             }
+            // A draw through a geometry shader whose passes' buffers would not
+            // hold it is drawn as pieces that each fit, one after the other.
+            if (pipeline.stages.gs?.shader && !pipeline.stages.gs.shader.passThrough)
+            {
+                const parts = geometryOf().pieces(pipeline, draw);
+                if (parts.length > 1)
+                {
+                    for (const part of parts)
+                    {
+                        this.draw(pipeline, part);
+                    }
+                    return;
+                }
+            }
             if (dumpLines)
             {
                 const viewport = pipeline.viewports?.[0];

@@ -2789,6 +2789,45 @@ test('draws through the tessellator write their uniforms in place, a backing a f
     assert.equal(device.diagnostics().tessellation.draws, 200);
 });
 
+test('a draw through a geometry shader past the room between the passes is drawn in runs that'
+    + ' fit, each numbering its primitives on from the last', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    /** @type {{ shader?: any }} */
+    const out = {};
+    assert.equal(device.CreateGeometryShader(triangleGeometryShader(), out), S_OK);
+    device.GSSetShader(out.shader);
+    const triangles = 3 << 20;
+    device.Draw(triangles * 3, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    assert.deepEqual(h.divergences, [], 'nothing lost');
+    const runs = h.gpu.of('dispatchWorkgroups').filter((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.startsWith('d3d11:gs#'));
+    assert.ok(runs.length > 1, `${runs.length} runs`);
+    assert.equal(device.diagnostics().geometry.cut, 1);
+    assert.equal(device.diagnostics().geometry.invocations, triangles, 'every primitive, once');
+    assert.equal(h.gpu.count('drawIndexedIndirect'), runs.length, 'a draw a run, in order');
+    // Each run's parameters (six 256-byte slots a draw): its first vertex
+    // (the vertex slot's fifth word) and its first primitive id (the
+    // geometry slot's eighth).
+    const params = h.gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        /^d3d11:geometry:params#/.test(call.descriptor.label)).at(-1).createBuffer;
+    const words = new Uint32Array(params.bytes.buffer, params.bytes.byteOffset,
+        params.bytes.byteLength >> 2);
+    const bases = runs.map((_, k)=>words[(k * 6 * 256 + 2 * 256) / 4 + 7]);
+    const firsts = runs.map((_, k)=>words[(k * 6 * 256) / 4 + 4]);
+    const step = bases[1];
+    assert.ok(step > 0);
+    assert.deepEqual(bases, runs.map((_, k)=>k * step), 'primitive ids go on run after run');
+    assert.deepEqual(firsts, bases.map(base=>base * 3), 'each run starts at its vertices');
+    assert.equal(triangles - bases.at(-1) <= step, true, 'the last run ends the draw');
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).find((/** @type {string} */ text)=>text.includes('geometryMain'));
+    assert.match(code, /primitiveId = gsPrim \+ gsParams\.primitiveBase;/);
+});
+
 test('draws through a geometry shader write their uniforms in place, a backing a'
     + ' frame', async()=>{
     const h = harness();

@@ -4555,7 +4555,7 @@ export function linkGeometry(gs, stage, options = {}){
     const code = [
         ...declared.text,
         'struct GsParams { invocations: u32, prims: u32, topology: u32, points: u32,',
-        '    indexBytes: u32, indexOffset: u32, first: u32, pad: u32, }',
+        '    indexBytes: u32, indexOffset: u32, first: u32, primitiveBase: u32, }',
         `@group(1) @binding(${GEOMETRY_BINDING.inputs}) var<storage, read> gsIn: array<${REG}>;`,
         `@group(1) @binding(${GEOMETRY_BINDING.indices}) var<storage, read> gsIndices: `
             + 'array<u32>;',
@@ -4622,7 +4622,8 @@ export function linkGeometry(gs, stage, options = {}){
         `    let gsFlat = id.x / ${stage.instances}u;`,
         '    let gsDrawn = gsFlat / max(1u, gsParams.prims);',
         '    let gsPrim = gsFlat % max(1u, gsParams.prims);',
-        '    primitiveId = gsPrim;',
+        // A draw cut in runs (`geometry.js` `pieces`) numbers its primitives on.
+        '    primitiveId = gsPrim + gsParams.primitiveBase;',
         `    var gsAt: array<u32, ${vertices}>;`,
         '    var gsWhole = true;',
         `    let gsStripped = ${STRIP_TOPOLOGIES.map(t=>`gsParams.topology == ${t}u`)

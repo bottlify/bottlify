@@ -211,7 +211,7 @@ export function createGeometry(services){
     const counterOf = new WeakMap();
     let nextCounter = COUNTER.filled;
     let drawn = 0;
-    const counted = { draws: 0, invocations: 0, streamedOut: 0, autoDraws: 0 };
+    const counted = { draws: 0, invocations: 0, streamedOut: 0, autoDraws: 0, cut: 0 };
 
     /** @param {string} name @param {number} bytes @param {number} [extra] */
     const scratchOf = (name, bytes, extra = 0)=>{
@@ -382,6 +382,96 @@ export function createGeometry(services){
         backing.gpu.markRead();
         const size = backing.gpu.gpu.size ?? Math.ceil(backing.gpu.size / 4) * 4;
         return { buffer: backing.gpu.gpu, offset: 0, size: size & ~3 };
+    };
+
+    /**
+     * The bytes the largest buffer between the passes takes for a draw of
+     * `instances` instances of `points` positions making `prims` primitives
+     * each through a stage.
+     *
+     * @param {import('./wgsl.js').GeometryStage} stage
+     * @param {number} instances @param {number} points @param {number} prims
+     */
+    const largestOf = (stage, instances, points, prims)=>{
+        const invocations = instances * prims * stage.instances;
+        const streams = stage.streams.length;
+        const vpp = stage.outputVertices;
+        return Math.max(invocations * streams * stage.maxOut * stage.outputRegisters * 16,
+            instances * points * stage.inputRegisters * 16,
+            streams * invocations * Math.max(1, stage.maxOut - vpp + 1) * vpp * 4);
+    };
+
+    /**
+     * A draw through a geometry shader as draws whose buffers between the
+     * passes each fit: its instances apart, and a list's primitives in runs,
+     * each run's first primitive its `primitiveBase` so the shader's
+     * primitive ids go on where the run before left them. A strip, an
+     * indirect draw, `DrawAuto` and a draw after the tessellator stay whole
+     * (and are said not drawn where they do not fit). Order is kept: the
+     * pieces are drawn one after the other as the one draw was.
+     *
+     * @param {any} pipeline @param {any} draw
+     * @returns {any[]} the draw alone, where it fits or cannot be cut
+     */
+    const pieces = (pipeline, draw)=>{
+        const shader = pipeline.stages.gs?.shader;
+        const topology = pipeline.topology;
+        const vertices = TOPOLOGY_VERTICES[topology] ?? 0;
+        if (!shader || draw.indirect || draw.auto || vertices === 0
+            || pipeline.stages.hs?.shader || pipeline.stages.ds?.shader)
+        {
+            return [draw];
+        }
+        const { stage } = stageOf(shader, Math.min(3, vertices));
+        if (stage.inputVertices !== vertices)
+        {
+            return [draw];
+        }
+        const indexed = draw.indexCount !== undefined;
+        const points = indexed ? draw.indexCount ?? 0 : draw.vertexCount ?? 0;
+        const instances = draw.instanceCount ?? 1;
+        const strip = STRIPS.includes(topology);
+        const prims = strip ? Math.max(0, points - vertices + 1) : Math.floor(points / vertices);
+        if (prims === 0 || largestOf(stage, instances, points, prims) <= MOST_BYTES)
+        {
+            return [draw];
+        }
+        const first = draw.startInstance ?? 0;
+        if (largestOf(stage, 1, points, prims) <= MOST_BYTES)
+        {
+            const each = Math.max(1, Math.floor(MOST_BYTES
+                / largestOf(stage, 1, points, prims)));
+            const made = [];
+            for (let at = 0; at < instances; at += each)
+            {
+                made.push({ ...draw, startInstance: first + at,
+                    instanceCount: Math.min(each, instances - at) });
+            }
+            counted.cut++;
+            return made;
+        }
+        if (strip)
+        {
+            return [draw];
+        }
+        const run = Math.max(1, Math.floor(MOST_BYTES / largestOf(stage, 1, vertices, 1)));
+        const made = [];
+        for (let instance = 0; instance < instances; instance++)
+        {
+            for (let at = 0; at < prims; at += run)
+            {
+                const count = Math.min(run, prims - at) * vertices;
+                made.push(indexed
+                    ? { ...draw, startIndex: (draw.startIndex ?? 0) + at * vertices,
+                        indexCount: count, startInstance: first + instance, instanceCount: 1,
+                        primitiveBase: at }
+                    : { ...draw, startVertex: (draw.startVertex ?? 0) + at * vertices,
+                        vertexCount: count, startInstance: first + instance, instanceCount: 1,
+                        primitiveBase: at });
+            }
+        }
+        counted.cut++;
+        return made;
     };
 
     /** The most primitives an instance of an indirect draw is sized for, its count unbounded. */
@@ -566,7 +656,8 @@ export function createGeometry(services){
             vertexParams[8 + 4 * k + 1] = layout.buffers[k].arrayStride ?? 0;
         });
         const geometryParams = new Uint32Array([invocations, prims, topology, points,
-            indexBytes, pipeline.indexOffset ?? 0, indexed ? draw.startIndex ?? 0 : 0, 0]);
+            indexBytes, pipeline.indexOffset ?? 0, indexed ? draw.startIndex ?? 0 : 0,
+            draw.primitiveBase ?? 0]);
 
         // Stream output, where the shader declares one.
         const declared = shader.streamOutput ?? null;
@@ -906,6 +997,7 @@ export function createGeometry(services){
 
     return {
         prepare,
+        pieces,
         bind,
         autoArgs,
         statistics,
