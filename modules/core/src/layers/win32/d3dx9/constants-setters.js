@@ -29,10 +29,24 @@
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
 
-/** The table's block: whether the shader is a pixel shader, then the scratch. */
+/**
+ * The table's block: whether the shader is a pixel shader, the scratch, and
+ * the list SetDefaults goes through and its length.
+ */
 export const BLOCK_PIXEL = 0;
 export const BLOCK_SCRATCH = 4;
-export const BLOCK_BYTES = 4 + 64;
+export const BLOCK_DEFAULTS = 68;
+export const BLOCK_DEFAULT_COUNT = 72;
+export const BLOCK_BYTES = 76;
+
+/**
+ * An entry of SetDefaults' list: the device's setter (its vtable slot, with
+ * `DEFAULT_TWIN` where it sets the twin of the entry before), the first
+ * register, the registers' values as the setter takes them and how many;
+ * no values for a constant whose set the host answers without a call.
+ */
+export const DEFAULT_BYTES = 16;
+export const DEFAULT_TWIN = 0x10000;
 
 /** A handle's record. */
 export const HANDLE_TAG = 0;
@@ -250,6 +264,45 @@ export function SetFloat({ u32, setU32, callStd, host }, self, device, h, f){
     setU32(out, f);
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
     return callStd(u32(u32(device) + slot * 4), device, u32(h + INDEX), out, 1) >>> 0;
+}
+
+/**
+ * HRESULT SetDefaults(LPDIRECT3DDEVICE9): each float constant with a default,
+ * and its twins, through the device's setters in the table's order; the
+ * answer the last one's, a twin skipped once the set before it failed.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} self @param {u32} device
+ * @returns {u32}
+ */
+export function SetDefaults({ u32, callStd, host }, self, device){
+    const block = u32(self + 4);
+    if (block === 0 || device === 0)
+    {
+        return host();
+    }
+    const list = u32(block + BLOCK_DEFAULTS);
+    const count = u32(block + BLOCK_DEFAULT_COUNT);
+    let answer = 0;
+    for (let i = 0; i < (count | 0); i++)
+    {
+        const entry = (list + i * DEFAULT_BYTES) >>> 0;
+        const slot = u32(entry);
+        if ((slot & DEFAULT_TWIN) === 0 || answer === 0)
+        {
+            const data = u32(entry + 8);
+            if (data === 0)
+            {
+                answer = 0;
+            }
+            else
+            {
+                answer = callStd(u32(u32(device) + (slot & 0xffff) * 4), device, u32(entry + 4),
+                    data, u32(entry + 12)) | 0;
+            }
+        }
+    }
+    return answer >>> 0;
 }
 
 /**

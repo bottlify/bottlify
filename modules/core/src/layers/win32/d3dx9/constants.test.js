@@ -276,7 +276,7 @@ test('the gate: the table\'s methods in the guest answer and call the device as 
     // array, a scalar, a vector array, a sampler, and a loop count with its twin.
         const constants = [['WorldViewProj', 2, 0, 4, 0, 0], ['Color', 2, 4, 1, 1, 0],
             ['Lights', 2, 5, 2, 2, 1], ['Diffuse', 3, 0, 1, 3, 0], ['Bones', 2, 7, 9, 4, 0],
-            ['Scale', 2, 16, 1, 5, 0], ['Short', 2, 17, 3, 0, 0], ['limit', 2, 20, 1, 6, 0],
+            ['Scale', 2, 16, 1, 5, 0], ['Short', 2, 17, 3, 0, 0], ['limit', 2, 20, 1, 6, 1],
             ['limit', 1, 0, 1, 6, 0]];
         const types = [[3, 3, 4, 4, 1], [1, 3, 1, 4, 1], [1, 3, 1, 4, 2], [4, 12, 1, 1, 1],
             [2, 3, 3, 4, 3], [0, 3, 1, 1, 1], [0, 2, 1, 1, 1]];
@@ -289,7 +289,7 @@ test('the gate: the table\'s methods in the guest answer and call the device as 
         };
         const plan = Array.from({ length: 400 }, ()=>({
             method: ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetFloat', 'GetConstantDesc',
-                'GetConstantElement'][Math.floor(random() * 6)],
+                'GetConstantElement', 'SetDefaults'][Math.floor(random() * 7)],
             name: names[Math.floor(random() * names.length)],
             how: Math.floor(random() * 6),
             index: Math.floor(random() * 4),
@@ -317,10 +317,11 @@ test('the gate: the table\'s methods in the guest answer and call the device as 
                         [method('GetConstantByName').invoke(table, [0, named]), step.index])
                         : step.how === 3 ? 0 : named;
                 const bits = new Uint32Array(Float32Array.of(step.values[0]).buffer)[0];
-                const args = step.method === 'GetConstantDesc' ? [handle, 0x2800, 0x2840]
-                    : step.method === 'GetConstantElement' ? [handle, step.index]
-                        : step.method === 'SetFloat' ? [m.DEVICE, handle, bits]
-                            : [m.DEVICE, handle, 0x2000];
+                const args = step.method === 'SetDefaults' ? [step.how === 3 ? 0 : m.DEVICE]
+                    : step.method === 'GetConstantDesc' ? [handle, 0x2800, 0x2840]
+                        : step.method === 'GetConstantElement' ? [handle, step.index]
+                            : step.method === 'SetFloat' ? [m.DEVICE, handle, bits]
+                                : [m.DEVICE, handle, 0x2000];
                 m.memory.fill(0, 0x2800, 0x2850);
                 const host = ()=>{
                     handed++;

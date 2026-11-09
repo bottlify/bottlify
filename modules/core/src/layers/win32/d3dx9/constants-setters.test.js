@@ -30,6 +30,7 @@ const LISTS = DATA + 0x2000;
 const INPUT = DATA + 0x3000;
 const NAME = DATA + 0x3800;
 const OUT = DATA + 0x3900;
+const DEFAULTS = DATA + 0x3a00;
 
 /**
  * The device's two setters: an answer made of the register and the count it
@@ -45,13 +46,23 @@ const HANDED = { host: ()=>0x8876086c,
 
 /** @param {() => number} next @returns {Uint8Array} */
 function layout(next){
-    const bytes = new Uint8Array(0x3a00);
+    const bytes = new Uint8Array(0x3b00);
     const view = new DataView(bytes.buffer);
     const put = (/** @type {number} */ at, /** @type {number} */ value)=>
         view.setUint32(at - DATA, value >>> 0, true);
     put(SELF + 4, next() % 10 === 0 ? 0 : BLOCK);
     put(BLOCK, next() % 2);
     put(DEVICE, VTABLE);
+    // SetDefaults' list: the two setters, twins among them, entries with no values.
+    const entries = next() % 8;
+    put(BLOCK + 68, DEFAULTS);
+    put(BLOCK + 72, entries);
+    for (let i = 0; i < entries; i++)
+    {
+        const data = next() % 5 === 0 ? 0 : INPUT;
+        [(next() % 2 ? 94 : 109) | (i > 0 && next() % 2 ? 0x10000 : 0), next() % 3, data,
+            next() % 3].forEach((value, k)=>put(DEFAULTS + i * 16 + k * 4, value));
+    }
     for (let slot = 0; slot < 120; slot++)
     {
         put(VTABLE + slot * 4, slot === 94 ? CALLBACK : slot === 109 ? CALLBACK + 16 : 0);
@@ -106,5 +117,6 @@ test('the table\'s methods in the guest answer, write and call the device as the
             same('GetConstantDesc', { stack: [SELF, h, next() % 5 === 0 ? 0 : OUT,
                 next() % 3 === 0 ? 0 : OUT + 0x40], memory }, HANDED);
             same('GetConstantElement', { stack: [SELF, h, next() % 8], memory }, HANDED);
+            same('SetDefaults', { stack: [SELF, device], memory }, HANDED);
         }
     });

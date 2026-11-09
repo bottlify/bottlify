@@ -27,7 +27,8 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { BLOCK_BYTES, BLOCK_PIXEL, HANDLE_BYTES, HANDLE_DESC, HANDLE_ELEMENTS, HANDLE_TAG,
+import { BLOCK_BYTES, BLOCK_DEFAULTS, BLOCK_PIXEL, DEFAULT_BYTES,
+    DEFAULT_TWIN, HANDLE_BYTES, HANDLE_DESC, HANDLE_ELEMENTS, HANDLE_TAG,
     HANDLE_TWIN } from './constants-setters.js';
 import { COMPILED } from './constants-setters.x86.js';
 
@@ -511,11 +512,32 @@ export function createConstantTableObjects(host){
         {
             return D3D_OK;
         }
-        const { registers, count } = registerValues(constant, values);
+        const count = registerBytes(constant, values);
         if (count === 0)
         {
             return D3D_OK;
         }
+        const data = host.heap.allocate(count * 16);
+        if (data === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(data, new Uint8Array(scratch.buffer, 0, count * 16));
+        const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
+        return { call: { entry: u32(u32(device) + slot * 4),
+            args: [device >>> 0, constant.index, data, count] }, data };
+    };
+
+    /**
+     * A constant's registers as its setter takes them, into the scratch:
+     * floats for the float registers, integers four to a register for the
+     * integer ones, one BOOL a register for the boolean ones.
+     *
+     * @param {Constant} constant @param {number[]} values
+     * @returns {number}  How many registers.
+     */
+    const registerBytes = (constant, values)=>{
+        const { registers, count } = registerValues(constant, values);
         const bytes = scratchOf(count * 16);
         const units = constant.set === SET.BOOL ? count : count * 4;
         for (let i = 0; i < units; i++)
@@ -531,15 +553,57 @@ export function createConstantTableObjects(host){
                     : Math.trunc(value), true);
             }
         }
-        const data = host.heap.allocate(count * 16);
-        if (data === 0)
+        return count;
+    };
+
+    /** The constants SetDefaults sets. @param {TableState} table */
+    const defaultsOf = table=>table.constants.filter(one=>one.defaultAt !== 0
+        && one.set === SET.FLOAT4);
+    /** A default's values. @param {Constant} constant */
+    const defaultValues = constant=>floats(constant.defaultAt, constant.count * 4)
+        .filter((_, i)=>i % 4 < Math.max(constant.columns, 1));
+
+    /**
+     * SetDefaults' list for the guest (`DEFAULT_*`), made once: a program
+     * sets a table's defaults before every draw, and they are the table's.
+     *
+     * @param {TableState} table @returns {boolean}  False when the heap had no room.
+     */
+    const writeDefaults = table=>{
+        const heap = /** @type {NonNullable<ConstantTableHost['heap']>} */ (host.heap);
+        /** @type {number[]} */
+        const entries = [];
+        let room = true;
+        for (const constant of defaultsOf(table))
         {
-            return E_OUTOFMEMORY;
+            [constant, ...twinsFor(table, constant)].forEach((one, i)=>{
+                const plain = one.set === SET.SAMPLER || one.cls === CLASS.STRUCT;
+                const count = plain ? 0 : registerBytes(one, defaultValues(constant));
+                let data = 0;
+                if (count !== 0)
+                {
+                    data = heap.allocate(count * 16);
+                    room &&= data !== 0;
+                    if (data !== 0)
+                    {
+                        table.owned.push(data);
+                        host.writeMemory(data, new Uint8Array(scratch.buffer, 0, count * 16));
+                    }
+                }
+                entries.push(plain ? 0 : SETTERS[one.set][table.pixel ? 1 : 0]
+                    | (i > 0 ? DEFAULT_TWIN : 0), one.index, data, count);
+            });
         }
-        host.writeMemory(data, new Uint8Array(bytes.buffer, 0, count * 16));
-        const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
-        return { call: { entry: u32(u32(device) + slot * 4),
-            args: [device >>> 0, constant.index, data, count] }, data };
+        const list = entries.length === 0 ? 0 : heap.allocate(entries.length * 4);
+        if (list !== 0)
+        {
+            table.owned.push(list);
+            host.writeMemory(list, Uint8Array.from(new Uint8Array(Uint32Array.from(entries
+                .map(value=>value >>> 0)).buffer)));
+        }
+        host.writeMemory(table.block + BLOCK_DEFAULTS, words([list,
+            list === 0 ? 0 : entries.length * 4 / DEFAULT_BYTES]));
+        return room && (entries.length === 0 || list !== 0);
     };
 
     /**
@@ -798,11 +862,8 @@ export function createConstantTableObjects(host){
             /** HRESULT SetDefaults(LPDIRECT3DDEVICE9) */
             { name: 'SetDefaults', argBytes: 8, invoke: (object, [device])=>{
                 const table = tableOf(object);
-                const defaults = table.constants.filter(one=>one.defaultAt !== 0
-                    && one.set === SET.FLOAT4);
-                /** @param {Constant} constant */
-                const valuesOf = constant=>floats(constant.defaultAt, constant.count * 4)
-                    .filter((_, i)=>i % 4 < Math.max(constant.columns, 1));
+                const defaults = defaultsOf(table);
+                const valuesOf = defaultValues;
                 if (host.drive)
                 {
                     // Each set in turn, the answer the last one's, as below.
@@ -902,6 +963,11 @@ export function createConstantTableObjects(host){
             owned: [base, state], block: state };
         // The constants the table lists have their handles from the start.
         parsed.constants.forEach(constant=>handleFor(table, constant));
+        if (!writeDefaults(table))
+        {
+            table.owned.forEach(address=>heap.free(address));
+            return E_OUTOFMEMORY;
+        }
         // Its count in a word of the guest's: a program takes and gives back a
         // reference to the table around every constant it sets, and the
         // guest's AddRef and Release count there with no host call.
