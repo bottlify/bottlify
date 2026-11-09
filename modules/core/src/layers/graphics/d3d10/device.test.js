@@ -2733,7 +2733,9 @@ test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0
             assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
             const answer = out.device.CheckFeatureSupport(5, new Uint8Array(14 * 4));
             out.device.release();
-            return [answer.hr, answer.data[12 * 4], answer.data.reduce((a, b)=>a + b, 0)];
+            /** @type {number[]} */
+            const words = [...answer.data];
+            return [answer.hr, words[12 * 4], words.reduce((sum, one)=>sum + one, 0)];
         };
         assert.deepEqual(extended(0xb000), [S_OK, 1, 1], 'the extended doubles, and nothing else');
         assert.deepEqual(extended(0xa100), [S_OK, 0, 0]);
