@@ -67,3 +67,16 @@ test('a stream with no end token, or no version token, has no function', ()=>{
     assert.equal(functionLength(reader([0xffff0200, 0x00000000, 0x00000000, END_TOKEN]).token, 2),
         0, 'the limit');
 });
+
+test('comments of words that look like ends, and def literals that do, are stepped over', ()=>{
+    // 0.99999988 is 0x3f7ffffe.
+    assert.equal(functionLength(reader([0xffff0300,
+        0x0002fffe, 0x0000ffff, 0x1234fffe,
+        0x05000051, 0xa00f0000, 0x3f7ffffe, 0x0000ffff, 0x3f800000, 0,
+        0x02000001, 0x800f0800, 0xa0e40000,
+        0x0000ffff]).token), 14);
+    assert.equal(functionLength(reader([0xfffe0101,
+        0x00000051, 0xa00f0000, 0x3f7ffffe, 0x0000ffff, 0x3f800000, 0,
+        0x00000001, 0xc00f0000, 0xa0e40000,
+        0x0000ffff]).token), 11);
+});

@@ -2941,3 +2941,23 @@ test('an occlusion count the side that draws writes into the guest answers as th
     assert.ok(crossings <= measured && polledInGuest > crossings * 5,
         `${polledInGuest} polls answered in the guest, ${crossings} crossings while waiting`);
 });
+
+test('a shader whose def holds a literal that looks like a comment or the end is read whole', ()=>{
+    // ps_3_0: def c0, 0.99999988 (0x3f7ffffe, a comment token by its low word),
+    // a denormal that is the end token's bits, 1, 0; mov oC0, c0; end.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const tokens = [versionToken(SHADER_KIND.PIXEL, 3, 0),
+        0x05000051, 0xa00f0000, 0x3f7ffffe, 0x0000ffff, 0x3f800000, 0,
+        0x02000001, 0x800f0800, 0xa0e40000, END_TOKEN];
+    const at = 0x3000;
+    h.box.services.writeMemory(at, new Uint8Array(Uint32Array.from(tokens).buffer));
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreatePixelShader', [at, out]), D3D_OK);
+    assert.notEqual(h.box.memory.readU32(out), 0);
+    assert.deepEqual(h.divergences, []);
+    assert.equal(h.release(h.box.memory.readU32(out)), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
