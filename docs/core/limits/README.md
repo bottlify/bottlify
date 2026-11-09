@@ -75,6 +75,14 @@ event, an error. Neither stops the program.
 - Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
   never do.
 
+## Accessibility
+
+- No UI Automation client runs beside a program (no screen reader, no test driver): in
+  `UIAutomationCore.dll`, clients are never listening, events raised reach nobody, a window
+  answers `WM_GETOBJECT` for UI Automation with nothing, and the provider a window is hosted
+  with knows only its handle. Identifiers are answered by GUID for properties, patterns, events
+  and control types; text attributes, landmarks, annotations, changes and styles answer 0.
+
 ## Network
 
 - No raw TCP or UDP. Sockets go through the relay over WebSocket; without `network` only the

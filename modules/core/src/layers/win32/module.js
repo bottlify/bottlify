@@ -178,6 +178,7 @@ import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 import { createMfplatFunctions } from './mfplat/functions.js';
+import { createUiaFunctions } from './uiautomationcore/functions.js';
 import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
     from './mfreadwrite/functions.js';
 import { createPropsysFunctions } from './propsys/functions.js';
@@ -4279,6 +4280,12 @@ export function createWin32Module(){
                         glyph: (code, font)=>config?.graphics?.glyph?.(code, font) ?? null,
                     },
                     gdi: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0 }),
+                // UI Automation's core, which WPF's automation peers register
+                // their identifiers with and raise events to (uiautomationcore/).
+                'UIAutomationCore.dll': createUiaFunctions({ readMemory, writeMemory,
+                    vtables: comVtables,
+                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1,
+                    divergence: config?.divergence }),
                 // The Windows Imaging Component, which .NET's WPF decodes and
                 // converts every bitmap through (windowscodecs/).
                 'windowscodecs.dll': createWindowscodecs(windowscodecsHost()),
