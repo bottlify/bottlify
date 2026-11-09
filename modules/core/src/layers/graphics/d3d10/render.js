@@ -2952,7 +2952,7 @@ export function createRenderer(services){
     /** What draws through a geometry shader and stream output are recorded with. */
     const geometryOf = ()=>{
         geometryPasses ??= createGeometry({
-            backend, BufferUsage, lose, layoutFor, idOf, translationOf,
+            backend, BufferUsage, lose, diverge, layoutFor, idOf, translationOf,
             bindingsFor: (stage, entries, uavs)=>bindingsFor(stage, entries, uavs),
             vertexLayouts: (inputLayout, program, strides)=>
                 vertexLayouts(inputLayout, program, strides),
@@ -4940,7 +4940,12 @@ export function createRenderer(services){
             if (!gpuBufferCopy(destination, backingOf(destination), offset, counted, null))
             {
                 diverge('a structure count copied to an unaligned offset is not copied');
+                return;
             }
+            // The most the count may be, where it went: what sizes the passes
+            // before an indirect draw through a geometry shader (`geometry.js`).
+            const into = backingOf(destination);
+            (into.counted ??= new Map()).set(offset, stateDesc(view).NumElements ?? 0);
         },
 
         /**

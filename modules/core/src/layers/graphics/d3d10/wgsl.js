@@ -4533,14 +4533,15 @@ const STRIP_TOPOLOGIES = Object.freeze([3, 5, 11, 13]);
  * topology, the positions an instance, the index size in bytes (0 for none),
  * the index buffer's byte offset and the first index.
  *
- * `limited`: the positions are what the tessellator wrote, a list whose
- * length the GPU holds (`gsLimit`, its first word): the invocations are
- * sized by the most it may write, and one past the primitives it did write
- * runs no body and counts nothing.
+ * `limited`: the positions are what the tessellator wrote, or an indirect
+ * draw's, a list whose length the GPU holds (`gsLimit`, its first word): the
+ * invocations are sized by the most it may write, and one past the
+ * primitives it did write runs no body and counts nothing. `instanced`: the
+ * instances drawn are the GPU's too, `gsLimit`'s second word.
  *
  * @param {TranslatedShader} gs
  * @param {GeometryStage} stage
- * @param {{ limited?: boolean }} [options]
+ * @param {{ limited?: boolean, instanced?: boolean }} [options]
  * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
  */
 export function linkGeometry(gs, stage, options = {}){
@@ -4630,8 +4631,14 @@ export function linkGeometry(gs, stage, options = {}){
         `        gsAt[j] = select(gsPrim * ${vertices}u + j, gsPrim + j, gsStripped);`,
         '        if (gsStripped && gsCutAt(gsAt[j])) { gsWhole = false; }',
         '    }',
-        ...(options.limited ? [`    if (gsPrim >= gsLimit[0] / ${vertices}u) { gsWhole = false; }`]
-            : []),
+        // The primitives the positions the GPU holds make, a strip's as
+        // overlapping as its own; with `instanced`, the instances too.
+        ...(options.limited ? [
+            `    let gsHeld = select(gsLimit[0] / ${vertices}u, max(gsLimit[0], ${vertices - 1}u)`
+                + ` - ${vertices - 1}u, gsStripped);`,
+            '    if (gsPrim >= gsHeld) { gsWhole = false; }',
+        ] : []),
+        ...(options.instanced ? ['    if (gsDrawn >= gsLimit[1]) { gsWhole = false; }'] : []),
         ...(vertices === 3 ? [
             '    if (gsWhole && gsParams.topology == 5u) {',
             // The strip's first triangle: after the last cut index, or the first.

@@ -137,6 +137,7 @@ export const GEOMETRY_DRAW_ENTRIES = Object.freeze([
  * @property {any} backend
  * @property {any} BufferUsage
  * @property {(detail: string) => void} lose
+ * @property {(detail: string) => void} [diverge]  says, once, what is drawn otherwise than asked
  * @property {(entries: any[], label: string) => any} layoutFor
  * @property {(object: any) => number} idOf
  * @property {(shader: any, variant?: string) => any} translationOf
@@ -198,6 +199,7 @@ export function streamOutWrites(gs, entries, strides){
 /** @param {GeometryServices} services */
 export function createGeometry(services){
     const { backend, BufferUsage, lose, layoutFor, idOf } = services;
+    const diverge = services.diverge ?? (()=>{});
     /** @type {WeakMap<object, any>} shader -> its translation and stage */
     const stages = new WeakMap();
     /** @type {Record<string, any>} */
@@ -376,6 +378,59 @@ export function createGeometry(services){
         return { buffer: backing.gpu.gpu, offset: 0, size: size & ~3 };
     };
 
+    /** The most primitives an instance of an indirect draw is sized for, its count unbounded. */
+    const MOST_INDIRECT_PRIMITIVES = 16384;
+
+    /**
+     * An indirect draw as one of the most it may draw: its count bounded by
+     * what the counter copied into it may hold (`CopyStructureCount`), else by
+     * MOST_INDIRECT_PRIMITIVES, its instances as the program last wrote them;
+     * and the copies of its count and instances into the words the geometry
+     * shader stops at. Null where its arguments are on no GPU buffer.
+     *
+     * @param {any} draw @param {number} topology
+     * @returns {{ draw: any, limit: any, copies: object[] } | null}
+     */
+    const indirectBounds = (draw, topology)=>{
+        const { buffer, offset } = draw.indirect;
+        const backing = services.backingOf(buffer);
+        if (!backing?.gpu)
+        {
+            return null;
+        }
+        const indexed = draw.indexCount !== undefined;
+        const host = new DataView(backing.bytes.buffer, backing.bytes.byteOffset,
+            backing.bytes.byteLength);
+        /** @param {number} k */
+        const word = k=>(offset + 4 * k + 4 <= host.byteLength
+            ? host.getUint32(offset + 4 * k, true) : 0);
+        /** @param {number} k @returns {number | undefined} */
+        const bound = k=>backing.counted?.get(offset + 4 * k);
+        const vertices = TOPOLOGY_VERTICES[topology] ?? 3;
+        let points = bound(0);
+        if (points === undefined)
+        {
+            points = MOST_INDIRECT_PRIMITIVES * vertices;
+            diverge(`an indirect draw through a geometry shader whose count no structure count`
+                + ` bounds draws at most ${MOST_INDIRECT_PRIMITIVES} primitives an instance`);
+        }
+        const instances = Math.max(1, bound(1) ?? word(1));
+        backing.gpu.markRead();
+        const limit = scratchOf('indirect-limit', 16);
+        const copy = (/** @type {number} */ k, /** @type {number} */ to)=>({ kind: 'copyBuffer',
+            source: backing.gpu.gpu, sourceOffset: offset + 4 * k, destination: limit.gpu,
+            destinationOffset: to, size: 4 });
+        return {
+            limit,
+            copies: [copy(0, 0), copy(1, 4)],
+            draw: indexed
+                ? { ...draw, indirect: undefined, indexCount: points, instanceCount: instances,
+                    startIndex: word(2), baseVertex: word(3) | 0, startInstance: word(4) }
+                : { ...draw, indirect: undefined, vertexCount: points, instanceCount: instances,
+                    startVertex: word(2), startInstance: word(3) },
+        };
+    };
+
     /**
      * The passes before a draw through a geometry shader, or null where the
      * draw makes nothing (said where Direct3D would have made something).
@@ -398,11 +453,25 @@ export function createGeometry(services){
         {
             return null;
         }
-        if (draw.indirect || draw.auto)
+        if (draw.auto || (draw.indirect && tessellated))
         {
-            lose('an indirect draw through a geometry shader is not drawn: how many primitives'
-                + ' it draws is on the GPU, and the passes before it are sized by it');
+            lose(`${draw.auto ? 'DrawAuto' : 'an indirect draw of patches'} through a geometry`
+                + ' shader is not drawn: how many primitives it draws is on the GPU, and the'
+                + ' passes before it are sized by it');
             return null;
+        }
+        // An indirect draw: its counts are on the GPU. The passes are sized
+        // by the most it may draw and the geometry shader runs for what the
+        // arguments hold (`gsLimit`, the count and the instances copied
+        // there), the rest of the arguments as the program last wrote them.
+        const indirect = draw.indirect ? indirectBounds(draw, pipeline.topology) : null;
+        if (draw.indirect && !indirect)
+        {
+            return null;
+        }
+        if (indirect)
+        {
+            draw = indirect.draw;
         }
         const topology = tessellated ? TESSELLATED_TOPOLOGY[tessellated.topology] ?? 4
             : pipeline.topology;
@@ -550,9 +619,14 @@ export function createGeometry(services){
         const indices = scratchOf('indices', indicesBytes, BufferUsage.INDEX);
 
         const commands = [];
-        // The tessellator's first word: the indices it wrote.
+        // The tessellator's first word: the indices it wrote; an indirect
+        // draw's count and instances, copied from its arguments.
         const limit = tessellated ? { buffer: tessellated.args.gpu, offset: tessellated.args.offset,
-            size: 16 } : null;
+            size: 16 } : indirect ? { buffer: indirect.limit.gpu, offset: 0, size: 16 } : null;
+        if (indirect)
+        {
+            commands.push(...indirect.copies);
+        }
         if (domainShader && limit)
         {
             commands.push({
@@ -591,9 +665,11 @@ export function createGeometry(services){
         }
 
         // 2. the geometry shader
-        const linked = linkGeometry(gs, stage, limit ? { limited: true } : {});
+        const linked = linkGeometry(gs, stage, limit ? { limited: true, instanced: !!indirect }
+            : {});
         const geometryPipeline = computeFor(
-            `gs:${idOf(shader)}|${stage.inputVertices}${limit ? '|limited' : ''}`,
+            `gs:${idOf(shader)}|${stage.inputVertices}${limit ? '|limited' : ''}`
+                + `${indirect ? '|instanced' : ''}`,
             linked.code, 'geometryMain',
             [linked.entries, limit ? LIMITED_GEOMETRY_ENTRIES : GEOMETRY_ENTRIES],
             `d3d11:gs#${idOf(shader)}`, linked.unsupported);

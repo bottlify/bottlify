@@ -2866,7 +2866,7 @@ test('a draw through the tessellator and a geometry shader runs the domain shade
         call.module === pass.pipeline.descriptor.compute.module).descriptor.code;
     assert.match(code(passes[5]), /if \(id\.x >= dsCount\[0\]\) \{ return; \}/);
     assert.match(code(passes[5]), /let dsVertex = id\.x;/);
-    assert.match(code(passes[6]), /if \(gsPrim >= gsLimit\[0\] \/ 3u\) \{ gsWhole = false; \}/);
+    assert.match(code(passes[6]), /if \(gsPrim >= gsHeld\) \{ gsWhole = false; \}/);
     // Sized by the most the tessellator may write: 3 patches of 3x3 quads.
     assert.ok(passes[6].grid[0] >= 1);
     assert.equal(device.diagnostics().geometry.draws, 1);

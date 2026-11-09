@@ -76,10 +76,13 @@
   invocation, the strips it builds made lists, stream output into the bound buffers (whole
   primitives, stopping at the first that does not fit; each buffer's filled size kept on the GPU
   for the next draw, `DrawAuto` and the stream-output queries), and the rasterized stream drawn
-  indexed and indirect, after the tessellator too. Not drawn, and said: an indirect draw or
-  `DrawAuto` through a geometry shader (their counts are on the GPU, and the passes are sized by
-  them), a triangle strip with adjacency through one, and a draw whose output could pass 128 MB
-  between the passes.
+  indexed and indirect, after the tessellator too. An indirect draw through a geometry shader
+  is sized by the most its count may be - the capacity of the append or counter view whose count
+  `CopyStructureCount` copied there, else 16384 primitives an instance, said once - and the
+  shader runs for the count and instances the GPU holds; the arguments' first vertex and first
+  instance are as the program last wrote them. Not drawn, and said: `DrawAuto` and an indirect
+  draw of patches through a geometry shader, a triangle strip with adjacency through one, and a
+  draw whose output could pass 128 MB between the passes.
 - HLSL compiled at run time (`D3DCompile` of D3DCompiler_43 and D3DCOMPILER_47,
   `D3D10CompileShader`): vertex and pixel shaders of models 4.0, 4.1 and 5.0, and the model 2
   and 3 profiles as `D3DXCompileShader` compiles them. Geometry, hull, domain and compute
