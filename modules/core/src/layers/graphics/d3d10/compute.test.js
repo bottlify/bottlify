@@ -488,7 +488,15 @@ test('a clear of a buffer view writes its range in turn; of a texture, by a disp
 
 test('a texture the GPU cannot keep is cleared through a view in its own bytes, each slice of'
     + ' it (test_clear_image_unordered_access_view)', async()=>{
-    const h = harness();
+    // The device refuses the floats R16G16_UNORM is kept in without
+    // texture-formats-tier1: the texture lives in its bytes alone.
+    const h = harness((descriptor, made)=>{
+        if (descriptor.format === 'rg32float')
+        {
+            throw new TypeError('rg32float refused');
+        }
+        return made(descriptor);
+    });
     const format = DXGI_FORMAT.R16G16_UNORM;
     const base = { Width: 4, Height: 2, MipLevels: 2, Format: format,
         Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D11_BIND_UNORDERED_ACCESS, CPUAccessFlags: 0,

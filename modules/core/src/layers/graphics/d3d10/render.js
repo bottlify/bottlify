@@ -50,7 +50,8 @@ const NO_VIEWS = Object.freeze([]);
  * four-component element at the largest aligned offset an element may have.
  */
 const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
-import { convertTexels, convertedTexelBytes } from './blocks.js';
+import { convertTexels, convertedTexelBytes, isSixteenBit, programTexelBytes, sixteenBitFromFloats }
+    from './blocks.js';
 import {
     INDEX_FORMAT, PULLED_VERTEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
     copyCompatible,
@@ -727,6 +728,16 @@ export function createRenderer(services){
             };
         }
         const storage = textureStorage(desc.Format, desc.BindFlags, formatOptions);
+        // What is written into a 16-bit normalised target kept in floats keeps
+        // the float a draw or a shader wrote: held to the format's range and
+        // rounded to its codes only when it is read back.
+        if (isSixteenBit(storage?.conversion)
+            && (desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)) !== 0)
+        {
+            diverge(`a ${storage?.conversion} target is kept in ${storage?.format} on a GPU`
+                + ' without texture-formats-tier1: what is drawn into it is not held to its range'
+                + ' nor rounded to sixteen bits until it is read back');
+        }
         const info = FORMAT_INFO[desc.Format];
         const levels = [];
         let offset = 0;
@@ -1459,17 +1470,19 @@ export function createRenderer(services){
      */
     const readable = backing=>{
         const storage = backing.layout.storage;
-        return !!storage && (!storage.conversion || storage.conversion === 'a8') && !storage.depth
-            && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
+        return !!storage && (!storage.conversion || programTexelBytes(storage.conversion) > 0)
+            && !storage.depth && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
     };
 
     /**
      * The bytes a texel of a texture that can be read back comes back as to
-     * the program: its own, or A8's one, the alpha of the RGBA it is kept as.
+     * the program: its own, A8's one (the alpha of the RGBA it is kept as),
+     * or a 16-bit normalised format's (its codes, of the floats kept).
      *
      * @param {any} backing
      */
-    const programTexel = backing=>(backing.layout.storage.conversion === 'a8' ? 1
+    const programTexel = backing=>(backing.layout.storage.conversion
+        ? programTexelBytes(backing.layout.storage.conversion)
         : TEXEL_BYTES[backing.layout.storage.format]);
 
     /**
@@ -1480,7 +1493,13 @@ export function createRenderer(services){
      * @returns {(image: { width: number, height: number, data: Uint8Array } | null) => void}
      */
     const asProgramTexels = (backing, deliver)=>{
-        if (backing.layout.storage.conversion !== 'a8')
+        const conversion = backing.layout.storage.conversion;
+        if (isSixteenBit(conversion))
+        {
+            return image=>deliver(image ? { ...image,
+                data: sixteenBitFromFloats(conversion, image.data) } : null);
+        }
+        if (conversion !== 'a8')
         {
             return deliver;
         }

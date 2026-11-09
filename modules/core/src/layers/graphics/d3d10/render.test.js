@@ -1041,6 +1041,24 @@ async()=>{
 
 // --- resource traffic ---
 
+test('a 16-bit normalised texture on a GPU without texture-formats-tier1 is kept in floats of its'
+    + ' codes', ()=>{
+    const h = harness();
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    const codes = Uint16Array.of(0, 65535, 32768, 1);
+    assert.equal(h.device.CreateTexture2D({ ...TEXTURE_2X2, Format: DXGI_FORMAT.R16_UNORM },
+        [{ pSysMem: new Uint8Array(codes.buffer), SysMemPitch: 4 }], texture), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    assert.equal(made.descriptor.format, 'r32float');
+    const [upload] = h.gpu.of('writeTexture');
+    assert.deepEqual([...new Float32Array(upload.bytes.slice().buffer)],
+        [0, 1, Math.fround(32768 / 65535), Math.fround(1 / 65535)]);
+    assert.equal(upload.layout.bytesPerRow, 8);
+    assert.ok(!h.divergences.some(line=>/did not make|cannot be made/.test(line)),
+        h.divergences.join(' / '));
+});
+
 test('UpdateSubresource lands a box at its offset and uploads that box alone', ()=>{
     const h = harness();
     const { device } = h;

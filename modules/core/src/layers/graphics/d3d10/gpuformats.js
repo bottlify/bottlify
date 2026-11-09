@@ -268,6 +268,16 @@ function srgbTwin(format){
 const SIXTEEN_BIT_NORMALISED = new Set(['r16unorm', 'rg16unorm', 'rgba16unorm',
     'r16snorm', 'rg16snorm', 'rgba16snorm']);
 
+/**
+ * What keeps a 16-bit normalised format on a GPU without texture-formats-tier1,
+ * which feature level 10.0 requires: 32-bit floats of the same channels, which
+ * hold every code exactly (`blocks.js` converts on the way in and out).
+ */
+const SIXTEEN_BIT_STAND_IN = Object.freeze({
+    r16unorm: 'r32float', rg16unorm: 'rg32float', rgba16unorm: 'rgba32float',
+    r16snorm: 'r32float', rg16snorm: 'rg32float', rgba16snorm: 'rgba32float',
+});
+
 /** The formats WebGPU draws into only with texture-formats-tier1. */
 const TIER1_TARGETS = new Set([...SIXTEEN_BIT_NORMALISED, 'r8snorm', 'rg8snorm', 'rgba8snorm']);
 
@@ -340,7 +350,8 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
     const format = TEXTURE_FORMAT[typed];
     if (SIXTEEN_BIT_NORMALISED.has(format) && options.formatsTier1 === false)
     {
-        return null;
+        return kept(/** @type {Record<string, string>} */ (SIXTEEN_BIT_STAND_IN)[format],
+            /** @type {import('./blocks.js').SixteenBit} */ (format));
     }
     // A 32-bit depth with stencil needs a device feature; without it the
     // depth keeps 24 bits.

@@ -90,10 +90,14 @@
   formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture
   array is refused. A resolve, and the present of a multisampled swap chain, average the four
   samples equally.
-- On a GPU without WebGPU's `texture-formats-tier1`, Direct3D 10 and 11 have no 16-bit normalised
-  texture (R16_UNORM to R16G16B16A16_SNORM) and draw into no snorm one, and without
-  `rg11b10ufloat-renderable` into no R11G11B10_FLOAT one, though feature level 10.0 asks for
-  them: `CheckFormatSupport` says so, and a draw into such a target is lost alone.
+- On a GPU without WebGPU's `texture-formats-tier1`, Direct3D 10 and 11 keep the 16-bit normalised
+  textures (R16_UNORM to R16G16B16A16_SNORM) in 32-bit floats of their channels, which hold every
+  code exactly: they are sampled, drawn into and read back as the program's codes, but what a draw
+  or a shader writes into one is held to its range and rounded to sixteen bits only when it is read
+  back, and they are filtered and blended only where the GPU filters and blends 32-bit floats.
+  Such a GPU draws into no 8-bit snorm texture, and without `rg11b10ufloat-renderable` into no
+  R11G11B10_FLOAT one, though feature level 10.0 asks for them: `CheckFormatSupport` says so, and
+  a draw into such a target is lost alone.
 - A DXGI swap chain goes fullscreen as a Direct3D 9 device does: the reported display takes its
   mode and its window covers the whole of it. Going windowed again gives the display its mode back
   but leaves the window where fullscreen put it, and `ResizeTarget` on a windowed swap chain does

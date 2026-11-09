@@ -49,6 +49,7 @@ import {
     SHADER_KIND, SYSTEM_VALUE, declaresBufferViews, parseDxbc, parseShaderOfKind,
 } from './dxbc.js';
 import { createSharing } from './sharing.js';
+import { isSixteenBit } from './blocks.js';
 import { createFactory } from './dxgi.js';
 import {
     INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, PULLED_VERTEX_FORMAT, VERTEX_FORMAT,
@@ -1759,10 +1760,15 @@ export function createDevice(options = {}){
             if (kept && !kept.depth && info.kind === FORMAT_KIND.COLOUR)
             {
                 support |= FORMAT_SUPPORT.SHADER_LOAD;
+                // A 16-bit normalised format kept in floats is still the
+                // format feature level 10.0 requires: sampled, drawn into and
+                // blended, as Direct3D's own is.
+                const sixteen = isSixteenBit(kept.conversion);
+                const family = sixteen ? String(kept.conversion) : kept.format;
                 // What a sampler may filter: normalised and float formats, but
                 // not the 32-bit floats, which WebGPU does not filter.
-                const filterable = /unorm|snorm|float/.test(kept.format)
-                    && !/32float/.test(kept.format);
+                const filterable = sixteen || (/unorm|snorm|float/.test(kept.format)
+                    && !/32float/.test(kept.format));
                 if (filterable)
                 {
                     support |= FORMAT_SUPPORT.SHADER_SAMPLE;
@@ -1770,12 +1776,12 @@ export function createDevice(options = {}){
                 // A8_UNORM is drawn into as the alpha of an eight-bit texture;
                 // its conversion is for the bytes a program uploads. A target is also
                 // one only of a format the GPU draws into.
-                if (info.renderable && (!kept.conversion || kept.conversion === 'a8')
+                if (info.renderable && (!kept.conversion || kept.conversion === 'a8' || sixteen)
                     && gpuRenderable(kept.format, textureOptions))
                 {
                     // A normalised signed target is blended from feature
                     // level 10.1 (Wine's test_format_support sees 10.0 refuse it).
-                    const blended = filterable && (!/snorm/.test(kept.format)
+                    const blended = filterable && (!/snorm/.test(family)
                         || featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1);
                     support |= FORMAT_SUPPORT.RENDER_TARGET
                         | (blended ? FORMAT_SUPPORT.BLENDABLE : 0);

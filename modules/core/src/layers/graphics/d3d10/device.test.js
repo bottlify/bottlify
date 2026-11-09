@@ -1880,8 +1880,8 @@ test('a format reports what it can be used for, and an unknown one fails', ()=>{
     assertFullyReleased(device);
 });
 
-test('a GPU without texture-formats-tier1 is claimed no snorm target and no 16-bit normalised'
-    + ' texture; with it, both', ()=>{
+test('a GPU without texture-formats-tier1 is claimed no 8-bit snorm target, and has the 16-bit'
+    + ' normalised textures and targets in floats; with it, all of them', ()=>{
     /** @param {any} device @param {number} format */
     const support = (device, format)=>{
         /** @type {{ support?: number }} */
@@ -1893,7 +1893,12 @@ test('a GPU without texture-formats-tier1 is claimed no snorm target and no 16-b
     const core = createDevice({ formatsTier1: false, rg11b10Renderable: false });
     assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & TEXTURE2D, 'sampled still');
     assert.equal(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & RENDER_TARGET, 0);
-    assert.equal(support(core, DXGI_FORMAT.R16G16B16A16_UNORM) & TEXTURE2D, 0);
+    for (const format of [DXGI_FORMAT.R16G16B16A16_UNORM, DXGI_FORMAT.R16_UNORM,
+        DXGI_FORMAT.R16G16_SNORM])
+    {
+        assert.equal(support(core, format) & (TEXTURE2D | RENDER_TARGET),
+            TEXTURE2D | RENDER_TARGET, `${format} kept in floats`);
+    }
     assert.equal(support(core, DXGI_FORMAT.R11G11B10_FLOAT) & RENDER_TARGET, 0);
     assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_UNORM) & RENDER_TARGET);
     assertFullyReleased(core);

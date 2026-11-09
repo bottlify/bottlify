@@ -23,6 +23,7 @@
  */
 
 import { DXGI_FORMAT as F } from '../d3d10/constants.js';
+import { isSixteenBit } from '../d3d10/blocks.js';
 import { COMPRESSED_FORMAT, TEXEL_BYTES, gpuRenderable, textureStorage }
     from '../d3d10/gpuformats.js';
 import { formatTraits } from '../webgpu/internal/textures.js';
@@ -324,7 +325,9 @@ export function gpuStorageOf(format, device = {}){
     else
     {
         const kept = textureStorage(/** @type {number} */ (format.dxgi), 0, device);
-        if (!kept)
+        // Direct3D's stand-in for a 16-bit normalised format (32-bit floats)
+        // is not this layer's: it keeps its own half floats.
+        if (!kept || isSixteenBit(kept.conversion))
         {
             // No 16-bit normalised textures: the values as half floats,
             // ten bits of mantissa for sixteen of fraction.
