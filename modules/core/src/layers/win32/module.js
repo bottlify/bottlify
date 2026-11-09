@@ -4792,8 +4792,11 @@ export function createWin32Module(){
                         argBytes: 44,
                         /** @param {number[]} args */
                         handler: ([user, domain, , , ...rest])=>{
-                            const name = (user >>> 0) === 0 ? '' : readWideString(user, 512);
-                            const where = (domain >>> 0) === 0 ? '' : readWideString(domain, 512);
+                            // UNLEN characters and the terminator, in bytes.
+                            const name = (user >>> 0) === 0 ? ''
+                                : readWideString(user, 257 * 2);
+                            const where = (domain >>> 0) === 0 ? ''
+                                : readWideString(domain, 257 * 2);
                             const account = accountNamed(where && !name.includes('\\')
                                 ? `${where}\\${name}` : name);
                             if (!account || account.name !== USER_NAME)
