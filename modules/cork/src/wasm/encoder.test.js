@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Body, EMPTY, ModuleBuilder, ValType, leb128s32, leb128s64, leb128u } from './encoder.js';
-import { features } from './features.js';
+import v8 from 'node:v8';
+import { features, memory64 } from './features.js';
 
 /**
  * Instantiates a built module, saying why when the engine refuses it: a
@@ -345,4 +346,24 @@ test('atomic read-modify-writes on a shared memory answer the old value at every
     // A misaligned atomic traps where x86 would not: the emitter tests first.
     assert.throws(()=>f.add_i32(2, 1), WebAssembly.RuntimeError);
     assert.throws(()=>new Body().atomic('nand_i32'), /no such atomic/);
+});
+
+test('a second memory, memory64, read and written past 4 GiB beside the first', ()=>{
+    v8.setFlagsFromString('--experimental-wasm-memory64');
+    const state = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+    const ram = memory64(2 ** 33, true);
+    const high = 2 ** 32 + 0x1230;
+    new DataView(ram.buffer).setUint32(high, 0xc0ffee, true);
+    const m = new ModuleBuilder();
+    m.importMemory('env', 'state', { min: 1, max: 1, shared: true });
+    m.importMemory('env', 'ram', { min: 2 ** 17, max: 2 ** 17, shared: true, index64: true });
+    const type = m.type({ params: [ValType.i64], results: [] });
+    // state[0] = ram[a + 4]; ram[a + 8] = state[0] + 1
+    m.function(type, [], new Body().i32const(0).localGet(0).load('i32', { offset: 4, memory: 1 })
+        .store('i32')
+        .localGet(0).i32const(0).load('i32').i32const(1).op(0x6a)
+        .store('i32', { offset: 8, memory: 1 }).toBytes(), { exportAs: 'f' });
+    /** @type {any} */ (instantiate(m, { env: { state, ram } })).f(BigInt(high - 4));
+    assert.equal(new DataView(state.buffer).getUint32(0, true), 0xc0ffee);
+    assert.equal(new DataView(ram.buffer).getUint32(high + 4, true), 0xc0ffef);
 });

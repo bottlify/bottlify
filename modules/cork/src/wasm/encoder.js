@@ -421,10 +421,11 @@ export class Body {
      * lane index.
      *
      * @param {number} opcode
-     * @param {{ align: number, offset: number, lane?: number }} memarg  align as its log2
+     * @param {{ align: number, offset: number, lane?: number, memory?: number }} memarg  align
+     *     as its log2
      */
-    simdMem(opcode, { align, offset, lane }){
-        this.byte(0xfd).u32(opcode).u32(align).u32(offset);
+    simdMem(opcode, { align, offset, lane, memory }){
+        this.byte(0xfd).u32(opcode).memarg(align, offset, memory);
         return lane === undefined ? this : this.byte(lane);
     }
 
@@ -552,37 +553,49 @@ export class Body {
     }
 
     /**
-     * @param {keyof typeof LOADS} kind
-     * @param {{ offset?: number, align?: number }} [options]  `align` as log2; natural by default.
+     * A memarg: the alignment's log2 and the offset, and a memory other than
+     * the first (multi-memory) as the alignment's bit 6 and the memory's index.
+     *
+     * @param {number} align @param {number} offset @param {number} [memory]
      */
-    load(kind, { offset = 0, align } = {}){
+    memarg(align, offset, memory){
+        return memory ? this.u32(align | 0x40).u32(memory).u32(offset)
+            : this.u32(align).u32(offset);
+    }
+
+    /**
+     * @param {keyof typeof LOADS} kind
+     * @param {{ offset?: number, align?: number, memory?: number }} [options]  `align` as
+     *     log2, natural by default; `memory` the module's memory, the first by default.
+     */
+    load(kind, { offset = 0, align, memory } = {}){
         const [opcode, natural] = LOADS[kind];
-        return this.byte(opcode).u32(align ?? natural).u32(offset);
+        return this.byte(opcode).memarg(align ?? natural, offset, memory);
     }
 
     /**
      * @param {keyof typeof STORES} kind
-     * @param {{ offset?: number, align?: number }} [options]
+     * @param {{ offset?: number, align?: number, memory?: number }} [options]
      */
-    store(kind, { offset = 0, align } = {}){
+    store(kind, { offset = 0, align, memory } = {}){
         const [opcode, natural] = STORES[kind];
-        return this.byte(opcode).u32(align ?? natural).u32(offset);
+        return this.byte(opcode).memarg(align ?? natural, offset, memory);
     }
 
     /**
      * An atomic access (`ATOMICS`): sequentially consistent, and a trap where
      * the address is not a multiple of its width -- the caller tests that first.
      *
-     * @param {string} kind @param {{ offset?: number }} [options]
+     * @param {string} kind @param {{ offset?: number, memory?: number }} [options]
      */
-    atomic(kind, { offset = 0 } = {}){
+    atomic(kind, { offset = 0, memory } = {}){
         const entry = ATOMICS[/** @type {keyof typeof ATOMICS} */ (kind)];
         if (entry === undefined)
         {
             throw new Error(`encoder: no such atomic (${kind})`);
         }
         const [opcode, natural] = entry;
-        return this.byte(0xfe).u32(opcode).u32(natural).u32(offset);
+        return this.byte(0xfe).u32(opcode).memarg(natural, offset, memory);
     }
 
     /** `atomic.fence`: every access before it is seen before any after it. */
@@ -590,14 +603,14 @@ export class Body {
         return this.byte(0xfe).u32(0x03).byte(0);
     }
 
-    /** @param {{ offset?: number, align?: number }} [options] */
-    loadV128({ offset = 0, align = 4 } = {}){
-        return this.byte(0xfd).u32(SIMD_LOAD).u32(align).u32(offset);
+    /** @param {{ offset?: number, align?: number, memory?: number }} [options] */
+    loadV128({ offset = 0, align = 4, memory } = {}){
+        return this.byte(0xfd).u32(SIMD_LOAD).memarg(align, offset, memory);
     }
 
-    /** @param {{ offset?: number, align?: number }} [options] */
-    storeV128({ offset = 0, align = 4 } = {}){
-        return this.byte(0xfd).u32(SIMD_STORE).u32(align).u32(offset);
+    /** @param {{ offset?: number, align?: number, memory?: number }} [options] */
+    storeV128({ offset = 0, align = 4, memory } = {}){
+        return this.byte(0xfd).u32(SIMD_STORE).memarg(align, offset, memory);
     }
 
     /** @param {number} value */
@@ -711,10 +724,11 @@ export class ModuleBuilder {
 
     /**
      * @param {string} module @param {string} field
-     * @param {{ min: number, max?: number, shared?: boolean }} limits  in pages
+     * @param {{ min: number, max?: number, shared?: boolean, index64?: boolean }} limits  in
+     *     pages; `index64` for a `memory64` memory, addressed with i64
      */
-    importMemory(module, field, { min, max, shared = false }){
-        const flag = (max === undefined ? 0 : 1) | (shared ? 2 : 0);
+    importMemory(module, field, { min, max, shared = false, index64 = false }){
+        const flag = (max === undefined ? 0 : 1) | (shared ? 2 : 0) | (index64 ? 4 : 0);
         const limits = [flag, ...leb128u(min), ...(max === undefined ? [] : leb128u(max))];
         this.imports.push([...name(module), ...name(field), 0x02, ...limits]);
         return this;
