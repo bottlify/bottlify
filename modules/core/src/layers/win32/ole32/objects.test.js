@@ -196,3 +196,27 @@ test('objects of one interface description hand the bridge one method list', ()=
     assert.deepEqual(first?.methods.map((/** @type {any} */ method)=>method.name),
         ['QueryInterface', 'AddRef', 'Release', 'Draw']);
 });
+
+test('an object counting in a word of guest memory sees the guest\'s references there', ()=>{
+    const word = new Uint32Array(1);
+    let destroyed = 0;
+    const object = createComObject('{00000000-0000-0000-0000-0000000000AA}', {
+        interfaces: [], destroy: ()=>{
+            destroyed++;
+        },
+        count: { address: 0x4000, read: ()=>word[0], write: value=>{
+            word[0] = value;
+        } },
+    });
+    assert.equal(word[0], 1, 'the caller\'s reference, in the word');
+    assert.equal(object.countCell?.(), 0x4000);
+    object.addRef();
+    assert.equal(word[0], 2);
+    // The guest's AddRef and Release change the word alone.
+    word[0] = 5;
+    assert.equal(object.refCount, 5);
+    word[0] = 1;
+    assert.equal(object.release(), 0, 'the last reference comes to the host');
+    assert.equal(destroyed, 1);
+    assert.equal(object.countCell?.(), 0, 'a destroyed object names no word');
+});
