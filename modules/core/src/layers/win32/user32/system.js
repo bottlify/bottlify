@@ -2378,7 +2378,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * (a monitor's among them) answers FALSE with nothing written and the
      * last error left alone. What is written is the DEVMODE up to its display
      * frequency, the members a display has (dmSize says so), every mode with
-     * its orientation and flags and the mode in effect with its position too;
+     * its orientation and flags, the mode in effect and the registry's with
+     * their position too (monitor.c test_ChangeDisplaySettingsEx);
      * the Ex spelling writes no further than the caller's dmSize says it may,
      * keeping that dmSize when it is shorter (sysparams.c
      * test_EnumDisplaySettings).
@@ -2419,7 +2420,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         fields.setUint16(layout.dmDriverExtra, 0, true);
         fields.setUint32(layout.dmFields, DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT
             | DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION
-            | (index === ENUM_CURRENT_SETTINGS ? DM_POSITION : 0), true);
+            | (current ? DM_POSITION : 0), true);
         // dmPosition is the union's first eight bytes, before the orientation.
         fields.setInt32(layout.dmDisplayOrientation - 8, 0, true);
         fields.setInt32(layout.dmDisplayOrientation - 4, 0, true);

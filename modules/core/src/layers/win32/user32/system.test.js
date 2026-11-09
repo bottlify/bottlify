@@ -4347,8 +4347,9 @@ test('font smoothing is on or off, its contrast what was set, the hover time 10 
 test('EnumDisplaySettings writes the display\'s members of DEVMODE and no further', ()=>{
     // sysparams.c test_EnumDisplaySettings: dmSize becomes the offset of
     // dmICMMethod, nothing past it is touched; the Ex spelling writes no
-    // further than a shorter dmSize and keeps it; the mode in effect has its
-    // position, every mode its orientation and display flags.
+    // further than a shorter dmSize and keeps it; the mode in effect and the
+    // registry's have their position, every mode its orientation and display
+    // flags.
     const { memory, fns, errors } = setup();
     const u16 = (/** @type {number} */ at)=>memory.bytes[at] | memory.bytes[at + 1] << 8;
     const CURRENT = 0xffffffff;
@@ -4367,6 +4368,9 @@ test('EnumDisplaySettings writes the display\'s members of DEVMODE and no furthe
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmFields), MODE_FIELDS);
     assert.ok(memory.bytes.subarray(DEVMODE_BUFFER + 188, DEVMODE_BUFFER + DEVMODEW.SIZE)
         .every(byte=>byte === 0xcc));
+    assert.equal(fns.EnumDisplaySettingsW.handler([0, 0xfffffffe, DEVMODE_BUFFER]), 1);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEW.dmFields), SETTING_FIELDS,
+        'the registry\'s mode has a position too');
 
     memory.bytes.fill(0, DEVMODE_BUFFER, DEVMODE_BUFFER + DEVMODEA.SIZE);
     memory.bytes[DEVMODE_BUFFER + DEVMODEA.dmSize] = DEVMODEA.dmFields + 1;
