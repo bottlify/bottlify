@@ -33,6 +33,7 @@ import {
     createKernelGl,
     resolveOpenglEntry,
     describeEvent,
+    journalEvents,
     answeredByEngine,
     mapShippedLibraries,
     placeLibrary,
@@ -2159,4 +2160,31 @@ test('the engine keeps a range under the stacks, short of 0x10000000, cut out of
     assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x06000000 } }),
         { at: ENGINE_CUT_AT, span: 28 * MIB, inHeap: false, cut: true },
         'the program\'s image over both: cut out of the heap');
+});
+
+test('a shader that compiled is a journal line only when asked, one that failed always is', ()=>{
+    /** @param {boolean} shaders */
+    const journalled = shaders=>{
+        /** @type {any} */
+        let watcher = null;
+        /** @type {[string, string, string][]} */
+        const written = [];
+        journalEvents({ onAny: (/** @type {any} */ w)=>{ watcher = w; } },
+            { write: (level, category, _template, text)=>written.push([level, category, text]) },
+            { shaders });
+        const compiled = { api: 'D3DXCompileShader', profile: 'vs_2_0', entry: 'vsh',
+            defines: [['EVA_SM_2_0', '1'], ['FOG', '']], source: 'float4 vsh() : POSITION { }',
+            tokens: new Uint8Array(4) };
+        watcher('shader-compiled', compiled);
+        watcher('shader-compiled', { ...compiled, tokens: null, messages: 'error X3000' });
+        return written;
+    };
+    const quiet = journalled(false);
+    assert.equal(quiet.length, 1, 'off: only the failure');
+    assert.equal(quiet[0][0], 'warn');
+    assert.match(quiet[0][2], /float4 vsh/, 'the failed one with its source');
+    const asked = journalled(true);
+    assert.deepEqual(asked[0], ['info', 'shader-compiled',
+        'D3DXCompileShader vs_2_0 vsh defines=[EVA_SM_2_0=1 FOG=]']);
+    assert.doesNotMatch(asked[0][2], /float4/, 'no source for one that compiled');
 });

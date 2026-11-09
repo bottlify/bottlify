@@ -184,7 +184,9 @@ const hashText = (hash, text)=>{
  *     and an upload that nobody sees.
  * @property {{ categories?: Record<string, string>, capacity?: number,
  *     bytes?: number, sequenceBase?: number, journal?: any,
- *     now?: () => number }} [log]
+ *     now?: () => number, shaders?: boolean }} [log]
+ *     `shaders`: each shader a program compiled is a line in the journal, its
+ *     profile, entry and defines; off, only one that failed is, with its source.
  *     Which call areas are recorded from the first instruction, and how much of
  *     the journal is kept -- `capacity` records in the index, `bytes` for the
  *     records themselves (default 1 MiB; a call area logging every argument as
@@ -3968,10 +3970,27 @@ const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching'
  * @param {{ write: (level: string, category: string, template: string,
  *     ...args: any[]) => any }} into
  */
-function journalEvents(events, into){
+export function journalEvents(events, into, { shaders = false } = {}){
     events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
         if (UNJOURNALLED.has(name))
         {
+            return;
+        }
+        if (name === 'shader-compiled')
+        {
+            // The source is for a shader the compiler refused, where it is the
+            // thing to read; a compile that worked is a line, and only when asked.
+            if (!payload?.tokens)
+            {
+                into.write('warn', name, '{0}', describeEvent(payload));
+            }
+            else if (shaders)
+            {
+                const defines = (payload.defines ?? []).map((/** @type {any} */ one)=>
+                    (Array.isArray(one) ? one.join('=') : String(one))).join(' ');
+                into.write('info', name, '{0}', `${payload.api} ${payload.profile} `
+                    + `${payload.entry}${defines ? ` defines=[${defines}]` : ''}`);
+            }
             return;
         }
         into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
@@ -5615,7 +5634,7 @@ async function buildApp(options){
     // machine, and a process that replaced it still fires events.
     if (!options.log?.journal)
     {
-        journalEvents(events, journal.journal?.() ?? journal);
+        journalEvents(events, journal.journal?.() ?? journal, { shaders: options.log?.shaders });
     }
 
     const cpu = core.api('cpu');
@@ -9240,7 +9259,7 @@ async function buildSystemHost(deps){
     });
     const filesystem = core.api('filesystem');
     const journal = core.api('log');
-    journalEvents(events, journal.journal?.() ?? journal);
+    journalEvents(events, journal.journal?.() ?? journal, { shaders: options.log?.shaders });
     system.registry = createRunRegistry({
         windows: options.windows,
         directx: options.graphicsApi

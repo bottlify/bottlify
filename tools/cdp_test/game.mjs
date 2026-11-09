@@ -739,12 +739,19 @@ const toBgra = rgba=>{
  * @param {string} sessionId
  * @param {string} expression
  * @param {number} timeoutMs
+ * @param {() => string | null} [gone]  Why the page will never answer, once it
+ *     will not (its renderer died): the wait ends there rather than at the deadline.
  * @returns {Promise<any>}
  */
-async function poll(cdp, sessionId, expression, timeoutMs){
+async function poll(cdp, sessionId, expression, timeoutMs, gone = ()=>null){
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline)
     {
+        const why = gone();
+        if (why !== null)
+        {
+            throw new Error(why);
+        }
         try
         {
             const answer = await cdp.send(
@@ -799,12 +806,13 @@ const RESULT_GRACE_MS = 300000;
  * @param {CdpEndpoint} cdp
  * @param {string} sessionId
  * @param {number} timeoutMs
+ * @param {() => string | null} [gone]  as `poll` takes it
  * @returns {Promise<any>}
  */
-async function readResult(cdp, sessionId, timeoutMs){
+async function readResult(cdp, sessionId, timeoutMs, gone){
     const length = await poll(cdp, sessionId, 'window.__bottlify__.result ? String(('
         + 'self.__bottlifyResultText = JSON.stringify(window.__bottlify__.result)).length) : null',
-    timeoutMs);
+    timeoutMs, gone);
     const pieces = [];
     for (let at = 0; at < length;)
     {
@@ -1986,6 +1994,17 @@ export async function game(options){
         }
         await cdp.send('Runtime.enable', {}, sessionId);
         await cdp.send('Page.enable', {}, sessionId);
+        // A renderer that dies -- out of memory, a crash in the browser's own
+        // code -- answers nothing again, and a wait for it said only that the
+        // page did not answer. Its death is an event of the inspector's.
+        const openedAt = Date.now();
+        /** @type {string | null} */
+        let crashed = null;
+        await cdp.send('Inspector.enable', {}, sessionId).catch(()=>{});
+        cdp.on('Inspector.targetCrashed', ()=>{
+            crashed ??= `the page's renderer crashed ${((Date.now() - openedAt) / 1000)
+                .toFixed(0)} s after it opened`;
+        });
 
         /** @type {string[]} */
         const thrown = [];
@@ -2450,7 +2469,8 @@ export async function game(options){
         let result;
         try
         {
-            result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS);
+            result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS,
+                ()=>crashed);
             result.answeredAfterMs = Date.now() - startedAt;
             // What the origin holds once the run is over: the block cache, the
             // translations, the session (`navigator.storage.estimate()`).
