@@ -629,8 +629,11 @@ function featureSupport(feature, input, level, device){
             return bytesOf([format, 0]);
         case 4: // D3D10_X_HARDWARE_OPTIONS: compute at shader model 4
             return bytesOf([0]);
-        case 5: // D3D11_OPTIONS: none of 11.1's fourteen
-            return new Uint8Array(14 * 4);
+        case 5: { // D3D11_OPTIONS: of 11.1's fourteen, the extended doubles, exact as the rest
+            const options = new Uint8Array(14 * 4);
+            options[12 * 4] = level >= 0xb000 ? 1 : 0;
+            return options;
+        }
         case 6: // ARCHITECTURE_INFO: not a tiled renderer
             return bytesOf([0]);
         case 7: // D3D9_OPTIONS: textures of any size
