@@ -304,9 +304,9 @@ test('a run keeps in its store how many executors its threads opened, and the ne
      * @returns {Promise<{ open: number, opening: number }>} executors open, and asked for
      *     and still opening, at the run's end
      */
-    const opened = async executable=>{
+    const opened = async(/** @type {Uint8Array} */ executable, beside = false)=>{
         const app = await createApp({ executable, cpu: { cores: 4, eager: false },
-            cork: { config: { store } } });
+            cork: { config: { store } }, ...beside ? { startedBeside: true } : {} });
         try
         {
             assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
@@ -330,6 +330,11 @@ test('a run keeps in its store how many executors its threads opened, and the ne
     const next = await opened(oneSleeping);
     assert.equal(next.open + next.opening, first, 'opened at the start of the next run');
     assert.deepEqual(kept(), [first], 'and kept, not lowered');
+    // A process started beside another -- a helper its program waits on --
+    // opens none ahead: its one thread wants none.
+    const helper = await opened(oneSleeping, true);
+    assert.equal(helper.open + helper.opening, 0, 'a helper opens none it was not asked for');
+    assert.deepEqual(kept(), [first], 'and leaves the record as it was');
 });
 
 test('a worker its main thread waits on each round, both computing as much between, runs on its'

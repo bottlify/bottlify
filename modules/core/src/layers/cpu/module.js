@@ -695,7 +695,12 @@ export function createCpuModule(){
                             wantExecutors(settings.executors - 1);
                             await Promise.all(state.opening.values());
                         }
-                        else if (store !== null)
+                        // A process beside another -- a helper a program starts and
+                        // waits on -- opens none ahead: a tiny scanner opening the
+                        // game's count of executors, each a worker with its own
+                        // translator, took seconds to start, past the wait of the
+                        // program that started it.
+                        else if (store !== null && config?.learnExecutors !== false)
                         {
                             // As many as the bundle's threads opened in an earlier
                             // run, opened now, during the start: one opened when a
@@ -1611,6 +1616,15 @@ export function createCpuModule(){
                     // say what it is doing; sampled repeatedly from outside, this
                     // one number names the loop.
                     eip: instance.host.eip(),
+                    // And the frame it is in: the current thread's registers,
+                    // which the kernel's saved contexts do not hold for it.
+                    registers: (()=>{
+                        const context = instance.host.captureContext?.();
+                        const names = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+                        return context?.reg32 ? names.map((name, i)=>
+                            `${name}=${(context.reg32[i] >>> 0).toString(16)}`).join(' ')
+                            : 'not measured';
+                    })(),
                     // Where every slice since boot has gone, by address bucket.
                     // `top` is reported by the bucket's own address rather than
                     // by rank, so a caller polling this once a second (the

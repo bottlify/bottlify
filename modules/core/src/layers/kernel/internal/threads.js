@@ -2863,6 +2863,14 @@ export function createScheduler(options){
                         Math.round(thread.readyMs ?? 0), Math.round(thread.waitedMs ?? 0),
                         Math.round(thread.hostTotal ?? 0), thread.crossings ?? 0]]))),
                 current: current ? current.name : null,
+                // Where each thread that is not running stopped, as its saved
+                // registers say: eip, esp and ebp, the frame a loop that never
+                // leaves is reading from. The running one's are the processor's.
+                contexts: threads.filter(thread=>thread !== current && thread.context?.reg32)
+                    .map(thread=>`${thread.name} eip=${(thread.context.eip >>> 0).toString(16)}`
+                        + ` esp=${(thread.context.reg32[4] >>> 0).toString(16)}`
+                        + ` ebp=${(thread.context.reg32[5] >>> 0).toString(16)}`
+                        + ` ebx=${(thread.context.reg32[3] >>> 0).toString(16)}`),
                 // A thread that has been waiting on the same thing for a long
                 // time is the shape of a deadlock, so name what each is waiting on.
                 // A suspended thread is stopped too, whatever its state says.

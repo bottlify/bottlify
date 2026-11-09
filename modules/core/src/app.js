@@ -340,6 +340,9 @@ const hashText = (hash, text)=>{
  * @property {{ input?: number, output?: number, error?: number }} [standardHandles]
  *           Which of those its parent's STARTUPINFO made its standard handles.
  * @property {number} [parentProcessId]  The process that started this one, 0 for none.
+ * @property {boolean} [startedBeside]  A process started beside another one -- a child, a server:
+ *           its executors open as its threads want them, not as many as the bundle's
+ *           program once opened, and what it opens is not the bundle's record.
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
  *           parent handed CreateProcess, or the parent's own as they were then.
@@ -4615,6 +4618,7 @@ async function buildApp(options){
             executors: long ? 1 : options.cpu?.cores ?? 1,
             bits: processBits,
             eagerExecutors: options.cpu?.eager === true,
+            learnExecutors: options.startedBeside !== true,
             // The threads holding the guest's memory bring JavaScriptCore's
             // collections forward (`gc-nudge.js`): by default there only.
             gcNudge: options.cpu?.gcNudge,
@@ -10633,6 +10637,7 @@ export async function createApp(options){
             ...request.service ? { service: request.service } : {},
             ...ids,
             audio: sound.options,
+            startedBeside: true,
         });
         sound.announce(server);
         // A line of processes of its own: a server that starts a child and
@@ -11078,6 +11083,7 @@ export async function createApp(options){
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
                         suspended: request.suspended === true,
+                        ...request.parentId ? { startedBeside: true } : {},
                         ...request.environment ? { environment: request.environment } : {},
                         processId: request.id,
                         mainThreadId: request.threadId,
@@ -11459,6 +11465,7 @@ export async function createApp(options){
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
                         suspended: request.suspended === true,
+                        startedBeside: true,
                         ...request.environment ? { environment: request.environment } : {},
                         audio: sound.options,
                     });
