@@ -577,3 +577,54 @@ test('a batch over a file any process holds open is refused whole, from either p
         await first.dispose();
         await second.dispose();
     });
+
+test('a bundle mounted over the machine\'s own directories under another spelling: a file made'
+    + ' in one is written, read, exported and deleted', async()=>{
+    // The order a run takes: kernel32 makes C:\WINDOWS\TEMP when it comes up,
+    // before the bundle is mounted; the bundle spells the directory Windows.
+    // A driver a system-information tool extracts to %TEMP% was refused by
+    // the store, left a name the tree held as written, and threw at export.
+    const layer = createFilesystemModule();
+    const fs = await layer.create({});
+    fs.createDirectory('C:\\WINDOWS');
+    fs.createDirectory('C:\\WINDOWS\\TEMP');
+    fs.mount('C', { source: createMemoryStore({ 'Windows\\system32\\kernel32.dll': 'MZ' }) });
+
+    const path = 'C:\\WINDOWS\\TEMP\\cpuz149_x32.sys';
+    const handle = fs.open(path, { write: true, disposition: fs.Disposition.CREATE_ALWAYS });
+    fs.write(handle, bytes('driver'));
+    fs.close(handle);
+    const again = fs.open(path, { write: true, disposition: fs.Disposition.CREATE_ALWAYS });
+    fs.write(again, bytes('driver2'));
+    fs.close(again);
+
+    const reading = fs.open('c:\\windows\\temp\\CPUZ149_X32.SYS', { read: true });
+    assert.equal(text(fs.read(reading, 16)), 'driver2');
+    fs.close(reading);
+    assert.deepEqual(fs.export().map((/** @type {any} */ entry)=>[entry.path, text(entry.bytes)]),
+        [['C:\\WINDOWS\\TEMP\\cpuz149_x32.sys', 'driver2']]);
+    assert.equal(/** @type {any} */ (layer.diagnostics()).metrics.volumes['C:'].disagreements, 0);
+
+    fs.deleteFile(path);
+    assert.equal(fs.stat(path), null);
+    assert.deepEqual(fs.export(), []);
+    assert.deepEqual(fs.exportDirectories(), ['C:\\WINDOWS\\TEMP']);
+    assert.equal(/** @type {any} */ (layer.diagnostics()).metrics.volumes['C:'].disagreements, 0);
+    await layer.dispose();
+});
+
+test('a directory is not moved into itself: refused, and left where it was', async()=>{
+    const fs = await createFilesystemModule().create({});
+    fs.createDirectory('C:\\Data');
+    fs.createDirectory('C:\\Data\\Inner');
+    fs.apply([{ path: 'C:\\Data\\save.dat', bytes: bytes('save') }]);
+
+    assert.throws(()=>fs.rename('C:\\Data', 'C:\\DATA\\Inner\\Data'),
+        { code: 'SHARING_VIOLATION' });
+    assert.throws(()=>fs.rename('C:\\Data', 'c:\\data\\Moved'), { code: 'SHARING_VIOLATION' });
+    assert.deepEqual(fs.list('C:\\Data').map((/** @type {any} */ entry)=>entry.name).sort(),
+        ['Inner', 'save.dat']);
+    fs.rename('C:\\Data', 'C:\\Database');
+    assert.equal(fs.stat('C:\\Database\\save.dat')?.size, 4,
+        'a name that only begins with the directory\'s is not inside it');
+});

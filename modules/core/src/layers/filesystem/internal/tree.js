@@ -27,6 +27,13 @@
  * what spelling" -- which is also what makes case-insensitive lookup with
  * case-preserving enumeration cheap: the folded name is the key, the node's own
  * name is what enumeration reports.
+ *
+ * The stores do not fold case, and two layers need not agree on a spelling:
+ * the machine makes `WINDOWS\TEMP` before a bundle that spells it `Windows`
+ * is mounted over it. A node therefore keeps each layer's own key -- `path`
+ * in the writable store, `sourcePath` in the source -- and a store is changed
+ * before the node records the change, so a store that refuses leaves the tree
+ * as it was. `verify` says where the two disagree.
  */
 
 import { ErrorCode, fsError } from './errors.js';
@@ -36,7 +43,10 @@ import { bytesOf } from './memory-store.js';
 /**
  * @typedef {Object} Node
  * @property {string} name        As created; enumeration reports this.
- * @property {string} path        Backslash-separated path handed to the stores.
+ * @property {string} path        Its key in the writable store: where it is there,
+ *                                or where it will be made.
+ * @property {string} sourcePath  Its key in the source, which may spell a directory
+ *                                on the way to it otherwise.
  * @property {Node | null} parent
  * @property {boolean} directory
  * @property {boolean} inSource
@@ -66,16 +76,19 @@ import { bytesOf } from './memory-store.js';
  */
 export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
 
+/** @param {string} directory @param {string} name */
+const joinPath = (directory, name)=>(directory.length === 0 ? name : `${directory}\\${name}`);
+
 /**
  * @param {Node | null} parent
  * @param {string} name
  * @returns {Node}
  */
 function makeNode(parent, name){
-    const path = !parent || parent.path.length === 0 ? name : `${parent.path}\\${name}`;
     return {
         name,
-        path,
+        path: joinPath(parent?.path ?? '', name),
+        sourcePath: joinPath(parent?.sourcePath ?? '', name),
         parent,
         directory: false,
         inSource: false,
@@ -137,20 +150,24 @@ export function createOverlay({
     const index = (path, directory, layer, entry)=>{
         let node = root;
         const parts = path.split('\\').filter(part=>part.length > 0);
+        let key = '';
         parts.forEach((part, position)=>{
-            const key = foldName(part);
-            let child = node.children.get(key);
+            const folded = foldName(part);
+            key = joinPath(key, part);
+            let child = node.children.get(folded);
             if (!child)
             {
                 child = makeNode(node, part);
-                node.children.set(key, child);
+                node.children.set(folded, child);
             }
             // Anything with something under it is a directory, whether or not
             // the store bothered to list it as one.
             const leaf = position === parts.length - 1;
             child.directory = child.directory || !leaf || directory;
+            // The store's own spelling, whatever the other layer calls it.
             if (layer === 'source')
             {
+                child.sourcePath = key;
                 child.inSource = true;
                 if (leaf && typeof entry?.modified === 'number')
                 {
@@ -163,10 +180,35 @@ export function createOverlay({
             }
             else
             {
+                child.path = key;
                 child.inWritable = true;
             }
             node = child;
         });
+    };
+
+    /**
+     * What a layer does not hold of a node, it would hold under the node's
+     * parent as that layer spells it: a file made under `Windows` that the
+     * writable store holds as `WINDOWS` is made in `WINDOWS`. Settled after
+     * both layers are indexed, since the second may respell a directory the
+     * first already put children under.
+     *
+     * @param {Node} node
+     */
+    const settleKeys = node=>{
+        for (const child of node.children.values())
+        {
+            if (!child.inWritable)
+            {
+                child.path = joinPath(node.path, child.name);
+            }
+            if (!child.inSource)
+            {
+                child.sourcePath = joinPath(node.sourcePath, child.name);
+            }
+            settleKeys(child);
+        }
     };
 
     for (const entry of source?.list() ?? [])
@@ -177,6 +219,7 @@ export function createOverlay({
     {
         index(entry.path, entry.directory, 'writable');
     }
+    settleKeys(root);
 
     /**
      * @param {string[]} components
@@ -240,8 +283,11 @@ export function createOverlay({
         {
             return 0;
         }
-        const store = node.inWritable ? writable : node.inSource ? source : null;
-        return store?.stat(node.path)?.size ?? 0;
+        if (node.inWritable)
+        {
+            return writable.stat(node.path)?.size ?? 0;
+        }
+        return node.inSource ? source?.stat(node.sourcePath)?.size ?? 0 : 0;
     };
 
     /**
@@ -260,22 +306,23 @@ export function createOverlay({
     };
 
     /**
-     * Gives a node somewhere in the writable layer to live, parents first. A
-     * store is never asked to invent a directory it was not told about.
+     * Makes a directory and every one above it in the writable layer, so that
+     * something can be put in it. A store is never asked to invent a
+     * directory it was not told about.
      *
-     * @param {Node} node
+     * @param {Node} directory
      */
-    const materialiseParents = node=>{
+    const materialise = directory=>{
         /** @type {Node[]} */
         const missing = [];
-        for (let at = node.parent; at && !at.inWritable; at = at.parent)
+        for (let at = /** @type {Node | null} */ (directory); at && !at.inWritable; at = at.parent)
         {
             missing.unshift(at);
         }
-        for (const directory of missing)
+        for (const made of missing)
         {
-            writable.mkdir(directory.path);
-            directory.inWritable = true;
+            writable.mkdir(made.path);
+            made.inWritable = true;
         }
     };
 
@@ -290,9 +337,10 @@ export function createOverlay({
         {
             return;
         }
-        materialiseParents(node);
-        const size = source?.stat(node.path)?.size ?? 0;
-        writable.write(node.path, 0, source ? source.read(node.path, 0, size) : new Uint8Array(0));
+        materialise(/** @type {Node} */ (node.parent));
+        const size = source?.stat(node.sourcePath)?.size ?? 0;
+        writable.write(node.path, 0,
+            source ? source.read(node.sourcePath, 0, size) : new Uint8Array(0));
         node.inWritable = true;
     };
 
@@ -314,12 +362,13 @@ export function createOverlay({
         {
             // Recreating a deleted name must not resurrect what used to live
             // under it, and takes the spelling it is being recreated with.
-            // `inSource` stays: the source still holds the name, so deleting
-            // this again has to leave a tombstone rather than uncover it.
+            // `inSource` stays, and `sourcePath` with it: the source still
+            // holds the name, so deleting this again has to leave a tombstone
+            // rather than uncover it.
             existing.children.clear();
             existing.tombstone = false;
             existing.name = name;
-            existing.path = parent.path.length === 0 ? name : `${parent.path}\\${name}`;
+            existing.path = joinPath(parent.path, name);
         }
         return existing;
     };
@@ -425,8 +474,13 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
-            const store = node.inWritable ? writable : node.inSource ? source : null;
-            return store ? store.read(node.path, offset, length) : new Uint8Array(0);
+            if (node.inWritable)
+            {
+                return writable.read(node.path, offset, length);
+            }
+            return node.inSource && source
+                ? source.read(node.sourcePath, offset, length)
+                : new Uint8Array(0);
         },
 
         /**
@@ -481,8 +535,7 @@ export function createOverlay({
             }
             if (!node.inWritable)
             {
-                materialiseParents(node);
-                node.inWritable = true;
+                materialise(/** @type {Node} */ (node.parent));
             }
             if (contents && writable.adoptContents)
             {
@@ -501,6 +554,7 @@ export function createOverlay({
                     writable.write(node.path, 0, whole);
                 }
             }
+            node.inWritable = true;
             node.modified = now();
             changed(node.path, 'written');
         },
@@ -531,14 +585,14 @@ export function createOverlay({
             {
                 // Nothing of the source file survives a truncation to nothing,
                 // so copying it up first would only be work.
-                materialiseParents(node);
-                node.inWritable = true;
+                materialise(/** @type {Node} */ (node.parent));
             }
             else
             {
                 copyUp(node);
             }
             writable.truncate(node.path, size);
+            node.inWritable = true;
             node.modified = now();
             changed(node.path, 'written');
         },
@@ -562,10 +616,10 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
             }
+            materialise(parent);
+            writable.truncate(joinPath(parent.path, name), 0);
             const node = childFor(parent, name);
             node.directory = false;
-            materialiseParents(node);
-            writable.truncate(node.path, 0);
             node.inWritable = true;
             node.modified = now();
             changed(node.path, 'written');
@@ -599,15 +653,13 @@ export function createOverlay({
                 {
                     return false;
                 }
-                materialiseParents(existing);
-                writable.mkdir(existing.path);
-                existing.inWritable = true;
+                materialise(existing);
                 return false;
             }
+            materialise(parent);
+            writable.mkdir(joinPath(parent.path, name));
             const node = childFor(parent, name);
             node.directory = true;
-            materialiseParents(node);
-            writable.mkdir(node.path);
             node.inWritable = true;
             return true;
         },
@@ -640,10 +692,10 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
             }
+            materialise(parent);
+            writable.move(node.path, joinPath(parent.path, name));
             const target = childFor(parent, name);
             target.directory = false;
-            materialiseParents(target);
-            writable.move(node.path, target.path);
             target.inWritable = true;
             target.modified = node.modified;
             node.inWritable = false;
@@ -759,6 +811,68 @@ export function createOverlay({
             return found;
         },
 
+        /**
+         * Where the tree and its stores disagree, one line each; empty when
+         * they agree. What the tree says is in a layer must be there under
+         * the node's key for that layer, every node must be in one layer or
+         * the other, and nothing may be in the writable store that the tree
+         * does not hold there under that same key -- a file the program can
+         * neither see nor, if the tree lists it, read.
+         *
+         * @returns {string[]}
+         */
+        verify(){
+            /** @type {string[]} */
+            const problems = [];
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    const kind = child.directory ? 'directory' : 'file';
+                    if (child.inWritable)
+                    {
+                        const stored = writable.stat(child.path);
+                        if (!stored || stored.directory !== child.directory)
+                        {
+                            problems.push(`the writable layer has no ${kind} "${child.path}"`);
+                        }
+                        if (child.tombstone)
+                        {
+                            problems.push(`"${child.path}" is deleted and still written`);
+                        }
+                    }
+                    else if (!child.inSource)
+                    {
+                        problems.push(`"${child.path}" is in neither layer`);
+                    }
+                    if (child.inSource && !child.tombstone && !child.directory)
+                    {
+                        const held = source?.stat(child.sourcePath);
+                        if (!held || held.directory)
+                        {
+                            problems.push(`the source has no file "${child.sourcePath}"`);
+                        }
+                    }
+                    walk(child);
+                }
+            };
+            walk(root);
+            for (const entry of writable.list())
+            {
+                let node = /** @type {Node | undefined} */ (root);
+                for (const part of entry.path.split('\\').filter(name=>name.length > 0))
+                {
+                    node = node?.children.get(foldName(part));
+                }
+                if (!node || !node.inWritable || node.path !== entry.path)
+                {
+                    problems.push(`the writable layer holds "${entry.path}", which the tree `
+                        + (node?.inWritable ? `holds as "${node.path}"` : 'does not hold there'));
+                }
+            }
+            return problems;
+        },
+
         diagnostics(){
             let files = 0;
             let directories = 0;
@@ -785,7 +899,8 @@ export function createOverlay({
                 }
             };
             walk(root);
-            return { files, directories, tombstones, copied, layered: source !== null };
+            return { files, directories, tombstones, copied, layered: source !== null,
+                disagreements: overlay.verify().length };
         },
     };
     if (revision)
