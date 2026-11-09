@@ -4555,7 +4555,8 @@ export function linkGeometry(gs, stage, options = {}){
     const code = [
         ...declared.text,
         'struct GsParams { invocations: u32, prims: u32, topology: u32, points: u32,',
-        '    indexBytes: u32, indexOffset: u32, first: u32, primitiveBase: u32, }',
+        '    indexBytes: u32, indexOffset: u32, first: u32, primitiveBase: u32,',
+        '    instanceBase: u32, pad0: u32, pad1: u32, pad2: u32, }',
         `@group(1) @binding(${GEOMETRY_BINDING.inputs}) var<storage, read> gsIn: array<${REG}>;`,
         `@group(1) @binding(${GEOMETRY_BINDING.indices}) var<storage, read> gsIndices: `
             + 'array<u32>;',
@@ -4637,9 +4638,10 @@ export function linkGeometry(gs, stage, options = {}){
         ...(options.limited ? [
             `    let gsHeld = select(gsLimit[0] / ${vertices}u, max(gsLimit[0], ${vertices - 1}u)`
                 + ` - ${vertices - 1}u, gsStripped);`,
-            '    if (gsPrim >= gsHeld) { gsWhole = false; }',
+            '    if (gsPrim + gsParams.primitiveBase >= gsHeld) { gsWhole = false; }',
         ] : []),
-        ...(options.instanced ? ['    if (gsDrawn >= gsLimit[1]) { gsWhole = false; }'] : []),
+        ...(options.instanced ? ['    if (gsDrawn + gsParams.instanceBase >= gsLimit[1]) {'
+            + ' gsWhole = false; }'] : []),
         ...(vertices === 3 ? [
             '    if (gsWhole && gsParams.topology == 5u) {',
             // The strip's first triangle: after the last cut index, or the first.

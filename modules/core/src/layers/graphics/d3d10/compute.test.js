@@ -701,11 +701,88 @@ async()=>{
         call.pipeline.descriptor.label.startsWith('d3d11:gs#'));
     const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
         call.descriptor.code).find((/** @type {string} */ text)=>text.includes('fn geometryMain'));
-    assert.match(code, /if \(gsDrawn >= gsLimit\[1\]\) \{ gsWhole = false; \}/);
+    assert.match(code, /if \(gsDrawn \+ gsParams\.instanceBase >= gsLimit\[1\]\) \{ gsWhole = false; \}/);
     assert.ok(gs, 'the geometry shader runs');
     const params = gs.groups[1].descriptor.entries.find((/** @type {any} */ entry)=>
         entry.binding === 5).resource;
     const uniform = new Uint32Array(params.buffer.bytes.slice(params.offset,
         params.offset + 16).buffer);
     assert.equal(uniform[0], 10, 'invocations for the 30 entries the list may hold');
+});
+
+test('an indirect draw through a geometry shader whose bound passes the room between the passes'
+    + ' is drawn in runs, each stopping at the count the GPU holds past its first primitive',
+async()=>{
+    const h = harness();
+    const { device, context } = h;
+    const ELEMENTS = 9 << 20;
+    // A particle list as such a program keeps one: an append buffer of at
+    // most 30 entries, its count copied into the vertex count of arguments
+    // the processor wrote with one instance.
+    const list = uavBuffer(h, null, { MiscFlags11: D3D11_RESOURCE_MISC.BUFFER_STRUCTURED,
+        StructureByteStride: 4, ByteWidth: 4 * ELEMENTS });
+    const appended = uavOf(h, list.resource, { Format: DXGI_FORMAT.UNKNOWN,
+        ViewDimension: UAV_BUFFER, FirstElement: 0, NumElements: ELEMENTS,
+        Flags: D3D11_BUFFER_UAV_FLAG.APPEND });
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 32, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: 0, CPUAccessFlags: 0, MiscFlags: 0,
+        MiscFlags11: D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS },
+    [{ pSysMem: new Uint8Array(new Uint32Array([0, 0, 0, 1, 0, 0, 0, 0]).buffer) }], made),
+    S_OK);
+    const args = made.resource;
+    context.CopyStructureCount(args, 8, appended);
+
+    assert.equal(device.CreateBuffer({ ByteWidth: 30 * 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null, made),
+    S_OK);
+    context.IASetVertexBuffers(0, [made.resource], [16], [0]);
+    assert.equal(device.CreateInputLayout([{ SemanticName: 'POSITION', SemanticIndex: 0,
+        Format: DXGI_FORMAT.R32G32B32A32_FLOAT, InputSlot: 0, AlignedByteOffset: 0,
+        InputSlotClass: 0, InstanceDataStepRate: 0 }], passThroughVertexShader(), made), S_OK);
+    context.IASetInputLayout(made.layout);
+    context.IASetPrimitiveTopology(4);
+    for (const [create, bytes, set] of /** @type {const} */ ([
+        ['CreateVertexShader', passThroughVertexShader(), 'VSSetShader'],
+        ['CreateGeometryShader', triangleGeometryShader(), 'GSSetShader'],
+        ['CreatePixelShader', solidPixelShader([1, 0, 0, 1]), 'PSSetShader']]))
+    {
+        assert.equal(device[create](bytes, made), S_OK, create);
+        context[set](made.shader);
+    }
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 },
+        Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    assert.equal(device.CreateRenderTargetView(made.resource, null, made), S_OK);
+    context.OMSetRenderTargets([made.view], null);
+    context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0,
+        MaxDepth: 1 }]);
+
+    context.DrawInstancedIndirect(args, 8);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(h.divergences, []);
+    assert.equal(device.diagnostics().geometry.cut, 1);
+    const runs = h.gpu.of('dispatchWorkgroups').filter((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.startsWith('d3d11:gs#'));
+    assert.ok(runs.length > 1, `${runs.length} runs`);
+    assert.equal(device.diagnostics().geometry.draws, runs.length, 'a draw a run, none lost');
+    assert.equal(device.diagnostics().geometry.invocations, ELEMENTS / 3,
+        'every primitive the bound may hold, once');
+    const bases = runs.map((/** @type {any} */ run)=>{
+        const params = run.groups[1].descriptor.entries.find((/** @type {any} */ entry)=>
+            entry.binding === 5).resource;
+        const words = new Uint32Array(params.buffer.bytes.slice(params.offset,
+            params.offset + 48).buffer);
+        return [words[7], words[8]];
+    });
+    const step = bases[1][0];
+    assert.deepEqual(bases, runs.map((_, k)=>[k * step, 0]),
+        'each run its first primitive, the one instance');
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).find((/** @type {string} */ text)=>text.includes('fn geometryMain'));
+    assert.match(code, /if \(gsPrim \+ gsParams\.primitiveBase >= gsHeld\)/,
+        'the GPU count is held against the primitive the run is at');
 });

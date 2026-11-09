@@ -84,10 +84,10 @@
   shader runs for the count and instances the GPU holds; the arguments' first vertex and first
   instance are as the program last wrote them. A draw whose passes would take more than 128 MB
   in one buffer between them is drawn in pieces that fit, one after the other: its instances
-  apart, and a list's primitives in runs (primitive ids numbered on). Not drawn, and said:
+  apart, and a list's primitives in runs (primitive ids numbered on); an indirect draw is cut by
+  the most it may draw, each run stopping at the count the GPU holds. Not drawn, and said:
   `DrawAuto` and an indirect draw of patches through a geometry shader, a triangle strip with
-  adjacency through one, and a strip, an indirect draw or a draw after the tessellator past
-  those 128 MB.
+  adjacency through one, and a strip or a draw after the tessellator past those 128 MB.
 - HLSL compiled at run time (`D3DCompile` of D3DCompiler_43 and D3DCOMPILER_47,
   `D3D10CompileShader`): vertex and pixel shaders of models 4.0, 4.1 and 5.0, and the model 2
   and 3 profiles as `D3DXCompileShader` compiles them. Geometry, hull, domain and compute

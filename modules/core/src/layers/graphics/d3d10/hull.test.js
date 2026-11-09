@@ -132,7 +132,7 @@ test('a geometry shader after the tessellator stops at the primitives it wrote, 
     const limited = linkGeometry(gs, stage, { limited: true }).code;
     assert.match(limited, /var<storage, read> gsLimit: array<u32>;/);
     assert.match(limited, /let gsHeld = select\(gsLimit\[0\] \/ 3u, max\(gsLimit\[0\], 2u\) - 2u, gsStripped\);/);
-    assert.match(limited, /if \(gsPrim >= gsHeld\) \{ gsWhole = false; \}/);
+    assert.match(limited, /if \(gsPrim \+ gsParams\.primitiveBase >= gsHeld\) \{\s*gsWhole = false; \}/);
     assert.doesNotMatch(limited, /gsLimit\[1\]/, 'the instances are the draw\'s');
     // The counts are written all the same: an invocation past them counts nothing.
     assert.match(limited, /gsCounts\[id\.x \* 2u\] = gsMade;/);
