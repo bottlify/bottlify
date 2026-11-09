@@ -102,7 +102,36 @@ export function createFilesystemModule(){
          * @param {any} config
          * @returns {Promise<any>}
          */
-        async create(config){
+        async create(config, host){
+            /** The run's log, where it was given one. @type {any} */
+            const log = host?.requireApi?.('log') ?? null;
+            /** Names `export` could not read, each said once. @type {Set<string>} */
+            const unreadable = new Set();
+            /**
+             * One file as `export` hands it on, or null where the tree lists a
+             * name its store has nothing at: left out of the session, and said.
+             *
+             * @param {any} tree @param {string[]} components @param {string} path
+             */
+            const exported = (tree, components, path)=>{
+                try
+                {
+                    return handedOut(tree, components, path);
+                }
+                catch (e){
+                    if (/** @type {any} */ (e)?.code !== ErrorCode.NOT_FOUND)
+                    {
+                        throw e;
+                    }
+                    if (!unreadable.has(path))
+                    {
+                        unreadable.add(path);
+                        log?.warn?.('filesystem', `"${path}" is listed and has nothing to`
+                            + ' read: left out of what was exported');
+                    }
+                    return null;
+                }
+            };
             /**
              * The drives every process of a run shares, where this one was
              * handed them: one volume, as one Windows has. What each drive
@@ -502,14 +531,23 @@ export function createFilesystemModule(){
                         for (const entry of tree.writableFiles())
                         {
                             const components = splitComponents(entry.path);
-                            out.push(handedOut(tree, components, formatPath(key, components)));
+                            const file = exported(tree, components, formatPath(key, components));
+                            if (file)
+                            {
+                                out.push(file);
+                            }
                         }
                         for (const record of options?.everyName ? tree.links() : [])
                         {
                             for (const name of record.names)
                             {
                                 const components = splitComponents(name);
-                                out.push(handedOut(tree, components, formatPath(key, components)));
+                                const file = exported(tree, components,
+                                    formatPath(key, components));
+                                if (file)
+                                {
+                                    out.push(file);
+                                }
                             }
                         }
                     }

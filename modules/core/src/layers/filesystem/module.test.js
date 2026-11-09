@@ -577,3 +577,28 @@ test('a batch over a file any process holds open is refused whole, from either p
         await first.dispose();
         await second.dispose();
     });
+
+test('a name the tree lists and its store has nothing at is left out of an export, and said'
+    + ' once', async()=>{
+    const writable = createMemoryStore();
+    /** @type {string[]} */
+    const warned = [];
+    const host = { requireApi: (/** @type {string} */ name)=>(name === 'log'
+        ? { warn: (/** @type {string} */ category, /** @type {string} */ message)=>
+            warned.push(`${category}: ${message}`) } : null) };
+    const fs = await filesystemModule.create({ drives: { C: { writable } } }, host);
+    for (const name of ['kept.txt', 'gone.sys'])
+    {
+        const handle = fs.open(`C:\\${name}`, { write: true,
+            disposition: fs.Disposition.CREATE_NEW });
+        fs.write(handle, bytes(name));
+        fs.close(handle);
+    }
+    // The store loses the file behind the tree's back.
+    writable.remove('gone.sys');
+    assert.deepEqual(fs.export().map(file=>file.path), ['C:\\kept.txt']);
+    assert.deepEqual(fs.export().map(file=>text(file.bytes)), ['kept.txt']);
+    assert.deepEqual(warned, ['filesystem: "C:\\gone.sys" is listed and has nothing to read:'
+        + ' left out of what was exported']);
+    await filesystemModule.dispose();
+});
