@@ -37,7 +37,7 @@
  */
 
 import { DXGI_FORMAT } from './constants.js';
-import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseSignature } from './dxbc.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, patchConstantsOf } from './dxbc.js';
 import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
     SYNC_FLAG, decodeSm4,
@@ -4045,11 +4045,13 @@ export function linkHull(container){
     const globals = program.tokens.subarray(0, globalsEnd);
     /** @param {import('./dxbc.js').SignatureElement[]} elements */
     const registersOf = elements=>Math.max(1, ...elements.map(element=>element.register + 1));
-    const patchConstants = container.chunks.has('PCSG')
-        ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : [];
+    const patchConstants = patchConstantsOf(container.chunks);
     const inputRegisters = registersOf(container.inputs);
     const outputRegisters = registersOf(container.outputs);
-    const constantRegisters = registersOf(patchConstants);
+    // The registers the patch constant phases write, which the signature
+    // may name fewer of: an output declared but left out of it is still
+    // written, and the domain shader reads the constants at this stride.
+    let constantRegisters = registersOf(patchConstants);
     const inputPoints = Math.max(1, stage.inputPoints);
     const outputPoints = Math.max(1, stage.outputPoints);
 
@@ -4069,6 +4071,10 @@ export function linkHull(container){
         const shader = translateShader(container, { tokens,
             outputName: isControlPoint ? 'cpo' : 'pc' });
         translated.push(shader);
+        if (!isControlPoint)
+        {
+            constantRegisters = Math.max(constantRegisters, shader.outputRegisters);
+        }
         unsupported.push(...shader.unsupported);
         const icb = `icb_p${index}`;
         const lines = [`fn hsPhase${index}() {`];
@@ -4839,8 +4845,7 @@ export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
  */
 function domainLoad(ds, dsContainer, hull, stage, group){
     /** @param {import('./dxbc.js').DxbcContainer} container */
-    const constantsOf = container=>(container.chunks.has('PCSG')
-        ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : []);
+    const constantsOf = container=>patchConstantsOf(container.chunks);
     /** @param {import('./dxbc.js').SignatureElement[]} elements */
     const registersOf = elements=>Math.max(1, ...elements.map(element=>element.register + 1));
     const inputs = registersOf(ds.inputs);

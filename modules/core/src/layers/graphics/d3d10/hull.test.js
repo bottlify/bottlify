@@ -37,6 +37,30 @@ test('a hull shader links as one compute program: each phase a function, the sta
         'the edge factors from the patch constants the signature names');
 });
 
+test('the patch constants are as many registers as the phases write, whatever the signature'
+    + ' names, and a PSG1 names them as a PCSG does', ()=>{
+    const unsigned = /** @type {any} */ (parseDxbc(forkPhaseHullShader()));
+    unsigned.chunks.delete('PCSG');
+    const linked = linkHull(unsigned);
+    assert.equal(linked.stage.constantRegisters, 7, 'o6 is the last a fork phase writes');
+    assert.match(linked.code, /var<private> pc: array<vec4<u32>, 7>;/);
+
+    // One row a 32-byte PSG1 element: stream, name, index, system value,
+    // component type, register, mask, minimum precision; the name after.
+    const chunk = new Uint8Array(8 + 32 + 16);
+    const words = new DataView(chunk.buffer);
+    [1, 8].forEach((value, at)=>words.setUint32(at * 4, value, true));
+    [0, 40, 3, SYSTEM_VALUE.QUAD_EDGE_TESSFACTOR, 3, 3, 1, 0]
+        .forEach((value, at)=>words.setUint32(8 + at * 4, value, true));
+    chunk.set(new TextEncoder().encode('SV_TessFactor'), 40);
+    const precise = /** @type {any} */ (parseDxbc(forkPhaseHullShader()));
+    precise.chunks.delete('PCSG');
+    precise.chunks.set('PSG1', chunk);
+    assert.match(linkHull(precise).code,
+        /vec4<f32>\(0\.0, 0\.0, 0\.0, bitcast<f32>\(pc\[3\]\.x\)\)/,
+        'the fourth edge factor from the register the PSG1 names');
+});
+
 test('a vertex format is read as a vertex fetch reads it: each format\'s bytes, nothing else',
     ()=>{
         for (const format of new Set([...Object.values(VERTEX_FORMAT),
