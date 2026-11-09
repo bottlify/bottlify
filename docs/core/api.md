@@ -77,7 +77,7 @@ is ignored; `executors`, the older name of `cpu.cores`, is refused.
 | `desktop` | `{ picture? }` | none | What the desktop shows where no window is: `picture` is `{ width, height, bits }`, 32 bits a pixel (B, G, R, unused), top row first, scaled to the screen. Absent: the desktop colour. |
 | `maxFps` | number | 60 | The display's refresh rate the program is told, which its vertical sync keeps to; 0 for none. |
 | `graphics` | `{ compressedTextures?, maxFrameLatency?, videoMemory?, driverRules? }` | `false`, 3, the `graphicsApi` preset's, `'legacy'` | The device's settings ([configuration.md](configuration.md#graphics)). |
-| `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–11 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap`; `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
+| `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–11 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap` (as bytes on SwiftShader, which makes no picture of a worker's canvas); `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
 | `audio` | `{ drained?, sampleRate?, port? }` | `false`, none, none | The sound output, as `openSpeaker().audioOptions()` gives it ([configuration.md](configuration.md#audio)). |
 
 ### Storage, bundles and discs

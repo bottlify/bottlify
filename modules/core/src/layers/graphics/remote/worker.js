@@ -689,8 +689,19 @@ export function serveGraphics(scope, deps){
                     capture.open(frames);
                 }
                 opened ??= open(data.software === true);
-                opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
-                    e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+                opened.then(({ adapter })=>{
+                    // SwiftShader in Chrome makes no picture of a worker's
+                    // WebGPU canvas where it has no Vulkan below it: the GPU
+                    // process fails to back the canvas's texture and the page
+                    // goes with it. Its frames go as bytes instead.
+                    if (frames === 'bitmap' && /swiftshader/i.test(
+                        `${adapter.architecture} ${adapter.description}`))
+                    {
+                        frames = 'pixels';
+                    }
+                    scope.postMessage({ type: 'opened', adapter });
+                },
+                e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;
             case 'frames':
                 // The program's thread could not take a picture: from here on
