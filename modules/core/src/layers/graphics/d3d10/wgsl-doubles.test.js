@@ -334,3 +334,41 @@ test('dtof rounds to the nearest float, ftod, itod and utod are exact, dtoi and 
         sameDouble(word, helpers.dblFromUint(word), `utod(${word})`);
     }
 });
+
+test('the 64- and 128-bit integers under them are BigInt\'s: shifts, sticky shifts,'
+    + ' differences, leading zeros, the full product', ()=>{
+    const next = random(13);
+    /** @param {number[]} limbs low first */
+    const big = limbs=>limbs.reduceRight((sum, limb)=>(sum << 32n) | BigInt(limb >>> 0), 0n);
+    /** @param {bigint} value @param {number} count */
+    const limbsOf = (value, count)=>Array.from({ length: count },
+        (_, index)=>Number((value >> BigInt(32 * index)) & 0xffffffffn));
+    /** @param {bigint} value @param {number} count  value >> count, the bits lost or-ed in */
+    const jammed = (value, count)=>{
+        const kept = value >> BigInt(count);
+        return kept | ((kept << BigInt(count)) === value ? 0n : 1n);
+    };
+    const all64 = (1n << 64n) - 1n;
+    const all128 = (1n << 128n) - 1n;
+    for (let index = 0; index < CASES; index++)
+    {
+        // Runs of zeros make the leading zeros and the lost bits worth it.
+        const word = ()=>(next() % 4 === 0 ? 0 : next() >>> (next() % 32));
+        const a = [word(), word(), word(), word()];
+        const b = [word(), word(), word(), word()];
+        const s = next() % 140;
+        const [wide, other] = [big(a), big(b)];
+        const [narrow, short] = [big(a.slice(0, 2)), big(b.slice(0, 2))];
+        assert.deepEqual(helpers.u128ShrJam(a, s), limbsOf(jammed(wide, s), 4), `${wide} >> ${s}`);
+        assert.deepEqual(helpers.u128Shl(a, s % 128), limbsOf((wide << BigInt(s % 128)) & all128,
+            4), `${wide} << ${s % 128}`);
+        assert.equal(helpers.u128Clz(a), 128 - (wide === 0n ? 0 : wide.toString(2).length));
+        assert.deepEqual(helpers.u128Sub(a, b), limbsOf((wide - other) & all128, 4));
+        assert.deepEqual(helpers.u128Add(a, b), limbsOf((wide + other) & all128, 4));
+        assert.deepEqual(helpers.u64ShrJam(a.slice(0, 2), s), limbsOf(jammed(narrow, s), 2));
+        assert.deepEqual(helpers.u64Shl(a.slice(0, 2), s), limbsOf((narrow << BigInt(s)) & all64,
+            2));
+        assert.deepEqual(helpers.u64Wide(a.slice(0, 2), b.slice(0, 2)),
+            limbsOf(narrow * short, 4), `${narrow} * ${short}`);
+    }
+});

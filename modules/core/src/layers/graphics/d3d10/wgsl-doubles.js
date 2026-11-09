@@ -31,7 +31,9 @@ const lines = text=>text.trim().split('\n');
  */
 export const DOUBLE_HELPERS = Object.freeze({
     // 64-bit unsigned integers, vec2<u32>(low, high). A shift by 64 or more
-    // is zero; WGSL itself would take the count modulo 32.
+    // is zero; WGSL itself would take the count modulo 32. The shifts are
+    // straight-line, selects and no branches: the helpers are inlined at
+    // every call, and a GPU's compiler takes far longer over branches.
     u64: {
         needs: [],
         text: lines(`
@@ -49,34 +51,21 @@ fn u64Zero(a: vec2<u32>) -> bool {
     return a.x == 0u && a.y == 0u;
 }
 fn u64Shr(a: vec2<u32>, s: u32) -> vec2<u32> {
-    if (s == 0u) {
-        return a;
-    }
-    if (s >= 64u) {
-        return vec2<u32>(0u, 0u);
-    }
-    if (s >= 32u) {
-        return vec2<u32>(a.y >> (s - 32u), 0u);
-    }
-    return vec2<u32>((a.x >> s) | (a.y << (32u - s)), a.y >> s);
+    let k: u32 = s & 31u;
+    let high: u32 = a.y >> k;
+    let low: u32 = (a.x >> k) | ((a.y << 1u) << (31u - k));
+    return select(select(vec2<u32>(low, high), vec2<u32>(high, 0u), s >= 32u),
+        vec2<u32>(0u, 0u), s >= 64u);
 }
 fn u64Shl(a: vec2<u32>, s: u32) -> vec2<u32> {
-    if (s == 0u) {
-        return a;
-    }
-    if (s >= 64u) {
-        return vec2<u32>(0u, 0u);
-    }
-    if (s >= 32u) {
-        return vec2<u32>(0u, a.x << (s - 32u));
-    }
-    return vec2<u32>(a.x << s, (a.y << s) | (a.x >> (32u - s)));
+    let k: u32 = s & 31u;
+    let low: u32 = a.x << k;
+    let high: u32 = (a.y << k) | ((a.x >> 1u) >> (31u - k));
+    return select(select(vec2<u32>(low, high), vec2<u32>(0u, low), s >= 32u),
+        vec2<u32>(0u, 0u), s >= 64u);
 }
 fn u64Clz(a: vec2<u32>) -> u32 {
-    if (a.y != 0u) {
-        return countLeadingZeros(a.y);
-    }
-    return 32u + countLeadingZeros(a.x);
+    return select(32u + countLeadingZeros(a.x), countLeadingZeros(a.y), a.y != 0u);
 }
 fn u64ShrJam(a: vec2<u32>, s: u32) -> vec2<u32> {
     let kept: vec2<u32> = u64Shr(a, s);
@@ -85,14 +74,11 @@ fn u64ShrJam(a: vec2<u32>, s: u32) -> vec2<u32> {
     return vec2<u32>(kept.x | select(0u, 1u, lost), kept.y);
 }
 fn u64RoundShr(m: vec2<u32>, s: u32) -> vec2<u32> {
-    if (s > 64u) {
-        return vec2<u32>(0u, 0u);
-    }
     let q: vec2<u32> = u64Shr(m, s);
     let rest: vec2<u32> = u64Sub(m, u64Shl(q, s));
     let half: vec2<u32> = u64Shl(vec2<u32>(1u, 0u), s - 1u);
     let tie: bool = rest.x == half.x && rest.y == half.y;
-    let up: bool = u64Less(half, rest) || (tie && (q.x & 1u) == 1u);
+    let up: bool = s <= 64u && (u64Less(half, rest) || (tie && (q.x & 1u) == 1u));
     return select(q, u64Add(q, vec2<u32>(1u, 0u)), up);
 }
 fn u32Wide(a: u32, b: u32) -> vec2<u32> {
@@ -144,42 +130,31 @@ fn u128Zero(a: vec4<u32>) -> bool {
     return u64Zero(a.xy) && u64Zero(a.zw);
 }
 fn u128Clz(a: vec4<u32>) -> u32 {
-    if (!u64Zero(a.zw)) {
-        return u64Clz(a.zw);
-    }
-    return 64u + u64Clz(a.xy);
+    return select(64u + u64Clz(a.xy), u64Clz(a.zw), !u64Zero(a.zw));
 }
 fn u128Shl(a: vec4<u32>, s: u32) -> vec4<u32> {
-    if (s == 0u) {
-        return a;
-    }
-    if (s >= 128u) {
-        return vec4<u32>(0u, 0u, 0u, 0u);
-    }
-    if (s >= 64u) {
-        let high: vec2<u32> = u64Shl(a.xy, s - 64u);
-        return vec4<u32>(0u, 0u, high.x, high.y);
-    }
-    let low: vec2<u32> = u64Shl(a.xy, s);
-    let carried: vec2<u32> = u64Shr(a.xy, 64u - s);
-    let high: vec2<u32> = u64Shl(a.zw, s);
-    return vec4<u32>(low.x, low.y, high.x | carried.x, high.y | carried.y);
+    let whole: bool = s >= 64u;
+    let r: u32 = select(s, s - 64u, whole);
+    let low: vec2<u32> = select(a.xy, vec2<u32>(0u, 0u), whole);
+    let high: vec2<u32> = select(a.zw, a.xy, whole);
+    let shiftedLow: vec2<u32> = u64Shl(low, r);
+    let shiftedHigh: vec2<u32> = u64Shl(high, r);
+    let carried: vec2<u32> = u64Shr(low, 64u - r);
+    return vec4<u32>(shiftedLow.x, shiftedLow.y, shiftedHigh.x | carried.x,
+        shiftedHigh.y | carried.y);
 }
 fn u128ShrJam(a: vec4<u32>, s: u32) -> vec4<u32> {
-    if (s == 0u) {
-        return a;
-    }
-    if (s >= 128u) {
-        return vec4<u32>(select(0u, 1u, !u128Zero(a)), 0u, 0u, 0u);
-    }
-    if (s >= 64u) {
-        let low: vec2<u32> = u64ShrJam(a.zw, s - 64u);
-        return vec4<u32>(low.x | select(0u, 1u, !u64Zero(a.xy)), low.y, 0u, 0u);
-    }
-    let low: vec2<u32> = u64ShrJam(a.xy, s);
-    let carried: vec2<u32> = u64Shl(a.zw, 64u - s);
-    let high: vec2<u32> = u64Shr(a.zw, s);
-    return vec4<u32>(low.x | carried.x, low.y | carried.y, high.x, high.y);
+    let t: u32 = min(s, 128u);
+    let whole: bool = t >= 64u;
+    let r: u32 = select(t, t - 64u, whole);
+    let low: vec2<u32> = select(a.xy, a.zw, whole);
+    let high: vec2<u32> = select(a.zw, vec2<u32>(0u, 0u), whole);
+    let dropped: bool = whole && !u64Zero(a.xy);
+    let shiftedLow: vec2<u32> = u64ShrJam(low, r);
+    let carried: vec2<u32> = u64Shl(high, 64u - r);
+    let shiftedHigh: vec2<u32> = u64Shr(high, r);
+    return vec4<u32>(shiftedLow.x | carried.x | select(0u, 1u, dropped),
+        shiftedLow.y | carried.y, shiftedHigh.x, shiftedHigh.y);
 }
 `),
     },
@@ -201,29 +176,22 @@ fn dblZero(d: vec2<u32>) -> bool {
     return (d.y & 0x7fffffffu) == 0u && d.x == 0u;
 }
 fn dblRound(sign: u32, e: i32, m: vec2<u32>) -> vec2<u32> {
-    if (e >= 2047i) {
-        return vec2<u32>(0u, sign | 0x7ff00000u);
-    }
-    var shift: u32 = 11u;
-    var biased: i32 = e;
-    if (e <= 0i) {
-        shift = 11u + u32(min(1i - e, 64i));
-        biased = 1i;
-    }
+    let denormal: bool = e <= 0i;
+    let shift: u32 = select(11u, 11u + u32(min(1i - e, 64i)), denormal);
+    let biased: i32 = select(e, 1i, denormal);
     let r: vec2<u32> = u64RoundShr(m, shift);
-    return vec2<u32>(r.x, sign | ((u32(biased - 1i) << 20u) + r.y));
+    return select(vec2<u32>(r.x, sign | ((u32(biased - 1i) << 20u) + r.y)),
+        vec2<u32>(0u, sign | 0x7ff00000u), e >= 2047i);
 }
 fn dblUnpack(d: vec2<u32>) -> vec4<u32> {
     let sign: u32 = d.y & 0x80000000u;
     let field: u32 = (d.y >> 20u) & 0x7ffu;
     let fraction: vec2<u32> = vec2<u32>(d.x, d.y & 0xfffffu);
-    if (field != 0u) {
-        let m: vec2<u32> = u64Shl(vec2<u32>(fraction.x, fraction.y | 0x100000u), 11u);
-        return vec4<u32>(m.x, m.y, field, sign);
-    }
-    let lead: u32 = u64Clz(fraction);
-    let m: vec2<u32> = u64Shl(fraction, lead);
-    return vec4<u32>(m.x, m.y, bitcast<u32>(12i - i32(lead)), sign);
+    let normal: bool = field != 0u;
+    let lead: u32 = select(u64Clz(fraction), 11u, normal);
+    let m: vec2<u32> = u64Shl(vec2<u32>(fraction.x, fraction.y | select(0u, 0x100000u, normal)),
+        lead);
+    return vec4<u32>(m.x, m.y, select(bitcast<u32>(12i - i32(lead)), field, normal), sign);
 }
 `),
     },
@@ -260,22 +228,26 @@ fn dblAdd(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
         x = y;
         y = t;
     }
-    let e: i32 = bitcast<i32>(x.z);
+    var e: i32 = bitcast<i32>(x.z);
     let small: vec2<u32> = u64ShrJam(y.xy, u32(e - bitcast<i32>(y.z)));
+    var m: vec2<u32> = vec2<u32>(0u, 0u);
     if (x.w == y.w) {
-        let sum: vec2<u32> = u64Add(x.xy, small);
-        if (u64Less(sum, x.xy)) {
-            let halved: vec2<u32> = u64ShrJam(sum, 1u);
-            return dblRound(x.w, e + 1i, vec2<u32>(halved.x, halved.y | 0x80000000u));
+        m = u64Add(x.xy, small);
+        if (u64Less(m, x.xy)) {
+            m = u64ShrJam(m, 1u);
+            m = vec2<u32>(m.x, m.y | 0x80000000u);
+            e = e + 1i;
         }
-        return dblRound(x.w, e, sum);
+    } else {
+        m = u64Sub(x.xy, small);
+        if (u64Zero(m)) {
+            return vec2<u32>(0u, 0u);
+        }
+        let lead: u32 = u64Clz(m);
+        m = u64Shl(m, lead);
+        e = e - i32(lead);
     }
-    let difference: vec2<u32> = u64Sub(x.xy, small);
-    if (u64Zero(difference)) {
-        return vec2<u32>(0u, 0u);
-    }
-    let lead: u32 = u64Clz(difference);
-    return dblRound(x.w, e - i32(lead), u64Shl(difference, lead));
+    return dblRound(x.w, e, m);
 }
 `),
     },
@@ -351,7 +323,7 @@ fn dblDiv(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
     // a * b + c rounded once: the product exact in 128 bits, c added at its
     // place, the sum's top 64 bits rounded with the rest as the sticky bit.
     dblFma: {
-        needs: ['dblMul', 'u128'],
+        needs: ['dblCore', 'u128'],
         text: lines(`
 fn dblFma(a: vec2<u32>, b: vec2<u32>, c: vec2<u32>) -> vec2<u32> {
     let productSign: u32 = (a.y ^ b.y) & 0x80000000u;
@@ -374,12 +346,13 @@ fn dblFma(a: vec2<u32>, b: vec2<u32>, c: vec2<u32>) -> vec2<u32> {
         }
         return c;
     }
-    if (dblZero(c)) {
-        return dblMul(a, b);
-    }
     let x: vec4<u32> = dblUnpack(a);
     let y: vec4<u32> = dblUnpack(b);
-    let z: vec4<u32> = dblUnpack(c);
+    // A zero addend is placed far below the product, where it adds nothing.
+    var z: vec4<u32> = vec4<u32>(0u, 0u, bitcast<u32>(-2000i), 0u);
+    if (!dblZero(c)) {
+        z = dblUnpack(c);
+    }
     var big: vec4<u32> = u64Wide(x.xy, y.xy);
     var bigE: i32 = bitcast<i32>(x.z) + bitcast<i32>(y.z) - 1022i;
     var bigSign: u32 = productSign;
