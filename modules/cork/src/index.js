@@ -32,6 +32,7 @@ import { replaySlice } from './testing/differential.js';
 
 export {
     ownLayout, executorLayout, executorBytes, sharedLayout, basesOf, pagesFor, layoutId, Tables,
+    WINDOW, WIDE_WINDOWS, windowBits,
     tablesSize, blockFields, LOW_STATE, WRAP_SLACK, WRAP_WORD,
     STATE_BLOCK_SIZE, STATE_BLOCK_SIZE_64, stateBlockSize, PAGE,
 } from './runtime/layout.js';

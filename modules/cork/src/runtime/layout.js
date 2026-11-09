@@ -247,7 +247,8 @@ export const WRAP_SLACK = 2 * PAGE;
  * limit one subtraction makes rather than a constant built in two.
  *
  * @param {{ ramSize: number, hashSlots?: number, processors?: number,
- *     ramBase?: number, bits?: 32 | 64, tablesAt?: number, ramFloor?: number }} options
+ *     ramBase?: number, bits?: 32 | 64, tablesAt?: number, ramFloor?: number,
+ *     window?: number }} options
  *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
  *     `processors`: the process's executors, which `cpuid` says the machine has --
  *     a field only past one, so one processor's layout, and its translations, are
@@ -260,12 +261,18 @@ export const WRAP_SLACK = 2 * PAGE;
  *     `ramFloor`: a growing memory's (RAM at 0, a power of two up to `ramSize`, a power
  *     of two too): the RAM it always holds, and the mask an untested read is wrapped by
  *     then read from the process's word at `wrap` (`WRAP_WORD`), which the host sets to
- *     the RAM the memory holds now, less one, as it grows
+ *     the RAM the memory holds now, less one, as it grows;
+ *     `window`: long mode's address space, 4 GiB (the default), 8 or 16 GiB
+ *     (`wideLayout`)
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
-    ramBase = PAGE, bits = 32, tablesAt, ramFloor })
+    ramBase = PAGE, bits = 32, tablesAt, ramFloor, window = WINDOW })
 {
+    if (window !== WINDOW && (bits !== 64 || !WIDE_WINDOWS.includes(window)))
+    {
+        throw new Error(`cork: a window of ${window} bytes, not long mode's 4, 8 or 16 GiB`);
+    }
     if (tablesAt !== undefined && (tablesAt % PAGE !== 0 || tablesAt < 0))
     {
         throw new Error(`cork: tables at ${tablesAt}, not a page boundary`);
@@ -293,7 +300,8 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         {
             throw new Error('cork: long mode runs on one executor so far');
         }
-        return longLayout(state, ramBase, ramSize, hashSlots);
+        return window === WINDOW ? longLayout(state, ramBase, ramSize, hashSlots)
+            : wideLayout(window, ramSize, hashSlots);
     }
     const fields = {
         bits: /** @type {32} */ (32),
@@ -390,6 +398,44 @@ function longLayout(state, ramBase, ramSize, hashSlots){
     };
     return { ...fields, id: layoutId(fields) };
 }
+
+/** Long mode's address space unless a layout says otherwise: 4 GiB, RAM in the one memory. */
+export const WINDOW = 2 ** 32;
+
+/** The larger windows a process may be given (`wideLayout`). */
+export const WIDE_WINDOWS = Object.freeze([2 ** 33, 2 ** 34]);
+
+/**
+ * Long mode over a window of 8 or 16 GiB: the long layout's state block, with
+ * the guest's RAM in a memory of its own -- a `memory64` memory, the module's
+ * second (`ramMemory`), the guest's address 0 at its 0 -- and the state page
+ * and tables alone in the first, which translated code keeps addressing with
+ * 32 bits. The page flags, a byte per 4 KiB of the window, lie between the
+ * state page and the tables, which have room for 4 GiB's. As in 4 GiB, the
+ * window's last page is never RAM.
+ *
+ * @param {number} window @param {number} ramSize @param {number} hashSlots
+ * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
+ */
+function wideLayout(window, ramSize, hashSlots){
+    if (!(ramSize > 0 && ramSize <= window - 4096 && ramSize % 4096 === 0))
+    {
+        throw new RangeError(`cork: ${ramSize} bytes of RAM in a window of ${window}`);
+    }
+    /** @type {Record<string, any>} */
+    const fields = { ...longLayout(LOW_STATE, 0, 4096, hashSlots), ramSize, window,
+        ramMemory: 1, pageFlags: PAGE, tables: PAGE + window / 4096 };
+    delete fields.id;
+    return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
+}
+
+/**
+ * The bits of a layout's window: 32 for 4 GiB, 33 or 34 for a wide one. An
+ * access reaching `2 ** windowBits` faults (#GP).
+ *
+ * @param {{ window?: number }} layout
+ */
+export const windowBits = layout=>Math.log2(layout.window ?? WINDOW);
 
 /** The fields of a layout that lie in an executor's state page, each its own. */
 const STATE_FIELDS = Object.freeze(['regs', 'eip', 'previousIp', 'eflags', 'flagRecord',
@@ -511,7 +557,7 @@ export function executorLayout(layout, base, index = 1){
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function sharedLayout(layout){
-    if (layout.pageFlags !== undefined)
+    if (layout.codeRanges !== undefined)
     {
         throw new Error('layout: the shared layout is made from the first executor\'s');
     }
@@ -570,6 +616,10 @@ export function layoutId(fields){
  * @param {number} bytes  the tables' and what lies past them
  */
 export function pagesFor(layout, bytes){
+    if (layout.ramMemory !== undefined)
+    {
+        return Math.ceil((layout.tables + bytes) / PAGE);
+    }
     // A growing memory starts holding its floor's RAM and the slack past it.
     const floor = layout.ramFloor === undefined ? 0 : layout.ramFloor + WRAP_SLACK;
     return Math.ceil(Math.max(layout.tables + bytes, floor) / PAGE);
