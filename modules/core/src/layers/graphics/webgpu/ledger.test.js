@@ -53,3 +53,21 @@ test('the ledger weighs what is made, takes off what is destroyed, and names the
     assert.deepEqual(held.textures, { count: 0, bytes: 0 });
     assert.deepEqual(held.made, { buffers: 3, textures: 1, unweighed: 0 });
 });
+
+test('the ledger weighs labels by kind, their numbers taken out', ()=>{
+    const device = {
+        createBuffer: (/** @type {any} */ descriptor)=>({ descriptor, destroy(){} }),
+        createTexture: (/** @type {any} */ descriptor)=>({ descriptor, destroy(){} }),
+    };
+    const ledger = trackDevice(device);
+    for (const size of [1 << 20, 3 << 19, 1 << 21])
+    {
+        device.createBuffer({ label: `d3d10:buffer#${size}#0`, size, usage: 0x20 });
+    }
+    device.createBuffer({ label: 'd3d10:buffer#65536#1', size: 65536, usage: 0x20 });
+    device.createBuffer({ label: 'uniforms#0', size: 1 << 22, usage: 0x40 });
+    const held = ledger.diagnostics();
+    assert.deepEqual(held.heaviestBufferKinds, ['d3d10:buffer#N#N: 4 4.6 MB',
+        'uniforms#N: 1 4.0 MB']);
+    assert.equal(held.heaviestBuffers[0], 'uniforms#0: 1 4.0 MB', 'by label as before');
+});

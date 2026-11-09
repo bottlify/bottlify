@@ -126,6 +126,8 @@ export function serveGraphics(scope, deps){
     let lostWith = null;
     /** What the device holds, weighed (`ledger.js`). @type {ReturnType<typeof trackDevice> | null} */
     let ledger = null;
+    /** What the backend's dynamic buffers hold (`dynamicHeld`). @type {(() => any) | null} */
+    let heldBy = null;
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
      * Direct3D 8, 9, 10 and 11 device and OpenGL context here writes its next
@@ -466,6 +468,7 @@ export function serveGraphics(scope, deps){
         });
         const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
+        heldBy = ()=>backend.dynamicHeld();
         return { device, backend, adapter: {
             vendor: adapter.info?.vendor ?? '',
             architecture: adapter.info?.architecture ?? '',
@@ -618,7 +621,8 @@ export function serveGraphics(scope, deps){
             });
         }
         receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics(),
-            gpuMemory: ()=>ledger?.diagnostics() ?? null, times: ()=>latency.times() });
+            gpuMemory: ()=>(ledger ? { ...ledger.diagnostics(),
+                dynamic: heldBy?.() ?? null } : null), times: ()=>latency.times() });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,

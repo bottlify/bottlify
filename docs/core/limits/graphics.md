@@ -33,6 +33,8 @@
 - Shader model 5's doubles are exact (rounded to nearest, denormals kept) but worked out in
   integers, so much slower than floats. A shader's interfaces are translated for the class
   instances bound with it, but none can be made yet: `CreateClassInstance` answers `E_NOTIMPL`.
+  Direct3D 11.1's `msad` (masked sum of absolute differences) is not translated: a shader with it
+  is not drawn, and said.
 - `D3DX10CompileFromMemory` and `D3DX11CompileFromMemory` (and `...FromFile`) compile through
   the program's own `d3dcompiler_43.dll`; without one they answer `E_FAIL` with an error blob
   saying so. A program that ships its shaders compiled asks only for what its cache lacks.

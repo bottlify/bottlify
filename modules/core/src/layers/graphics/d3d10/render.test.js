@@ -2757,6 +2757,60 @@ function quadPatches(){
     return { gpu, device, context, shaders, divergences };
 }
 
+test('draws through the tessellator write their uniforms in place, a backing a frame: no'
+    + ' frame left one behind for each draw', async()=>{
+    const { gpu, device, context, divergences } = quadPatches();
+    /** @param {any} call */
+    const params = call=>/^d3d11:tessellation:params#/.test(call.descriptor.label);
+    for (let draw = 0; draw < 40; draw++)
+    {
+        context.Draw(3, 0);
+    }
+    const inFrame = gpu.of('createBuffer').filter(params).length;
+    assert.ok(inFrame <= 8,
+        `${inFrame} uniform backings for 40 draws of one frame, grown four times`);
+    for (let frame = 0; frame < 4; frame++)
+    {
+        context.Flush();
+        await device.idle();
+        for (let draw = 0; draw < 40; draw++)
+        {
+            context.Draw(3, 0);
+        }
+    }
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(divergences, []);
+    assert.deepEqual(gpu.errors, []);
+    // Flushes are no frames: the slots go on until a present, the buffer
+    // grown by doubling, never a backing a draw.
+    const made = gpu.of('createBuffer').filter(params).length;
+    assert.ok(made <= 10, `${made} uniform backings for 200 draws over five flushes`);
+    assert.equal(device.diagnostics().tessellation.draws, 200);
+});
+
+test('draws through a geometry shader write their uniforms in place, a backing a'
+    + ' frame', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    /** @type {{ shader?: any }} */
+    const out = {};
+    assert.equal(device.CreateGeometryShader(triangleGeometryShader(), out), S_OK);
+    device.GSSetShader(out.shader);
+    for (let draw = 0; draw < 40; draw++)
+    {
+        device.Draw(3, 0);
+    }
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    assert.deepEqual(h.divergences, []);
+    const made = h.gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        /^d3d11:geometry:params#/.test(call.descriptor.label)).length;
+    assert.ok(made <= 8, `${made} uniform backings for 40 draws of one frame, grown four times`);
+    assert.equal(device.diagnostics().geometry.draws, 40);
+});
+
 test('a draw through the tessellator is five compute passes and a draw of the domain shader'
     + ' over what they made, its count on the GPU', async()=>{
     const { gpu, device, context, divergences } = quadPatches();

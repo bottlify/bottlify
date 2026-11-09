@@ -229,9 +229,15 @@ export function createTessellation(services){
             }
             params = backend.createDynamicBuffer({ label: 'd3d11:tessellation:params',
                 size: Math.max(4 * bytes, 2 * (at + bytes)),
-                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, keep: false });
         }
-        const lock = params.lock(at, bytes, LockFlags.NONE);
+        // Each draw writes a slot no draw of the frame read: in place. The
+        // frame's first takes a backing of its own, the last frame's draws
+        // reading theirs until it is submitted -- where a lock that may
+        // overwrite read bytes renamed the whole buffer at every draw, and
+        // a load that drew for minutes before a submit kept every one.
+        const lock = params.lock(at, bytes, drawn === 0 ? LockFlags.DISCARD
+            : LockFlags.NOOVERWRITE);
         lock.data.fill(0);
         slots.forEach((words, slot)=>{
             if (words)

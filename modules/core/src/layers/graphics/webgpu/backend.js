@@ -397,6 +397,21 @@ export function createBackend(options){
     const unsubmitted = new Set();
     /** @type {Set<any>} */
     const touchedBuffers = new Set();
+    const dynamicHeld = ()=>{
+        const held = { buffers: 0, bytes: 0, shadowBytes: 0, spares: 0, spareBytes: 0,
+            sparesFreed: 0 };
+        for (const buffer of dynamicBuffers)
+        {
+            const { capacity, shadow, spares, sparesFreed } = buffer.held;
+            held.buffers++;
+            held.bytes += capacity;
+            held.shadowBytes += shadow;
+            held.spares += spares;
+            held.spareBytes += spares * capacity;
+            held.sparesFreed += sparesFreed;
+        }
+        return held;
+    };
     const touched = (/** @type {any} */ buffer)=>{
         touchedBuffers.add(buffer);
     };
@@ -1682,6 +1697,13 @@ export function createBackend(options){
         },
 
         /** @returns {any} */
+        /**
+         * What the dynamic buffers hold, summed: the live backings, the copies
+         * kept on the processor, the spare backings a rename left, and the
+         * spares given back.
+         */
+        dynamicHeld,
+
         diagnostics(){
             const snapshot = profiler.snapshot();
             return {
@@ -1692,6 +1714,7 @@ export function createBackend(options){
                 gpuPasses: gpuTimer.stats(),
                 uniforms: uniforms.stats(),
                 buffers: [...dynamicBuffers].map(buffer=>buffer.diagnostics()),
+                dynamic: dynamicHeld(),
                 frameOpen: !!(openFrame && !openFrame.ended),
                 // Cuts marked and not yet submitted: a number that only grows
                 // is a cut no frame will replay, and every backing retired

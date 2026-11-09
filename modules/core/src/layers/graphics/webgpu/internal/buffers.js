@@ -60,6 +60,15 @@ const COPY_SRC = 0x0004;
 export const UPLOAD_ALIGNMENT = 4;
 
 /**
+ * Frames submitted with no rename after which a buffer's spare backings go
+ * back to the GPU. A buffer renamed now and then -- its contents replaced
+ * while a draw still read them, once in a level's load -- kept a spare as
+ * large as itself for the rest of the run; one renamed every frame, a ring,
+ * reuses its spares long before this.
+ */
+export const SPARE_FRAMES = 30;
+
+/**
  * Grows a range to the alignment on both sides. Never inward: a byte the guest
  * wrote that falls outside the aligned range is a byte the GPU never sees.
  *
@@ -170,6 +179,9 @@ export function createDynamicBuffer(options){
     const touch = ()=>options.touched?.(self);
     let generation = 0;
     let renames = 0;
+    // The submits counted at the last rename, and the spares given back.
+    let renamedAt = 0;
+    let sparesFreed = 0;
     // What the uploads cost, for a report: each write is a trip to the GPU
     // process, and a rename without DISCARD resends the whole buffer.
     let writes = 0;
@@ -301,6 +313,7 @@ export function createDynamicBuffer(options){
         touch();
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
+        renamedAt = frames.submits;
         // Nothing has read the replacement yet.
         readIn = -1;
         reads = [];
@@ -323,12 +336,21 @@ export function createDynamicBuffer(options){
         get gpu(){
             return gpu;
         },
-        /** Whether a retired backing waits for its frame's submit to come back to the pool. */
+        /**
+         * Whether the frame's end has work for it: a retired backing waiting
+         * for its frame's submit to come back to the pool, or spares waiting
+         * to go back to the GPU.
+         */
         get retiring(){
-            return retired.length > 0;
+            return retired.length > 0 || available.length > 0;
         },
         get renames(){
             return renames;
+        },
+        /** What it holds: the live backing's bytes, its copy on the processor, its spares. */
+        get held(){
+            return { capacity, shadow: shadow.length, spares: available.length + retired.length,
+                sparesFreed };
         },
         size: options.size,
         label,
@@ -519,6 +541,15 @@ export function createDynamicBuffer(options){
                     retired.splice(index, 1);
                 }
             }
+            if (available.length > 0 && submits - renamedAt >= SPARE_FRAMES)
+            {
+                for (const spare of available)
+                {
+                    spare.destroy?.();
+                }
+                sparesFreed += available.length;
+                available.length = 0;
+            }
         },
 
         diagnostics(){
@@ -537,6 +568,8 @@ export function createDynamicBuffer(options){
                 locks,
                 wholeLocks,
                 pooled: available.length + retired.length,
+                capacity,
+                sparesFreed,
                 dirty: dirtyStart < 0 ? 0 : dirtyEnd - dirtyStart,
             };
         },
