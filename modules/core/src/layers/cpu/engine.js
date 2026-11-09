@@ -61,6 +61,8 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [window]     Long mode's address space when larger than 4 GiB: 8 or 16 GiB.
  * @property {number} [ramMemory]  Cork's own, with `window`: the module's memory that holds guest
  *     RAM, a `memory64` one (1), its address 0 the guest's; the state and tables stay in memory 0.
+ * @property {number} [codeBase]  Cork's own, with `window`: the 4 GiB block the process's code
+ *     lies in; the translator's instruction addresses are offsets in it.
  * @property {number} [staleSpan]  Cork's own, with `window`: the span the stores into code reached
  *     since the runtime last looked, as two quadwords (the first byte complemented, one past the
  *     last), in place of the tables' 32-bit one.

@@ -292,3 +292,33 @@ export function createPageTable(memory, layout, shared = null){
         },
     };
 }
+
+/**
+ * A page table as the translator sees a code block's pages (`codeBase`): its
+ * addresses and pages are offsets in the block, the table's the window's.
+ *
+ * @param {PageTable} pages @param {number} base  the block's first byte, a multiple of 4 GiB
+ * @returns {PageTable}
+ */
+export function codeBlockPages(pages, base){
+    if (base === 0)
+    {
+        return pages;
+    }
+    const first = base / GUEST_PAGE;
+    return {
+        set: (page, flag)=>pages.set(page + first, flag),
+        clear: (page, flag)=>pages.clear(page + first, flag),
+        get: page=>pages.get(page + first),
+        takeWritten: page=>pages.takeWritten(page + first),
+        markWrittenRange: (address, length)=>pages.markWrittenRange(address + base, length),
+        markCode: (address, length)=>pages.markCode(address + base, length),
+        clearCode: page=>pages.clearCode(page + first),
+        codeRange: page=>pages.codeRange(page + first),
+        markRange: (address, length, flag)=>pages.markRange(address + base, length, flag),
+        clearRange: (address, length, flag)=>pages.clearRange(address + base, length, flag),
+        staleAddress: ()=>pages.staleAddress() - base,
+        staleSize: ()=>pages.staleSize(),
+        clearStale: ()=>pages.clearStale(),
+    };
+}

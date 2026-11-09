@@ -88,12 +88,14 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
      * first time it is met (formed in the call: the runtime has no worker here).
      * @param {bigint} at
      */
-    const entryAt = at=>{
-        if (at >= 2n ** 32n)
+    // The translator's addresses are offsets in the code block (`codeBase`).
+    const codeBase = BigInt(layout.codeBase ?? 0);
+    const entryAt = (/** @type {bigint} */ at)=>{
+        if (at < codeBase || at - codeBase >= 2n ** 32n)
         {
             return -1;
         }
-        const address = Number(at);
+        const address = Number(at - codeBase);
         // Regions are compiled for the x87 stack's top they are entered with.
         const top = view().getUint8(layout.x87Top);
         const key = `${address}@${top}`;

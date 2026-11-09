@@ -423,7 +423,9 @@ export function addCodeHitHelper(m, layout, shared = false){
     // local 1: the page; local 2: the granule; local 3: the page's flags
     if (wide)
     {
-        b.localGet(0).i64const(12n).op(I64.shrU).op(I64.wrap).localSet(1);
+        // Inside the table whatever the address, as `pageIndex` keeps it.
+        b.localGet(0).i64const(12n).op(I64.shrU).op(I64.wrap).i32const(windowPagesMask(layout))
+            .op(I32.and).localSet(1);
     }
     else
     {
@@ -560,7 +562,7 @@ export function addWindowHitHelper(m, layout, spanHit){
         past(offset);
         if (wide)
         {
-            b.i64const(12n).op(I64.shrU).op(I64.wrap);
+            b.i64const(12n).op(I64.shrU).op(I64.wrap).i32const(windowPagesMask(layout)).op(I32.and);
         }
         else
         {
@@ -2424,7 +2426,10 @@ export function pageIndex(e, delta = 0){
     b.i32const(12).op(I32.shrU);
     if (e.guest !== null)
     {
-        b.localGet(e.guest.high).i64const(12n).op(I64.shrU).op(I64.wrap).op(I32.or);
+        // Inside the table whatever the address: one past the window faults on its own
+        // test, after its flags are read.
+        b.localGet(e.guest.high).i64const(12n).op(I64.shrU).op(I64.wrap)
+            .i32const(windowPagesMask(e.layout)).op(I32.and).op(I32.or);
     }
 }
 
@@ -2593,3 +2598,11 @@ export function spansOf(entries){
     }
     return out;
 }
+
+/**
+ * The page indices of a layout's window, less one: a wide window's page index
+ * is kept inside its flags by it (`pageIndex`).
+ *
+ * @param {{ window?: number }} layout
+ */
+const windowPagesMask = layout=>(layout.window ?? 2 ** 32) / 4096 - 1;

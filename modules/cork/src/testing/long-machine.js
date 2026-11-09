@@ -80,7 +80,9 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
         v8.setFlagsFromString('--experimental-wasm-memory64');
     }
     const layout = window === undefined ? ownLayout({ ramSize, ramBase: 0, bits: 64 })
-        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window });
+        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,
+            // The code area's 4 GiB block, which its code is translated in.
+            codeBase: Math.floor((CORPUS.codeAt + codeHigh) / 2 ** 32) * 2 ** 32 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
         tablesSize(layout) + (tiered ? WASM_INTERPRETER_AREA : 0)) });
     const ram = window === undefined ? undefined : memory64(window);
@@ -434,7 +436,8 @@ export function load(m, one){
     const disp = CORPUS.codeSize - 8 - (code.length + 6);
     ram.set([0xff, 0x25, disp & 0xff, disp >>> 8 & 0xff, disp >>> 16 & 0xff, disp >>> 24],
         codeAt + code.length);
-    new DataView(ram.buffer).setBigUint64(codeAt + CORPUS.codeSize - 8, BigInt(EXIT), true);
+    new DataView(ram.buffer).setBigUint64(codeAt + CORPUS.codeSize - 8,
+        BigInt(EXIT + (layout.codeBase ?? 0)), true);
     ram.set(fill(one.seed, CORPUS.dataSize), CORPUS.dataAt + high);
     // A register pointing into an area points into it where it lies.
     const moved = (/** @type {bigint} */ value)=>[[CORPUS.dataAt, CORPUS.dataSize, high],
@@ -503,7 +506,7 @@ export function run(m, translated, budget = 7){
             throw e;
         }
         state.syncOut();
-        fault = error.eip === EXIT ? 'exit'
+        fault = error.eip === EXIT + (layout.codeBase ?? 0) ? 'exit'
             : `${error.vector}@${(error.eip ?? 0) - CORPUS.codeAt - m.codeHigh}`;
     }
     const bytes = new Uint8Array(memory.buffer);
