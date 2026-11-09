@@ -27,10 +27,10 @@ const seconds = Number(process.argv[2] ?? 20);
 const minMs = Number(process.argv[3] ?? 50);
 const [wanted, nth] = (process.argv[4] ?? '').split('#');
 const { cdp, engineWorker, workers } = await connect();
-const worker = wanted
+const matching = wanted
     ? (await workers()).filter((/** @type {{ url: string }} */ one)=>one.url.includes(wanted))
-        [Math.max(1, Number(nth ?? 1)) - 1] ?? null
-    : await engineWorker();
+    : [];
+const worker = wanted ? matching[Math.max(1, Number(nth ?? 1)) - 1] ?? null : await engineWorker();
 if (!worker)
 {
     console.log('the page has no worker');
