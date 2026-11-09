@@ -677,7 +677,15 @@ export function createCpuModule(){
                         const cork = Object.fromEntries(Object.entries(hostConfig.cork)
                             .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
                                 && typeof value !== 'function'));
-                        if (cork.translators === 0)
+                        // Where the pool lends this process's executors workers
+                        // too (`executorTranslators`), each waits for its lend,
+                        // emitting on its own thread meanwhile, as the process's
+                        // own executor does.
+                        /** @type {{ add: (index: number, reach: any) => void,
+                         *     remove: (index: number) => void } | null} */
+                        const lending = cork.translators === 0
+                            ? config?.executorTranslators ?? null : null;
+                        if (cork.translators === 0 && lending === null)
                         {
                             cork.translators = 1;
                         }
@@ -688,7 +696,24 @@ export function createCpuModule(){
                             engineUrl: settings.engineUrl, bell,
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
-                            config: { ...hostConfig, cork } });
+                            config: { ...hostConfig, cork } }).then(remote=>{
+                            if (lending === null)
+                            {
+                                return remote;
+                            }
+                            lending.add(index, {
+                                lend: (/** @type {MessagePort} */ port,
+                                    /** @type {number} */ token)=>remote.lendTranslator(port, token),
+                                recall: (/** @type {number} */ token)=>remote.recallTranslator(token),
+                                demand: ()=>remote.translatedHere(),
+                            });
+                            const close = remote.close.bind(remote);
+                            remote.close = ()=>{
+                                lending.remove(index);
+                                return close();
+                            };
+                            return remote;
+                        });
                         const store = hostConfig.cork?.store ?? null;
                         if (config?.eagerExecutors === true)
                         {

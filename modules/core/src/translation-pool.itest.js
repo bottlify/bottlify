@@ -59,3 +59,55 @@ for (const concurrency of /** @type {const} */ ([1, 2]))
         assert.ok(pool.workers <= 2 * 2, `${pool.workers} workers, the ceiling perProcess × n`);
     });
 }
+
+/** @param {number} value @returns {number[]} */
+const u32 = value=>[
+    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
+];
+
+/** Two threads that each loop on their own, the program waiting for both. */
+async function twoLoops(){
+    const { assemble, buildExe } = await import('../../../tools/make-pe.mjs');
+    const WORKER_AT = 0x100;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess'] },
+        codeSize: 0x200,
+        data: { first: u32(0), second: u32(0) },
+        code: ({ iat, at, code })=>{
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            /** @param {string} slot */
+            const start = slot=>[0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(code(WORKER_AT)),
+                0x6a, 0x00, 0x6a, 0x00, ...call('CreateThread'), 0xa3, ...u32(at(slot))];
+            /** @param {string} slot */
+            const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+                ...call('WaitForSingleObject')];
+            const main = [...start('first'), ...start('second'), ...wait('first'),
+                ...wait('second'), 0x6a, 0x00, ...call('ExitProcess')];
+            const worker = assemble([
+                0xb9, ...u32(40_000_000), //               mov ecx, 40 M
+                0x31, 0xc0, //                             xor eax, eax
+                { label: 'loop' },
+                0x01, 0xc8, //                             add eax, ecx
+                0x49, { jump: 'jnz', to: 'loop' }, //      dec ecx
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //           xor eax, eax; ret 4
+            ]);
+            return [...main, ...new Array(WORKER_AT - main.length).fill(0xcc), ...worker];
+        },
+    });
+}
+
+test('a process\'s other executors are lent workers of the pool, as its own is, and open no'
+    + ' translator of their own', { timeout: 120000 }, async t=>{
+    const app = await createApp({ executable: await twoLoops(), cpu: { cores: 2, eager: true },
+        cork: { poolPerProcess: 2, poolCapacity: 2,
+            config: { worker: true, hotThreshold: 50 } } });
+    t.after(()=>app.dispose());
+    assert.equal(await app.run({ timeoutMs: 90000 }), 0);
+    const pool = app.translationPool();
+    const lentTo = new Set(pool.journal.filter((/** @type {any} */ one)=>one.kind === 'start')
+        .map((/** @type {any} */ one)=>one.process));
+    assert.ok([...lentTo].some(id=>id < 0),
+        `an executor was lent one: ${JSON.stringify(pool.journal)}`);
+    assert.ok(pool.workers <= 2, `${pool.workers} workers, the run's capacity`);
+});

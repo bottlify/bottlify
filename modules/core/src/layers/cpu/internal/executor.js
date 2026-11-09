@@ -32,7 +32,8 @@ async function openWorker(url){
     {
         const worker = new globalThis.Worker(url, { type: 'module' });
         return {
-            post: (/** @type {any} */ message)=>worker.postMessage(message),
+            post: (/** @type {any} */ message, /** @type {any[]} */ transfer = [])=>
+                worker.postMessage(message, transfer),
             onMessage: (/** @type {(data: any) => void} */ handler)=>worker.addEventListener(
                 'message', (/** @type {any} */ event)=>handler(event.data)),
             // The page's worker runs nothing more once terminated: there is no
@@ -43,7 +44,8 @@ async function openWorker(url){
     const { Worker } = await import('node:worker_threads');
     const worker = new Worker(url);
     return {
-        post: (/** @type {any} */ message)=>worker.postMessage(message),
+        post: (/** @type {any} */ message, /** @type {any[]} */ transfer = [])=>
+            worker.postMessage(message, transfer),
         onMessage: (/** @type {(data: any) => void} */ handler)=>worker.on('message', handler),
         terminate: async()=>{
             await worker.terminate();
@@ -145,6 +147,9 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     }
     const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
     const channel = channelOf(buffer);
+    // The milliseconds its translator emitted on its own thread, as it last
+    // wrote them: what a pool lending it a worker reads as a want.
+    const emittedHere = new Int32Array(new SharedArrayBuffer(4));
     const worker = await openWorker(workerUrl);
     /** @type {string | null} */
     let failed = null;
@@ -205,7 +210,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             }
         });
         worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
-            unbroken, store: store !== null, config: { ...config, executor: index } });
+            unbroken, store: store !== null, emittedHere: emittedHere.buffer,
+            config: { ...config, executor: index } });
     });
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);
@@ -435,6 +441,22 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 worker.post({ type: 'diagnostics', id });
             });
         },
+        /**
+         * A worker of the run's translation pool lent to this executor's
+         * translator: the port is its end of the worker's, the token names it
+         * when it is asked back.
+         *
+         * @param {MessagePort} port @param {number} token
+         */
+        lendTranslator(port, token){
+            worker.post({ type: 'translator', port, token }, [port]);
+        },
+        /** @param {number} token */
+        recallTranslator(token){
+            worker.post({ type: 'recall', token });
+        },
+        /** The milliseconds its translator emitted on its own thread, ever. */
+        translatedHere: ()=>Atomics.load(emittedHere, 0),
         /**
          * Ends the executor; resolved once its worker can no longer touch the
          * process's memory, which a later process may then be given.

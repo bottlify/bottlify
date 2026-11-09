@@ -36,6 +36,8 @@ import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
  * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
  * @property {boolean} [store]  the process answers for the run's translation store
+ * @property {SharedArrayBuffer} [emittedHere]  where it writes the milliseconds its
+ *     translator emitted on its own thread, read by a pool that lends it workers
  */
 
 /** How long the executor waits in place for the next slice before its event loop does. */
@@ -63,6 +65,40 @@ const FEED_MS = 1;
 
 /** The executor's host, once started. @type {any} */
 let running = null;
+/** Where the translator's own-thread milliseconds are written for the process. @type {Int32Array | null} */
+let emitted = null;
+/** Workers of the run's pool lent to this executor, by token. @type {Map<number, any>} */
+const lent = new Map();
+/** Lent before the translator was up. @type {any[]} */
+const lentWaiting = [];
+
+/**
+ * The translator's side of a worker the run's pool lent: the port's messages
+ * are the worker's, and giving it back tells the worker it is done here.
+ *
+ * @param {MessagePort} port
+ */
+const portTranslator = port=>({
+    post: (/** @type {any} */ message, /** @type {any[]} */ transfer)=>
+        port.postMessage(message, transfer),
+    onMessage: (/** @type {(data: any) => void} */ handler)=>{
+        if ('on' in port && typeof /** @type {any} */ (port).on === 'function')
+        {
+            /** @type {any} */ (port).on('message', handler);
+        }
+        else
+        {
+            port.onmessage = event=>handler(event.data);
+        }
+        port.start?.();
+    },
+    // A lent worker that dies is the pool's to see; the port says nothing.
+    onLost: ()=>{},
+    terminate: ()=>{
+        port.postMessage({ done: true });
+        port.close();
+    },
+});
 /** Its side of the channel's wakes and sleeps (`channelOf`), once started. @type {any} */
 let waits = null;
 
@@ -119,11 +155,18 @@ const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0
  * @param {ExecutorStart} start
  * @param {(message: any, transfer?: any[]) => void} send
  */
-async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroken, store }, send){
+async function serve(
+    { engineUrl, config, memory, channel: buffer, bell, unbroken, store, emittedHere }, send)
+{
     const engine = await import(engineUrl);
     const host = createCorkHost({ ...config, engine, memory,
         ...(store === true ? { cork: { ...config.cork, store: processStore(send) } } : {}) });
     running = host;
+    emitted = emittedHere ? new Int32Array(emittedHere) : null;
+    for (const adapter of lentWaiting.splice(0))
+    {
+        host.cork().attachTranslator?.(adapter);
+    }
     // This thread holds the guest's memory too (`gcNudge`, settled by the process).
     if (config.gcNudge)
     {
@@ -339,6 +382,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         const feedFrom = performance.now();
         host.cork().translatePending().catch(()=>{});
         spent.feedMs += performance.now() - feedFrom;
+        if (emitted !== null)
+        {
+            Atomics.store(emitted, 0, Math.round(host.cork().translatedHere?.() ?? 0));
+        }
     }
 }
 
@@ -357,6 +404,34 @@ function bind(listen, send){
         {
             storeAnswers.get(data.id)?.(data.bytes ?? null);
             storeAnswers.delete(data.id);
+        }
+        else if (data?.type === 'translator')
+        {
+            const adapter = portTranslator(data.port);
+            lent.set(data.token, adapter);
+            if (running === null)
+            {
+                lentWaiting.push(adapter);
+            }
+            else
+            {
+                running.cork().attachTranslator?.(adapter);
+            }
+        }
+        else if (data?.type === 'recall')
+        {
+            const adapter = lent.get(data.token);
+            lent.delete(data.token);
+            const waiting = lentWaiting.indexOf(adapter);
+            if (waiting >= 0)
+            {
+                lentWaiting.splice(waiting, 1);
+                adapter.terminate();
+            }
+            else if (adapter !== undefined)
+            {
+                running?.cork().detachTranslator?.(adapter);
+            }
         }
         else if (data?.type === 'diagnostics')
         {
