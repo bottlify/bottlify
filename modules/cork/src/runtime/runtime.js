@@ -1469,6 +1469,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         return changed;
     };
 
+    /** @param {any} record */
+    const sourcesOf = record=>
+        /** @type {{ start: number, bytes: Uint8Array }[]} */ (record.sources);
     /**
      * Bytes at `[address, address + size)` were written while code stood on
      * their pages. A region goes when a byte it was made from now differs:
@@ -1510,13 +1513,34 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             // their stores reach this one's regions only when it next looks
             // (`takeCodeWrites`), and keeping regions across that gap is not
             // yet judged by the executors' gate.
-            const whole = codeShared !== null || on === undefined || on.size === 0
-                || [...on].some(record=>record.sources === undefined);
-            /** @param {any} record */
-            const sourcesOf = record=>
-                /** @type {{ start: number, bytes: Uint8Array }[]} */ (record.sources);
-            const met = whole ? undefined
-                : [...on].filter(record=>sourcesMet(sourcesOf(record), address, end));
+            // Walked rather than copied: every host write into a watched page
+            // comes here, the arguments of every call into the guest among
+            // them, and a copy of the page's regions per write was garbage.
+            let whole = codeShared !== null || on === undefined || on.size === 0;
+            if (!whole && on !== undefined)
+            {
+                for (const record of on)
+                {
+                    if (record.sources === undefined)
+                    {
+                        whole = true;
+                        break;
+                    }
+                }
+            }
+            /** @type {any[] | undefined} */
+            let met;
+            if (!whole && on !== undefined)
+            {
+                met = [];
+                for (const record of on)
+                {
+                    if (sourcesMet(sourcesOf(record), address, end))
+                    {
+                        met.push(record);
+                    }
+                }
+            }
             // Into none of the page's regions' bytes: no translation is wrong
             // for it, and what is left to decide is whether the page stays
             // code. A store that changed what was there is data beside the

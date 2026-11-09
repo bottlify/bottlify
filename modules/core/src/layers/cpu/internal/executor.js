@@ -228,8 +228,17 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             to.set(from);
             return;
         }
-        to.set(from.subarray(0, counterAt));
-        to.set(from.subarray(counterAt + 4), counterAt + 4);
+        // The word kept by hand rather than two views made around it: this
+        // runs at every answer between executors, and the views were garbage.
+        const b0 = to[counterAt];
+        const b1 = to[counterAt + 1];
+        const b2 = to[counterAt + 2];
+        const b3 = to[counterAt + 3];
+        to.set(from);
+        to[counterAt] = b0;
+        to[counterAt + 1] = b1;
+        to[counterAt + 2] = b2;
+        to[counterAt + 3] = b3;
     };
 
     /**
