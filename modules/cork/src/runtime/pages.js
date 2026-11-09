@@ -117,11 +117,12 @@ export function createPageTable(memory, layout, shared = null){
     let flagView = new Uint8Array(0);
     let rangePairs = new Uint16Array(0);
     let words = new DataView(new ArrayBuffer(0));
+    // A wide window's tables cover its 8 or 16 GiB (`wideLayout`).
+    const windowPages = (layout.window ?? 2 ** 32) / GUEST_PAGE;
     const fresh = ()=>{
         const buffer = memory.buffer;
-        flagView = new Uint8Array(buffer, pageFlagsAt(layout),
-            Tables.PAGE_FLAGS_SIZE);
-        rangePairs = new Uint16Array(buffer, codeRangesAt(layout), 1 << 20);
+        flagView = new Uint8Array(buffer, pageFlagsAt(layout), windowPages);
+        rangePairs = new Uint16Array(buffer, codeRangesAt(layout), windowPages);
         words = new DataView(buffer);
     };
     const flags = ()=>{
@@ -149,10 +150,14 @@ export function createPageTable(memory, layout, shared = null){
     const GRANULE = Tables.CODE_GRANULE_SHIFT;
     const ramPages = Math.ceil(layout.ramSize / GUEST_PAGE);
     flags().fill(PageFlag.INACCESSIBLE, ramPages);
+    // A wide window's addresses run past 32 bits.
+    /** @type {(address: number) => number} */
+    const pageOf = layout.window === undefined ? address=>address >>> 12
+        : address=>Math.floor(address / GUEST_PAGE);
     /** @param {number} address @param {number} length */
     const pagesOf = (address, length)=>{
-        const first = address >>> 12;
-        const last = length > 0 ? (address + length - 1) >>> 12 : first;
+        const first = pageOf(address);
+        const last = length > 0 ? pageOf(address + length - 1) : first;
         return [first, last];
     };
     return {
@@ -259,13 +264,29 @@ export function createPageTable(memory, layout, shared = null){
             }
         },
         staleAddress(){
+            if (layout.staleSpan !== undefined)
+            {
+                return Number(~tableWords().getBigUint64(layout.staleSpan, true)
+                    & 0xffffffffffffffffn);
+            }
             return ~tableWords().getUint32(layout.tables + Tables.STALE_LOW, true) >>> 0;
         },
         staleSize(){
+            if (layout.staleSpan !== undefined)
+            {
+                const end = Number(tableWords().getBigUint64(layout.staleSpan + 8, true));
+                return end === 0 ? 0 : end - this.staleAddress();
+            }
             const end = tableWords().getUint32(layout.tables + Tables.STALE_END, true);
             return end === 0 ? 0 : (end - this.staleAddress()) >>> 0;
         },
         clearStale(){
+            if (layout.staleSpan !== undefined)
+            {
+                tableWords().setBigUint64(layout.staleSpan, 0n, true);
+                tableWords().setBigUint64(layout.staleSpan + 8, 0n, true);
+                return;
+            }
             tableWords().setUint32(layout.tables + Tables.STALE_LOW, 0, true);
             tableWords().setUint32(layout.tables + Tables.STALE_END, 0, true);
         },

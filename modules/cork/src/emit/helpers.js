@@ -52,7 +52,7 @@ export function defineHelpers(m, layout, shared = false){
     const f64ToBcd = addBcdHelper(m);
     const x87Invalid = addInvalidHelper(m, layout);
     const remainder = addRemainderHelper(m);
-    const spanHit = addSpanHitHelper(m, codeHit);
+    const spanHit = addSpanHitHelper(m, codeHit, layout.window !== undefined);
     const windowHit = addWindowHitHelper(m, layout, spanHit);
     return {
         materialise, f80ToF64, f64ToF80, round, codeHit, f64ToBcd, x87Invalid, remainder,

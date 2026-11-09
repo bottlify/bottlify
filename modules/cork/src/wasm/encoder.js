@@ -467,12 +467,21 @@ export class Body {
         {
             this.localSet(scratch);
         }
-        this.op(0xad).localGet(wide.high).op(0x84);
+        this.widenGuest();
         if (scratch >= 0)
         {
             this.localGet(scratch);
         }
         return wide.memory;
+    }
+
+    /**
+     * The i32 guest address on the stack as a wide window's i64 one, its high
+     * half put in (`guest`); as it is in 4 GiB. What a helper given a guest
+     * address takes in a wide window.
+     */
+    widenGuest(){
+        return this.guest === null ? this : this.op(0xad).localGet(this.guest.high).op(0x84);
     }
 
     unreachable(){

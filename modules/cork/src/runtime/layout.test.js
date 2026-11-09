@@ -37,7 +37,8 @@ for (const window of [8 * GiB, 16 * GiB])
         }
         assert.equal(pageFlagsAt(layout), PAGE);
         assert.equal(codeRangesAt(layout), PAGE + window / 4096, 'a flag byte per page');
-        assert.equal(layout.tables, PAGE + window / 4096 * 3, 'two granule bytes per page');
+        assert.equal(layout.staleSpan, PAGE + window / 4096 * 3, 'two granule bytes per page');
+        assert.equal(layout.tables, layout.staleSpan + PAGE);
         assert.equal(pagesFor(layout, tablesSize(layout)),
             Math.ceil((layout.tables + tablesSize(layout)) / PAGE), 'memory 0 holds no RAM');
         assert.equal(sharedLayout(layout).pageFlags, PAGE, 'the process\'s flags shared');

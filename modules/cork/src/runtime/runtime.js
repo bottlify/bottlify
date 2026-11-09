@@ -5182,7 +5182,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             // Looked at whatever the run left by: a rep that stored into code and
             // ran out of budget on a later page in bulk leaves by the budget, and
             // the run that finishes it stores no code of its own.
-            if (kind === 'stale' || view().getUint32(layout.tables + Tables.STALE_END, true) !== 0)
+            if (kind === 'stale' || pages.staleSize() !== 0)
             {
                 // Every page the run's stores into code reached, from the
                 // lowest of them to the highest.

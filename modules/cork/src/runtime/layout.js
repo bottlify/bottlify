@@ -412,8 +412,9 @@ export const WIDE_WINDOWS = Object.freeze([2 ** 33, 2 ** 34]);
  * and tables alone in the first, which translated code keeps addressing with
  * 32 bits. The page flags, a byte per 4 KiB of the window, and the pages' code
  * granules, two bytes per page, lie between the state page and the tables,
- * whose own have room for 4 GiB's. As in 4 GiB, the window's last page is
- * never RAM.
+ * whose own have room for 4 GiB's; past them, a page holding the span of
+ * code the stores since the runtime last looked reached (`staleSpan`), as
+ * quadwords. As in 4 GiB, the window's last page is never RAM.
  *
  * @param {number} window @param {number} ramSize @param {number} hashSlots
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
@@ -426,7 +427,7 @@ function wideLayout(window, ramSize, hashSlots){
     /** @type {Record<string, any>} */
     const fields = { ...longLayout(LOW_STATE, 0, 4096, hashSlots), ramSize, window,
         ramMemory: 1, pageFlags: PAGE, codeRanges: PAGE + window / 4096,
-        tables: PAGE + window / 4096 * 3 };
+        staleSpan: PAGE + window / 4096 * 3, tables: PAGE * 2 + window / 4096 * 3 };
     delete fields.id;
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }
