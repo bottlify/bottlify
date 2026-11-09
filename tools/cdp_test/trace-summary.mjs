@@ -63,7 +63,10 @@ for await (const line of lines)
 if (!inEvents)
 {
     const raw = JSON.parse(whole.join('\n'));
-    events.push(...Array.isArray(raw) ? raw : raw.traceEvents);
+    for (const event of Array.isArray(raw) ? raw : raw.traceEvents)
+    {
+        events.push(event);
+    }
 }
 /** @type {Map<string, string>} */
 const names = new Map();
