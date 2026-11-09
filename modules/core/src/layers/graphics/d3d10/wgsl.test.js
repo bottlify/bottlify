@@ -34,7 +34,9 @@ import {
     imul,
     immediateConstantBuffer, indexedBy, ineg, ishl, ishr, itof, l, ld, log, loop, lt, lu, mad, max,
     min, modified, mov, movc, mul, ne, not, nullDest, o, oDepth, or, passThroughVertexShader,
-    rasterizer, sampleInfo, samplePos, dclInputPsSgv,
+    rasterizer, sampleInfo, samplePos, dclInputPsSgv, lod, evalCentroid, evalSampleIndex,
+    evalSnapped, dclFunctionBody, dclFunctionTable, dclInterface, fcall, functionBody,
+    thisPointer,
     r, resinfo, ret, retcNz, roundNe, roundNi, rsq, s, sample, sampleCLz, sampleL, sincos,
     solidPixelShader, sqrt, t, udiv, ult, umax, umin, umul, ushr, utof, v, xor,
     atomicIadd, dclGlobalFlags, dclIndexRange, oMask, vCoverage, dclUavTyped, ldUavTyped,
@@ -388,7 +390,7 @@ test('a call that recurs, or names no label, is refused', ()=>{
     assert.deepEqual(translate([call(0), ret(), label(0), call(0)]).unsupported,
         ['a recursive call']);
     assert.deepEqual(translate([call(4)]).unsupported,
-        ['a call to label 4, which the program does not have']);
+        ['a call to l4, which the program does not have']);
 });
 
 // --- constant buffers and indexable temps ---
@@ -756,11 +758,11 @@ test('a sample and a load move by their immediate offset (test_texture, d3d11.c)
 });
 
 test('an instruction with no translation is named, and nothing plausible is emitted', ()=>{
-    const translated = translate([{ opcode: 108, operands: [r(0), r(1), t(0), s(0)] }],
+    const translated = translate([{ opcode: 213, operands: [r(0), r(1), r(2), r(3)] }],
         { declarations: TEXTURE });
-    assert.deepEqual(translated.unsupported, ['lod']);
+    assert.deepEqual(translated.unsupported, ['msad']);
     const vs = translateShader(/** @type {any} */ (parseDxbc(passThroughVertexShader())));
-    assert.ok(linkProgram(vs, translated).unsupported.includes('lod'),
+    assert.ok(linkProgram(vs, translated).unsupported.includes('msad'),
         'and the pair carries the refusal');
 });
 
@@ -1296,6 +1298,96 @@ test('a primitive\'s viewport index travels flat, and a drawing through one view
     assert.match(second.vertex, /@interpolate\(flat\) rtViewport: u32,/);
     assert.match(second.fragment,
         /if \(in\.rtViewport != 1u\) \{ discard; \}/);
+});
+
+test('lod is the longer footprint\'s log2 in texels of level 0 plus the sampler\'s bias: x held'
+    + ' to the levels, y not', ()=>{
+    /** @param {number} dimension @param {object} [options] */
+    const lodOf = (dimension, options)=>translate([lod(r(0), v(0), t(0, 'yxzw'), s(0))], {
+        declarations: [dclResource(0, dimension, RETURN_TYPE.FLOAT), dclSampler(0)], options });
+    const flat = lodOf(RESOURCE_DIMENSION.TEXTURE2D);
+    assert.deepEqual(flat.unsupported, []);
+    assert.equal(bodyOf(flat), [
+        `let held0 = ${F}(v0.xyzw);`,
+        'let held1 = dpdx(held0.xy) * vec2<f32>(textureDimensions(t0, 0));',
+        'let held2 = dpdy(held0.xy) * vec2<f32>(textureDimensions(t0, 0));',
+        'let held3 = 0.5 * log2(max(dot(held1, held1), dot(held2, held2)));',
+        `r0 = ${U}(vec4<f32>(clamp(held3, 0.0, f32(textureNumLevels(t0) - 1u)), held3,`
+            + ' 0.0, 0.0)).yxzw;',
+    ].join('\n'));
+    const biased = bodyOf(lodOf(RESOURCE_DIMENSION.TEXTURE2DARRAY, { samplerBias: { 0: -1 } }));
+    assert.match(biased, /dot\(held2, held2\)\)\) \+ bitcast<f32>\(3212836864u\);/);
+    assert.match(bodyOf(lodOf(RESOURCE_DIMENSION.TEXTURE1DARRAY)),
+        /held1 = vec2<f32>\(dpdx\(held0\.x\) \* f32\(textureDimensions\(t0, 0\)\.x\), 0\.0\);/);
+    assert.match(bodyOf(lodOf(RESOURCE_DIMENSION.TEXTURE3D)),
+        /held2 = dpdy\(held0\.xyz\) \* vec3<f32>\(textureDimensions\(t0, 0\)\);/);
+    const cube = lodOf(RESOURCE_DIMENSION.TEXTURECUBE);
+    assert.ok(cube.helpers.includes('cubeFaceSlope'));
+    assert.match(bodyOf(cube), new RegExp('held1 = cubeFaceSlope\\(held0\\.xyz, dpdx\\(held0'
+        + '\\.xyz\\)\\) \\* \\(0\\.5 \\* f32\\(textureDimensions\\(t0, 0\\)\\.x\\)\\);'));
+    assert.deepEqual(translate([lod(r(0), v(0), t(0), s(0))], { kind: SHADER_KIND.VERTEX,
+        declarations: [dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT)] })
+        .unsupported, ['lod outside a pixel shader']);
+});
+
+test('a cube\'s face slope is d(minor / major) on the longest axis, x before y before z', ()=>{
+    const text = HELPERS.cubeFaceSlope.text.join('\n');
+    assert.match(text, /return \(slid \* major - minor \* moved\) \/ \(major \* major\);/);
+    assert.match(text, /if \(a\.x >= a\.y && a\.x >= a\.z\) \{ major = c\.x; moved = d\.x;/);
+    assert.match(text, /else if \(a\.y >= a\.z\) \{ major = c\.y; moved = d\.y;/);
+});
+
+test('eval_* carry an input along its slopes to the sample or the snapped offset; the centroid'
+    + ' of a pixel drawn whole is its own value', ()=>{
+    assert.equal(emitted([evalCentroid(r(0), v(1, 'zyxw'))]), 'r0 = v1.zyxw;');
+    const indexed = translate([evalSampleIndex(r(0), v(1), r(2, 'xxxx'))]);
+    assert.equal(indexed.rasterizerSamples, true);
+    assert.ok(indexed.helpers.includes('samplePosition'));
+    assert.equal(bodyOf(indexed), [
+        `let held0 = ${F}(v1.xyzw);`,
+        'let held1 = samplePosition(rasterSamples, r2.xxxx.x);',
+        `r0 = ${U}(held0 + dpdx(held0) * held1.x + dpdy(held0) * held1.y);`,
+    ].join('\n'));
+    assert.match(emitted([evalSnapped(r(0), v(1), r(2))]),
+        /let held1 = vec2<f32>\(\(bitcast<vec4<i32>>\(r2\.xyzw\)\.xy << vec2<u32>\(28u\)\) >> vec2<u32>\(28u\)\) \/ 16\.0;/);
+    assert.match(bodyOf(translate([{ ...evalSnapped(r(0), v(1), r(2)), saturate: true }])),
+        /clamp\(held0 \+ dpdx\(held0\)/);
+    assert.deepEqual(translate([evalCentroid(r(0), v(1))], { kind: SHADER_KIND.VERTEX })
+        .unsupported, ['eval_centroid outside a pixel shader']);
+});
+
+test('fcall writes the body the bound instance\'s table names for the call site; this reads the'
+    + ' instance\'s words; a pointer array indexed at run time is a switch', ()=>{
+    // Two classes, two call sites each: ft0 = { fb0, fb1 }, ft1 = { fb2, fb3 };
+    // fp0 is one pointer, fp1 an array of two, both taking either class.
+    const declarations = [dclFunctionBody(0), dclFunctionBody(1), dclFunctionBody(2),
+        dclFunctionBody(3), dclFunctionTable(0, [0, 1]), dclFunctionTable(1, [2, 3]),
+        dclInterface(0, 1, 2, [0, 1]), dclInterface(1, 2, 2, [0, 1])];
+    const bodies = [ret(), functionBody(0), mov(r(0), l(0, 0, 0, 0)), ret(),
+        functionBody(1), mov(r(0), l(1, 1, 1, 1)), ret(), functionBody(2),
+        mov(r(0), thisPointer(0, 'yyyy')), ret(), functionBody(3), mov(r(0), thisPointer(2))];
+    /** @param {any[]} body @param {any} interfaces */
+    const linked = (body, interfaces)=>translate([...body, ...bodies],
+        { declarations, options: { interfaces } });
+    const instances = [{ table: 1, data: [5, 6, 7, 8] }, { table: 0, data: [9, 9, 9, 9] },
+        { table: 1, data: [1, 2, 3, 4] }];
+    const direct = linked([fcall(0, 0, 0), fcall(1, 1, 1)], instances);
+    assert.deepEqual(direct.unsupported, []);
+    // fp0 holds ft1: its site 0 is fb2, which reads this[0].y; fp1[1] is slot
+    // 2, ft1 again: site 1 is fb3, which reads this[2] whole.
+    assert.equal(bodyOf(direct), 'r0 = vec4<u32>(5u, 6u, 7u, 8u).yyyy;\n'
+        + 'r0 = vec4<u32>(1u, 2u, 3u, 4u).xyzw;');
+    const computed = bodyOf(linked([fcall(0, 1, 0, r(3, 'x'))], instances));
+    assert.equal(computed, ['switch (r3.xxxx.x) {', 'case 0u: {', 'r0 = vec4<u32>(0u, 0u, 0u, 0u);',
+        '}', 'case 1u: {', 'r0 = vec4<u32>(5u, 6u, 7u, 8u).yyyy;', '}', 'default: {}', '}']
+        .join('\n'));
+    const unbound = linked([fcall(0, 0, 0)], [null]);
+    assert.deepEqual([unbound.unsupported, unbound.unboundInterfaces, bodyOf(unbound)],
+        [[], [0], 'RET'], 'the call does nothing');
+    assert.deepEqual(linked([fcall(0, 0, 0)], undefined).unsupported,
+        ['an interface call, with no class instances given']);
+    assert.deepEqual(linked([fcall(0, 0, 0)], [{ table: 7, data: [0, 0, 0, 0] }]).unsupported,
+        ['class instance table 7 at slot 0, which its interface does not take']);
 });
 
 test('sampleinfo and samplepos read the rasterizer\'s sample count, fixed at link, or the'
