@@ -2824,6 +2824,30 @@ export function createRenderer(services){
     };
 
     /**
+     * What a shader reads as an empty texture says of the view bound: a
+     * buffer's, where the shader declares a texture, or a texture's in a
+     * format or shape the device did not make.
+     *
+     * @param {any} view
+     */
+    const unbackedView = view=>{
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view.GetResource(held);
+        const resource = held.resource;
+        resource?.release();
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view.GetDesc(described);
+        const format = described.desc?.Format ?? 'unknown';
+        return resource?.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
+            ? `a buffer's view (format ${format}) bound where the shader reads a texture is read`
+                + ' as an empty texture'
+            : `a texture this device did not make (view format ${format},`
+                + ` ${view.dimensionName ?? 'unknown shape'}) is read as an empty texture`;
+    };
+
+    /**
      * The bind group entries of one stage, from what the device has bound.
      *
      * @param {any} stage  The device's per-stage bindings.
@@ -2869,8 +2893,7 @@ export function createRenderer(services){
                 const gpu = view ? viewOf(view) : null;
                 if (view && !gpu)
                 {
-                    diverge('a shader resource view over a buffer, or over a texture this'
-                        + ' device could not back, is read as an empty texture');
+                    diverge(unbackedView(view));
                 }
                 if (gpu && !(ACCEPTS[entry.texture.sampleType] ?? []).includes(gpu.sampleType))
                 {

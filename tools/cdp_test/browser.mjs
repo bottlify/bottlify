@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -228,6 +228,9 @@ function start(browser, flags, headed = false, profileDir){
             // at idle priority: the engine waited for a core a quarter of the
             // time, and the frame times measured were the scheduler's.
             ...BACKGROUND_OFF,
+            // The browser's own log, its renderer's and GPU process's among
+            // it, into a file: what a crash of the page leaves nowhere else.
+            ...process.env.CDP_TEST_CHROME_LOG ? ['--enable-logging=stderr', '--v=0'] : [],
             ...flags,
             `--user-data-dir=${profileRoot}`,
             '--remote-debugging-port=0',
@@ -238,7 +241,12 @@ function start(browser, flags, headed = false, profileDir){
 
     let stderr = '';
     let browserWs = '';
+    const chromeLog = process.env.CDP_TEST_CHROME_LOG ?? '';
     proc.stderr.on('data', chunk=>{
+        if (chromeLog)
+        {
+            appendFileSync(chromeLog, chunk);
+        }
         stderr += chunk.toString();
         const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
         if (match)

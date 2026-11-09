@@ -734,7 +734,10 @@ export function listen(app, collected){
         app.on(name, (/** @type {any} */ payload)=>{
             if (collected.events.length < LIMITS.events)
             {
-                collected.events.push(`[${name}] ${JSON.stringify(payload).slice(0, 300)}`);
+                // An error is kept whole enough to read: its trace and the
+                // calls before it are what a child's failure leaves nowhere else.
+                collected.events.push(`[${name}] ${JSON.stringify(payload)
+                    .slice(0, name === 'error' ? 6000 : 300)}`);
             }
         });
     }
