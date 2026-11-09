@@ -2822,7 +2822,7 @@ test('a draw through a geometry shader past the room between the passes is drawn
     assert.ok(step > 0);
     assert.deepEqual(bases, runs.map((_, k)=>k * step), 'primitive ids go on run after run');
     assert.deepEqual(firsts, bases.map(base=>base * 3), 'each run starts at its vertices');
-    assert.equal(triangles - bases.at(-1) <= step, true, 'the last run ends the draw');
+    assert.equal(triangles - (bases.at(-1) ?? 0) <= step, true, 'the last run ends the draw');
     const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
         call.descriptor.code).find((/** @type {string} */ text)=>text.includes('geometryMain'));
     assert.match(code, /primitiveId = gsPrim \+ gsParams\.primitiveBase;/);

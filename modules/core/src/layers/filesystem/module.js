@@ -100,6 +100,7 @@ export function createFilesystemModule(){
 
         /**
          * @param {any} config
+         * @param {any} [host]  the module host, whose log is told what an export left out
          * @returns {Promise<any>}
          */
         async create(config, host){
@@ -999,6 +1000,14 @@ export function createFilesystemModule(){
 
                     if (entry.directory)
                     {
+                        // Into its own subtree it would never finish: each
+                        // name moved makes another under the one being moved.
+                        // Windows refuses it.
+                        if (locate(to).key.startsWith(`${locate(from).key}\\`))
+                        {
+                            throw fsError(ErrorCode.SHARING_VIOLATION,
+                                `${from} cannot be moved into itself, to ${to}`);
+                        }
                         this.createDirectory(to);
                         for (const child of this.list(from))
                         {

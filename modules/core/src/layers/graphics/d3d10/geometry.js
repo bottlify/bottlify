@@ -565,7 +565,8 @@ export function createGeometry(services){
      * @param {any} pipeline the device's state (`PipelineSnapshot`)
      * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
      *     indexCount?: number, startIndex?: number, baseVertex?: number,
-     *     startInstance?: number, indirect?: any, auto?: any }} draw
+     *     startInstance?: number, indirect?: any, auto?: any, cut?: any,
+     *     primitiveBase?: number, instanceBase?: number }} draw
      * @param {any} [tessellated]  the tessellator's passes before it (`tessellation.js`'s
      *     `prepare`), whose indices the geometry shader takes in place of the draw's
      * @returns {{ commands: any[], waits: Promise<any>[], gs: any,
