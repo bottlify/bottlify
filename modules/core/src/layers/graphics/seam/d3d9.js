@@ -69,7 +69,7 @@ import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, DISPLAY_MODE_FORMATS, EX_SURFACE_USAGE, PALETTE_BYTES }
     from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
-import { END_TOKEN } from '../d3d9/shader.js';
+import { shaderEnd } from './shader-tokens.js';
 import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, refreshRatesOf, registryMode }
     from '../../win32/user32/display.js';
 import { scanWindows } from '../../win32/common/scan-windows.js';
@@ -702,7 +702,7 @@ export function createDirect3D9Seam(
     const readTokens = pointer=>{
         /** @type {number[]} */
         const tokens = [];
-        let skip = 0;
+        const ends = shaderEnd();
         const windows = scanWindows({ readMemory: memory.windowMemory ?? memory.readMemory },
             pointer, 4);
         for (const piece of windows)
@@ -715,17 +715,7 @@ export function createDirect3D9Seam(
             for (const token of chunk)
             {
                 tokens.push(token);
-                if (skip > 0)
-                {
-                    skip--;
-                    continue;
-                }
-                if (tokens.length > 1 && (token & 0xffff) === 0xfffe)
-                {
-                    skip = (token >>> 16) & 0x7fff;
-                    continue;
-                }
-                if (token === END_TOKEN)
+                if (ends(token))
                 {
                     return Uint32Array.from(tokens);
                 }

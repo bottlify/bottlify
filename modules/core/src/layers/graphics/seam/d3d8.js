@@ -60,7 +60,7 @@ import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { PRESENTATION_INTERVALS, TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
-import { END_TOKEN } from '../d3d9/shader.js';
+import { shaderEnd } from './shader-tokens.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
     commandCode, compiledAt, createShadow, settledAfter, depthStencilMirror, renderTargetMirror,
@@ -1355,20 +1355,12 @@ export function createDirect3D8Seam(
     const readFunction = pointer=>{
         /** @type {number[]} */
         const tokens = [];
-        let skip = 0;
+        const ends = shaderEnd();
         while (tokens.length < MAX_SHADER_DWORDS)
         {
             const token = fields.readU32(pointer + tokens.length * 4);
             tokens.push(token);
-            if (skip > 0)
-            {
-                skip--;
-            }
-            else if (tokens.length > 1 && (token & 0xffff) === 0xfffe)
-            {
-                skip = (token >>> 16) & 0x7fff;
-            }
-            else if (token === END_TOKEN)
+            if (ends(token))
             {
                 return Uint32Array.from(tokens);
             }
