@@ -132,15 +132,15 @@ test('an immediate constant buffer is a customdata block with its own length', (
 });
 
 test('an unknown opcode is skipped by its length and named by its number', ()=>{
-    // Opcode 200 is beyond anything Shader Model 4 defines; length 3 with two
+    // Opcode 1000 is beyond anything Shader Model 5 defines; length 3 with two
     // dwords of whatever, then a mov that must still be found.
     const tokens = Uint32Array.from([
-        (3 << 24) | 200, 0xdeadbeef, 0xcafebabe,
+        (3 << 24) | 1000, 0xdeadbeef, 0xcafebabe,
         ...decodeAsTokens([mad(r(0), r(1), r(2), r(3)), ret()]),
     ]);
     const decoded = decodeSm4(tokens);
     assert.equal(decoded.length, 3);
-    assert.equal(decoded[0].name, 'opcode_200');
+    assert.equal(decoded[0].name, 'opcode_1000');
     assert.equal(decoded[1].opcode, OPCODE.MAD);
     assert.equal(decoded[1].operands.length, 4);
     assert.equal(decoded[2].opcode, OPCODE.RET);
@@ -155,6 +155,36 @@ test('an operand can be decoded on its own from any position', ()=>{
     const source = decodeOperand(tokens, next);
     assert.deepEqual(source.operand.immediate, [0x3e800000]);
     assert.equal(source.next, tokens.length);
+});
+
+test('fcall names its call site before its interface operand; class linkage declarations keep'
+    + ' their dwords', ()=>{
+    // fcall fp2[1][3], token by token: the opcode with its length, the call
+    // site, the operand (no components, type 19, two immediate indices).
+    const [call, table] = decodeSm4(new Uint32Array([0x05000078, 3, 0x00213000, 2, 1,
+        // dcl_function_table ft1 = { fb4, fb5 }
+        0x05000091, 1, 2, 4, 5]));
+    assert.equal(call.name, 'interface_call');
+    assert.equal(call.callSite, 3);
+    assert.equal(call.operands[0].type, OPERAND.INTERFACE);
+    assert.deepEqual(call.operands[0].indices.map(index=>index.value), [2, 1]);
+    assert.deepEqual(table.extra, [1, 2, 4, 5]);
+    assert.equal(table.operands.length, 0);
+});
+
+test('a double immediate of four components is two doubles, four dwords', ()=>{
+    // dmov r0.xyzw, d(1.0, 2.0); ret
+    const [move, after] = decodeSm4(new Uint32Array([0x080000c7, 0x001000f2, 0, 0x00005002,
+        0, 0x3ff00000, 0, 0x40000000, 0x0100003e]));
+    assert.equal(move.name, 'dmov');
+    assert.deepEqual(move.operands[1].immediate, [0, 0x3ff00000, 0, 0x40000000]);
+    assert.equal(after.opcode, OPCODE.RET);
+});
+
+test('the double opcodes are named, the extended set too', ()=>{
+    assert.equal(decodeSm4(new Uint32Array([0x010000bf]))[0].name, 'dadd');
+    assert.equal(decodeSm4(new Uint32Array([0x010000d2]))[0].name, 'ddiv');
+    assert.equal(decodeSm4(new Uint32Array([0x010000d9]))[0].name, 'utod');
 });
 
 /** @param {import('./shader-fixtures.js').AsmInstruction[]} instructions */

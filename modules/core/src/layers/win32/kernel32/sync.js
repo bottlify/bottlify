@@ -140,6 +140,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
  *   timeout note on WaitForMultipleObjects.
  * @property {(code: number) => void} [setLastError]
  * @property {() => Record<string, number>} [registers]  the running thread's
+ * @property {(values: Record<string, number>) => void} [setRegisters]  the running
+ *           thread's, where it goes on from (NtContinue)
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {import('./changes.js').WatchedVolume} [volume]
  *           The volume, for the directories a change notification watches;
@@ -614,6 +616,8 @@ export function createSyncFunctions(host){
             setLastError: host.setLastError,
             currentThread: host.currentThread,
             registers: host.registers,
+            setRegisters: host.setRegisters,
+            divergence: host.divergence,
             pointerSize: host.pointerSize,
             processId: host.processId,
             threadOf,
@@ -1118,6 +1122,38 @@ export function createSyncFunctions(host){
                 return writeTimes([creation, exit, kernelTime, userTime], child !== null
                     && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE),
                 child === null ? kernel.processCpuMs?.() ?? 0 : 0);
+            },
+        },
+
+        /**
+         * BOOL GetSystemTimes(LPFILETIME lpIdleTime, LPFILETIME lpKernelTime,
+         *     LPFILETIME lpUserTime)
+         *
+         * The machine's processor time since it started, summed over its
+         * processors: user time is what this process's threads ran, idle
+         * the rest, and kernel time includes the idle time, as Windows
+         * counts it. Each pointer may be null.
+         */
+        GetSystemTimes: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([idle, kernelTime, userTime])=>{
+                const total = kernel.clock.virtualTime() * processors.count();
+                const busy = Math.min(kernel.processCpuMs?.() ?? 0, total);
+                /** @param {number} address @param {number} ms */
+                const write = (address, ms)=>{
+                    if ((address >>> 0) !== 0)
+                    {
+                        const bytes = new Uint8Array(8);
+                        new DataView(bytes.buffer).setBigUint64(0,
+                            BigInt(Math.round(ms * 10000)), true);
+                        host.writeMemory(address >>> 0, bytes);
+                    }
+                };
+                write(idle, total - busy);
+                write(kernelTime, total - busy);
+                write(userTime, busy);
+                return 1;
             },
         },
 

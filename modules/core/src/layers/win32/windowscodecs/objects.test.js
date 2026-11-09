@@ -327,3 +327,9 @@ test('the factory is a COM class, and what is not provided is refused and said',
         WINCODEC.COMPONENTNOTFOUND);
     assert.ok(t.said.some(s=>s.startsWith('IWICImagingFactory::CreateEncoder')));
 });
+
+test('IWICBitmapSource\'s methods pop `this` and their pointers: GetResolution two double *',
+    ()=>{
+        assert.deepEqual(INTERFACES.IWICBitmapSource.methods, [['GetSize', 12],
+            ['GetPixelFormat', 8], ['GetResolution', 12], ['CopyPalette', 8], ['CopyPixels', 20]]);
+    });

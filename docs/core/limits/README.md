@@ -44,6 +44,10 @@ event, an error. Neither stops the program.
   `CreateApplicationContext` are refused (`E_NOTIMPL`) and said.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
+- The WebBrowser control (ieframe, shdocvw) is there without an HTML engine
+  (`roadmap/decisions.md` A240): a program embeds it, navigates and hears its events, but the
+  page is not drawn and has no document; each address not drawn is said once as a loss. The
+  InternetExplorer application object is not there.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.
@@ -74,6 +78,20 @@ event, an error. Neither stops the program.
 
 - Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
   never do.
+
+## Accessibility
+
+- No UI Automation client runs beside a program (no screen reader, no test driver): in
+  `UIAutomationCore.dll`, clients are never listening, events raised reach nobody, a window
+  answers `WM_GETOBJECT` for UI Automation with nothing, and the provider a window is hosted
+  with knows only its handle. Identifiers are answered by GUID for properties, patterns, events
+  and control types; text attributes, landmarks, annotations, changes and styles answer 0.
+
+## Displays
+
+- The one display monitor is one physical monitor (`dxva2`'s monitor configuration API), a
+  "Generic PnP Monitor" with no DDC/CI: its brightness, contrast and other settings cannot be
+  read or set (`ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA`).
 
 ## Network
 

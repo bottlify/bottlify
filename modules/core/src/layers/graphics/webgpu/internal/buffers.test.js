@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LockFlags, alignOutward, carriedRanges, createDynamicBuffer } from './buffers.js';
+import { LockFlags, SPARE_FRAMES, alignOutward, carriedRanges, createDynamicBuffer }
+    from './buffers.js';
 import { createFakeDevice } from './fake-device.js';
 
 /** @param {number} size @param {number} [alignment] */
@@ -175,6 +176,35 @@ test('retired buffers come back after a frame boundary instead of allocating for
     fill(dynamic, 0, 16, LockFlags.DISCARD);
     assert.equal(gpu.count('createBuffer'), 2, 'the retired buffer was reused');
     assert.equal(dynamic.gpu, first);
+});
+
+test('a spare a rename left goes back to the GPU once the buffer has not renamed for a while,'
+    + ' and a ring keeps its spares', ()=>{
+    const { gpu, dynamic } = buffer(4096);
+    const first = dynamic.gpu;
+    fill(dynamic, 0, 16, LockFlags.DISCARD);
+    dynamic.endFrame();
+    assert.equal(dynamic.held.spares, 1, 'the retired backing is pooled');
+    assert.equal(dynamic.retiring, true, 'the frame end keeps visiting it while it has a spare');
+    for (let frame = 2; frame < SPARE_FRAMES; frame++)
+    {
+        dynamic.endFrame();
+    }
+    assert.equal(dynamic.held.spares, 1, 'kept while a rename may still come');
+    dynamic.endFrame();
+    assert.deepEqual({ ...dynamic.held }, { capacity: 4096, shadow: 4096, spares: 0,
+        sparesFreed: 1 });
+    assert.equal(gpu.of('destroy').at(-1).buffer, first, 'the spare is the backing destroyed');
+    assert.equal(dynamic.retiring, false);
+
+    const ring = buffer(4096).dynamic;
+    for (let frame = 0; frame < SPARE_FRAMES * 3; frame++)
+    {
+        fill(ring, 0, 16, LockFlags.DISCARD);
+        ring.endFrame();
+    }
+    assert.equal(ring.held.sparesFreed, 0, 'a buffer renamed every frame keeps its spare');
+    assert.equal(ring.held.spares, 1);
 });
 
 test('a buffer in flight this frame is not recycled into itself', ()=>{

@@ -121,6 +121,8 @@ const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022 | 0;
 
 /** DXGI_RESIDENCY_FULLY_RESIDENT. */
 const DXGI_RESIDENCY_FULLY_RESIDENT = 1;
+/** DXGI_PRESENT_TEST: a present that only asks whether it would be shown. */
+const DXGI_PRESENT_TEST = 0x1;
 
 // --- structures, by offset ---
 
@@ -1766,7 +1768,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             return handBack(device, deviceInterfaces, id, out);
         },
         /** @param {any} swapChain @param {number[]} args */
-        Present: (swapChain, [interval, flags])=>swapChain.Present(interval >>> 0, flags >>> 0),
+        Present: (swapChain, [interval, flags])=>presented(swapChain,
+            swapChain.Present(interval >>> 0, flags >>> 0), flags >>> 0),
         /** @param {any} swapChain @param {number[]} args */
         GetBuffer: (swapChain, [index, guid, out])=>{
             const id = readGuid(memory, guid);
@@ -1895,7 +1898,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         },
         // Dirty rectangles and scrolling only say what changed: the whole is shown.
         /** @param {any} swapChain @param {number[]} args */
-        Present1: (swapChain, [interval, flags])=>swapChain.Present(interval >>> 0, flags >>> 0),
+        Present1: (swapChain, [interval, flags])=>presented(swapChain,
+            swapChain.Present(interval >>> 0, flags >>> 0), flags >>> 0),
         /** @param {any} swapChain */
         IsTemporaryMonoSupported: swapChain=>(swapChain.IsTemporaryMonoSupported() ? 1 : 0),
         /** @param {any} swapChain @param {number[]} args */
@@ -2013,6 +2017,45 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     /** The device each swap chain presents for, for `GetDevice`. */
     /** @type {WeakMap<object, any>} */
     const swapChainDevices = new WeakMap();
+    /**
+     * The window the last swap chain that showed a frame presents into, and
+     * whether it is full screen: what the screen shows there is that frame,
+     * not the window's own surface (`presentedWindow`). Null until one has.
+     *
+     * @type {{ window: number, fullscreen: boolean } | null}
+     */
+    let presentedInto = null;
+    /**
+     * A present's answer, the window it showed in remembered: one that only
+     * tests (DXGI_PRESENT_TEST) or failed shows nothing. A present held until
+     * the GPU takes the frame answers later, and is remembered then.
+     *
+     * @template {number | Promise<number>} T
+     * @param {any} swapChain @param {T} answer @param {number} flags
+     * @returns {T}
+     */
+    const presented = (swapChain, answer, flags)=>{
+        /** @param {number} hr */
+        const shown = hr=>{
+            /** @type {{ desc?: any }} */
+            const held = {};
+            if (hr >= 0 && (flags & DXGI_PRESENT_TEST) === 0 && swapChain.GetDesc?.(held) >= 0
+                && held.desc)
+            {
+                presentedInto = { window: held.desc.outputWindow >>> 0,
+                    fullscreen: !held.desc.windowed };
+            }
+        };
+        if (answer instanceof Promise)
+        {
+            answer.then(shown, ()=>{});
+        }
+        else
+        {
+            shown(/** @type {number} */ (answer));
+        }
+        return answer;
+    };
 
     // --- resources ---
 
@@ -4963,6 +5006,12 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     };
 
     return {
+        /**
+         * The window the last swap chain presented a frame into and whether
+         * it is full screen, or null: full screen, or windowed over the whole
+         * screen, its frames are the screen.
+         */
+        presentedWindow: ()=>presentedInto,
         deviceInterfaces,
         swapChainInterfaces,
         factoryInterfaces,

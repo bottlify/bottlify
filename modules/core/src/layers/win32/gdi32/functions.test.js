@@ -2976,3 +2976,22 @@ test('EnumFonts names a face as EnumFontFamilies names a family, in either width
     assert.equal(await narrow.fns.EnumFontsA.handler([narrow.hdc, 0, ENUMPROC, 0]), 1);
     assert.ok(narrow.seen.map(one=>one.face).includes('Times New Roman'), 'no name: every face');
 });
+
+test('GdiEntry13 (DdQueryDisplaySettingsUniqueness) moves when the display mode does', ()=>{
+    const memory = fakeMemory();
+    const screen = { width: 800, height: 600, bitsPerPixel: 32 };
+    const { table } = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        screen,
+    });
+    const first = table.GdiEntry13.handler();
+    assert.equal(table.GdiEntry13.handler(), first, 'the same mode, the same number');
+    screen.width = 1024;
+    screen.height = 768;
+    assert.notEqual(table.GdiEntry13.handler(), first);
+});

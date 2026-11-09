@@ -35,7 +35,7 @@ export const INTERFACES = {
     IWICBitmapSource: {
         iid: '{00000120-A8F2-4877-BA0A-FD2B6645FB94}', base: 'IUnknown',
         methods: [
-            ['GetSize', 12], ['GetPixelFormat', 8], ['GetResolution', 20], ['CopyPalette', 8],
+            ['GetSize', 12], ['GetPixelFormat', 8], ['GetResolution', 12], ['CopyPalette', 8],
             ['CopyPixels', 20]
         ] },
     IWICBitmapLock: {

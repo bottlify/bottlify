@@ -70,13 +70,15 @@ import { createMessageQueue } from './user32/messages.js';
 import { KEY_OF_HANDLE, createRegistryFunctions } from './advapi32/functions.js';
 import { RECORD_SECURITY } from './advapi32/named-security.js';
 import {
-    ADMINISTRATORS_SID, USER_SID_TEXT, RECORD_OBJECT_SECURITY, createTokenFunctions, isTokenMember,
+    ADMINISTRATORS_SID, USER_SID_TEXT, RECORD_OBJECT_SECURITY, accountNamed, createTokenFunctions,
+    isTokenMember,
 } from './advapi32/tokens.js';
 import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
-    DIRECTX_RELEASES, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, REG_EXPAND_SZ,
-    REG_SZ, createHive, shellFolderDirectories, shellFolders,
+    DIRECTX_RELEASES, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+    MACHINE_ENVIRONMENT, REG_EXPAND_SZ, REG_SZ, createHive, shellFolderDirectories,
+    shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -123,6 +125,7 @@ import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
 import { createUrlMonikers } from './urlmon/monikers.js';
+import { createIeframe } from './ieframe/functions.js';
 import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
 import { createOleaccFunctions } from './oleacc/functions.js';
@@ -176,6 +179,9 @@ import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 import { createMfplatFunctions } from './mfplat/functions.js';
+import { createUiaFunctions } from './uiautomationcore/functions.js';
+import { createDxva2Functions } from './dxva2/functions.js';
+import { PRIMARY_MONITOR } from './user32/system.js';
 import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
     from './mfreadwrite/functions.js';
 import { createPropsysFunctions } from './propsys/functions.js';
@@ -265,6 +271,7 @@ const EXCEPTION_NONCONTINUABLE = 1;
 
 /** A path as GetModuleFileNameA writes one: MAX_PATH characters and the terminator. */
 const MAX_PATH_BYTES = 261;
+const ERROR_LOGON_FAILURE = 1326;
 
 /** How many refused file opens a report names, the latest. */
 const REFUSED_OPENS_KEPT = 32;
@@ -517,6 +524,7 @@ export function createWin32Module(){
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
              *     objects?: any, fileSecurity?: Map<string, any>,
              *     processTables?: Map<number, any>,
+             *     pipes?: import('./kernel32/pipes.js').PipesAcross,
              *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')
              *         .createSharedViews> } | null} */
             const system = config?.system ?? null;
@@ -604,6 +612,8 @@ export function createWin32Module(){
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
+            /** Whether CreateProcessWithLogonW has said it checks no password. */
+            let loggedOnSaid = false;
             /**
              * Each thread's error information: oleaut32's SetErrorInfo and
              * GetErrorInfo, and a call between processes handing a failure
@@ -1145,6 +1155,8 @@ export function createWin32Module(){
                 // A process in a worker of its own holds stand-ins of the
                 // run's objects, never the objects a pipe's ends are.
                 remote: Boolean(system?.objects),
+                // Where the ends its parent started it with are served, then.
+                across: system?.pipes ?? null,
                 processId,
                 completed: (file, transferred, overlapped, status, skip)=>
                     ports.completed(file, transferred, overlapped, status, skip),
@@ -1534,6 +1546,62 @@ export function createWin32Module(){
                 /** @param {any} thread */
                 park: thread=>bridge.park(thread),
             });
+
+            /**
+             * A thread of the program's that runs work the host hands it, in
+             * turn: a D3DX thread pump's IO and processing stages, which call
+             * the program's loaders and processors from threads that are not
+             * the caller's, as D3DX's own threads do. Each job is a host
+             * routine on that thread, free to call guest code there.
+             *
+             * @param {string} name
+             */
+            const serviceThread = name=>{
+                const notices = createNoticeThread({
+                    name,
+                    reason: `${name} work`,
+                    trap: `<${name}>`,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    writeMemory,
+                    register: (trapName, fn)=>bridge.register(trapName, fn),
+                    /** @param {{ entry: number, name: string }} options */
+                    createThread: options=>{
+                        const thread = kernel.createThread(options);
+                        threadMade(thread);
+                        return thread;
+                    },
+                    currentThread: ()=>kernel.currentThread(),
+                    /** @param {any} thread @param {string} reason */
+                    block: (thread, reason)=>kernel.block(thread, reason),
+                    /** @param {any} thread @param {number} result */
+                    wake: (thread, result)=>kernel.wake(thread, result),
+                    /** @param {any} thread */
+                    park: thread=>bridge.park(thread),
+                });
+                return {
+                    /** @param {(thread: any) => Promise<void>} job */
+                    run: job=>{
+                        const id = nextServiceJob++;
+                        serviceJobs.set(id, job);
+                        serviceJobStub ||= bridge.register('<service-job>', {
+                            argBytes: 4,
+                            /** @param {number[]} args */
+                            handler: ([at])=>{
+                                const owed = serviceJobs.get(at >>> 0);
+                                serviceJobs.delete(at >>> 0);
+                                return owed ? owed(kernel.currentThread()).then(()=>0) : 0;
+                            },
+                        });
+                        notices.deliver(serviceJobStub, [id]);
+                    },
+                };
+            };
+            /** The jobs handed to service threads and not yet run, by number. */
+            /** @type {Map<number, (thread: any) => Promise<void>>} */
+            const serviceJobs = new Map();
+            let nextServiceJob = 1;
+            let serviceJobStub = 0;
 
             // Multimedia timers fire on a thread of their own, like the notices
             // above, but the kernel's clock is what wakes it.
@@ -2033,6 +2101,25 @@ export function createWin32Module(){
                 callerThread: ()=>bridge.callerThread(),
             };
             registerDplayClasses(com, dplayHost);
+
+            // Internet Explorer's WebBrowser control, which WPF's and Windows
+            // Forms' WebBrowser embed (ieframe/): made, sited, activated and
+            // navigated, with no HTML engine to draw the page.
+            const ieframe = createIeframe({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory,
+                callGuest: call=>bridge.callGuest(call),
+                callerThread: ()=>kernel.currentThread(),
+                system: (library, name, args, thread)=>{
+                    const entry = libraries[library]?.[name];
+                    if (!entry)
+                    {
+                        return null;
+                    }
+                    return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                        : entry.handler(args);
+                },
+                divergence: config?.divergence,
+            });
 
             /** @param {string} text  NUL-ended UTF-16LE */
             const wideText = text=>{
@@ -2675,6 +2762,7 @@ export function createWin32Module(){
                         setLastError: setError,
                         registers: ()=>Object.fromEntries([...registerNames, 'eflags']
                             .map(name=>[name, cpuRegisters.read(name)])),
+                        setRegisters,
                         divergence: config?.divergence,
                     }),
                     ...createLocaleFunctions({
@@ -3610,9 +3698,19 @@ export function createWin32Module(){
                 // embeds a browser or fetches with the system's identity.
                 'urlmon.dll': {
                     ...createUrlmonFunctions({ windows: windows.name,
+                        divergence: config?.divergence,
                         readU32: address=>memory.readU32(address),
                         writeU32: (address, value)=>memory.writeU32(address, value),
-                        writeMemory }),
+                        writeMemory, readMemory,
+                        // INTERNET_MAX_URL_LENGTH characters, in bytes.
+                        readWideString: address=>readWideString(address, 2084 * 2),
+                        allocate: bytes=>heap.allocate(bytes),
+                        contentType: extension=>{
+                            const key = hive.open(hive.root(HKEY_CLASSES_ROOT), extension);
+                            const value = key ? hive.getValue(key, 'Content Type') : null;
+                            return value ? new TextDecoder('utf-16le').decode(value.data)
+                                .replace(/\0[^]*$/, '') || null : null;
+                        } }),
                     // A control that loads its content by URL - Flash Player
                     // names its movie so even on the local disk.
                     ...createUrlMonikers({
@@ -3968,6 +4066,7 @@ export function createWin32Module(){
                         callGuest: call=>bridge.callGuest(call),
                         drive: steps=>bridge.drive(steps),
                         currentThread: ()=>kernel.currentThread(),
+                        serviceThread,
                         // The FromFile and FromResource functions read the same
                         // volume and modules the program does; SaveToFile writes it.
                         readFile: async path=>{
@@ -4264,9 +4363,22 @@ export function createWin32Module(){
                         glyph: (code, font)=>config?.graphics?.glyph?.(code, font) ?? null,
                     },
                     gdi: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0 }),
+                // The monitor configuration API: one physical monitor, no DDC/CI.
+                'dxva2.dll': createDxva2Functions({ readMemory, writeMemory,
+                    setLastError: setError, isMonitor: monitor=>monitor === PRIMARY_MONITOR }),
+                // UI Automation's core, which WPF's automation peers register
+                // their identifiers with and raise events to (uiautomationcore/).
+                'UIAutomationCore.dll': createUiaFunctions({ readMemory, writeMemory,
+                    vtables: comVtables,
+                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1,
+                    divergence: config?.divergence }),
                 // The Windows Imaging Component, which .NET's WPF decodes and
                 // converts every bitmap through (windowscodecs/).
                 'windowscodecs.dll': createWindowscodecs(windowscodecsHost()),
+                // The WebBrowser control's library, and shdocvw.dll, where it
+                // lived before Internet Explorer 7 and a program still loads it.
+                'ieframe.dll': ieframe.functions,
+                'shdocvw.dll': ieframe.functions,
                 // The Steam client's side of a game's Steamworks calls, for the
                 // account the launcher signed in with (steamclient/): the
                 // library of the process's width, as the client installs both.
@@ -4368,6 +4480,8 @@ export function createWin32Module(){
                     // program picks its mode from this and would otherwise be
                     // offered one the device it then creates does not have.
                     screen: config?.screen,
+                    // The user's profile SystemParametersInfo keeps settings in.
+                    registry: hive,
                     // The desktop's background where no window is, when the
                     // embedder gave it a picture rather than its colour.
                     desktopPicture: config?.desktop?.picture ?? null,
@@ -4605,7 +4719,8 @@ export function createWin32Module(){
                                     callerThread: ()=>bridge.callerThread(),
                                 },
                             }),
-                            ...createRichEditControls(controlHost, toolkit)])
+                            ...createRichEditControls(controlHost, toolkit),
+                            ...ieframe.controls(controlHost)])
                         {
                             register(definition);
                         }
@@ -4748,6 +4863,48 @@ export function createWin32Module(){
                         /** @param {number[]} args */
                         handler: ([, ...args])=>
                             libraries['KERNEL32.dll'].CreateProcessW.handler(args),
+                    },
+                    // BOOL CreateProcessWithTokenW(HANDLE hToken, DWORD dwLogonFlags,
+                    //     LPCWSTR app, LPWSTR command, DWORD flags, LPVOID env,
+                    //     LPCWSTR directory, LPSTARTUPINFOW, LPPROCESS_INFORMATION):
+                    // the one user's token, so CreateProcess with no attributes.
+                    CreateProcessWithTokenW: {
+                        argBytes: 36,
+                        /** @param {number[]} args */
+                        handler: ([, , app, command, flags, env, directory, startup, info])=>
+                            libraries['KERNEL32.dll'].CreateProcessW.handler([app, command, 0,
+                                0, 0, flags, env, directory, startup, info]),
+                    },
+                    // BOOL CreateProcessWithLogonW(LPCWSTR user, LPCWSTR domain,
+                    //     LPCWSTR password, DWORD logonFlags, then CreateProcessWithTokenW's
+                    //     last seven): the one account by its name is started as itself;
+                    // any other name is a logon that fails. Its password is not checked.
+                    CreateProcessWithLogonW: {
+                        argBytes: 44,
+                        /** @param {number[]} args */
+                        handler: ([user, domain, , , ...rest])=>{
+                            // UNLEN characters and the terminator, in bytes.
+                            const name = (user >>> 0) === 0 ? ''
+                                : readWideString(user, 257 * 2);
+                            const where = (domain >>> 0) === 0 ? ''
+                                : readWideString(domain, 257 * 2);
+                            const account = accountNamed(where && !name.includes('\\')
+                                ? `${where}\\${name}` : name);
+                            if (!account || account.name !== USER_NAME)
+                            {
+                                setError(ERROR_LOGON_FAILURE);
+                                return 0;
+                            }
+                            if (!loggedOnSaid)
+                            {
+                                loggedOnSaid = true;
+                                config?.divergence?.('CreateProcessWithLogonW',
+                                    'the password is not checked');
+                            }
+                            const [app, command, flags, env, directory, startup, info] = rest;
+                            return libraries['KERNEL32.dll'].CreateProcessW.handler([app, command,
+                                0, 0, 0, flags, env, directory, startup, info]);
+                        },
                     },
                 },
 

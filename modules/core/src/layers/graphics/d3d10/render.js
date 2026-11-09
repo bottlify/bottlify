@@ -50,7 +50,8 @@ const NO_VIEWS = Object.freeze([]);
  * four-component element at the largest aligned offset an element may have.
  */
 const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
-import { convertTexels, convertedTexelBytes } from './blocks.js';
+import { convertTexels, convertedTexelBytes, isSixteenBit, programTexelBytes, sixteenBitFromFloats }
+    from './blocks.js';
 import {
     INDEX_FORMAT, PULLED_VERTEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
     copyCompatible,
@@ -59,12 +60,14 @@ import {
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, STORAGE_TEXTURE_FORMAT, linkCompute,
+    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, PACKED_TEXELS, STAGE, STORAGE_TEXTURE_FORMAT,
+    linkCompute,
     linkDomain, linkGeometryDraw, linkProgram, translateShader,
 } from './wgsl.js';
 import { DOMAIN_ENTRIES, FIRST_PATCH_LIST, createTessellation } from './tessellation.js';
 import { GEOMETRY_DRAW_ENTRIES, createGeometry } from './geometry.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
+import { textureBreach } from '../webgpu/features.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { SYSTEM_VALUE } from './dxbc.js';
@@ -94,6 +97,9 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  * @property {GuestStorage} [guest]  Where a resource the program maps keeps the bytes a
  *     map hands out: guest memory, so a map is an address and no copy.
  * @property {number} [featureLevel]  The device's D3D_FEATURE_LEVEL (10_0 without one).
+ * @property {{ dumpFrames: number, written?: (lines: string[], frame: number) => void }} [liveDump]
+ *     Frames to write down from now on, on asking (`app.debug.dumpFrames`): each draw,
+ *     clear and dispatch a line, the frame handed over when the count runs out.
  */
 
 /**
@@ -220,13 +226,14 @@ const ADDRESS = Object.freeze({
 
 /**
  * Formats WebGPU blends. An integer target is never blended (Direct3D skips
- * blending for one too), and a 32-bit float one only with a device feature
- * this build does not ask for, which CheckFormatSupport says by not claiming
- * it blendable.
+ * blending for one too), and a 32-bit float one only on a device made with
+ * float32-blendable; CheckFormatSupport, which answers before any device
+ * draws, does not claim it blendable.
  *
- * @param {string} format
+ * @param {string} format @param {boolean} float32  the device blends 32-bit floats
  */
-const blendable = format=>!/int$/.test(format) && !/32float$/.test(format);
+const blendable = (format, float32)=>!/int$/.test(format)
+    && (float32 || !/32float$/.test(format));
 
 /** The state a null rasterizer, depth-stencil or blend state stands for. */
 /** What a draw with no input layout bound is fed by: nothing. */
@@ -567,6 +574,9 @@ export function createRenderer(services){
         rg11b10Renderable: backend ? backend.hasFeature?.('rg11b10ufloat-renderable') === true
             : services.rg11b10Renderable ?? true };
 
+    /** Whether the device blends 32-bit float targets (float32-blendable). */
+    const float32Blending = backend ? backend.hasFeature?.('float32-blendable') === true : false;
+
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
     /** @param {string} detail */
@@ -653,6 +663,128 @@ export function createRenderer(services){
      */
     const pendingClears = new Map();
 
+    const liveDump = services.liveDump ?? null;
+    /**
+     * The frame being written down (`liveDump`), a line a draw, clear and
+     * dispatch, or null while nobody asked; and what names each shader and
+     * texture in it, numbered as first seen.
+     *
+     * @type {string[] | null}
+     */
+    let dumpLines = null;
+    /** @type {WeakMap<object, string>} */
+    const dumpNames = new WeakMap();
+    let dumpNamed = 0;
+    /** @param {any} object @param {string} kind */
+    const dumpName = (object, kind)=>{
+        if (!object)
+        {
+            return '-';
+        }
+        let name = dumpNames.get(object);
+        if (!name)
+        {
+            name = `${kind}${++dumpNamed}`;
+            dumpNames.set(object, name);
+        }
+        return name;
+    };
+    /** A view in a dump line: its texture, format and size. @param {any} view */
+    const dumpView = view=>{
+        if (!view)
+        {
+            return '-';
+        }
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view.GetResource?.(held);
+        held.resource?.release?.();
+        const backing = held.resource ? backingOf(held.resource) : null;
+        const level = backing?.layout?.levels?.[0];
+        return `${dumpName(held.resource, 't')}:${backing?.layout?.format ?? '?'}`
+            + `:${level?.width ?? '?'}x${level?.height ?? '?'}${dumpContent(backing)}`;
+    };
+    /**
+     * How much of a resource's host copy is not zero, sampled at 4096 points:
+     * a texture sampled black because it never got its texels shows `nz=0`.
+     * A target drawn on the GPU alone shows its host copy, not its drawing.
+     *
+     * @param {any} backing
+     */
+    const dumpContent = backing=>{
+        const bytes = backing?.bytes;
+        if (!bytes?.length || backing.layout?.format?.startsWith('depth'))
+        {
+            return '';
+        }
+        const points = Math.min(4096, bytes.length);
+        let set = 0;
+        for (let point = 0; point < points; point++)
+        {
+            set += bytes[Math.floor(point * bytes.length / points)] !== 0 ? 1 : 0;
+        }
+        return `:nz=${Math.round(set * 100 / points)}%`;
+    };
+    /**
+     * The first eight floats of each constant buffer a stage reads, so a dump
+     * shows the factors a pass is scaled by.
+     *
+     * @param {any} stage
+     */
+    const dumpConstants = stage=>(stage?.constantBuffers ?? []).flatMap(
+        (/** @type {any} */ buffer, /** @type {number} */ slot)=>{
+            const bytes = buffer ? backingOf(buffer)?.bytes : null;
+            if (!bytes)
+            {
+                return [];
+            }
+            const floats = new Float32Array(bytes.slice(0, Math.min(8, bytes.length >> 2) * 4)
+                .buffer);
+            return [` cb${slot}=${[...floats].map(value=>+value.toPrecision(4)).join(',')}`];
+        }).join('');
+    /** The shaders a dump has written out, so each is written once. */
+    let dumpShown = new WeakSet();
+    /**
+     * A shader's WGSL body the first time a dump names it, as lines before
+     * the draw's, so a dump says what a pass computes as well as what it reads.
+     *
+     * @param {any} shader @param {string} kind
+     */
+    const dumpShader = (shader, kind)=>{
+        if (!shader || dumpShown.has(shader) || !dumpLines)
+        {
+            return;
+        }
+        dumpShown.add(shader);
+        const made = /** @type {import('./wgsl.js').TranslatedShader} */ (translationOf(shader));
+        dumpLines.push(`shader ${dumpName(shader, kind)}: in ${made.inputs.map(
+            input=>`${input.name}${input.index}@v${input.register}`).join(' ')} out ${
+            made.outputs.map(output=>`${output.name}${output.index}@o${output.register}`)
+                .join(' ')}\n${made.body.filter(line=>typeof line === 'string').join('\n')}`);
+    };
+    /**
+     * The first sixteen floats a draw's vertices start at in each bound
+     * vertex buffer.
+     *
+     * @param {PipelineSnapshot} pipeline @param {number} first
+     */
+    const dumpVertices = (pipeline, first)=>pipeline.vertexBuffers.flatMap((buffer, slot)=>{
+        const bytes = buffer ? backingOf(buffer)?.bytes : null;
+        if (!bytes)
+        {
+            return [];
+        }
+        const from = Math.min(bytes.length, (pipeline.vertexOffsets[slot] ?? 0)
+            + first * (pipeline.vertexStrides[slot] ?? 0));
+        const end = Math.min(bytes.length, from + 64);
+        const floats = new Float32Array(bytes.slice(from, from + ((end - from) & ~3)).buffer);
+        return [` vb${slot}=${[...floats].map(value=>+value.toPrecision(4)).join(',')}`];
+    }).join('');
+    const dumpStarts = ()=>{
+        dumpShown = new WeakSet();
+        dumpLines = liveDump !== null && liveDump.dumpFrames > 0 ? [] : null;
+    };
+
     const counters = {
         frames: 0,
         draws: 0,
@@ -727,6 +859,16 @@ export function createRenderer(services){
             };
         }
         const storage = textureStorage(desc.Format, desc.BindFlags, formatOptions);
+        // What is written into a 16-bit normalised target kept in floats keeps
+        // the float a draw or a shader wrote: held to the format's range and
+        // rounded to its codes only when it is read back.
+        if (isSixteenBit(storage?.conversion)
+            && (desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)) !== 0)
+        {
+            diverge(`a ${storage?.conversion} target is kept in ${storage?.format} on a GPU`
+                + ' without texture-formats-tier1: what is drawn into it is not held to its range'
+                + ' nor rounded to sixteen bits until it is read back');
+        }
         const info = FORMAT_INFO[desc.Format];
         const levels = [];
         let offset = 0;
@@ -880,6 +1022,16 @@ export function createRenderer(services){
      * @param {any} descriptor
      */
     const madeTexture = descriptor=>{
+        // Direct3D 11 holds 2048 array layers and 16384 texels a side;
+        // WebGPU's devices from 256 layers and 8192.
+        const past = textureBreach(descriptor.size, descriptor.dimension ?? '2d',
+            name=>backend?.limit?.(name));
+        if (past)
+        {
+            lose(`a ${descriptor.format} texture of ${past} cannot be made on this device; it is`
+                + ' kept in memory and never drawn with');
+            return null;
+        }
         try
         {
             return createTexture(descriptor);
@@ -1459,17 +1611,19 @@ export function createRenderer(services){
      */
     const readable = backing=>{
         const storage = backing.layout.storage;
-        return !!storage && (!storage.conversion || storage.conversion === 'a8') && !storage.depth
-            && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
+        return !!storage && (!storage.conversion || programTexelBytes(storage.conversion) > 0)
+            && !storage.depth && TEXEL_BYTES[storage.format] > 0 && backing.sampleCount === 1;
     };
 
     /**
      * The bytes a texel of a texture that can be read back comes back as to
-     * the program: its own, or A8's one, the alpha of the RGBA it is kept as.
+     * the program: its own, A8's one (the alpha of the RGBA it is kept as),
+     * or a 16-bit normalised format's (its codes, of the floats kept).
      *
      * @param {any} backing
      */
-    const programTexel = backing=>(backing.layout.storage.conversion === 'a8' ? 1
+    const programTexel = backing=>(backing.layout.storage.conversion
+        ? programTexelBytes(backing.layout.storage.conversion)
         : TEXEL_BYTES[backing.layout.storage.format]);
 
     /**
@@ -1480,7 +1634,13 @@ export function createRenderer(services){
      * @returns {(image: { width: number, height: number, data: Uint8Array } | null) => void}
      */
     const asProgramTexels = (backing, deliver)=>{
-        if (backing.layout.storage.conversion !== 'a8')
+        const conversion = backing.layout.storage.conversion;
+        if (isSixteenBit(conversion))
+        {
+            return image=>deliver(image ? { ...image,
+                data: sixteenBitFromFloats(conversion, image.data) } : null);
+        }
+        if (conversion !== 'a8')
         {
             return deliver;
         }
@@ -2324,7 +2484,7 @@ export function createRenderer(services){
                         + `${DUAL_SOURCE.has(factor) ? ' without dual-source-blending' : ''}`);
                 }
             }
-            if (target.BlendEnable && !blendable(format) && !/int$/.test(format))
+            if (target.BlendEnable && !blendable(format, float32Blending) && !/int$/.test(format))
             {
                 diverge(`a ${format} target is drawn unblended: WebGPU blends one only with a`
                     + ' device feature');
@@ -2335,7 +2495,7 @@ export function createRenderer(services){
                 writeMask: program.targets.includes(index)
                     ? target.RenderTargetWriteMask & state.targetWriteMasks[index]
                     : 0,
-                ...(target.BlendEnable && blendable(format)
+                ...(target.BlendEnable && blendable(format, float32Blending)
                     ? {
                         blend: {
                             color: {
@@ -2796,7 +2956,7 @@ export function createRenderer(services){
     /** What draws through a geometry shader and stream output are recorded with. */
     const geometryOf = ()=>{
         geometryPasses ??= createGeometry({
-            backend, BufferUsage, lose, layoutFor, idOf, translationOf,
+            backend, BufferUsage, lose, diverge, layoutFor, idOf, translationOf,
             bindingsFor: (stage, entries, uavs)=>bindingsFor(stage, entries, uavs),
             vertexLayouts: (inputLayout, program, strides)=>
                 vertexLayouts(inputLayout, program, strides),
@@ -2821,6 +2981,30 @@ export function createRenderer(services){
             placeholder: ()=>placeholdersOf().storage,
         });
         return tessellation;
+    };
+
+    /**
+     * What a shader reads as an empty texture says of the view bound: a
+     * buffer's, where the shader declares a texture, or a texture's in a
+     * format or shape the device did not make.
+     *
+     * @param {any} view
+     */
+    const unbackedView = view=>{
+        /** @type {{ resource?: any }} */
+        const held = {};
+        view.GetResource(held);
+        const resource = held.resource;
+        resource?.release();
+        /** @type {{ desc?: any }} */
+        const described = {};
+        view.GetDesc(described);
+        const format = described.desc?.Format ?? 'unknown';
+        return resource?.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
+            ? `a buffer's view (format ${format}) bound where the shader reads a texture is read`
+                + ' as an empty texture'
+            : `a texture this device did not make (view format ${format},`
+                + ` ${view.dimensionName ?? 'unknown shape'}) is read as an empty texture`;
     };
 
     /**
@@ -2869,8 +3053,7 @@ export function createRenderer(services){
                 const gpu = view ? viewOf(view) : null;
                 if (view && !gpu)
                 {
-                    diverge('a shader resource view over a buffer, or over a texture this'
-                        + ' device could not back, is read as an empty texture');
+                    diverge(unbackedView(view));
                 }
                 if (gpu && !(ACCEPTS[entry.texture.sampleType] ?? []).includes(gpu.sampleType))
                 {
@@ -3724,6 +3907,24 @@ export function createRenderer(services){
     const counterBuffers = new WeakMap();
 
     /**
+     * The format a typed view over a texture is written in as packed words
+     * (`PACKED_TEXELS`, `wordsOf`) where WebGPU stores into none of its own:
+     * the words are the texture's bytes, so a view of the same texel size
+     * packs them as its own format reads, whatever the texture's.
+     *
+     * @param {any} view @param {number} dxgi  the view's format
+     * @returns {string | null}
+     */
+    const packedFormatOf = (view, dxgi)=>{
+        const format = textureStorage(dxgi, 0, { ...formatOptions, formatsTier1: true })?.format;
+        const backing = backingOf(resourceOf(view));
+        return format && PACKED_TEXELS[format] && backing.texture && backing.sampleCount === 1
+            && !backing.layout.storage?.conversion
+            && TEXEL_BYTES[backing.layout.format] === PACKED_TEXELS[format].bytes
+            ? format : null;
+    };
+
+    /**
      * The storage format each typed view over a texture writes in, by slot:
      * what a compute shader's translation declares its storage textures as.
      *
@@ -3736,11 +3937,20 @@ export function createRenderer(services){
         bound.forEach((view, slot)=>{
             if (view && view.dimensionName !== 'BUFFER')
             {
-                const format = /** @type {Record<number, string>} */ (STORAGE_TEXTURE_FORMAT)[
-                    stateDesc(view).Format];
-                if (format)
+                const dxgi = stateDesc(view).Format;
+                const format = /** @type {Record<number, string>} */ (STORAGE_TEXTURE_FORMAT)[dxgi];
+                const packed = format ? null : packedFormatOf(view, dxgi);
+                if (format || packed)
                 {
-                    formats[slot] = format;
+                    formats[slot] = /** @type {string} */ (format ?? packed);
+                }
+                else
+                {
+                    // Which format, so the loss the translation then reports
+                    // names what a shader wrote into.
+                    diverge(`a typed unordered-access view of ${Object.keys(DXGI_FORMAT).find(
+                        name=>/** @type {Record<string, number>} */ (DXGI_FORMAT)[name] === dxgi)
+                        ?? dxgi} has no WebGPU storage format`);
                 }
             }
         });
@@ -3884,11 +4094,12 @@ export function createRenderer(services){
     };
 
     /**
-     * A typed texture view a shader makes atomics on, as the words of its
-     * texels in a buffer, rows padded as a copy lays them out (`words` in the
-     * translator: WebGPU has no atomics on a storage texture). It is a twin:
-     * given the texels before the operation and giving them back after.
-     * Null where a texel is not one word.
+     * A typed texture view a shader makes atomics on, or writes in a format
+     * packed there (`PACKED_TEXELS`), as its texels' bytes in a buffer, rows
+     * padded as a copy lays them out (`words` in the translator: WebGPU has
+     * no atomics on a storage texture). It is a twin: given the texels before
+     * the operation and giving them back after. Null where a texel is not a
+     * word, a half or a byte.
      *
      * @param {any} view
      * @returns {{ words: any, uniform: any, rowWords: number } | null}
@@ -3896,8 +4107,9 @@ export function createRenderer(services){
     const wordsOf = view=>{
         const backing = backingOf(resourceOf(view));
         const level = backing.layout.levels[view.range.mip];
+        const texel = TEXEL_BYTES[backing.layout.format];
         if (!backing.texture || backing.sampleCount !== 1 || !level
-            || TEXEL_BYTES[backing.layout.format] !== 4 || backing.layout.storage?.conversion)
+            || ![1, 2, 4].includes(texel) || backing.layout.storage?.conversion)
         {
             return null;
         }
@@ -3907,15 +4119,16 @@ export function createRenderer(services){
         let mirror = backing.mirrors.get(key);
         if (!mirror)
         {
-            const rowWords = Math.ceil(level.width / 64) * 64;
+            // Rows as a copy lays them out: a multiple of 256 bytes.
+            const rowWords = Math.ceil(level.width * texel / 256) * 64;
             const words = backend.createDynamicBuffer({ label: 'd3d10:uav-words',
                 size: rowWords * 4 * level.height * count,
                 usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST });
             const uniform = backend.createDynamicBuffer({ label: 'd3d10:uav-words-view', size: 16,
                 usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
             const lock = uniform.lock(0, 16, LockFlags.DISCARD);
-            lock.data.set(new Uint8Array(new Uint32Array([rowWords, level.height, level.width,
-                count]).buffer));
+            lock.data.set(new Uint8Array(new Uint32Array([rowWords * 4 / texel, level.height,
+                level.width, count]).buffer));
             uniform.unlock(lock);
             mirror = { id: nextBacking++, words, uniform, rowWords };
             backing.mirrors.set(key, mirror);
@@ -4454,6 +4667,7 @@ export function createRenderer(services){
             {
                 return;
             }
+            dumpLines?.push(`clear ${dumpView(view)} colour=${[...color].join(',')}`);
             throughTwins(()=>{
                 // A clear writes every texel of every slice the view names.
                 const count = view?.range?.count ?? 1;
@@ -4549,6 +4763,8 @@ export function createRenderer(services){
             {
                 return;
             }
+            dumpLines?.push(`dispatch ${dumpName(pipeline.stages.cs.shader, 'cs')}`
+                + ` groups=${Array.isArray(groups) ? groups.join('x') : 'indirect'}`);
             const shader = pipeline.stages.cs.shader;
             if (!shader)
             {
@@ -4728,7 +4944,12 @@ export function createRenderer(services){
             if (!gpuBufferCopy(destination, backingOf(destination), offset, counted, null))
             {
                 diverge('a structure count copied to an unaligned offset is not copied');
+                return;
             }
+            // The most the count may be, where it went: what sizes the passes
+            // before an indirect draw through a geometry shader (`geometry.js`).
+            const into = backingOf(destination);
+            (into.counted ??= new Map()).set(offset, stateDesc(view).NumElements ?? 0);
         },
 
         /**
@@ -4743,6 +4964,53 @@ export function createRenderer(services){
             if (!backend)
             {
                 return;
+            }
+            // A draw through a geometry shader whose passes' buffers would not
+            // hold it is drawn as pieces that each fit, one after the other.
+            if (pipeline.stages.gs?.shader && !pipeline.stages.gs.shader.passThrough)
+            {
+                const parts = geometryOf().pieces(pipeline, draw);
+                if (parts.length > 1)
+                {
+                    for (const part of parts)
+                    {
+                        this.draw(pipeline, part);
+                    }
+                    return;
+                }
+            }
+            if (dumpLines)
+            {
+                const viewport = pipeline.viewports?.[0];
+                const { vs, gs, ps } = pipeline.stages;
+                const count = draw.indexCount !== undefined ? `indexed ${draw.indexCount}`
+                    : draw.vertexCount ?? 'auto';
+                dumpShader(vs?.shader, 'vs');
+                dumpShader(gs?.shader, 'gs');
+                dumpShader(ps?.shader, 'ps');
+                dumpLines.push(`draw ${count} x${draw.instanceCount ?? 1}`
+                    + ` topology=${pipeline.topology} vs=${dumpName(vs?.shader, 'vs')}`
+                    + ` gs=${dumpName(gs?.shader, 'gs')} ps=${dumpName(ps?.shader, 'ps')}`
+                    + ` rt=[${pipeline.renderTargets.map(dumpView).join(' ')
+                        .replace(/( -)+$/, '')}]`
+                    + ` ds=${dumpView(pipeline.depthStencilView)}`
+                    + ` srv=[${(ps?.shaderResources ?? []).flatMap((/** @type {any} */ view,
+                        /** @type {number} */ slot)=>(view ? [`${slot}:${dumpView(view)}`] : []))
+                        .join(' ')}]`
+                    + ` vp=${viewport ? `${viewport.TopLeftX},${viewport.TopLeftY}`
+                        + `+${viewport.Width}x${viewport.Height}` : '-'}`
+                    + ` blend=${pipeline.blendState ? blendTargetsOf(pipeline.blendState).targets
+                        .slice(0, Math.max(1, pipeline.renderTargets.reduce(
+                            (/** @type {number} */ bound, /** @type {any} */ view,
+                                /** @type {number} */ slot)=>(view ? slot + 1 : bound), 0)))
+                        .map((/** @type {any} */ target)=>`${target.BlendEnable
+                            ? `${target.SrcBlend}/${target.DestBlend}/${target.BlendOp}`
+                            + `,${target.SrcBlendAlpha}/${target.DestBlendAlpha}`
+                            + `/${target.BlendOpAlpha}` : 'off'}:m${target.RenderTargetWriteMask}`)
+                        .join(' ') + ` factor=${[...pipeline.blendFactor].join(',')}`
+                        : 'default'}${dumpConstants(ps)}${dumpConstants(vs).replace(/ cb/g, ' vcb')}`
+                    + dumpVertices(pipeline, draw.indexCount !== undefined ? draw.baseVertex ?? 0
+                        : draw.startVertex ?? 0));
             }
             twinUses = new Map();
             // A geometry shader runs, and streams out, whether or not the draw
@@ -5118,6 +5386,17 @@ export function createRenderer(services){
                 return chain;
             }
             counters.frames++;
+            if (dumpLines && liveDump)
+            {
+                dumpLines.push(`frame ${counters.frames - 1}: presents back buffer`
+                    + ` ${dumpName(backBuffer, 't')}:${backingOf(backBuffer).layout.format}`);
+                liveDump.dumpFrames--;
+                if (liveDump.dumpFrames <= 0)
+                {
+                    liveDump.written?.(dumpLines, counters.frames - 1);
+                }
+            }
+            dumpStarts();
             geometryPasses?.endFrame();
             const room = tessellation?.endFrame();
             if (room)

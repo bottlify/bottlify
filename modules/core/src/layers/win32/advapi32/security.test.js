@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSecurityFunctions } from './security.js';
 import { createLsaFunctions } from './lsa.js';
+import { USER_SID_TEXT, aceBytes, aclBytes, parseSid } from './tokens.js';
 
 /* The contract's numbers, restated so a wrong constant in the module cannot
  * hide behind the test importing it. */
@@ -351,3 +352,37 @@ test('LsaLookupPrivilegeName knows the privileges by LUID, with a NULL name for 
     assert.equal(env.call('LsaLookupPrivilegeName', policy, SID, TEXT), 0);
     assert.equal(env.unicode(env.u32(TEXT)), 'SeCreateTokenPrivilege');
 });
+
+test('GetEffectiveRightsFromAcl walks the ACEs in order for the trustee, Everyone and its groups',
+    ()=>{
+        const { memory, call, u32 } = setup();
+        const user = /** @type {Uint8Array} */ (parseSid(USER_SID_TEXT));
+        const everyone = /** @type {Uint8Array} */ (parseSid('S-1-1-0'));
+        const admins = /** @type {Uint8Array} */ (parseSid('S-1-5-32-544'));
+        const other = /** @type {Uint8Array} */ (parseSid('S-1-5-21-1-2-3-999'));
+        const ACL = 0x1000;
+        const TRUSTEE = 0x2000;
+        const SID_AT = 0x2100;
+        const RIGHTS = 0x2200;
+        memory.set(aclBytes([
+            aceBytes(1, 0, 0x2, user), //            deny write to the user
+            aceBytes(0, 0, 0x7, everyone), //        allow read, write, execute to all
+            aceBytes(0, 0, 0x10000, admins), //      DELETE to Administrators
+            aceBytes(0, 0x08, 0x20, everyone), //   inherit only: not this object's
+            aceBytes(0, 0, 0x40, other), //          another account's
+        ]), ACL);
+        const trustee = (/** @type {Uint8Array} */ sid)=>{
+            memory.set(sid, SID_AT);
+            memory.set(new Uint8Array(32), TRUSTEE);
+            new DataView(memory.buffer).setUint32(TRUSTEE + 16, SID_AT, true);
+        };
+        trustee(user);
+        assert.equal(call('GetEffectiveRightsFromAclW', ACL, TRUSTEE, RIGHTS), 0);
+        assert.equal(u32(RIGHTS), 0x10005, 'write denied first; the group\'s DELETE');
+        trustee(other);
+        call('GetEffectiveRightsFromAclW', ACL, TRUSTEE, RIGHTS);
+        assert.equal(u32(RIGHTS), 0x47, 'Everyone\'s and its own, no group of this account');
+        assert.equal(call('GetEffectiveRightsFromAclW', 0, TRUSTEE, RIGHTS), 0);
+        assert.equal(u32(RIGHTS), 0x1fffff, 'a NULL DACL gives everything');
+        assert.equal(call('GetEffectiveRightsFromAclW', ACL, 0, RIGHTS), 87);
+    });

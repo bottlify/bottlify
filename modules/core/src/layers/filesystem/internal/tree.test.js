@@ -202,7 +202,7 @@ test('what was copied up is visible in diagnostics', ()=>{
     const { tree } = mounted();
 
     assert.deepEqual(tree.diagnostics(),
-        { files: 3, directories: 2, tombstones: 0, copied: 0, layered: true });
+        { files: 3, directories: 2, tombstones: 0, copied: 0, layered: true, disagreements: 0 });
 
     tree.write(['Readme.TXT'], 0, bytes('x'));
     assert.equal(tree.diagnostics().copied, 1);
@@ -225,6 +225,7 @@ test('a hard link is one file under two names', ()=>{
     tree.setModified(['Game', 'B.DAT'], 1234);
     assert.equal(tree.stat(['Saves', 'A.DAT'])?.modified, 1234, 'the time is the file\'s');
     assert.deepEqual(tree.links(), [{ owner: 'Saves\\A.DAT', names: ['Game\\B.DAT'] }]);
+    assert.deepEqual(tree.verify(), [], 'a further name holds nothing of its own');
 
     // Renaming one name leaves the other; deleting the owner name moves the bytes.
     assert.equal(tree.moveFile(['Game', 'B.DAT'], ['Game', 'C.DAT']), true);
@@ -274,4 +275,106 @@ test('a drive remounted from its files and links has the same names', ()=>{
     }
     again.write(['C.DAT'], 0, bytes('X'));
     assert.equal(text(again.read(['A.DAT'], 0, 3)), 'Xbc');
+    assert.deepEqual(again.verify(), []);
+});
+
+test('a link under a directory the source spells otherwise keeps its bytes where the writable'
+    + ' layer has the directory', ()=>{
+    const source = createMemoryStore({ 'Windows\\system32\\x.dll': 'library' });
+    const writable = createMemoryStore({ 'WINDOWS\\TEMP\\old.tmp': 'old' });
+    const tree = createOverlay({ source, writable });
+    tree.link(['Windows', 'system32', 'x.dll'], ['windows', 'temp', 'y.dll']);
+    assert.equal(text(writable.read('WINDOWS\\system32\\x.dll', 0, 8)), 'library');
+    tree.write(['Windows', 'TEMP', 'Y.DLL'], 0, bytes('L'));
+    assert.equal(text(tree.read(['WINDOWS', 'SYSTEM32', 'X.DLL'], 0, 8)), 'Library');
+    assert.deepEqual(tree.verify(), []);
+    assert.equal(tree.moveFile(['Windows', 'system32', 'x.dll'], ['Windows', 'TEMP', 'z.dll']),
+        true, 'the owning name moved: the bytes go with it');
+    assert.equal(text(writable.read('WINDOWS\\TEMP\\z.dll', 0, 8)), 'Library');
+    assert.deepEqual(tree.verify(), []);
+});
+
+test('a source that spells a directory otherwise than the writable layer does is one directory'
+    + ' that both layers keep under their own spelling', ()=>{
+    // The machine makes WINDOWS\TEMP before the bundle is mounted, and the
+    // bundle spells the directory Windows; neither store folds case.
+    const source = createMemoryStore({ 'Windows\\system32\\x.dll': 'library' });
+    const writable = createMemoryStore({ 'WINDOWS\\TEMP\\old.tmp': 'old' });
+    const tree = createOverlay({ source, writable });
+
+    assert.deepEqual(tree.list([]).map(entry=>entry.name), ['Windows']);
+    assert.equal(text(tree.read(['Windows', 'TEMP', 'old.tmp'], 0, 8)), 'old',
+        'what the writable layer held before the mount is read where it is');
+
+    tree.createFile(['Windows', 'TEMP', 'cpuz.sys']);
+    tree.write(['Windows', 'TEMP', 'cpuz.sys'], 0, bytes('driver'));
+    assert.equal(text(writable.read('WINDOWS\\TEMP\\cpuz.sys', 0, 8)), 'driver',
+        'a file made under the bundle\'s spelling goes where the writable layer has the directory');
+
+    assert.equal(text(tree.read(['WINDOWS', 'System32', 'X.DLL'], 0, 16)), 'library');
+    tree.write(['Windows', 'system32', 'x.dll'], 7, bytes('!'));
+    assert.equal(text(writable.read('WINDOWS\\system32\\x.dll', 0, 16)), 'library!',
+        'a copy-up reads the source under its spelling and writes the store under its own');
+    tree.createDirectory(['Windows', 'Fonts']);
+    assert.equal(writable.stat('WINDOWS\\Fonts')?.directory, true);
+
+    for (const entry of tree.writableFiles())
+    {
+        assert.ok(writable.stat(entry.path), `"${entry.path}" is in the writable store`);
+    }
+    assert.deepEqual(tree.verify(), []);
+
+    tree.removeFile(['windows', 'temp', 'CPUZ.SYS']);
+    tree.removeFile(['Windows', 'TEMP', 'old.tmp']);
+    tree.removeDirectory(['Windows', 'TEMP']);
+    assert.equal(writable.stat('WINDOWS\\TEMP'), null);
+    assert.deepEqual(tree.verify(), []);
+});
+
+test('a store that refuses a change leaves the tree as it was', ()=>{
+    const { source, writable } = mounted();
+    const full = Object.assign(Object.create(null), writable, {
+        truncate: ()=>{
+            throw Object.assign(new Error('full'), { code: 'DISK_FULL' });
+        },
+        adopt: ()=>{
+            throw Object.assign(new Error('full'), { code: 'DISK_FULL' });
+        },
+        mkdir: ()=>{
+            throw Object.assign(new Error('full'), { code: 'DISK_FULL' });
+        },
+    });
+    const tree = createOverlay({ source, writable: full });
+
+    assert.throws(()=>tree.createFile(['New.DAT']), { code: 'DISK_FULL' });
+    assert.equal(tree.stat(['New.DAT']), null, 'no name is left behind that holds nothing');
+    assert.doesNotThrow(()=>tree.removeFile(['Readme.TXT']));
+    assert.throws(()=>tree.createFile(['Readme.TXT']), { code: 'DISK_FULL' });
+    assert.equal(tree.stat(['Readme.TXT']), null, 'the deleted name stays deleted');
+
+    assert.throws(()=>tree.truncate(['Game', 'Setup.EXE'], 0), { code: 'DISK_FULL' });
+    assert.throws(()=>tree.replace(['Game', 'Data', 'Config.WTF'], bytes('x')),
+        { code: 'DISK_FULL' });
+    assert.equal(text(tree.read(['Game', 'Data', 'Config.WTF'], 0, 8)), 'source',
+        'a file the store would not take is still the source\'s');
+    assert.equal(text(tree.read(['Game', 'Setup.EXE'], 0, 8)), 'binary');
+    assert.throws(()=>tree.createDirectory(['Saves']), { code: 'DISK_FULL' });
+    assert.equal(tree.stat(['Saves']), null);
+    assert.deepEqual(tree.verify(), []);
+    assert.deepEqual(tree.writableFiles(), []);
+});
+
+test('verify names every place the tree and its stores disagree', ()=>{
+    const { writable, tree } = mounted();
+    tree.write(['Readme.TXT'], 0, bytes('x'));
+    assert.deepEqual(tree.verify(), []);
+
+    // Behind the tree's back, as a second overlay on the same store would.
+    writable.remove('Readme.TXT');
+    writable.write('Stray.DAT', 0, bytes('?'));
+    assert.deepEqual(tree.verify(), [
+        'the writable layer has no file "Readme.TXT"',
+        'the writable layer holds "Stray.DAT", which the tree does not hold there',
+    ]);
+    assert.equal(tree.diagnostics().disagreements, 2);
 });

@@ -22,7 +22,8 @@ import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import {
     assemble, atomicIadd, dclGlobalFlags, dclOutput, dclOutputSiv, dclTemps, dclThreadGroup,
     dclUavRaw, dclUavStructured, dclUavTyped, immAtomicAlloc, ishl, l, lu, mov, o, r, ret,
-    storeRaw, storeUavTyped, u, vThreadID,
+    passThroughVertexShader, solidPixelShader, storeRaw, storeUavTyped,
+    triangleGeometryShader, u, vThreadID,
 } from './shader-fixtures.js';
 import { BINDING } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -289,6 +290,56 @@ test('a texture an atomic is made on is written as the words of its texels in a 
     assert.equal(h.gpu.of('copyBufferToTexture').at(-1).source.buffer, words.buffer);
 });
 
+test('a texture whose format WebGPU stores into is not written as packed words: an 11-11-10'
+    + ' float in a word a texel, a 16-bit float in half a word set by two atomics', async()=>{
+    for (const [format, texel, wordsARow] of /** @type {[number, string, number][]} */ ([
+        [DXGI_FORMAT.R11G11B10_FLOAT, 'rg11b10ufloat', 64],
+        [DXGI_FORMAT.R16_FLOAT, 'r16float', 64]]))
+    {
+        const h = harness();
+        const texture = texture2D(h, format, D3D11_BIND_UNORDERED_ACCESS);
+        const view = uavOf(h, texture, { Format: format, ViewDimension: UAV_TEXTURE2D,
+            MipSlice: 0 });
+        h.context.CSSetShader(computeShader(h, [
+            dclThreadGroup(8, 4, 1),
+            dclUavTyped(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            storeUavTyped(u(0, 'xyzw'), vThreadID('xyyy'), l(1, 0.5, 0.25, 1)),
+            ret(),
+        ]), null, 0);
+        h.context.CSSetUnorderedAccessViews(0, [view], null);
+        h.context.Dispatch(1, 1, 1);
+        h.context.Flush();
+        await h.device.idle();
+        assert.deepEqual(h.divergences, [], texel);
+        const ops = h.gpu.calls.map((/** @type {any} */ call)=>call.op).filter((
+            /** @type {string} */ op)=>['copyTextureToBuffer', 'dispatchWorkgroups',
+            'copyBufferToTexture'].includes(op));
+        assert.deepEqual(ops, ['copyTextureToBuffer', 'dispatchWorkgroups',
+            'copyBufferToTexture'], texel);
+        const [given] = h.gpu.of('copyTextureToBuffer');
+        assert.equal(given.destination.bytesPerRow, wordsARow * 4, texel);
+        const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+            call.descriptor.code).find((/** @type {string} */ text)=>text.includes('u0_pack'));
+        assert.ok(code, `${texel}: the store packs`);
+        assert.match(code, /var<storage, read_write> u0: array<atomic<u32>>;/);
+        if (texel === 'rg11b10ufloat')
+        {
+            assert.match(code, /fn packedUf\(/);
+            assert.match(code, /atomicStore\(&u0\[w\], bits\);/);
+        }
+        else
+        {
+            assert.match(code, /atomicAnd\(&u0\[w\], ~\(65535u << shift\)\);/);
+            assert.match(code, /pack2x16float/);
+        }
+        const viewWords = h.gpu.of('writeBuffer').map((/** @type {any} */ call)=>
+            (call.bytes.length >= 16 ? [...new Uint32Array(call.bytes.slice(0, 16).buffer)] : []))
+            .find((/** @type {number[]} */ words)=>words[1] === 4 && words[2] === 8);
+        assert.deepEqual(viewWords, [wordsARow * 4 / (texel === 'r16float' ? 2 : 4), 4, 8, 1],
+            `${texel}: texels a row, rows, width, layers`);
+    }
+});
+
 test('a pixel shader that asks for early depth tests tests itself against the depth buffer,'
     + ' attached read-only, a clear waiting for it made first', async()=>{
     const h = harness();
@@ -367,6 +418,38 @@ test('from level 11_0 a viewport corner left of or above the target is floored t
     const rects = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect.slice(0, 2));
     assert.deepEqual(rects.at(-2), [-1, -1]);
     assert.deepEqual(rects.at(-1), [0.25, 0], 'a corner inside the target is kept as it is');
+});
+
+test('a command list keeps the bytes it was handed: the buffer they came in may be gone when'
+    + ' it plays', async()=>{
+    // In the graphics worker a deferred context's UpdateSubresource and its
+    // unmapped bytes arrive as views of a message the channel takes back;
+    // the list is played frames later.
+    const h = harness();
+    const { resource } = uavBuffer(h, null);
+    /** @type {{ context?: any, list?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateDeferredContext(0, made), S_OK);
+    const deferred = made.context;
+    const written = Uint8Array.from({ length: 64 }, (_, at)=>at + 1);
+    const mapped = Uint8Array.from({ length: 64 }, (_, at)=>200 - at);
+    deferred.UpdateSubresource(resource, 0, null, written, 64, 64);
+    deferred.WriteMapped(resource, mapped);
+    assert.equal(deferred.FinishCommandList(false, made), S_OK);
+    // The messages go back to where they came from.
+    structuredClone(written.buffer, { transfer: [written.buffer] });
+    structuredClone(mapped.buffer, { transfer: [mapped.buffer] });
+    assert.equal(written.length, 0, 'detached');
+    const before = h.gpu.of('writeBuffer').length;
+    h.context.ExecuteCommandList(made.list, false);
+    h.context.Flush();
+    await h.device.idle();
+    const writes = h.gpu.of('writeBuffer').slice(before);
+    assert.equal(writes.length, 2);
+    assert.deepEqual([...writes[0].bytes.slice(0, 4)], [1, 2, 3, 4]);
+    assert.deepEqual([...writes[1].bytes.slice(0, 4)], [200, 199, 198, 197]);
+    made.list.release();
+    deferred.release();
 });
 
 test('a command list finished keeping its context\'s bindings starts from them where it plays;'
@@ -456,7 +539,15 @@ test('a clear of a buffer view writes its range in turn; of a texture, by a disp
 
 test('a texture the GPU cannot keep is cleared through a view in its own bytes, each slice of'
     + ' it (test_clear_image_unordered_access_view)', async()=>{
-    const h = harness();
+    // The device refuses the floats R16G16_UNORM is kept in without
+    // texture-formats-tier1: the texture lives in its bytes alone.
+    const h = harness((descriptor, made)=>{
+        if (descriptor.format === 'rg32float')
+        {
+            throw new TypeError('rg32float refused');
+        }
+        return made(descriptor);
+    });
     const format = DXGI_FORMAT.R16G16_UNORM;
     const base = { Width: 4, Height: 2, MipLevels: 2, Format: format,
         Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D11_BIND_UNORDERED_ACCESS, CPUAccessFlags: 0,
@@ -543,4 +634,155 @@ test('a texture the device refuses on the spot is kept in memory and said, and t
     }, null, texture), S_OK);
     assert.ok(h.divergences.some(line=>line.includes('lost: a rg16float texture cannot be made')),
         h.divergences.join(' / '));
+});
+
+test('an indirect draw through a geometry shader is sized by the structure count copied into'
+    + ' its arguments, and the shader runs for the count and instances the GPU holds there',
+async()=>{
+    const h = harness();
+    const { device, context } = h;
+    // A particle list as such a program keeps one: an append buffer of at
+    // most 30 entries, its count copied into the vertex count of arguments
+    // the processor wrote with one instance.
+    const list = uavBuffer(h, null, { MiscFlags11: D3D11_RESOURCE_MISC.BUFFER_STRUCTURED,
+        StructureByteStride: 4, ByteWidth: 120 });
+    const appended = uavOf(h, list.resource, { Format: DXGI_FORMAT.UNKNOWN,
+        ViewDimension: UAV_BUFFER, FirstElement: 0, NumElements: 30,
+        Flags: D3D11_BUFFER_UAV_FLAG.APPEND });
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 32, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: 0, CPUAccessFlags: 0, MiscFlags: 0,
+        MiscFlags11: D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS },
+    [{ pSysMem: new Uint8Array(new Uint32Array([0, 0, 0, 1, 0, 0, 0, 0]).buffer) }], made),
+    S_OK);
+    const args = made.resource;
+    context.CopyStructureCount(args, 8, appended);
+
+    assert.equal(device.CreateBuffer({ ByteWidth: 30 * 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null, made),
+    S_OK);
+    context.IASetVertexBuffers(0, [made.resource], [16], [0]);
+    assert.equal(device.CreateInputLayout([{ SemanticName: 'POSITION', SemanticIndex: 0,
+        Format: DXGI_FORMAT.R32G32B32A32_FLOAT, InputSlot: 0, AlignedByteOffset: 0,
+        InputSlotClass: 0, InstanceDataStepRate: 0 }], passThroughVertexShader(), made), S_OK);
+    context.IASetInputLayout(made.layout);
+    context.IASetPrimitiveTopology(4);
+    for (const [create, bytes, set] of /** @type {const} */ ([
+        ['CreateVertexShader', passThroughVertexShader(), 'VSSetShader'],
+        ['CreateGeometryShader', triangleGeometryShader(), 'GSSetShader'],
+        ['CreatePixelShader', solidPixelShader([1, 0, 0, 1]), 'PSSetShader']]))
+    {
+        assert.equal(device[create](bytes, made), S_OK, create);
+        context[set](made.shader);
+    }
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 },
+        Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    assert.equal(device.CreateRenderTargetView(made.resource, null, made), S_OK);
+    context.OMSetRenderTargets([made.view], null);
+    context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0,
+        MaxDepth: 1 }]);
+
+    context.DrawInstancedIndirect(args, 8);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(h.divergences, []);
+    assert.equal(device.diagnostics().geometry.draws, 1, 'drawn, not lost');
+    const argsGpu = h.gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        call.descriptor.label.startsWith('d3d10:buffer#32')).at(-1).createBuffer;
+    const limits = h.gpu.of('copyBufferToBuffer').filter((/** @type {any} */ call)=>
+        call.source === argsGpu && /indirect-limit/.test(call.destination.descriptor?.label
+            ?? call.destination.label ?? ''));
+    assert.deepEqual(limits.map((/** @type {any} */ call)=>[call.sourceOffset,
+        call.destinationOffset]), [[8, 0], [12, 4]], 'the count and the instances');
+    const gs = h.gpu.of('dispatchWorkgroups').find((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.startsWith('d3d11:gs#'));
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).find((/** @type {string} */ text)=>text.includes('fn geometryMain'));
+    assert.match(code, /if \(gsDrawn \+ gsParams\.instanceBase >= gsLimit\[1\]\) \{ gsWhole = false; \}/);
+    assert.ok(gs, 'the geometry shader runs');
+    const params = gs.groups[1].descriptor.entries.find((/** @type {any} */ entry)=>
+        entry.binding === 5).resource;
+    const uniform = new Uint32Array(params.buffer.bytes.slice(params.offset,
+        params.offset + 16).buffer);
+    assert.equal(uniform[0], 10, 'invocations for the 30 entries the list may hold');
+});
+
+test('an indirect draw through a geometry shader whose bound passes the room between the passes'
+    + ' is drawn in runs, each stopping at the count the GPU holds past its first primitive',
+async()=>{
+    const h = harness();
+    const { device, context } = h;
+    const ELEMENTS = 9 << 20;
+    // A particle list as such a program keeps one: an append buffer of at
+    // most 30 entries, its count copied into the vertex count of arguments
+    // the processor wrote with one instance.
+    const list = uavBuffer(h, null, { MiscFlags11: D3D11_RESOURCE_MISC.BUFFER_STRUCTURED,
+        StructureByteStride: 4, ByteWidth: 4 * ELEMENTS });
+    const appended = uavOf(h, list.resource, { Format: DXGI_FORMAT.UNKNOWN,
+        ViewDimension: UAV_BUFFER, FirstElement: 0, NumElements: ELEMENTS,
+        Flags: D3D11_BUFFER_UAV_FLAG.APPEND });
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 32, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: 0, CPUAccessFlags: 0, MiscFlags: 0,
+        MiscFlags11: D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS },
+    [{ pSysMem: new Uint8Array(new Uint32Array([0, 0, 0, 1, 0, 0, 0, 0]).buffer) }], made),
+    S_OK);
+    const args = made.resource;
+    context.CopyStructureCount(args, 8, appended);
+
+    assert.equal(device.CreateBuffer({ ByteWidth: 30 * 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 }, null, made),
+    S_OK);
+    context.IASetVertexBuffers(0, [made.resource], [16], [0]);
+    assert.equal(device.CreateInputLayout([{ SemanticName: 'POSITION', SemanticIndex: 0,
+        Format: DXGI_FORMAT.R32G32B32A32_FLOAT, InputSlot: 0, AlignedByteOffset: 0,
+        InputSlotClass: 0, InstanceDataStepRate: 0 }], passThroughVertexShader(), made), S_OK);
+    context.IASetInputLayout(made.layout);
+    context.IASetPrimitiveTopology(4);
+    for (const [create, bytes, set] of /** @type {const} */ ([
+        ['CreateVertexShader', passThroughVertexShader(), 'VSSetShader'],
+        ['CreateGeometryShader', triangleGeometryShader(), 'GSSetShader'],
+        ['CreatePixelShader', solidPixelShader([1, 0, 0, 1]), 'PSSetShader']]))
+    {
+        assert.equal(device[create](bytes, made), S_OK, create);
+        context[set](made.shader);
+    }
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 },
+        Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    assert.equal(device.CreateRenderTargetView(made.resource, null, made), S_OK);
+    context.OMSetRenderTargets([made.view], null);
+    context.RSSetViewports([{ TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0,
+        MaxDepth: 1 }]);
+
+    context.DrawInstancedIndirect(args, 8);
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(h.divergences, []);
+    assert.equal(device.diagnostics().geometry.cut, 1);
+    const runs = h.gpu.of('dispatchWorkgroups').filter((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.startsWith('d3d11:gs#'));
+    assert.ok(runs.length > 1, `${runs.length} runs`);
+    assert.equal(device.diagnostics().geometry.draws, runs.length, 'a draw a run, none lost');
+    assert.equal(device.diagnostics().geometry.invocations, ELEMENTS / 3,
+        'every primitive the bound may hold, once');
+    const bases = runs.map((/** @type {any} */ run)=>{
+        const params = run.groups[1].descriptor.entries.find((/** @type {any} */ entry)=>
+            entry.binding === 5).resource;
+        const words = new Uint32Array(params.buffer.bytes.slice(params.offset,
+            params.offset + 48).buffer);
+        return [words[7], words[8]];
+    });
+    const step = bases[1][0];
+    assert.deepEqual(bases, runs.map((_, k)=>[k * step, 0]),
+        'each run its first primitive, the one instance');
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).find((/** @type {string} */ text)=>text.includes('fn geometryMain'));
+    assert.match(code, /if \(gsPrim \+ gsParams\.primitiveBase >= gsHeld\)/,
+        'the GPU count is held against the primitive the run is at');
 });

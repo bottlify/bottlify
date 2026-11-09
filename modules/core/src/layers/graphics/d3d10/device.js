@@ -49,6 +49,7 @@ import {
     SHADER_KIND, SYSTEM_VALUE, declaresBufferViews, parseDxbc, parseShaderOfKind,
 } from './dxbc.js';
 import { createSharing } from './sharing.js';
+import { isSixteenBit } from './blocks.js';
 import { createFactory } from './dxgi.js';
 import {
     INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, PULLED_VERTEX_FORMAT, VERTEX_FORMAT,
@@ -140,6 +141,8 @@ const PREDICATE_QUERIES = new Set([
  * @property {boolean} [formatsTier1]  Whether the GPU has texture-formats-tier1: the
  *     16-bit normalised formats, and the snorm ones as targets. Absent, taken as so.
  * @property {boolean} [rg11b10Renderable]  Whether it draws into R11G11B10_FLOAT.
+ * @property {{ dumpFrames: number, written?: (lines: string[], frame: number) => void }} [liveDump]
+ *     Frames the renderer writes down on asking (`app.debug.dumpFrames`).
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a swap chain's present queues; what it answers is
  *     what the present waits on before it answers the program.
@@ -601,8 +604,8 @@ export function D3D11CreateDeviceAndSwapChain(adapter, driverType, software, fla
 /**
  * D3D11_FEATURE_*'s answers, by the structure the program hands in: what
  * this device does past its level. Its views are emulated, so a command
- * list is the runtime's and not the driver's; WebGPU has no doubles, no
- * minimum precision and no tiling to say; a 10.x level runs no compute.
+ * list is the runtime's and not the driver's; WebGPU has no minimum
+ * precision and no tiling to say; a 10.x level runs no compute.
  *
  * @param {number} feature @param {Uint8Array} input @param {number} level
  * @param {any} device  for a format's support
@@ -617,8 +620,8 @@ function featureSupport(feature, input, level, device){
     {
         case 0: // THREADING: concurrent creates, driver command lists
             return bytesOf([1, 0]);
-        case 1: // DOUBLES
-            return bytesOf([0]);
+        case 1: // DOUBLES: worked out in integers (wgsl-doubles.js), at shader model 5
+            return bytesOf([level >= 0xb000 ? 1 : 0]);
         case 2: { // FORMAT_SUPPORT: the format, then what it supports
             /** @type {{ support?: number }} */
             const held = {};
@@ -629,8 +632,11 @@ function featureSupport(feature, input, level, device){
             return bytesOf([format, 0]);
         case 4: // D3D10_X_HARDWARE_OPTIONS: compute at shader model 4
             return bytesOf([0]);
-        case 5: // D3D11_OPTIONS: none of 11.1's fourteen
-            return new Uint8Array(14 * 4);
+        case 5: { // D3D11_OPTIONS: of 11.1's fourteen, the extended doubles, exact as the rest
+            const options = new Uint8Array(14 * 4);
+            options[12 * 4] = level >= 0xb000 ? 1 : 0;
+            return options;
+        }
         case 6: // ARCHITECTURE_INFO: not a tiled renderer
             return bytesOf([0]);
         case 7: // D3D9_OPTIONS: textures of any size
@@ -736,6 +742,7 @@ export function createDevice(options = {}){
         rg11b10Renderable: options.rg11b10Renderable,
         guest: options.guest,
         featureLevel: options.featureLevel,
+        liveDump: options.liveDump,
     });
     const statistics = createDrawStatistics();
     /** @type {import('./resources.js').ResourceStorage} */
@@ -1756,10 +1763,15 @@ export function createDevice(options = {}){
             if (kept && !kept.depth && info.kind === FORMAT_KIND.COLOUR)
             {
                 support |= FORMAT_SUPPORT.SHADER_LOAD;
+                // A 16-bit normalised format kept in floats is still the
+                // format feature level 10.0 requires: sampled, drawn into and
+                // blended, as Direct3D's own is.
+                const sixteen = isSixteenBit(kept.conversion);
+                const family = sixteen ? String(kept.conversion) : kept.format;
                 // What a sampler may filter: normalised and float formats, but
                 // not the 32-bit floats, which WebGPU does not filter.
-                const filterable = /unorm|snorm|float/.test(kept.format)
-                    && !/32float/.test(kept.format);
+                const filterable = sixteen || (/unorm|snorm|float/.test(kept.format)
+                    && !/32float/.test(kept.format));
                 if (filterable)
                 {
                     support |= FORMAT_SUPPORT.SHADER_SAMPLE;
@@ -1767,12 +1779,12 @@ export function createDevice(options = {}){
                 // A8_UNORM is drawn into as the alpha of an eight-bit texture;
                 // its conversion is for the bytes a program uploads. A target is also
                 // one only of a format the GPU draws into.
-                if (info.renderable && (!kept.conversion || kept.conversion === 'a8')
+                if (info.renderable && (!kept.conversion || kept.conversion === 'a8' || sixteen)
                     && gpuRenderable(kept.format, textureOptions))
                 {
                     // A normalised signed target is blended from feature
                     // level 10.1 (Wine's test_format_support sees 10.0 refuse it).
-                    const blended = filterable && (!/snorm/.test(kept.format)
+                    const blended = filterable && (!/snorm/.test(family)
                         || featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1);
                     support |= FORMAT_SUPPORT.RENDER_TARGET
                         | (blended ? FORMAT_SUPPORT.BLENDABLE : 0);

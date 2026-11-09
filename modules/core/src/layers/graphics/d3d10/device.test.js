@@ -1880,8 +1880,8 @@ test('a format reports what it can be used for, and an unknown one fails', ()=>{
     assertFullyReleased(device);
 });
 
-test('a GPU without texture-formats-tier1 is claimed no snorm target and no 16-bit normalised'
-    + ' texture; with it, both', ()=>{
+test('a GPU without texture-formats-tier1 is claimed no 8-bit snorm target, and has the 16-bit'
+    + ' normalised textures and targets in floats; with it, all of them', ()=>{
     /** @param {any} device @param {number} format */
     const support = (device, format)=>{
         /** @type {{ support?: number }} */
@@ -1893,7 +1893,12 @@ test('a GPU without texture-formats-tier1 is claimed no snorm target and no 16-b
     const core = createDevice({ formatsTier1: false, rg11b10Renderable: false });
     assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & TEXTURE2D, 'sampled still');
     assert.equal(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & RENDER_TARGET, 0);
-    assert.equal(support(core, DXGI_FORMAT.R16G16B16A16_UNORM) & TEXTURE2D, 0);
+    for (const format of [DXGI_FORMAT.R16G16B16A16_UNORM, DXGI_FORMAT.R16_UNORM,
+        DXGI_FORMAT.R16G16_SNORM])
+    {
+        assert.equal(support(core, format) & (TEXTURE2D | RENDER_TARGET),
+            TEXTURE2D | RENDER_TARGET, `${format} kept in floats`);
+    }
     assert.equal(support(core, DXGI_FORMAT.R11G11B10_FLOAT) & RENDER_TARGET, 0);
     assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_UNORM) & RENDER_TARGET);
     assertFullyReleased(core);
@@ -2712,6 +2717,34 @@ test('a shader model 4 program that reads raw memory is refused below level 11, 
     assert.equal(made(0xb000, raw), S_OK);
     assert.equal(made(0xa000, solidPixelShader([1, 0, 0, 1])), S_OK);
 });
+
+test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0, not at 10.x',
+    ()=>{
+        /** @param {number} level */
+        const doubles = level=>{
+            /** @type {any} */
+            const out = { wantDevice: true };
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            const answer = out.device.CheckFeatureSupport(1, new Uint8Array(4));
+            out.device.release();
+            return [answer.hr, answer.data[0]];
+        };
+        assert.deepEqual(doubles(0xb000), [S_OK, 1]);
+        assert.deepEqual(doubles(0xa100), [S_OK, 0]);
+        /** D3D11_OPTIONS' ExtendedDoublesShaderInstructions, its thirteenth word. @param {number} level */
+        const extended = level=>{
+            /** @type {any} */
+            const out = { wantDevice: true };
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            const answer = out.device.CheckFeatureSupport(5, new Uint8Array(14 * 4));
+            out.device.release();
+            /** @type {number[]} */
+            const words = [...answer.data];
+            return [answer.hr, words[12 * 4], words.reduce((sum, one)=>sum + one, 0)];
+        };
+        assert.deepEqual(extended(0xb000), [S_OK, 1, 1], 'the extended doubles, and nothing else');
+        assert.deepEqual(extended(0xa100), [S_OK, 0, 0]);
+    });
 
 test('a texture made shared is opened by another device of the same root over the same'
     + ' bytes, by the kind of handle it was made for (test_shared_resource)', async()=>{

@@ -95,3 +95,34 @@ test('the XP-era scheme calls find no policy, and only Balanced can be made acti
     assert.equal(power.PowerSetActiveScheme.handler([0, 0x60]), 2);
     assert.equal(power.PowerSetActiveScheme.handler([0, 0]), 87);
 });
+
+test('PowerEnumerate lists Balanced alone; PowerReadFriendlyName names it', ()=>{
+    const m = machine();
+    const memory = new Uint8Array(0x200);
+    const view = new DataView(memory.buffer);
+    const power = createPowrprofFunctions({ ...m.host,
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
+            memory.set(bytes, at),
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            memory.slice(at, at + length) });
+    const SIZE = 0x10;
+    const BUFFER = 0x40;
+    assert.equal(power.PowerEnumerate.handler([0, 0, 0, 16, 0, 0, SIZE]), 0);
+    assert.equal(view.getUint32(SIZE, true), 16, 'the size a GUID takes');
+    view.setUint32(SIZE, 8, true);
+    assert.equal(power.PowerEnumerate.handler([0, 0, 0, 16, 0, BUFFER, SIZE]), 234);
+    view.setUint32(SIZE, 16, true);
+    assert.equal(power.PowerEnumerate.handler([0, 0, 0, 16, 0, BUFFER, SIZE]), 0);
+    assert.equal(view.getUint32(BUFFER, true), 0x381b4222);
+    assert.equal(power.PowerEnumerate.handler([0, 0, 0, 16, 1, BUFFER, SIZE]), 259, 'one scheme');
+    assert.equal(power.PowerEnumerate.handler([0, BUFFER, 0, 17, 0, BUFFER, SIZE]), 259,
+        'no subgroups');
+    assert.equal(power.PowerEnumerate.handler([0, 0, 0, 3, 0, BUFFER, SIZE]), 87);
+    view.setUint32(SIZE, 64, true);
+    assert.equal(power.PowerReadFriendlyName.handler([0, BUFFER, 0, 0, 0x80, SIZE]), 0);
+    assert.equal(view.getUint32(SIZE, true), 18);
+    assert.equal(String.fromCharCode(...new Uint16Array(memory.slice(0x80, 0x80 + 16).buffer)),
+        'Balanced');
+    memory[BUFFER] ^= 1;
+    assert.equal(power.PowerReadFriendlyName.handler([0, BUFFER, 0, 0, 0x80, SIZE]), 2);
+});

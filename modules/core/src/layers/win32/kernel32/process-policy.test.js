@@ -19,8 +19,14 @@ const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const CURRENT_PROCESS = 0xffffffff;
 const CURRENT_THREAD = 0xfffffffe;
 
-/** A thread whose block says its stack runs from 0x8000 up to 0x9000. */
-function machine({ registers = {} } = {}){
+/**
+ * A thread whose block says its stack runs from 0x8000 up to 0x9000.
+ *
+ * @param {{ registers?: Record<string, number>,
+ *     setRegisters?: (values: Record<string, number>) => void,
+ *     divergence?: (api: string, detail: string) => void }} [options]
+ */
+function machine({ registers = {}, setRegisters, divergence } = {}){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {number[]} */
@@ -59,16 +65,23 @@ function machine({ registers = {} } = {}){
                 }
             },
             processId: 0x100,
+            setRegisters,
+            divergence,
         }));
     /** @param {string} name @param {...number} args */
-    const call = (name, ...args)=>fns[name].handler(args);
+    const call = (name, ...args)=>(name === 'NtContinue'
+        ? /** @type {any} */ (fns.RtlCaptureContext).natives.NtContinue : fns[name]).handler(args);
     return { bytes, view, errors, handles, call, fns, childHandle, threadHandle };
 }
 
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
     const { view, call } = machine({ registers: { esp: 0x8f00, ebp: 0x8f40 } });
     view.setUint32(0x8f00, 0x401234, true);
+    new Uint8Array(view.buffer).fill(0xee, 0x2000, 0x2000 + 0x2cc);
     assert.equal(call('RtlCaptureContext', 0x2000), 0);
+    assert.deepEqual([view.getUint32(0x2004, true), view.getUint32(0x2088, true),
+        view.getUint32(0x2000 + 0xcc, true)], [0xeeeeeeee, 0xeeeeeeee, 0xeeeeeeee],
+    'the debug and floating-point groups and the extended registers are not written');
     assert.equal(view.getUint32(0x2000, true), 0x10007, 'control, integer and segments');
     assert.equal(view.getUint32(0x2000 + 0xb8, true), 0x401234, 'EIP is the return address');
     assert.equal(view.getUint32(0x2000 + 0xc4, true), 0x8f08, 'ESP past it and the argument');
@@ -76,6 +89,28 @@ test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=
     assert.equal(view.getUint32(0x2000 + 0xb0, true), 1, 'EAX');
     assert.equal(view.getUint32(0x2000 + 0x9c, true), 6, 'EDI');
     assert.equal(view.getUint32(0x2000 + 0xc0, true), 0x246);
+});
+
+test('NtContinue goes on from the groups a context names and answers its EAX', ()=>{
+    /** @type {Record<string, number>[]} */
+    const set = [];
+    /** @type {string[]} */
+    const said = [];
+    const { view, call } = machine({ registers: { esp: 0x8f00, ebp: 0x8f40 },
+        setRegisters: values=>set.push(values), divergence: (api, detail)=>said.push(detail) });
+    view.setUint32(0x8f00, 0x401234, true);
+    call('RtlCaptureContext', 0x2000);
+    view.setUint32(0x2000 + 0xb0, 0x77, true);
+    assert.equal(call('NtContinue', 0x2000, 0), 0x77);
+    assert.deepEqual(set.at(-1), { edi: 6, esi: 5, ebx: 4, edx: 3, ecx: 2, eax: 0x77,
+        ebp: 0x8f40, eip: 0x401234, eflags: 0x246, esp: 0x8f08 });
+    view.setUint32(0x2000, 0x10001, true);
+    assert.equal(call('NtContinue', 0x2000, 0), 1, 'no integer group: EAX stays');
+    assert.deepEqual(Object.keys(set.at(-1) ?? {}), ['ebp', 'eip', 'eflags', 'esp']);
+    assert.equal(said.length, 0);
+    view.setUint32(0x2000, 0x1000b, true);
+    call('NtContinue', 0x2000, 0);
+    assert.match(said.join(), /floating-point/);
 });
 
 test('RtlCaptureStackBackTrace walks the frame chain within the thread\'s stack', ()=>{

@@ -156,6 +156,10 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  *           (`bridge.drive`); what a handler returns in place of a promise.
  * @property {() => any} [currentThread]
  *           Whose call is in flight: a call into the guest made after an await names it.
+ * @property {(name: string) => { run: (job: (thread: any) => Promise<void>) => void }}
+ *     [serviceThread]
+ *           A thread of the program's that runs what it is handed: D3DX 10 and 11's
+ *           thread pump's stages.
  * @property {(font: any) => any} [fontMetrics]
  *           What the font engine GDI draws with measures for a font, or null.
  * @property {(code: number, font: any) => any} [glyph]

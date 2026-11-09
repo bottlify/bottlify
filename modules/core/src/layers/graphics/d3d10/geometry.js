@@ -137,6 +137,7 @@ export const GEOMETRY_DRAW_ENTRIES = Object.freeze([
  * @property {any} backend
  * @property {any} BufferUsage
  * @property {(detail: string) => void} lose
+ * @property {(detail: string) => void} [diverge]  says, once, what is drawn otherwise than asked
  * @property {(entries: any[], label: string) => any} layoutFor
  * @property {(object: any) => number} idOf
  * @property {(shader: any, variant?: string) => any} translationOf
@@ -198,6 +199,7 @@ export function streamOutWrites(gs, entries, strides){
 /** @param {GeometryServices} services */
 export function createGeometry(services){
     const { backend, BufferUsage, lose, layoutFor, idOf } = services;
+    const diverge = services.diverge ?? (()=>{});
     /** @type {WeakMap<object, any>} shader -> its translation and stage */
     const stages = new WeakMap();
     /** @type {Record<string, any>} */
@@ -209,7 +211,7 @@ export function createGeometry(services){
     const counterOf = new WeakMap();
     let nextCounter = COUNTER.filled;
     let drawn = 0;
-    const counted = { draws: 0, invocations: 0, streamedOut: 0, autoDraws: 0 };
+    const counted = { draws: 0, invocations: 0, streamedOut: 0, autoDraws: 0, cut: 0 };
 
     /** @param {string} name @param {number} bytes @param {number} [extra] */
     const scratchOf = (name, bytes, extra = 0)=>{
@@ -278,9 +280,15 @@ export function createGeometry(services){
             }
             params = backend.createDynamicBuffer({ label: 'd3d11:geometry:params',
                 size: Math.max(4 * bytes, 2 * (at + bytes)),
-                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
+                usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST, keep: false });
         }
-        const lock = params.lock(at, bytes, LockFlags.NONE);
+        // Each draw writes a slot no draw of the frame read: in place. The
+        // frame's first takes a backing of its own, the last frame's draws
+        // reading theirs until it is submitted -- where a lock that may
+        // overwrite read bytes renamed the whole buffer at every draw, and
+        // a load that drew for minutes before a submit kept every one.
+        const lock = params.lock(at, bytes, drawn === 0 ? LockFlags.DISCARD
+            : LockFlags.NOOVERWRITE);
         lock.data.fill(0);
         slots.forEach((words, slot)=>{
             if (words)
@@ -377,13 +385,188 @@ export function createGeometry(services){
     };
 
     /**
+     * The bytes the largest buffer between the passes takes for a draw of
+     * `instances` instances of `points` positions making `prims` primitives
+     * each through a stage.
+     *
+     * @param {import('./wgsl.js').GeometryStage} stage
+     * @param {number} instances @param {number} points @param {number} prims
+     */
+    const largestOf = (stage, instances, points, prims)=>{
+        const invocations = instances * prims * stage.instances;
+        const streams = stage.streams.length;
+        const vpp = stage.outputVertices;
+        return Math.max(invocations * streams * stage.maxOut * stage.outputRegisters * 16,
+            instances * points * stage.inputRegisters * 16,
+            streams * invocations * Math.max(1, stage.maxOut - vpp + 1) * vpp * 4);
+    };
+
+    /**
+     * A draw cut to some of its instances and, within one instance, some of
+     * its primitives: its first vertex or index moved on to the run's first
+     * primitive, and the bases the geometry shader numbers its primitives and
+     * instances on from (and, for an indirect draw, stops at the count on the
+     * GPU by).
+     *
+     * @param {any} draw  the draw, its counts known (an indirect one as bounded)
+     * @param {{ instance: number, instances: number, primitive: number,
+     *     primitives: number | null }} cut
+     * @param {number} vertices  a primitive's
+     */
+    const applyCut = (draw, cut, vertices)=>{
+        const first = draw.startInstance ?? 0;
+        const made = { ...draw, startInstance: first + cut.instance, instanceCount: cut.instances,
+            primitiveBase: cut.primitive, instanceBase: cut.instance };
+        if (cut.primitives === null)
+        {
+            return made;
+        }
+        const count = cut.primitives * vertices;
+        return draw.indexCount !== undefined
+            ? { ...made, startIndex: (draw.startIndex ?? 0) + cut.primitive * vertices,
+                indexCount: count }
+            : { ...made, startVertex: (draw.startVertex ?? 0) + cut.primitive * vertices,
+                vertexCount: count };
+    };
+
+    /**
+     * A draw through a geometry shader as draws whose buffers between the
+     * passes each fit: its instances apart, and a list's primitives in runs,
+     * each run's first primitive its `primitiveBase` so the shader's
+     * primitive ids go on where the run before left them. An indirect draw is
+     * cut by the most it may draw, each piece stopping at the count the GPU
+     * holds. A strip, `DrawAuto` and a draw after the tessellator stay whole
+     * (and are said not drawn where they do not fit). Order is kept: the
+     * pieces are drawn one after the other as the one draw was.
+     *
+     * @param {any} pipeline @param {any} draw
+     * @returns {any[]} the draw alone, where it fits or cannot be cut
+     */
+    const pieces = (pipeline, draw)=>{
+        const shader = pipeline.stages.gs?.shader;
+        const topology = pipeline.topology;
+        const vertices = TOPOLOGY_VERTICES[topology] ?? 0;
+        // A piece is drawn as it is.
+        if (!shader || draw.auto || draw.cut || draw.primitiveBase !== undefined || vertices === 0
+            || pipeline.stages.hs?.shader || pipeline.stages.ds?.shader)
+        {
+            return [draw];
+        }
+        const { stage } = stageOf(shader, Math.min(3, vertices));
+        if (stage.inputVertices !== vertices)
+        {
+            return [draw];
+        }
+        const sized = draw.indirect ? indirectBounds(draw, topology)?.draw : draw;
+        if (!sized)
+        {
+            return [draw];
+        }
+        const points = sized.indexCount !== undefined ? sized.indexCount ?? 0
+            : sized.vertexCount ?? 0;
+        const instances = sized.instanceCount ?? 1;
+        const strip = STRIPS.includes(topology);
+        const prims = strip ? Math.max(0, points - vertices + 1) : Math.floor(points / vertices);
+        if (prims === 0 || largestOf(stage, instances, points, prims) <= MOST_BYTES)
+        {
+            return [draw];
+        }
+        /** @type {{ instance: number, instances: number, primitive: number,
+         *     primitives: number | null }[]} */
+        const cuts = [];
+        if (largestOf(stage, 1, points, prims) <= MOST_BYTES)
+        {
+            const each = Math.max(1, Math.floor(MOST_BYTES / largestOf(stage, 1, points, prims)));
+            for (let at = 0; at < instances; at += each)
+            {
+                cuts.push({ instance: at, instances: Math.min(each, instances - at), primitive: 0,
+                    primitives: null });
+            }
+        }
+        else if (strip)
+        {
+            return [draw];
+        }
+        else
+        {
+            const run = Math.max(1, Math.floor(MOST_BYTES / largestOf(stage, 1, vertices, 1)));
+            for (let instance = 0; instance < instances; instance++)
+            {
+                for (let at = 0; at < prims; at += run)
+                {
+                    cuts.push({ instance, instances: 1, primitive: at,
+                        primitives: Math.min(run, prims - at) });
+                }
+            }
+        }
+        counted.cut++;
+        // An indirect draw's counts are known only once bounded, in `prepare`.
+        return cuts.map(cut=>(draw.indirect ? { ...draw, cut }
+            : applyCut(draw, cut, vertices)));
+    };
+
+    /** The most primitives an instance of an indirect draw is sized for, its count unbounded. */
+    const MOST_INDIRECT_PRIMITIVES = 16384;
+
+    /**
+     * An indirect draw as one of the most it may draw: its count bounded by
+     * what the counter copied into it may hold (`CopyStructureCount`), else by
+     * MOST_INDIRECT_PRIMITIVES, its instances as the program last wrote them;
+     * and the copies of its count and instances into the words the geometry
+     * shader stops at. Null where its arguments are on no GPU buffer.
+     *
+     * @param {any} draw @param {number} topology
+     * @returns {{ draw: any, limit: any, copies: object[] } | null}
+     */
+    const indirectBounds = (draw, topology)=>{
+        const { buffer, offset } = draw.indirect;
+        const backing = services.backingOf(buffer);
+        if (!backing?.gpu)
+        {
+            return null;
+        }
+        const indexed = draw.indexCount !== undefined;
+        const host = new DataView(backing.bytes.buffer, backing.bytes.byteOffset,
+            backing.bytes.byteLength);
+        /** @param {number} k */
+        const word = k=>(offset + 4 * k + 4 <= host.byteLength
+            ? host.getUint32(offset + 4 * k, true) : 0);
+        /** @param {number} k @returns {number | undefined} */
+        const bound = k=>backing.counted?.get(offset + 4 * k);
+        const vertices = TOPOLOGY_VERTICES[topology] ?? 3;
+        let points = bound(0);
+        if (points === undefined)
+        {
+            points = MOST_INDIRECT_PRIMITIVES * vertices;
+            diverge(`an indirect draw through a geometry shader whose count no structure count`
+                + ` bounds draws at most ${MOST_INDIRECT_PRIMITIVES} primitives an instance`);
+        }
+        const instances = Math.max(1, bound(1) ?? word(1));
+        backing.gpu.markRead();
+        const limit = scratchOf('indirect-limit', 16);
+        const copy = (/** @type {number} */ k, /** @type {number} */ to)=>({ kind: 'copyBuffer',
+            source: backing.gpu.gpu, sourceOffset: offset + 4 * k, destination: limit.gpu,
+            destinationOffset: to, size: 4 });
+        return {
+            limit,
+            copies: [copy(0, 0), copy(1, 4)],
+            draw: indexed
+                ? { ...draw, indirect: undefined, indexCount: points, instanceCount: instances,
+                    startIndex: word(2), baseVertex: word(3) | 0, startInstance: word(4) }
+                : { ...draw, indirect: undefined, vertexCount: points, instanceCount: instances,
+                    startVertex: word(2), startInstance: word(3) },
+        };
+    };
+
+    /**
      * The passes before a draw through a geometry shader, or null where the
      * draw makes nothing (said where Direct3D would have made something).
      *
      * @param {any} pipeline the device's state (`PipelineSnapshot`)
      * @param {{ vertexCount: number, startVertex: number, instanceCount?: number,
      *     indexCount?: number, startIndex?: number, baseVertex?: number,
-     *     startInstance?: number, indirect?: any, auto?: any }} draw
+     *     startInstance?: number, indirect?: any, auto?: any, cut?: any,
+     *     primitiveBase?: number, instanceBase?: number }} draw
      * @param {any} [tessellated]  the tessellator's passes before it (`tessellation.js`'s
      *     `prepare`), whose indices the geometry shader takes in place of the draw's
      * @returns {{ commands: any[], waits: Promise<any>[], gs: any,
@@ -398,15 +581,29 @@ export function createGeometry(services){
         {
             return null;
         }
-        if (draw.indirect || draw.auto)
+        if (draw.auto || (draw.indirect && tessellated))
         {
-            lose('an indirect draw through a geometry shader is not drawn: how many primitives'
-                + ' it draws is on the GPU, and the passes before it are sized by it');
+            lose(`${draw.auto ? 'DrawAuto' : 'an indirect draw of patches'} through a geometry`
+                + ' shader is not drawn: how many primitives it draws is on the GPU, and the'
+                + ' passes before it are sized by it');
+            return null;
+        }
+        // An indirect draw: its counts are on the GPU. The passes are sized
+        // by the most it may draw and the geometry shader runs for what the
+        // arguments hold (`gsLimit`, the count and the instances copied
+        // there), the rest of the arguments as the program last wrote them.
+        const indirect = draw.indirect ? indirectBounds(draw, pipeline.topology) : null;
+        if (draw.indirect && !indirect)
+        {
             return null;
         }
         const topology = tessellated ? TESSELLATED_TOPOLOGY[tessellated.topology] ?? 4
             : pipeline.topology;
         const vertices = TOPOLOGY_VERTICES[topology] ?? (topology >= 33 ? topology - 32 : 0);
+        if (indirect)
+        {
+            draw = draw.cut ? applyCut(indirect.draw, draw.cut, vertices) : indirect.draw;
+        }
         const { gs, stage } = stageOf(shader, Math.min(3, vertices));
         if (vertices !== stage.inputVertices)
         {
@@ -491,7 +688,8 @@ export function createGeometry(services){
             vertexParams[8 + 4 * k + 1] = layout.buffers[k].arrayStride ?? 0;
         });
         const geometryParams = new Uint32Array([invocations, prims, topology, points,
-            indexBytes, pipeline.indexOffset ?? 0, indexed ? draw.startIndex ?? 0 : 0, 0]);
+            indexBytes, pipeline.indexOffset ?? 0, indexed ? draw.startIndex ?? 0 : 0,
+            draw.primitiveBase ?? 0, draw.instanceBase ?? 0, 0, 0, 0]);
 
         // Stream output, where the shader declares one.
         const declared = shader.streamOutput ?? null;
@@ -550,9 +748,14 @@ export function createGeometry(services){
         const indices = scratchOf('indices', indicesBytes, BufferUsage.INDEX);
 
         const commands = [];
-        // The tessellator's first word: the indices it wrote.
+        // The tessellator's first word: the indices it wrote; an indirect
+        // draw's count and instances, copied from its arguments.
         const limit = tessellated ? { buffer: tessellated.args.gpu, offset: tessellated.args.offset,
-            size: 16 } : null;
+            size: 16 } : indirect ? { buffer: indirect.limit.gpu, offset: 0, size: 16 } : null;
+        if (indirect)
+        {
+            commands.push(...indirect.copies);
+        }
         if (domainShader && limit)
         {
             commands.push({
@@ -591,9 +794,11 @@ export function createGeometry(services){
         }
 
         // 2. the geometry shader
-        const linked = linkGeometry(gs, stage, limit ? { limited: true } : {});
+        const linked = linkGeometry(gs, stage, limit ? { limited: true, instanced: !!indirect }
+            : {});
         const geometryPipeline = computeFor(
-            `gs:${idOf(shader)}|${stage.inputVertices}${limit ? '|limited' : ''}`,
+            `gs:${idOf(shader)}|${stage.inputVertices}${limit ? '|limited' : ''}`
+                + `${indirect ? '|instanced' : ''}`,
             linked.code, 'geometryMain',
             [linked.entries, limit ? LIMITED_GEOMETRY_ENTRIES : GEOMETRY_ENTRIES],
             `d3d11:gs#${idOf(shader)}`, linked.unsupported);
@@ -611,7 +816,7 @@ export function createGeometry(services){
                     { binding: GEOMETRY_BINDING.starts, resource: whole(starts, startsBytes) },
                     { binding: GEOMETRY_BINDING.counts, resource: whole(counts,
                         invocations * 32) },
-                    { binding: GEOMETRY_BINDING.params, resource: uniform(SLOT.geometry, 32) },
+                    { binding: GEOMETRY_BINDING.params, resource: uniform(SLOT.geometry, 48) },
                     ...(limit ? [{ binding: GEOMETRY_BINDING.limit, resource: limit }] : []),
                 ],
             ],
@@ -824,6 +1029,7 @@ export function createGeometry(services){
 
     return {
         prepare,
+        pieces,
         bind,
         autoArgs,
         statistics,

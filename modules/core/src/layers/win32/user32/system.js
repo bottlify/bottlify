@@ -29,7 +29,7 @@ import { cursorFilePicture, dibToBgra, groupImageId, iconFilePicture } from './c
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { displayModes, refreshOf, registryMode } from './display.js';
 import {
-    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT,
+    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, TOOL_CAPTION_HEIGHT,
     WS_CAPTION, WS_CHILD, WS_THICKFRAME, WS_VISIBLE, frameOf,
 } from './frame.js';
 import {
@@ -54,7 +54,7 @@ import {
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
 import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
-import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
+import { LOGFONTA, LOGFONTW_SIZE, logFontBytes, readLogFont, readLogFontW } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
@@ -125,10 +125,11 @@ const SM_CYMAXIMIZED = 62;
 /**
  * The metrics that do not follow the screen, as a display at 96 dots per inch
  * with the classic non-client metrics answers them: icons and cursors, the
- * caption's buttons, edges, the minimum width a caption's buttons and title
- * need, double-click and drag slop, the mouse and its wheel. Anything not
- * here and not derived below is a zero, which is also Windows' answer for a
- * feature this machine does not have.
+ * caption's buttons, edges, double-click and drag slop, the mouse and its
+ * wheel. Those SystemParametersInfo sets (the icon spacing, the double-click
+ * rectangle, the arrangement of minimised windows) start from these. Anything
+ * not here and not derived below is a zero, which is also Windows' answer for
+ * a feature this machine does not have.
  *
  * @type {ReadonlyMap<number, number>}
  */
@@ -138,17 +139,14 @@ const FIXED_METRICS = new Map([
     [13, 32], [14, 32],       // SM_CXCURSOR, SM_CYCURSOR
     [19, 1],                  // SM_MOUSEPRESENT
     [20, 16], [21, 16],       // SM_CYVSCROLL, SM_CXHSCROLL: a scroll bar's arrow
-    [28, 112], [34, 112],     // SM_CXMIN, SM_CXMINTRACK
     [30, 18], [31, 18],       // SM_CXSIZE, SM_CYSIZE: a caption button
     [36, 4], [37, 4],         // SM_CXDOUBLECLK, SM_CYDOUBLECLK
     [38, 75], [39, 75],       // SM_CXICONSPACING, SM_CYICONSPACING
     [43, 3],                  // SM_CMOUSEBUTTONS
     [45, 2], [46, 2],         // SM_CXEDGE, SM_CYEDGE
-    [47, 160], [48, 24],      // SM_CXMINSPACING, SM_CYMINSPACING
     [49, 16], [50, 16],       // SM_CXSMICON, SM_CYSMICON
     [54, 18], [55, 18],       // SM_CXMENUSIZE, SM_CYMENUSIZE
     [56, 8],                  // SM_ARRANGE: ARW_HIDE, minimised windows not shown
-    [57, 160], [58, 24],      // SM_CXMINIMIZED, SM_CYMINIMIZED
     [68, 4], [69, 4],         // SM_CXDRAG, SM_CYDRAG
     [71, 13], [72, 13],       // SM_CXMENUCHECK, SM_CYMENUCHECK
     [75, 1],                  // SM_MOUSEWHEELPRESENT
@@ -228,10 +226,10 @@ export function createSystemColors(){
     };
 }
 
-/** MonitorFromRect and friends answer with this, there being one display. */
 /** What SetClassWord answers for the atom, or a word past the extra bytes. */
 const ERROR_INVALID_INDEX = 1413;
-const PRIMARY_MONITOR = 0x00010001;
+/** MonitorFromRect and friends answer with this, there being one display. */
+export const PRIMARY_MONITOR = 0x00010001;
 const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
 
@@ -492,10 +490,375 @@ const CS_HREDRAW = 0x0002;
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
+/**
+ * The SystemParametersInfo settings that are one number, with Windows 7's
+ * default: [get action, set action, default, where the set finds the value].
+ * The older ones take it in uiParam; the 0x1000 and 0x2000 ranges, and the
+ * mouse speed, in pvParam itself. A get writes a BOOL or DWORD at pvParam.
+ *
+ * @type {ReadonlyArray<readonly [number, number, number, 'param' | 'pointer']>}
+ */
+const SPI_NUMBERS = Object.freeze([
+    [0x0001, 0x0002, 1, 'param'], // BEEP
+    [0x0005, 0x0006, BORDER, 'param'], // BORDER
+    [0x000a, 0x000b, 31, 'param'], // KEYBOARDSPEED
+    [0x000e, 0x000f, 600, 'param'], // SCREENSAVETIMEOUT
+    [0x0010, 0x0011, 0, 'param'], // SCREENSAVEACTIVE
+    [0x0016, 0x0017, 1, 'param'], // KEYBOARDDELAY
+    [0x0019, 0x001a, 1, 'param'], // ICONTITLEWRAP
+    [0x001b, 0x001c, 0, 'param'], // MENUDROPALIGNMENT
+    [0x0023, 0x0024, 1, 'param'], // FASTTASKSWITCH
+    [0x0026, 0x0025, 1, 'param'], // DRAGFULLWINDOWS
+    [0x0038, 0x0039, 0, 'param'], // SHOWSOUNDS
+    [0x0044, 0x0045, 0, 'param'], // KEYBOARDPREF
+    [0x0046, 0x0047, 0, 'param'], // SCREENREADER
+    // FONTSMOOTHING, off: text is drawn here without smoothing. A font
+    // renderer picks the quality it asks GDI for from this, and a refusal
+    // leaves it reporting an error on every font it makes.
+    [0x004a, 0x004b, 0, 'param'],
+    [0x004f, 0x0051, 0, 'param'], // LOWPOWERTIMEOUT
+    [0x0050, 0x0052, 0, 'param'], // POWEROFFTIMEOUT
+    [0x0053, 0x0055, 0, 'param'], // LOWPOWERACTIVE
+    [0x0054, 0x0056, 0, 'param'], // POWEROFFACTIVE
+    [0x005e, 0x005d, 0, 'param'], // MOUSETRAILS
+    [0x005f, 0x0060, 0, 'param'], // SNAPTODEFBUTTON
+    [0x0062, 0x0063, HOVER_SIZE, 'param'], // MOUSEHOVERWIDTH
+    [0x0064, 0x0065, HOVER_SIZE, 'param'], // MOUSEHOVERHEIGHT
+    [0x0066, 0x0067, HOVER_TIME, 'param'], // MOUSEHOVERTIME
+    [0x0068, 0x0069, 3, 'param'], // WHEELSCROLLLINES
+    [0x006a, 0x006b, 400, 'param'], // MENUSHOWDELAY
+    [0x006c, 0x006d, 3, 'param'], // WHEELSCROLLCHARS
+    [0x006e, 0x006f, 1, 'param'], // SHOWIMEUI
+    [0x0070, 0x0071, 10, 'pointer'], // MOUSESPEED
+    [0x0072, 0, 0, 'param'], // SCREENSAVERRUNNING
+    [0x0076, 0x0077, 0, 'param'], // SCREENSAVESECURE
+    [0x0078, 0x0079, 5000, 'param'], // HUNGAPPTIMEOUT
+    [0x007a, 0x007b, 20000, 'param'], // WAITTOKILLTIMEOUT
+    [0x007c, 0x007d, 12000, 'param'], // WAITTOKILLSERVICETIMEOUT
+    // The user interface effects, each a BOOL: activewindow tracking, menu,
+    // combo box and list box animation, gradient captions, keyboard cues
+    // (hidden until the keyboard is used), z-order tracking, hot tracking,
+    // menu and selection fades, tooltip animation and fade, the cursor's
+    // shadow, sonar, click lock, vanish, flat menus, drop shadows, input
+    // resets, the effects as a whole, overlapped content, client-area
+    // animation, ClearType (off: text is drawn without smoothing here).
+    ...[[0x1000, 0], [0x1002, 1], [0x1004, 1], [0x1006, 1], [0x1008, 1], [0x100a, 0],
+        [0x100c, 0], [0x100e, 1], [0x1012, 1], [0x1014, 1], [0x1016, 1], [0x1018, 1],
+        [0x101a, 1], [0x101c, 0], [0x101e, 0], [0x1020, 1], [0x1022, 1], [0x1024, 1],
+        [0x1026, 0], [0x103e, 1], [0x1040, 0], [0x1042, 1], [0x1048, 0]]
+        .map(([get, on])=>/** @type {const} */ ([get, get + 1, on, 'pointer'])),
+    // Foreground lock timeout, window-tracking timeout, flash count, caret
+    // width, click-lock time, font smoothing type, contrast (the gamma
+    // DirectWrite blends GDI-like text with, over a thousand) and
+    // orientation, focus border width and height, message duration.
+    ...[[0x2000, 200000], [0x2002, 0], [0x2004, 7], [0x2006, 1], [0x2008, 1200],
+        [0x200a, 1], [0x200c, 1400], [0x200e, 1], [0x2010, 1], [0x2012, 1], [0x2016, 5]]
+        .map(([get, value])=>/** @type {const} */ ([get, get + 1, value, 'pointer'])),
+]);
+
+/**
+ * The settings that are a structure beginning with its cbSize, by get action:
+ * the set action and the default words, the size first. FILTERKEYS,
+ * TOGGLEKEYS, MOUSEKEYS, STICKYKEYS, ACCESSTIMEOUT, SOUNDSENTRY (its effect
+ * library's name left null) and ANIMATIONINFO, with Windows 7's accessibility
+ * defaults.
+ *
+ * @type {ReadonlyMap<number, { set: number, words: readonly number[] }>}
+ */
+const SPI_STRUCTURES = new Map([
+    [0x0032, { set: 0x0033, words: [24, 126, 1000, 1000, 500, 0] }],
+    [0x0034, { set: 0x0035, words: [8, 58] }],
+    [0x0036, { set: 0x0037, words: [28, 62, 80, 3000, 0, 0, 0] }],
+    [0x003a, { set: 0x003b, words: [8, 510] }],
+    [0x003c, { set: 0x003d, words: [12, 2, 300000] }],
+    [0x0040, { set: 0x0041, words: [48, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }],
+    [0x0048, { set: 0x0049, words: [8, 1] }],
+]);
+
+/** The keys under HKEY_CURRENT_USER a user's settings are kept in. */
+const DESKTOP_KEY = 'Control Panel\\Desktop';
+const METRICS_KEY = 'Control Panel\\Desktop\\WindowMetrics';
+const MOUSE_KEY = 'Control Panel\\Mouse';
+const KEYBOARD_KEY = 'Control Panel\\Keyboard';
+const ACCESSIBILITY_KEY = 'Control Panel\\Accessibility';
+
+/**
+ * How a setting is written in the profile: 'text' a decimal REG_SZ, 'yes'
+ * "Yes" or "No", 'smoothing' "2" (on) or "0", 'twips' a size as a negative
+ * count of twips in a REG_SZ (a twip is a 1440th of an inch, fifteen a pixel
+ * at 96 dots per inch), 'dword' a REG_DWORD, 'bit' one bit of
+ * UserPreferencesMask.
+ *
+ * @typedef {'text' | 'yes' | 'smoothing' | 'twips' | 'dword' | 'bit'} ProfileFormat
+ */
+
+/**
+ * Where SystemParametersInfo keeps a one-number setting in the user's
+ * profile, by its get action (a setting that has none, by its set action): the
+ * key under HKEY_CURRENT_USER, the value's name and its format. A set with
+ * SPIF_UPDATEINIFILE writes it there, and a process starts from what is there.
+ *
+ * @type {ReadonlyMap<number, { key: string, name: string, as: ProfileFormat }>}
+ */
+const SPI_PLACES = new Map(/** @type {[number, string, string, ProfileFormat][]} */ ([
+    [0x0001, 'Control Panel\\Sound', 'Beep', 'yes'],
+    [0x0005, METRICS_KEY, 'BorderWidth', 'twips'],
+    [0x000a, KEYBOARD_KEY, 'KeyboardSpeed', 'text'],
+    [0x000e, DESKTOP_KEY, 'ScreenSaveTimeOut', 'text'],
+    [0x0010, DESKTOP_KEY, 'ScreenSaveActive', 'text'],
+    [0x0016, KEYBOARD_KEY, 'KeyboardDelay', 'text'],
+    [0x0019, METRICS_KEY, 'IconTitleWrap', 'text'],
+    [0x001b, 'Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', 'MenuDropAlignment',
+        'text'],
+    [0x001d, MOUSE_KEY, 'DoubleClickWidth', 'text'],
+    [0x001e, MOUSE_KEY, 'DoubleClickHeight', 'text'],
+    [0x0020, MOUSE_KEY, 'DoubleClickSpeed', 'text'],
+    [0x0021, MOUSE_KEY, 'SwapMouseButtons', 'text'],
+    [0x0026, DESKTOP_KEY, 'DragFullWindows', 'text'],
+    [0x0038, `${ACCESSIBILITY_KEY}\\ShowSounds`, 'On', 'text'],
+    [0x0044, `${ACCESSIBILITY_KEY}\\Keyboard Preference`, 'On', 'text'],
+    [0x0046, `${ACCESSIBILITY_KEY}\\Blind Access`, 'On', 'text'],
+    [0x004a, DESKTOP_KEY, 'FontSmoothing', 'smoothing'],
+    [0x004f, DESKTOP_KEY, 'LowPowerTimeOut', 'text'],
+    [0x0050, DESKTOP_KEY, 'PowerOffTimeOut', 'text'],
+    [0x0053, DESKTOP_KEY, 'LowPowerActive', 'text'],
+    [0x0054, DESKTOP_KEY, 'PowerOffActive', 'text'],
+    [0x005e, MOUSE_KEY, 'MouseTrails', 'text'],
+    [0x005f, MOUSE_KEY, 'SnapToDefaultButton', 'text'],
+    [0x0062, MOUSE_KEY, 'MouseHoverWidth', 'text'],
+    [0x0064, MOUSE_KEY, 'MouseHoverHeight', 'text'],
+    [0x0066, MOUSE_KEY, 'MouseHoverTime', 'text'],
+    [0x0068, DESKTOP_KEY, 'WheelScrollLines', 'text'],
+    [0x006a, DESKTOP_KEY, 'MenuShowDelay', 'text'],
+    [0x006c, DESKTOP_KEY, 'WheelScrollChars', 'text'],
+    [0x0070, MOUSE_KEY, 'MouseSensitivity', 'text'],
+    [0x0076, DESKTOP_KEY, 'ScreenSaverIsSecure', 'text'],
+    [0x0078, DESKTOP_KEY, 'HungAppTimeout', 'text'],
+    [0x007a, DESKTOP_KEY, 'WaitToKillAppTimeout', 'text'],
+    // The user interface effects up to the effects as a whole are the bits
+    // of one mask, each at its get action's place in the range.
+    ...[0x1000, 0x1002, 0x1004, 0x1006, 0x1008, 0x100a, 0x100c, 0x100e, 0x1012, 0x1014,
+        0x1016, 0x1018, 0x101a, 0x101c, 0x101e, 0x1020, 0x1022, 0x1024, 0x1026, 0x103e]
+        .map(get=>/** @type {[number, string, string, ProfileFormat]} */ (
+            [get, DESKTOP_KEY, 'UserPreferencesMask', 'bit'])),
+    [0x2000, DESKTOP_KEY, 'ForegroundLockTimeout', 'dword'],
+    [0x2002, DESKTOP_KEY, 'ActiveWndTrkTimeout', 'dword'],
+    [0x2004, DESKTOP_KEY, 'ForegroundFlashCount', 'dword'],
+    [0x2006, DESKTOP_KEY, 'CaretWidth', 'dword'],
+    [0x2008, DESKTOP_KEY, 'ClickLockTime', 'dword'],
+    [0x200a, DESKTOP_KEY, 'FontSmoothingType', 'dword'],
+    [0x200c, DESKTOP_KEY, 'FontSmoothingGamma', 'dword'],
+    [0x200e, DESKTOP_KEY, 'FocusBorderWidth', 'dword'],
+    [0x2010, DESKTOP_KEY, 'FocusBorderHeight', 'dword'],
+    [0x2012, DESKTOP_KEY, 'FontSmoothingOrientation', 'dword'],
+]).map(([action, key, name, as])=>[action, { key, name, as }]));
+
+/**
+ * What a set does to the number it is given before keeping it, by get
+ * action: a border is at least a pixel wide, the hover time is at least the
+ * shortest a timer waits, font smoothing is on or off.
+ *
+ * @type {ReadonlyMap<number, (value: number) => number>}
+ */
+const SPI_KEPT_AS = new Map([
+    [0x0005, value=>Math.max(value | 0, 1)],
+    [0x004a, value=>(value !== 0 ? 1 : 0)],
+    [0x0066, value=>Math.max(value, 10)],
+]);
+
+/**
+ * Where a structure setting keeps its words past cbSize, by get action: the
+ * key, and each word's value name (null for one Windows does not keep).
+ *
+ * @type {ReadonlyMap<number, { key: string, names: (string | null)[] }>}
+ */
+const SPI_STRUCTURE_PLACES = new Map([
+    [0x0032, { key: `${ACCESSIBILITY_KEY}\\Keyboard Response`, names: ['Flags',
+        'DelayBeforeAcceptance', 'AutoRepeatDelay', 'AutoRepeatRate', 'BounceTime'] }],
+    [0x0034, { key: `${ACCESSIBILITY_KEY}\\ToggleKeys`, names: ['Flags'] }],
+    [0x0036, { key: `${ACCESSIBILITY_KEY}\\MouseKeys`, names: ['Flags', 'MaximumSpeed',
+        'TimeToMaximumSpeed', null, null, null] }],
+    [0x003a, { key: `${ACCESSIBILITY_KEY}\\StickyKeys`, names: ['Flags'] }],
+    [0x003c, { key: `${ACCESSIBILITY_KEY}\\TimeOut`, names: ['Flags', 'TimeToWait'] }],
+    [0x0040, { key: `${ACCESSIBILITY_KEY}\\SoundSentry`, names: ['Flags', 'FSTextEffect',
+        null, null, null, null, null, 'WindowsEffect', null, null, null] }],
+    [0x0048, { key: METRICS_KEY, names: ['MinAnimate'] }],
+]);
+
+/** The fonts' character set: DEFAULT_CHARSET, the one the user's locale picks. */
+const DEFAULT_CHARSET = 1;
+
+/**
+ * The non-client fonts' face and size, Tahoma at eight points (eleven pixels
+ * at 96 dots per inch), as LOGFONT fields: the caption's bold.
+ *
+ * @param {number} weight
+ * @returns {import('../gdi32/structs.js').LogFontFields}
+ */
+const systemFont = weight=>({ height: -11, width: 0, escapement: 0, orientation: 0, weight,
+    italic: 0, underline: 0, strikeOut: 0, charSet: DEFAULT_CHARSET, outPrecision: 0,
+    clipPrecision: 0, quality: 0, pitchAndFamily: 0, faceName: 'Tahoma' });
+
+/**
+ * The average character width of the caption's font as this build's GDI
+ * measures it (bold Tahoma at eleven pixels): SM_CXMIN, the narrowest a
+ * window may be, holds four of them beside its caption's buttons.
+ */
+const CAPTION_CHAR_WIDTH = 6;
+
+/** The narrowest icon spacing a set leaves: an icon's width at 96 dots per inch. */
+const LEAST_ICON_SPACING = 32;
+
+/** What WM_SETTINGCHANGE is, and how long its broadcast waits for each window. */
+const WM_SETTINGCHANGE = 0x001a;
+const SETTING_CHANGE_WAIT_MS = 2000;
+/** SystemParametersInfo's fWinIni: write the setting to the profile, tell every window. */
+const SPIF_UPDATEINIFILE = 0x1;
+const SPIF_SENDCHANGE = 0x2;
+/** The settings GetSystemMetrics reads too, by their get actions. */
+const SPI_GETBORDER = 0x0005;
+const SPI_GETMENUDROPALIGNMENT = 0x001b;
+const SPI_GETSHOWSOUNDS = 0x0038;
+/** The registry's root for the user's profile, and the value types written there. */
+const HKEY_CURRENT_USER = 0x80000001;
+const REG_SZ = 1;
+const REG_BINARY = 3;
+const REG_DWORD = 4;
+/** The actions whose sets are not one number of SPI_NUMBERS. */
+const SPI_SETMOUSE = 0x0004;
+const SPI_ICONHORIZONTALSPACING = 0x000d;
+const SPI_SETDESKWALLPAPER = 0x0014;
+const SPI_ICONVERTICALSPACING = 0x0018;
+const SPI_SETICONTITLEWRAP = 0x001a;
+const SPI_SETDOUBLECLICKTIME = 0x0020;
+const SPI_SETMOUSEBUTTONSWAP = 0x0021;
+const SPI_SETICONTITLELOGFONT = 0x0022;
+const SPI_SETMINIMIZEDMETRICS = 0x002c;
+const SPI_SETICONMETRICS = 0x002e;
+const SPI_SETWORKAREA = 0x002f;
+const SPI_SETHIGHCONTRAST = 0x0043;
+
+/**
+ * A value of the registry, as the hive keeps it.
+ *
+ * @typedef {{ type: number, data: Uint8Array }} RegistryValue
+ */
+
+/**
+ * One value of the user's profile a setting is kept in: where it is, what
+ * the setting writes there, and how the setting takes back what is there
+ * (absent for a value only written).
+ *
+ * @typedef {Object} ProfileValue
+ * @property {string} key  Under HKEY_CURRENT_USER.
+ * @property {string} name
+ * @property {() => RegistryValue} written
+ * @property {(found: RegistryValue) => void} [read]
+ */
+
+/** UserPreferencesMask's length, and the bit of an effect's get action in it. */
+const PREFERENCES_MASK_BYTES = 8;
+/** @param {number} get */
+const maskBit = get=>(get - 0x1000) >>> 1;
+/** How many twips a pixel is at 96 dots per inch. */
+const TWIPS_PER_PIXEL = 15;
+
+/** @param {string} text @returns {RegistryValue} */
+const textValue = text=>({ type: REG_SZ, data: encodeAnsi(text) });
+/** @param {RegistryValue} found @returns {string | null} a REG_SZ's text */
+const textOf = found=>(found.type === REG_SZ
+    ? decodeAnsi(found.data).replace(/\0+$/, '') : null);
+/** @param {RegistryValue} found @returns {number | null} a decimal REG_SZ's number */
+const numberOf = found=>{
+    const text = textOf(found);
+    return text !== null && /^\s*[-+]?\d/.test(text) ? Number.parseInt(text, 10) : null;
+};
+
+/**
+ * A setting's number as the profile writes it.
+ *
+ * @param {ProfileFormat} as @param {number} value
+ * @returns {RegistryValue}
+ */
+const placeValue = (as, value)=>{
+    switch (as){
+        case 'yes':
+            return textValue(value !== 0 ? 'Yes' : 'No');
+        case 'smoothing':
+            return textValue(value !== 0 ? '2' : '0');
+        case 'twips':
+            return textValue(String(value === 0 ? 0 : -TWIPS_PER_PIXEL * (value | 0)));
+        case 'dword':
+            return { type: REG_DWORD, data: new Uint8Array(new Uint32Array([value >>> 0]).buffer) };
+        default:
+            return textValue(String(value >>> 0));
+    }
+};
+
+/**
+ * The number a profile value holds for a setting, null for one in another
+ * form: a size in twips (negative) comes back in pixels, rounded, and a
+ * positive one is pixels already.
+ *
+ * @param {ProfileFormat} as @param {RegistryValue} found @param {number} bit  Of the mask.
+ * @returns {number | null}
+ */
+const placeNumber = (as, found, bit)=>{
+    if (as === 'dword')
+    {
+        return found.type === REG_DWORD && found.data.length >= 4
+            ? new DataView(found.data.buffer, found.data.byteOffset).getUint32(0, true) : null;
+    }
+    if (as === 'bit')
+    {
+        return found.type === REG_BINARY && found.data.length > bit >>> 3
+            ? (found.data[bit >>> 3] >>> (bit & 7)) & 1 : null;
+    }
+    if (as === 'yes')
+    {
+        const text = textOf(found);
+        return text === null ? null : /^\s*yes\s*$/i.test(text) ? 1 : 0;
+    }
+    const number = numberOf(found);
+    if (number === null)
+    {
+        return null;
+    }
+    if (as === 'smoothing')
+    {
+        return number !== 0 ? 1 : 0;
+    }
+    if (as === 'twips' && number < 0)
+    {
+        return Math.floor((-number * 96 + 720) / 1440);
+    }
+    return number >>> 0;
+};
+
+/** GetSystemMetrics' indices of the icon spacing. */
+const SM_CXICONSPACING_INDEX = 38;
+const SM_CYICONSPACING_INDEX = 39;
+
+/** HIGHCONTRAST's flags: available, its hot key active, confirmed, sounded, shown. */
+const HIGHCONTRAST_DEFAULT_FLAGS = 0x7e;
+
 /** The metrics SPI_SETMINIMIZEDMETRICS and ArrangeIconicWindows go by. */
 const SM_ARRANGE = 56;
 const SM_CXMINIMIZED = 57;
 const SM_CYMINIMIZED = 58;
+const SM_CXMINSPACING = 47;
+const SM_CYMINSPACING = 48;
+/** A minimised window's width inside its frame, as MINIMIZEDMETRICS has it. */
+const MINIMIZED_WIDTH = 154;
+/** The metrics a setting of SystemParametersInfo moves. */
+const SM_SWAPBUTTON = 23;
+const SM_CXMIN = 28;
+const SM_CYSIZE = 31;
+const SM_CXMINTRACK = 34;
+const SM_CXDOUBLECLK = 36;
+const SM_CYDOUBLECLK = 37;
+const SM_MENUDROPALIGNMENT = 40;
+const SM_SHOWSOUNDS = 70;
 const WS_POPUP = 0x80000000;
 /** What the region calls answer: no region, or one rectangle. */
 const REGION_ERROR = 0;
@@ -810,8 +1173,22 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     /** GetCaretBlinkTime's answer, which SetCaretBlinkTime changes. */
     let caretBlinkTime = CARET_BLINK_TIME;
 
-    /** GetDoubleClickTime's answer, which SetDoubleClickTime changes. */
-    let doubleClickTime = DOUBLE_CLICK_TIME;
+    /**
+     * The double-click time as SetDoubleClickTime or SPI_SETDOUBLECLICKTIME
+     * last set it, zero for the default, which GetDoubleClickTime answers.
+     */
+    const clickTime = { value: DOUBLE_CLICK_TIME };
+
+    /**
+     * The work area SPI_SETWORKAREA set, null for the whole screen: a mode
+     * change gives the whole new screen back, as Windows lays the work area
+     * out again then.
+     *
+     * @type {{ left: number, top: number, right: number, bottom: number } | null}
+     */
+    let workArea = null;
+    const workAreaRect = ()=>workArea
+        ?? { left: 0, top: 0, right: screen.width, bottom: screen.height };
 
     /**
      * GetKeyboardLayoutName in either encoding.
@@ -850,11 +1227,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * GetMonitorInfo, both spellings. cbSize is the caller saying which
      * structure it allocated; a size that is neither of the two it may be is a
      * caller bug, and answering FALSE is how it finds out rather than by
-     * having its stack written past.
+     * having its stack written past. MONITORINFOEX, as long again as the
+     * device name of the caller's spelling, has the adapter's name after it:
+     * the name EnumDisplaySettings takes for the monitor's modes.
      *
-     * @param {number} monitor @param {number} info
+     * @param {number} monitor @param {number} info @param {boolean} [wide]
      */
-    const monitorInfo = (monitor, info)=>{
+    const monitorInfo = (monitor, info, wide = false)=>{
+        const CCHDEVICENAME = 32;
         if ((monitor >>> 0) !== PRIMARY_MONITOR || (info >>> 0) === 0)
         {
             return 0;
@@ -867,8 +1247,15 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
         writeRect(host, info + MONITORINFO.rcMonitor, whole);
-        writeRect(host, info + MONITORINFO.rcWork, whole);
+        writeRect(host, info + MONITORINFO.rcWork, workAreaRect());
         writeU32s(host, info + MONITORINFO.dwFlags, [MONITORINFOF_PRIMARY]);
+        const unit = wide ? 2 : 1;
+        if (declared >= MONITORINFO.SIZE + CCHDEVICENAME * unit)
+        {
+            const name = new Uint8Array(CCHDEVICENAME * unit);
+            name.set(textBytes(DISPLAY_DEVICE_NAME, wide));
+            host.writeMemory(info + MONITORINFO.SIZE, name);
+        }
         return 1;
     };
 
@@ -1987,12 +2374,31 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * shallowest depth it knows -- sixteen bits, for every surface it makes
      * after.
      *
+     * The display is named by the adapter's name or by none; any other name
+     * (a monitor's among them) answers FALSE with nothing written and the
+     * last error left alone. What is written is the DEVMODE up to its display
+     * frequency, the members a display has (dmSize says so), every mode with
+     * its orientation and flags, the mode in effect and the registry's with
+     * their position too (monitor.c test_ChangeDisplaySettingsEx);
+     * the Ex spelling writes no further than the caller's dmSize says it may,
+     * keeping that dmSize when it is shorter (sysparams.c
+     * test_EnumDisplaySettings).
+     *
+     * @param {number} name  The device's name, or 0.
      * @param {number} mode @param {number} devMode
      * @param {typeof DEVMODEA | typeof DEVMODEW} layout
+     * @param {boolean} [ex]  Whether the call was the Ex spelling.
      */
-    const enumDisplaySettings = (mode, devMode, layout)=>{
+    const enumDisplaySettings = (name, mode, devMode, layout, ex = false)=>{
+        const DM_POSITION = 0x00000020;
+        const DM_DISPLAYFLAGS = 0x00200000;
         const index = mode | 0;
         if ((devMode >>> 0) === 0)
+        {
+            return 0;
+        }
+        if ((name >>> 0) !== 0 && readText(host, name >>> 0, layout === DEVMODEW)
+            .toUpperCase() !== DISPLAY_DEVICE_NAME)
         {
             return 0;
         }
@@ -2004,13 +2410,24 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         const answer = listed ?? { ...screen, refresh: refreshOf(screen),
             ...(index === ENUM_REGISTRY_SETTINGS ? registryMode(screen) : {}) };
-        writeU16(host, devMode + layout.dmSize, layout.SIZE);
-        writeU16(host, devMode + layout.dmDriverExtra, 0);
-        writeU32s(host, devMode + layout.dmFields,
-            [DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY]);
-        writeU32s(host, devMode + layout.dmBitsPerPel,
-            [answer.bitsPerPixel, answer.width, answer.height]);
-        writeU32s(host, devMode + layout.dmDisplayFrequency, [answer.refresh]);
+        const whole = layout.dmDisplayFrequency + 4;
+        const given = ex ? readU16(devMode + layout.dmSize) : whole;
+        const room = Math.min(given, whole);
+        const image = new Uint8Array(whole);
+        image.set(host.readMemory(devMode, room));
+        const fields = new DataView(image.buffer);
+        fields.setUint16(layout.dmSize, given >= whole ? whole : given, true);
+        fields.setUint16(layout.dmDriverExtra, 0, true);
+        fields.setUint32(layout.dmFields, DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT
+            | DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION
+            | (current ? DM_POSITION : 0), true);
+        // dmPosition is the union's first eight bytes, before the orientation.
+        fields.setInt32(layout.dmDisplayOrientation - 8, 0, true);
+        fields.setInt32(layout.dmDisplayOrientation - 4, 0, true);
+        fields.setUint32(layout.dmDisplayOrientation, DMDO_DEFAULT, true);
+        [answer.bitsPerPixel, answer.width, answer.height, 0, answer.refresh]
+            .forEach((one, at)=>fields.setUint32(layout.dmBitsPerPel + at * 4, one >>> 0, true));
+        host.writeMemory(devMode, image.subarray(0, room));
         return 1;
     };
 
@@ -2101,6 +2518,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         screen.width = width;
         screen.height = height;
+        workArea = null;
         return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
             ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0, false, DISPLAY_CHANGE_WAIT_MS),
         ()=>DISP_CHANGE_SUCCESSFUL);
@@ -2221,17 +2639,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         /** @param {number} weight */
-        const face = weight=>logFontBytes({ height: -11, width: 0, escapement: 0,
-            orientation: 0, weight, italic: 0, underline: 0, strikeOut: 0, charSet: 0,
-            outPrecision: 0, clipPrecision: 0, quality: 0, pitchAndFamily: 0,
-            faceName: 'Tahoma' }, wide);
+        const face = weight=>logFontBytes(systemFont(weight), wide);
         const bytes = new Uint8Array(cbSize);
         const view = new DataView(bytes.buffer);
         /** @param {number} at @param {number[]} values */
         const put = (at, values)=>values.forEach((one, index)=>{
             view.setInt32(at + index * 4, one, true);
         });
-        put(0, [cbSize, BORDER, SCROLLBAR, SCROLLBAR, metric(SM_CXSIZE), CAPTION_HEIGHT - 1]);
+        put(0, [cbSize, border(), SCROLLBAR, SCROLLBAR, metric(SM_CXSIZE), CAPTION_HEIGHT - 1]);
         bytes.set(face(700), 24);
         const smallCaption = 24 + font;
         put(smallCaption, [metric(SM_CXSMSIZE), metric(SM_CYSMSIZE)]);
@@ -2249,59 +2664,542 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     /**
      * MINIMIZEDMETRICS past its cbSize, as SPI_SETMINIMIZEDMETRICS last set
      * it: the width of a minimised window, the gaps between them, and where
-     * ArrangeIconicWindows starts and which way it goes.
+     * ArrangeIconicWindows starts and which way it goes. SM_CXMINIMIZED is
+     * the width and a frame of three pixels either side, the spacing metrics
+     * the minimised size and the gaps, SM_ARRANGE the arrangement: Windows 7
+     * starts at 160 pixels apart, bottom left, hidden.
      */
-    let minimizedMetrics = [FIXED_METRICS.get(SM_CXMINIMIZED) ?? 0, 0, 0,
-        FIXED_METRICS.get(SM_ARRANGE) ?? 0];
+    let minimizedMetrics = [MINIMIZED_WIDTH, 0, 0, FIXED_METRICS.get(SM_ARRANGE) ?? 0];
+
+    /** The icon spacing, across and down, and the icon title font (ICONMETRICS). */
+    const iconSpacing = { across: FIXED_METRICS.get(SM_CXICONSPACING_INDEX) ?? 0,
+        down: FIXED_METRICS.get(SM_CYICONSPACING_INDEX) ?? 0 };
+    /** @type {import('../gdi32/structs.js').LogFontFields} */
+    let iconFont = systemFont(400);
 
     /**
-     * SystemParametersInfo, both spellings: the work area, the hover
-     * parameters TrackMouseEvent works by, the non-client and minimised
-     * windows' metrics, whether text is smoothed, and a refusal for
-     * everything else.
+     * The settings that are GetSystemMetrics answers too and have no get
+     * action of their own, by set action: the double-click rectangle and
+     * whether the buttons are swapped.
      *
-     * @param {number} action @param {number} value @param {boolean} wide
+     * @type {Map<number, { index: number, value: number }>}
      */
-    const systemParameter = (action, value, wide)=>{
+    const metricSettings = new Map([
+        [0x001d, { index: SM_CXDOUBLECLK, value: FIXED_METRICS.get(SM_CXDOUBLECLK) ?? 0 }],
+        [0x001e, { index: SM_CYDOUBLECLK, value: FIXED_METRICS.get(SM_CYDOUBLECLK) ?? 0 }],
+        [0x0021, { index: SM_SWAPBUTTON, value: 0 }],
+    ]);
+
+    /**
+     * The one-number settings as they stand, by get and by set action: a set
+     * is what the next get reads.
+     *
+     * @type {Map<number, { get: number, set: number, from: 'param' | 'pointer', value: number }>}
+     */
+    const numberSettings = new Map();
+    for (const [get, set, value, from] of SPI_NUMBERS)
+    {
+        const setting = { get, set, from, value };
+        numberSettings.set(get, setting);
+        if (set !== 0)
+        {
+            numberSettings.set(set, setting);
+        }
+    }
+    /**
+     * The structure settings as they stand, by get and by set action.
+     *
+     * @type {Map<number, { get: number, set: number, words: number[] }>}
+     */
+    const structureSettings = new Map();
+    for (const [get, { set, words }] of SPI_STRUCTURES)
+    {
+        const setting = { get, set, words: [...words] };
+        structureSettings.set(get, setting);
+        structureSettings.set(set, setting);
+    }
+    /** SPI_GETMOUSE's thresholds and acceleration. */
+    let mouseThresholds = [6, 10, 1];
+    let highContrast = HIGHCONTRAST_DEFAULT_FLAGS;
+    let wallpaper = '';
+    /** The actions SystemParametersInfo has said it does not answer. */
+    const saidSettings = new Set();
+    /** What SystemParametersInfo has said it does not do, each said once. */
+    const saidParts = new Set();
+    /** @param {string} detail */
+    const sayOnce = detail=>{
+        if (!saidParts.has(detail))
+        {
+            saidParts.add(detail);
+            host.divergence?.('SystemParametersInfo', detail);
+        }
+    };
+    /** HIGHCONTRAST: cbSize, dwFlags, lpszDefaultScheme. */
+    const HIGHCONTRAST_SIZE = 12;
+    /** The default scheme's name, an empty string of each spelling, made once. */
+    const schemeNames = { ansi: 0, wide: 0 };
+    /** @param {boolean} wide */
+    const schemeName = wide=>{
+        const key = wide ? 'wide' : 'ansi';
+        if (schemeNames[key] === 0 && host.allocate)
+        {
+            schemeNames[key] = host.allocate(2) >>> 0;
+            host.writeMemory(schemeNames[key], new Uint8Array(2));
+        }
+        return schemeNames[key];
+    };
+    /** The border SPI_SETBORDER last set, a pixel at least. */
+    const border = ()=>numberSettings.get(SPI_GETBORDER)?.value ?? BORDER;
+    /** A sizing frame: the border and the dialog frame inside it. */
+    const sizeFrame = ()=>border() + DIALOG_FRAME;
+    /**
+     * A LOGFONT of the caller's spelling, as its fields.
+     *
+     * @param {number} at @param {boolean} wide
+     */
+    const readFont = (at, wide)=>(wide ? readLogFontW : readLogFont)(host, at);
+    /** UserPreferencesMask: a bit for each effect, eight bytes. */
+    const preferencesMask = ()=>{
+        const bytes = new Uint8Array(PREFERENCES_MASK_BYTES);
+        for (const [get, where] of SPI_PLACES)
+        {
+            const bit = maskBit(get);
+            if (where.as === 'bit' && (numberSettings.get(get)?.value ?? 0) !== 0)
+            {
+                bytes[bit >>> 3] |= 1 << (bit & 7);
+            }
+        }
+        return bytes;
+    };
+
+    /**
+     * The values of the profile each setting is kept in, by the action that
+     * sets it: what the setting writes there, and how it takes back what is
+     * there. The non-client sizes and fonts have no set here and are only
+     * written, so a profile holds what Windows' holds (by no action).
+     *
+     * @type {Map<number, ProfileValue[]>}
+     */
+    const profileValues = new Map();
+    /** @param {number} action @param {ProfileValue[]} values */
+    const keep = (action, values)=>profileValues.set(action,
+        [...profileValues.get(action) ?? [], ...values]);
+    for (const [action, where] of SPI_PLACES)
+    {
+        const setting = numberSettings.get(action);
+        const metricSetting = metricSettings.get(action);
+        const holder = setting ?? metricSetting ?? (action === SPI_SETDOUBLECLICKTIME
+            ? clickTime : null);
+        if (!holder)
+        {
+            continue;
+        }
+        keep(setting ? setting.set : action, [{ key: where.key, name: where.name,
+            written: ()=>(where.as === 'bit'
+                ? { type: REG_BINARY, data: preferencesMask() }
+                : placeValue(where.as, holder.value)),
+            read: found=>{
+                const number = placeNumber(where.as, found, maskBit(action));
+                if (number !== null)
+                {
+                    holder.value = SPI_KEPT_AS.get(action)?.(number) ?? number;
+                }
+            } }]);
+    }
+    for (const [get, { key, names: wordNames }] of SPI_STRUCTURE_PLACES)
+    {
+        const setting = structureSettings.get(get);
+        if (!setting)
+        {
+            continue;
+        }
+        keep(setting.set, wordNames.flatMap((name, index)=>(name === null ? [] : [{ key, name,
+            written: ()=>textValue(String(setting.words[index + 1] >>> 0)),
+            read: (/** @type {RegistryValue} */ found)=>{
+                const number = numberOf(found);
+                if (number !== null)
+                {
+                    setting.words[index + 1] = number >>> 0;
+                }
+            } }])));
+    }
+    keep(SPI_SETMOUSE, ['MouseThreshold1', 'MouseThreshold2', 'MouseSpeed'].map((name, index)=>({
+        key: MOUSE_KEY, name,
+        written: ()=>textValue(String(mouseThresholds[index] | 0)),
+        read: (/** @type {RegistryValue} */ found)=>{
+            const number = numberOf(found);
+            if (number !== null)
+            {
+                mouseThresholds[index] = number;
+            }
+        } })));
+    keep(SPI_SETHIGHCONTRAST, [{ key: `${ACCESSIBILITY_KEY}\\HighContrast`, name: 'Flags',
+        written: ()=>textValue(String(highContrast >>> 0)),
+        read: found=>{
+            highContrast = numberOf(found) ?? highContrast;
+        } }]);
+    keep(SPI_SETDESKWALLPAPER, [{ key: DESKTOP_KEY, name: 'Wallpaper',
+        written: ()=>textValue(wallpaper),
+        read: found=>{
+            wallpaper = textOf(found) ?? wallpaper;
+        } }]);
+    /** @type {ProfileValue[]} */
+    const spacingValues = [['IconSpacing', 'across'], ['IconVerticalSpacing', 'down']]
+        .map(([name, way])=>({ key: METRICS_KEY, name,
+            written: ()=>placeValue('twips', iconSpacing[/** @type {'across' | 'down'} */ (way)]),
+            read: found=>{
+                const number = placeNumber('twips', found, 0);
+                if (number !== null)
+                {
+                    iconSpacing[/** @type {'across' | 'down'} */ (way)] = number;
+                }
+            } }));
+    /** @type {ProfileValue} */
+    const iconFontValue = { key: METRICS_KEY, name: 'IconFont',
+        written: ()=>({ type: REG_BINARY, data: logFontBytes(iconFont, true) }),
+        read: found=>{
+            if (found.type === REG_BINARY && found.data.length >= LOGFONTW_SIZE)
+            {
+                iconFont = readLogFontW({ readMemory: (at, length)=>found.data.slice(at,
+                    at + length), writeMemory: ()=>{} }, 0);
+            }
+        } };
+    // Windows keeps the work area in no profile: a set is the session's.
+    keep(SPI_SETWORKAREA, []);
+    keep(SPI_ICONHORIZONTALSPACING, [spacingValues[0]]);
+    keep(SPI_ICONVERTICALSPACING, [spacingValues[1]]);
+    keep(SPI_SETICONTITLELOGFONT, [iconFontValue]);
+    keep(SPI_SETICONMETRICS, [...spacingValues, ...profileValues.get(SPI_SETICONTITLEWRAP) ?? [],
+        iconFontValue]);
+    keep(SPI_SETMINIMIZEDMETRICS, /** @type {[string, ProfileFormat][]} */ ([['MinWidth', 'twips'],
+        ['MinHorzGap', 'twips'], ['MinVertGap', 'twips'], ['MinArrange', 'text']])
+        .map(([name, as], index)=>({ key: METRICS_KEY, name,
+            written: ()=>placeValue(as, minimizedMetrics[index]),
+            read: found=>{
+                const number = placeNumber(as, found, 0);
+                if (number !== null)
+                {
+                    minimizedMetrics[index] = number;
+                }
+            } })));
+    // The sizes as NONCLIENTMETRICS has them, the metrics' less a pixel
+    // where it adds one; GetSystemMetrics itself is not asked while the
+    // functions are still being made.
+    keep(0, [...[['ScrollWidth', SCROLLBAR], ['ScrollHeight', SCROLLBAR],
+        ['CaptionWidth', FIXED_METRICS.get(SM_CXSIZE) ?? 0], ['CaptionHeight', CAPTION_HEIGHT - 1],
+        ['SmCaptionWidth', TOOL_CAPTION_HEIGHT - 1], ['SmCaptionHeight', TOOL_CAPTION_HEIGHT - 1],
+        ['MenuWidth', FIXED_METRICS.get(SM_CXMENUSIZE) ?? 0], ['MenuHeight', MENU_HEIGHT - 1]]
+        .map(([name, size])=>({ key: METRICS_KEY, name: String(name),
+            written: ()=>placeValue('twips', Number(size)) })),
+    ...[['CaptionFont', 700], ['SmCaptionFont', 700], ['MenuFont', 400], ['StatusFont', 400],
+        ['MessageFont', 400]].map(([name, weight])=>({ key: METRICS_KEY, name: String(name),
+        written: ()=>({ type: REG_BINARY, data: logFontBytes(systemFont(Number(weight)), true) }),
+    }))]);
+
+    /**
+     * The user's profile in the registry: the key a path names under
+     * HKEY_CURRENT_USER, made on the way when asked to be; null without a
+     * registry.
+     *
+     * @param {string} path @param {boolean} make
+     */
+    const profileKey = (path, make)=>{
+        const hive = host.registry;
+        const root = hive?.root(HKEY_CURRENT_USER) ?? null;
+        if (!root)
+        {
+            return null;
+        }
+        return make ? hive.create(root, path).key : hive.open(root, path);
+    };
+    /** @param {ProfileValue} value */
+    const writeKept = value=>{
+        const { type, data } = value.written();
+        const key = profileKey(value.key, true);
+        if (key)
+        {
+            host.registry.setValue(key, value.name, type, data);
+        }
+    };
+    // A process starts from the user's profile: what a set kept there, and,
+    // where the profile holds nothing yet, Windows' default written in, as a
+    // new user's profile holds it. Each value is read once, though several
+    // settings may share it (the effects' mask).
+    if (host.registry)
+    {
+        for (const values of profileValues.values())
+        {
+            for (const value of values)
+            {
+                const key = profileKey(value.key, false);
+                const found = key ? host.registry.getValue(key, value.name) : null;
+                if (found)
+                {
+                    value.read?.(found);
+                }
+                else
+                {
+                    writeKept(value);
+                }
+            }
+        }
+    }
+
+    /**
+     * What a successful set does past keeping the value for the process:
+     * with SPIF_UPDATEINIFILE it is written where the user's profile keeps it,
+     * and with SPIF_SENDCHANGE every top-level window is sent WM_SETTINGCHANGE
+     * with the action in wParam (and no section named in lParam) before the
+     * call returns, a window that does not answer waited for
+     * SETTING_CHANGE_WAIT_MS.
+     *
+     * @param {number} action @param {number} ini
+     * @returns {number | Promise<number>}
+     */
+    const settled = (action, ini)=>{
+        if ((ini & SPIF_UPDATEINIFILE) !== 0)
+        {
+            const values = profileValues.get(action);
+            if (!values)
+            {
+                sayOnce(`action 0x${action.toString(16)} is kept for this run alone: the`
+                    + ' profile has no place for it');
+            }
+            else if (!host.registry)
+            {
+                sayOnce('there is no registry: a setting is kept for this run alone');
+            }
+            else
+            {
+                values.forEach(writeKept);
+            }
+        }
+        if ((ini & SPIF_SENDCHANGE) === 0)
+        {
+            return 1;
+        }
+        return andThen(sendMessage(HWND_BROADCAST, WM_SETTINGCHANGE, action, 0, false,
+            SETTING_CHANGE_WAIT_MS), ()=>1);
+    };
+
+    /**
+     * What a set of a one-number setting changes beyond what the next get
+     * reads, said where this build does not follow it: the window frames,
+     * the pointer's hover and the smoothing of text keep their own.
+     *
+     * @param {number} get @param {number} value
+     */
+    const sayUnfollowed = (get, value)=>{
+        const SPI_GETFONTSMOOTHING = 0x004a;
+        const SPI_GETMOUSEHOVERWIDTH = 0x0062;
+        const SPI_GETMOUSEHOVERTIME = 0x0066;
+        if (get === SPI_GETBORDER && value !== BORDER)
+        {
+            sayOnce('a window is framed at the default border whatever SPI_SETBORDER says;'
+                + ' the frame metrics follow it');
+        }
+        else if (get >= SPI_GETMOUSEHOVERWIDTH && get <= SPI_GETMOUSEHOVERTIME)
+        {
+            sayOnce('TrackMouseEvent hovers by the default time and rectangle whatever'
+                + ' SPI_SETMOUSEHOVER* says');
+        }
+        else if (get === SPI_GETFONTSMOOTHING && value !== 0)
+        {
+            sayOnce('text is drawn without smoothing whatever SPI_SETFONTSMOOTHING says');
+        }
+    };
+
+    /**
+     * A structure setting read or set: its cbSize must be the structure's.
+     *
+     * @param {{ get: number, set: number, words: number[] }} setting
+     * @param {number} action @param {number} at @param {number} ini
+     */
+    const structureSetting = (setting, action, at, ini)=>{
+        if (at === 0 || readU32(at) !== setting.words[0])
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (action === setting.set)
+        {
+            setting.words = setting.words.map((word, index)=>(index === 0 ? word
+                : readU32(at + index * 4)));
+            return settled(action, ini);
+        }
+        writeU32s(host, at + 4, setting.words.slice(1));
+        return 1;
+    };
+
+    /**
+     * SystemParametersInfo, both spellings: the work area, the non-client,
+     * icon and minimised windows' metrics, the icon title font, the mouse,
+     * the wallpaper, high contrast, the one-number settings and the
+     * accessibility structures (SPI_NUMBERS, SPI_STRUCTURES), each read back
+     * as it was last set, and GetSystemMetrics following those it derives
+     * from. A set is kept in the user's profile and announced as fWinIni asks
+     * (`settled`). A setting it does not know is refused with
+     * ERROR_INVALID_PARAMETER, as Windows refuses an action it does not have,
+     * and said once.
+     *
+     * @param {number} action @param {number} param  uiParam
+     * @param {number} value  pvParam @param {boolean} wide
+     * @param {number} [ini]  fWinIni
+     */
+    const systemParameter = (action, param, value, wide, ini = 0)=>{
+        const SPI_GETMOUSE = 0x0003;
+        const SPI_GETICONTITLELOGFONT = 0x001f;
+        const SPI_GETICONMETRICS = 0x002d;
+        const SPI_GETHIGHCONTRAST = 0x0042;
+        const SPI_GETDESKWALLPAPER = 0x0073;
         const SPI_GETMINIMIZEDMETRICS = 0x002b;
-        const SPI_SETMINIMIZEDMETRICS = 0x002c;
         const MINIMIZEDMETRICS_SIZE = 20;
         const SPI_GETNONCLIENTMETRICS = 0x0029;
         const SPI_GETWORKAREA = 0x0030;
-        const SPI_GETMOUSEHOVERWIDTH = 0x0062;
-        const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
-        const SPI_GETMOUSEHOVERTIME = 0x0066;
-        const SPI_GETFONTSMOOTHING = 0x004a;
-        const SPI_GETFONTSMOOTHINGCONTRAST = 0x200c;
+        const asked = action >>> 0;
+        const number = numberSettings.get(asked);
+        if (number)
+        {
+            if (number.set === asked)
+            {
+                const given = (number.from === 'param' ? param : value) >>> 0;
+                number.value = SPI_KEPT_AS.get(number.get)?.(given) ?? given;
+                sayUnfollowed(number.get, number.value);
+                return settled(asked, ini);
+            }
+            if ((value >>> 0) === 0)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            writeU32s(host, value >>> 0, [number.value]);
+            return 1;
+        }
+        const structure = structureSettings.get(asked);
+        if (structure)
+        {
+            return structureSetting(structure, asked, value >>> 0, ini);
+        }
+        const metricSetting = metricSettings.get(asked);
+        if (metricSetting)
+        {
+            metricSetting.value = asked === SPI_SETMOUSEBUTTONSWAP ? ((param >>> 0) !== 0 ? 1 : 0)
+                : param >>> 0;
+            sayOnce(asked === SPI_SETMOUSEBUTTONSWAP
+                ? 'the buttons are reported as swapped and not swapped in input'
+                : 'a double click is recognised in the default rectangle; GetSystemMetrics'
+                    + ' follows SPI_SETDOUBLECLK*');
+            return settled(asked, ini);
+        }
+        if (asked === SPI_SETDOUBLECLICKTIME)
+        {
+            clickTime.value = param >>> 0;
+            return settled(asked, ini);
+        }
+        // The icon spacing is set by uiParam with no pointer, an icon's width
+        // at least, and read with one.
+        if (asked === SPI_ICONHORIZONTALSPACING || asked === SPI_ICONVERTICALSPACING)
+        {
+            const way = asked === SPI_ICONHORIZONTALSPACING ? 'across' : 'down';
+            if ((value >>> 0) !== 0)
+            {
+                writeU32s(host, value >>> 0, [iconSpacing[way]]);
+                return 1;
+            }
+            iconSpacing[way] = Math.max(param | 0, LEAST_ICON_SPACING);
+            return settled(asked, ini);
+        }
         if ((value >>> 0) === 0)
         {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        switch (action >>> 0){
+        switch (asked){
+            case SPI_GETMOUSE:
+                writeU32s(host, value >>> 0, mouseThresholds);
+                return 1;
+            case SPI_SETMOUSE:
+                mouseThresholds = [0, 4, 8].map(at=>readU32((value >>> 0) + at));
+                return settled(asked, ini);
+            case SPI_GETICONTITLELOGFONT:
+                host.writeMemory(value >>> 0, logFontBytes(iconFont, wide));
+                return 1;
+            case SPI_SETICONTITLELOGFONT:
+                iconFont = readFont(value >>> 0, wide);
+                return settled(asked, ini);
+            case SPI_GETICONMETRICS:
+            case SPI_SETICONMETRICS: {
+                const size = 16 + (wide ? LOGFONTW_SIZE : LOGFONTA.SIZE);
+                if (readU32(value >>> 0) !== size)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const wrap = /** @type {{ value: number }} */ (
+                    numberSettings.get(SPI_SETICONTITLEWRAP));
+                if (asked === SPI_SETICONMETRICS)
+                {
+                    const [across, down, titleWrap] = [4, 8, 12].map(at=>readU32((value >>> 0) + at)
+                        | 0);
+                    iconSpacing.across = Math.max(across, LEAST_ICON_SPACING);
+                    iconSpacing.down = Math.max(down, LEAST_ICON_SPACING);
+                    wrap.value = titleWrap >>> 0;
+                    iconFont = readFont((value >>> 0) + 16, wide);
+                    return settled(asked, ini);
+                }
+                writeU32s(host, (value >>> 0) + 4, [iconSpacing.across, iconSpacing.down,
+                    wrap.value]);
+                host.writeMemory((value >>> 0) + 16, logFontBytes(iconFont, wide));
+                return 1;
+            }
+            case SPI_GETHIGHCONTRAST: {
+                if (readU32(value >>> 0) !== HIGHCONTRAST_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, (value >>> 0) + 4, [highContrast, schemeName(wide)]);
+                return 1;
+            }
+            case SPI_SETHIGHCONTRAST:
+                if (readU32(value >>> 0) !== HIGHCONTRAST_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                highContrast = readU32((value >>> 0) + 4);
+                return settled(asked, ini);
+            case SPI_GETDESKWALLPAPER: {
+                const bytes = textBytes(wallpaper, wide);
+                host.writeMemory(value >>> 0, bytes.subarray(0, Math.min(bytes.length,
+                    Math.max(param >>> 0, wide ? 2 : 1))));
+                return 1;
+            }
+            case SPI_SETDESKWALLPAPER:
+                wallpaper = readText(host, value >>> 0, wide);
+                return settled(asked, ini);
             case SPI_GETNONCLIENTMETRICS:
                 return nonClientMetrics(value >>> 0, wide);
             case SPI_GETWORKAREA:
-                writeRect(host, value,
-                    { left: 0, top: 0, right: screen.width, bottom: screen.height });
+                writeRect(host, value, workAreaRect());
                 return 1;
-            case SPI_GETMOUSEHOVERWIDTH:
-            case SPI_GETMOUSEHOVERHEIGHT:
-                writeU32s(host, value, [HOVER_SIZE]);
-                return 1;
-            case SPI_GETMOUSEHOVERTIME:
-                writeU32s(host, value, [HOVER_TIME]);
-                return 1;
-            // FALSE: text is drawn here without smoothing. A font renderer
-            // picks the quality it asks GDI for from this, and a refusal
-            // leaves it reporting an error on every font it makes.
-            case SPI_GETFONTSMOOTHING:
-                writeU32s(host, value, [0]);
-                return 1;
-            // Windows' default: the gamma DirectWrite blends GDI-like text with
-            // is this over a thousand.
-            case SPI_GETFONTSMOOTHINGCONTRAST:
-                writeU32s(host, value, [1400]);
-                return 1;
+            // Any rectangle with room in it: a maximised window still covers
+            // the screen, the work area being where a program asks to put
+            // its windows.
+            case SPI_SETWORKAREA: {
+                const area = readRect(host, value >>> 0);
+                if (area.right <= area.left || area.bottom <= area.top)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                workArea = area;
+                sayOnce('a window maximises over the whole screen whatever SPI_SETWORKAREA'
+                    + ' says');
+                return settled(asked, ini);
+            }
+            // The width and the gaps are none at least, and the arrangement
+            // is its four bits.
             case SPI_GETMINIMIZEDMETRICS:
             case SPI_SETMINIMIZEDMETRICS: {
                 const fields = new DataView(host.readMemory(value >>> 0,
@@ -2311,17 +3209,25 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if ((action >>> 0) === SPI_GETMINIMIZEDMETRICS)
+                if (asked === SPI_GETMINIMIZEDMETRICS)
                 {
                     writeU32s(host, (value >>> 0) + 4, minimizedMetrics);
+                    return 1;
                 }
-                else
-                {
-                    minimizedMetrics = [4, 8, 12, 16].map(at=>fields.getInt32(at, true));
-                }
-                return 1;
+                const [width, across, down, arrange] = [4, 8, 12, 16]
+                    .map(at=>fields.getInt32(at, true));
+                minimizedMetrics = [Math.max(width, 0), Math.max(across, 0), Math.max(down, 0),
+                    arrange & 0xf];
+                return settled(asked, ini);
             }
             default:
+                if (!saidSettings.has(asked))
+                {
+                    saidSettings.add(asked);
+                    host.divergence?.('SystemParametersInfo',
+                        `action 0x${asked.toString(16)} is not answered`);
+                }
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
                 return 0;
         }
     };
@@ -2465,7 +3371,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             ?? 0;
     };
 
-    /** @param {number} index */
+    /** @param {number} index @returns {number} */
     const metric = index=>{
         switch (index | 0){
             case SM_CXSCREEN:
@@ -2493,9 +3399,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             case SM_CXFIXEDFRAME:
             case SM_CYFIXEDFRAME:
                 return DIALOG_FRAME;
+            // A sizing frame is the border SPI_SETBORDER sets and the
+            // dialog frame inside it.
             case SM_CXSIZEFRAME:
             case SM_CYSIZEFRAME:
-                return SIZE_FRAME;
+                return sizeFrame();
             case SM_CYMENU:
                 return MENU_HEIGHT;
             case SM_CXVSCROLL:
@@ -2508,15 +3416,48 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             // with some to spare, as Windows derives both.
             case SM_CYMIN:
             case SM_CYMINTRACK:
-                return CAPTION_HEIGHT + 2 * SIZE_FRAME;
+                return CAPTION_HEIGHT + 2 * sizeFrame();
+            // As narrow as three caption buttons, a caption button's height,
+            // four characters of the caption's font with two pixels either
+            // side, and two sizing frames.
+            case SM_CXMIN:
+            case SM_CXMINTRACK:
+                return 3 * metric(SM_CXSIZE) + metric(SM_CYSIZE) + 4 + 4 * CAPTION_CHAR_WIDTH
+                    + 2 * sizeFrame();
             case SM_CXMAXTRACK:
             case SM_CYMAXTRACK:
                 return ((index | 0) === SM_CXMAXTRACK ? screen.width : screen.height)
-                    + 4 + 2 * SIZE_FRAME;
+                    + 4 + 2 * sizeFrame();
             case SM_CXMAXIMIZED:
             case SM_CYMAXIMIZED:
                 return ((index | 0) === SM_CXMAXIMIZED ? screen.width : screen.height)
-                    + 2 * SIZE_FRAME;
+                    + 2 * sizeFrame();
+            case SM_CXICONSPACING_INDEX:
+                return iconSpacing.across;
+            case SM_CYICONSPACING_INDEX:
+                return iconSpacing.down;
+            // A minimised window is its width and a three-pixel frame
+            // either side wide, a caption and five pixels high; the spacing
+            // adds the gaps between two.
+            case SM_CXMINIMIZED:
+                return minimizedMetrics[0] + 6;
+            case SM_CYMINIMIZED:
+                return CAPTION_HEIGHT + 5;
+            case SM_CXMINSPACING:
+                return metric(SM_CXMINIMIZED) + minimizedMetrics[1];
+            case SM_CYMINSPACING:
+                return metric(SM_CYMINIMIZED) + minimizedMetrics[2];
+            case SM_ARRANGE:
+                return minimizedMetrics[3];
+            case SM_MENUDROPALIGNMENT:
+                return numberSettings.get(SPI_GETMENUDROPALIGNMENT)?.value ?? 0;
+            case SM_SHOWSOUNDS:
+                return numberSettings.get(SPI_GETSHOWSOUNDS)?.value ?? 0;
+            case SM_CXDOUBLECLK:
+            case SM_CYDOUBLECLK:
+            case SM_SWAPBUTTON:
+                return [...metricSettings.values()].find(setting=>setting.index === (index | 0))
+                    ?.value ?? 0;
             default:
                 return FIXED_METRICS.get(index | 0) ?? 0;
         }
@@ -2720,15 +3661,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam,
          *                            UINT fWinIni)
          *
-         * Only the work area, the one a window uses to place itself, the
-         * hover parameters and the non-client metrics are answered. Everything
-         * else reports failure rather than a default that would contradict the
-         * screen above.
+         * The settings `systemParameter` knows, Windows 7's defaults until a
+         * program sets them; any other is refused and said.
          */
         SystemParametersInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value, false),
+            handler: ([action, param, value, ini])=>systemParameter(action, param, value, false,
+                ini),
         },
 
         /**
@@ -2740,7 +3680,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         SystemParametersInfoW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value, true),
+            handler: ([action, param, value, ini])=>systemParameter(action, param, value, true,
+                ini),
         },
 
         /**
@@ -2835,12 +3776,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * BOOL GetMonitorInfoW(HMONITOR hMonitor, LPMONITORINFO lpmi)
          *
-         * MONITORINFO has no string in it, so the two spellings answer alike.
+         * MONITORINFO has no string in it, so the two spellings answer alike
+         * but for MONITORINFOEX's device name.
          */
         GetMonitorInfoW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([monitor, info])=>monitorInfo(monitor, info),
+            handler: ([monitor, info])=>monitorInfo(monitor, info, true),
         },
 
         /**
@@ -2850,14 +3792,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         EnumDisplaySettingsA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEA),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEA),
         },
 
         /** BOOL EnumDisplaySettingsW(LPCWSTR, DWORD iModeNum, DEVMODEW *lpDevMode) */
         EnumDisplaySettingsW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEW),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEW),
         },
 
         /**
@@ -2870,14 +3812,16 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         EnumDisplaySettingsExA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEA),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEA,
+                true),
         },
 
         /** BOOL EnumDisplaySettingsExW(LPCWSTR, DWORD, DEVMODEW *, DWORD dwFlags) */
         EnumDisplaySettingsExW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEW),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEW,
+                true),
         },
 
         /**
@@ -3511,7 +4455,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([parent, how, rect, count, list])=>{
                 const MDITILE_HORIZONTAL = 0x0001;
-                const SM_CXMIN = 28;
                 const found = arrangement(parent, how, rect, count, list);
                 if (!found || found.windows.length === 0)
                 {
@@ -5050,11 +5993,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([key])=>host.asyncKeyState?.(key >>> 0) ?? 0,
         },
 
-        /** SHORT GetKeyState(int nVirtKey) */
+        /**
+         * SHORT GetKeyState(int nVirtKey)
+         *
+         * The thread's synchronous state: each key and button as of the last
+         * input message the thread took (`messages.js`), the keys as they
+         * are until it takes one. GetAsyncKeyState is the keys as they are.
+         */
         GetKeyState: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
+            handler: ([key])=>host.queue?.syncedKeyState?.(key >>> 0)
+                ?? host.keyState?.(key >>> 0) ?? 0,
         },
 
         /**
@@ -5074,7 +6024,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(state >>> 0, host.keyboardState?.() ?? new Uint8Array(256));
+                host.writeMemory(state >>> 0, host.queue?.syncedKeyboard?.()
+                    ?? host.keyboardState?.() ?? new Uint8Array(256));
                 return 1;
             },
         },
@@ -5095,7 +6046,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.setKeyboardState?.(host.readMemory(state >>> 0, 256));
+                const bytes = host.readMemory(state >>> 0, 256);
+                host.queue?.setSyncedKeyboard?.(bytes);
+                host.setKeyboardState?.(bytes);
                 return 1;
             },
         },
@@ -5237,16 +6190,40 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         GetDoubleClickTime: {
             argBytes: 0,
-            handler: ()=>doubleClickTime,
+            handler: ()=>clickTime.value || DOUBLE_CLICK_TIME,
         },
 
-        /** BOOL SetDoubleClickTime(UINT uInterval), zero meaning the default again. */
+        /**
+         * BOOL SetDoubleClickTime(UINT uInterval), zero meaning the default
+         * again: for the session, the profile left as it was (sysparams.c
+         * test_SPI_SETDOUBLECLICKTIME).
+         */
         SetDoubleClickTime: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([interval])=>{
-                doubleClickTime = (interval >>> 0) === 0 ? DOUBLE_CLICK_TIME : interval >>> 0;
+                clickTime.value = interval >>> 0;
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL SwapMouseButton(BOOL fSwap)
+         *
+         * Whether the buttons are swapped, as SPI_SETMOUSEBUTTONSWAP sets it
+         * and SM_SWAPBUTTON reads it, answering whether they were; the
+         * profile is left as it was.
+         */
+        SwapMouseButton: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([swap])=>{
+                const setting = /** @type {{ value: number }} */ (
+                    metricSettings.get(SPI_SETMOUSEBUTTONSWAP));
+                const was = setting.value;
+                setting.value = (swap >>> 0) !== 0 ? 1 : 0;
+                sayOnce('the buttons are reported as swapped and not swapped in input');
+                return was;
             },
         },
 

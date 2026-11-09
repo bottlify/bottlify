@@ -179,6 +179,23 @@ function outputsOf(chunks){
 }
 
 /**
+ * A hull or domain shader's patch constants: its PCSG, or the PSG1 of a
+ * compiler that writes each row's stream and minimum precision.
+ *
+ * @param {Map<string, Uint8Array>} chunks
+ * @returns {SignatureElement[]}
+ */
+export function patchConstantsOf(chunks){
+    const plain = chunks.get('PCSG');
+    if (plain)
+    {
+        return parseSignature(plain);
+    }
+    const one = chunks.get('PSG1');
+    return one ? parseSignature(one, true, 32) : [];
+}
+
+/**
  * @param {Uint8Array} chunk
  * @returns {ShaderProgram | null}
  */

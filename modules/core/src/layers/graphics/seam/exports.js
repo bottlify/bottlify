@@ -229,7 +229,8 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *                       swapBuffers: (hdc: number) => boolean | Promise<boolean>,
  *                       entry: (name: string) => ((args: number[]) => number) | null },
  *             diagnostics: () => any,
- *             shadow: () => any, screenHeld: () => number }}
+ *             shadow: () => any, screenHeld: () => number,
+ *             presentedWindow: () => { window: number, fullscreen: boolean } | null }}
  */
 export function createGraphicsLibraries(
     { graphics, only, memory, publishInterface, unpublishInterface, screen, gdi, present,
@@ -977,5 +978,7 @@ export function createGraphicsLibraries(
 
         /** The window a full-screen Direct3D 8 or 9 device holds the screen with, or 0. */
         screenHeld: ()=>focus?.screen() ?? 0,
+        /** The window the last DXGI swap chain presented into, full screen or not. */
+        presentedWindow: ()=>d3d10?.presentedWindow?.() ?? null,
     };
 }

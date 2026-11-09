@@ -6,8 +6,9 @@
 
 /**
  * The maths the Universal CRT adds to msvcrt's: C99's functions (`trunc`,
- * `round`, `expm1`, `log1p`, `exp2`, `log2`, `fmax`, `fmin`, `copysign`) and
- * their float forms, the classifiers `<math.h>`'s macros call (`_dclass`,
+ * `round`, `expm1`, `log1p`, `exp2`, `log2`, the inverse hyperbolics, `cbrt`,
+ * `fmax`, `fmin`, `copysign`, `fma`, `ilogb`) and their float forms, the
+ * classifiers `<math.h>`'s macros call (`_dclass`,
  * `_dtest`, `_dsign` and the float ones), `_except1`, which a 32-bit
  * compiler's inline maths calls when an x87 operation raised, and the SSE2
  * entries (`__libm_sse2_sin` and the rest) a 32-bit program built for SSE2
@@ -33,6 +34,10 @@ import { EDOM, ERANGE } from './globals.js';
  */
 
 const ONE_DOUBLE = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
+const THREE_DOUBLES = Object.freeze({ 0: /** @type {'f64'} */ ('f64'),
+    2: /** @type {'f64'} */ ('f64'), 4: /** @type {'f64'} */ ('f64') });
+const THREE_FLOATS = Object.freeze({ 0: /** @type {'f32'} */ ('f32'),
+    1: /** @type {'f32'} */ ('f32'), 2: /** @type {'f32'} */ ('f32') });
 const TWO_DOUBLES = Object.freeze({ 0: /** @type {'f64'} */ ('f64'),
     2: /** @type {'f64'} */ ('f64') });
 const ONE_FLOAT = Object.freeze({ 0: /** @type {'f32'} */ ('f32') });
@@ -73,7 +78,88 @@ const UNARY = {
     log1p: Math.log1p,
     exp2: (/** @type {number} */ x)=>2 ** x,
     log2: Math.log2,
+    acosh: Math.acosh,
+    asinh: Math.asinh,
+    atanh: Math.atanh,
+    cbrt: Math.cbrt,
 };
+
+/** A finite double as sign, integer significand and binary exponent. @param {number} x */
+function parts(x){
+    const view = new DataView(new ArrayBuffer(8));
+    view.setFloat64(0, x, true);
+    const high = view.getUint32(4, true);
+    const biased = high >>> 20 & 0x7ff;
+    const fraction = BigInt(high & 0xfffff) << 32n | BigInt(view.getUint32(0, true));
+    return {
+        negative: high >>> 31 === 1,
+        significand: biased === 0 ? fraction : fraction | 1n << 52n,
+        exponent: (biased === 0 ? 1 : biased) - 1075,
+    };
+}
+
+/**
+ * x * y + z with one rounding, to `precision` bits (53 for a double, 24 for
+ * a float) and no exponent below `least`: computed exactly as an integer
+ * times a power of two, then rounded to nearest, ties to even. What is not
+ * finite, and a zero product, take the ordinary arithmetic, whose infinities,
+ * NaNs and signed zeros are the fused ones.
+ *
+ * @param {number} x @param {number} y @param {number} z
+ * @param {number} precision @param {number} least
+ */
+export function fusedMultiplyAdd(x, y, z, precision, least){
+    if (![x, y, z].every(Number.isFinite) || x === 0 || y === 0 || z === 0)
+    {
+        return x * y + z;
+    }
+    const [a, b, c] = [parts(x), parts(y), parts(z)];
+    const productExponent = a.exponent + b.exponent;
+    const bottom = Math.min(productExponent, c.exponent);
+    const product = (a.significand * b.significand) << BigInt(productExponent - bottom);
+    const addend = c.significand << BigInt(c.exponent - bottom);
+    const sum = (a.negative !== b.negative ? -product : product)
+        + (c.negative ? -addend : addend);
+    if (sum === 0n)
+    {
+        return 0;
+    }
+    const negative = sum < 0n;
+    const magnitude = negative ? -sum : sum;
+    const ulp = Math.max(bottom + magnitude.toString(2).length - precision, least);
+    let rounded = magnitude;
+    if (ulp > bottom)
+    {
+        const shift = BigInt(ulp - bottom);
+        rounded = magnitude >> shift;
+        const rest = magnitude - (rounded << shift);
+        const half = 1n << shift - 1n;
+        if (rest > half || (rest === half && (rounded & 1n) === 1n))
+        {
+            rounded += 1n;
+        }
+    }
+    const value = Number(rounded) * 2 ** Math.max(ulp, bottom);
+    return negative ? -value : value;
+}
+
+/** ilogb's answers for zero and for a NaN or an infinity (FP_ILOGB0, FP_ILOGBNAN). */
+const ILOGB_ZERO = -2147483648;
+const ILOGB_NAN = 2147483647;
+
+/** The unbiased exponent of x as an int, subnormals as though normalised. @param {number} x */
+function exponentOf(x){
+    if (x === 0)
+    {
+        return ILOGB_ZERO;
+    }
+    if (!Number.isFinite(x))
+    {
+        return ILOGB_NAN;
+    }
+    const { significand, exponent } = parts(x);
+    return exponent + significand.toString(2).length - 1;
+}
 
 /** And of two. */
 const BINARY = { fmax: larger, fmin: smaller, copysign: copySign };
@@ -200,6 +286,21 @@ export function createUcrtMathFunctions(host){
         handler: (/** @type {number[]} */ args)=>roundToLong(readDouble(args, 0)) };
     table.lroundf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
         handler: (/** @type {number[]} */ args)=>roundToLong(readSingle(args, 0)) };
+
+    /**
+     * double fma(double x, double y, double z), float fmaf(float, float, float):
+     * one rounding, of the float's precision for the float form.
+     */
+    table.fma = returningDouble(fpu, 24, args=>fusedMultiplyAdd(readDouble(args, 0),
+        readDouble(args, 2), readDouble(args, 4), 53, -1074), THREE_DOUBLES);
+    table.fmaf = returningSingle(fpu, 12, args=>fusedMultiplyAdd(readSingle(args, 0),
+        readSingle(args, 1), readSingle(args, 2), 24, -149), THREE_FLOATS);
+
+    /** int ilogb(double x), int ilogbf(float x) */
+    table.ilogb = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
+        handler: (/** @type {number[]} */ args)=>exponentOf(readDouble(args, 0)) >>> 0 };
+    table.ilogbf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
+        handler: (/** @type {number[]} */ args)=>exponentOf(readSingle(args, 0)) >>> 0 };
 
     /** short _dclass(double x), short _fdclass(float x) */
     table._dclass = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,

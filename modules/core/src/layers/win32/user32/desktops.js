@@ -13,6 +13,11 @@
  * names one of them -- that is what these calls keep. Which desktop a window
  * is on is not kept: every window is drawn and reached as though it were on
  * the input desktop, which is the one a person sees.
+ *
+ * The message filter User Interface Privilege Isolation keeps lives here too:
+ * every process here runs at one integrity level, so no message is ever held
+ * back by it, and a program's changes to it are kept only to answer what
+ * the next one finds.
  */
 
 import { threadIdOf } from './messages.js';
@@ -33,6 +38,18 @@ const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const UOI_TYPE = 3;
 const UOI_USER_SID = 4;
 const UOI_IO = 6;
+
+/** ChangeWindowMessageFilter's flags, and ChangeWindowMessageFilterEx's actions. */
+const MSGFLT_ADD = 1;
+const MSGFLT_REMOVE = 2;
+const MSGFLT_RESET = 0;
+const MSGFLT_ALLOW = 1;
+const MSGFLT_DISALLOW = 2;
+/** CHANGEFILTERSTRUCT: cbSize, ExtStatus. */
+const CHANGEFILTERSTRUCT_SIZE = 8;
+const MSGFLTINFO_NONE = 0;
+const MSGFLTINFO_ALREADYALLOWED_FORWND = 1;
+const MSGFLTINFO_ALREADYDISALLOWED_FORWND = 2;
 
 /** USEROBJECTFLAGS: fInherit, fReserved, dwFlags. */
 const USEROBJECTFLAGS_SIZE = 12;
@@ -316,7 +333,82 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         })();
     };
 
+    /** @param {number} at */
+    const readU32 = at=>new DataView(host.readMemory(at, 4).slice().buffer).getUint32(0, true);
+    /** The messages each window was told to let in (ChangeWindowMessageFilterEx). */
+    const allowedFor = new Map();
+
     return {
+        /**
+         * BOOL ChangeWindowMessageFilter(UINT message, DWORD dwFlag)
+         *
+         * MSGFLT_ADD or MSGFLT_REMOVE for the whole process: accepted, as
+         * there is no lower integrity level to filter.
+         */
+        ChangeWindowMessageFilter: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, flag])=>{
+                if ((flag >>> 0) !== MSGFLT_ADD && (flag >>> 0) !== MSGFLT_REMOVE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ChangeWindowMessageFilterEx(HWND hwnd, UINT message, DWORD action,
+         *     PCHANGEFILTERSTRUCT pChangeFilterStruct)
+         *
+         * For one window of this process: MSGFLT_RESET, MSGFLT_ALLOW,
+         * MSGFLT_DISALLOW. The structure, when given, must say its size and
+         * is told whether the message was let in or kept out already.
+         */
+        ChangeWindowMessageFilterEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, action, info])=>{
+                if (!windowOf?.(hwnd >>> 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const at = info >>> 0;
+                if ((action >>> 0) > MSGFLT_DISALLOW
+                    || (at !== 0 && readU32(at) !== CHANGEFILTERSTRUCT_SIZE))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                /** @type {Set<number>} */
+                const allowed = allowedFor.get(hwnd >>> 0) ?? new Set();
+                allowedFor.set(hwnd >>> 0, allowed);
+                const was = allowed.has(message >>> 0);
+                let status = MSGFLTINFO_NONE;
+                if ((action >>> 0) === MSGFLT_RESET)
+                {
+                    allowed.clear();
+                }
+                else if ((action >>> 0) === MSGFLT_ALLOW)
+                {
+                    status = was ? MSGFLTINFO_ALREADYALLOWED_FORWND : MSGFLTINFO_NONE;
+                    allowed.add(message >>> 0);
+                }
+                else
+                {
+                    status = was ? MSGFLTINFO_NONE : MSGFLTINFO_ALREADYDISALLOWED_FORWND;
+                    allowed.delete(message >>> 0);
+                }
+                if (at !== 0)
+                {
+                    host.writeMemory(at + 4, new Uint8Array(new Uint32Array([status]).buffer));
+                }
+                return 1;
+            },
+        },
+
         /** HDESK OpenInputDesktop(DWORD dwFlags, BOOL fInherit, ACCESS_MASK dwDesiredAccess) */
         OpenInputDesktop: {
             argBytes: 12,

@@ -22,12 +22,17 @@ import {
     SE_RM_CONTROL_VALID, SE_SELF_RELATIVE, createDescriptorCodec,
 } from './descriptors.js';
 import {
-    PRIVILEGES, SDDL_ACE_FLAGS, SDDL_RIGHTS, SDDL_SIDS, encodeText, isThisMachine, sidBytes,
-    sidText, wideTextAt,
+    PRIVILEGES, SDDL_ACE_FLAGS, SDDL_RIGHTS, SDDL_SIDS, USER_SID_TEXT, accountNamed, encodeText,
+    isThisMachine, isTokenMember, parseSid, sidBytes, sidText, wideTextAt,
 } from './tokens.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_NOACCESS = 998;
+const ERROR_NONE_MAPPED = 1332;
+/** What a NULL DACL gives: every standard and specific right. */
+const ALL_RIGHTS = 0x001fffff;
+/** An ACE that is only for the children an object makes. */
+const INHERIT_ONLY_ACE = 0x08;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_SUCH_PRIVILEGE = 1313;
@@ -606,6 +611,85 @@ export function createSecurityFunctions(host){
         },
     };
 
+    /**
+     * GetEffectiveRightsFromAcl: the rights an ACL's ACEs give a trustee, in
+     * the ACL's order - an allowing ACE grants what no earlier one denied, a
+     * denying ACE denies what no earlier one granted - over the ACEs that
+     * name the trustee, Everyone, or, for this account, one of its groups.
+     * ACEs only inherited by children are passed over. A trustee named by
+     * an account name is looked up as LookupAccountName looks it up; the
+     * object forms are refused.
+     *
+     * @param {boolean} wide
+     */
+    const effectiveRights = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [acl, trustee, out])=>{
+            if ((trustee >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const form = readDword(trustee + TRUSTEE.FORM);
+            const named = readDword(trustee + TRUSTEE.NAME);
+            /** @type {Uint8Array | null} */
+            let sid = null;
+            if (form === TRUSTEE_IS_SID)
+            {
+                sid = sidAt(named);
+            }
+            else if (form === TRUSTEE_IS_NAME && named !== 0)
+            {
+                const account = accountNamed(wide ? wideTextAt(host.readMemory, named, 256)
+                    : host.readCString(named, 256));
+                sid = account ? sidBytes(account.sid) : null;
+                if (!account)
+                {
+                    return ERROR_NONE_MAPPED;
+                }
+            }
+            if (!sid)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if ((acl >>> 0) === 0)
+            {
+                writeDword(out, ALL_RIGHTS);
+                return ERROR_SUCCESS;
+            }
+            const aces = acesIn(aclAt(acl) ?? new Uint8Array(0));
+            if (aces === null)
+            {
+                return ERROR_INVALID_ACL;
+            }
+            const user = parseSid(USER_SID_TEXT);
+            const self = user !== null && sameSid(sid, user);
+            const everyone = parseSid('S-1-1-0') ?? new Uint8Array(0);
+            let granted = 0;
+            let denied = 0;
+            for (const ace of aces)
+            {
+                const applies = ace.sid !== null && (ace.flags & INHERIT_ONLY_ACE) === 0
+                    && (sameSid(ace.sid, sid) || sameSid(ace.sid, everyone)
+                        || (self && isTokenMember(ace.sid)));
+                if (applies && ace.type === ACCESS_ALLOWED_ACE_TYPE)
+                {
+                    granted = (granted | ace.mask & ~denied) >>> 0;
+                }
+                else if (applies && ace.type === ACCESS_DENIED_ACE_TYPE)
+                {
+                    denied = (denied | ace.mask & ~granted) >>> 0;
+                }
+            }
+            writeDword(out, granted);
+            return ERROR_SUCCESS;
+        },
+    });
+
+    /** @param {Uint8Array} left @param {Uint8Array} right */
+    const sameSid = (left, right)=>left.length === right.length
+        && left.every((byte, at)=>byte === right[at]);
+
     /** @param {number} field  A TRUSTEE's field, read as it is. */
     const trusteeField = field=>({
         argBytes: 4,
@@ -898,6 +982,12 @@ export function createSecurityFunctions(host){
 
         GetExplicitEntriesFromAclA: explicitEntries(false),
         GetExplicitEntriesFromAclW: explicitEntries(true),
+        /**
+         * DWORD GetEffectiveRightsFromAcl(PACL pacl, PTRUSTEE pTrustee,
+         *     PACCESS_MASK pAccessRights)
+         */
+        GetEffectiveRightsFromAclA: effectiveRights(false),
+        GetEffectiveRightsFromAclW: effectiveRights(true),
 
         /**
          * BOOL SetSecurityDescriptorControl(PSECURITY_DESCRIPTOR,

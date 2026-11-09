@@ -80,3 +80,26 @@ export const RAISED_GPU_LIMITS = Object.freeze(['maxTextureDimension1D', 'maxTex
 export const gpuLimitsOf = adapter=>Object.fromEntries(RAISED_GPU_LIMITS
     .filter(name=>typeof adapter.limits?.[name] === 'number')
     .map(name=>[name, /** @type {Record<string, number>} */ (adapter.limits)[name]]));
+
+/**
+ * What of a texture's size is past a device's limits, or null. A device
+ * refuses such a texture only when the frame it was made in is submitted,
+ * and with it that frame and every later one that writes or reads the
+ * texture; a renderer asks this first and keeps the texture off the device.
+ *
+ * @param {{ width: number, height: number, depthOrArrayLayers: number }} size
+ * @param {string} dimension  '1d', '2d' or '3d'
+ * @param {(name: string) => number | null | undefined} limit  the device's limit by name;
+ *     null where it does not say, which nothing is past
+ * @returns {string | null}
+ */
+export const textureBreach = (size, dimension, limit)=>{
+    const largest = limit(dimension === '3d' ? 'maxTextureDimension3D'
+        : dimension === '1d' ? 'maxTextureDimension1D' : 'maxTextureDimension2D') ?? Infinity;
+    const layers = dimension === '3d' ? largest
+        : dimension === '1d' ? 1 : limit('maxTextureArrayLayers') ?? Infinity;
+    return Math.max(size.width, size.height) > largest || size.depthOrArrayLayers > layers
+        ? `${size.width}x${size.height}x${size.depthOrArrayLayers}, past its ${largest}`
+            + ` texels a side and ${layers} ${dimension === '3d' ? 'deep' : 'layers'}`
+        : null;
+};

@@ -103,6 +103,34 @@ function windowTree(windows){
 }
 
 /**
+ * Whether a window is shown, its client area covers the whole screen, and no
+ * shown top-level window over its own reaches the screen (a minimised one
+ * lies off it): nothing on the screen is then anything but that window's
+ * client area.
+ *
+ * @param {ListedWindow[]} windows  bottom to top
+ * @param {number} handle
+ * @param {{ width: number, height: number }} screen
+ */
+export function fillsScreen(windows, handle, screen){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
+    if (!window || !tree.shown(window))
+    {
+        return false;
+    }
+    const { client } = window;
+    if (client.left > 0 || client.top > 0 || client.right < screen.width
+        || client.bottom < screen.height)
+    {
+        return false;
+    }
+    const above = tree.topLevels.slice(tree.topLevels.indexOf(tree.topLevelOf(window)) + 1);
+    return !above.some(({ rect })=>rect.right > 0 && rect.bottom > 0 && rect.left < screen.width
+        && rect.top < screen.height);
+}
+
+/**
  * The top-level window a primary surface belongs to: the cooperative
  * window's, else the topmost shown one; null when the program shows none.
  *
@@ -306,6 +334,15 @@ export function clientDrawable(drawable, windows){
 }
 
 export function createGraphicsModule(){
+    /**
+     * The desktop's presents at a paint, those kept back (`presentDesktop`),
+     * and the window, client area and screen the last was judged by.
+     *
+     * @type {{ presented: number, keptBack: number, window: number,
+     *     client: import('./gdi/contract.js').Rect | null,
+     *     screen: { width: number, height: number } | null }}
+     */
+    const desktops = { presented: 0, keptBack: 0, window: 0, client: null, screen: null };
     /**
      * The instance this module object made last, for `diagnostics()` and
      * `dispose()`. Every graph is given module objects of its own
@@ -1055,6 +1092,7 @@ export function createGraphicsModule(){
                 backend: ()=>api.backend(),
                 readMemory: services.readMemory,
                 windowMemory: services.windowMemory,
+                ...(typeof config?.processId === 'number' ? { source: config.processId } : {}),
             });
 
             /**
@@ -1511,8 +1549,36 @@ export function createGraphicsModule(){
                         return;
                     }
                     const screen = screens.screen();
+                    // A DXGI swap chain's frames are its window's
+                    // client area, which DWM shows in place of what GDI drew
+                    // there; here a process's picture is its desktop or its
+                    // device's frame, so while that window fills the screen
+                    // from the top, the desktop composed again -- the window's
+                    // own surface, black -- would hide every frame between
+                    // two presents. The same ceiling as above.
+                    // DWM shows it whether or not its application is active.
+                    // A full-screen swap chain's window is the screen while
+                    // it is shown, as a full-screen Direct3D 8 or 9 device's.
+                    const into = state.seam?.presentedWindow?.() ?? null;
+                    desktops.window = into?.window ?? 0;
+                    if (screen && into)
+                    {
+                        const listed = win32.windows?.() ?? [];
+                        const hex = `0x${(into.window >>> 0).toString(16)}`;
+                        const window = listed.find((/** @type {ListedWindow} */ each)=>
+                            each.hwnd === hex);
+                        desktops.client = window?.client ?? null;
+                        desktops.screen = { width: screen.width, height: screen.height };
+                        if (into.fullscreen ? window?.visible === true
+                            : fillsScreen(listed, into.window, screen))
+                        {
+                            desktops.keptBack++;
+                            return;
+                        }
+                    }
                     if (screen)
                     {
+                        desktops.presented++;
                         state.shown.present({ ...screen, label: 'desktop',
                             prepare: screens.compose });
                     }
@@ -1638,6 +1704,9 @@ export function createGraphicsModule(){
                     seam,
                     // What this layer holds of the tab's memory (`memory-zones.js`).
                     bytesHeld: bytesHeldOf(worker, seam),
+                    // The desktop shown at a paint, and kept back under a
+                    // windowed swap chain's window that fills the screen.
+                    desktops: { ...desktops },
                     // GDI's copies by path, and why one went a pixel at a time.
                     blits: { ...blitPaths, why: { ...blitPaths.why } },
                     // State the program set in the guest, and the calls that never

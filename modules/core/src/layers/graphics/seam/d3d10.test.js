@@ -190,7 +190,8 @@ const floatBits = floats=>[...new Uint32Array(Float32Array.from(floats).buffer)]
 /**
  * The whole assembly as a program reaches it, over a recording GPU.
  *
- * @param {{ gdi?: import('./ddraw.js').SurfaceDcServices }} [assembly]
+ * @param {{ gdi?: import('./ddraw.js').SurfaceDcServices,
+ *     frameQueued?: import('../webgpu/internal/latency.js').FrameQueued }} [assembly]
  */
 function seamed(assembly = {}){
     const box = machine();
@@ -219,6 +220,7 @@ function seamed(assembly = {}){
             createSampler: descriptor=>({ kind: 'sampler', descriptor }),
             createTexture: gpu.device.createTexture,
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+            ...(assembly.frameQueued ? { frameQueued: assembly.frameQueued } : {}),
         }),
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         gdi: assembly.gdi,
@@ -312,6 +314,26 @@ test('the combined entry point hands back a device and a swap chain, and either 
     ]) >>> 0, E_INVALIDARG);
     assert.equal(h.box.memory.readU32(chainAt), 0);
     assert.equal(h.box.memory.readU32(deviceAt), 0);
+});
+
+test('the window a swap chain shows a frame in is remembered; a test present shows'
+    + ' none', ()=>{
+    const h = seamed();
+    assert.equal(h.seam.presentedWindow(), null);
+    const { swapChain } = h.createDeviceAndSwapChain();
+    assert.equal(h.swapChain(swapChain, 'Present', [0, 1]), S_OK, 'DXGI_PRESENT_TEST');
+    assert.equal(h.seam.presentedWindow(), null);
+    assert.equal(h.swapChain(swapChain, 'Present', [0, 0]), S_OK);
+    assert.deepEqual(h.seam.presentedWindow(), { window: 0x1234, fullscreen: false });
+});
+
+test('a present held until the GPU takes its frame is remembered when it answers', async()=>{
+    const h = seamed({ frameQueued: ()=>new Promise(resolve=>setTimeout(resolve, 0)) });
+    const { swapChain } = h.createDeviceAndSwapChain();
+    h.swapChain(swapChain, 'Present', [0, 0]);
+    assert.equal(h.seam.presentedWindow(), null, 'not before the present answers');
+    await new Promise(resolve=>setTimeout(resolve, 5));
+    assert.deepEqual(h.seam.presentedWindow(), { window: 0x1234, fullscreen: false });
 });
 
 test('the first frame: a back buffer, a view, a clear and a present reach the GPU', async()=>{

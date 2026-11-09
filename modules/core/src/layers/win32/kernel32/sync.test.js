@@ -1258,3 +1258,19 @@ test('ReinitializeCriticalSection makes a section new again, as InitializeCritic
         assert.deepEqual(reinitialised, host.bytes.slice(0x100, 0x118));
         assert.equal(host.readI32(0x104), -1, 'LockCount: free');
     });
+
+test('GetSystemTimes: the processors\' time since boot, user what this process ran, idle the'
+    + ' rest, kernel including idle', ()=>{
+    const host = fakeHost();
+    /** @type {any} */ (host.kernel).processCpuMs = ()=>250;
+    /** @type {any} */ (host.kernel).clock.virtualTime = ()=>1000;
+    const fns = createSyncFunctions(host);
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigUint64(at, true);
+    assert.equal(fns.GetSystemTimes.handler([0x300, 0x308, 0x310]), 1);
+    const [idle, kernelTime, user] = [read64(0x300), read64(0x308), read64(0x310)];
+    assert.equal(user, 2500000n);
+    assert.equal(idle, kernelTime);
+    assert.equal((idle + user) % 10000000n, 0n, 'whole seconds of whole processors');
+    assert.ok(idle + user >= 10000000n);
+    assert.equal(fns.GetSystemTimes.handler([0, 0, 0]), 1, 'every pointer may be null');
+});

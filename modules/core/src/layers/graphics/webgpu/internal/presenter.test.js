@@ -171,7 +171,7 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
         presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
         dropped: 0, layered: 0, composed: 0, unshown: 0, shownBy: {}, lastBuffer: 0x1000,
         pending: false, claimed: 0, attached: 0, gamma: false, failures: [], disposed: false,
-        framesFrom: {}, layers: [], composes: false,
+        framesFrom: {}, uploadsFrom: { unnamed: 1 }, layers: [], composes: false,
         // No queue was handed over, so nothing is counted against the bound.
         latency: { limit: 3, counting: false, inFlight: 0, peak: 0, frames: 0, held: 0,
             heldMs: 0, waiting: 0 },
@@ -757,4 +757,38 @@ test('a sending presenter hands each frame its own bytes, which the receiver may
     assert.notEqual(sent[0].pixels.buffer, sent[1].pixels.buffer,
         'a buffer handed over is never written again');
     assert.deepEqual([sent[0].pixels[0], sent[1].pixels[0]], [0, 0x7f]);
+});
+
+test('with a GPU and no canvas the screen is still composed of every process\'s picture, and'
+    + ' that is what the frames\' sink is handed', ()=>{
+    // A page with no canvas of its own (a harness reading frames back) was
+    // handed each process's picture in turn: a full-screen window of one
+    // process flickered with the desktop of another.
+    const gpu = createFakeDevice();
+    /** @type {any[]} */
+    const handed = [];
+    const whole = { left: 0, top: 0, right: 8, bottom: 4 };
+    const windows = [
+        { processId: 2, rect: whole, visible: true },
+        { processId: 1, rect: { left: -32000, top: -32000, right: -31990, bottom: -31996 },
+            visible: true },
+    ];
+    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>handed.push(frame), windows: ()=>windows, foreground: ()=>1 });
+    /** @param {string} label */
+    const surfaceOf = label=>({ texture: gpu.device.createTexture({ label,
+        size: { width: 8, height: 4 }, format: 'rgba8unorm', usage: 0x1f }),
+    width: 8, height: 4, format: 'rgba8unorm' });
+    presenter.show({ surface: surfaceOf('desktop of 1'), frameIndex: 1, source: 1 });
+    presenter.show({ surface: surfaceOf('frame of 2'), frameIndex: 2, source: 2 });
+    presenter.show({ surface: surfaceOf('desktop of 1'), frameIndex: 3, source: 1 });
+    assert.deepEqual(handed.map(frame=>frame.surface.label), ['composed', 'composed', 'composed']);
+    const report = presenter.diagnostics();
+    assert.equal(report.layered, 3);
+    assert.equal(report.composed, 3);
+    // The last composition: process 1's picture under, process 2's window over all of it.
+    const copies = gpu.of('copyTextureToTexture').slice(-2);
+    assert.deepEqual(copies.map((/** @type {any} */ copy)=>[copy.source.texture.descriptor?.label
+        ?? copy.source.texture.label, copy.size.width, copy.size.height]),
+    [['layer of process 1', 8, 4], ['layer of process 2', 8, 4]]);
 });

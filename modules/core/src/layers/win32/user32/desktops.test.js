@@ -51,7 +51,8 @@ function setup(){
         callerThread: ()=>caller.current,
         setLastError: (/** @type {number} */ code)=>errors.push(code),
     };
-    const fns = createDesktopFunctions({ host, topLevel: ()=>[] });
+    const fns = createDesktopFunctions({ host, topLevel: ()=>[],
+        windowOf: hwnd=>(hwnd === 0x10010 ? { exStyle: 0 } : null) });
     /** @param {string} text */
     const put = text=>{
         bytes.set([...text].map(character=>character.charCodeAt(0)), NAME);
@@ -67,7 +68,7 @@ function setup(){
         }
         return String.fromCharCode(...bytes.subarray(at, end));
     };
-    return { fns, errors, caller, put, u32, text, table };
+    return { fns, errors, caller, put, u32, text, table, bytes };
 }
 
 test('a desktop made and switched to takes the input, and the input desktop can be reopened',
@@ -151,4 +152,26 @@ test('a window station made beside WinSta0, opened by its name and set as the pr
     fns.GetUserObjectInformationA.handler([now, UOI_NAME, OUT, 64, NEEDED]);
     assert.equal(text(OUT), 'Sandbox');
     assert.equal(fns.CloseWindowStation.handler([made]), 1);
+});
+
+test('the message filter: accepted for the process; for a window, what was let in is told', ()=>{
+    const { fns, bytes, errors } = setup();
+    const view = new DataView(bytes.buffer);
+    assert.equal(fns.ChangeWindowMessageFilter.handler([0x4a, 1]), 1);
+    assert.equal(fns.ChangeWindowMessageFilter.handler([0x4a, 3]), 0);
+    assert.equal(errors.at(-1), 87);
+    const STRUCT = 0x2000;
+    view.setUint32(STRUCT, 8, true);
+    assert.equal(fns.ChangeWindowMessageFilterEx.handler([0x10010, 0x4a, 1, STRUCT]), 1);
+    assert.equal(view.getUint32(STRUCT + 4, true), 0);
+    fns.ChangeWindowMessageFilterEx.handler([0x10010, 0x4a, 1, STRUCT]);
+    assert.equal(view.getUint32(STRUCT + 4, true), 1, 'already allowed for the window');
+    fns.ChangeWindowMessageFilterEx.handler([0x10010, 0x4a, 2, STRUCT]);
+    fns.ChangeWindowMessageFilterEx.handler([0x10010, 0x4a, 2, STRUCT]);
+    assert.equal(view.getUint32(STRUCT + 4, true), 2, 'already disallowed');
+    assert.equal(fns.ChangeWindowMessageFilterEx.handler([0x20020, 0x4a, 1, 0]), 0);
+    assert.equal(errors.at(-1), 1400, 'no such window');
+    view.setUint32(STRUCT, 12, true);
+    assert.equal(fns.ChangeWindowMessageFilterEx.handler([0x10010, 0x4a, 1, STRUCT]), 0,
+        'a structure of another size');
 });

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createUcrtbaseFunctions } from './ucrtbase.js';
+import { fusedMultiplyAdd } from './ucrt-math.js';
 import { moduleKeyOf } from '../../../app.js';
 
 const STANDARD_SNPRINTF_BEHAVIOR = 0x2;
@@ -257,4 +258,39 @@ test('lround and lroundf round half away from zero; a value no long holds is 0 a
     const single = new DataView(new ArrayBuffer(4));
     single.setFloat32(0, -0.5, true);
     assert.equal(ucrt.lroundf.handler([single.getUint32(0, true)]), -1);
+});
+
+test('fma rounds once: the error of a product is kept, ties go to even, floats round as'
+    + ' floats', ()=>{
+    /** @param {number[]} xyz */
+    const double = (...xyz)=>fusedMultiplyAdd(xyz[0], xyz[1], xyz[2], 53, -1074);
+    assert.equal(double(0.1, 10, -1), 5.551115123125783e-17, 'what 0.1 * 10 - 1 loses');
+    assert.equal(double(2 ** -1074, 0.5, 2 ** -1074), 2 ** -1073, 'a tie below the least ulp');
+    assert.equal(double(1e308, 10, -1e308), Infinity);
+    assert.ok(Object.is(double(-1, 1, 1), 0), 'an exact zero sum is +0');
+    assert.ok(Number.isNaN(double(Infinity, 0, 1)));
+    const f = Math.fround;
+    // (1 + 2^-23)^2 - 1 is 2^-22 + 2^-46: half a float ulp past 2^-22, rounded to even.
+    assert.equal(fusedMultiplyAdd(f(1 + 2 ** -23), f(1 + 2 ** -23), -1, 24, -149), 2 ** -22);
+    assert.equal(fusedMultiplyAdd(f(0.1), 10, -1, 24, -149), 1.4901161193847656e-8);
+});
+
+test('ilogb is the exponent as an int; zero and NaN have their own answers', ()=>{
+    const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
+    const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
+        writeMemory: ()=>{} })));
+    const words = (/** @type {number} */ x)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setFloat64(0, x, true);
+        return [view.getUint32(0, true), view.getUint32(4, true)];
+    };
+    assert.equal(ucrt.ilogb.handler(words(1)), 0);
+    assert.equal(ucrt.ilogb.handler(words(0.75)) | 0, -1);
+    assert.equal(ucrt.ilogb.handler(words(2 ** -1074)) | 0, -1074, 'a subnormal, as if normal');
+    assert.equal(ucrt.ilogb.handler(words(0)) | 0, -2147483648);
+    assert.equal(ucrt.ilogb.handler(words(NaN)), 2147483647);
+    const single = new DataView(new ArrayBuffer(4));
+    single.setFloat32(0, 1024, true);
+    assert.equal(ucrt.ilogbf.handler([single.getUint32(0, true)]), 10);
 });

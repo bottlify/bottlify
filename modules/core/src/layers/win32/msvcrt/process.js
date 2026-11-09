@@ -381,11 +381,25 @@ export function createProcessFunctions(host){
             },
         },
     };
+    /**
+     * intptr_t _execv(const char *cmdname, const char *const *argv): the
+     * image run in the caller's place, as _spawnv's _P_OVERLAY.
+     */
+    const execv = {
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([name, argv])=>table._spawnv.handler([P_OVERLAY, name, argv]),
+    };
     return {
         ...table,
         // The PATH forms. The image is resolved as CreateProcess resolves
         // the name; the runtime's own walk of PATH's directories is not made.
         _spawnlp: table._spawnl,
         _spawnvp: table._spawnv,
+        _execv: execv,
+        _execvp: execv,
+        // int _wsystem(const wchar_t *command): `system`'s answers.
+        _wsystem: table.system,
     };
 }

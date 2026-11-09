@@ -1458,6 +1458,7 @@ export function createMsvcrtFunctions(host){
                 doserrno: code=>globals.set('doserrno', code),
                 divergence: host.divergence,
                 setRegisters: host.setRegisters,
+                systemTimeMs: host.systemTimeMs,
             }, descriptors)
             : {}),
         ...(stdio ?? {}),

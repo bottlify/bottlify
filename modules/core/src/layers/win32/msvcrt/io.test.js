@@ -1025,3 +1025,30 @@ test('__badioinfo is the entry of no descriptor: an invalid handle, text mode, n
     assert.equal(bytes[4], 0x80, 'WX_TEXT, and not WX_OPEN');
     assert.equal(bytes.length, 36);
 });
+
+test('_utime64 and _utime32 set a file\'s modification time; null is now; no file is ENOENT', ()=>{
+    const { memory, files, fns, errno, open } = build({ 'C:\\game\\a.txt': bytesOf('a') });
+    /** @type {[string, number][]} */
+    const stamps = [];
+    /** @param {string} path @param {number} ms */
+    const setModified = (path, ms)=>stamps.push([path, ms]);
+    /** @type {any} */ (files).setModified = setModified;
+    const times = memory.allocate(16);
+    const view = new DataView(memory.bytes.buffer);
+    view.setBigInt64(times, 100n, true);
+    view.setBigInt64(times + 8, 1700000000n, true);
+    assert.equal(fns._utime64.handler([memory.put('C:\\game\\a.txt'), times]), 0);
+    assert.deepEqual(stamps.at(-1), ['C:\\game\\a.txt', 1700000000000], 'the second time');
+    view.setInt32(times, 5, true);
+    view.setInt32(times + 4, 1000000000, true);
+    assert.equal(fns._utime32.handler([memory.put('C:\\game\\a.txt'), times]), 0);
+    assert.equal(stamps.at(-1)?.[1], 1000000000000);
+    assert.equal(fns._utime64.handler([memory.put('C:\\game\\missing.txt'), times]), -1);
+    assert.equal(errno.at(-1), 2);
+    const fd = open('C:\\game\\a.txt', 0);
+    view.setBigInt64(times + 8, 1234n, true);
+    assert.equal(fns._futime64.handler([fd, times]), 0);
+    assert.equal(stamps.at(-1)?.[1], 1234000);
+    assert.equal(fns._futime64.handler([99, times]), -1);
+    assert.equal(errno.at(-1), 9, 'EBADF');
+});

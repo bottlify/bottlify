@@ -58,6 +58,36 @@ test('a key is held as of the key message taken, not as the keys are now', ()=>{
     assert.equal(queue.heldAsOfMessage(0x11), false);
 });
 
+test('GetKeyState\'s state moves as the thread takes its input, buttons and keys alike', ()=>{
+    // The button was pressed and let go before the program got to either
+    // message: as it handles the press, the button is down for it.
+    /** @type {Record<number, number>} */
+    const now = { 0x14: 0x0001 };
+    const main = { id: 1 };
+    const other = { id: 2 };
+    let thread = main;
+    const queue = createMessageQueue({ keyState: vk=>now[vk] ?? 0, currentThread: ()=>thread });
+    assert.equal(queue.syncedKeyState(0x01), null, 'nothing taken: the keys as they are');
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0 });
+    queue.post({ hwnd: 0, message: 0x0202, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x14, lParam: 0 });
+    queue.peek(ALL);
+    assert.equal(queue.syncedKeyState(0x01), 0x8001, 'down as of WM_LBUTTONDOWN, toggled');
+    assert.equal(queue.syncedKeyState(0x14), 0x0001, 'Caps Lock\'s toggle, as it was');
+    assert.equal(queue.syncedKeyboard()?.[0x01], 0x81);
+    queue.peek(ALL);
+    assert.equal(queue.syncedKeyState(0x01), 0x0001, 'up, still toggled by the press');
+    queue.peek(ALL);
+    assert.equal(queue.syncedKeyState(0x14), 0x8000, 'pressed: the toggle flips off');
+    // Another thread has taken nothing: it reads the keys as they are.
+    thread = other;
+    assert.equal(queue.syncedKeyState(0x01), null);
+    queue.setSyncedKeyboard(new Uint8Array(256).fill(0x81));
+    assert.equal(queue.syncedKeyState(0x41), 0x8001, 'SetKeyboardState sets the thread\'s');
+    thread = main;
+    assert.equal(queue.syncedKeyState(0x41), 0);
+});
+
 test('an empty queue answers with nothing rather than a placeholder', ()=>{
     const queue = createMessageQueue();
     assert.equal(queue.peek(ALL), null);

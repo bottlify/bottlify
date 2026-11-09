@@ -98,7 +98,8 @@ function guestMemory(){
  *           depthClipControl?: boolean, sampleCount?: number, format?: number,
  *           fake?: Parameters<typeof createFakeDevice>[0],
  *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued,
- *           guest?: import('./render.js').GuestStorage }} [options]
+ *           guest?: import('./render.js').GuestStorage,
+ *           liveDump?: import('./render.js').RenderServices['liveDump'] }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice(options.fake);
@@ -132,6 +133,7 @@ function harness(options = {}){
             depthClipControl: options.depthClipControl,
             frameQueued: options.frameQueued,
             guest: options.guest,
+            liveDump: options.liveDump,
         }), S_OK);
     const device = deviceOut.device;
     const swapChain = chainOut.swapChain;
@@ -1040,6 +1042,72 @@ async()=>{
 });
 
 // --- resource traffic ---
+
+test('a frame is written down on asking: each clear and draw a line, handed over at the present'
+    + ' that ends the count', ()=>{
+    /** @type {{ lines: string[], frame: number }[]} */
+    const handed = [];
+    const liveDump = { dumpFrames: 0,
+        written: (/** @type {string[]} */ lines, /** @type {number} */ frame)=>
+            handed.push({ lines, frame }) };
+    const h = harness({ liveDump });
+    const { device } = h;
+    bindTriangle(h, [[-1, -1, 0, 1], [3, -1, 0, 1], [-1, 3, 0, 1]], [1, 0, 0, 1]);
+    /** @type {{ resource?: any }} */
+    const constants = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 16, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.CONSTANT_BUFFER, CPUAccessFlags: 0, MiscFlags: 0 },
+    { pSysMem: floatBytes([0.5, 0, 0, 1]) }, constants), S_OK);
+    device.PSSetConstantBuffers(0, [constants.resource]);
+    /** @type {{ state?: any }} */
+    const blend = {};
+    assert.equal(device.CreateBlendState({ AlphaToCoverageEnable: false,
+        BlendEnable: [true, false, false, false, false, false, false, false],
+        SrcBlend: 5, DestBlend: 6, BlendOp: 1, SrcBlendAlpha: 2, DestBlendAlpha: 1,
+        BlendOpAlpha: 1, RenderTargetWriteMask: [15, 15, 15, 15, 15, 15, 15, 15] }, blend),
+    S_OK);
+    device.OMSetBlendState(blend.state, [0.25, 0.5, 0.75, 1], 0xffffffff);
+    const frame = ()=>{
+        device.ClearRenderTargetView(h.renderTargetView, [0, 0, 1, 1]);
+        device.Draw(3, 0);
+        assert.equal(h.swapChain.Present(0, 0), S_OK);
+    };
+    frame();
+    assert.equal(handed.length, 0, 'nobody asked');
+    liveDump.dumpFrames = 1;
+    frame();
+    frame();
+    assert.equal(handed.length, 1);
+    const shaders = handed[0].lines.filter(line=>line.startsWith('shader '));
+    assert.equal(shaders.length, 2, 'each shader once, before the draw that first uses it');
+    assert.match(shaders[1], /^shader ps\d+: in .* out SV_TARGET0@o0\n/);
+    const lines = handed[0].lines.filter(line=>!line.startsWith('shader '));
+    assert.match(lines[0], /^clear t\d+:\S+:8x8:nz=0% colour=0,0,1,1$/);
+    assert.match(lines[1],
+        /^draw 3 x1 topology=\d+ vs=vs\d+ gs=- ps=ps\d+ rt=\[t\d+:\S+:8x8:nz=\d+%\]/);
+    assert.match(lines[1], / blend=5\/6\/1,2\/1\/1:m15 factor=0\.25,0\.5,0\.75,1 cb0=0\.5,0,0,1 vb0=-1,-1,0,1,3,-1,0,1,-1,3,0,1$/,
+        'the blend, its factor and the constants the pixel shader is given');
+    assert.match(lines.at(-1) ?? '', /^frame \d+: presents back buffer t\d+:/);
+    assert.equal(liveDump.dumpFrames, 0);
+});
+
+test('a 16-bit normalised texture on a GPU without texture-formats-tier1 is kept in floats of its'
+    + ' codes', ()=>{
+    const h = harness();
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    const codes = Uint16Array.of(0, 65535, 32768, 1);
+    assert.equal(h.device.CreateTexture2D({ ...TEXTURE_2X2, Format: DXGI_FORMAT.R16_UNORM },
+        [{ pSysMem: new Uint8Array(codes.buffer), SysMemPitch: 4 }], texture), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    assert.equal(made.descriptor.format, 'r32float');
+    const [upload] = h.gpu.of('writeTexture');
+    assert.deepEqual([...new Float32Array(upload.bytes.slice().buffer)],
+        [0, 1, Math.fround(32768 / 65535), Math.fround(1 / 65535)]);
+    assert.equal(upload.layout.bytesPerRow, 8);
+    assert.ok(!h.divergences.some(line=>/did not make|cannot be made/.test(line)),
+        h.divergences.join(' / '));
+});
 
 test('UpdateSubresource lands a box at its offset and uploads that box alone', ()=>{
     const h = harness();
@@ -2396,7 +2464,7 @@ test('a shader with an instruction that has no translation refuses its draws by 
                 dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
                 dclSampler(0),
                 dclOutput(o(0)),
-                { opcode: 108, operands: [o(0), r(0), t(0), s(0)] },
+                { opcode: 213, operands: [o(0), r(0), r(1), r(2)] },
                 ret(),
             ],
         }), ps), S_OK, 'the create accepts it: the refusal is the draw\'s');
@@ -2407,7 +2475,7 @@ test('a shader with an instruction that has no translation refuses its draws by 
         assert.deepEqual([h.device.diagnostics().skipped.untranslatable,
             h.device.diagnostics().skipped.pipeline], [1, 0],
         'counted as untranslatable, apart from a pipeline the GPU refused');
-        assert.ok(h.divergences.some(line=>line.includes('lod')), h.divergences.join('\n'));
+        assert.ok(h.divergences.some(line=>line.includes('msad')), h.divergences.join('\n'));
         assert.ok(h.divergences.some(line=>line.includes('lost: a draw was skipped')),
             'a draw not made is a loss, not a warning');
     });
@@ -2689,6 +2757,99 @@ function quadPatches(){
     return { gpu, device, context, shaders, divergences };
 }
 
+test('draws through the tessellator write their uniforms in place, a backing a frame: no'
+    + ' frame left one behind for each draw', async()=>{
+    const { gpu, device, context, divergences } = quadPatches();
+    /** @param {any} call */
+    const params = call=>/^d3d11:tessellation:params#/.test(call.descriptor.label);
+    for (let draw = 0; draw < 40; draw++)
+    {
+        context.Draw(3, 0);
+    }
+    const inFrame = gpu.of('createBuffer').filter(params).length;
+    assert.ok(inFrame <= 8,
+        `${inFrame} uniform backings for 40 draws of one frame, grown four times`);
+    for (let frame = 0; frame < 4; frame++)
+    {
+        context.Flush();
+        await device.idle();
+        for (let draw = 0; draw < 40; draw++)
+        {
+            context.Draw(3, 0);
+        }
+    }
+    context.Flush();
+    await device.idle();
+    assert.deepEqual(divergences, []);
+    assert.deepEqual(gpu.errors, []);
+    // Flushes are no frames: the slots go on until a present, the buffer
+    // grown by doubling, never a backing a draw.
+    const made = gpu.of('createBuffer').filter(params).length;
+    assert.ok(made <= 10, `${made} uniform backings for 200 draws over five flushes`);
+    assert.equal(device.diagnostics().tessellation.draws, 200);
+});
+
+test('a draw through a geometry shader past the room between the passes is drawn in runs that'
+    + ' fit, each numbering its primitives on from the last', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    /** @type {{ shader?: any }} */
+    const out = {};
+    assert.equal(device.CreateGeometryShader(triangleGeometryShader(), out), S_OK);
+    device.GSSetShader(out.shader);
+    const triangles = 3 << 20;
+    device.Draw(triangles * 3, 0);
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    assert.deepEqual(h.divergences, [], 'nothing lost');
+    const runs = h.gpu.of('dispatchWorkgroups').filter((/** @type {any} */ call)=>
+        call.pipeline.descriptor.label.startsWith('d3d11:gs#'));
+    assert.ok(runs.length > 1, `${runs.length} runs`);
+    assert.equal(device.diagnostics().geometry.cut, 1);
+    assert.equal(device.diagnostics().geometry.invocations, triangles, 'every primitive, once');
+    assert.equal(h.gpu.count('drawIndexedIndirect'), runs.length, 'a draw a run, in order');
+    // Each run's parameters (six 256-byte slots a draw): its first vertex
+    // (the vertex slot's fifth word) and its first primitive id (the
+    // geometry slot's eighth).
+    const params = h.gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        /^d3d11:geometry:params#/.test(call.descriptor.label)).at(-1).createBuffer;
+    const words = new Uint32Array(params.bytes.buffer, params.bytes.byteOffset,
+        params.bytes.byteLength >> 2);
+    const bases = runs.map((_, k)=>words[(k * 6 * 256 + 2 * 256) / 4 + 7]);
+    const firsts = runs.map((_, k)=>words[(k * 6 * 256) / 4 + 4]);
+    const step = bases[1];
+    assert.ok(step > 0);
+    assert.deepEqual(bases, runs.map((_, k)=>k * step), 'primitive ids go on run after run');
+    assert.deepEqual(firsts, bases.map(base=>base * 3), 'each run starts at its vertices');
+    assert.equal(triangles - (bases.at(-1) ?? 0) <= step, true, 'the last run ends the draw');
+    const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code).find((/** @type {string} */ text)=>text.includes('geometryMain'));
+    assert.match(code, /primitiveId = gsPrim \+ gsParams\.primitiveBase;/);
+});
+
+test('draws through a geometry shader write their uniforms in place, a backing a'
+    + ' frame', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    /** @type {{ shader?: any }} */
+    const out = {};
+    assert.equal(device.CreateGeometryShader(triangleGeometryShader(), out), S_OK);
+    device.GSSetShader(out.shader);
+    for (let draw = 0; draw < 40; draw++)
+    {
+        device.Draw(3, 0);
+    }
+    await h.present();
+    assert.deepEqual(h.gpu.errors, []);
+    assert.deepEqual(h.divergences, []);
+    const made = h.gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        /^d3d11:geometry:params#/.test(call.descriptor.label)).length;
+    assert.ok(made <= 8, `${made} uniform backings for 40 draws of one frame, grown four times`);
+    assert.equal(device.diagnostics().geometry.draws, 40);
+});
+
 test('a draw through the tessellator is five compute passes and a draw of the domain shader'
     + ' over what they made, its count on the GPU', async()=>{
     const { gpu, device, context, divergences } = quadPatches();
@@ -2798,7 +2959,7 @@ test('a draw through the tessellator and a geometry shader runs the domain shade
         call.module === pass.pipeline.descriptor.compute.module).descriptor.code;
     assert.match(code(passes[5]), /if \(id\.x >= dsCount\[0\]\) \{ return; \}/);
     assert.match(code(passes[5]), /let dsVertex = id\.x;/);
-    assert.match(code(passes[6]), /if \(gsPrim >= gsLimit\[0\] \/ 3u\) \{ gsWhole = false; \}/);
+    assert.match(code(passes[6]), /if \(gsPrim \+ gsParams\.primitiveBase >= gsHeld\) \{\s*gsWhole = false; \}/);
     // Sized by the most the tessellator may write: 3 patches of 3x3 quads.
     assert.ok(passes[6].grid[0] >= 1);
     assert.equal(device.diagnostics().geometry.draws, 1);
@@ -3138,4 +3299,91 @@ test('a multisampled render target can be read by the shader that resolves it, w
     const made = h.gpu.of('createTexture').at(-1);
     assert.equal(made.descriptor.sampleCount, 4);
     assert.ok((made.descriptor.usage & 0x04) !== 0, 'TEXTURE_BINDING');
+});
+
+test('a texture past the device\'s limits is never asked of it: it is lost, and the frames it'
+    + ' is used in are drawn', async()=>{
+    for (const layers of [256, 2048])
+    {
+        const h = harness({ fake: { limits: { maxTextureArrayLayers: layers } } });
+        const { device } = h;
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, ArraySize: 768,
+            Format: DXGI_FORMAT.R32_FLOAT,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET }, null, texture),
+        S_OK);
+        /** @type {{ view?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTargetView(texture.resource, null, target), S_OK);
+        device.ClearRenderTargetView(target.view, [1, 0, 0, 0]);
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        device.Draw(3, 0);
+        await h.present();
+        const made = h.gpu.of('createTexture').some((/** @type {any} */ call)=>
+            call.descriptor.size.depthOrArrayLayers === 768);
+        assert.equal(made, layers >= 768, `with ${layers} layers a texture`);
+        assert.deepEqual(h.gpu.errors, [], 'no frame refused');
+        assert.equal(h.divergences.some(line=>line.includes('lost: a r32float texture of 2x2x768,'
+            + ' past its 8192 texels a side and 256 layers cannot be made')), layers < 768);
+        assert.equal(h.gpu.count('draw'), 1, 'the back buffer is drawn');
+    }
+});
+
+test('a 32-bit float target is blended on a device made with float32-blendable, and drawn'
+    + ' unblended, said, on one without', async()=>{
+    for (const features of [['float32-blendable'], []])
+    {
+        const h = harness({ fake: { features } });
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0.5, 0, 0, 0.5]);
+        /** @type {any} */
+        const made = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Format:
+            DXGI_FORMAT.R32G32B32A32_FLOAT, BindFlags: D3D10_BIND.RENDER_TARGET }, null, made),
+        S_OK);
+        assert.equal(device.CreateRenderTargetView(made.resource, null, made), S_OK);
+        device.OMSetRenderTargets([made.view], null);
+        assert.equal(device.CreateBlendState({ AlphaToCoverageEnable: false,
+            BlendEnable: [true, false, false, false, false, false, false, false],
+            SrcBlend: 5, DestBlend: 6, BlendOp: 1, SrcBlendAlpha: 2, DestBlendAlpha: 1,
+            BlendOpAlpha: 1, RenderTargetWriteMask: [15, 15, 15, 15, 15, 15, 15, 15] }, made),
+        S_OK);
+        device.OMSetBlendState(made.state, [1, 1, 1, 1], 0xffffffff);
+        device.Draw(3, 0);
+        await h.present();
+        const [target] = h.gpu.of('createRenderPipeline').at(-1).descriptor.fragment.targets;
+        assert.equal(target.format, 'rgba32float');
+        const blended = features.length > 0;
+        assert.equal(target.blend !== undefined, blended, `${features}`);
+        assert.equal(h.divergences.some(line=>/rgba32float target is drawn unblended/.test(line)),
+            !blended);
+    }
+});
+
+test('a 16-bit normalised target kept in floats comes back to a staging copy in its own codes'
+    + ' (test_alpha_to_coverage)', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {any} */
+    const target = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.R16G16_UNORM, BindFlags: D3D10_BIND.RENDER_TARGET }, null, target),
+    S_OK);
+    assert.equal(h.gpu.of('createTexture').at(-1).descriptor.format, 'rg32float');
+    assert.equal(device.CreateRenderTargetView(target.resource, null, target), S_OK);
+    device.ClearRenderTargetView(target.view, [1, 0.5, 1, 1]);
+    /** @type {any} */
+    const staging = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.R16G16_UNORM, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ }, null, staging), S_OK);
+    device.CopyResource(staging.resource, target.resource);
+    await h.present();
+    /** @type {{ data?: Uint8Array | null }} */
+    const mapped = {};
+    assert.equal(await staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    const codes = new Uint16Array((mapped.data ?? new Uint8Array(4)).slice(0, 4).buffer);
+    assert.deepEqual([...codes], [65535, 32768], 'red and green as their 16-bit codes');
+    staging.resource.Unmap(0);
 });

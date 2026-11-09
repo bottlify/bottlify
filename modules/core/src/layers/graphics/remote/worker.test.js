@@ -305,6 +305,59 @@ test('counting, the worker says every frame presented, without its picture', asy
     }
 });
 
+test('on SwiftShader the worker sends its frames as bytes, asked for pictures or not',
+    async()=>{
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {any[]} */
+        const posted = [];
+        /** @type {any} */
+        const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+            onmessage: null };
+        let canvases = 0;
+        serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(),
+                info: { vendor: 'google', architecture: 'swiftshader',
+                    description: 'SwiftShader Device (Subzero)' },
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>{
+                canvases++;
+                return Object.assign(gpu.canvas, { width, height,
+                    transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) });
+            },
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        const { port1, port2 } = new MessageChannel();
+        scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
+        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+            transfer), framesAhead: 100 });
+        port1.onmessage = event=>sender.receive(event.data);
+        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+        try
+        {
+            out.device.BeginScene();
+            out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000001, 1, 0);
+            out.device.EndScene();
+            await out.device.Present();
+            await out.device.idle();
+            await settle();
+            const frame = posted.find(message=>message.type === 'frame');
+            assert.equal(frame?.bitmap, undefined);
+            assert.ok(frame?.pixels instanceof Uint8Array, 'bytes');
+            assert.equal(canvases, 0, 'no WebGPU canvas made in the worker');
+        }
+        finally
+        {
+            port1.close();
+            port2.close();
+        }
+    });
+
 test('told to, the worker sends its frames as bytes from then on', async()=>{
     const gpu = createFakeDevice();
     Object.assign(gpu.device, { queue: gpu.queue });

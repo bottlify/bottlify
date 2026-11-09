@@ -575,6 +575,8 @@ const ENUMERATED_FONTTYPE = 0x0004;
 export function createGdiFunctions(host){
     const objects = createGdiObjects(host.handles);
     const screen = host.screen ?? DEFAULT_SCREEN;
+    /** The display mode GdiEntry13 saw last, and its count of changes. */
+    const displayMode = { seen: '', uniqueness: 0 };
     /** @type {Map<number, any>} */
     const contexts = new Map();
 
@@ -2528,6 +2530,27 @@ export function createGdiFunctions(host){
                 select(dc, bitmap);
                 writeU32s(host, desc + 28, [dc.hdc, bitmap]);
                 return 0;
+            },
+        },
+
+        /**
+         * ULONG GdiEntry13(void) - DdQueryDisplaySettingsUniqueness
+         *
+         * A number that changes whenever the display's mode does: a caller
+         * keeps it with what it made for the mode (WPF's renderer, its
+         * surfaces) and makes them again when it moved. The mode is read at
+         * each call, so a change through any path counts.
+         */
+        GdiEntry13: {
+            argBytes: 0,
+            handler: ()=>{
+                const mode = `${screen.width}x${screen.height}x${screen.bitsPerPixel ?? 32}`;
+                if (mode !== displayMode.seen)
+                {
+                    displayMode.seen = mode;
+                    displayMode.uniqueness = (displayMode.uniqueness + 1) >>> 0;
+                }
+                return displayMode.uniqueness;
             },
         },
 

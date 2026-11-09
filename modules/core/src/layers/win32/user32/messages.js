@@ -183,6 +183,48 @@ const classOf = message=>{
     return QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
 };
 
+/** The virtual keys of the mouse buttons. */
+const VK_LBUTTON = 0x01;
+const VK_RBUTTON = 0x02;
+const VK_MBUTTON = 0x04;
+const VK_XBUTTON1 = 0x05;
+const VK_XBUTTON2 = 0x06;
+
+/**
+ * What an input message changes in the synchronous key state: the keys it
+ * presses or lets go, or null for a message that is no key or button. A
+ * button's client and non-client messages alike; a double click is a press.
+ *
+ * @param {number} message @param {number} wParam
+ * @returns {{ keys: number[], down: boolean } | null}
+ */
+export function inputChange(message, wParam){
+    // WM_LBUTTONDOWN and WM_NCLBUTTONDOWN on, each button's down, up and
+    // double click; WM_XBUTTON* name their button in the high word.
+    switch (message){
+        // WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP.
+        case 0x100: case 0x104: case 0x101: case 0x105:
+            return { keys: [wParam & 0xff], down: message === 0x100 || message === 0x104 };
+        case 0x201: case 0x203: case 0xa1: case 0xa3:
+            return { keys: [VK_LBUTTON], down: true };
+        case 0x202: case 0xa2:
+            return { keys: [VK_LBUTTON], down: false };
+        case 0x204: case 0x206: case 0xa4: case 0xa6:
+            return { keys: [VK_RBUTTON], down: true };
+        case 0x205: case 0xa5:
+            return { keys: [VK_RBUTTON], down: false };
+        case 0x207: case 0x209: case 0xa7: case 0xa9:
+            return { keys: [VK_MBUTTON], down: true };
+        case 0x208: case 0xa8:
+            return { keys: [VK_MBUTTON], down: false };
+        case 0x20b: case 0x20d: case 0xab: case 0xad: case 0x20c: case 0xac:
+            return { keys: [(wParam >>> 16 & 0xffff) === 2 ? VK_XBUTTON2 : VK_XBUTTON1],
+                down: message !== 0x20c && message !== 0xac };
+        default:
+            return null;
+    }
+}
+
 /**
  * @param {Object} [options]
  * @param {() => number} [options.now]
@@ -226,6 +268,55 @@ export function createMessageQueue(options = {}){
     // the program gets to the V it was held for.
     const keysAsTaken = new Uint8Array(256);
     let heldKnown = false;
+    /**
+     * Each thread's synchronous key state, GetKeyState's and
+     * GetKeyboardState's: the down bit (0x80) and the toggle bit (0x01) of
+     * every virtual key as of the last input message the thread took, the
+     * mouse buttons with the keys. Made from the keys as they are when the
+     * thread takes its first input message; before that it answers as they
+     * are. A slow loop that reads the left button while handling the
+     * WM_LBUTTONDOWN it took sees it down, however long ago it was let go.
+     *
+     * @type {Map<any, Uint8Array>}
+     */
+    const synced = new Map();
+    /** @param {any} thread */
+    const syncedOf = thread=>{
+        let table = synced.get(thread);
+        if (!table)
+        {
+            table = new Uint8Array(256);
+            for (let vk = 1; vk < 256; vk++)
+            {
+                const state = keyState(vk);
+                table[vk] = ((state & 0x8000) !== 0 ? 0x80 : 0) | (state & 0x01);
+            }
+            synced.set(thread, table);
+        }
+        return table;
+    };
+    /**
+     * An input message taken: its key's or button's transition, in the
+     * taking thread's state. A press of a key that was up flips its toggle.
+     *
+     * @param {any} thread @param {{ message: number, wParam: number }} entry
+     */
+    const takeInput = (thread, { message, wParam })=>{
+        const change = inputChange(message, wParam);
+        if (change === null)
+        {
+            return;
+        }
+        const table = syncedOf(thread);
+        for (const vk of change.keys)
+        {
+            if (change.down && (table[vk] & 0x80) === 0)
+            {
+                table[vk] ^= 0x01;
+            }
+            table[vk] = (table[vk] & 0x01) | (change.down ? 0x80 : 0);
+        }
+    };
 
     /**
      * What a thread's last look at its queue saw.
@@ -1212,6 +1303,7 @@ export function createMessageQueue(options = {}){
                     pending.splice(index, 1);
                     retrieved++;
                     last = entry;
+                    takeInput(running(), entry);
                     if (entry.message === WM_KEYDOWN || entry.message === WM_SYSKEYDOWN
                         || entry.message === WM_KEYUP || entry.message === WM_SYSKEYUP)
                     {
@@ -1279,6 +1371,32 @@ export function createMessageQueue(options = {}){
 
         /** The message most recently taken, or null before the first. */
         last: ()=>last,
+
+        /**
+         * GetKeyState's answer for the asking thread, or null before it took
+         * any input message (then the keys as they are answer).
+         *
+         * @param {number} vk
+         */
+        syncedKeyState: vk=>{
+            const table = synced.get(running());
+            return table ? ((table[vk & 0xff] & 0x80) !== 0 ? 0x8000 : 0)
+                | (table[vk & 0xff] & 0x01) : null;
+        },
+        /** GetKeyboardState's table for the asking thread, or null as above. */
+        syncedKeyboard: ()=>synced.get(running())?.slice() ?? null,
+        /**
+         * SetKeyboardState: the asking thread's state from then on.
+         *
+         * @param {Uint8Array} bytes
+         */
+        setSyncedKeyboard: bytes=>{
+            const table = syncedOf(running());
+            for (let vk = 0; vk < 256; vk++)
+            {
+                table[vk] = bytes[vk] & 0x81;
+            }
+        },
 
         /**
          * Whether a key was down as of the last key message taken, or null

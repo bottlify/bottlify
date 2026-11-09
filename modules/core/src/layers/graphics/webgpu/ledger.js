@@ -169,14 +169,39 @@ export function trackDevice(device){
     const heaviest = from=>[...from].sort((a, b)=>b[1].bytes - a[1].bytes).slice(0, 12)
         .map(([label, held])=>`${label}: ${held.count} ${(held.bytes / 2 ** 20).toFixed(1)} MB`);
 
+    /**
+     * The heaviest kinds: labels with their numbers after `#` taken out, so a thousand
+     * buffers each labelled by its own size are weighed as the one kind they are.
+     *
+     * @param {Map<string, Weight>} from
+     */
+    const heaviestKinds = from=>{
+        /** @type {Map<string, Weight>} */
+        const kinds = new Map();
+        for (const [label, held] of from)
+        {
+            const kind = label.replace(/#\d+/g, '#N');
+            const sum = kinds.get(kind) ?? { count: 0, bytes: 0 };
+            sum.count += held.count;
+            sum.bytes += held.bytes;
+            kinds.set(kind, sum);
+        }
+        return heaviest(kinds);
+    };
+
     return {
         device,
-        /** Live buffers and textures by count and bytes, the heaviest labels, and what was dropped. */
+        /**
+         * Live buffers and textures by count and bytes, the heaviest labels and
+         * kinds, and what was dropped.
+         */
         diagnostics: ()=>({
             buffers: total(buffers),
             textures: total(textures),
             heaviestBuffers: heaviest(buffers),
             heaviestTextures: heaviest(textures),
+            heaviestBufferKinds: heaviestKinds(buffers),
+            heaviestTextureKinds: heaviestKinds(textures),
             made: { ...made },
             droppedWithoutDestroy: { ...dropped },
         }),

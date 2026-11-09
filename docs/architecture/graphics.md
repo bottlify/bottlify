@@ -118,7 +118,9 @@ flowchart TB
   brings every other count the renderer already holds, each marked with the `Issue(END)` it
   belongs to.
 - **Shaders.** Direct3D 8/9 shader bytecode is parsed and translated to WGSL
-  (`graphics/d3d9/shader.js`, `wgsl.js`). For the fixed-function pipeline, WGSL is generated
+  (`graphics/d3d9/shader.js`, `wgsl.js`), as is Direct3D 10 and 11's shader model 4 and 5
+  (`graphics/d3d10/wgsl.js`), whose doubles WGSL lacks: they are IEEE binary64 worked out in
+  integers (`wgsl-doubles.js`). For the fixed-function pipeline, WGSL is generated
   (`webgpu/internal/fixedfunction.js`). OpenGL's GLSL 1.10 to 4.60 is compiled on the engine thread
   (`graphics/opengl/glsl-*.js`: preprocessor, parser, checker, linker) and written as WGSL where it
   is drawn (`glsl-wgsl.js`), with GL's built-in state packed into the program's uniform block; ARB

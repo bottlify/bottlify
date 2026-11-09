@@ -37,11 +37,12 @@
  */
 
 import { DXGI_FORMAT } from './constants.js';
-import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseSignature } from './dxbc.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, patchConstantsOf } from './dxbc.js';
 import {
     CUSTOMDATA, MODIFIER, OPCODE, OPERAND, RESOURCE_DIMENSION, RETURN_TYPE, SAMPLER_MODE,
     SYNC_FLAG, decodeSm4,
 } from './sm4.js';
+import { DOUBLE_HELPERS } from './wgsl-doubles.js';
 
 /** Every register file is thirty-two bit patterns, four to a register. */
 const REG = 'vec4<u32>';
@@ -98,6 +99,137 @@ export const STORAGE_TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R8G8B8A8_SINT]: 'rgba8sint',
     [DXGI_FORMAT.B8G8R8A8_UNORM]: 'bgra8unorm',
 });
+
+/**
+ * The texture formats a shader writes through a typed view as packed words,
+ * where WebGPU stores into none of them (or only with texture-formats-tier1):
+ * the view is held as its texels' bytes in a buffer (`words`), each store
+ * packs its value as the format keeps it, and a texel narrower than a word
+ * is written in its part of one with two atomics, so neighbours stored at
+ * once are kept. By the texture's WebGPU format: how many bytes a texel,
+ * and the WGSL that packs a register's four components' bits (`v`, a
+ * vec4<u32>) and unpacks a texel's bits (`b`) back into four, the
+ * components a format lacks read as 0 and its alpha as 1, as Direct3D reads
+ * them. Unsigned 11- and 10-bit floats round to nearest even, keep NaN and
+ * infinity, and make zero of what is negative (Direct3D's 11.1 functional
+ * specification, 3.2.4); unorm and snorm round to nearest; integers clamp.
+ *
+ * @type {Readonly<Record<string, { bytes: number, pack: string, unpack: string }>>}
+ */
+export const PACKED_TEXELS = (()=>{
+    const f = 'bitcast<vec4<f32>>(v)';
+    const one = '0x3f800000u';
+    /** Floats' bits of four f32 expressions. @param {string[]} parts */
+    const floats = parts=>`bitcast<vec4<u32>>(vec4<f32>(${parts.join(', ')}))`;
+    /** @param {number} max @param {number} bits @param {number} count */
+    const uints = (max, bits, count)=>[
+        Array.from({ length: count }, (_, k)=>`(min(v.${'xyzw'[k]}, ${max}u) << ${k * bits}u)`)
+            .join(' | '),
+        `vec4<u32>(${Array.from({ length: 4 }, (_, k)=>(k < count
+            ? `(b >> ${k * bits}u) & ${max}u` : k === 3 ? '1u' : '0u')).join(', ')})`];
+    /** @param {number} bits @param {number} count */
+    const sints = (bits, count)=>{
+        const high = (1 << (bits - 1)) - 1;
+        const mask = (1 << bits) - 1;
+        const iv = 'bitcast<vec4<i32>>(v)';
+        return [
+            Array.from({ length: count }, (_, k)=>`((bitcast<u32>(clamp(${iv}.${'xyzw'[k]}, `
+                + `${-high - 1}, ${high})) & ${mask}u) << ${k * bits}u)`).join(' | '),
+            `bitcast<vec4<u32>>(vec4<i32>(${Array.from({ length: 4 }, (_, k)=>(k < count
+                ? `extractBits(bitcast<i32>(b), ${k * bits}u, ${bits}u)` : k === 3 ? '1' : '0'))
+                .join(', ')}))`];
+    };
+    /** @param {number} bytes @param {string[]} code  the packing and the unpacking */
+    const entry = (bytes, [pack, unpack])=>({ bytes, pack, unpack });
+    return Object.freeze({
+        rg11b10ufloat: entry(4, [
+            `packedUf(bitcast<u32>(${f}.x), 6u) | (packedUf(bitcast<u32>(${f}.y), 6u) << 11u)`
+                + ` | (packedUf(bitcast<u32>(${f}.z), 5u) << 22u)`,
+            `vec4<u32>(unpackedUf(b & 0x7ffu, 6u), unpackedUf((b >> 11u) & 0x7ffu, 6u),`
+                + ` unpackedUf(b >> 22u, 5u), ${one})`]),
+        rgb10a2unorm: entry(4, [
+            `dot(vec4<u32>(round(clamp(select(${f}, vec4<f32>(0.0), ${f} != ${f}),`
+                + ' vec4<f32>(0.0), vec4<f32>(1.0)) * vec4<f32>(1023.0, 1023.0, 1023.0, 3.0))),'
+                + ' vec4<u32>(1u, 1024u, 1048576u, 1073741824u))',
+            floats(['f32(b & 1023u) / 1023.0', 'f32((b >> 10u) & 1023u) / 1023.0',
+                'f32((b >> 20u) & 1023u) / 1023.0', 'f32(b >> 30u) / 3.0'])]),
+        rgb10a2uint: entry(4, [
+            '(min(v.x, 1023u) | (min(v.y, 1023u) << 10u) | (min(v.z, 1023u) << 20u)'
+                + ' | (min(v.w, 3u) << 30u))',
+            'vec4<u32>(b & 1023u, (b >> 10u) & 1023u, (b >> 20u) & 1023u, b >> 30u)']),
+        rg16float: entry(4, [`pack2x16float(${f}.xy)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack2x16float(b)), 0u, ${one})`]),
+        rg16unorm: entry(4, [`pack2x16unorm(${f}.xy)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack2x16unorm(b)), 0u, ${one})`]),
+        rg16snorm: entry(4, [`pack2x16snorm(${f}.xy)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack2x16snorm(b)), 0u, ${one})`]),
+        rg16uint: entry(4, uints(0xffff, 16, 2)),
+        rg16sint: entry(4, sints(16, 2)),
+        r16float: entry(2, [`(pack2x16float(vec2<f32>(${f}.x, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<u32>(unpack2x16float(b).x), 0u, 0u, ${one})`]),
+        r16unorm: entry(2, [`(pack2x16unorm(vec2<f32>(${f}.x, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<u32>(unpack2x16unorm(b).x), 0u, 0u, ${one})`]),
+        r16snorm: entry(2, [`(pack2x16snorm(vec2<f32>(${f}.x, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<u32>(unpack2x16snorm(b).x), 0u, 0u, ${one})`]),
+        r16uint: entry(2, uints(0xffff, 16, 1)),
+        r16sint: entry(2, sints(16, 1)),
+        rg8unorm: entry(2, [`(pack4x8unorm(vec4<f32>(${f}.xy, 0.0, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack4x8unorm(b).xy), 0u, ${one})`]),
+        rg8snorm: entry(2, [`(pack4x8snorm(vec4<f32>(${f}.xy, 0.0, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack4x8snorm(b).xy), 0u, ${one})`]),
+        rg8uint: entry(2, uints(0xff, 8, 2)),
+        rg8sint: entry(2, sints(8, 2)),
+        r8unorm: entry(1, [`(pack4x8unorm(vec4<f32>(${f}.x, 0.0, 0.0, 0.0)) & 0xffu)`,
+            `vec4<u32>(bitcast<u32>(unpack4x8unorm(b).x), 0u, 0u, ${one})`]),
+        r8snorm: entry(1, [`(pack4x8snorm(vec4<f32>(${f}.x, 0.0, 0.0, 0.0)) & 0xffu)`,
+            `vec4<u32>(bitcast<u32>(unpack4x8snorm(b).x), 0u, 0u, ${one})`]),
+        r8uint: entry(1, uints(0xff, 8, 1)),
+        r8sint: entry(1, sints(8, 1)),
+    });
+})();
+
+/**
+ * An unsigned float of 5 exponent bits and `m` mantissa bits from a 32-bit
+ * float's bits, and back (`PACKED_TEXELS`).
+ */
+const UNSIGNED_FLOAT_WGSL = [
+    'fn packedUf(x: u32, m: u32) -> u32 {',
+    '    let a: u32 = x & 0x7fffffffu;',
+    '    let top: u32 = 31u << m;',
+    '    if (a > 0x7f800000u) { return top | 1u; }',
+    '    if ((x >> 31u) != 0u) { return 0u; }',
+    '    if (a == 0x7f800000u) { return top; }',
+    '    let drop: u32 = 23u - m;',
+    '    let e: i32 = i32(a >> 23u) - 112i;',
+    '    var v: u32 = 0u;',
+    '    var r: u32 = 0u;',
+    '    var half: u32 = 0u;',
+    '    if (e >= 1i) {',
+    '        v = (u32(min(e, 63i)) << m) | ((a & 0x7fffffu) >> drop);',
+    '        r = a & ((1u << drop) - 1u);',
+    '        half = 1u << (drop - 1u);',
+    '    } else {',
+    '        let shift: u32 = drop + u32(1i - e);',
+    '        if (shift > 24u) { return 0u; }',
+    '        let mm: u32 = (a & 0x7fffffu) | 0x800000u;',
+    '        v = mm >> shift;',
+    '        r = mm & ((1u << shift) - 1u);',
+    '        half = 1u << (shift - 1u);',
+    '    }',
+    '    if (r > half || (r == half && (v & 1u) == 1u)) { v = v + 1u; }',
+    '    return min(v, top);',
+    '}',
+    'fn unpackedUf(b: u32, m: u32) -> u32 {',
+    '    let e: u32 = (b >> m) & 31u;',
+    '    let f: u32 = b & ((1u << m) - 1u);',
+    '    if (e == 31u) { return select(0x7f800000u, 0x7fc00000u, f != 0u); }',
+    '    if (e != 0u) { return ((e + 112u) << 23u) | (f << (23u - m)); }',
+    '    if (f == 0u) { return 0u; }',
+    // A denormal, f * 2^(-14 - m), normalised by its top bit.
+    '    let top: u32 = 31u - countLeadingZeros(f);',
+    '    return ((top + 113u - m) << 23u) | ((f << (23u - top)) & 0x7fffffu);',
+    '}',
+].join('\n');
 
 /**
  * A typed buffer element written from register bits, by the view's format:
@@ -247,6 +379,24 @@ export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
  * @type {Readonly<Record<string, { needs: string[], text: string[] }>>}
  */
 export const HELPERS = Object.freeze({
+    ...DOUBLE_HELPERS,
+    unsignedFloat: { needs: [], text: UNSIGNED_FLOAT_WGSL.split('\n') },
+    // How fast a cube's face coordinates move, d(minor / major), for a
+    // coordinate c moving by d; the major axis is the longest, x before y
+    // before z on a tie, as the face selection takes it.
+    cubeFaceSlope: {
+        needs: [],
+        text: [
+            'fn cubeFaceSlope(c: vec3<f32>, d: vec3<f32>) -> vec2<f32> {',
+            '    let a = abs(c);',
+            '    var major = c.z; var moved = d.z; var minor = c.xy; var slid = d.xy;',
+            '    if (a.x >= a.y && a.x >= a.z) {'
+                + ' major = c.x; moved = d.x; minor = c.yz; slid = d.yz; }',
+            '    else if (a.y >= a.z) { major = c.y; moved = d.y; minor = c.xz; slid = d.xz; }',
+            '    return (slid * major - minor * moved) / (major * major);',
+            '}',
+        ],
+    },
     // Direct3D's standard sample positions, in sixteenths of a pixel from
     // its centre; an index past the count is at the centre.
     samplePosition: {
@@ -362,6 +512,8 @@ export const HELPERS = Object.freeze({
  *     by input register, as its declarations give it (D3D10_SB_INTERPOLATION_MODE).
  * @property {boolean} [rasterizerSamples]  Whether the body reads the rasterizer's sample
  *     count (`sampleinfo`, `samplepos` of the rasterizer), `rasterSamples` at link.
+ * @property {number[]} [unboundInterfaces]  Interface slots a call reached with no class
+ *     instance bound: the call does nothing, which the caller says.
  * @property {string[]} unsupported                Opcode names with no translation.
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
  * @property {number[]} threadGroup                A compute shader's group, x by y by z.
@@ -381,7 +533,8 @@ export const HELPERS = Object.freeze({
  * @property {boolean} loaded     Whether the shader reads it as well as writes it.
  * @property {string} [format]    A typed texture's storage format (`uavFormats`).
  * @property {boolean} [words]    A typed texture view held as its texels' words
- *     in a buffer, for the atomics made on it.
+ *     in a buffer, for the atomics made on it or a format packed there.
+ * @property {string} [packed]    The format its texels are packed in (`PACKED_TEXELS`).
  * @property {Set<string>} [atomicOps]  The atomic operations made on it.
  * @property {boolean} [counted]  Whether its append counter is used.
  */
@@ -469,6 +622,11 @@ const floatLiteral = value=>
  * its outputs are written into.
  *
  * @param {import('./dxbc.js').DxbcContainer} container
+ * `interfaces` is the class instance bound at each interface slot: the
+ * function table (ft#) of its class for that pointer, and the four words its
+ * `this` reads. A slot with none makes a call through it do nothing, and is
+ * listed in `unboundInterfaces`.
+ *
  * `samplerBias` is the MipLODBias of the sampler bound at each slot that has
  * one: WebGPU's samplers have none, so the shader adds it to every level it
  * samples by. `constantSizes`: the registers a constant buffer read at a
@@ -479,7 +637,8 @@ const floatLiteral = value=>
  *     stencil?: readonly number[], uavFormats?: Readonly<Record<number, string>>,
  *     tokens?: Uint32Array,
  *     outputName?: string, samplerBias?: Readonly<Record<number, number>>,
- *     constantSizes?: Readonly<Record<number, number>> }} [options]
+ *     constantSizes?: Readonly<Record<number, number>>,
+ *     interfaces?: readonly ({ table: number, data: readonly number[] } | null)[] }} [options]
  * @returns {TranslatedShader}
  */
 export function translateShader(container, options = {}){
@@ -654,6 +813,8 @@ export function translateShader(container, options = {}){
                 return `${REG}(gsInstance).${swizzle}`;
             case OPERAND.INDEXABLE_TEMP:
                 return `x${operand.indices[0].value}[${indexExpression(operand, 1)}].${swizzle}`;
+            case OPERAND.THIS_POINTER:
+                return `${thisPointer(operand)}.${swizzle}`;
             case OPERAND.CONSTANT_BUFFER:
                 if (operand.indices[1]?.relative)
                 {
@@ -675,6 +836,11 @@ export function translateShader(container, options = {}){
                 return `csLocal.${swizzle}`;
             case OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED:
                 return `${REG}(csFlat).${swizzle}`;
+            case OPERAND.IMMEDIATE64:
+                // A double's dwords, low first; one double is both halves.
+                return `${REG}(${(operand.immediate.length === 2
+                    ? [...operand.immediate, ...operand.immediate] : operand.immediate)
+                    .map(u32Literal).join(', ')})`;
             case OPERAND.IMMEDIATE32:
                 if (operand.immediate.length === 1)
                 {
@@ -974,6 +1140,153 @@ export function translateShader(container, options = {}){
     };
 
     /**
+     * A double source's four dwords, two doubles, its modifier applied to
+     * each one's sign bit.
+     *
+     * @param {import('./sm4.js').Operand} operand
+     */
+    const doubleSource = operand=>{
+        const bits = untyped(operand);
+        const signs = `${REG}(0u, 0x80000000u, 0u, 0x80000000u)`;
+        switch (operand.modifier)
+        {
+            case MODIFIER.NEG:
+                return `(${bits} ^ ${signs})`;
+            case MODIFIER.ABS:
+                return `(${bits} & ~${signs})`;
+            case MODIFIER.ABSNEG:
+                return `(${bits} | ${signs})`;
+            default:
+                return bits;
+        }
+    };
+
+    /** @param {import('./sm4.js').Operand} operand  Each held once, as doubles. */
+    const heldDouble = operand=>{
+        const name = held();
+        emit(`let ${name} = ${doubleSource(operand)};`);
+        return name;
+    };
+
+    /** @param {number} half  0 for the double in .xy, 1 for the one in .zw */
+    const halfOf = half=>(half === 0 ? 'xy' : 'zw');
+
+    /**
+     * An instruction whose result is doubles: .xy, .zw or both, each the
+     * double in the same place of the swizzled sources. `dmovc`'s condition
+     * is a dword a double: x for the first, y for the second.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const doubleResult = instruction=>{
+        const [target, ...sources] = instruction.operands;
+        const opcode = instruction.opcode;
+        const condition = opcode === OPCODE.DMOVC ? held() : null;
+        if (condition)
+        {
+            emit(`let ${condition} = ${u(sources[0])};`);
+        }
+        const [a, b, c] = (condition ? sources.slice(1) : sources).map(heldDouble);
+        const entry = { [OPCODE.DADD]: 'dblAdd', [OPCODE.DMUL]: 'dblMul', [OPCODE.DDIV]: 'dblDiv',
+            [OPCODE.DRCP]: 'dblDiv', [OPCODE.DFMA]: 'dblFma', [OPCODE.DMIN]: 'dblCompare',
+            [OPCODE.DMAX]: 'dblCompare' }[opcode];
+        if (entry)
+        {
+            need(entry);
+        }
+        if (instruction.saturate)
+        {
+            need('dblCompare');
+        }
+        /** @param {number} half */
+        const one = half=>{
+            const at = halfOf(half);
+            /** @type {Record<number, () => string>} */
+            const ways = {
+                [OPCODE.DADD]: ()=>`dblAdd(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMUL]: ()=>`dblMul(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DDIV]: ()=>`dblDiv(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DRCP]: ()=>`dblDiv(vec2<u32>(0u, 0x3ff00000u), ${a}.${at})`,
+                [OPCODE.DFMA]: ()=>`dblFma(${a}.${at}, ${b}.${at}, ${c}.${at})`,
+                [OPCODE.DMIN]: ()=>`dblMin(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMAX]: ()=>`dblMax(${a}.${at}, ${b}.${at})`,
+                [OPCODE.DMOV]: ()=>`${a}.${at}`,
+                [OPCODE.DMOVC]: ()=>`select(${b}.${at}, ${a}.${at},`
+                    + ` ${condition}.${COMPONENT[half]} != 0u)`,
+            };
+            const value = ways[opcode]();
+            return instruction.saturate ? `dblSaturate(${value})` : value;
+        };
+        const halves = [(target.mask & 0x3) !== 0, (target.mask & 0xc) !== 0];
+        store(target, `${REG}(${halves.map((wanted, half)=>(wanted ? one(half)
+            : 'vec2<u32>(0u)')).join(', ')})`);
+    };
+
+    /**
+     * An instruction of doubles whose result is a dword each: the first
+     * component the mask writes takes the first double, the second the
+     * second.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const wordsOfDoubles = instruction=>{
+        const [target, ...sources] = instruction.operands;
+        const opcode = instruction.opcode;
+        const [a, b] = sources.map(heldDouble);
+        need(opcode === OPCODE.DTOF || opcode === OPCODE.DTOI || opcode === OPCODE.DTOU
+            ? 'dblConvert' : 'dblCompare');
+        /** @param {string} test */
+        const all = test=>`select(0u, 0xffffffffu, ${test})`;
+        /** @param {number} half */
+        const one = half=>{
+            const at = halfOf(half);
+            switch (opcode)
+            {
+                case OPCODE.DEQ:
+                    return all(`dblEqual(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DNE:
+                    return all(`!dblEqual(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DLT:
+                    return all(`dblLess(${a}.${at}, ${b}.${at})`);
+                case OPCODE.DGE:
+                    return all(`!(dblNan(${a}.${at}) || dblNan(${b}.${at})`
+                        + ` || dblLess(${a}.${at}, ${b}.${at}))`);
+                case OPCODE.DTOF:
+                    return instruction.saturate
+                        ? `bitcast<u32>(clamp(bitcast<f32>(dblToFloat(${a}.${at})), 0.0, 1.0))`
+                        : `dblToFloat(${a}.${at})`;
+                case OPCODE.DTOI:
+                    return `dblToInt(${a}.${at})`;
+                default:
+                    return `dblToUint(${a}.${at})`;
+            }
+        };
+        let written = 0;
+        store(target, `${REG}(${COMPONENT.map((_, place)=>((target.mask & (1 << place)) === 0
+            ? '0u' : one(written++))).join(', ')})`);
+    };
+
+    /**
+     * A double from a dword: x makes the double in .xy, y the one in .zw.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const doublesOfWords = instruction=>{
+        const [target, source] = instruction.operands;
+        need('dblConvert');
+        const words = held();
+        const opcode = instruction.opcode;
+        emit(`let ${words} = ${opcode === OPCODE.FTOD ? (modifiedRead(source)
+            ? `bitcast<${REG}>(${f(source)})` : u(source))
+            : opcode === OPCODE.ITOD ? `bitcast<${REG}>(${i(source)})` : u(source)};`);
+        const convert = { [OPCODE.FTOD]: 'dblFromFloat', [OPCODE.ITOD]: 'dblFromInt',
+            [OPCODE.UTOD]: 'dblFromUint' }[opcode];
+        const halves = [(target.mask & 0x3) !== 0, (target.mask & 0xc) !== 0];
+        store(target, `${REG}(${halves.map((wanted, half)=>(wanted
+            ? `${convert}(${words}.${COMPONENT[half]})` : 'vec2<u32>(0u)')).join(', ')})`);
+    };
+
+    /**
      * Two-destination integer multiplies and divides: the destination that is
      * `null` is simply not stored.
      *
@@ -999,12 +1312,13 @@ export function translateShader(container, options = {}){
     };
 
     /**
-     * The subroutines after the main program, by label. A call is translated
-     * by writing the subroutine's body where the call is: Shader Model 4
-     * forbids recursion, so every call graph unrolls, and the body then works
-     * on the caller's registers as the hardware's does.
+     * The subroutines after the main program, by label (`l3`) or function
+     * body (`fb3`). A call is translated by writing the subroutine's body
+     * where the call is: Shader Model 4 and 5 forbid recursion, so every call
+     * graph unrolls, and the body then works on the caller's registers as the
+     * hardware's does.
      *
-     * @type {Map<number, import('./sm4.js').Instruction[]>}
+     * @type {Map<string, import('./sm4.js').Instruction[]>}
      */
     const subroutines = new Map();
     const firstLabel = instructions.findIndex(entry=>entry.opcode === OPCODE.LABEL);
@@ -1015,13 +1329,112 @@ export function translateShader(container, options = {}){
         if (entry.opcode === OPCODE.LABEL)
         {
             subroutine = [];
-            subroutines.set(entry.operands[0]?.indices[0]?.value ?? -1, subroutine);
+            const named = entry.operands[0];
+            subroutines.set(`${named?.type === OPERAND.FUNCTION_BODY ? 'fb' : 'l'}`
+                + `${named?.indices[0]?.value ?? -1}`, subroutine);
             continue;
         }
         subroutine.push(entry);
     }
-    /** @type {Set<number>} */
+    /** @type {Set<string>} */
     const calling = new Set();
+
+    /**
+     * Class linkage. A function table lists one body for each call site; an
+     * interface pointer (fp#, an array of them) lists the tables of the
+     * classes it may hold; `fcall fp#[i][site]` calls the bound instance's
+     * table's body for that site. Which class each pointer holds, and the
+     * four words of its `this`, are known only when the shader is bound, so
+     * the shader is translated for them (`options.interfaces`, by slot) and
+     * each call is the one body written in place. The slots follow the
+     * pointers in the order they are declared, an array taking one each.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const functionTables = new Map();
+    /** @type {Map<number, { slot: number, size: number, sites: number, tables: number[] }>} */
+    const interfacePointers = new Map();
+    let interfaceSlots = 0;
+
+    /** @param {import('./sm4.js').Operand} operand  this[#], as four words. */
+    const thisPointer = operand=>{
+        const instances = options.interfaces;
+        if (!instances)
+        {
+            result.unsupported.push('a this pointer, with no class instances given');
+            return `${REG}(0u)`;
+        }
+        /** @param {number} slot */
+        const words = slot=>`${REG}(${(instances[slot]?.data ?? [0, 0, 0, 0])
+            .map(u32Literal).join(', ')})`;
+        const index = operand.indices[0];
+        if (!index?.relative)
+        {
+            return words(index?.value ?? 0);
+        }
+        const count = Math.max(instances.length, 1);
+        return `array<${REG}, ${count}>(${Array.from({ length: count }, (_, slot)=>words(slot))
+            .join(', ')})[min(${indexExpression(operand, 0)}, ${count - 1}u)]`;
+    };
+
+    /**
+     * `fcall`: the body the instance bound at each slot the call may reach
+     * selects, a switch on the array index where it is computed.
+     *
+     * @param {import('./sm4.js').Instruction} instruction
+     */
+    const interfaceCall = instruction=>{
+        const [pointer] = instruction.operands;
+        const declared = interfacePointers.get(pointer?.indices[0]?.value ?? -1);
+        const site = instruction.callSite ?? 0;
+        if (!declared)
+        {
+            unsupported('an interface call through an undeclared pointer');
+            return;
+        }
+        if (!options.interfaces)
+        {
+            unsupported('an interface call, with no class instances given');
+            return;
+        }
+        /** @param {number} element */
+        const callAt = element=>{
+            const slot = declared.slot + element;
+            const instance = options.interfaces?.[slot];
+            if (!instance)
+            {
+                result.unboundInterfaces = [...new Set([...result.unboundInterfaces ?? [], slot])];
+                return;
+            }
+            const table = functionTables.get(instance.table);
+            if (!declared.tables.includes(instance.table) || !table)
+            {
+                unsupported(`class instance table ${instance.table} at slot ${slot}, which its`
+                    + ' interface does not take');
+                return;
+            }
+            callSubroutine(`fb${table[site] ?? -1}`);
+        };
+        const index = pointer.indices[1];
+        if (!index?.relative)
+        {
+            callAt(index?.value ?? 0);
+            return;
+        }
+        emit(`switch (${indexExpression(pointer, 1)}) {`);
+        depth++;
+        for (let element = 0; element < declared.size; element++)
+        {
+            emit(`case ${element}u: {`);
+            depth++;
+            callAt(element);
+            depth--;
+            emit('}');
+        }
+        emit('default: {}');
+        depth--;
+        emit('}');
+    };
 
     /**
      * The switches being written. A run of `case`s with nothing between them
@@ -1077,12 +1490,12 @@ export function translateShader(container, options = {}){
         }
     };
 
-    /** @param {number} index */
+    /** @param {string} index  `l<n>` or `fb<n>` */
     const callSubroutine = index=>{
         const body = subroutines.get(index);
         if (!body)
         {
-            unsupported(`a call to label ${index}, which the program does not have`);
+            unsupported(`a call to ${index}, which the program does not have`);
             return;
         }
         if (calling.has(index))
@@ -1383,8 +1796,14 @@ export function translateShader(container, options = {}){
                 const slot = dest.indices[0].value;
                 const isTyped = instruction.opcode === OPCODE.DCL_UAV_TYPED;
                 const format = isTyped ? options.uavFormats?.[slot] : undefined;
-                const words = isTyped && (instruction.control & 0x1f) !== RESOURCE_DIMENSION.BUFFER
-                    && atomicViews.has(slot);
+                const texture = isTyped
+                    && (instruction.control & 0x1f) !== RESOURCE_DIMENSION.BUFFER;
+                const packed = texture && format && PACKED_TEXELS[format] ? format : null;
+                const words = texture && (atomicViews.has(slot) || packed !== null);
+                if (packed === 'rg11b10ufloat')
+                {
+                    need('unsignedFloat');
+                }
                 result.uavs.push({
                     slot,
                     structure: isTyped ? 'typed'
@@ -1397,8 +1816,9 @@ export function translateShader(container, options = {}){
                         && ((instruction.control >>> 12) & 1) === 1,
                     atomic: false,
                     loaded: false,
-                    ...(format ? { format } : {}),
+                    ...(format && !packed ? { format } : {}),
                     ...(words ? { words } : {}),
+                    ...(packed ? { packed } : {}),
                 });
                 if (isTyped && (instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -1438,6 +1858,33 @@ export function translateShader(container, options = {}){
                         result.immediateConstants.push(data.slice(row, row + 4));
                     }
                 }
+                break;
+
+            // --- doubles (wgsl-doubles.js) ---
+            case OPCODE.DADD:
+            case OPCODE.DMUL:
+            case OPCODE.DDIV:
+            case OPCODE.DRCP:
+            case OPCODE.DFMA:
+            case OPCODE.DMIN:
+            case OPCODE.DMAX:
+            case OPCODE.DMOV:
+            case OPCODE.DMOVC:
+                doubleResult(instruction);
+                break;
+            case OPCODE.DEQ:
+            case OPCODE.DNE:
+            case OPCODE.DLT:
+            case OPCODE.DGE:
+            case OPCODE.DTOF:
+            case OPCODE.DTOI:
+            case OPCODE.DTOU:
+                wordsOfDoubles(instruction);
+                break;
+            case OPCODE.FTOD:
+            case OPCODE.ITOD:
+            case OPCODE.UTOD:
+                doublesOfWords(instruction);
                 break;
 
             // --- moves ---
@@ -1712,12 +2159,32 @@ export function translateShader(container, options = {}){
                 break;
             }
             case OPCODE.CALL:
-                callSubroutine(dest.indices[0]?.value ?? -1);
+                callSubroutine(`l${dest.indices[0]?.value ?? -1}`);
+                break;
+            case OPCODE.DCL_FUNCTION_BODY:
+                break;
+            case OPCODE.DCL_FUNCTION_TABLE: {
+                const [index, count] = instruction.extra;
+                functionTables.set(index, instruction.extra.slice(2, 2 + count));
+                break;
+            }
+            case OPCODE.DCL_INTERFACE: {
+                // fp#, the call sites, the array's size over the count of
+                // tables, then the tables.
+                const [index, sites, shape] = instruction.extra;
+                const size = Math.max(shape >>> 16, 1);
+                interfacePointers.set(index, { slot: interfaceSlots, size, sites,
+                    tables: instruction.extra.slice(3, 3 + (shape & 0xffff)) });
+                interfaceSlots += size;
+                break;
+            }
+            case OPCODE.INTERFACE_CALL:
+                interfaceCall(instruction);
                 break;
             case OPCODE.CALLC:
                 emit(`if (${u(dest)}.x ${instruction.testNonZero ? '!=' : '=='} 0u) {`);
                 depth++;
-                callSubroutine(a.indices[0]?.value ?? -1);
+                callSubroutine(`l${a.indices[0]?.value ?? -1}`);
                 depth--;
                 emit('}');
                 break;
@@ -1898,6 +2365,102 @@ export function translateShader(container, options = {}){
                 store(target, instruction.opcode === OPCODE.LD_MS && sampleIndex
                     ? `select(${kept}, ${REG}(0u), ${u(sampleIndex)}.x != 0u)`
                     : kept);
+                break;
+            }
+            case OPCODE.LOD: {
+                // WGSL has no query of the level of detail, so it is reckoned
+                // as the specification defines it: the longer of the two
+                // screen-space footprints in texels of level 0, its log2,
+                // plus the sampler's bias; x held to the texture's levels,
+                // y not. The sampler's MinLOD and MaxLOD are not seen here,
+                // so x is held to the levels alone.
+                const [target, coordinate, resource, sampler] = instruction.operands;
+                if (!isPixel)
+                {
+                    unsupported('lod outside a pixel shader');
+                    break;
+                }
+                const texture = textureOf(resource.indices[0].value);
+                if (!texture || texture.multisampled
+                    || texture.dimension === RESOURCE_DIMENSION.BUFFER
+                    || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
+                    || texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMSARRAY)
+                {
+                    unsupported('lod on an undeclared or unsupported texture');
+                    break;
+                }
+                const name = `t${texture.slot}`;
+                const at = held();
+                emit(`let ${at} = ${f(coordinate)};`);
+                const size = `textureDimensions(${name}, 0)`;
+                const dimension = texture.dimension;
+                // The footprint along each axis, in texels, for a derivative.
+                const footprint = dimension === RESOURCE_DIMENSION.TEXTURE1D
+                    || dimension === RESOURCE_DIMENSION.TEXTURE1DARRAY
+                    ? (/** @type {string} */ slope)=>
+                        `vec2<f32>(${slope}(${at}.x) * f32(${size}.x), 0.0)`
+                    : dimension === RESOURCE_DIMENSION.TEXTURE2D
+                    || dimension === RESOURCE_DIMENSION.TEXTURE2DARRAY
+                        ? (/** @type {string} */ slope)=>
+                            `${slope}(${at}.xy) * vec2<f32>(${size})`
+                        : dimension === RESOURCE_DIMENSION.TEXTURE3D
+                            ? (/** @type {string} */ slope)=>
+                                `${slope}(${at}.xyz) * vec3<f32>(${size})`
+                            // A cube's face spans [-1, 1] of the minor axes
+                            // over the major one: half the face's size a unit.
+                            : (/** @type {string} */ slope)=>(need('cubeFaceSlope'),
+                            `cubeFaceSlope(${at}.xyz, ${slope}(${at}.xyz))`
+                                + ` * (0.5 * f32(${size}.x))`);
+                const dx = held();
+                const dy = held();
+                emit(`let ${dx} = ${footprint('dpdx')};`);
+                emit(`let ${dy} = ${footprint('dpdy')};`);
+                const bias = options.samplerBias?.[sampler.indices[0].value] ?? 0;
+                const raw = held();
+                emit(`let ${raw} = 0.5 * log2(max(dot(${dx}, ${dx}), dot(${dy}, ${dy})))`
+                    + `${bias ? ` + ${floatLiteral(bias)}` : ''};`);
+                store(target, `bitcast<vec4<u32>>(vec4<f32>(clamp(${raw}, 0.0,`
+                    + ` f32(textureNumLevels(${name}) - 1u)), ${raw}, 0.0, 0.0))`
+                    + `.${swizzleText(resource.swizzle)}`);
+                break;
+            }
+            case OPCODE.EVAL_CENTROID:
+            case OPCODE.EVAL_SAMPLE_INDEX:
+            case OPCODE.EVAL_SNAPPED: {
+                // WGSL interpolates an input only where it is declared, so an
+                // input is carried to another point of the pixel along its
+                // screen-space slopes: v + dpdx(v) * dx + dpdy(v) * dy, from
+                // where the input was interpolated. A pixel drawn whole has
+                // its centroid at its centre, which is where it is taken.
+                const [target, input, where] = instruction.operands;
+                if (!isPixel)
+                {
+                    unsupported(`${instruction.name} outside a pixel shader`);
+                    break;
+                }
+                if (instruction.opcode === OPCODE.EVAL_CENTROID)
+                {
+                    store(target, sat ? fromFloat(f(input), true) : moved(input));
+                    break;
+                }
+                const value = held();
+                const offset = held();
+                emit(`let ${value} = ${f(input)};`);
+                if (instruction.opcode === OPCODE.EVAL_SAMPLE_INDEX)
+                {
+                    result.rasterizerSamples = true;
+                    need('samplePosition');
+                    emit(`let ${offset} = samplePosition(rasterSamples, ${u(where)}.x);`);
+                }
+                else
+                {
+                    // Two signed four-bit sixteenths of a pixel, in the low
+                    // bits of x and y.
+                    emit(`let ${offset} = vec2<f32>((${i(where)}.xy << vec2<u32>(28u))`
+                        + ' >> vec2<u32>(28u)) / 16.0;');
+                }
+                store(target, fromFloat(`${value} + dpdx(${value}) * ${offset}.x`
+                    + ` + dpdy(${value}) * ${offset}.y`, sat));
                 break;
             }
             case OPCODE.SAMPLE_INFO:
@@ -2098,8 +2661,10 @@ export function translateShader(container, options = {}){
                 }
                 if (uav.words)
                 {
-                    store(dest, `${REG}(${memory.name}_load(${wordIndex(memory.name, uav, u(a))}),`
-                        + ` 0u, 0u, 1u).${swizzleText(b.swizzle)}`);
+                    const index = wordIndex(memory.name, uav, u(a));
+                    store(dest, `${uav.packed ? `${memory.name}_unpack(${index})`
+                        : `${REG}(${memory.name}_load(${index}), 0u, 0u, 1u)`}`
+                        + `.${swizzleText(b.swizzle)}`);
                     break;
                 }
                 const at = storageCoordinate(uav, u(a));
@@ -2129,7 +2694,9 @@ export function translateShader(container, options = {}){
                 }
                 if (uav.words)
                 {
-                    emit(`${memory.name}_store(${wordIndex(memory.name, uav, u(a))}, ${u(b)}.x);`);
+                    const index = wordIndex(memory.name, uav, u(a));
+                    emit(uav.packed ? `${memory.name}_pack(${index}, ${u(b)});`
+                        : `${memory.name}_store(${index}, ${u(b)}.x);`);
                     break;
                 }
                 const at = storageCoordinate(uav, u(a));
@@ -2480,6 +3047,46 @@ function textureType(texture){
  */
 
 /**
+ * The store and load of a view whose texels are packed in its words
+ * (`PACKED_TEXELS`), by texel index (`_index`, all ones past the view): a
+ * texel narrower than a word is cleared and set in its part of one, each an
+ * atomic, so the other texels of the word, stored at once, are kept. A load
+ * past the view reads zeros.
+ *
+ * @param {string} name @param {string | undefined} packed
+ * @returns {string[]}
+ */
+function packedAccessors(name, packed){
+    const texel = packed ? PACKED_TEXELS[packed] : null;
+    if (!texel)
+    {
+        return [];
+    }
+    const lanes = 4 / texel.bytes;
+    const mask = texel.bytes === 4 ? '0xffffffffu' : `${(1 << (texel.bytes * 8)) - 1}u`;
+    const part = lanes === 1 ? ['let w = i;', 'let shift = 0u;']
+        : [`let w = i / ${lanes}u;`, `let shift = (i % ${lanes}u) * ${texel.bytes * 8}u;`];
+    return [
+        `fn ${name}_pack(i: u32, v: vec4<u32>) {`,
+        '    if (i == 0xffffffffu) { return; }',
+        ...part.map(line=>`    ${line}`),
+        `    if (w >= arrayLength(&${name})) { return; }`,
+        `    let bits = (${texel.pack}) & ${mask};`,
+        ...(lanes === 1 ? [`    atomicStore(&${name}[w], bits);`] : [
+            `    atomicAnd(&${name}[w], ~(${mask} << shift));`,
+            `    atomicOr(&${name}[w], bits << shift);`]),
+        '}',
+        `fn ${name}_unpack(i: u32) -> vec4<u32> {`,
+        '    if (i == 0xffffffffu) { return vec4<u32>(0u); }',
+        ...part.map(line=>`    ${line}`),
+        `    if (w >= arrayLength(&${name})) { return vec4<u32>(0u); }`,
+        `    let b = (atomicLoad(&${name}[w]) >> shift) & ${mask};`,
+        `    return ${texel.unpack};`,
+        '}',
+    ];
+}
+
+/**
  * The module-scope declarations of one stage: its bindings and its immediate
  * constants.
  *
@@ -2579,7 +3186,7 @@ function declarations(shader, group, visibility){
         const binding = BINDING.UAV + uav.slot;
         if (uav.words)
         {
-            // Its view uniform: words a row, rows a layer, width, layers.
+            // Its view uniform: texels a row, rows a layer, width, layers.
             text.push(`@group(${group}) @binding(${binding}) var<storage, read_write> ${name}: `
                 + 'array<atomic<u32>>;',
             `@group(${group}) @binding(${BINDING.UAV_VIEW + uav.slot}) var<uniform> ${name}view:`
@@ -2596,6 +3203,7 @@ function declarations(shader, group, visibility){
             `fn ${name}_store(i: u32, value: u32) {`,
             `    if (i < arrayLength(&${name})) { atomicStore(&${name}[i], value); }`,
             '}',
+            ...packedAccessors(name, uav.packed),
             ...[...uav.atomicOps ?? []].flatMap(op=>atomicAccessor(name, op, true, null, -1)));
             entries.push({ binding, visibility, buffer: { type: 'storage' } });
             entries.push({ binding: BINDING.UAV_VIEW + uav.slot, visibility,
@@ -3622,11 +4230,13 @@ export function linkHull(container){
     const globals = program.tokens.subarray(0, globalsEnd);
     /** @param {import('./dxbc.js').SignatureElement[]} elements */
     const registersOf = elements=>Math.max(1, ...elements.map(element=>element.register + 1));
-    const patchConstants = container.chunks.has('PCSG')
-        ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : [];
+    const patchConstants = patchConstantsOf(container.chunks);
     const inputRegisters = registersOf(container.inputs);
     const outputRegisters = registersOf(container.outputs);
-    const constantRegisters = registersOf(patchConstants);
+    // The registers the patch constant phases write, which the signature
+    // may name fewer of: an output declared but left out of it is still
+    // written, and the domain shader reads the constants at this stride.
+    let constantRegisters = registersOf(patchConstants);
     const inputPoints = Math.max(1, stage.inputPoints);
     const outputPoints = Math.max(1, stage.outputPoints);
 
@@ -3646,6 +4256,10 @@ export function linkHull(container){
         const shader = translateShader(container, { tokens,
             outputName: isControlPoint ? 'cpo' : 'pc' });
         translated.push(shader);
+        if (!isControlPoint)
+        {
+            constantRegisters = Math.max(constantRegisters, shader.outputRegisters);
+        }
         unsupported.push(...shader.unsupported);
         const icb = `icb_p${index}`;
         const lines = [`fn hsPhase${index}() {`];
@@ -3919,14 +4533,15 @@ const STRIP_TOPOLOGIES = Object.freeze([3, 5, 11, 13]);
  * topology, the positions an instance, the index size in bytes (0 for none),
  * the index buffer's byte offset and the first index.
  *
- * `limited`: the positions are what the tessellator wrote, a list whose
- * length the GPU holds (`gsLimit`, its first word): the invocations are
- * sized by the most it may write, and one past the primitives it did write
- * runs no body and counts nothing.
+ * `limited`: the positions are what the tessellator wrote, or an indirect
+ * draw's, a list whose length the GPU holds (`gsLimit`, its first word): the
+ * invocations are sized by the most it may write, and one past the
+ * primitives it did write runs no body and counts nothing. `instanced`: the
+ * instances drawn are the GPU's too, `gsLimit`'s second word.
  *
  * @param {TranslatedShader} gs
  * @param {GeometryStage} stage
- * @param {{ limited?: boolean }} [options]
+ * @param {{ limited?: boolean, instanced?: boolean }} [options]
  * @returns {{ code: string, entries: BindGroupLayoutEntry[], unsupported: string[] }}
  */
 export function linkGeometry(gs, stage, options = {}){
@@ -3940,7 +4555,8 @@ export function linkGeometry(gs, stage, options = {}){
     const code = [
         ...declared.text,
         'struct GsParams { invocations: u32, prims: u32, topology: u32, points: u32,',
-        '    indexBytes: u32, indexOffset: u32, first: u32, pad: u32, }',
+        '    indexBytes: u32, indexOffset: u32, first: u32, primitiveBase: u32,',
+        '    instanceBase: u32, pad0: u32, pad1: u32, pad2: u32, }',
         `@group(1) @binding(${GEOMETRY_BINDING.inputs}) var<storage, read> gsIn: array<${REG}>;`,
         `@group(1) @binding(${GEOMETRY_BINDING.indices}) var<storage, read> gsIndices: `
             + 'array<u32>;',
@@ -4007,7 +4623,8 @@ export function linkGeometry(gs, stage, options = {}){
         `    let gsFlat = id.x / ${stage.instances}u;`,
         '    let gsDrawn = gsFlat / max(1u, gsParams.prims);',
         '    let gsPrim = gsFlat % max(1u, gsParams.prims);',
-        '    primitiveId = gsPrim;',
+        // A draw cut in runs (`geometry.js` `pieces`) numbers its primitives on.
+        '    primitiveId = gsPrim + gsParams.primitiveBase;',
         `    var gsAt: array<u32, ${vertices}>;`,
         '    var gsWhole = true;',
         `    let gsStripped = ${STRIP_TOPOLOGIES.map(t=>`gsParams.topology == ${t}u`)
@@ -4016,8 +4633,15 @@ export function linkGeometry(gs, stage, options = {}){
         `        gsAt[j] = select(gsPrim * ${vertices}u + j, gsPrim + j, gsStripped);`,
         '        if (gsStripped && gsCutAt(gsAt[j])) { gsWhole = false; }',
         '    }',
-        ...(options.limited ? [`    if (gsPrim >= gsLimit[0] / ${vertices}u) { gsWhole = false; }`]
-            : []),
+        // The primitives the positions the GPU holds make, a strip's as
+        // overlapping as its own; with `instanced`, the instances too.
+        ...(options.limited ? [
+            `    let gsHeld = select(gsLimit[0] / ${vertices}u, max(gsLimit[0], ${vertices - 1}u)`
+                + ` - ${vertices - 1}u, gsStripped);`,
+            '    if (gsPrim + gsParams.primitiveBase >= gsHeld) { gsWhole = false; }',
+        ] : []),
+        ...(options.instanced ? ['    if (gsDrawn + gsParams.instanceBase >= gsLimit[1]) {'
+            + ' gsWhole = false; }'] : []),
         ...(vertices === 3 ? [
             '    if (gsWhole && gsParams.topology == 5u) {',
             // The strip's first triangle: after the last cut index, or the first.
@@ -4416,8 +5040,7 @@ export function linkDomain(ds, dsContainer, ps, hull, stage, options = {}){
  */
 function domainLoad(ds, dsContainer, hull, stage, group){
     /** @param {import('./dxbc.js').DxbcContainer} container */
-    const constantsOf = container=>(container.chunks.has('PCSG')
-        ? parseSignature(/** @type {Uint8Array} */ (container.chunks.get('PCSG'))) : []);
+    const constantsOf = container=>patchConstantsOf(container.chunks);
     /** @param {import('./dxbc.js').SignatureElement[]} elements */
     const registersOf = elements=>Math.max(1, ...elements.map(element=>element.register + 1));
     const inputs = registersOf(ds.inputs);

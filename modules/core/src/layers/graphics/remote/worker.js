@@ -126,10 +126,12 @@ export function serveGraphics(scope, deps){
     let lostWith = null;
     /** What the device holds, weighed (`ledger.js`). @type {ReturnType<typeof trackDevice> | null} */
     let ledger = null;
+    /** What the backend's dynamic buffers hold (`dynamicHeld`). @type {(() => any) | null} */
+    let heldBy = null;
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
-     * Direct3D 8 and 9 device here writes its next frames down while this is
-     * above zero.
+     * Direct3D 8, 9, 10 and 11 device and OpenGL context here writes its next
+     * frames down while this is above zero.
      */
     /** The frozen frame's timer (`freeze`), while one runs. @type {ReturnType<typeof setInterval> | undefined} */
     let frozen;
@@ -466,6 +468,7 @@ export function serveGraphics(scope, deps){
         });
         const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
+        heldBy = ()=>backend.dynamicHeld();
         return { device, backend, adapter: {
             vendor: adapter.info?.vendor ?? '',
             architecture: adapter.info?.architecture ?? '',
@@ -552,6 +555,7 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D10(createDirect3D10, {
                 ...options,
+                liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 createTexture: (/** @type {any} */ descriptor)=>device.createTexture(descriptor),
@@ -617,7 +621,8 @@ export function serveGraphics(scope, deps){
             });
         }
         receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics(),
-            gpuMemory: ()=>ledger?.diagnostics() ?? null, times: ()=>latency.times() });
+            gpuMemory: ()=>(ledger ? { ...ledger.diagnostics(),
+                dynamic: heldBy?.() ?? null } : null), times: ()=>latency.times() });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,
@@ -689,8 +694,19 @@ export function serveGraphics(scope, deps){
                     capture.open(frames);
                 }
                 opened ??= open(data.software === true);
-                opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
-                    e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+                opened.then(({ adapter })=>{
+                    // SwiftShader in Chrome makes no picture of a worker's
+                    // WebGPU canvas where it has no Vulkan below it: the GPU
+                    // process fails to back the canvas's texture and the page
+                    // goes with it. Its frames go as bytes instead.
+                    if (frames === 'bitmap' && /swiftshader/i.test(
+                        `${adapter.architecture} ${adapter.description}`))
+                    {
+                        frames = 'pixels';
+                    }
+                    scope.postMessage({ type: 'opened', adapter });
+                },
+                e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;
             case 'frames':
                 // The program's thread could not take a picture: from here on

@@ -93,8 +93,11 @@
   pipes, overlapped reads and connects completed through their event and completion port, and a
   pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's
   number. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
-  Windows 9x refuses it). Writes are never held back by a full buffer, and `GetOverlappedResult` on a pipe operation
-  whose OVERLAPPED has no event waits on nothing.
+  Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
+  handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
+  own: they are served where the parent holds them, and a wait on such a handle itself fails
+  (`ERROR_INVALID_HANDLE`, said as a divergence). Writes are never held back by a full buffer, and `GetOverlappedResult` on a pipe
+  operation whose OVERLAPPED has no event waits on nothing.
 - A child in a worker of its own shares the run's registry, files, window directory (it finds,
   reads, posts and sends to every other process's windows, and they to its), ids, bundle (a block
   it misses is fetched for it), named events, semaphores and mutexes, and the position of a file
