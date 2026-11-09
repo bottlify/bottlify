@@ -101,6 +101,137 @@ export const STORAGE_TEXTURE_FORMAT = Object.freeze({
 });
 
 /**
+ * The texture formats a shader writes through a typed view as packed words,
+ * where WebGPU stores into none of them (or only with texture-formats-tier1):
+ * the view is held as its texels' bytes in a buffer (`words`), each store
+ * packs its value as the format keeps it, and a texel narrower than a word
+ * is written in its part of one with two atomics, so neighbours stored at
+ * once are kept. By the texture's WebGPU format: how many bytes a texel,
+ * and the WGSL that packs a register's four components' bits (`v`, a
+ * vec4<u32>) and unpacks a texel's bits (`b`) back into four, the
+ * components a format lacks read as 0 and its alpha as 1, as Direct3D reads
+ * them. Unsigned 11- and 10-bit floats round to nearest even, keep NaN and
+ * infinity, and make zero of what is negative (Direct3D's 11.1 functional
+ * specification, 3.2.4); unorm and snorm round to nearest; integers clamp.
+ *
+ * @type {Readonly<Record<string, { bytes: number, pack: string, unpack: string }>>}
+ */
+export const PACKED_TEXELS = (()=>{
+    const f = 'bitcast<vec4<f32>>(v)';
+    const one = '0x3f800000u';
+    /** Floats' bits of four f32 expressions. @param {string[]} parts */
+    const floats = parts=>`bitcast<vec4<u32>>(vec4<f32>(${parts.join(', ')}))`;
+    /** @param {number} max @param {number} bits @param {number} count */
+    const uints = (max, bits, count)=>[
+        Array.from({ length: count }, (_, k)=>`(min(v.${'xyzw'[k]}, ${max}u) << ${k * bits}u)`)
+            .join(' | '),
+        `vec4<u32>(${Array.from({ length: 4 }, (_, k)=>(k < count
+            ? `(b >> ${k * bits}u) & ${max}u` : k === 3 ? '1u' : '0u')).join(', ')})`];
+    /** @param {number} bits @param {number} count */
+    const sints = (bits, count)=>{
+        const high = (1 << (bits - 1)) - 1;
+        const mask = (1 << bits) - 1;
+        const iv = 'bitcast<vec4<i32>>(v)';
+        return [
+            Array.from({ length: count }, (_, k)=>`((bitcast<u32>(clamp(${iv}.${'xyzw'[k]}, `
+                + `${-high - 1}, ${high})) & ${mask}u) << ${k * bits}u)`).join(' | '),
+            `bitcast<vec4<u32>>(vec4<i32>(${Array.from({ length: 4 }, (_, k)=>(k < count
+                ? `extractBits(bitcast<i32>(b), ${k * bits}u, ${bits}u)` : k === 3 ? '1' : '0'))
+                .join(', ')}))`];
+    };
+    /** @param {number} bytes @param {string[]} code  the packing and the unpacking */
+    const entry = (bytes, [pack, unpack])=>({ bytes, pack, unpack });
+    return Object.freeze({
+        rg11b10ufloat: entry(4, [
+            `packedUf(bitcast<u32>(${f}.x), 6u) | (packedUf(bitcast<u32>(${f}.y), 6u) << 11u)`
+                + ` | (packedUf(bitcast<u32>(${f}.z), 5u) << 22u)`,
+            `vec4<u32>(unpackedUf(b & 0x7ffu, 6u), unpackedUf((b >> 11u) & 0x7ffu, 6u),`
+                + ` unpackedUf(b >> 22u, 5u), ${one})`]),
+        rgb10a2unorm: entry(4, [
+            `dot(vec4<u32>(round(clamp(select(${f}, vec4<f32>(0.0), ${f} != ${f}),`
+                + ' vec4<f32>(0.0), vec4<f32>(1.0)) * vec4<f32>(1023.0, 1023.0, 1023.0, 3.0))),'
+                + ' vec4<u32>(1u, 1024u, 1048576u, 1073741824u))',
+            floats(['f32(b & 1023u) / 1023.0', 'f32((b >> 10u) & 1023u) / 1023.0',
+                'f32((b >> 20u) & 1023u) / 1023.0', 'f32(b >> 30u) / 3.0'])]),
+        rgb10a2uint: entry(4, [
+            '(min(v.x, 1023u) | (min(v.y, 1023u) << 10u) | (min(v.z, 1023u) << 20u)'
+                + ' | (min(v.w, 3u) << 30u))',
+            'vec4<u32>(b & 1023u, (b >> 10u) & 1023u, (b >> 20u) & 1023u, b >> 30u)']),
+        rg16float: entry(4, [`pack2x16float(${f}.xy)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack2x16float(b)), 0u, ${one})`]),
+        rg16unorm: entry(4, [`pack2x16unorm(${f}.xy)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack2x16unorm(b)), 0u, ${one})`]),
+        rg16snorm: entry(4, [`pack2x16snorm(${f}.xy)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack2x16snorm(b)), 0u, ${one})`]),
+        rg16uint: entry(4, uints(0xffff, 16, 2)),
+        rg16sint: entry(4, sints(16, 2)),
+        r16float: entry(2, [`(pack2x16float(vec2<f32>(${f}.x, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<u32>(unpack2x16float(b).x), 0u, 0u, ${one})`]),
+        r16unorm: entry(2, [`(pack2x16unorm(vec2<f32>(${f}.x, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<u32>(unpack2x16unorm(b).x), 0u, 0u, ${one})`]),
+        r16snorm: entry(2, [`(pack2x16snorm(vec2<f32>(${f}.x, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<u32>(unpack2x16snorm(b).x), 0u, 0u, ${one})`]),
+        r16uint: entry(2, uints(0xffff, 16, 1)),
+        r16sint: entry(2, sints(16, 1)),
+        rg8unorm: entry(2, [`(pack4x8unorm(vec4<f32>(${f}.xy, 0.0, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack4x8unorm(b).xy), 0u, ${one})`]),
+        rg8snorm: entry(2, [`(pack4x8snorm(vec4<f32>(${f}.xy, 0.0, 0.0)) & 0xffffu)`,
+            `vec4<u32>(bitcast<vec2<u32>>(unpack4x8snorm(b).xy), 0u, ${one})`]),
+        rg8uint: entry(2, uints(0xff, 8, 2)),
+        rg8sint: entry(2, sints(8, 2)),
+        r8unorm: entry(1, [`(pack4x8unorm(vec4<f32>(${f}.x, 0.0, 0.0, 0.0)) & 0xffu)`,
+            `vec4<u32>(bitcast<u32>(unpack4x8unorm(b).x), 0u, 0u, ${one})`]),
+        r8snorm: entry(1, [`(pack4x8snorm(vec4<f32>(${f}.x, 0.0, 0.0, 0.0)) & 0xffu)`,
+            `vec4<u32>(bitcast<u32>(unpack4x8snorm(b).x), 0u, 0u, ${one})`]),
+        r8uint: entry(1, uints(0xff, 8, 1)),
+        r8sint: entry(1, sints(8, 1)),
+    });
+})();
+
+/**
+ * An unsigned float of 5 exponent bits and `m` mantissa bits from a 32-bit
+ * float's bits, and back (`PACKED_TEXELS`).
+ */
+const UNSIGNED_FLOAT_WGSL = [
+    'fn packedUf(x: u32, m: u32) -> u32 {',
+    '    let a: u32 = x & 0x7fffffffu;',
+    '    let top: u32 = 31u << m;',
+    '    if (a > 0x7f800000u) { return top | 1u; }',
+    '    if ((x >> 31u) != 0u) { return 0u; }',
+    '    if (a == 0x7f800000u) { return top; }',
+    '    let drop: u32 = 23u - m;',
+    '    let e: i32 = i32(a >> 23u) - 112i;',
+    '    var v: u32 = 0u;',
+    '    var r: u32 = 0u;',
+    '    var half: u32 = 0u;',
+    '    if (e >= 1i) {',
+    '        v = (u32(min(e, 63i)) << m) | ((a & 0x7fffffu) >> drop);',
+    '        r = a & ((1u << drop) - 1u);',
+    '        half = 1u << (drop - 1u);',
+    '    } else {',
+    '        let shift: u32 = drop + u32(1i - e);',
+    '        if (shift > 24u) { return 0u; }',
+    '        let mm: u32 = (a & 0x7fffffu) | 0x800000u;',
+    '        v = mm >> shift;',
+    '        r = mm & ((1u << shift) - 1u);',
+    '        half = 1u << (shift - 1u);',
+    '    }',
+    '    if (r > half || (r == half && (v & 1u) == 1u)) { v = v + 1u; }',
+    '    return min(v, top);',
+    '}',
+    'fn unpackedUf(b: u32, m: u32) -> u32 {',
+    '    let e: u32 = (b >> m) & 31u;',
+    '    let f: u32 = b & ((1u << m) - 1u);',
+    '    if (e == 31u) { return select(0x7f800000u, 0x7fc00000u, f != 0u); }',
+    '    if (e != 0u) { return ((e + 112u) << 23u) | (f << (23u - m)); }',
+    '    if (f == 0u) { return 0u; }',
+    // A denormal, f * 2^(-14 - m), normalised by its top bit.
+    '    let top: u32 = 31u - countLeadingZeros(f);',
+    '    return ((top + 113u - m) << 23u) | ((f << (23u - top)) & 0x7fffffu);',
+    '}',
+].join('\n');
+
+/**
  * A typed buffer element written from register bits, by the view's format:
  * the 32-bit-per-channel formats and the packed four-channel ones. The
  * dwords to write and how many; a format this cannot pack writes none.
@@ -249,6 +380,7 @@ export const BUFFER_VIEW_FORMATS = BUFFER_ELEMENT.formats;
  */
 export const HELPERS = Object.freeze({
     ...DOUBLE_HELPERS,
+    unsignedFloat: { needs: [], text: UNSIGNED_FLOAT_WGSL.split('\n') },
     // How fast a cube's face coordinates move, d(minor / major), for a
     // coordinate c moving by d; the major axis is the longest, x before y
     // before z on a tie, as the face selection takes it.
@@ -401,7 +533,8 @@ export const HELPERS = Object.freeze({
  * @property {boolean} loaded     Whether the shader reads it as well as writes it.
  * @property {string} [format]    A typed texture's storage format (`uavFormats`).
  * @property {boolean} [words]    A typed texture view held as its texels' words
- *     in a buffer, for the atomics made on it.
+ *     in a buffer, for the atomics made on it or a format packed there.
+ * @property {string} [packed]    The format its texels are packed in (`PACKED_TEXELS`).
  * @property {Set<string>} [atomicOps]  The atomic operations made on it.
  * @property {boolean} [counted]  Whether its append counter is used.
  */
@@ -1663,8 +1796,14 @@ export function translateShader(container, options = {}){
                 const slot = dest.indices[0].value;
                 const isTyped = instruction.opcode === OPCODE.DCL_UAV_TYPED;
                 const format = isTyped ? options.uavFormats?.[slot] : undefined;
-                const words = isTyped && (instruction.control & 0x1f) !== RESOURCE_DIMENSION.BUFFER
-                    && atomicViews.has(slot);
+                const texture = isTyped
+                    && (instruction.control & 0x1f) !== RESOURCE_DIMENSION.BUFFER;
+                const packed = texture && format && PACKED_TEXELS[format] ? format : null;
+                const words = texture && (atomicViews.has(slot) || packed !== null);
+                if (packed === 'rg11b10ufloat')
+                {
+                    need('unsignedFloat');
+                }
                 result.uavs.push({
                     slot,
                     structure: isTyped ? 'typed'
@@ -1677,8 +1816,9 @@ export function translateShader(container, options = {}){
                         && ((instruction.control >>> 12) & 1) === 1,
                     atomic: false,
                     loaded: false,
-                    ...(format ? { format } : {}),
+                    ...(format && !packed ? { format } : {}),
                     ...(words ? { words } : {}),
+                    ...(packed ? { packed } : {}),
                 });
                 if (isTyped && (instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -2521,8 +2661,10 @@ export function translateShader(container, options = {}){
                 }
                 if (uav.words)
                 {
-                    store(dest, `${REG}(${memory.name}_load(${wordIndex(memory.name, uav, u(a))}),`
-                        + ` 0u, 0u, 1u).${swizzleText(b.swizzle)}`);
+                    const index = wordIndex(memory.name, uav, u(a));
+                    store(dest, `${uav.packed ? `${memory.name}_unpack(${index})`
+                        : `${REG}(${memory.name}_load(${index}), 0u, 0u, 1u)`}`
+                        + `.${swizzleText(b.swizzle)}`);
                     break;
                 }
                 const at = storageCoordinate(uav, u(a));
@@ -2552,7 +2694,9 @@ export function translateShader(container, options = {}){
                 }
                 if (uav.words)
                 {
-                    emit(`${memory.name}_store(${wordIndex(memory.name, uav, u(a))}, ${u(b)}.x);`);
+                    const index = wordIndex(memory.name, uav, u(a));
+                    emit(uav.packed ? `${memory.name}_pack(${index}, ${u(b)});`
+                        : `${memory.name}_store(${index}, ${u(b)}.x);`);
                     break;
                 }
                 const at = storageCoordinate(uav, u(a));
@@ -2903,6 +3047,46 @@ function textureType(texture){
  */
 
 /**
+ * The store and load of a view whose texels are packed in its words
+ * (`PACKED_TEXELS`), by texel index (`_index`, all ones past the view): a
+ * texel narrower than a word is cleared and set in its part of one, each an
+ * atomic, so the other texels of the word, stored at once, are kept. A load
+ * past the view reads zeros.
+ *
+ * @param {string} name @param {string | undefined} packed
+ * @returns {string[]}
+ */
+function packedAccessors(name, packed){
+    const texel = packed ? PACKED_TEXELS[packed] : null;
+    if (!texel)
+    {
+        return [];
+    }
+    const lanes = 4 / texel.bytes;
+    const mask = texel.bytes === 4 ? '0xffffffffu' : `${(1 << (texel.bytes * 8)) - 1}u`;
+    const part = lanes === 1 ? ['let w = i;', 'let shift = 0u;']
+        : [`let w = i / ${lanes}u;`, `let shift = (i % ${lanes}u) * ${texel.bytes * 8}u;`];
+    return [
+        `fn ${name}_pack(i: u32, v: vec4<u32>) {`,
+        '    if (i == 0xffffffffu) { return; }',
+        ...part.map(line=>`    ${line}`),
+        `    if (w >= arrayLength(&${name})) { return; }`,
+        `    let bits = (${texel.pack}) & ${mask};`,
+        ...(lanes === 1 ? [`    atomicStore(&${name}[w], bits);`] : [
+            `    atomicAnd(&${name}[w], ~(${mask} << shift));`,
+            `    atomicOr(&${name}[w], bits << shift);`]),
+        '}',
+        `fn ${name}_unpack(i: u32) -> vec4<u32> {`,
+        '    if (i == 0xffffffffu) { return vec4<u32>(0u); }',
+        ...part.map(line=>`    ${line}`),
+        `    if (w >= arrayLength(&${name})) { return vec4<u32>(0u); }`,
+        `    let b = (atomicLoad(&${name}[w]) >> shift) & ${mask};`,
+        `    return ${texel.unpack};`,
+        '}',
+    ];
+}
+
+/**
  * The module-scope declarations of one stage: its bindings and its immediate
  * constants.
  *
@@ -3002,7 +3186,7 @@ function declarations(shader, group, visibility){
         const binding = BINDING.UAV + uav.slot;
         if (uav.words)
         {
-            // Its view uniform: words a row, rows a layer, width, layers.
+            // Its view uniform: texels a row, rows a layer, width, layers.
             text.push(`@group(${group}) @binding(${binding}) var<storage, read_write> ${name}: `
                 + 'array<atomic<u32>>;',
             `@group(${group}) @binding(${BINDING.UAV_VIEW + uav.slot}) var<uniform> ${name}view:`
@@ -3019,6 +3203,7 @@ function declarations(shader, group, visibility){
             `fn ${name}_store(i: u32, value: u32) {`,
             `    if (i < arrayLength(&${name})) { atomicStore(&${name}[i], value); }`,
             '}',
+            ...packedAccessors(name, uav.packed),
             ...[...uav.atomicOps ?? []].flatMap(op=>atomicAccessor(name, op, true, null, -1)));
             entries.push({ binding, visibility, buffer: { type: 'storage' } });
             entries.push({ binding: BINDING.UAV_VIEW + uav.slot, visibility,

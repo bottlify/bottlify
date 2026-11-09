@@ -11,8 +11,11 @@
   the immediate context plays (`DriverCommandLists` is false). A context state
   (`CreateDeviceContextState`) swaps the whole pipeline; one made for Direct3D 10 makes Direct3D
   11's calls on the context do nothing. Compute shaders run as WebGPU compute passes; a view a
-  shader writes through over a texture takes the formats WebGPU stores into (32-bit channels, four
-  16- or 8-bit ones), and reads back only those of one 32-bit channel. An indirect draw whose
+  shader writes through over a texture of a format WebGPU stores into (32-bit channels, four 16-
+  or 8-bit ones) is a storage texture, and reads back only those of one 32-bit channel. A view of
+  a packed format WebGPU does not store into (11-11-10 and 10-10-10-2, the 16- and 8-bit formats
+  of one and two channels) is written as its texture's bytes in a buffer, copied there before the
+  pass and back after it: slower, and a texel narrower than four bytes is set by two atomics. An indirect draw whose
   arguments a shader wrote draws nothing if its first instance is not zero, unless the device
   has `indirect-first-instance`. A constant
   buffer offset (`*SetConstantBuffers1`) is ignored and the whole buffer bound

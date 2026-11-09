@@ -289,6 +289,56 @@ test('a texture an atomic is made on is written as the words of its texels in a 
     assert.equal(h.gpu.of('copyBufferToTexture').at(-1).source.buffer, words.buffer);
 });
 
+test('a texture whose format WebGPU stores into is not written as packed words: an 11-11-10'
+    + ' float in a word a texel, a 16-bit float in half a word set by two atomics', async()=>{
+    for (const [format, texel, wordsARow] of /** @type {[number, string, number][]} */ ([
+        [DXGI_FORMAT.R11G11B10_FLOAT, 'rg11b10ufloat', 64],
+        [DXGI_FORMAT.R16_FLOAT, 'r16float', 64]]))
+    {
+        const h = harness();
+        const texture = texture2D(h, format, D3D11_BIND_UNORDERED_ACCESS);
+        const view = uavOf(h, texture, { Format: format, ViewDimension: UAV_TEXTURE2D,
+            MipSlice: 0 });
+        h.context.CSSetShader(computeShader(h, [
+            dclThreadGroup(8, 4, 1),
+            dclUavTyped(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            storeUavTyped(u(0, 'xyzw'), vThreadID('xyyy'), l(1, 0.5, 0.25, 1)),
+            ret(),
+        ]), null, 0);
+        h.context.CSSetUnorderedAccessViews(0, [view], null);
+        h.context.Dispatch(1, 1, 1);
+        h.context.Flush();
+        await h.device.idle();
+        assert.deepEqual(h.divergences, [], texel);
+        const ops = h.gpu.calls.map((/** @type {any} */ call)=>call.op).filter((
+            /** @type {string} */ op)=>['copyTextureToBuffer', 'dispatchWorkgroups',
+            'copyBufferToTexture'].includes(op));
+        assert.deepEqual(ops, ['copyTextureToBuffer', 'dispatchWorkgroups',
+            'copyBufferToTexture'], texel);
+        const [given] = h.gpu.of('copyTextureToBuffer');
+        assert.equal(given.destination.bytesPerRow, wordsARow * 4, texel);
+        const code = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+            call.descriptor.code).find((/** @type {string} */ text)=>text.includes('u0_pack'));
+        assert.ok(code, `${texel}: the store packs`);
+        assert.match(code, /var<storage, read_write> u0: array<atomic<u32>>;/);
+        if (texel === 'rg11b10ufloat')
+        {
+            assert.match(code, /fn packedUf\(/);
+            assert.match(code, /atomicStore\(&u0\[w\], bits\);/);
+        }
+        else
+        {
+            assert.match(code, /atomicAnd\(&u0\[w\], ~\(65535u << shift\)\);/);
+            assert.match(code, /pack2x16float/);
+        }
+        const viewWords = h.gpu.of('writeBuffer').map((/** @type {any} */ call)=>
+            (call.bytes.length >= 16 ? [...new Uint32Array(call.bytes.slice(0, 16).buffer)] : []))
+            .find((/** @type {number[]} */ words)=>words[1] === 4 && words[2] === 8);
+        assert.deepEqual(viewWords, [wordsARow * 4 / (texel === 'r16float' ? 2 : 4), 4, 8, 1],
+            `${texel}: texels a row, rows, width, layers`);
+    }
+});
+
 test('a pixel shader that asks for early depth tests tests itself against the depth buffer,'
     + ' attached read-only, a clear waiting for it made first', async()=>{
     const h = harness();

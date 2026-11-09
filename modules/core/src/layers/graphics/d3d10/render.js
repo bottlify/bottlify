@@ -60,7 +60,8 @@ import {
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, STORAGE_TEXTURE_FORMAT, linkCompute,
+    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, PACKED_TEXELS, STAGE, STORAGE_TEXTURE_FORMAT,
+    linkCompute,
     linkDomain, linkGeometryDraw, linkProgram, translateShader,
 } from './wgsl.js';
 import { DOMAIN_ENTRIES, FIRST_PATCH_LIST, createTessellation } from './tessellation.js';
@@ -3902,6 +3903,24 @@ export function createRenderer(services){
     const counterBuffers = new WeakMap();
 
     /**
+     * The format a typed view over a texture is written in as packed words
+     * (`PACKED_TEXELS`, `wordsOf`) where WebGPU stores into none of its own:
+     * the words are the texture's bytes, so a view of the same texel size
+     * packs them as its own format reads, whatever the texture's.
+     *
+     * @param {any} view @param {number} dxgi  the view's format
+     * @returns {string | null}
+     */
+    const packedFormatOf = (view, dxgi)=>{
+        const format = textureStorage(dxgi, 0, { ...formatOptions, formatsTier1: true })?.format;
+        const backing = backingOf(resourceOf(view));
+        return format && PACKED_TEXELS[format] && backing.texture && backing.sampleCount === 1
+            && !backing.layout.storage?.conversion
+            && TEXEL_BYTES[backing.layout.format] === PACKED_TEXELS[format].bytes
+            ? format : null;
+    };
+
+    /**
      * The storage format each typed view over a texture writes in, by slot:
      * what a compute shader's translation declares its storage textures as.
      *
@@ -3914,11 +3933,20 @@ export function createRenderer(services){
         bound.forEach((view, slot)=>{
             if (view && view.dimensionName !== 'BUFFER')
             {
-                const format = /** @type {Record<number, string>} */ (STORAGE_TEXTURE_FORMAT)[
-                    stateDesc(view).Format];
-                if (format)
+                const dxgi = stateDesc(view).Format;
+                const format = /** @type {Record<number, string>} */ (STORAGE_TEXTURE_FORMAT)[dxgi];
+                const packed = format ? null : packedFormatOf(view, dxgi);
+                if (format || packed)
                 {
-                    formats[slot] = format;
+                    formats[slot] = /** @type {string} */ (format ?? packed);
+                }
+                else
+                {
+                    // Which format, so the loss the translation then reports
+                    // names what a shader wrote into.
+                    diverge(`a typed unordered-access view of ${Object.keys(DXGI_FORMAT).find(
+                        name=>/** @type {Record<string, number>} */ (DXGI_FORMAT)[name] === dxgi)
+                        ?? dxgi} has no WebGPU storage format`);
                 }
             }
         });
@@ -4062,11 +4090,12 @@ export function createRenderer(services){
     };
 
     /**
-     * A typed texture view a shader makes atomics on, as the words of its
-     * texels in a buffer, rows padded as a copy lays them out (`words` in the
-     * translator: WebGPU has no atomics on a storage texture). It is a twin:
-     * given the texels before the operation and giving them back after.
-     * Null where a texel is not one word.
+     * A typed texture view a shader makes atomics on, or writes in a format
+     * packed there (`PACKED_TEXELS`), as its texels' bytes in a buffer, rows
+     * padded as a copy lays them out (`words` in the translator: WebGPU has
+     * no atomics on a storage texture). It is a twin: given the texels before
+     * the operation and giving them back after. Null where a texel is not a
+     * word, a half or a byte.
      *
      * @param {any} view
      * @returns {{ words: any, uniform: any, rowWords: number } | null}
@@ -4074,8 +4103,9 @@ export function createRenderer(services){
     const wordsOf = view=>{
         const backing = backingOf(resourceOf(view));
         const level = backing.layout.levels[view.range.mip];
+        const texel = TEXEL_BYTES[backing.layout.format];
         if (!backing.texture || backing.sampleCount !== 1 || !level
-            || TEXEL_BYTES[backing.layout.format] !== 4 || backing.layout.storage?.conversion)
+            || ![1, 2, 4].includes(texel) || backing.layout.storage?.conversion)
         {
             return null;
         }
@@ -4085,15 +4115,16 @@ export function createRenderer(services){
         let mirror = backing.mirrors.get(key);
         if (!mirror)
         {
-            const rowWords = Math.ceil(level.width / 64) * 64;
+            // Rows as a copy lays them out: a multiple of 256 bytes.
+            const rowWords = Math.ceil(level.width * texel / 256) * 64;
             const words = backend.createDynamicBuffer({ label: 'd3d10:uav-words',
                 size: rowWords * 4 * level.height * count,
                 usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST });
             const uniform = backend.createDynamicBuffer({ label: 'd3d10:uav-words-view', size: 16,
                 usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST });
             const lock = uniform.lock(0, 16, LockFlags.DISCARD);
-            lock.data.set(new Uint8Array(new Uint32Array([rowWords, level.height, level.width,
-                count]).buffer));
+            lock.data.set(new Uint8Array(new Uint32Array([rowWords * 4 / texel, level.height,
+                level.width, count]).buffer));
             uniform.unlock(lock);
             mirror = { id: nextBacking++, words, uniform, rowWords };
             backing.mirrors.set(key, mirror);
