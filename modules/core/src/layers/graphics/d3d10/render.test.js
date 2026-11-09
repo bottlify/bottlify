@@ -3267,3 +3267,30 @@ test('a 32-bit float target is blended on a device made with float32-blendable, 
             !blended);
     }
 });
+
+test('a 16-bit normalised target kept in floats comes back to a staging copy in its own codes'
+    + ' (test_alpha_to_coverage)', async()=>{
+    const h = harness();
+    const { device } = h;
+    /** @type {any} */
+    const target = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.R16G16_UNORM, BindFlags: D3D10_BIND.RENDER_TARGET }, null, target),
+    S_OK);
+    assert.equal(h.gpu.of('createTexture').at(-1).descriptor.format, 'rg32float');
+    assert.equal(device.CreateRenderTargetView(target.resource, null, target), S_OK);
+    device.ClearRenderTargetView(target.view, [1, 0.5, 1, 1]);
+    /** @type {any} */
+    const staging = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 4, Height: 4,
+        Format: DXGI_FORMAT.R16G16_UNORM, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ }, null, staging), S_OK);
+    device.CopyResource(staging.resource, target.resource);
+    await h.present();
+    /** @type {{ data?: Uint8Array | null }} */
+    const mapped = {};
+    assert.equal(await staging.resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    const codes = new Uint16Array((mapped.data ?? new Uint8Array(4)).slice(0, 4).buffer);
+    assert.deepEqual([...codes], [65535, 32768], 'red and green as their 16-bit codes');
+    staging.resource.Unmap(0);
+});
