@@ -226,13 +226,14 @@ const ADDRESS = Object.freeze({
 
 /**
  * Formats WebGPU blends. An integer target is never blended (Direct3D skips
- * blending for one too), and a 32-bit float one only with a device feature
- * this build does not ask for, which CheckFormatSupport says by not claiming
- * it blendable.
+ * blending for one too), and a 32-bit float one only on a device made with
+ * float32-blendable; CheckFormatSupport, which answers before any device
+ * draws, does not claim it blendable.
  *
- * @param {string} format
+ * @param {string} format @param {boolean} float32  the device blends 32-bit floats
  */
-const blendable = format=>!/int$/.test(format) && !/32float$/.test(format);
+const blendable = (format, float32)=>!/int$/.test(format)
+    && (float32 || !/32float$/.test(format));
 
 /** The state a null rasterizer, depth-stencil or blend state stands for. */
 /** What a draw with no input layout bound is fed by: nothing. */
@@ -572,6 +573,9 @@ export function createRenderer(services){
             : services.formatsTier1 ?? true,
         rg11b10Renderable: backend ? backend.hasFeature?.('rg11b10ufloat-renderable') === true
             : services.rg11b10Renderable ?? true };
+
+    /** Whether the device blends 32-bit float targets (float32-blendable). */
+    const float32Blending = backend ? backend.hasFeature?.('float32-blendable') === true : false;
 
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
@@ -2480,7 +2484,7 @@ export function createRenderer(services){
                         + `${DUAL_SOURCE.has(factor) ? ' without dual-source-blending' : ''}`);
                 }
             }
-            if (target.BlendEnable && !blendable(format) && !/int$/.test(format))
+            if (target.BlendEnable && !blendable(format, float32Blending) && !/int$/.test(format))
             {
                 diverge(`a ${format} target is drawn unblended: WebGPU blends one only with a`
                     + ' device feature');
@@ -2491,7 +2495,7 @@ export function createRenderer(services){
                 writeMask: program.targets.includes(index)
                     ? target.RenderTargetWriteMask & state.targetWriteMasks[index]
                     : 0,
-                ...(target.BlendEnable && blendable(format)
+                ...(target.BlendEnable && blendable(format, float32Blending)
                     ? {
                         blend: {
                             color: {

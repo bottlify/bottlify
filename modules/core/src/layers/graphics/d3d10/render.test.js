@@ -3236,3 +3236,34 @@ test('a texture past the device\'s limits is never asked of it: it is lost, and 
         assert.equal(h.gpu.count('draw'), 1, 'the back buffer is drawn');
     }
 });
+
+test('a 32-bit float target is blended on a device made with float32-blendable, and drawn'
+    + ' unblended, said, on one without', async()=>{
+    for (const features of [['float32-blendable'], []])
+    {
+        const h = harness({ fake: { features } });
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0.5, 0, 0, 0.5]);
+        /** @type {any} */
+        const made = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Format:
+            DXGI_FORMAT.R32G32B32A32_FLOAT, BindFlags: D3D10_BIND.RENDER_TARGET }, null, made),
+        S_OK);
+        assert.equal(device.CreateRenderTargetView(made.resource, null, made), S_OK);
+        device.OMSetRenderTargets([made.view], null);
+        assert.equal(device.CreateBlendState({ AlphaToCoverageEnable: false,
+            BlendEnable: [true, false, false, false, false, false, false, false],
+            SrcBlend: 5, DestBlend: 6, BlendOp: 1, SrcBlendAlpha: 2, DestBlendAlpha: 1,
+            BlendOpAlpha: 1, RenderTargetWriteMask: [15, 15, 15, 15, 15, 15, 15, 15] }, made),
+        S_OK);
+        device.OMSetBlendState(made.state, [1, 1, 1, 1], 0xffffffff);
+        device.Draw(3, 0);
+        await h.present();
+        const [target] = h.gpu.of('createRenderPipeline').at(-1).descriptor.fragment.targets;
+        assert.equal(target.format, 'rgba32float');
+        const blended = features.length > 0;
+        assert.equal(target.blend !== undefined, blended, `${features}`);
+        assert.equal(h.divergences.some(line=>/rgba32float target is drawn unblended/.test(line)),
+            !blended);
+    }
+});
