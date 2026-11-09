@@ -11,7 +11,11 @@
  * translated guest code with the wall-clock moment it began -- the pauses a
  * guest thread (a sound mixer, say) waited through.
  *
- *   node tools/cdp_test/live/worker-profile.mjs [seconds=20] [minMs=50]
+ *   node tools/cdp_test/live/worker-profile.mjs [seconds=20] [minMs=50] [worker]
+ *
+ * `worker` profiles another worker than the engine's, the first whose script
+ * URL holds it (`graphics`, `executor`, `translator`): which of them works
+ * and which waits is the first thing to know of a slow frame.
  *
  * The raw profile is written to dbg/worker.cpuprofile for DevTools.
  */
@@ -20,8 +24,12 @@ import { connect } from './connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 20);
 const minMs = Number(process.argv[3] ?? 50);
-const { cdp, engineWorker } = await connect();
-const worker = await engineWorker();
+const wanted = process.argv[4];
+const { cdp, engineWorker, workers } = await connect();
+const worker = wanted
+    ? (await workers()).find((/** @type {{ url: string }} */ one)=>one.url.includes(wanted))
+        ?? null
+    : await engineWorker();
 if (!worker)
 {
     console.log('the page has no worker');
