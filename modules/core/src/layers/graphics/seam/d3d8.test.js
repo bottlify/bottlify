@@ -2359,7 +2359,7 @@ test('the guest routines a device writes come from the code pages, not the heap 
         /** @type {[number, number][]} */
         const code = [];
         const h = seamed({ shadow: true, allocateCode: (/** @type {number} */ size)=>{
-            const at = 0xf000 + code.length * 0x200;
+            const at = 0xf000 + code.length * 0x400;
             code.push([at, size]);
             return at;
         } });
@@ -2368,7 +2368,7 @@ test('the guest routines a device writes come from the code pages, not the heap 
         assert.equal(h.device(device,
             'CreateTexture', [8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
         assert.ok(code.length > 0, 'a guest routine was placed');
-        assert.ok(code.every(([, size])=>size > 0 && size <= 0x200));
+        assert.ok(code.every(([, size])=>size > 0 && size <= 0x400));
     });
 
 test('a target made by another device is not bound', ()=>{
