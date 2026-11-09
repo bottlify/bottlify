@@ -369,6 +369,38 @@ test('from level 11_0 a viewport corner left of or above the target is floored t
     assert.deepEqual(rects.at(-1), [0.25, 0], 'a corner inside the target is kept as it is');
 });
 
+test('a command list keeps the bytes it was handed: the buffer they came in may be gone when'
+    + ' it plays', async()=>{
+    // In the graphics worker a deferred context's UpdateSubresource and its
+    // unmapped bytes arrive as views of a message the channel takes back;
+    // the list is played frames later.
+    const h = harness();
+    const { resource } = uavBuffer(h, null);
+    /** @type {{ context?: any, list?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateDeferredContext(0, made), S_OK);
+    const deferred = made.context;
+    const written = Uint8Array.from({ length: 64 }, (_, at)=>at + 1);
+    const mapped = Uint8Array.from({ length: 64 }, (_, at)=>200 - at);
+    deferred.UpdateSubresource(resource, 0, null, written, 64, 64);
+    deferred.WriteMapped(resource, mapped);
+    assert.equal(deferred.FinishCommandList(false, made), S_OK);
+    // The messages go back to where they came from.
+    structuredClone(written.buffer, { transfer: [written.buffer] });
+    structuredClone(mapped.buffer, { transfer: [mapped.buffer] });
+    assert.equal(written.length, 0, 'detached');
+    const before = h.gpu.of('writeBuffer').length;
+    h.context.ExecuteCommandList(made.list, false);
+    h.context.Flush();
+    await h.device.idle();
+    const writes = h.gpu.of('writeBuffer').slice(before);
+    assert.equal(writes.length, 2);
+    assert.deepEqual([...writes[0].bytes.slice(0, 4)], [1, 2, 3, 4]);
+    assert.deepEqual([...writes[1].bytes.slice(0, 4)], [200, 199, 198, 197]);
+    made.list.release();
+    deferred.release();
+});
+
 test('a command list finished keeping its context\'s bindings starts from them where it plays;'
     + ' one with nowhere to go is dropped (test_deferred_context_rendering)', async()=>{
     const h = harness();

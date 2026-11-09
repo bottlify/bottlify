@@ -208,10 +208,19 @@ export function createDeferredContext(services, flags){
     const state = createPipelineState({ diverge: services.diverge, keepsBound: true });
     /** @type {[string, any[]][]} */
     let calls = [];
-    /** @param {string} name @param {any[]} args */
+    /**
+     * A call kept for the list, with its own copy of the bytes it was handed
+     * (UpdateSubresource's, an unmapped buffer's): Direct3D copies them at the
+     * call, and the program -- or the graphics worker's channel, whose
+     * message they came in -- may have reused or given back the memory by
+     * the time the list plays.
+     *
+     * @param {string} name @param {any[]} args
+     */
     const record = (name, args)=>{
         objectsIn(args, object=>object.addRef());
-        calls.push([name, args]);
+        calls.push([name, args.map(arg=>(ArrayBuffer.isView(arg) && !(arg instanceof DataView)
+            ? /** @type {Uint8Array} */ (arg).slice() : arg))]);
     };
     /** @type {Record<string, Function>} */
     const setters = {};
