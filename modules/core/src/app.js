@@ -10632,6 +10632,7 @@ export async function createApp(options){
                 detail: `the server ${request.command} of ${request.clsid} is not on the volume` });
             return -1;
         }
+        const ids = newProcessIds();
         const server = await build({
             executable: found.image,
             imagePath: found.path,
@@ -10639,7 +10640,7 @@ export async function createApp(options){
             commandLine: request.service ? request.command.trim()
                 : `${request.command.trim()} -Embedding`,
             ...request.service ? { service: request.service } : {},
-            ...newProcessIds(),
+            ...ids,
             audio: sound.options,
         });
         sound.announce(server);
@@ -10648,6 +10649,11 @@ export async function createApp(options){
         // program the page started is.
         const line = { current: server, main: false, service: request.service ?? null };
         serving.add(line);
+        const listed = { id: ids.processId, image: found.path, beside: /** @type {true} */ (true),
+            diagnostics: ()=>line.current.diagnostics(),
+            read: (/** @type {number} */ address, /** @type {number} */ length)=>
+                line.current.debug.read(address, length) };
+        standingBeside.add(listed);
         noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
         stand(server);
@@ -10660,6 +10666,7 @@ export async function createApp(options){
         catch (e){
             events.emit('error', { reason: 'server', error: e });
         }
+        standingBeside.delete(listed);
         await retire(line.current);
         serving.delete(line);
         noteMachines();
@@ -10700,6 +10707,16 @@ export async function createApp(options){
      *     diagnostics: () => Promise<any> }>}
      */
     const standingAcross = new Set();
+    /**
+     * The children running beside their parent, in this worker: listed with
+     * the others, since a child that never exits holds its executors and
+     * their memory, and a list without it says the run has one process.
+     *
+     * @type {Set<{ image: string, id: number, beside: true,
+     *     diagnostics: () => Promise<any>,
+     *     read: (address: number, length: number) => Uint8Array }>}
+     */
+    const standingBeside = new Set();
 
     /**
      * The page's input, where the run's window manager says it goes
@@ -10876,6 +10893,8 @@ export async function createApp(options){
                 processes: ()=>[
                     { id: options.processId ?? FIRST_PROCESS_ID, image: options.imagePath ?? '' },
                     ...[...standingAcross].map(each=>({ id: each.id, image: each.image })),
+                    ...[...standingBeside].map(each=>({ id: each.id, image: each.image,
+                        beside: true })),
                 ],
                 /** @param {number} id */
                 diagnosticsOf: id=>{
@@ -10883,9 +10902,28 @@ export async function createApp(options){
                     {
                         return facade.diagnostics();
                     }
-                    const child = [...standingAcross].find(each=>each.id === id);
+                    const child = [...standingAcross, ...standingBeside].find(each=>each.id === id);
                     return child ? child.diagnostics()
                         : Promise.reject(new Error(`no process ${id} stands`));
+                },
+                /**
+                 * Bytes of a process's memory by its id, the first's or one
+                 * running beside it: an OVERLAPPED a program polls, a buffer it
+                 * waits on.
+                 *
+                 * @param {number} id @param {number} address @param {number} length
+                 */
+                readOf: (id, address, length)=>{
+                    if (id === (options.processId ?? FIRST_PROCESS_ID))
+                    {
+                        return speaking.debug.read(address, length);
+                    }
+                    const child = [...standingBeside].find(each=>each.id === id);
+                    if (!child)
+                    {
+                        throw new Error(`no process ${id} stands beside`);
+                    }
+                    return child.read(address, length);
                 } };
         }
     };
@@ -11471,6 +11509,11 @@ export async function createApp(options){
             {
                 child.terminate(reach.code);
             }
+            const listed = { id: request.id, image: request.imagePath, beside: /** @type {true} */ (true),
+                diagnostics: ()=>line.current.diagnostics(),
+                read: (/** @type {number} */ address, /** @type {number} */ length)=>
+                    line.current.debug.read(address, length) };
+            standingBeside.add(listed);
             let code = -1;
             try
             {
@@ -11482,6 +11525,7 @@ export async function createApp(options){
             finally
             {
                 reachable.delete(request.id);
+                standingBeside.delete(listed);
             }
             // Its parent is told however the teardown goes.
             try

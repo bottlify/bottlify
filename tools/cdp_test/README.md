@@ -211,7 +211,7 @@ ones need the graphics worker.
 | `hook(address, how)` | a watch in front of a routine: its calls in the trace with arguments and answer |
 | `ringTrace(n)` | keeps the last n Direct3D calls the guest's command rings carried (calls that never cross to the host one by one), 0 stops; answers what was kept |
 | `callRingSkip('A,B')` | names kept out of the bridge's call ring, the one `app.diagnostics()` reads as the bridge's `recentDetailed` (each call with its caller `from`, arguments and answer) |
-| `processes()`, `diagnosticsOf(id)` | every process standing; one process's diagnostics |
+| `processes()`, `diagnosticsOf(id)` | every process standing, those running beside their parent (children, COM servers, services) marked `beside`; one process's diagnostics, its pipes among them (`win32.pipes`: each handle and what holds the other end) |
 | `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
 
 One more is on `app.log` rather than `app.debug`, since it reads the profiler's frames:

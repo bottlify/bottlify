@@ -3202,13 +3202,26 @@ export const VIEWPORT_MIRROR = Object.freeze([
  * target with a block: the viewport a new target brings -- all of it, depths
  * 0 and 1 -- and the target's size, from the surface's description. The
  * surface is the argument at `[esp+at]`: Direct3D 9's second, 8's first.
- * The target GetRenderTarget answers with is the host's to say again: the
- * routine knows the pointer but not the word the surface counts in.
+ * The pair GetRenderTarget answers with is the surface and the word it
+ * counts in, the third of its interface's (`bridge/internal/vtable.js`): a
+ * program saves and restores its target around every pass, and a pair left
+ * for the host to say again sent each of those reads to the host, which
+ * played the whole ring first. A surface counting nowhere leaves the pair to
+ * the host.
  *
  * @param {number} at
  */
 export const renderTargetMirror = at=>Object.freeze([
     [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfe],          // and dword [ecx+disp], ~1
+    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
+    [0x8b, 0x40, 0x08],                                          // mov eax, [eax+8]: its count
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'targetHeld' },                             // jz targetHeld
+    [0x89, 0x81, ...dword(SHADOW.TARGETS + 4)],                  // mov [ecx+pair+4], eax
+    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]
+    [0x89, 0x81, ...dword(SHADOW.TARGETS)],                      // mov [ecx+pair], eax
+    [0x83, 0x89, ...dword(SHADOW.TARGETS_VALID), 0x01],          // or dword [ecx+disp], 1
+    { label: 'targetHeld' },
     [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
     [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
     [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
@@ -3316,14 +3329,27 @@ export const COPY_GUARD_8 = Object.freeze([
  * The same for a depth surface set -- Direct3D 9's SetDepthStencilSurface,
  * 8's SetRenderTarget -- after its checks have found the surface a depth
  * surface with a block, or none: whether a depth surface is set and whether
- * it holds a stencil, which Clear's checks read; and that the surface
- * GetDepthStencilSurface answers with is the host's to say again. The surface
+ * it holds a stencil, which Clear's checks read; and the pair
+ * GetDepthStencilSurface answers with, as `renderTargetMirror` writes the
+ * target's: the surface and its count's word, or zeros for none. The surface
  * is the argument at `[esp+at]`.
  *
  * @param {number} at
  */
 export const depthStencilMirror = at=>Object.freeze([
     [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfd],          // and dword [ecx+disp], ~2
+    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'depthPair' },                              // jz depthPair: none, zeros
+    [0x8b, 0x40, 0x08],                                          // mov eax, [eax+8]: its count
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'depthHeld' },                              // jz depthHeld
+    { label: 'depthPair' },
+    [0x89, 0x81, ...dword(SHADOW.TARGETS + 12)],                 // mov [ecx+pair+4], eax
+    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]
+    [0x89, 0x81, ...dword(SHADOW.TARGETS + 8)],                  // mov [ecx+pair], eax
+    [0x83, 0x89, ...dword(SHADOW.TARGETS_VALID), 0x02],          // or dword [ecx+disp], 2
+    { label: 'depthHeld' },
     unmarkDrawable(DRAW.DEPTH | DRAW.STENCIL),
     [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
     [0x85, 0xc0],                                                // test eax, eax
@@ -5494,6 +5520,13 @@ export const HOST_MIRRORS = Object.freeze({
         m.setU32(block + SHADOW.VIEWPORT + 16, 0);
         m.setU32(block + SHADOW.VIEWPORT + 20, 0x3f800000);
         m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~1);
+        const cell = m.u32(surface + 8);
+        if (cell !== 0)
+        {
+            m.setU32(block + SHADOW.TARGETS + 4, cell);
+            m.setU32(block + SHADOW.TARGETS, surface);
+            m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) | 1);
+        }
         return true;
     },
     /** @type {HostMirror} */
@@ -5522,6 +5555,13 @@ export const HOST_MIRRORS = Object.freeze({
                 ? DRAW.STENCIL : 0);
         drawable(m, block, DRAW.DEPTH | DRAW.STENCIL, depth);
         m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~2);
+        const cell = surface === 0 ? 0 : m.u32(surface + 8);
+        if (surface === 0 || cell !== 0)
+        {
+            m.setU32(block + SHADOW.TARGETS + 12, cell);
+            m.setU32(block + SHADOW.TARGETS + 8, surface);
+            m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) | 2);
+        }
         return true;
     },
     /** Direct3D 8's CopyRects, as `COPY_GUARD_8` takes it. @type {HostMirror} */

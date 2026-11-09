@@ -282,6 +282,8 @@ export function pipeStandIn(id, described){
  * @property {number} length
  * @property {number} out  the count's address
  * @property {boolean} [native]  NtReadFile's: `out` is the IO_STATUS_BLOCK
+ * @property {number} [statusAt]  the OVERLAPPED a call on a handle opened
+ *     without FILE_FLAG_OVERLAPPED gave, which waits and is told its status there
  */
 
 /**
@@ -466,6 +468,17 @@ export function createNamedPipes(host){
         if (op.out !== 0)
         {
             owner.writeMemory(op.out, dwordBytes(count));
+        }
+        if (op.statusAt)
+        {
+            const theirs = overlappedLayout(owner.pointerSize);
+            overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)), theirs,
+                op.statusAt, status, count);
+            const event = readFrom(owner, op.statusAt + theirs.event);
+            if (event !== 0)
+            {
+                owner.setEvent?.(event);
+            }
         }
         // A part of a message is read and still FALSE, ERROR_MORE_DATA.
         owner.setLastErrorFor(op.thread, succeeded ? ERROR_SUCCESS : error);
@@ -953,16 +966,23 @@ export function createNamedPipes(host){
         {
             return native ? STATUS_PIPE_LISTENING : fail(ERROR_NO_DATA);
         }
+        // A handle opened without FILE_FLAG_OVERLAPPED takes an OVERLAPPED for
+        // its offset and its status alone: the read waits, as a synchronous
+        // one, and says its count where the call asked. A service that polls
+        // that count waited for ever on a read answered "pending".
+        const waits = overlapped !== 0 && !native
+            && /** @type {any} */ (end).overlapped !== true;
         /** @type {Op} */
         const op = { kind: 'read', ctx, thread: host.currentThread(), handle,
-            overlapped: overlapped >>> 0, buffer: buffer >>> 0, length: length >>> 0,
-            out: out >>> 0, native, end };
+            overlapped: waits ? 0 : overlapped >>> 0, buffer: buffer >>> 0,
+            length: length >>> 0, out: out >>> 0, native, end,
+            ...waits ? { statusAt: overlapped >>> 0 } : {} };
         end.readers.push(op);
         if (end.signal)
         {
             kernel.resetEvent?.(end.signal);
         }
-        if (overlapped !== 0)
+        if (op.overlapped !== 0)
         {
             overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
             return native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
@@ -1671,6 +1691,30 @@ export function createNamedPipes(host){
             writeDwordIf(left, end.instance.pipe.messages && front
                 ? front.bytes.length - front.at - (visible ? copied : 0) : 0);
             return 1;
+        },
+
+        /**
+         * Each of this process's pipe handles, one line: its name or that it
+         * is anonymous, its side, the handles onto it and onto the other end
+         * in every process, whether the other end is gone, the reads waiting
+         * and the bytes unread.
+         *
+         * @returns {string[]}
+         */
+        describe(){
+            return [...inheritable.keys()].flatMap(handle=>{
+                const end = endOf(handle);
+                if (!end)
+                {
+                    return [];
+                }
+                const peer = peerOf(end);
+                const unread = end.inbox.reduce((sum, one)=>sum + one.bytes.length - one.at, 0);
+                return [`${handle} ${end.instance.pipe.name ?? 'anonymous'} ${end.side}`
+                    + ` refs=${end.refs} peer=${peer ? `${peer.refs}${peer.closed ? ' closed' : ''}`
+                        : 'none'} state=${end.instance.state} readers=${end.readers.length}`
+                    + ` unread=${unread}`];
+            });
         },
 
         /**

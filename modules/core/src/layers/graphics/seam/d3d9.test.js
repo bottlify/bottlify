@@ -2214,6 +2214,13 @@ test('a render target is set in the guest, and on the host it falls back to its 
     'the target\'s whole');
     assert.deepEqual([h.box.memory.readU32(owner + SHADOW.TARGET_WIDTH),
         h.box.memory.readU32(owner + SHADOW.TARGET_HEIGHT)], [32, 16]);
+    // GetRenderTarget's pair is the surface and its count's word, the third
+    // of its interface's, there for the guest's GetRenderTarget to answer.
+    const cell = h.box.memory.readU32(target + 8);
+    assert.notEqual(cell, 0, 'the surface counts in guest memory');
+    assert.deepEqual([h.box.memory.readU32(owner + SHADOW.TARGETS),
+        h.box.memory.readU32(owner + SHADOW.TARGETS + 4),
+        h.box.memory.readU32(owner + SHADOW.TARGETS_VALID) & 1], [target, cell, 1]);
     // The program lets go of the target while the device holds it: the
     // device keeps it.
     assert.equal(h.release(target), 0);

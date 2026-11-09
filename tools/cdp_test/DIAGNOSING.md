@@ -10,7 +10,7 @@ unmeasured cause is a second bug.
 
 - **Which process answers.** `app.diagnostics()` is the first process of the run. A launcher that
   started a child (a setup's game, a benchmark's test runner) has the work in the child:
-  `app.debug.processes()` lists them, `app.debug.diagnosticsOf(id)` reads one. Numbers from the
+  `app.debug.processes()` lists them, beside ones included, `app.debug.diagnosticsOf(id)` reads one. Numbers from the
   wrong process look plausible and say nothing.
 - **Which build is loaded.** A minified build names functions `a`, `Ze`; build readable for a
   profile (`BOTTLIFY_READABLE=1 BOTTLIFY_DIAGNOSTICS=1 npm run build`). `npm run
@@ -45,7 +45,13 @@ a copy of a buffer nobody changed, a background task that wakes on every frame. 
 counter that grows with frames where it should stay flat (shaders compiled, pipelines created,
 buffers uploaded, objects made) and for a host call whose count is a multiple of the draws.
 
-## 4. The collector
+## 4. Memory and the collector
+
+Count the workers before blaming a heap: every process opens executors and translators, each a
+worker of its own, so a run with processes that never exit holds gigabytes no heap shows.
+`processes()` names them; their `kernel.waiting` and `win32.pipes` say what each waits for.
+
+### The collector
 
 A collector pause is paid by whatever allocates; it is a symptom of allocation, not a cause by
 itself. Two readings:
