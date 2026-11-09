@@ -17,7 +17,16 @@
  */
 
 const S_OK = 0;
+const S_FALSE = 1;
 const E_FAIL = 0x80004005;
+
+/** INTERNETFEATURELIST's FEATURE_ENTRY_COUNT, as IE 8 on Windows 7 has it. */
+const FEATURE_ENTRY_COUNT = 28;
+const FEATURE_OBJECT_CACHING = 0;
+/** SET_FEATURE_ON_THREAD through SET_FEATURE_ON_THREAD_RESTRICTED. */
+const SET_FEATURE_ALL = 0xff;
+const SET_FEATURE_ON_PROCESS = 0x2;
+const SET_FEATURE_IN_REGISTRY = 0x4;
 const E_INVALIDARG = 0x80070057;
 const E_OUTOFMEMORY = 0x8007000e;
 
@@ -106,6 +115,7 @@ export const USER_AGENTS = Object.freeze({
  * @param {(bytes: number) => number} [host.allocate]  CoTaskMemAlloc's
  * @param {(extension: string) => string | null} [host.contentType]  the
  *     `Content Type` of HKEY_CLASSES_ROOT's key for an extension
+ * @param {(api: string, detail: string) => void} [host.divergence]
  */
 export function createUrlmonFunctions(host){
     const { windows, readU32, writeU32, writeMemory, readMemory, readWideString, allocate,
@@ -125,7 +135,71 @@ export function createUrlmonFunctions(host){
         return at >>> 0;
     };
 
+    /** The Internet features as this process set them; the defaults until then. */
+    const features = new Map();
+    /** Whether a setting kept beyond what was asked has been said. */
+    const said = new Set();
+    /** @param {string} what */
+    const sayOnce = what=>{
+        if (!said.has(what))
+        {
+            said.add(what);
+            host.divergence?.('CoInternetSetFeatureEnabled', what);
+        }
+    };
+
     return {
+        /**
+         * HRESULT CoInternetSetFeatureEnabled(INTERNETFEATURELIST FeatureEntry,
+         *     DWORD dwFlags, BOOL fEnable)
+         *
+         * A feature of Internet Explorer's controls turned on or off for the
+         * process. One set for a thread, or for a zone's threads, is kept for
+         * the whole process (there is one place the controls look), and one
+         * asked into the registry is not written there; each is said.
+         */
+        CoInternetSetFeatureEnabled: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([feature, flags, enable])=>{
+                if ((feature >>> 0) >= FEATURE_ENTRY_COUNT || (flags >>> 0) === 0
+                    || ((flags >>> 0) & ~SET_FEATURE_ALL) !== 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (((flags >>> 0) & ~SET_FEATURE_ON_PROCESS) & ~SET_FEATURE_IN_REGISTRY)
+                {
+                    sayOnce('a feature set for a thread is kept for the whole process');
+                }
+                if (((flags >>> 0) & SET_FEATURE_IN_REGISTRY) !== 0)
+                {
+                    sayOnce('a feature set in the registry is kept for this process alone');
+                }
+                features.set(feature >>> 0, (enable >>> 0) !== 0);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoInternetIsFeatureEnabled(INTERNETFEATURELIST FeatureEntry, DWORD dwFlags)
+         *
+         * S_OK when on, S_FALSE when off: as the process set it, else as a
+         * process that is not Internet Explorer starts, with object caching
+         * on and the rest off.
+         */
+        CoInternetIsFeatureEnabled: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([feature])=>{
+                if ((feature >>> 0) >= FEATURE_ENTRY_COUNT)
+                {
+                    return E_FAIL;
+                }
+                return (features.get(feature >>> 0) ?? (feature >>> 0) === FEATURE_OBJECT_CACHING)
+                    ? S_OK : S_FALSE;
+            },
+        },
+
         /**
          * HRESULT FindMimeFromData(LPBC pBC, LPCWSTR pwzUrl, LPVOID pBuffer,
          *     DWORD cbSize, LPCWSTR pwzMimeProposed, DWORD dwMimeFlags,

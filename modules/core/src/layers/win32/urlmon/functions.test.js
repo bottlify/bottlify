@@ -119,3 +119,22 @@ test('the signatures and the URL\'s extension', ()=>{
     assert.equal(urlExtension('http://h/p/file.tar.GZ#frag'), '.gz');
     assert.equal(urlExtension('http://h/p.d/file'), '');
 });
+
+test('CoInternetSetFeatureEnabled turns a feature on or off; IsFeatureEnabled answers S_OK or'
+    + ' S_FALSE', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const fns = createUrlmonFunctions({ windows: 'win7', readU32: ()=>0, writeU32: ()=>{},
+        writeMemory: ()=>{}, divergence: (api, detail)=>said.push(detail) });
+    const FEATURE_WEBOC_POPUPMANAGEMENT = 5;
+    assert.equal(fns.CoInternetIsFeatureEnabled.handler([0, 2]), 0, 'object caching starts on');
+    assert.equal(fns.CoInternetIsFeatureEnabled.handler([FEATURE_WEBOC_POPUPMANAGEMENT, 2]), 1);
+    assert.equal(fns.CoInternetSetFeatureEnabled.handler([FEATURE_WEBOC_POPUPMANAGEMENT, 2, 1]), 0);
+    assert.equal(fns.CoInternetIsFeatureEnabled.handler([FEATURE_WEBOC_POPUPMANAGEMENT, 2]), 0);
+    assert.equal(fns.CoInternetSetFeatureEnabled.handler([28, 2, 1]) >>> 0, 0x80070057,
+        'past the last feature');
+    assert.equal(fns.CoInternetSetFeatureEnabled.handler([1, 0, 1]) >>> 0, 0x80070057, 'no flags');
+    assert.equal(said.length, 0);
+    fns.CoInternetSetFeatureEnabled.handler([1, 1, 1]);
+    assert.match(said.join(), /thread/);
+});

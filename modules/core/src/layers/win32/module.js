@@ -125,6 +125,7 @@ import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
 import { createUrlMonikers } from './urlmon/monikers.js';
+import { createIeframe } from './ieframe/functions.js';
 import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
 import { createOleaccFunctions } from './oleacc/functions.js';
@@ -2042,6 +2043,25 @@ export function createWin32Module(){
             };
             registerDplayClasses(com, dplayHost);
 
+            // Internet Explorer's WebBrowser control, which WPF's and Windows
+            // Forms' WebBrowser embed (ieframe/): made, sited, activated and
+            // navigated, with no HTML engine to draw the page.
+            const ieframe = createIeframe({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory,
+                callGuest: call=>bridge.callGuest(call),
+                callerThread: ()=>kernel.currentThread(),
+                system: (library, name, args, thread)=>{
+                    const entry = libraries[library]?.[name];
+                    if (!entry)
+                    {
+                        return null;
+                    }
+                    return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                        : entry.handler(args);
+                },
+                divergence: config?.divergence,
+            });
+
             /** @param {string} text  NUL-ended UTF-16LE */
             const wideText = text=>{
                 const bytes = new Uint8Array((text.length + 1) * 2);
@@ -3619,6 +3639,7 @@ export function createWin32Module(){
                 // embeds a browser or fetches with the system's identity.
                 'urlmon.dll': {
                     ...createUrlmonFunctions({ windows: windows.name,
+                        divergence: config?.divergence,
                         readU32: address=>memory.readU32(address),
                         writeU32: (address, value)=>memory.writeU32(address, value),
                         writeMemory, readMemory,
@@ -4294,6 +4315,10 @@ export function createWin32Module(){
                 // The Windows Imaging Component, which .NET's WPF decodes and
                 // converts every bitmap through (windowscodecs/).
                 'windowscodecs.dll': createWindowscodecs(windowscodecsHost()),
+                // The WebBrowser control's library, and shdocvw.dll, where it
+                // lived before Internet Explorer 7 and a program still loads it.
+                'ieframe.dll': ieframe.functions,
+                'shdocvw.dll': ieframe.functions,
                 // The Steam client's side of a game's Steamworks calls, for the
                 // account the launcher signed in with (steamclient/): the
                 // library of the process's width, as the client installs both.
@@ -4634,7 +4659,8 @@ export function createWin32Module(){
                                     callerThread: ()=>bridge.callerThread(),
                                 },
                             }),
-                            ...createRichEditControls(controlHost, toolkit)])
+                            ...createRichEditControls(controlHost, toolkit),
+                            ...ieframe.controls(controlHost)])
                         {
                             register(definition);
                         }
