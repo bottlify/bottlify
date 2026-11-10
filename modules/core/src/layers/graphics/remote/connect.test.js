@@ -446,3 +446,18 @@ test('the guest\'s RAM goes only to a root that lends from it', ()=>{
     assert.equal(d3d9.memory, ram, 'and is handed the RAM it lends from');
     end.dispose();
 });
+
+test('a lost device is said as a loss with WebGPU\'s reason and message', ()=>{
+    const worker = fakeWorker();
+    /** @type {string[]} */
+    const said = [];
+    let lost = 0;
+    const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{},
+        lost: ()=>lost++,
+        divergence: (api, detail, severity)=>said.push(`${api} ${severity}: ${detail}`) });
+    worker.answer({ type: 'lost', reason: 'unknown', message: 'D3D12 device removed' });
+    assert.equal(lost, 1);
+    assert.deepEqual(said,
+        ['graphics loss: the GPU device was lost (unknown): D3D12 device removed']);
+    end.dispose();
+});

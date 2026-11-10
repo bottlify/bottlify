@@ -201,7 +201,7 @@ export function portEnd(port){
  * @typedef {Object} Connection
  * @property {() => boolean} drew   whether a root of its plays on the worker
  * @property {(data: any) => void} frame
- * @property {() => void} lost
+ * @property {(reason?: string, message?: string) => void} lost
  * @property {(message: string, seen: number) => void} refused  the worker's GPU
  *     refused a command buffer, and with it a frame
  */
@@ -292,7 +292,7 @@ function join(worker, connection){
                 case 'lost':
                     for (const each of [...connections])
                     {
-                        each.lost();
+                        each.lost(data.reason, data.message);
                     }
                     break;
                 case 'refused':
@@ -484,7 +484,13 @@ export function connectGraphicsWorker(options){
                 handed(data, arrived, sharedNow() - arrived);
             }
         },
-        lost: ()=>lost?.(),
+        // Said with WebGPU's reason and message: a device lost is every frame
+        // after it lost, and why is the whole question.
+        lost: (reason, message)=>{
+            divergence?.('graphics', `the GPU device was lost (${reason ?? 'unknown'})`
+                + (message ? `: ${message}` : ''), 'loss');
+            lost?.();
+        },
         refused: (message, seen)=>divergence?.('graphics', `the GPU refused a frame: ${message}`
             + (seen > 1 ? ` (x${seen})` : ''), 'loss'),
     };

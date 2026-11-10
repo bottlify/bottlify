@@ -122,7 +122,7 @@ export function serveGraphics(scope, deps){
      * @type {ReturnType<typeof createCapture> | null}
      */
     let capture = null;
-    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string } | null} */
+    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string, message: string } | null} */
     let lostWith = null;
     /** What the device holds, weighed (`ledger.js`). @type {ReturnType<typeof trackDevice> | null} */
     let ledger = null;
@@ -424,7 +424,7 @@ export function serveGraphics(scope, deps){
         const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter),
             requiredLimits: gpuLimitsOf(adapter) });
         ledger = trackDevice(device);
-        device.lost?.then((/** @type {{ reason?: string }} */ info)=>{
+        device.lost?.then((/** @type {{ reason?: string, message?: string }} */ info)=>{
             if (info?.reason === 'destroyed')
             {
                 return;
@@ -435,7 +435,8 @@ export function serveGraphics(scope, deps){
                 watcher();
             }
             losers.clear();
-            lostWith = { type: 'lost', reason: info?.reason ?? 'unknown' };
+            lostWith = { type: 'lost', reason: info?.reason ?? 'unknown',
+                message: String(info?.message ?? '') };
             scope.postMessage(lostWith);
             for (const client of clients)
             {
