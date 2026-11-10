@@ -4737,6 +4737,9 @@ export function createWin32Module(){
                     // A bitmap's size, for a caret drawn in it and an icon made from it.
                     /** @param {number} bitmap */
                     bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+                    // And its pixels, which an icon or a cursor made of it is drawn from.
+                    /** @param {number} bitmap */
+                    bitmapPixels: bitmap=>gdi.bitmapPixels(bitmap),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands
