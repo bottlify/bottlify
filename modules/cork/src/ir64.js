@@ -1133,6 +1133,11 @@ function simd(instruction, state){
         const reg = /** @type {number} */ (dst.reg);
         setRegister(state, reg, Math.max(dst.size, 4), BigInt(view.reg[reg]));
     }
+    if (op === 'pcmpistri' || op === 'pcmpestri')
+    {
+        // The index goes to ecx, an operand of no field: written as a dword, zero-extended.
+        setRegister(state, 1, 4, BigInt(view.reg[1]));
+    }
 }
 
 /**
