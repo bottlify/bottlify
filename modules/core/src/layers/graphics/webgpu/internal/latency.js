@@ -157,6 +157,12 @@ export function createFrameLatency(options = {}){
                 held,
                 heldMs: Math.round(heldMs),
                 waiting: waiting.length,
+                // Where the finished frames' time went: until the frame was on
+                // the queue (its pipelines built, its replay done), and the
+                // GPU's own share after.
+                timed: timedFrames,
+                toQueueMs: Math.round(toQueueMs),
+                gpuMs: Math.round(gpuMs),
             };
         },
     };
