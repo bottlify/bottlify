@@ -173,6 +173,9 @@ const latencyOf = senders=>{
             held: sum.held + one.held,
             heldMs: sum.heldMs + one.heldMs,
             waiting: sum.waiting + one.waiting,
+            timed: (sum.timed ?? 0) + (one.timed ?? 0),
+            toQueueMs: (sum.toQueueMs ?? 0) + (one.toQueueMs ?? 0),
+            gpuMs: (sum.gpuMs ?? 0) + (one.gpuMs ?? 0),
         };
     }
     return sum;

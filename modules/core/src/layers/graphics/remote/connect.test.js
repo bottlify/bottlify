@@ -400,7 +400,8 @@ test('each root goes with the run\'s frame bound, and the roots\' holds are summ
         await delivered();
 
         assert.deepEqual(end.diagnostics().latency, { limit: 6, counting: true, inFlight: 1,
-            peak: 7, frames: 340, held: 13, heldMs: 104, waiting: 0 });
+            peak: 7, frames: 340, held: 13, heldMs: 104, waiting: 0, timed: 0, toQueueMs: 0,
+            gpuMs: 0 });
     }
     finally
     {
