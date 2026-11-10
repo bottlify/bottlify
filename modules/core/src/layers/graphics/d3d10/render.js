@@ -572,7 +572,14 @@ export function createRenderer(services){
         formatsTier1: backend ? backend.hasFeature?.('texture-formats-tier1') === true
             : services.formatsTier1 ?? true,
         rg11b10Renderable: backend ? backend.hasFeature?.('rg11b10ufloat-renderable') === true
-            : services.rg11b10Renderable ?? true };
+            : services.rg11b10Renderable ?? true,
+        // A 16-bit normalised texture samples unfiltered alone, which a
+        // shader's filtering sampler cannot bind; a 32-bit float filters.
+        sixteenBitStandIn: backend ? backend.hasFeature?.('float32-filterable') === true : false };
+
+    /** Whether a 3D texture may keep BC blocks (texture-compression-bc-sliced-3d). */
+    const compressedVolumes = backend
+        ? backend.hasFeature?.('texture-compression-bc-sliced-3d') === true : compressed;
 
     /** Whether the device blends 32-bit float targets (float32-blendable). */
     const float32Blending = backend ? backend.hasFeature?.('float32-blendable') === true : false;
@@ -858,15 +865,19 @@ export function createRenderer(services){
                 slices: 1,
             };
         }
-        const storage = textureStorage(desc.Format, desc.BindFlags, formatOptions);
+        // A volume of BC blocks needs its own feature, which an adapter with
+        // BC may still lack: without it the volume is decoded on the way in.
+        const storage = textureStorage(desc.Format, desc.BindFlags,
+            resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D && !compressedVolumes
+                ? { ...formatOptions, compressed: false } : formatOptions);
         // What is written into a 16-bit normalised target kept in floats keeps
         // the float a draw or a shader wrote: held to the format's range and
         // rounded to its codes only when it is read back.
         if (isSixteenBit(storage?.conversion)
             && (desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)) !== 0)
         {
-            diverge(`a ${storage?.conversion} target is kept in ${storage?.format} on a GPU`
-                + ' without texture-formats-tier1: what is drawn into it is not held to its range'
+            diverge(`a ${storage?.conversion} target is kept in ${storage?.format}, which`
+                + ' this GPU filters: what is drawn into it is not held to its range'
                 + ' nor rounded to sixteen bits until it is read back');
         }
         const info = FORMAT_INFO[desc.Format];
@@ -1181,7 +1192,8 @@ export function createRenderer(services){
      *     or the bytes cannot be carried between the two
      */
     const twinOf = (backing, viewFormat)=>{
-        const own = textureStorage(viewFormat, 0, formatOptions);
+        const own = textureStorage(viewFormat, 0, backing.made?.dimension === '3d'
+            && !compressedVolumes ? { ...formatOptions, compressed: false } : formatOptions);
         const format = own?.format;
         const storage = backing.layout.storage;
         if (!format || !backing.texture || !backing.made || format === backing.layout.format
