@@ -2551,7 +2551,11 @@ export function createRenderer(services){
             passOp: STENCIL_OP[depthStencil[which].StencilPassOp],
         });
         const depthEnabled = depthStencil.DepthEnable;
-        const gpu = backend.createRenderPipeline({
+        // Built off the device's queue: a pipeline made synchronously is
+        // compiled in turn with every other, and a frame of a few new ones
+        // waited on all of them; made asynchronously they compile side by
+        // side, and one the device refuses is this draw's loss alone.
+        const gpu = await backend.createRenderPipelineAsync({
             label: `d3d10:${pipelineKey(state)}`,
             layout: pipelineLayout,
             vertex: { module: vertexModule, entryPoint: 'vertexMain', buffers: layout.buffers },

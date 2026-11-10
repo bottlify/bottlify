@@ -3432,3 +3432,15 @@ test('a frame\'s replay is timed, and how much of it waited on its pipelines', a
     assert.equal(typeof replayMs, 'number');
     assert.ok(pipelineWaitMs >= 0 && pipelineWaitMs <= replayMs + 1, 'the wait is part of it');
 });
+
+test('a draw\'s pipeline is built off the queue: one the device refuses loses that draw alone',
+    async()=>{
+        const h = harness({ fake: { refusePipeline: ()=>'the pipeline is refused' } });
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        h.device.Draw(3, 0);
+        await h.present();
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.skipped.pipeline, 1, 'the draw skipped');
+        assert.deepEqual(diagnostics.failures, [], 'and the frame not lost with it');
+        assert.equal(h.gpu.count('draw'), 0);
+    });
