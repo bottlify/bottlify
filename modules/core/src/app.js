@@ -5949,7 +5949,9 @@ async function buildApp(options){
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
                 } : {
-                    target: fn.guest && !long
+                    // Guest code placed at bind time runs in a 64-bit process
+                    // too where it says it places its x86-64 there (`guestLong`).
+                    target: fn.guest && (!long || fn.guestLong)
                         ? fn.guest({
                             /** @param {string} label @param {any} trap */
                             register: (label, trap)=>bridge.register(label, trap),
