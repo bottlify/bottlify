@@ -45,6 +45,7 @@ export {
 export { eflagsOf, setEflags } from './emit/flags.js';
 export { SHARED_CODE_BYTES } from './runtime/shared-code.js';
 export { createArena } from './runtime/arena.js';
+export { memory64 } from './wasm/features.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf, wrappedAddress } from './emit/memory.js';
 export { slotOf } from './runtime/entries.js';

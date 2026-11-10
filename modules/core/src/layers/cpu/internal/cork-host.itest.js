@@ -12,6 +12,7 @@
  */
 
 import { test } from 'node:test';
+import v8 from 'node:v8';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import * as engine from '../../../../../cork/src/index.js';
@@ -255,3 +256,33 @@ test('long mode\'s writes to the trap port run translated on the shared runtime'
 function hex(text){
     return (text.match(/../g) ?? []).map(byte=>parseInt(byte, 16));
 }
+
+test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, its data past 4 GiB',
+    async()=>{
+        v8.setFlagsFromString('--experimental-wasm-memory64');
+        const code = 0x140001000;
+        const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
+            entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
+            codeBase: 2 ** 32, cork: { sliceMs: Infinity } });
+        // 1: add qword ptr [rip + data], 3; dec ecx; jnz 1b; mov rax, [rip + data]; hlt -- the
+        // data on the next page, a store into the code's page being a store into code.
+        const program = hex('488305f80f000003ffc975f4488b05ed0f0000f4');
+        const data = code + 0x1000;
+        h.writePhysical(code, Uint8Array.from(program));
+        h.writePhysical(data, Uint8Array.from(hex('0000000001000000')));
+        h.writeReg64('rcx', 300_000n);
+        h.writeReg64('rip', BigInt(code));
+        for (let guard = 0; !h.halted() && guard < 10_000; guard++)
+        {
+            await h.cork().translatePending().catch(()=>{});
+            h.runSlice(5000);
+        }
+        assert.equal(h.readReg64('rax'), 0x100000000n + 900_000n,
+            'the loop added into its quadword');
+        assert.equal(h.readReg64('rip'), BigInt(code + program.length), 'past the hlt, whole');
+        const quad = h.readPhysical(data, 8);
+        assert.equal(new DataView(quad.buffer, quad.byteOffset, 8).getBigUint64(0, true),
+            0x100000000n + 900_000n, 'past 4 GiB in the RAM\'s own memory');
+        const script = h.corkDiagnostics().interpretedByScript;
+        assert.ok(script < 90_000, `${script} of 900 000 interpreted: the rest translated`);
+    });
