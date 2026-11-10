@@ -54,6 +54,6 @@ test('a 64-bit process reads its performance counter in the guest, each read lat
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), 3, 'one gigahertz, and later');
         const calls = JSON.stringify(/** @type {any} */ (app.diagnostics()
-            .find(layer=>layer.name === 'bridge'))?.metrics?.byFunction ?? []);
+            .find((/** @type {any} */ layer)=>layer.name === 'bridge'))?.metrics?.byFunction ?? []);
         assert.doesNotMatch(calls, /QueryPerformance/, 'neither went to the host');
     });

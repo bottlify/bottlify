@@ -320,3 +320,27 @@ test('what a framebuffer says of itself: the window double-buffered, an object n
     assert.equal(gl.glIsRenderbuffer(a), GL.TRUE);
     assert.equal(gl.glIsRenderbuffer(b), GL.TRUE);
 });
+
+test('the default framebuffer\'s buffers answer as the pixel format has them', ()=>{
+    // SDL reads its window's sizes back so -- GL_BACK_LEFT's red size on the
+    // default framebuffer -- and took the error for a format without colour.
+    const gl = fixture();
+    /** @param {number} attachment @param {number} pname */
+    const query = (attachment, pname)=>
+        gl.glGetFramebufferAttachmentParameteriv(GL.FRAMEBUFFER, attachment, pname);
+    assert.deepEqual(query(GL.BACK_LEFT, GL.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE),
+        [GL.FRAMEBUFFER_DEFAULT]);
+    assert.deepEqual([GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE, GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE,
+        GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE]
+        .map(pname=>query(GL.BACK_LEFT, pname)[0]), [8, 8, 8, 8]);
+    assert.deepEqual(query(GL.DEPTH, GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE), [24]);
+    assert.deepEqual(query(GL.FRONT_LEFT, GL.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE),
+        [GL.UNSIGNED_NORMALIZED]);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(query(GL.STENCIL, GL.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE), [GL.NONE],
+        'a format without stencil');
+    assert.equal(query(GL.STENCIL, GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE), null);
+    assert.equal(gl.glGetError(), GL.INVALID_OPERATION, 'nothing there to size');
+    assert.equal(query(GL.COLOR_ATTACHMENT0, GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE), null);
+    assert.equal(gl.glGetError(), GL.INVALID_ENUM, 'an object\'s attachment point is not one');
+});
