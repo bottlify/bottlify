@@ -340,11 +340,12 @@ const ERROR_INVALID_PARAMETER = 87;
 /** Every right a token has, which a service asks of the user's token for its programs. */
 const TOKEN_ALL_ACCESS = 0x000f01ff;
 
-/** nvapi's one export: every interface asked for by id is absent. */
-const NVAPI = Object.freeze({
-    /** void *nvapi_QueryInterface(unsigned int id) */
-    nvapi_QueryInterface: { argBytes: 4, convention: 'cdecl', handler: ()=>0 },
-});
+/**
+ * The nvapi interfaces there are, by the id nvapi_QueryInterface is asked
+ * with (the SDK's nvapi_interface.h): a start and an end that succeed, and
+ * nothing between them, every other id absent.
+ */
+const NVAPI_INTERFACES = new Map([[0x0150e828, 'NvAPI_Initialize'], [0xd22bdd7e, 'NvAPI_Unload']]);
 
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
@@ -716,6 +717,26 @@ export function createWin32Module(){
                 find: ()=>null, byBase: ()=>null, imagePath: ()=>'',
             };
             const idle = config?.idle ?? (()=>Promise.resolve());
+            /**
+             * nvapi under its name: the library a program links for it starts
+             * the driver's interface, and loads it again at every call while
+             * that fails.
+             *
+             * @param {string} name
+             */
+            const nvapi = name=>({
+                /** void *nvapi_QueryInterface(unsigned int id) */
+                nvapi_QueryInterface: { argBytes: 4, convention: 'cdecl',
+                    /** @param {number[]} args */
+                    handler: ([id])=>{
+                        const found = NVAPI_INTERFACES.get(id >>> 0);
+                        return found ? /** @type {any} */ (modules.find(name))?.addressOf(found) ?? 0
+                            : 0;
+                    } },
+                // NVAPI_OK: started, and nothing it offers.
+                NvAPI_Initialize: { argBytes: 0, convention: 'cdecl', handler: ()=>0 },
+                NvAPI_Unload: { argBytes: 0, convention: 'cdecl', handler: ()=>0 },
+            });
 
             const readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>
                 memory.readBytes(address, length);
@@ -3724,8 +3745,8 @@ export function createWin32Module(){
                 // NVIDIA's: it offers no function, so a program takes the path
                 // it takes on a driver without the one it asks for. Missing,
                 // the library linked into a program loads it at every call.
-                'nvapi.dll': NVAPI,
-                'nvapi64.dll': NVAPI,
+                'nvapi.dll': nvapi('nvapi.dll'),
+                'nvapi64.dll': nvapi('nvapi64.dll'),
                 'cryptbase.dll': {},
                 'cryptnet.dll': {},
                 'msasn1.dll': {},

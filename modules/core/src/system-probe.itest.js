@@ -49,3 +49,30 @@ test('the system libraries a runtime probes with LoadLibraryEx are there',
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), NAMES.length);
     });
+
+test('nvapi starts: Initialize found by its id answers NVAPI_OK, another id is absent',
+    { timeout: 60000 }, async t=>{
+        const program = buildExe({
+            codeSize: 0x100,
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetProcAddress', 'ExitProcess'] },
+            data: { lib: cString('nvapi.dll'), query: cString('nvapi_QueryInterface') },
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('lib')), 0xff, 0x15, ...u32(iat('LoadLibraryA')),
+                0x68, ...u32(at('query')), 0x50, 0xff, 0x15, ...u32(iat('GetProcAddress')),
+                0x89, 0xc6, // mov esi, eax: nvapi_QueryInterface
+                0x68, ...u32(0x12345678), 0xff, 0xd6, 0x83, 0xc4, 0x04, // an id it does not have
+                0x89, 0xc3, // mov ebx, eax
+                0x68, ...u32(0x0150e828), 0xff, 0xd6, 0x83, 0xc4, 0x04, // NvAPI_Initialize
+                0x85, 0xc0, 0x74, 0x07, // test eax, eax; jz absent
+                0xff, 0xd0, // call eax: its status
+                0x01, 0xd8, // add eax, ebx: both zero
+                0x40, // inc eax: 1 when they are
+                0xeb, 0x05, // jmp exit
+                0xb8, ...u32(0xdead), // absent: mov eax, 0xdead
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const app = await createApp({ executable: program });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 50000 }), 1);
+    });
