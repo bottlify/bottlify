@@ -37,6 +37,21 @@
  */
 export const FETCHED_PIECE_BYTES = 8 << 20;
 
+/**
+ * Large reads kept whole, by the file's identity, size and last write: an
+ * engine maps its own executable, reads its tables and unmaps it hundreds of
+ * times while it loads, and each map decoded every bundle block of it again
+ * (a second a time for 111 MB).
+ */
+export const KEPT_READ_BYTES = 256 << 20;
+/** A read smaller than this costs less than keeping it. */
+export const KEPT_READ_MIN = 1 << 20;
+/**
+ * A last write younger than this is not trusted to tell versions apart: two
+ * writes in one millisecond carry the same stamp.
+ */
+const SETTLED_MS = 2000;
+
 const CHANGE_FILE_NAME = 0x001;
 const CHANGE_DIR_NAME = 0x002;
 const CHANGE_ATTRIBUTES = 0x004;
@@ -273,6 +288,45 @@ export function createVolume(fs, fetchBlocks = null){
      */
     const openedAt = new WeakMap();
 
+    /** The path each node was opened by, for its version. @type {WeakMap<any, string>} */
+    const pathOf = new WeakMap();
+    /** Kept reads, oldest first. @type {Map<string, Uint8Array>} */
+    const kept = new Map();
+    let keptBytes = 0;
+    /**
+     * The key a read of a node is kept under, or null when it is not to be:
+     * a small read, an unknown file, or one written moments ago.
+     *
+     * @param {any} node @param {number} offset @param {number} length
+     */
+    const keptKey = (node, offset, length)=>{
+        const path = length >= KEPT_READ_MIN ? pathOf.get(node) : undefined;
+        const entry = path === undefined ? null : attempt(()=>fs.stat(path), null);
+        return entry && !entry.directory && Date.now() - (entry.modified ?? 0) > SETTLED_MS
+            ? `${entry.identity ?? entry.path}|${entry.size}|${entry.modified}|${offset}|${length}`
+            : null;
+    };
+    /** @param {string | null} key @param {Uint8Array} bytes */
+    const keep = (key, bytes)=>{
+        if (key === null || bytes.length > KEPT_READ_BYTES)
+        {
+            return bytes;
+        }
+        kept.set(key, bytes);
+        keptBytes += bytes.length;
+        for (const [oldest, held] of kept)
+        {
+            if (keptBytes <= KEPT_READ_BYTES)
+            {
+                break;
+            }
+            kept.delete(oldest);
+            keptBytes -= held.length;
+        }
+        // Copied out: whoever reads may write into what it was given.
+        return bytes.slice();
+    };
+
     /** @param {string} path  The volume's own spelling, no trailing separator. */
     const spelled = path=>attempt(()=>fs.resolve(path).path, path).replace(/\\+$/, '');
     /** @param {string} path  The volume's own spelling, folded, no trailing separator. */
@@ -468,6 +522,10 @@ export function createVolume(fs, fetchBlocks = null){
                     throw e;
                 }
             }, null);
+            if (node)
+            {
+                pathOf.set(node, path);
+            }
             if (node && watches.size > 0)
             {
                 openedAt.set(node, path);
@@ -499,6 +557,27 @@ export function createVolume(fs, fetchBlocks = null){
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
         read(node, offset, length){
+            const key = keptKey(node, offset, length);
+            const held = key === null ? undefined : kept.get(key);
+            if (held)
+            {
+                kept.delete(/** @type {string} */ (key));
+                kept.set(/** @type {string} */ (key), held);
+                return held.slice();
+            }
+            const bytes = this.readFresh(node, offset, length);
+            return typeof (/** @type {any} */ (bytes))?.then === 'function'
+                ? /** @type {Promise<Uint8Array>} */ (bytes).then(arrived=>keep(key, arrived))
+                : keep(key, /** @type {Uint8Array} */ (bytes));
+        },
+
+        /**
+         * read, past what is kept.
+         *
+         * @param {any} node @param {number} offset @param {number} length
+         * @returns {Uint8Array | Promise<Uint8Array>}
+         */
+        readFresh(node, offset, length){
             fs.seek(node, offset, SeekFrom.BEGIN);
             try
             {
