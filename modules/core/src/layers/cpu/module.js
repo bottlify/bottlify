@@ -436,7 +436,8 @@ export function createCpuModule(){
                 bits: config?.bits === 64 ? /** @type {64} */ (64) : /** @type {32} */ (32),
                 // An image past 4 GiB: the wide window it runs over and the block its code lies in.
                 ...(config?.bits === 64 && config?.window ? { window: config.window,
-                    codeBase: config.codeBase ?? 0 } : {}),
+                    codeBase: config.codeBase ?? 0,
+                    ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
             };
             if (settings.bits === 64)
             {
@@ -657,7 +658,9 @@ export function createCpuModule(){
                         translationZone: TRANSLATION_ZONE_BYTES,
                         bits: settings.bits,
                         ...(settings.window ? { window: settings.window,
-                            codeBase: settings.codeBase ?? 0 } : {}),
+                            codeBase: settings.codeBase ?? 0,
+                            ...settings.hostAlias ? { hostAlias: settings.hostAlias } : {} }
+                            : {}),
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                         reused: settings.reused });

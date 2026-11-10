@@ -286,3 +286,23 @@ test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, i
         const script = h.corkDiagnostics().interpretedByScript;
         assert.ok(script < 90_000, `${script} of 900 000 interpreted: the rest translated`);
     });
+
+test('over a wide window the host reaches the image through its low dword', ()=>{
+    v8.setFlagsFromString('--experimental-wasm-memory64');
+    const image = 0x140000000;
+    const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
+        codeBase: 2 ** 32, hostAlias: { at: 0x40000000, size: 0x20000 } });
+    // A string in the image, where a handler handed `args[i] >>> 0` reads it.
+    h.writePhysical(image + 0x1100, Uint8Array.from([0x6b, 0x33, 0x32, 0]));
+    assert.deepEqual([...h.readPhysical(0x40001100, 4)], [0x6b, 0x33, 0x32, 0]);
+    assert.equal(h.readU32(0x40001100), 0x0032336b);
+    // A handler's answer written through the low half lands in the image.
+    h.writeData(0x40001200, Uint8Array.from([1, 2, 3, 4]));
+    assert.deepEqual([...h.readPhysical(image + 0x1200, 4)], [1, 2, 3, 4]);
+    // Past the span the low space is its own.
+    h.writeData(0x40020000, Uint8Array.from([9]));
+    assert.equal(h.readPhysical(image + 0x20000, 1)[0], 0, 'the image untouched past its span');
+    assert.equal(h.readPhysical(0x40020000, 1)[0], 9);
+    assert.equal(h.ramView(), null, 'no view in place to miss the alias');
+});

@@ -4122,7 +4122,10 @@ async function buildApp(options){
         executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
     // Past 2 GiB the RAM is all of wasm's 4 GiB, which only a memory that grows
     // holds -- its tables inside the guest's space, not past it: 2 GiB otherwise.
-    const askedMemory = options.memorySize ?? DEFAULT_MEMORY_SIZE;
+    // A wide window's space below is the whole 2 GiB every address it gives out lies in:
+    // its RAM is the window, and the image's low dword span is cut from that heap.
+    const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
+        : options.memorySize ?? DEFAULT_MEMORY_SIZE;
     const memorySize = askedMemory > 2 ** 31 && areaFor(askedMemory) === undefined ? 2 ** 31
         : askedMemory;
     const engineArea = areaFor(memorySize);
@@ -4657,7 +4660,10 @@ async function buildApp(options){
             bits: processBits,
             // An image past 4 GiB: the wide window, its RAM the whole of it.
             ...programLoaded.wide === undefined ? {} : { window: programLoaded.wide.window,
-                codeBase: programLoaded.wide.codeBase },
+                codeBase: programLoaded.wide.codeBase,
+                // The image's low dword span: a handler's pointer into it lands there.
+                hostAlias: { at: programLoaded.imageBase % 2 ** 32,
+                    size: programLoaded.sizeOfImage } },
             eagerExecutors: options.cpu?.eager === true,
             executorTranslators: options.cpu?.executorTranslators,
             learnExecutors: options.startedBeside !== true,
@@ -6964,6 +6970,23 @@ async function buildApp(options){
     {
         throw new Error(`image: 0x${mainImage.imageBase.toString(16)}+0x`
             + `${mainImage.sizeOfImage.toString(16)} lies in the heap and is not free there`);
+    }
+    // A wide window's image past 4 GiB: its span at the low dword kept from everything
+    // else, where the host reads a pointer into the image it was handed the low half of
+    // (the cpu's `hostAlias`).
+    const aliasAt = programLoaded.wide === undefined ? null : programLoaded.imageBase % 2 ** 32;
+    if (aliasAt !== null && librarySpace.claim(aliasAt, programLoaded.sizeOfImage) !== aliasAt)
+    {
+        throw new Error(`image: its low dword's span 0x${aliasAt.toString(16)}+0x`
+            + `${programLoaded.sizeOfImage.toString(16)} is not free below 4 GiB`);
+    }
+    if (aliasAt !== null)
+    {
+        // A region of its own, so the host's accesses there pass the map; the image's
+        // pages keep their own protection at its real address.
+        memory.register({ name: 'image (low dword)', base: aliasAt,
+            size: programLoaded.sizeOfImage, kind: memory.RegionKind.IMAGE,
+            access: memory.Access.READ_WRITE_EXECUTE });
     }
 
     // The program's activation context, before any library is looked for:

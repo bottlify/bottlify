@@ -6,7 +6,7 @@ stated). For example, `AddAtomA: { argBytes: 4, handler: ([p]) => add(p) }` in
 [`core/src/layers/win32/kernel32/atoms.js`](../../modules/core/src/layers/win32/kernel32/atoms.js).
 
 When a process starts, the loader builds real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
-from these tables and places them in the program's memory. To the program they are ordinary DLLs,
+from these tables (PE32+, AMD64, in a 64-bit process) and places them in the program's memory. To the program they are ordinary DLLs,
 with headers, an export table and code. So the address `GetProcAddress` returns is the one the import
 was bound to.
 

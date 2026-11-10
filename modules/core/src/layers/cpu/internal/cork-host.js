@@ -122,6 +122,10 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     `wideLayout`): the guest's RAM a memory64 memory of its own; 4 GiB in the one memory
  *     when absent.
  * @property {number} [codeBase]   With `window`: the 4 GiB block the process's code lies in.
+ * @property {{ at: number, size: number }} [hostAlias]  With `window`: the image's span at
+ *     its low dword, kept free below 4 GiB; a host access there is the image's (`codeBase`
+ *     past it), the pointer a handler reads as `args[i] >>> 0`. The RAM is lent in place
+ *     (`ramView`) to nobody then.
  * @property {WebAssembly.Memory} [ram]  With `window`: the RAM's memory, made here when absent.
  * @property {number} trapPort
  * @property {number} entryVector  Linear address of the dword holding the entry point.
@@ -234,7 +238,15 @@ export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, zeroReadsBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
-        window: wideWindow, codeBase = 0 } = config;
+        window: wideWindow, codeBase = 0, hostAlias } = config;
+    // A wide window's image as the host is handed it: a pointer's low dword (a handler
+    // reads `args[i] >>> 0`). The image's span below 4 GiB is kept free (`app.js`), so a
+    // host access there is the image's, in the block from `codeBase`.
+    const aliasFrom = hostAlias?.at ?? 0;
+    const aliasTo = hostAlias === undefined ? 0 : aliasFrom + hostAlias.size;
+    /** @param {number} address */
+    const hostAt = address=>(address >= aliasFrom && address < aliasTo ? address + codeBase
+        : address);
     // Long mode: the 64-bit block, the shared runtime's regions at its width and
     // the long-mode interpreter.
     const long = bits === 64;
@@ -1971,8 +1983,11 @@ export function createCorkHost(config){
         interrupts: ()=>interrupts,
         runSlice,
 
-        /** One byte of guest memory, for the runtime's decoder. @param {number} address */
-        readByte: address=>(holds(address, 1) ? ram[address] : 0),
+        /** One byte of guest memory, for the runtime's decoder. @param {number} at */
+        readByte: at=>{
+            const address = hostAt(at);
+            return holds(address, 1) ? ram[address] : 0;
+        },
         /** Cork's own memory. */
         wasmMemory: ()=>memory,
         /** The eager flags word. */
@@ -2008,8 +2023,9 @@ export function createCorkHost(config){
         },
         raiseTrap,
 
-        /** @param {number} address @param {number} length @returns {Uint8Array} */
-        readPhysical: (address, length)=>{
+        /** @param {number} at @param {number} length @returns {Uint8Array} */
+        readPhysical: (at, length)=>{
+            const address = hostAt(at);
             if (holds(address, length))
             {
                 return ram.subarray(address, address + length);
@@ -2019,16 +2035,20 @@ export function createCorkHost(config){
             bytes.set(ram.subarray(Math.min(address, held), Math.min(address + length, held)));
             return bytes;
         },
-        /** @param {number} address */
-        readU32: address=>(!holds(address, 4) ? 0
-            : (address & 3) === 0 ? ramWords[ramOffset(address) / 4] >>> 0
-                : ramData.getUint32(ramOffset(address), true)),
+        /** @param {number} at */
+        readU32: at=>{
+            const address = hostAt(at);
+            return !holds(address, 4) ? 0
+                : (address & 3) === 0 ? ramWords[ramOffset(address) / 4] >>> 0
+                    : ramData.getUint32(ramOffset(address), true);
+        },
         /**
          * Dwords, signed, into an array: a host call's stack words in one call.
          *
-         * @param {number} address @param {number} count @param {number[]} into @param {number} at
+         * @param {number} to @param {number} count @param {number[]} into @param {number} at
          */
-        readU32sInto: (address, count, into, at)=>{
+        readU32sInto: (to, count, into, at)=>{
+            const address = hostAt(to);
             const from = ramOffset(address);
             const inside = holds(address, count * 4);
             for (let word = 0; word < count; word++)
@@ -2037,25 +2057,31 @@ export function createCorkHost(config){
                     ? ramData.getInt32(from + word * 4, true) : 0;
             }
         },
-        /** @param {number} address */
-        readF32: address=>(holds(address, 4) ? ramData.getFloat32(ramOffset(address), true) : 0),
+        /** @param {number} at */
+        readF32: at=>{
+            const address = hostAt(at);
+            return holds(address, 4) ? ramData.getFloat32(ramOffset(address), true) : 0;
+        },
 
-        /** @param {number} address @param {Uint8Array} bytes */
-        writePhysical: (address, bytes)=>{
+        /** @param {number} at @param {Uint8Array} bytes */
+        writePhysical: (at, bytes)=>{
+            const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += bytes.length;
             copyAround(address, bytes);
             invalidate(address, bytes.length);
         },
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeData: (address, bytes)=>{
+        /** @param {number} at @param {Uint8Array} bytes */
+        writeData: (at, bytes)=>{
+            const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += bytes.length;
             copyAround(address, bytes);
             invalidate(address, bytes.length);
         },
-        /** @param {number} address @param {number} value @param {number} length */
-        fillData: (address, value, length)=>{
+        /** @param {number} at @param {number} value @param {number} length */
+        fillData: (at, value, length)=>{
+            const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += length;
             fillAround(address, value, length);
@@ -2218,7 +2244,8 @@ export function createCorkHost(config){
         /** The guest's RAM in place, byte 0 at address 0, as much of it as the memory holds. */
         ramView: ()=>{
             fitRam();
-            return ram;
+            // Not over a wide window: a view in place would miss the image's alias.
+            return hostAlias === undefined ? ram : null;
         },
         /**
          * Grows a growing memory to hold `end` bytes of RAM (`growTo`); answers the
