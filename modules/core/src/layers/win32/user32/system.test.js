@@ -1173,8 +1173,8 @@ test('the display enumeration ends', ()=>{
     }
     // Every size of the era, whatever the display: a program's resolution
     // menu is built from exactly this walk.
-    assert.equal(index, displayModes(SCREEN).length,
-        'every size of the era at both rates, and then the end');
+    assert.equal(index, displayModes(SCREEN).length * 2,
+        'every size of the era at both rates and at 32 and 16 bits, and then the end');
     const last = memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth);
     assert.equal(last, 3456, 'the largest listed is the largest of the era');
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmDisplayFrequency), 120,
@@ -1299,7 +1299,7 @@ test('the name the device enumeration gives is one the mode enumeration takes', 
         index++;
         assert.ok(index < 1000, 'the enumeration did not terminate');
     }
-    assert.equal(index, displayModes(SCREEN).length,
+    assert.equal(index, displayModes(SCREEN).length * 2,
         'every mode the display offers answers under its own name');
 });
 
@@ -2595,14 +2595,22 @@ test('ChangeDisplaySettingsA sets any listed mode, and the screen follows it', (
     assert.equal(screen.width, SCREEN.width);
     assert.equal(screen.height, SCREEN.height);
 
-    // A depth the caller names is checked too: a program walks its own list
-    // of modes and takes the first accepted as the display's depth, so a
-    // sixteen-bit request for this screen has to be refused.
+    // A depth the caller names is checked too, and set: sixteen bits is a
+    // mode a thirty-two-bit display lists (an OpenGL engine's full screen
+    // asks for it), and the display is that deep after, as the program
+    // takes it to be; a depth the list does not carry is refused.
     putMode(memory, SCREEN.width, SCREEN.height);
     memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_BITSPERPEL]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [24]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
+        DISP_CHANGE_BADMODE, 'a depth the display does not list is refused');
     memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [16]);
     assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
-        DISP_CHANGE_BADMODE, 'a shallower depth is another mode');
+        DISP_CHANGE_SUCCESSFUL, 'sixteen bits is set');
+    assert.equal(screen.bitsPerPixel, 16, 'and the display is that deep');
+    assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL);
+    assert.equal(screen.bitsPerPixel, SCREEN.bitsPerPixel,
+        'the registry mode puts the depth of the display back');
     memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [SCREEN.bitsPerPixel]);
     assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
         DISP_CHANGE_SUCCESSFUL, 'and the depth of the screen is the mode in effect');

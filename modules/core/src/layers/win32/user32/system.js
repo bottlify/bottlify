@@ -1321,6 +1321,21 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
+    /** The depth the display started at, which the registry's mode goes back to. */
+    const launchBits = screen.bitsPerPixel;
+    /**
+     * The modes user32 lists and sets: every size at the display's own depth,
+     * then each again at sixteen bits, as Windows lists a thirty-two-bit
+     * display's lower depths -- a program that asks for a sixteen-bit full
+     * screen (an OpenGL engine of 1998) is refused nothing a real display
+     * would give it. The display's own depth first: a program taking the
+     * first mode it is offered keeps the depth it had.
+     */
+    const userModes = ()=>{
+        const own = displayModes(screen);
+        return screen.bitsPerPixel === 16 || launchBits !== 32 ? own
+            : [...own, ...own.map(one=>({ ...one, bitsPerPixel: 16 }))];
+    };
 
 
     /**
@@ -2403,7 +2418,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const current = index === ENUM_CURRENT_SETTINGS || index === ENUM_REGISTRY_SETTINGS;
-        const listed = current ? null : displayModes(screen)[index];
+        const listed = current ? null : userModes()[index];
         if (!current && (index < 0 || !listed))
         {
             return 0;
@@ -2457,7 +2472,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             if ((flags & CDS_TEST) === 0)
             {
                 const mode = registryMode(screen);
-                return setMode(mode.width, mode.height);
+                return setMode(mode.width, mode.height, launchBits);
             }
             return DISP_CHANGE_SUCCESSFUL;
         }
@@ -2474,13 +2489,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             ? readU32(devMode + layout.dmPelsWidth) : screen.width;
         const height = (named & DM_PELSHEIGHT) !== 0
             ? readU32(devMode + layout.dmPelsHeight) : screen.height;
-        // The depth as well, when the caller named one. A program that walks
-        // its own list of modes takes the first this accepts as the depth of
-        // the display, and accepting a sixteen-bit request for a thirty-two-bit
-        // screen makes every surface it creates after sixteen bits deep.
+        // The depth as well, when the caller named one: a mode at a depth the
+        // list does not carry is refused, and one it does sets the display's
+        // depth with its size, so a program's surfaces after it are as deep as
+        // the display it asked for.
         const bits = (named & DM_BITSPERPEL) !== 0
             ? readU32(devMode + layout.dmBitsPerPel) : screen.bitsPerPixel;
-        const offered = displayModes(screen).some(mode=>
+        const offered = userModes().some(mode=>
             mode.width === width && mode.height === height && mode.bitsPerPixel === bits);
         if (!offered)
         {
@@ -2498,7 +2513,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             display.registryWidth = width;
             display.registryHeight = height;
         }
-        return (flags & CDS_NORESET) === 0 ? setMode(width, height) : DISP_CHANGE_SUCCESSFUL;
+        return (flags & CDS_NORESET) === 0 ? setMode(width, height, bits)
+            : DISP_CHANGE_SUCCESSFUL;
     };
 
     /**
@@ -2509,15 +2525,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * ever: a thread blocked outside its message loop holds no mode change.
      *
      * @param {number} width @param {number} height
+     * @param {number} [bits]  the depth, the display's own unless named
      * @returns {number | Promise<number>}
      */
-    const setMode = (width, height)=>{
-        if (screen.width === width && screen.height === height)
+    const setMode = (width, height, bits = screen.bitsPerPixel)=>{
+        if (screen.width === width && screen.height === height && screen.bitsPerPixel === bits)
         {
             return DISP_CHANGE_SUCCESSFUL;
         }
         screen.width = width;
         screen.height = height;
+        screen.bitsPerPixel = bits;
         workArea = null;
         return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
             ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0, false, DISPLAY_CHANGE_WAIT_MS),

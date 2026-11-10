@@ -212,6 +212,9 @@ export function createCefStrings(host, { utf8 = false } = {}){
         }),
         cef_string_utf8_clear: cdecl(4, ([at])=>void clear(at)),
         cef_string_utf16_clear: cdecl(4, ([at])=>void clear(at)),
+        // wchar_t is UTF-16 on Windows: the wide form is the UTF-16 one (an older
+        // framework's program names it so).
+        cef_string_wide_clear: cdecl(4, ([at])=>void clear(at)),
         cef_string_utf8_cmp: cdecl(8, ([a, b])=>{
             const left = bytesAt(dword(a), dword(a + 4));
             const right = bytesAt(dword(b), dword(b + 4));
@@ -232,6 +235,10 @@ export function createCefStrings(host, { utf8 = false } = {}){
             return 1;
         }),
         cef_string_utf8_to_utf16: cdecl(12, ([src, length, output])=>{
+            writeAs(output, new TextDecoder().decode(bytesAt(src, length >>> 0)), true);
+            return 1;
+        }),
+        cef_string_utf8_to_wide: cdecl(12, ([src, length, output])=>{
             writeAs(output, new TextDecoder().decode(bytesAt(src, length >>> 0)), true);
             return 1;
         }),
@@ -263,6 +270,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
             return 1;
         }),
         cef_string_list_append: cdecl(8, ([handle, value])=>void list(handle).push(read(value))),
+        cef_string_list_copy: cdecl(4, ([handle])=>collection([...list(handle)])),
 
         cef_string_map_alloc: cdecl(0, ()=>collection([])),
         cef_string_map_free: cdecl(4, ([handle])=>void drop(handle)),

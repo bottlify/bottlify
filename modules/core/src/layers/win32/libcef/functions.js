@@ -50,7 +50,7 @@ const TID_UI = 0;
 const API_HASHES = ['8e4d334971e43b4e56c93030410b02d735d99c8b',
     '13586d84cb6038b38bf769db815e59d3d152d474', '2e81dea53f5ecdc1c057e4c70ecd66151987296a'];
 
-/** Every export of CEF 126's libcef.dll a program may import. */
+/** Every export of CEF 126's libcef.dll a program may import, and an older one's. */
 const EXPORTS = Object.freeze([
     'cef_api_hash', 'cef_execute_process', 'cef_initialize', 'cef_shutdown',
     'cef_do_message_loop_work', 'cef_run_message_loop', 'cef_quit_message_loop',
@@ -80,6 +80,11 @@ const EXPORTS = Object.freeze([
     'cef_string_userfree_utf8_free', 'cef_string_utf8_set', 'cef_string_utf8_clear',
     'cef_string_utf8_cmp', 'cef_string_wide_to_utf8', 'cef_string_utf16_clear',
     'cef_string_utf8_to_utf16', 'cef_string_userfree_utf16_free',
+    // An older framework's, which a program built against it imports (Half-Life's
+    // chromehtml.dll): its wide strings and list copy answered, the rest zero -- no
+    // browser, no cookie -- with a divergence, as any export not answered yet.
+    'cef_string_wide_clear', 'cef_string_utf8_to_wide', 'cef_string_list_copy',
+    'cef_build_revision', 'cef_browser_create_sync', 'cef_set_cookie', 'cef_visit_url_cookies',
 ]);
 
 /**
