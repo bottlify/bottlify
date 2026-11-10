@@ -1010,6 +1010,8 @@ export function createDevice(options = {}){
         return S_OK;
     };
 
+    /** Shaders made, and their distinct bytecodes. @type {{ objects: number, distinct: Set<string> }} */
+    const shaderCount = { objects: 0, distinct: new Set() };
     /**
      * A shader is made from a container holding a program of the kind the
      * create is for. Anything else -- an older shader model's tokens, a pixel
@@ -1028,6 +1030,15 @@ export function createDevice(options = {}){
      */
     const createShader = (iid, kind, out, bytecode, made = null)=>{
         out.shader = null;
+        // How many shaders a program made, and how many distinct bytecodes
+        // among them, by the container's own checksum: a program that makes
+        // the same shader again makes a pipeline again.
+        if (bytecode && bytecode.length >= 20)
+        {
+            shaderCount.objects++;
+            shaderCount.distinct.add(Array.from(bytecode.subarray(4, 20), byte=>
+                byte.toString(16).padStart(2, '0')).join(''));
+        }
         const container = made ?? (bytecode ? parseShaderOfKind(bytecode, kind, shaderModel)
             : null);
         if (!container || (kind >= SHADER_KIND.HULL
@@ -2450,7 +2461,9 @@ export function createDevice(options = {}){
 
         /** What the renderer has done and declined to do. */
         diagnostics(){
-            return renderer.diagnostics();
+            return Object.assign(renderer.diagnostics(), {
+                shaderObjects: shaderCount.objects, shaderBytecodes: shaderCount.distinct.size,
+            });
         },
 
         /**

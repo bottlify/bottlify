@@ -38,7 +38,7 @@ export function createShaderCache(options){
     /** Milliseconds from a module's creation until the compiler answered, summed. */
     let buildMs = 0;
     const now = options.now ?? (()=>performance.now());
-    /** @type {Map<string, Map<string, Promise<any>>>} each shader's module, by label and code */
+    /** @type {Map<string, Promise<any>>} each shader's module, by its code */
     const built = new Map();
 
     /** @param {any} message */
@@ -67,15 +67,15 @@ export function createShaderCache(options){
          */
         build(request){
             const label = request.label === undefined ? 'shader' : request.label;
-            // One module for one shader's code, however many pipelines take it:
-            // a draw state is a pipeline, and one shader is in many of them.
-            const byCode = built.get(label) ?? new Map();
-            built.set(label, byCode);
-            let made = byCode.get(request.code);
+            // One module for one shader's code, however many pipelines or
+            // shader objects take it: a draw state is a pipeline, and a
+            // program may make one shader again.
+            // By the code alone: the label names the first shader that had it.
+            let made = built.get(request.code);
             if (!made)
             {
                 made = compile(label, request.code);
-                byCode.set(request.code, made);
+                built.set(request.code, made);
             }
             else
             {

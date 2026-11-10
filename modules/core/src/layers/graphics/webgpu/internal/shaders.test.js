@@ -73,9 +73,9 @@ test('the ring drops the oldest distinct message rather than growing without bou
     });
     const shaders = createShaderCache({ device: gpu.device, ringSize: 2 });
 
-    await shaders.build({ code: '', label: 'a' });
-    await shaders.build({ code: '', label: 'b' });
-    await shaders.build({ code: '', label: 'c' });
+    await shaders.build({ code: 'fn a() {}', label: 'a' });
+    await shaders.build({ code: 'fn b() {}', label: 'b' });
+    await shaders.build({ code: 'fn c() {}', label: 'c' });
 
     assert.deepEqual(shaders.messages().map((/** @type {any} */ entry)=>entry.message),
         ['second', 'third']);
@@ -87,7 +87,7 @@ test('one shader\'s code is compiled once, however many pipelines ask for it', a
     let clock = 0;
     const shaders = createShaderCache({ device: gpu.device, now: ()=>(clock += 5) });
     const first = await shaders.build({ code: 'fn main() {}', label: 'vs#1' });
-    const again = await shaders.build({ code: 'fn main() {}', label: 'vs#1' });
+    const again = await shaders.build({ code: 'fn main() {}', label: 'vs#2' });
     await shaders.build({ code: 'fn other() {}', label: 'vs#1' });
     assert.equal(again, first, 'the same module');
     assert.equal(gpu.count('createShaderModule'), 2);
