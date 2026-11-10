@@ -36,6 +36,7 @@ import { createActivationContexts } from './kernel32/actctx.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createBcryptFunctions, createBcryptPrimitivesFunctions } from './bcrypt/functions.js';
+import { createGdiplusFunctions } from './gdiplus/functions.js';
 import { createNcryptFunctions, createSecur32Functions } from './secur32/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
@@ -3678,6 +3679,11 @@ export function createWin32Module(){
                 'pdh.dll': createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
                 'bcrypt.dll': createBcryptFunctions({ writeMemory, readMemory }),
+                // GDI+'s bitmaps over guest memory; its codecs and drawing say they are not here.
+                'gdiplus.dll': createGdiplusFunctions({ writeMemory, readMemory, pointerSize,
+                    allocate: bytes=>allocator.allocate(bytes),
+                    free: address=>allocator.free(address),
+                    divergence: config?.divergence }),
                 // The per-process generator under it, which a browser imports
                 // and then finds by GetModuleHandle: it must be a module.
                 // The Windows Runtime's start and strings, and no class of it:

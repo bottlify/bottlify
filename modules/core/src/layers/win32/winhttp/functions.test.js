@@ -36,7 +36,7 @@ function setup(){
 test('WinHttpCheckPlatform says the platform runs WinHTTP', ()=>{
     const { fns } = setup();
     assert.equal(fns.WinHttpCheckPlatform.argBytes, 0);
-    assert.equal(fns.WinHttpCheckPlatform.handler([]), 1);
+    assert.equal(fns.WinHttpCheckPlatform.handler(), 1);
 });
 
 test('the proxy settings are a direct connection', ()=>{
