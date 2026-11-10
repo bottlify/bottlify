@@ -568,6 +568,10 @@ export function createCpuModule(){
                 setControlWord: word=>activeFpu().setControlWord?.(word),
                 statusWord: ()=>activeFpu().statusWord?.() ?? 0,
                 clearExceptions: ()=>activeFpu().clearExceptions?.(),
+                // SSE's control and status register, the running thread's.
+                mxcsr: ()=>started().readMxcsr() >>> 0,
+                /** @param {number} word */
+                setMxcsr: word=>started().writeMxcsr(word >>> 0),
             };
 
             current = state;

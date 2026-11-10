@@ -5401,6 +5401,9 @@ async function buildApp(options){
                 setControlWord: word=>core.api('cpu').fpu.setControlWord(word),
                 statusWord: ()=>core.api('cpu').fpu.statusWord(),
                 clearExceptions: ()=>core.api('cpu').fpu.clearExceptions(),
+                mxcsr: ()=>core.api('cpu').fpu.mxcsr(),
+                /** @param {number} word */
+                setMxcsr: word=>core.api('cpu').fpu.setMxcsr(word),
             },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {
