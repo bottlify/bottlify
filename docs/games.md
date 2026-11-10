@@ -33,7 +33,7 @@
 - FlatOut (demo)
 - FlatOut 2 (demo)
 - Grand Theft Auto: San Andreas
-- Half-Life (demo)
+- Half-Life
 - Half-Life 2 (demo)
 - Heroes of Might and Magic III (demo)
 - Hitman: Codename 47 (demo)
