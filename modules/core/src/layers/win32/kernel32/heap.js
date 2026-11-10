@@ -543,6 +543,8 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
      * committed page is a promise the first touch collects on.
      */
     let handedTo = base;
+    /** What the free spans hold, kept as they change: a program asks every frame. */
+    let freeBytes = 0;
 
     /** @param {number} spanBase @param {number} spanSize */
     const insert = (spanBase, spanSize)=>{
@@ -552,6 +554,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
         byBase.set(spanBase, span);
         byEnd.set(spanBase + spanSize, span);
         liveSpans++;
+        freeBytes += spanSize;
     };
 
     /** @param {FreeSpan} span */
@@ -566,6 +569,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
         byBase.set(span.base, null);
         byEnd.set(span.base + span.size, null);
         liveSpans--;
+        freeBytes -= span.size;
         forget();
     };
 
@@ -834,6 +838,9 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
          */
         handedTo: ()=>handedTo,
 
+        /** The free spans' total, without walking them. */
+        freeTotal: ()=>freeBytes,
+
         diagnostics(){
             let used = 0;
             for (const block of live.values())
@@ -961,6 +968,9 @@ export function createHeapFunctions(host){
     // section, COM task memory -- comes from the same free list rather than from
     // arenas carved up in advance into sizes nobody can predict.
     const allocator = host.allocator ?? createHeapAllocator(host.arena);
+    /** The arena's free bytes; a wrapped allocator without the running total walks its spans. */
+    const freeInArena = ()=>(/** @type {any} */ (allocator).freeTotal?.()
+        ?? allocator.diagnostics().free);
     /** The most the arena has had handed out at any GetProcessMemoryInfo. */
     let peakUsed = 0;
 
@@ -2747,7 +2757,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                const free = allocator.diagnostics().free;
+                const free = freeInArena();
                 const total = host.arena.size;
                 const data = new Uint8Array(MEMORYSTATUS.SIZE);
                 const view = new DataView(data.buffer);
@@ -2801,7 +2811,7 @@ export function createHeapFunctions(host){
                 const size = (cb >>> 0) >= PROCESS_MEMORY_COUNTERS.SIZE_EX
                     ? PROCESS_MEMORY_COUNTERS.SIZE_EX
                     : PROCESS_MEMORY_COUNTERS.SIZE;
-                const used = Math.max(0, host.arena.size - allocator.diagnostics().free);
+                const used = Math.max(0, host.arena.size - freeInArena());
                 peakUsed = Math.max(peakUsed, used);
                 const data = new Uint8Array(size);
                 const view = new DataView(data.buffer);
@@ -2845,7 +2855,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const used = Math.max(0, host.arena.size - allocator.diagnostics().free);
+                const used = Math.max(0, host.arena.size - freeInArena());
                 peakUsed = Math.max(peakUsed, used);
                 const pages = (/** @type {number} */ bytes)=>Math.floor(bytes / PAGE_SIZE);
                 const counts = host.systemCounts?.() ?? { processes: 1, threads: 1 };
@@ -2882,7 +2892,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const free = allocator.diagnostics().free;
+                const free = freeInArena();
                 const total = host.arena.size;
                 const data = new Uint8Array(MEMORYSTATUSEX.SIZE);
                 const view = new DataView(data.buffer);

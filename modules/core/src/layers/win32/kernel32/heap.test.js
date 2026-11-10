@@ -1709,3 +1709,27 @@ test('a range kept from the program is no block of its, and the mark of what was
     assert.equal(allocator.handedTo(), first + 0x1000);
     assert.equal(allocator.allocateAt(0x300000, 0x1000), false, 'and it is never handed out');
 });
+
+test('the allocator keeps its free total as blocks come and go', ()=>{
+    const allocator = createHeapAllocator(ARENA);
+    /** @type {number[]} */
+    const held = [];
+    let seed = 7;
+    const next = ()=>(seed = seed * 1103515245 + 12345 >>> 0);
+    for (let step = 0; step < 2000; step++)
+    {
+        if (held.length > 0 && next() % 3 === 0)
+        {
+            allocator.free(held.splice(next() % held.length, 1)[0]);
+        }
+        else
+        {
+            const address = allocator.allocate(1 + next() % 0x3000);
+            if (address)
+            {
+                held.push(address);
+            }
+        }
+        assert.equal(allocator.freeTotal(), allocator.diagnostics().free);
+    }
+});
