@@ -2141,3 +2141,19 @@ test('a frame chain through a region nothing may read ends there, rather than fa
     dispatcher.frameChain(0x4000000);
     assert.equal(dispatcher.chainFirst, 0, 'an EBP inside it names no caller');
 });
+
+test('a 64-bit call hands each argument\'s high dword beside it, for a pointer past 4 GiB', ()=>{
+    // A wide window's image at 0x140000000 passes pointers into itself: RCX
+    // one of them, R11 (RDX) a plain dword whose high half is zero.
+    const { dispatcher } = longMachine({ rcx: 0x140001234n, r11: 5n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Pointer', ...STDCALL, argBytes: 8,
+        /** @param {number[] & { high?: number[] }} args */
+        handler: args=>{
+            seen.push([args[0], args[1], ...(args.high ?? []).slice(0, 2)]);
+            return 0;
+        } });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0x40001234, 5, 1, 0]]);
+});

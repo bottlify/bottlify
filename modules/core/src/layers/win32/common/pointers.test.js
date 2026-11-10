@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pointerWidth } from './pointers.js';
+import { pointerArg, pointerWidth } from './pointers.js';
 
 test('a 32-bit pointer is a dword', ()=>{
     const width = pointerWidth();
@@ -28,4 +28,12 @@ test('a 64-bit pointer is a qword whose high half is zero', ()=>{
 
 test('no other width', ()=>{
     assert.throws(()=>pointerWidth(2), RangeError);
+});
+
+test('a pointer argument whole: the low dword, and the high one a 64-bit call carries', ()=>{
+    const args = /** @type {number[] & { high?: number[] }} */ ([0x40001000 | 0, -1]);
+    assert.equal(pointerArg(args, 0), 0x40001000, 'no high half: the low dword unsigned');
+    assert.equal(pointerArg(args, 1), 0xffffffff);
+    args.high = [1, 0];
+    assert.equal(pointerArg(args, 0), 0x140001000, 'an image at 0x140000000');
 });
