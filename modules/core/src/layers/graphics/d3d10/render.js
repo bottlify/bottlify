@@ -2624,9 +2624,18 @@ export function createRenderer(services){
         {
             promise = buildPipeline(state);
             pipelines.set(key, promise);
+            // The last pipelines made, by key: a count that grows every frame
+            // is a key that changes every frame, and these say which part.
+            recentKeys.push(key);
+            if (recentKeys.length > 16)
+            {
+                recentKeys.shift();
+            }
         }
         return promise;
     };
+    /** @type {string[]} */
+    const recentKeys = [];
 
     // --- recording ---
 
@@ -5693,6 +5702,7 @@ export function createRenderer(services){
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
+                recentPipelineKeys: [...recentKeys],
                 replayMs: Math.round(counters.replayMs),
                 pipelineWaitMs: Math.round(counters.pipelineWaitMs),
                 shaders: backend?.shaderStats?.() ?? null,
