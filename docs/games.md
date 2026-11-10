@@ -77,9 +77,9 @@
 - Warcraft III (demo)
 - Warcraft III: The Frozen Throne
 - World of Goo
-- World of Warcraft: Classic (relay only)
-- World of Warcraft: The Burning Crusade (relay only)
-- World of Warcraft: Wrath of the Lich King (relay only)
+- World of Warcraft: Classic (networking required)
+- World of Warcraft: The Burning Crusade (networking required)
+- World of Warcraft: Wrath of the Lich King (networking required)
 
 ## Starts, with problems
 
