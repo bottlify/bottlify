@@ -32,6 +32,7 @@
 - FIFA 08 (demo)
 - FlatOut (demo)
 - FlatOut 2 (demo)
+- Grand Theft Auto: San Andreas
 - Half-Life (demo)
 - Heroes of Might and Magic III (demo)
 - Hitman: Codename 47 (demo)
