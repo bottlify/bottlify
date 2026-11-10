@@ -5247,6 +5247,24 @@ function switchCases(e){
     }
     // Charged once, at the block's depth, for every way out below.
     e.charge();
+    if (table.before !== undefined)
+    {
+        // The table's read wrote the index over (MSVC's `mov eax, [rcx + rax*4 + d];
+        // add rax, rcx; jmp rax`): the register holds the target, not the index, so
+        // the target alone picks the case, matched with each in turn.
+        // ponytail: a compare per case; a br_table on the index saved at `before`
+        // if a switch of hundreds of cases shows in a profile.
+        for (const target of cases)
+        {
+            e.markArm();
+            // Long mode's alone (`region-switch64.js`): the whole target in `LONG_WIDE`.
+            b.localGet(LONG_WIDE).i64const(codeAddress(e, target)).op(I64.eq);
+            e.openIf('case');
+            e.jumpTo(target);
+            e.close();
+        }
+        return;
+    }
     e.open('switchOut', EMPTY);
     for (let k = cases.length - 1; k >= 0; k--)
     {

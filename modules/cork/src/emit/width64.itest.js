@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CORPUS, FAR_CALL, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined,
+    CORPUS, FAR_CALL, HOISTED_SWITCHES, MASKED_SWITCHES, OVERWRITTEN_SWITCH, SWITCHES, compare,
+    flagsLeftUndefined,
     load, loopCases, machine, nested, pool, program, run, stacked,
 } from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
@@ -241,6 +242,17 @@ test('switches run in the shared emitter\'s regions as interpreted, their index 
         assert.equal(exits, cases.length);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
+});
+
+test('a switch whose table read writes its index over keeps its cases in its region', ()=>{
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `overwritten ${i}`, code: OVERWRITTEN_SWITCH }));
+    const { failures, exits, stats } = compare(cases, { budget: 100000, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.equal(exits, cases.length);
+    // One region a program: a case picked by the target, not by the register the
+    // read wrote over, is a jump inside it, never an exit that forms one of its own.
+    assert.equal(stats.regions, cases.length, JSON.stringify(stats));
 });
 
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{

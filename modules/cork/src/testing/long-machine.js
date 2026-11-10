@@ -656,6 +656,22 @@ export const HOISTED_SWITCHES = ''
     + '58ffffff75ffffff7bffffff82ffffff89ffffff';
 
 /**
+ * MSVC's switch whose table read writes its index over, two hundred rounds: the
+ * register the jump goes through held the index a moment before.
+ *
+ *         xor esi, esi
+ *     1:  mov eax, esi; and eax, 3; cmp eax, 3; ja next; movsxd rax, eax
+ *         lea rcx, [rip + start]; mov eax, [rcx + rax*4 + table]; add rax, rcx; jmp rax
+ *     c0..c3: add [rbx], 1 / add [rbx], 10 / xor [rbx], rsi / sub [rbx], 7; jmp next
+ *     next: inc esi; cmp esi, 200; jb 1b; jmp done
+ *     table: the cases' offsets from the start
+ */
+export const OVERWRITTEN_SWITCH = ''
+    + '31f689f083e00383f803772b4863c0488d0deaffffff8b8481430000004801c8ffe0'
+    + '48830301eb0f4883030aeb09483133eb0448832b07ffc681fec800000072c1eb10'
+    + '22000000280000002e00000033000000';
+
+/**
  * Two switches whose index the block masks itself, no bound test before it,
  * forty rounds, each case changing a word of [rbx] its own way:
  *

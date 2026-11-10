@@ -826,7 +826,8 @@ async function main(){
         stopped = `exited with ${code}`;
     }
     catch (e){
-        stopped = /** @type {any} */ (e).message;
+        // A throw that is not an Error has no message: say what was thrown.
+        stopped = /** @type {any} */ (e)?.message ?? JSON.stringify(e)?.slice(0, 600) ?? String(e);
     }
     finally
     {
@@ -871,6 +872,14 @@ async function main(){
             + ` shape misses ${cork.shapeMisses}, checked ${cork.shapeChecked},`
             + ` float misses ${cork.floatMisses}, rounded ${cork.floatsRounded},`
             + ` relaxed status reads ${cork.x87RelaxedReads}`);
+    }
+    // The exits translated code left for the interpreter, and why each target has
+    // no entry: a loop running interpreted shows here before anywhere else.
+    if (cork?.exitsByTarget?.length)
+    {
+        console.log(`  untranslated exits by target: ${cork.exitsByTarget.slice(0, 16)
+            .map((/** @type {any} */ { address, count, reason })=>
+                `${(address >>> 0).toString(16)} x${count} ${reason}`).join(', ')}`);
     }
     if (cork?.mechanisms)
     {
