@@ -325,3 +325,14 @@ test('a non-temporal store with REX.W stores its quadword whole, in the shared e
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });
+
+test('an explicit-length string compare reads its lengths as dwords, or with REX.W as saturated'
+    + ' quadwords, in the shared emitter\'s regions as interpreted', ()=>{
+    // pcmpestri xmm0, xmm1, 0x0c / with REX.W / pcmpestrm; rax and rdx with
+    // their high halves set, then small, negative and past the element count.
+    const cases = edges(['660f3a61c10c', '66480f3a61c10c', '660f3a60c118'], [0],
+        ['', 'b805000000ba03000000', '48c7c0f6ffffff48c7c2feffffff', 'b828000000ba11000000']);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
