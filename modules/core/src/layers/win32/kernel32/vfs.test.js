@@ -524,5 +524,9 @@ test('a large read of an unchanged file is kept; a write makes the next one fres
     vol.read(node, 0, size);
     vol.read(node, 0, size);
     assert.equal(reads, 5, 'settled again: kept again');
+    const section = vol.section(node, 'readonly');
+    vol.read(section, 0, size);
+    assert.equal(reads, 5, 'a section\'s own hold on the file reads what is kept');
+    vol.close(section);
     vol.close(node);
 });

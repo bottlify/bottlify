@@ -756,7 +756,15 @@ export function createVolume(fs, fetchBlocks = null){
          *
          * @param {any} node @param {'readonly' | 'readwrite' | 'image'} kind
          */
-        section: (node, kind)=>attempt(()=>fs.reopenSection?.(node, kind) ?? null, null),
+        section: (node, kind)=>{
+            const held = attempt(()=>fs.reopenSection?.(node, kind) ?? null, null);
+            const path = pathOf.get(node);
+            if (held && path !== undefined)
+            {
+                pathOf.set(held, path);
+            }
+            return held;
+        },
 
         /** @param {string} path @returns {boolean} */
         mkdir: path=>{
