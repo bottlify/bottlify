@@ -39,6 +39,12 @@ const AES_BLOCK = 16;
 /** The chaining modes a key runs in (BCRYPT_CHAINING_MODE's values); CBC the default. */
 const CHAINING_MODES = new Set(['ChainingModeCBC', 'ChainingModeECB']);
 
+/** BCRYPT_KEY_DATA_BLOB: the blob type a symmetric key is imported and exported as. */
+const KEY_DATA_BLOB = 'KeyDataBlob';
+/** BCRYPT_KEY_DATA_BLOB_MAGIC, "KDBM", and the header before the key: magic, version, length. */
+const KEY_DATA_BLOB_MAGIC = 0x4d42444b;
+const KEY_DATA_BLOB_HEADER = 12;
+
 /** BCryptOpenAlgorithmProvider's flag: the hash is keyed, an HMAC. */
 const BCRYPT_ALG_HANDLE_HMAC_FLAG = 0x8;
 
@@ -568,6 +574,108 @@ export function createBcryptFunctions(host){
             /** @param {number[]} args */
             handler: args=>crypt(args, false),
         },
+
+        /**
+         * NTSTATUS BCryptImportKey(BCRYPT_ALG_HANDLE hAlgorithm, BCRYPT_KEY_HANDLE hImportKey,
+         *   LPCWSTR pszBlobType, BCRYPT_KEY_HANDLE *phKey, PUCHAR pbKeyObject,
+         *   ULONG cbKeyObject, PUCHAR pbInput, ULONG cbInput, ULONG dwFlags)
+         *
+         * An AES key from a BCRYPT_KEY_DATA_BLOB: its header (the magic 'KDBM',
+         * version 1, the key's length) and the key. Another blob type is not
+         * supported; a wrapped import (hImportKey) is not either.
+         */
+        BCryptImportKey: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([algorithm, wrapping, type, out, , , input, inputLength])=>{
+                const opened = algorithms.get(algorithm >>> 0);
+                if (!opened || opened.chaining === undefined)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                if ((out >>> 0) === 0 || (input >>> 0) === 0 || (type >>> 0) === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if ((wrapping >>> 0) !== 0 || wideName(type) !== KEY_DATA_BLOB)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+                const length = inputLength >>> 0;
+                if (length < KEY_DATA_BLOB_HEADER)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const blob = host.readMemory(input >>> 0, length).slice();
+                const view = new DataView(blob.buffer);
+                const size = view.getUint32(8, true);
+                if (view.getUint32(0, true) !== KEY_DATA_BLOB_MAGIC || view.getUint32(4, true) !== 1
+                    || KEY_DATA_BLOB_HEADER + size > length || ![16, 24, 32].includes(size))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const secretBytes = blob.slice(KEY_DATA_BLOB_HEADER, KEY_DATA_BLOB_HEADER + size);
+                const made = handle();
+                keys.set(made, { secret: secretBytes, aes: createAes(secretBytes),
+                    chaining: opened.chaining });
+                putU32(out >>> 0, made);
+                return STATUS_SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS BCryptExportKey(BCRYPT_KEY_HANDLE hKey, BCRYPT_KEY_HANDLE hExportKey,
+         *   LPCWSTR pszBlobType, PUCHAR pbOutput, ULONG cbOutput, ULONG *pcbResult,
+         *   ULONG dwFlags)
+         *
+         * An AES key as a BCRYPT_KEY_DATA_BLOB; with no buffer, its size.
+         */
+        BCryptExportKey: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([key, wrapping, type, output, room, result])=>{
+                const held = keys.get(key >>> 0);
+                if (!held)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                if ((type >>> 0) === 0 || (result >>> 0) === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if ((wrapping >>> 0) !== 0 || wideName(type) !== KEY_DATA_BLOB)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+                const blob = new Uint8Array(KEY_DATA_BLOB_HEADER + held.secret.length);
+                const view = new DataView(blob.buffer);
+                view.setUint32(0, KEY_DATA_BLOB_MAGIC, true);
+                view.setUint32(4, 1, true);
+                view.setUint32(8, held.secret.length, true);
+                blob.set(held.secret, KEY_DATA_BLOB_HEADER);
+                putU32(result >>> 0, blob.length);
+                if ((output >>> 0) === 0)
+                {
+                    return STATUS_SUCCESS;
+                }
+                if ((room >>> 0) < blob.length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+                host.writeMemory(output >>> 0, blob);
+                return STATUS_SUCCESS;
+            },
+        },
+
+        // The key pairs and the agreements made of them (ECDH, RSA): no such
+        // algorithm opens here (BCryptOpenAlgorithmProvider answers NOT_FOUND), so
+        // no handle these are given is one, as on a machine whose providers lack them.
+        BCryptGenerateKeyPair: { argBytes: 16, handler: ()=>STATUS_INVALID_HANDLE },
+        BCryptFinalizeKeyPair: { argBytes: 8, handler: ()=>STATUS_INVALID_HANDLE },
+        BCryptImportKeyPair: { argBytes: 28, handler: ()=>STATUS_INVALID_HANDLE },
+        BCryptSecretAgreement: { argBytes: 16, handler: ()=>STATUS_INVALID_HANDLE },
+        BCryptDeriveKey: { argBytes: 28, handler: ()=>STATUS_INVALID_HANDLE },
+        BCryptDestroySecret: { argBytes: 4, handler: ()=>STATUS_INVALID_HANDLE },
 
         /** NTSTATUS BCryptDestroyKey(BCRYPT_KEY_HANDLE hKey) */
         BCryptDestroyKey: {

@@ -2890,6 +2890,19 @@ test('CancelIoEx finds nothing left to cancel on a file', ()=>{
     assert.equal(error.code, ERROR_INVALID_HANDLE);
 });
 
+test('ReOpenFile opens the same file again as a handle of its own', ()=>{
+    const { fns, open, error } = setup();
+    const file = open('C:\\GAME\\SAVE.DAT', CREATE_ALWAYS);
+    // GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OVERLAPPED.
+    const again = fns.ReOpenFile.handler([file, 0x80000000, 3, 0x40000000]);
+    assert.notEqual(again >>> 0, 0xffffffff);
+    assert.notEqual(again, file, 'a handle of its own');
+    assert.equal(fns.GetFinalPathNameByHandleW.handler([again, 0x400, 64, 0]),
+        '\\\\?\\C:\\GAME\\SAVE.DAT'.length, 'to the same file');
+    assert.equal(fns.ReOpenFile.handler([0x7770, 0x80000000, 3, 0]) >>> 0, 0xffffffff);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+});
+
 test('GetFinalPathNameByHandle names the file in the namespace asked for', ()=>{
     const { memory, fns, open, error } = setup();
     const file = open('C:\\GAME\\SAVE.DAT', CREATE_ALWAYS);

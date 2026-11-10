@@ -1557,6 +1557,25 @@ export function createWinsockFunctions(host){
             },
         },
 
+        /**
+         * int WSASendDisconnect(SOCKET s, LPWSABUF lpOutboundDisconnectData)
+         *
+         * shutdown(s, SD_SEND); TCP carries no disconnect data, so the buffer is not read.
+         */
+        WSASendDisconnect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const socket = socketOf(handle);
+                if (!socket)
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                const outcome = registry.shutdown(socket, 1);
+                return outcome.error ? fail(outcome.error) : ok(0);
+            },
+        },
+
         shutdown: {
             argBytes: 8,
             /** @param {number[]} args */

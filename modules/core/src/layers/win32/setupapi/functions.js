@@ -3081,6 +3081,18 @@ export function createSetupapiFunctions(host){
             },
         })),
 
+        /**
+         * BOOL SetupGetInfDriverStoreLocationW(PCWSTR FileName, PSP_ALTPLATFORM_INFO,
+         *     PCWSTR LocaleName, PWSTR ReturnBuffer, DWORD ReturnBufferSize, PDWORD RequiredSize)
+         *
+         * Where an INF lies in the driver store: no driver package is installed here,
+         * so none is found, ERROR_FILE_NOT_FOUND.
+         */
+        SetupGetInfDriverStoreLocationW: {
+            argBytes: 24,
+            handler: ()=>fail(ERROR_FILE_NOT_FOUND),
+        },
+
         /** VOID SetupCloseInfFile(HINF InfHandle) -- a handle that names no INF is ignored. */
         SetupCloseInfFile: {
             argBytes: 4,

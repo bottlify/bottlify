@@ -1063,6 +1063,18 @@ export function createSystemFunctions(host){
         GetSystemInfo: systemInfoOf(false),
 
         /**
+         * SIZE_T GetLargePageMinimum(void)
+         *
+         * Zero: the processor here has no large pages to give, which is how
+         * Windows answers where they are not supported, and a program that
+         * would use them allocates ordinary pages.
+         */
+        GetLargePageMinimum: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
          * VOID GetNativeSystemInfo(LPSYSTEM_INFO lpSystemInfo)
          *
          * What the machine is beneath WOW64; with no WOW64 on a 32-bit

@@ -217,3 +217,33 @@ test('a duplicated key and hash go on apart from their originals', ()=>{
         'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
         'SHA-256("abc"): the twin did not see the original\'s second update');
 });
+
+test('an AES key imported from a BCRYPT_KEY_DATA_BLOB enciphers as one generated, and exports'
+    + ' as the same blob', ()=>{
+    const { memory, fns, view, putWide, algorithm } = aesKey('000102030405060708090a0b0c0d0e0f');
+    // 'KDBM', version 1, 16 bytes, the key: FIPS 197 C.1's.
+    const blob = new Uint8Array(28);
+    new DataView(blob.buffer).setUint32(0, 0x4d42444b, true);
+    new DataView(blob.buffer).setUint32(4, 1, true);
+    new DataView(blob.buffer).setUint32(8, 16, true);
+    blob.set(bytesOf('000102030405060708090a0b0c0d0e0f'), 12);
+    memory.set(blob, 0xa00);
+    putWide(0x280, 'KeyDataBlob');
+    assert.equal(fns.BCryptImportKey.handler([algorithm, 0, 0x280, 0x320, 0, 0, 0xa00, 28, 0]), 0);
+    const imported = view.getUint32(0x320, true);
+    putWide(0x2c0, 'ChainingMode');
+    putWide(0x2e0, 'ChainingModeECB');
+    assert.equal(fns.BCryptSetProperty.handler([imported, 0x2c0, 0x2e0, 32, 0]), 0);
+    memory.set(bytesOf('00112233445566778899aabbccddeeff'), 0x600);
+    assert.equal(fns.BCryptEncrypt.handler([imported, 0x600, 16, 0, 0, 0, 0x700, 16, 0x800, 0]), 0);
+    assert.equal(hex(memory.subarray(0x700, 0x710)), '69c4e0d86a7b0430d8cdb78070b4c55a');
+    assert.equal(fns.BCryptExportKey.handler([imported, 0, 0x280, 0, 0, 0x800, 0]), 0);
+    assert.equal(view.getUint32(0x800, true), 28, 'the blob\'s size, asked with no buffer');
+    assert.equal(fns.BCryptExportKey.handler([imported, 0, 0x280, 0xb00, 28, 0x800, 0]), 0);
+    assert.deepEqual([...memory.subarray(0xb00, 0xb1c)], [...blob]);
+    memory[0xa04] = 2;
+    assert.equal(fns.BCryptImportKey.handler([algorithm, 0, 0x280, 0x320, 0, 0, 0xa00, 28, 0]),
+        STATUS_INVALID_PARAMETER, 'a version that is not 1');
+    assert.equal(fns.BCryptGenerateKeyPair.handler(),
+        STATUS_INVALID_HANDLE, 'no key pair: no such algorithm opens');
+});

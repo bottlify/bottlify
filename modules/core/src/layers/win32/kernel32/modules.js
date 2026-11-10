@@ -118,6 +118,7 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           Why `load` answered zero for that name, when it was not that nothing
  *           was found: ERROR_BAD_EXE_FORMAT for a file that is no image for the
  *           process. Null: ERROR_MOD_NOT_FOUND.
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose HMODULE is a quadword
  * @property {(handle: number) => ModuleRecord | null} [dataFile]
  *           A library LoadLibraryEx mapped as data, by the handle it gave out:
  *           no module, so not among the ones `byBase` knows.
@@ -381,6 +382,34 @@ export function createModuleFunctions(host){
             return 0;
         }
         return module.release ? module.release() : 1;
+    };
+
+    /** A module handle's bytes: a quadword in a 64-bit process. */
+    const handleSize = host.pointerSize ?? 4;
+    /**
+     * As many module handles as fit in `size` bytes, the image first, and the bytes
+     * all of them take: what EnumProcessModules writes.
+     *
+     * @param {number} handles @param {number} size @param {number} needed
+     */
+    const enumModules = (handles, size, needed)=>{
+        if ((needed >>> 0) === 0)
+        {
+            host.setLastError(ERROR_NOACCESS);
+            return 0;
+        }
+        const bases = (host.list?.() ?? []).map(module=>module.base >>> 0);
+        const fits = Math.min(bases.length, Math.floor((size >>> 0) / handleSize));
+        if (fits > 0)
+        {
+            const out = new DataView(new ArrayBuffer(fits * handleSize));
+            bases.slice(0, fits).forEach((base, at)=>out.setUint32(at * handleSize, base, true));
+            host.writeMemory(handles >>> 0, new Uint8Array(out.buffer));
+        }
+        const total = new DataView(new ArrayBuffer(4));
+        total.setUint32(0, bases.length * handleSize, true);
+        host.writeMemory(needed >>> 0, new Uint8Array(total.buffer));
+        return 1;
     };
 
     return {
@@ -690,25 +719,20 @@ export function createModuleFunctions(host){
         K32EnumProcessModules: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, handles, size, needed])=>{
-                if ((needed >>> 0) === 0)
-                {
-                    host.setLastError(ERROR_NOACCESS);
-                    return 0;
-                }
-                const bases = (host.list?.() ?? []).map(module=>module.base >>> 0);
-                const fits = Math.min(bases.length, Math.floor((size >>> 0) / 4));
-                if (fits > 0)
-                {
-                    const out = new DataView(new ArrayBuffer(fits * 4));
-                    bases.slice(0, fits).forEach((base, at)=>out.setUint32(at * 4, base, true));
-                    host.writeMemory(handles >>> 0, new Uint8Array(out.buffer));
-                }
-                const total = new DataView(new ArrayBuffer(4));
-                total.setUint32(0, bases.length * 4, true);
-                host.writeMemory(needed >>> 0, new Uint8Array(total.buffer));
-                return 1;
-            },
+            handler: ([, handles, size, needed])=>enumModules(handles, size, needed),
+        },
+
+        /**
+         * BOOL K32EnumProcessModulesEx(HANDLE hProcess, HMODULE *lphModule, DWORD cb,
+         *     LPDWORD lpcbNeeded, DWORD dwFilterFlag)
+         *
+         * The same, filtered to the 32- or 64-bit modules: every module of a process
+         * is of its own width here, so the filter keeps them all.
+         */
+        K32EnumProcessModulesEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, handles, size, needed])=>enumModules(handles, size, needed),
         },
 
         /**

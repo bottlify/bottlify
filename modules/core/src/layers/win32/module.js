@@ -3046,6 +3046,7 @@ export function createWin32Module(){
                     ...seh64 ? seh64.table : {},
                     ...createModuleFunctions({
                         readCString,
+                        pointerSize,
                         readWideString,
                         writeMemory,
                         readMemory,
