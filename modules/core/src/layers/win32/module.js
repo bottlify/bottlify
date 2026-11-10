@@ -3711,6 +3711,13 @@ export function createWin32Module(){
                 'ncrypt.dll': createNcryptFunctions({ writeMemory, readMemory,
                     setLastError: setError }),
 
+                // Libraries every Windows has and nothing here calls into: a
+                // program loads them to learn whether LoadLibraryEx searches
+                // System32 alone, and asks again on every call while they fail.
+                'cryptbase.dll': {},
+                'cryptnet.dll': {},
+                'msasn1.dll': {},
+
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
                 'faultrep.dll': createFaultrepFunctions(),
                 // What Internet Explorer calls itself, for a module that
