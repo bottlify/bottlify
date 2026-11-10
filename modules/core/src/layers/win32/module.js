@@ -105,6 +105,7 @@ import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerMsxmlClasses } from './msxml/dom.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
+import { registerMmDevApiClasses } from './ole32/mmdevapi.js';
 import { createWindowscodecs, gdiPixels } from './windowscodecs/functions.js';
 import { registerJScriptClass } from './jscript/active-script.js';
 import { registerVBScriptClass } from './vbscript/active-script.js';
@@ -2090,6 +2091,12 @@ export function createWin32Module(){
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 windows, directx, screen: config?.screen, physicalMemory: arena.size,
                 divergence: config?.divergence,
+            });
+
+            // The audio endpoints a program walks to find the device it plays to.
+            registerMmDevApiClasses({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                pointerSize, divergence: config?.divergence,
             });
 
             // DirectPlay's session and lobby objects, which a program makes
