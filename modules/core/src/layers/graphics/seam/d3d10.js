@@ -1166,11 +1166,24 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      *     methods
      */
     /**
+     * The longest of the faces' slot lists this one is a prefix of: every version of an
+     * interface the object has, its vtable whole. Windows hands one object out under
+     * IDXGIFactory1 to 7 with one vtable, and a program calls IDXGIFactory2's methods
+     * through the pointer CreateDXGIFactory1 gave it; a vtable cut at the asked
+     * version's end sent such a call to whatever lay past it.
+     *
+     * @param {[string, number][]} slots @param {[string, [string, number][]][]} faces
+     * @returns {[string, number][]}
+     */
+    const widest = (slots, faces)=>faces.reduce((best, [, other])=>(other.length > best.length
+        && slots.every(([name], index)=>other[index]?.[0] === name) ? other : best), slots);
+
+    /**
      * @param {[string, [string, number][]][]} faces @param {any} methods
      * @param {Record<string, (builder: { trap: number }) => number>} [guests]
      */
-    const describeAll = (faces, methods, guests)=>faces.map(([id, slots])=>describe(id, slots,
-        methods, guests));
+    const describeAll =(faces, methods, guests)=>faces.map(([id, slots])=>describe(id,
+        widest(slots, faces), methods, guests));
 
     /**
      * A notice registered by cookie, which is never sent here (nothing is

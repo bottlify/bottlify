@@ -596,11 +596,13 @@ for (const elsewhere of [false, true])
             'GetAdapter'), [adapterAt]), S_OK);
         const factoryAt = s.place([0, 0]);
         assert.equal(s.call(s.memory.readU32(adapterAt), slot(IDXGIDEVICE_SLOTS, 'GetParent'),
-            [s.placeGuid(IID.IDXGIFactory2), factoryAt]), S_OK);
+            [s.placeGuid(IID.IDXGIFactory1), factoryAt]), S_OK);
         // DXGI_SWAP_CHAIN_DESC1: 640 by 480, B8G8R8A8, one sample, a render target, two
         // buffers, FLIP_DISCARD.
         const desc1 = s.place([640, 480, 87, 0, 1, 0, 0x20, 2, 0, 4, 0, 0]);
         const chainAt = s.place([0xcccccccc, 0xcccccccc]);
+        // IDXGIFactory2's method through the IDXGIFactory1 pointer, as an engine calls it:
+        // one object, its vtable the newest version's whatever it was asked as.
         assert.equal(s.call(s.memory.readU32(factoryAt), slot(IDXGIFACTORY2_SLOTS,
             'CreateSwapChainForHwnd'), [device, 0x1234, desc1, 0, 0, chainAt]), S_OK);
         assert.notEqual(s.memory.readU32(chainAt), 0, 'the swap chain handed back');
