@@ -3423,3 +3423,12 @@ test('a BC volume stays compressed only where the GPU has sliced-3d BC; it is de
                 features.join(', '));
         }
     });
+
+test('a frame\'s replay is timed, and how much of it waited on its pipelines', async()=>{
+    const h = harness();
+    h.device.ClearRenderTargetView(h.renderTargetView, [0, 0, 0, 1]);
+    await h.present();
+    const { replayMs, pipelineWaitMs } = h.device.diagnostics();
+    assert.equal(typeof replayMs, 'number');
+    assert.ok(pipelineWaitMs >= 0 && pipelineWaitMs <= replayMs + 1, 'the wait is part of it');
+});

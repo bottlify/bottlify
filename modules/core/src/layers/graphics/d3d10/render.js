@@ -793,6 +793,10 @@ export function createRenderer(services){
     };
 
     const counters = {
+        // A frame's replay, and how much of it waited on its pipelines: where
+        // the time from a present to the queue goes.
+        replayMs: 0,
+        pipelineWaitMs: 0,
         frames: 0,
         draws: 0,
         clears: 0,
@@ -5685,6 +5689,8 @@ export function createRenderer(services){
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
+                replayMs: Math.round(counters.replayMs),
+                pipelineWaitMs: Math.round(counters.pipelineWaitMs),
                 tessellation: tessellation ? tessellation.diagnostics() : null,
                 geometry: geometryPasses ? geometryPasses.diagnostics() : null,
             }, 'lastFrame', { value: lastFrame });
@@ -5704,7 +5710,17 @@ export function createRenderer(services){
         const counting = recordingCounters;
         recordingCounters = new Set();
         const cut = backend.markPresent();
-        chain = chain.then(()=>replay(recorded, surface, cut)).catch(failure=>{
+        chain = chain.then(async()=>{
+            const began = performance.now();
+            try
+            {
+                await replay(recorded, surface, cut);
+            }
+            finally
+            {
+                counters.replayMs += performance.now() - began;
+            }
+        }).catch(failure=>{
             counters.failures.push(String(failure && failure.message || failure));
             divergence?.('Direct3D 10', `lost a frame: ${failure && failure.message || failure}`,
                 'loss');
@@ -5737,8 +5753,10 @@ export function createRenderer(services){
      * @param {number} cut   the backend's cut the recording was queued as
      */
     async function replay(recorded, surface, cut){
+        const began = performance.now();
         const pipelinesNeeded = await Promise.allSettled(
             recorded.map(command=>command.pipeline ?? null));
+        counters.pipelineWaitMs += performance.now() - began;
         const frame = backend.beginFrame({ cut });
         /** @type {{ read: () => Promise<any>, command: any }[]} */
         const readers = [];
