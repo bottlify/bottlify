@@ -340,6 +340,12 @@ const ERROR_INVALID_PARAMETER = 87;
 /** Every right a token has, which a service asks of the user's token for its programs. */
 const TOKEN_ALL_ACCESS = 0x000f01ff;
 
+/** nvapi's one export: every interface asked for by id is absent. */
+const NVAPI = Object.freeze({
+    /** void *nvapi_QueryInterface(unsigned int id) */
+    nvapi_QueryInterface: { argBytes: 4, convention: 'cdecl', handler: ()=>0 },
+});
+
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
     'difxapi.dll', 'gdi32.dll', 'gdiplus.dll', 'imagehlp.dll', 'imm32.dll',
@@ -3714,6 +3720,12 @@ export function createWin32Module(){
                 // Libraries every Windows has and nothing here calls into: a
                 // program loads them to learn whether LoadLibraryEx searches
                 // System32 alone, and asks again on every call while they fail.
+                // The display driver's interface, there because the adapter is
+                // NVIDIA's: it offers no function, so a program takes the path
+                // it takes on a driver without the one it asks for. Missing,
+                // the library linked into a program loads it at every call.
+                'nvapi.dll': NVAPI,
+                'nvapi64.dll': NVAPI,
                 'cryptbase.dll': {},
                 'cryptnet.dll': {},
                 'msasn1.dll': {},

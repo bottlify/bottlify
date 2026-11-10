@@ -8,7 +8,9 @@
  * LoadLibraryEx of libraries every Windows has, through `createApp`, with
  * LOAD_LIBRARY_SEARCH_SYSTEM32: a statically linked runtime loads cryptnet,
  * cryptbase and msasn1 that way to learn whether the flag is understood, and
- * asked again on every call while they were missing.
+ * asked again on every call while they were missing; and the display
+ * driver's nvapi, which the library a program links for it loads at every
+ * call while it is missing, the adapter being NVIDIA's.
  */
 
 import { test } from 'node:test';
@@ -21,7 +23,7 @@ const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value
 /** @param {string} text */
 const cString = text=>[...new TextEncoder().encode(text), 0];
 
-const NAMES = ['cryptnet.dll', 'cryptbase.dll', 'msasn1.dll'];
+const NAMES = ['cryptnet.dll', 'cryptbase.dll', 'msasn1.dll', 'nvapi.dll'];
 const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800;
 
 test('the system libraries a runtime probes with LoadLibraryEx are there',
