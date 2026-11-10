@@ -2636,6 +2636,8 @@ export function createWin32Module(){
                         regionAt: address=>memory.find(address),
                         /** @param {number} address */
                         nextRegionAfter: address=>memory.nextRegionAfter(address) ?? null,
+                        mappedTop: ()=>memory.list().reduce((/** @type {number} */ top,
+                            /** @type {any} */ region)=>Math.max(top, region.base + region.size), 0),
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,

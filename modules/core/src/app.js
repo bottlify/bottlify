@@ -6985,7 +6985,7 @@ async function buildApp(options){
         // A region of its own, so the host's accesses there pass the map; the image's
         // pages keep their own protection at its real address.
         memory.register({ name: 'image (low dword)', base: aliasAt,
-            size: programLoaded.sizeOfImage, kind: memory.RegionKind.IMAGE,
+            size: programLoaded.sizeOfImage, kind: memory.RegionKind.RESERVED,
             access: memory.Access.READ_WRITE_EXECUTE });
     }
 
