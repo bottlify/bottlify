@@ -314,3 +314,14 @@ test('seeded stack traffic and untested reads run in loose regions as interprete
         assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
     }
 });
+
+test('a non-temporal store with REX.W stores its quadword whole, in the shared emitter\'s regions'
+    + ' as interpreted', ()=>{
+    // movnti [rbx], rdx / [rbx], edx / [rbx+8], r10: the C runtime's memset of
+    // a large block, whose regions were refused whole while the store was
+    // read as a dword's.
+    const cases = edges(['480fc313', '0fc313', '4c0fc35308'], [0]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});

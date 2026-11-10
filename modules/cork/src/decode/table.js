@@ -616,7 +616,7 @@ TWO_BYTE[0xc2] = S({
     '': I('cmpps', 'Vps,Wps,Ib'), 66: I('cmppd', 'Vpd,Wpd,Ib'), f3: I('cmpss', 'Vss,Wss,Ib'),
     f2: I('cmpsd', 'Vsd,Wsd,Ib'),
 });
-TWO_BYTE[0xc3] = I('movnti', 'Md,Gy');
+TWO_BYTE[0xc3] = I('movnti', 'My,Gy');
 TWO_BYTE[0xc4] = S({ '': I('pinsrw', 'Pq,Ew,Ib'), 66: I('pinsrw', 'Vdq,Ew,Ib') });
 TWO_BYTE[0xc5] = S({ '': I('pextrw', 'Gy,Nq,Ib'), 66: I('pextrw', 'Gy,Udq,Ib') });
 TWO_BYTE[0xc6] = S({ '': I('shufps', 'Vps,Wps,Ib'), 66: I('shufpd', 'Vpd,Wpd,Ib') });
