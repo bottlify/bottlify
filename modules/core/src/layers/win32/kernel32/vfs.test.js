@@ -515,6 +515,8 @@ test('a large read of an unchanged file is kept; a write makes the next one fres
     assert.equal(reads, 1, 'the second read was the kept one');
     vol.read(node, 0, 100);
     assert.equal(reads, 2, 'a small read is not kept');
+    assert.equal(vol.read(node, 0, size, true), vol.read(node, 0, size, true),
+        'a reader that only copies out gets the kept bytes themselves');
 
     vol.write(node, 0, new Uint8Array([5]));
     assert.equal(vol.read(node, 0, size)[0], 5, 'written moments ago: read fresh');

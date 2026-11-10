@@ -2865,7 +2865,9 @@ export function createWin32Module(){
                              *
                              * @param {any} node @param {number} offset @param {number} length
                              */
-                            read: (node, offset, length)=>volume.read(node, offset, length),
+                            // Copied into the view and never written into: a
+                            // kept read comes as it is.
+                            read: (node, offset, length)=>volume.read(node, offset, length, true),
                             /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                             write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                             /** @param {any} node */

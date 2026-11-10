@@ -306,11 +306,16 @@ export function createVolume(fs, fetchBlocks = null){
             ? `${entry.identity ?? entry.path}|${entry.size}|${entry.modified}|${offset}|${length}`
             : null;
     };
-    /** @param {string | null} key @param {Uint8Array} bytes */
+    /**
+     * Keeps a read, and answers whether it did: what is kept is handed out
+     * only as a copy.
+     *
+     * @param {string | null} key @param {Uint8Array} bytes
+     */
     const keep = (key, bytes)=>{
         if (key === null || bytes.length > KEPT_READ_BYTES)
         {
-            return bytes;
+            return false;
         }
         kept.set(key, bytes);
         keptBytes += bytes.length;
@@ -323,8 +328,7 @@ export function createVolume(fs, fetchBlocks = null){
             kept.delete(oldest);
             keptBytes -= held.length;
         }
-        // Copied out: whoever reads may write into what it was given.
-        return bytes.slice();
+        return true;
     };
 
     /** @param {string} path  The volume's own spelling, no trailing separator. */
@@ -554,21 +558,26 @@ export function createVolume(fs, fetchBlocks = null){
          * same machinery that parks it on any other call that cannot answer yet.
          *
          * @param {any} node @param {number} offset @param {number} length
+         * @param {boolean} [onlyCopied]  the caller copies the bytes out and
+         *        never writes into them, so kept ones come as they are
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
-        read(node, offset, length){
+        read(node, offset, length, onlyCopied = false){
             const key = keptKey(node, offset, length);
             const held = key === null ? undefined : kept.get(key);
             if (held)
             {
                 kept.delete(/** @type {string} */ (key));
                 kept.set(/** @type {string} */ (key), held);
-                return held.slice();
+                return onlyCopied ? held : held.slice();
             }
             const bytes = this.readFresh(node, offset, length);
+            // Copied out when kept: whoever reads may write into what it got.
+            /** @param {Uint8Array} arrived */
+            const kept_ = arrived=>(keep(key, arrived) && !onlyCopied ? arrived.slice() : arrived);
             return typeof (/** @type {any} */ (bytes))?.then === 'function'
-                ? /** @type {Promise<Uint8Array>} */ (bytes).then(arrived=>keep(key, arrived))
-                : keep(key, /** @type {Uint8Array} */ (bytes));
+                ? /** @type {Promise<Uint8Array>} */ (bytes).then(kept_)
+                : kept_(/** @type {Uint8Array} */ (bytes));
         },
 
         /**

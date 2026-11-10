@@ -387,7 +387,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
- * @property {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
+ * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
+ *     Uint8Array | Promise<Uint8Array>} read
  *           Short at the end of the file; empty past it, which is not an error.
  *           A promise when the bytes are not resident yet -- see ReadFile.
  * @property {(node: any, offset: number, bytes: Uint8Array) => number} write
@@ -612,10 +613,14 @@ export function withSystemLibraries(real, libraries, where = {}){
             opened.set(standIn, image);
             return standIn;
         },
-        /** @param {any} node @param {number} offset @param {number} length */
-        read: (node, offset, length)=>{
+        /**
+         * @param {any} node @param {number} offset @param {number} length
+         * @param {boolean} [onlyCopied]
+         */
+        read: (node, offset, length, onlyCopied)=>{
             const image = opened.get(node);
-            return image ? image.slice(offset, offset + length) : real.read(node, offset, length);
+            return image ? image.slice(offset, offset + length)
+                : real.read(node, offset, length, onlyCopied);
         },
         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
         write: (node, offset, bytes)=>(opened.has(node) ? 0 : real.write(node, offset, bytes)),
