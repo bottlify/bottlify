@@ -5691,6 +5691,7 @@ export function createRenderer(services){
                 pipelines: pipelines.size,
                 replayMs: Math.round(counters.replayMs),
                 pipelineWaitMs: Math.round(counters.pipelineWaitMs),
+                shaders: backend?.shaderStats?.() ?? null,
                 tessellation: tessellation ? tessellation.diagnostics() : null,
                 geometry: geometryPasses ? geometryPasses.diagnostics() : null,
             }, 'lastFrame', { value: lastFrame });
