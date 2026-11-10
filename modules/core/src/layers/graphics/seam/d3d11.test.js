@@ -46,7 +46,8 @@ const RELEASE = 2;
  * A flat address space, the bridge's publisher, and the seam over a recording
  * GPU: the device drawn here, or recorded and played elsewhere.
  *
- * @param {{ elsewhere?: boolean, sharedHandles?: { open: (key: number) => number,
+ * @param {{ elsewhere?: boolean, pointerSize?: 4 | 8,
+ *     sharedHandles?: { open: (key: number) => number,
  *     resolve: (handle: number) => number | null } }} [options]
  */
 function seamed(options = {}){
@@ -117,6 +118,7 @@ function seamed(options = {}){
         },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         sharedHandles: options.sharedHandles,
+        ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
     });
     /** @param {number[]} dwords */
     const place = dwords=>{
@@ -363,6 +365,28 @@ for (const elsewhere of [false, true])
         assert.equal(s.memory.readU32(mappedAt + 4), 16, 'four texels a row');
     });
 }
+
+test('a 64-bit process lays its initial data and its map out whole: pointers of eight bytes',
+    async()=>{
+        const s = seamed({ pointerSize: 8 });
+        const { device, context } = s.create();
+        // D3D11_SUBRESOURCE_DATA at 64 bits: pSysMem a quadword, the pitches past it.
+        const words = s.place([10, 11, 12, 13]);
+        const initial = s.place([words, 0, 0, 0]);
+        const out = s.place([0xcccccccc, 0xcccccccc]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateBuffer'),
+            [s.place([16, D3D10_USAGE.STAGING, 0, 0x20000, 0, 0]), initial, out]), S_OK);
+        assert.equal(s.memory.readU32(out + 4), 0, 'the interface whole, its high half zero');
+        // D3D11_MAPPED_SUBRESOURCE at 64 bits: pData, then RowPitch and DepthPitch at 8.
+        const mapped = s.place([0xdeadbeef, 0xdeadbeef, 0xabab, 0xcdcd]);
+        assert.equal(await s.answer(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'Map'),
+            [s.memory.readU32(out), 0, 1, 0, mapped]) >>> 0, S_OK);
+        const at = s.memory.readU32(mapped);
+        assert.equal(s.memory.readU32(mapped + 4), 0, 'pData whole');
+        assert.deepEqual([8, 12].map(offset=>s.memory.readU32(mapped + offset)), [16, 16]);
+        assert.deepEqual([0, 1, 2, 3].map(index=>s.memory.readU32(at + 4 * index)),
+            [10, 11, 12, 13], 'the initial data read from its quadword pointer');
+    });
 
 test('a deferred map leaves the buffer as it was until its list plays, and refuses what it'
     + ' must (test_deferred_context_map, d3d11.c:33978)', async()=>{

@@ -414,6 +414,7 @@ export function createGraphicsLibraries(
         // process, whose calls all trap.
         ringAllocate: guestAllocate,
         allocateCode: guestAllocateCode, traps: new Set(guestTraps), ringBytes, floatResult,
+        pointerSize,
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
         events,

@@ -118,6 +118,23 @@ test('a swap chain description round trips through guest memory', ()=>{
     assert.deepEqual(readSwapChainDesc(memory, 0x100), desc);
 });
 
+test('a 64-bit swap chain description has its window on an eight-byte boundary', ()=>{
+    const memory = createMemory();
+    const desc = {
+        bufferDesc: { width: 800, height: 600, refreshNumerator: 0, refreshDenominator: 0,
+            format: DXGI_FORMAT.B8G8R8A8_UNORM, scanlineOrdering: 0, scaling: 0 },
+        sampleDesc: { count: 1, quality: 0 }, bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT,
+        bufferCount: 2, outputWindow: 0x00010004, windowed: true,
+        swapEffect: DXGI_SWAP_EFFECT.DISCARD, flags: 2,
+    };
+    writeSwapChainDesc(memory, 0x100, desc, 8);
+    assert.equal(readU32(memory, 0x100 + 0x30), 0x00010004, 'OutputWindow at 0x30');
+    assert.equal(readU32(memory, 0x100 + 0x34), 0, 'its high half');
+    assert.equal(readU32(memory, 0x100 + 0x38), 1, 'Windowed at 0x38');
+    assert.equal(readU32(memory, 0x100 + 0x40), 2, 'Flags at 0x40');
+    assert.deepEqual(readSwapChainDesc(memory, 0x100, 8), desc);
+});
+
 test('a windowed flag is a BOOL, so any non-zero value means true', ()=>{
     const memory = createMemory();
     writeSwapChainDesc(memory, 0x100, {

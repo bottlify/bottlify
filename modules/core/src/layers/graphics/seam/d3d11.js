@@ -262,6 +262,8 @@ const STAGE_SHADERS = Object.freeze({
  * @property {(address: number, objects: any[], interfaces: any[], id: string) => void}
  *     writeObjects
  * @property {(address: number, count: number) => any[]} readObjects
+ * @property {4 | 8} pointerSize  8 in a 64-bit process
+ * @property {(address: number, value: number) => void} writePointer  a pointer out, whole
  * @property {(address: number, count: number) => number[]} readDwords
  * @property {(address: number, count: number) => number[]} readFloats
  * @property {Record<string, Function>} privateDataMethods
@@ -1010,7 +1012,7 @@ export function createDirect3D11Seam(describe, kit, guests){
             && !(type === D3D10_MAP.WRITE_NO_OVERWRITE && last))
         {
             // A refused map hands out no pointer; the pitches stay as they were.
-            k().fields.writeU32(out, 0);
+            k().writePointer(out, 0);
             return type === D3D10_MAP.WRITE_NO_OVERWRITE
                 ? D3D11_ERROR_DEFERRED_CONTEXT_MAP_WITHOUT_INITIAL_DISCARD : E_INVALIDARG;
         }
@@ -1030,9 +1032,9 @@ export function createDirect3D11Seam(describe, kit, guests){
             held.set(resource, { address, bytes });
         }
         const mapped = /** @type {{ address: number }} */ (held.get(resource));
-        k().fields.writeU32(out, mapped.address);
-        k().fields.writeU32(out + 4, bytes);
-        k().fields.writeU32(out + 8, bytes);
+        k().writePointer(out, mapped.address);
+        k().fields.writeU32(out + k().pointerSize, bytes);
+        k().fields.writeU32(out + k().pointerSize + 4, bytes);
         return S_OK;
     };
 
@@ -1065,14 +1067,16 @@ export function createDirect3D11Seam(describe, kit, guests){
                     // as they were (test_resource_map).
                     if (mapped.hr !== S_OK)
                     {
-                        k().fields.writeU32(out, 0);
+                        k().writePointer(out, 0);
                         return mapped.hr;
                     }
                     const whole = resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER
                         ? resource.desc.ByteWidth : 0;
-                    k().fields.writeU32(out, mapped.address);
-                    k().fields.writeU32(out + 4, whole || mapped.rowPitch);
-                    k().fields.writeU32(out + 8, whole || mapped.depthPitch);
+                    // D3D11_MAPPED_SUBRESOURCE: pData a pointer, the pitches past it.
+                    const pitches = out + k().pointerSize;
+                    k().writePointer(out, mapped.address);
+                    k().fields.writeU32(pitches, whole || mapped.rowPitch);
+                    k().fields.writeU32(pitches + 4, whole || mapped.depthPitch);
                     return S_OK;
                 });
         });
