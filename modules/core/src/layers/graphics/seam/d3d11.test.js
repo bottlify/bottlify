@@ -20,7 +20,10 @@ import {
     ID3D11DEVICE1_SLOTS, ID3D11DEVICECHILD_SLOTS, ID3D11DEVICECONTEXT_SLOTS, ID3D11DEVICE_SLOTS,
     ID3D11RESOURCEDESC_SLOTS, ID3D11VIEWDESC_SLOTS, miscFlagsIn, miscFlagsOut,
 } from './d3d11.js';
-import { IDXGIKEYEDMUTEX_SLOTS, IDXGIRESOURCE1_SLOTS, IDXGIRESOURCE_SLOTS } from './d3d10.js';
+import {
+    IDXGIDEVICE_SLOTS, IDXGIFACTORY2_SLOTS, IDXGIKEYEDMUTEX_SLOTS, IDXGIRESOURCE1_SLOTS,
+    IDXGIRESOURCE_SLOTS,
+} from './d3d10.js';
 import {
     D3D10_BIND, D3D10_USAGE, D3D_FEATURE_LEVEL, DXGI_FORMAT, E_INVALIDARG, IID, S_FALSE, S_OK,
 } from '../d3d10/constants.js';
@@ -178,7 +181,7 @@ function seamed(options = {}){
             context: contextAt ? memory.readU32(contextAt) : 0,
         };
     };
-    return { memory, place, call, answer, query, create, divergences, seam };
+    return { memory, place, placeGuid, call, answer, query, create, divergences, seam };
 }
 
 test('D3D11CreateDevice answers S_FALSE asked for nothing, and makes a device of level 11.0'
@@ -580,3 +583,27 @@ test('a texture made shared is opened by another device through its handle: a le
 test('a shared texture is opened alike on a device recorded and played elsewhere', ()=>{
     sharedThrough(true);
 });
+
+for (const elsewhere of [false, true])
+{
+    test(`a window's swap chain from the factory its device's adapter belongs to${
+        elsewhere ? ', the device drawn elsewhere' : ''}`, ()=>{
+        const s = seamed({ elsewhere, pointerSize: 8 });
+        const { device } = s.create();
+        // As an engine finds the factory: the DXGI device, its adapter, the adapter's parent.
+        const adapterAt = s.place([0, 0]);
+        assert.equal(s.call(s.query(device, IID.IDXGIDevice), slot(IDXGIDEVICE_SLOTS,
+            'GetAdapter'), [adapterAt]), S_OK);
+        const factoryAt = s.place([0, 0]);
+        assert.equal(s.call(s.memory.readU32(adapterAt), slot(IDXGIDEVICE_SLOTS, 'GetParent'),
+            [s.placeGuid(IID.IDXGIFactory2), factoryAt]), S_OK);
+        // DXGI_SWAP_CHAIN_DESC1: 640 by 480, B8G8R8A8, one sample, a render target, two
+        // buffers, FLIP_DISCARD.
+        const desc1 = s.place([640, 480, 87, 0, 1, 0, 0x20, 2, 0, 4, 0, 0]);
+        const chainAt = s.place([0xcccccccc, 0xcccccccc]);
+        assert.equal(s.call(s.memory.readU32(factoryAt), slot(IDXGIFACTORY2_SLOTS,
+            'CreateSwapChainForHwnd'), [device, 0x1234, desc1, 0, 0, chainAt]), S_OK);
+        assert.notEqual(s.memory.readU32(chainAt), 0, 'the swap chain handed back');
+        assert.equal(s.memory.readU32(chainAt + 4), 0, 'whole');
+    });
+}

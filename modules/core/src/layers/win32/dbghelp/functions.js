@@ -73,6 +73,7 @@ const WALK_STARTED = 0x4b4c4157;
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           EDX, for a DWORD64 answer: the high half of an x86 address is zero.
  * @property {(address: number) => string} [readCString]
+ * @property {(address: number) => string} [readWide]
  * @property {{ stat: (path: string) => { exists: boolean, isDirectory: boolean } | null,
  *     mkdir: (path: string) => boolean, currentDirectory?: () => string }} [files]
  *           The volume, for MakeSureDirectoryPathExists.
@@ -80,10 +81,13 @@ const WALK_STARTED = 0x4b4c4157;
 
 /**
  * @param {DbghelpHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => number }>}
+ * @returns {Record<string, { argBytes: number, quadwords?: number[],
+ *     handler: (args: number[]) => number }>}
  */
 export function createDbghelpFunctions(host){
     let options = SYMOPT_UNDNAME;
+    /** The symbol search path SymSetSearchPathW was given. */
+    let searchPath = '';
 
     /** @param {number} address @returns {number | null} */
     const readU32 = address=>{
@@ -251,6 +255,77 @@ export function createDbghelpFunctions(host){
 
         /** BOOL SymInitialize(HANDLE hProcess, PCSTR UserSearchPath, BOOL fInvadeProcess) */
         SymInitialize: { argBytes: 12, handler: ()=>1 },
+        /** BOOL SymInitializeW(HANDLE hProcess, PCWSTR UserSearchPath, BOOL fInvadeProcess) */
+        SymInitializeW: { argBytes: 12, handler: ()=>1 },
+
+        /**
+         * BOOL SymSetSearchPathW(HANDLE hProcess, PCWSTR SearchPath) and the getter:
+         * where symbols would be looked for. None are read here; the path set is
+         * kept for the getter, an empty one where none was set.
+         */
+        SymSetSearchPathW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, path])=>{
+                searchPath = (path >>> 0) === 0 ? '' : host.readWide?.(path >>> 0) ?? '';
+                return 1;
+            },
+        },
+        /** BOOL SymGetSearchPathW(HANDLE hProcess, PWSTR SearchPath, DWORD SearchPathLength) */
+        SymGetSearchPathW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, out, room])=>{
+                if ((out >>> 0) === 0 || (room >>> 0) < searchPath.length + 1)
+                {
+                    return fail(0, ERROR_INVALID_PARAMETER);
+                }
+                host.writeMemory(out >>> 0,
+                    new Uint8Array(Uint16Array.from(`${searchPath}\0`, c=>c.charCodeAt(0)).buffer));
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD64 SymLoadModuleExW(HANDLE hProcess, HANDLE hFile, PCWSTR ImageName,
+         *     PCWSTR ModuleName, DWORD64 BaseOfDll, DWORD DllSize, PMODLOAD_DATA Data,
+         *     DWORD Flags), and SymLoadModuleEx and SymLoadModule64 beside it: the base,
+         *     as SymLoadModule answers.
+         */
+        SymLoadModuleExW: {
+            argBytes: 36,
+            quadwords: [4],
+            /** @param {number[]} args */
+            handler: ([, , , , base])=>((base >>> 0) !== 0 ? base >>> 0
+                : fail(0, ERROR_MOD_NOT_FOUND)),
+        },
+        SymLoadModuleEx: {
+            argBytes: 36,
+            quadwords: [4],
+            /** @param {number[]} args */
+            handler: ([, , , , base])=>((base >>> 0) !== 0 ? base >>> 0
+                : fail(0, ERROR_MOD_NOT_FOUND)),
+        },
+        SymLoadModule64: {
+            argBytes: 28,
+            quadwords: [4],
+            /** @param {number[]} args */
+            handler: ([, , , , base])=>((base >>> 0) !== 0 ? base >>> 0
+                : fail(0, ERROR_MOD_NOT_FOUND)),
+        },
+        /** BOOL SymUnloadModule64(HANDLE hProcess, DWORD64 BaseOfDll) */
+        SymUnloadModule64: { argBytes: 12, quadwords: [1], handler: ()=>1 },
+        /** BOOL SymRefreshModuleList(HANDLE hProcess) */
+        SymRefreshModuleList: { argBytes: 4, handler: ()=>1 },
+
+        /**
+         * BOOL SymFromAddrW(HANDLE, DWORD64 Address, PDWORD64 Displacement,
+         *     PSYMBOL_INFOW Symbol) and SymGetLineFromAddrW64: no symbol, no line.
+         */
+        SymFromAddrW: { argBytes: 20, quadwords: [1],
+            handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+        SymGetLineFromAddrW64: { argBytes: 20, quadwords: [1],
+            handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
 
         /** BOOL SymCleanup(HANDLE hProcess) */
         SymCleanup: { argBytes: 4, handler: ()=>1 },
@@ -364,6 +439,7 @@ export function createDbghelpFunctions(host){
          */
         SymGetModuleInfo64: {
             argBytes: 16,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([, address, high, info])=>{
                 const at = address >>> 0;
