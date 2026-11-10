@@ -108,14 +108,31 @@ export { ValType };
  */
 export function memory64(bytes, shared = false){
     const pages = bytes / 65536;
-    try
+    const asks = [
+        { address: 'i64', shared, initial: BigInt(pages), maximum: BigInt(pages) },
+        { address: 'i64', shared, initial: pages, maximum: pages },
+        { index: 'i64', shared, initial: pages, maximum: pages },
+    ];
+    /** @type {string[]} */
+    const refused = [];
+    for (const ask of asks)
     {
-        return new WebAssembly.Memory(/** @type {any} */ ({ address: 'i64', shared,
-            initial: BigInt(pages), maximum: BigInt(pages) }));
+        try
+        {
+            const memory = new WebAssembly.Memory(/** @type {any} */ (ask));
+            // An engine that ignores the 64-bit key makes a 32-bit memory, or refuses its size.
+            if (memory.buffer.byteLength === bytes)
+            {
+                return memory;
+            }
+            refused.push(`${Object.keys(ask)[0]}: ${memory.buffer.byteLength} bytes made`);
+        }
+        catch (e){
+            const form = typeof ask.initial === 'bigint' ? ' (BigInt)' : '';
+            refused.push(`${Object.keys(ask)[0]}${form}: `
+                + String(/** @type {Error} */ (e)?.message ?? e));
+        }
     }
-    catch (e){
-        void e;
-        return new WebAssembly.Memory(/** @type {any} */ ({ index: 'i64', shared,
-            initial: pages, maximum: pages }));
-    }
+    throw new RangeError(`memory64 of ${bytes} bytes${shared ? ', shared' : ''} not made: `
+        + refused.join('; '));
 }
