@@ -1622,7 +1622,8 @@ export function createCorkHost(config){
         halted = false;
         if (!entered)
         {
-            setEip(ramData.getUint32(ramOffset(entryVector), true));
+            setEip(long ? Number(ramData.getBigUint64(ramOffset(entryVector), true))
+                : ramData.getUint32(ramOffset(entryVector), true));
         }
         let remaining = maxInstructions;
         let ran = 0;

@@ -65,6 +65,8 @@ const u32 = value=>[
     value >>> 16 & 0xff,
     value >>> 24 & 0xff,
 ];
+/** A quadword, a number below 2^53, little-endian. @param {number} value */
+const u64 = value=>[...u32(value >>> 0), ...u32(Math.floor(value / 2 ** 32))];
 
 /**
  * @typedef {Object} TlsSetup
@@ -192,13 +194,14 @@ function longProcessInit({ libraries, entryPoint, loaderLock }){
     const attached = [];
     let tlsImages = 0;
     /** @param {number} routine */
+    // Every address a whole quadword: a wide window's image lies past 4 GiB.
     const call = routine=>[
-        0xb8, ...u32(routine), //               mov eax, routine
+        0x48, 0xb8, ...u64(routine), //         mov rax, routine
         0xff, 0xd0, //                          call rax
     ];
     /** DllMain's three arguments, and the call. @param {number} base @param {number} routine */
     const attach = (base, routine)=>[
-        0xb9, ...u32(base), //                  mov ecx, hinstDLL
+        0x48, 0xb9, ...u64(base), //            mov rcx, hinstDLL
         0xba, ...u32(DLL_PROCESS_ATTACH), //    mov edx, fdwReason
         0x41, 0xb8, ...u32(LOADED_STATICALLY), // mov r8d, lpvReserved
         ...call(routine),
@@ -235,7 +238,7 @@ function longProcessInit({ libraries, entryPoint, loaderLock }){
     code.push(
         ...locked(loaderLock?.leave ?? 0),
         0x48, 0x83, 0xc4, 0x28, //              add rsp, 40
-        0xb8, ...u32(entryPoint), //            mov eax, entry
+        0x48, 0xb8, ...u64(entryPoint), //      mov rax, entry
         0xff, 0xe0, //                          jmp rax
     );
     return { bytes: new Uint8Array(code), attached, tlsImages };
