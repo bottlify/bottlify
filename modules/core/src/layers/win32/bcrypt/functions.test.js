@@ -128,3 +128,92 @@ test('an algorithm opened for an HMAC keys its hashes by the secret', ()=>{
     putWide(0x140, 'SHA384');
     assert.equal(fns.BCryptOpenAlgorithmProvider.handler([0x10, 0x140, 0, 0]), STATUS_NOT_FOUND);
 });
+
+/** @param {string} text */
+const bytesOf = text=>Uint8Array.from(text.match(/../g) ?? [], byte=>parseInt(byte, 16));
+
+/**
+ * An AES key of `secret` (hex) in a fresh machine; the algorithm's handle and the key's.
+ *
+ * @param {string} secret
+ */
+function aesKey(secret){
+    const m = machine();
+    m.putWide(0x200, 'AES');
+    assert.equal(m.fns.BCryptOpenAlgorithmProvider.handler([0x300, 0x200, 0, 0]), 0);
+    const algorithm = m.view.getUint32(0x300, true);
+    m.memory.set(bytesOf(secret), 0x400);
+    assert.equal(m.fns.BCryptGenerateSymmetricKey.handler(
+        [algorithm, 0x304, 0, 0, 0x400, secret.length / 2, 0]), 0);
+    return { ...m, algorithm, key: m.view.getUint32(0x304, true) };
+}
+
+test('an AES key in CBC enciphers SP 800-38A\'s vectors, the IV left on the chain', ()=>{
+    // NIST SP 800-38A F.2.1, CBC-AES128.Encrypt, its first two blocks.
+    const { memory, fns, view, key } = aesKey('2b7e151628aed2a6abf7158809cf4f3c');
+    memory.set(bytesOf('000102030405060708090a0b0c0d0e0f'), 0x500);
+    memory.set(bytesOf('6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51'), 0x600);
+    assert.equal(fns.BCryptEncrypt.handler([key, 0x600, 32, 0, 0x500, 16, 0x700, 32, 0x800, 0]), 0);
+    assert.equal(view.getUint32(0x800, true), 32);
+    assert.equal(hex(memory.subarray(0x700, 0x720)),
+        '7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2');
+    assert.equal(hex(memory.subarray(0x500, 0x510)), '5086cb9b507219ee95db113a917678b2',
+        'the IV is the last cipher block');
+
+    memory.set(bytesOf('000102030405060708090a0b0c0d0e0f'), 0x500);
+    assert.equal(fns.BCryptDecrypt.handler([key, 0x700, 32, 0, 0x500, 16, 0x900, 32, 0x800, 0]), 0);
+    assert.equal(hex(memory.subarray(0x900, 0x920)),
+        '6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51');
+});
+
+test('BCRYPT_BLOCK_PADDING pads with PKCS #7 and takes it off; a size is asked with no buffer',
+    ()=>{
+        const { memory, fns, view, key, putWide, algorithm } = aesKey(
+            '000102030405060708090a0b0c0d0e0f');
+        // ECB, set on the key itself.
+        putWide(0x280, 'ChainingMode');
+        putWide(0x2c0, 'ChainingModeECB');
+        assert.equal(fns.BCryptSetProperty.handler([key, 0x280, 0x2c0, 32, 0]), 0);
+        memory.set(new TextEncoder().encode('hello'), 0x600);
+        assert.equal(fns.BCryptEncrypt.handler([key, 0x600, 5, 0, 0, 0, 0, 0, 0x800, 1]), 0);
+        assert.equal(view.getUint32(0x800, true), 16, 'five bytes padded to a block');
+        assert.equal(fns.BCryptEncrypt.handler([key, 0x600, 5, 0, 0, 0, 0x700, 16, 0x800, 1]), 0);
+        assert.equal(fns.BCryptDecrypt.handler([key, 0x700, 16, 0, 0, 0, 0x900, 16, 0x800, 1]), 0);
+        assert.equal(view.getUint32(0x800, true), 5);
+        assert.equal(new TextDecoder().decode(memory.subarray(0x900, 0x905)), 'hello');
+        assert.equal(fns.BCryptEncrypt.handler([key, 0x600, 5, 0, 0, 0, 0x700, 16, 0x800, 0]),
+            0xc0000206 | 0, 'no padding: whole blocks only');
+        putWide(0x2c0, 'ChainingModeGCM');
+        assert.equal(fns.BCryptSetProperty.handler([algorithm, 0x280, 0x2c0, 32, 0]),
+            0xc00000bb | 0, 'a mode not kept is not supported');
+    });
+
+test('a duplicated key and hash go on apart from their originals', ()=>{
+    const { memory, fns, view, key } = aesKey('000102030405060708090a0b0c0d0e0f');
+    assert.equal(fns.BCryptDuplicateKey.handler([key, 0x310, 0, 0, 0]), 0);
+    const copy = view.getUint32(0x310, true);
+    assert.notEqual(copy, key);
+    assert.equal(fns.BCryptDestroyKey.handler([key]), 0);
+    memory.set(bytesOf('00112233445566778899aabbccddeeff'), 0x600);
+    assert.equal(fns.BCryptSetProperty.handler([copy, 0, 0, 0, 0]), STATUS_INVALID_PARAMETER);
+    assert.equal(fns.BCryptEncrypt.handler([copy, 0x600, 16, 0, 0, 0, 0x700, 16, 0x800, 0]), 0);
+    // FIPS 197 C.1, the zero IV in CBC making it the bare block.
+    assert.equal(hex(memory.subarray(0x700, 0x710)), '69c4e0d86a7b0430d8cdb78070b4c55a');
+    assert.equal(fns.BCryptDestroyKey.handler([key]), STATUS_INVALID_HANDLE);
+
+    const hashing = machine();
+    hashing.putWide(0x200, 'SHA256');
+    hashing.fns.BCryptOpenAlgorithmProvider.handler([0x300, 0x200, 0, 0]);
+    const sha = hashing.view.getUint32(0x300, true);
+    hashing.fns.BCryptCreateHash.handler([sha, 0x304, 0, 0, 0, 0, 0]);
+    const hash = hashing.view.getUint32(0x304, true);
+    hashing.memory.set(new TextEncoder().encode('abc'), 0x400);
+    hashing.fns.BCryptHashData.handler([hash, 0x400, 3, 0]);
+    assert.equal(hashing.fns.BCryptDuplicateHash.handler([hash, 0x308, 0, 0, 0]), 0);
+    const twin = hashing.view.getUint32(0x308, true);
+    hashing.fns.BCryptHashData.handler([hash, 0x400, 3, 0]);
+    assert.equal(hashing.fns.BCryptFinishHash.handler([twin, 0x500, 32, 0]), 0);
+    assert.equal(hex(hashing.memory.subarray(0x500, 0x520)),
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+        'SHA-256("abc"): the twin did not see the original\'s second update');
+});

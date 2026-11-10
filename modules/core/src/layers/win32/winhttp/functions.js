@@ -217,6 +217,16 @@ export function createWinhttpFunctions(host){
         },
 
         /**
+         * BOOL WinHttpCheckPlatform(void)
+         *
+         * Whether this platform runs WinHTTP: every one since Windows 2000 does.
+         */
+        WinHttpCheckPlatform: {
+            argBytes: 0,
+            handler: ()=>1,
+        },
+
+        /**
          * HINTERNET WinHttpOpen(LPCWSTR pszAgentW, DWORD dwAccessType,
          *     LPCWSTR pszProxyW, LPCWSTR pszProxyBypassW, DWORD dwFlags)
          */
