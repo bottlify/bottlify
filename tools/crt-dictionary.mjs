@@ -651,6 +651,13 @@ async function verify64(bytes, image, mapped, exports, specs){
                 DATA + DATA_BYTES - length));
             const args = operation === 'memset' ? [dst, int(2 ** 32), length]
                 : operation === 'strlen' ? [src] : [dst, src, length];
+            // __chkstk: rax the bytes to have below rsp, the thread block in the data
+            // with its StackLimit at the stack's open bottom or above it (a stack
+            // to grow, its probe writing into the pages between).
+            const chkstk = operation === 'chkstk64';
+            const size = [0, 8, 0x1000, 0x2000, 0xf00, 0xff00, 0x10000, 0x20000, 2 ** 40][int(9)]
+                + int(0x100);
+            const limit = STACK - [0x10000, 0x8000, 0x1000][int(3)];
             if (operation === 'strlen')
             {
                 data.forEach((v, i)=>{
@@ -659,7 +666,8 @@ async function verify64(bytes, image, mapped, exports, specs){
                 data[src - DATA + length] = 0;
             }
             const program = [
-                0x48, 0xb9, ...q(args[0]), 0x48, 0xba, ...q(args[1] ?? 0),
+                ...chkstk ? [0x48, 0xb8, ...q(size)] : [0x48, 0xb9, ...q(args[0])],
+                0x48, 0xba, ...q(args[1] ?? 0),
                 0x49, 0xb8, ...q(args[2] ?? 0),
                 0xe8, ...u32x((entry - (PROGRAM + 30 + 5)) >>> 0),
                 0x48, 0x89, 0x04, 0x25, ...u32x(OUT),
@@ -676,6 +684,10 @@ async function verify64(bytes, image, mapped, exports, specs){
                 for (let pass = 0; pass < 2; pass++)
                 {
                     ram.set(data, m.layout.ramBase + DATA);
+                    if (chkstk)
+                    {
+                        view.setBigUint64(m.layout.ramBase + DATA + 0x10, BigInt(limit), true);
+                    }
                     ram.fill(0, m.layout.ramBase + OUT, m.layout.ramBase + OUT + 8);
                     for (let r = 0; r < 16; r++)
                     {
@@ -683,6 +695,12 @@ async function verify64(bytes, image, mapped, exports, specs){
                             BigInt(Math.imul(r + 1, 0x9e3779b1) >>> 0) << 16n, true);
                     }
                     view.setBigUint64(m.layout.regs + 8 * 4, BigInt(STACK - 0x100), true);
+                    if (chkstk)
+                    {
+                        view.setBigUint64(m.layout.regs, BigInt(size), true);
+                        view.setBigUint64(/** @type {number} */ (m.layout.gsBase), BigInt(DATA),
+                            true);
+                    }
                     view.setBigUint64(m.layout.eip, BigInt(PROGRAM), true);
                     view.setUint32(m.layout.eflags, 0x202, true);
                     view.setUint32(m.layout.mxcsr, 0x1f80, true);
@@ -698,7 +716,8 @@ async function verify64(bytes, image, mapped, exports, specs){
                     out: [...ram.subarray(m.layout.ramBase + OUT, m.layout.ramBase + OUT + 8)],
                     data: Buffer.from(ram.subarray(m.layout.ramBase + DATA,
                         m.layout.ramBase + DATA + DATA_BYTES)).toString('base64'),
-                    saved: [3, 4, 5, 6, 7, 12, 13, 14, 15].map(r=>regs[r].toString(16)),
+                    saved: [3, 4, 5, 6, 7, ...chkstk ? [10, 11] : [], 12, 13, 14, 15]
+                        .map(r=>regs[r].toString(16)),
                     xmm: Buffer.from(ram.subarray(m.layout.xmm + 96, m.layout.xmm + 256))
                         .toString('hex') });
             });
@@ -707,7 +726,7 @@ async function verify64(bytes, image, mapped, exports, specs){
                 apart++;
                 if (apart <= 3)
                 {
-                    console.log(`  ${name} apart: ${JSON.stringify(args)}`
+                    console.log(`  ${name} apart: ${JSON.stringify(chkstk ? [size, limit] : args)}`
                         + `\n   ${seen[0].slice(0, 300)}\n   ${seen[1].slice(0, 300)}`);
                 }
             }

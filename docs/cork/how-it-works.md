@@ -72,7 +72,7 @@ is one instruction, where an offset of 64 KiB took two more. A program that may 
 
 A compiler links the same functions into every program it builds: its own helpers (`_ftol2`, the
 32-bit quadword arithmetic `_allmul`, `_alldiv`, `_aulldiv`, `_allrem`, `_aullrem`, `_aulldvrm`,
-the quadword shifts and `__chkstk`), and the C runtime's `memcpy`, `memmove`, `memset`, `strlen`
+the quadword shifts and `__chkstk`, 32-bit and x86-64), and the C runtime's `memcpy`, `memmove`, `memset`, `strlen`
 `sqrt`, `floor` and `ceil` in a program linked with the runtime statically. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
 `helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
 that differ where it is linked (relocated addresses, RIP-relative offsets, calls out of it)
@@ -86,7 +86,8 @@ where the function leaves it and no other register changes.
 Where the operation cannot be done whole in place, the call is made as it was and the function's
 own code runs: a span that reaches a closed page or translated code itself, an address past
 4 GiB, a `sqrt` of a negative number or a NaN (which sets `errno`), a `floor` or `ceil` of an
-infinity or a NaN, a divide by zero, a stack that `__chkstk` would probe into a closed page. A copy
+infinity or a NaN, a divide by zero, a stack that `__chkstk` would probe into a closed page or (x86-64) grow past
+the thread's limit. A copy
 or fill into a page that only holds code elsewhere, or is watched for writes, is made in place, the
 watched page marked written as a store marks it. A process over a wide window (a 64-bit image at
 0x140000000) forms its copies, fills and string lengths over the whole window, past 4 GiB too.

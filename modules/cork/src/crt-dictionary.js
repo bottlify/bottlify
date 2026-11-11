@@ -179,6 +179,9 @@ export const CRT_DICTIONARY = Object.freeze([
     // _chkstk, the compiler's own (llmath, chkstk): the same bytes in every MSVC
     entry({ name: '_chkstk', does: 'chkstk', quick: '27a7f2a3bdb1d9c9', hash: 'dfe28e9509ed3a48',
         spans: [[0, 43]], masks: [] }),
+    // __chkstk, the compiler's own (chkstk.obj), x86-64: the same bytes in every image seen
+    entry({ name: '__chkstk', does: 'chkstk64', bits: 64, quick: '7d8c83bf6e534bd5',
+        hash: '3166d08ff8ebcc9e', spans: [[0, 78]], masks: [] }),
     // _allshr, the compiler's own (llmath, chkstk): the same bytes in every MSVC
     entry({ name: '_allshr', does: 'allshr', quick: '95d4a299b46ad05f', hash: '0ad55242ad9d7388',
         spans: [[0, 33]], masks: [] }),

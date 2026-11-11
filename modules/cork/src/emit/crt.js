@@ -33,6 +33,7 @@ import { I32, I64 } from './flags.js';
 import { Exit, Local } from './region.js';
 import { registerLocal } from './width.js';
 import { pageFlagsAt } from '../runtime/layout.js';
+import { atState } from './bases.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
@@ -130,6 +131,8 @@ export function emitCrt(e, instruction){
             finiteArgument(e);
             leaveUnless(e, instruction);
             return true;
+        case 'chkstk64':
+            return isLong(e) && chkstk64(e, instruction);
         default:
             return !isLong(e) && helper32(e, instruction);
     }
@@ -245,6 +248,61 @@ function helper32(e, instruction){
     return false;
 }
 
+/**
+ * Long mode's `__chkstk`: the stack rax bytes below rsp at the call already
+ * the thread's (`rsp - rax`, 0 past the bottom, not below the thread block's
+ * StackLimit at gs:[0x10]), it does nothing a program sees -- the registers it
+ * saves it puts back, under rsp where the call left its return address. A
+ * stack to grow is the function's own to probe, page by page: then, or where
+ * the thread block's limit cannot be read, the call is made as it was.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function chkstk64(e, instruction){
+    const { b } = e;
+    const flags = pageFlagsAt(e.layout);
+    const rsp = registerLocal(e, ESP);
+    const rax = registerLocal(e, RAX);
+    b.i32const(0).localSet(Local.addr);
+    // The limit's address, in RAM and its quadword in an open page.
+    atState(e.context, b).load('i64', { offset: /** @type {number} */ (e.layout.gsBase) })
+        .i64const(0x10n).op(I64.add).localTee(Local.t64)
+        .i64const(BigInt(e.layout.ramSize - 8)).op(I64.gtU);
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.else();
+    for (const delta of [0n, 7n])
+    {
+        b.localGet(Local.t64).i64const(delta).op(I64.add).i64const(12n).op(I64.shrU).op(I64.wrap)
+            .load('i32_8u', { offset: flags }).i32const(PageFlag.INACCESSIBLE).op(I32.and)
+            .localGet(Local.addr).op(I32.or).localSet(Local.addr);
+    }
+    b.localGet(Local.addr);
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.else();
+    // rsp - rax, or 0 where rax is past rsp, below the limit: to grow.
+    b.i64const(0n).localGet(rsp).localGet(rax).op(I64.sub)
+        .localGet(rax).localGet(rsp).op(I64.gtU).select();
+    b.localGet(Local.t64);
+    if (isWide(e))
+    {
+        b.load('i64', { memory: e.layout.ramMemory });
+    }
+    else
+    {
+        b.op(I64.wrap).load('i64', { guest: true, offset: e.layout.ramBase });
+    }
+    b.op(I64.ltU);
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.end();
+    b.end();
+    b.end();
+    leaveUnless(e, instruction);
+    return true;
+}
+
 /** Whether the region is long mode's. @param {E} e */
 const isLong = e=>e.width.bits === 64;
 
@@ -256,7 +314,7 @@ const isLong = e=>e.width.bits === 64;
 const isWide = e=>e.layout.window !== undefined;
 
 /** What a wide window forms: the operations on its RAM, not the 32-bit helpers. */
-const WIDE_OPERATIONS = new Set(['memmove', 'memcpy', 'memset', 'strlen']);
+const WIDE_OPERATIONS = new Set(['memmove', 'memcpy', 'memset', 'strlen', 'chkstk64']);
 
 /**
  * The locals the destination and the source (or the string) are read from:

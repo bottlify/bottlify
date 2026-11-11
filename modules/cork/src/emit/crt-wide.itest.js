@@ -236,3 +236,87 @@ for (const [name, does] of /** @type {const} */ ([['memmove', 'memmove'], ['memm
         assert.ok(made > 0, `${made} calls made as they were`);
     });
 }
+
+/**
+ * The test's own long-mode `__chkstk`, as Microsoft's does it: r10 and r11
+ * kept, the bytes rax below the caller's rsp (0 past the bottom) compared with
+ * the thread block's StackLimit (gs:[0x10]), and below it each page from the
+ * limit down probed with a zero byte.
+ */
+const CHKSTK = [0x41, 0x52, 0x41, 0x53, 0x4c, 0x8d, 0x54, 0x24, 0x18, 0x49, 0x29, 0xc2, 0x73,
+    0x03, 0x45, 0x31, 0xd2, 0x65, 0x4c, 0x8b, 0x1c, 0x25, 0x10, 0x00, 0x00, 0x00, 0x4d, 0x39,
+    0xda, 0x73, 0x17, 0x49, 0x81, 0xe2, 0x00, 0xf0, 0xff, 0xff, 0x49, 0x81, 0xeb, 0x00, 0x10,
+    0x00, 0x00, 0x41, 0xc6, 0x03, 0x00, 0x4d, 0x39, 0xd3, 0x75, 0xf0, 0x41, 0x5b, 0x41, 0x5a,
+    0xc3];
+
+/**
+ * One `__chkstk` call, translated, with `helpers` or through the body: rax the
+ * size, the stack's top `AREA + 0x6000` in the area, the thread block at the
+ * area's start, its limit `limit` past the area's.
+ *
+ * @param {{ window?: number, high: number }} where @param {number} size
+ * @param {number} limit @param {false | object[]} helpers
+ */
+function runChkstk(where, size, limit, helpers){
+    const m = machine({ ...where, config: { helpers } });
+    const { high } = where;
+    const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout),
+        (where.window ?? 2 ** 32) / 4096);
+    const ram = new Uint8Array((m.ram ?? m.memory).buffer);
+    const view = new DataView(m.memory.buffer);
+    const from = AREA + high;
+    flags.fill(0, from / 4096, (from + AREA_BYTES) / 4096);
+    ram.fill(0x5a, from, from + AREA_BYTES);
+    new DataView(ram.buffer).setBigUint64(from + 0x10, BigInt(from + limit), true);
+    const program = [0x48, 0xb8, ...quad(size), 0xe8, ...quad(FUNCTION_OFFSET - 15).slice(0, 4),
+        0xe9, ...quad(CHKSTK.length + FUNCTION_OFFSET - 20).slice(0, 4)];
+    while (program.length < FUNCTION_OFFSET)
+    {
+        program.push(0x90);
+    }
+    const regs = Array.from({ length: 16 },
+        (unused, i)=>(BigInt(i) * 0x1111111111111n).toString(16));
+    regs[4] = BigInt(from + 0x6000).toString(16);
+    load(m, { code: Buffer.from([...program, ...CHKSTK]).toString('hex'), regs, flags: 0,
+        seed: 1, fresh: true });
+    view.setBigUint64(/** @type {number} */ (m.layout.gsBase), BigInt(from), true);
+    m.state.syncIn();
+    const seen = run(m, true, 100000);
+    return {
+        fault: seen.fault, regs: seen.regs.filter((unused, i)=>i !== 0),
+        rax: BigInt(`0x${seen.regs[0]}`) === BigInt(size) ? 'kept' : seen.regs[0],
+        bytes: Buffer.from(ram.subarray(from, from + 0x5f00)).toString('base64'),
+        retired: Number(seen.retired),
+    };
+}
+
+for (const where of [{ high: 0 }, { window: WINDOW, high: HIGH }])
+{
+    test(`long mode's __chkstk${where.window === undefined ? '' : ' in a wide window'}: made as`
+        + ' the operation as through the body', ()=>{
+        const helpers = [{ name: '__chkstk', does: 'chkstk64', bits: 64, length: CHKSTK.length,
+            hash: fingerprint(at=>CHKSTK[at] ?? 0, 0, CHKSTK.length) }];
+        let formed = 0;
+        let made = 0;
+        for (const size of [0, 8, 0x1000, 0x2fff, 0x5800, 0x6000, 0x7000, 2 ** 40, 2 ** 63])
+        {
+            for (const limit of [0, 0x3000, 0x5800, 0x6000])
+            {
+                const { retired: bodyRetired, ...body } = runChkstk(where, size, limit, false);
+                const { retired, ...seen } = runChkstk(where, size, limit, helpers);
+                assert.deepEqual(seen, body, `rax ${size.toString(16)}, limit ${limit}`);
+                assert.equal(body.rax, 'kept',
+                    `rax ${size.toString(16)}, limit ${limit}: ${body.fault}`);
+                if (retired < bodyRetired)
+                {
+                    formed++;
+                }
+                else
+                {
+                    made++;
+                }
+            }
+        }
+        assert.ok(formed > 8 && made > 8, `${formed} formed, ${made} made as they were`);
+    });
+}
