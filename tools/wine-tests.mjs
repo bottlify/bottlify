@@ -50,7 +50,7 @@
  *                         failing that held there
  *     --volume <dir>      a directory of this machine laid on C: before each test:
  *                         a runtime the tests need that is not part of the engine
- *                         (the Mono runtime and the .NET Framework stubs for mscoree)
+ *                         (the .NET Framework, for the tests of its libraries)
  *     --cork-config <json>  the translator's settings, over the ones used here
  *     --browser           run each test in a headless browser on WebGPU, through
  *                         tools/cdp_test/game.mjs: what a test draws is drawn and

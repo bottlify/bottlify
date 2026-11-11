@@ -113,6 +113,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.SECTION_NOT_IMAGE, 87],
         [STATUS.MAPPED_FILE_SIZE_ZERO, 1006],
         [STATUS.INVALID_IMAGE_NOT_MZ, 193],
+        [STATUS.INVALID_IMAGE_FORMAT, 193],
         [STATUS.INVALID_CID, 87],
         [STATUS.INVALID_PARAMETER_MIX, 87],
         [STATUS.RESOURCE_DATA_NOT_FOUND, 1812],

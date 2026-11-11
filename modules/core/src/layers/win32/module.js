@@ -120,10 +120,6 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
-import { createMscoreeFunctions } from './mscoree/functions.js';
-import { createFusionFunctions } from './fusion/functions.js';
-import { RUNTIME_LIBRARIES, runtimeDirectories } from './mscoree/versions.js';
-import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createHttpapiFunctions } from './httpapi/functions.js';
 import { createLoadperfFunctions } from './loadperf/functions.js';
@@ -891,14 +887,10 @@ export function createWin32Module(){
                 .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             // Every file call's volume, with the engine's libraries standing in
             // their folders as files of their images (A41).
-            /** The runtime folders an engine library stands in too (A237). @param {string} name */
-            const alsoIn = name=>(RUNTIME_LIBRARIES.includes(name.toLowerCase())
-                ? runtimeDirectories('C:\\WINDOWS') : []);
             const volume = withSystemLibraries(
                 createVolume(filesystem, config?.fetchBlocks ?? null),
                 ()=>systemLibraryNames(),
                 { homeOf: libraryHome,
-                    alsoIn,
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
@@ -3093,7 +3085,6 @@ export function createWin32Module(){
                         setLastError: setError,
                         imagePath: ()=>modules.imagePath(),
                         libraryHome,
-                        alsoIn,
                         list: ()=>modules.list?.() ?? [],
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
@@ -4251,116 +4242,6 @@ export function createWin32Module(){
                             heap.free(scratch);
                         }
                     },
-                }),
-
-                // A managed executable's entry, handed to the bottle's Mono runtime.
-                'mscoree.dll': createMscoreeFunctions({
-                    loadLibrary: async path=>{
-                        const name = heap.allocate(path.length + 1);
-                        writeMemory(name, encodeAnsi(`${path}\0`));
-                        try
-                        {
-                            return (await libraries['KERNEL32.dll'].LoadLibraryA.handler([name]))
-                                >>> 0;
-                        }
-                        finally
-                        {
-                            heap.free(name);
-                        }
-                    },
-                    procAddress: async(module, routine)=>{
-                        const name = heap.allocate(routine.length + 1);
-                        writeMemory(name, encodeAnsi(`${routine}\0`));
-                        try
-                        {
-                            return (await libraries['KERNEL32.dll'].GetProcAddress.handler(
-                                [module, name])) >>> 0;
-                        }
-                        finally
-                        {
-                            heap.free(name);
-                        }
-                    },
-                    callGuest: call=>bridge.callGuest(call),
-                    currentThread: ()=>kernel.currentThread(),
-                    heap,
-                    writeMemory,
-                    imagePath: ()=>modules.imagePath(),
-                    arguments: ()=>splitCommandLine(config?.commandLine
-                        ?? `"${modules.imagePath()}"`),
-                    exists: path=>Boolean(volume.stat(path)),
-                    getEnvironment: async variable=>{
-                        const name = heap.allocate(variable.length + 1);
-                        const value = heap.allocate(4096);
-                        writeMemory(name, encodeAnsi(`${variable}\0`));
-                        try
-                        {
-                            const length = (await libraries['KERNEL32.dll']
-                                .GetEnvironmentVariableA.handler([name, value, 4096])) >>> 0;
-                            return length === 0 || length >= 4096 ? null
-                                : decodeAnsi(readMemory(value, length));
-                        }
-                        finally
-                        {
-                            heap.free(name);
-                            heap.free(value);
-                        }
-                    },
-                    setEnvironment: async(variable, text)=>{
-                        const name = heap.allocate(variable.length + 1);
-                        const value = heap.allocate(text.length + 1);
-                        writeMemory(name, encodeAnsi(`${variable}\0`));
-                        writeMemory(value, encodeAnsi(`${text}\0`));
-                        try
-                        {
-                            return await libraries['KERNEL32.dll'].SetEnvironmentVariableA
-                                .handler([name, value]);
-                        }
-                        finally
-                        {
-                            heap.free(name);
-                            heap.free(value);
-                        }
-                    },
-                    // _CorExeMain gives up after awaiting the runtime: it has
-                    // left the bridge, so the process ends without parking it,
-                    // as the C runtime's exit does.
-                    exitProcess: code=>detachAndEnd(code) ?? code,
-                    readMemory,
-                    readWideString,
-                    windowsDirectory: ()=>'C:\\WINDOWS',
-                    readFile: async path=>{
-                        const entry = volume.stat(path);
-                        const node = entry && !entry.isDirectory
-                            ? volume.open(path, { read: true }) : null;
-                        if (!entry || !node)
-                        {
-                            return null;
-                        }
-                        try
-                        {
-                            return await volume.read(node, 0, entry.size);
-                        }
-                        finally
-                        {
-                            volume.close(node);
-                        }
-                    },
-                    publish: (object, iid)=>bridge.publishInterface(object, iid),
-                    divergence: config?.divergence,
-                }),
-
-                // The .NET assembly cache, as folders on the volume.
-                'fusion.dll': createFusionFunctions({
-                    readMemory,
-                    writeMemory,
-                    readWideString,
-                    pointerSize,
-                    windowsDirectory: ()=>'C:\\WINDOWS',
-                    files: volume,
-                    publish: (object, iid)=>bridge.publishInterface(object, iid),
-                    objectAt: pointer=>bridge.interfaceObject(pointer),
-                    divergence: config?.divergence,
                 }),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,

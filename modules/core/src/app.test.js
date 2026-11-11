@@ -1690,10 +1690,11 @@ test('resolveOpenglEntry remembers a seam that throws once, and reuses one that 
 test('an event line names a picture by its size, never by its pixels', ()=>{
     const line = describeEvent({
         width: 32, height: 32, hotSpot: { x: 1, y: 2 }, bgra: new Uint8Array(32 * 32 * 4),
-        shown: true, names: ['a', 'b'],
+        shown: true, names: ['a', 'b'], changes: [{ path: 'a.txt', kind: 'written' }],
     });
     assert.equal(line,
-        'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]');
+        'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]'
+        + ' changes=[{"path":"a.txt","kind":"written"}]');
 });
 
 test('a file\'s version block is read without reading the file', ()=>{

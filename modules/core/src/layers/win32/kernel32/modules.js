@@ -108,8 +108,6 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {() => string} imagePath  The path the running program was loaded from.
  * @property {(name: string) => string | null} [libraryHome]  The folder a library this
  *           build synthesises is installed in when it is not the system folder.
- * @property {(name: string) => string[]} [alsoIn]  The other folders a library this
- *           build synthesises stands in as a file (a .NET runtime's, for its fusion.dll).
  * @property {(name: string, flags?: number) => number | Promise<number>} [load]
  *           Brings a library in if it is not here yet, answering with its base
  *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
@@ -165,8 +163,7 @@ export function createModuleFunctions(host){
      *
      * @param {ModuleRecord} module
      */
-    const fileNameOf = module=>module.path ?? loadedFrom.get(module.base)
-        ?? `${host.libraryHome?.(module.name)
+    const fileNameOf = module=>module.path ?? `${host.libraryHome?.(module.name)
             ?? `C:${SEPARATOR}Windows${SEPARATOR}System32`}${SEPARATOR}${module.name}`;
 
     /**
@@ -194,10 +191,6 @@ export function createModuleFunctions(host){
             if (base === 0)
             {
                 host.setLastError(host.loadError?.(tried) ?? ERROR_MOD_NOT_FOUND);
-            }
-            else
-            {
-                noteFolder(base, tried);
             }
             return base;
         };
@@ -230,33 +223,6 @@ export function createModuleFunctions(host){
                 : again.then(found=>settle(found, beside));
         };
         return typeof answer === 'number' ? retry(answer) : answer.then(retry);
-    };
-
-    /**
-     * Where a library this build synthesises was last loaded from, when that
-     * was one of the other folders it stands in: a library loaded from a .NET
-     * runtime's folder is that folder's, as its own file would have been.
-     *
-     * @type {Map<number, string>}
-     */
-    const loadedFrom = new Map();
-
-    /** @param {number} base @param {string} asked */
-    const noteFolder = (base, asked)=>{
-        const cut = asked.lastIndexOf(SEPARATOR);
-        // The latest such load names it: one module of the engine stands for
-        // each runtime's file, and a program loads the one it asked for last.
-        const module = cut < 0 ? null : host.byBase(base);
-        if (!module || module.path)
-        {
-            return;
-        }
-        const folder = asked.slice(0, cut).toLowerCase();
-        if ((host.alsoIn?.(module.name) ?? []).some(each=>each.toLowerCase()
-            .replace(/\\+$/, '') === folder))
-        {
-            loadedFrom.set(base, asked);
-        }
     };
 
     /**

@@ -385,6 +385,37 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     await flushed;
 });
 
+test('a program that never stops writing gets a save no more than a tenth of the time', async()=>{
+    /** @type {number[]} */
+    const waits = [];
+    /** @type {(() => void)[]} */
+    const timers = [];
+    let now = 0;
+    /** @type {(() => void) | null} */
+    let finish = null;
+    const saver = coalescedSaver({
+        snapshot: ()=>({ files: [], registry: null }),
+        persist: ()=>new Promise(resolve=>{
+            finish = ()=>{
+                now += 400;
+                resolve(undefined);
+            };
+        }),
+        schedule: (fn, ms)=>{
+            waits.push(ms);
+            timers.push(fn);
+        },
+        clock: ()=>now,
+    });
+    saver.note([{ kind: 'registry' }]);
+    timers.shift()?.();
+    saver.note([{ kind: 'registry' }]);
+    /** @type {() => void} */ (/** @type {unknown} */ (finish))();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(waits, [250, 3600], 'a save of 400 ms waits nine times that before the next');
+});
+
 test('a save names each file once, by its last change, however many turns noted it', async()=>{
     // The filesystem collapses a file's writes only within one turn of the
     // machine; a save written over several turns arrives as several notes, and

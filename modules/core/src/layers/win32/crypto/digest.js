@@ -176,50 +176,65 @@ function md5Compress(st, b, o){
     st[3] = (st[3] + d) >>> 0;
 }
 
+/**
+ * The message schedule, one for every block: a compression never calls
+ * another, and an array made per block of a file being hashed was most of
+ * the cost.
+ */
+const SHA1_W = new Uint32Array(80);
+
 /** @param {Uint32Array} st @param {Uint8Array} b @param {number} o */
 function sha1Compress(st, b, o){
-    const W = new Uint32Array(80);
+    const W = SHA1_W;
     for (let i = 0; i < 16; i++)
     {
         W[i] = readU32BE(b, o + i * 4);
     }
     for (let i = 16; i < 80; i++)
     {
-        W[i] = rotl((W[i - 3] ^ W[i - 8] ^ W[i - 14] ^ W[i - 16]) >>> 0, 1);
+        const x = W[i - 3] ^ W[i - 8] ^ W[i - 14] ^ W[i - 16];
+        W[i] = (x << 1) | (x >>> 31);
     }
-    let a = st[0];
-    let bb = st[1];
-    let c = st[2];
-    let d = st[3];
-    let e = st[4];
-    for (let i = 0; i < 80; i++)
+    let a = st[0] | 0;
+    let bb = st[1] | 0;
+    let c = st[2] | 0;
+    let d = st[3] | 0;
+    let e = st[4] | 0;
+    let i = 0;
+    for (; i < 20; i++)
     {
-        let f;
-        let k;
-        if (i < 20)
-        {
-            f = ((bb & c) | (~bb & d)) >>> 0;
-            k = 0x5a827999;
-        }
-        else if (i < 40)
-        {
-            f = (bb ^ c ^ d) >>> 0;
-            k = 0x6ed9eba1;
-        }
-        else if (i < 60)
-        {
-            f = ((bb & c) | (bb & d) | (c & d)) >>> 0;
-            k = 0x8f1bbcdc;
-        }
-        else
-        {
-            f = (bb ^ c ^ d) >>> 0;
-            k = 0xca62c1d6;
-        }
-        const temp = (rotl(a, 5) + f + e + k + W[i]) >>> 0;
+        const temp = (((a << 5) | (a >>> 27)) + ((bb & c) | (~bb & d)) + e + 0x5a827999 + W[i]) | 0;
         e = d;
         d = c;
-        c = rotl(bb, 30);
+        c = (bb << 30) | (bb >>> 2);
+        bb = a;
+        a = temp;
+    }
+    for (; i < 40; i++)
+    {
+        const temp = (((a << 5) | (a >>> 27)) + (bb ^ c ^ d) + e + 0x6ed9eba1 + W[i]) | 0;
+        e = d;
+        d = c;
+        c = (bb << 30) | (bb >>> 2);
+        bb = a;
+        a = temp;
+    }
+    for (; i < 60; i++)
+    {
+        const temp = (((a << 5) | (a >>> 27)) + ((bb & c) | (bb & d) | (c & d)) + e + 0x8f1bbcdc
+            + W[i]) | 0;
+        e = d;
+        d = c;
+        c = (bb << 30) | (bb >>> 2);
+        bb = a;
+        a = temp;
+    }
+    for (; i < 80; i++)
+    {
+        const temp = (((a << 5) | (a >>> 27)) + (bb ^ c ^ d) + e + 0xca62c1d6 + W[i]) | 0;
+        e = d;
+        d = c;
+        c = (bb << 30) | (bb >>> 2);
         bb = a;
         a = temp;
     }
@@ -250,9 +265,12 @@ const SHA256_K = new Uint32Array([
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
+/** SHA-256's message schedule, shared as SHA-1's is. */
+const SHA256_W = new Uint32Array(64);
+
 /** @param {Uint32Array} st @param {Uint8Array} b @param {number} o */
 function sha256Compress(st, b, o){
-    const W = new Uint32Array(64);
+    const W = SHA256_W;
     for (let i = 0; i < 16; i++)
     {
         W[i] = readU32BE(b, o + i * 4);

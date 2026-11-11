@@ -155,11 +155,7 @@ flowchart TD
   included. D3DX 10 and 11 are one library over two devices: the image loaders make their
   textures through the device's own creates, the compiles go to `D3DCompile`.
 - **Where an engine library stands as a file:** in the system folder, as a file a setup or a
-  program can find, read and replace (`withSystemLibraries`); a .NET runtime's own library
-  (`fusion.dll`) also in each runtime's folder, `C:\WINDOWS\Microsoft.NET\Framework\v2.0.50727`
-  and `v4.0.30319`, while that folder is there: `LoadLibraryShim` and
-  `ICLRRuntimeInfo::LoadLibrary` load it from there, and a setup made for Wine that asks for it
-  with `WineFakeDlls` finds it in place.
+  program can find, read and replace (`withSystemLibraries`).
 - **The Windows Imaging Component** (`windowscodecs.dll`) is the engine's too, its factory a COM
   class as on Windows: its decoders reuse the D3DX and media layers' readers, and a bitmap's
   pixels live in guest memory, since its lock hands the program a pointer into them. The

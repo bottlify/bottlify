@@ -2594,34 +2594,3 @@ test('a class name names the installed classes of that name, counted before they
         assert.equal(m.lastError(), 0xe0000220, 'ERROR_INVALID_MACHINENAME');
         assert.equal(m.fns.SetupDiClassGuidsFromNameA.handler([0, list, 2, needed]), 0);
     });
-
-test('WineFakeDlls: the folder made, an engine library standing there, the rest said', async()=>{
-    const { withSystemLibraries } = await import('../kernel32/files.js');
-    const framework = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\v4.0.30319';
-    /** @type {string[]} */
-    const said = [];
-    const plain = await machine();
-    const files = withSystemLibraries(/** @type {any} */ (plain.volume), ()=>['fusion.dll'],
-        { alsoIn: name=>(name === 'fusion.dll' ? [framework] : []) });
-    const m = await machine({
-        files,
-        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
-            said.push(`${api}: ${detail}`),
-    });
-    plain.file('C:\\src\\fake.inf', ['[Version]', 'Signature="$Chicago$"',
-        '[DefaultInstall]', 'WineFakeDlls=Fake',
-        '[Fake]', '10,Microsoft.NET\\Framework\\v4.0.30319,fusion.dll',
-        '10,Microsoft.NET\\Framework\\v4.0.30319,ngen.exe', ''].join('\r\n'));
-    assert.equal(files.stat(`${framework}\\fusion.dll`), null, 'not before its folder is');
-    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\fake.inf'), 0,
-        INF_STYLE_WIN4, 0]);
-    const forward = m.callback(args=>m.fns.SetupDefaultQueueCallbackA.handler(args));
-    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf,
-        m.str('DefaultInstall'), SPINST_FILES, 0, 0, 0, forward, 0, 0, 0]), 1);
-    assert.ok(plain.volume.stat(framework)?.isDirectory, 'the folder is made');
-    assert.ok(files.stat(`${framework}\\fusion.dll`), 'the engine\'s fusion stands there');
-    assert.deepEqual(said.filter(line=>line.includes('fake library')), [
-        `SetupInstallFromInfSectionA: the fake library ngen.exe in ${framework} is not provided`]);
-    assert.equal(said.filter(line=>line.includes('WineFakeDlls')).length, 0,
-        'the directive is carried out');
-});

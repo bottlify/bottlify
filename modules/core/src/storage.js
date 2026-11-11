@@ -717,6 +717,9 @@ export function opfsSession(key, directory){
  * @typedef {{ kind: string, path?: string }} SessionChange
  */
 
+/** The most of the time saving a session may take while a program keeps writing. */
+const SAVE_SHARE = 0.1;
+
 /**
  * One save for a burst of changes.
  *
@@ -732,15 +735,26 @@ export function opfsSession(key, directory){
  * of the machine, a save spans as many turns as the writes took, and the store
  * puts a named file whole for every time it is named.
  *
+ * A program that never stops writing - an installer laying down a framework -
+ * never lets a burst settle, and each save serializes the whole registry and
+ * lists every file again: measured in an installer's run, saves took a sixth
+ * of the engine's thread. So a save waits, besides the settling, until the one
+ * before it is at most `SAVE_SHARE` of the time since it began.
+ *
  * @param {Object} options
  * @param {() => Session} options.snapshot  The session as it is now; called once per save.
  * @param {(session: Session, changes: SessionChange[]) => unknown} options.persist
  * @param {number} [options.settleMs]  How long after the last change a save begins.
  * @param {(fn: () => void, ms: number) => unknown} [options.schedule]
  *        How to wait; the default is the host's timer.
+ * @param {() => number} [options.clock]  Milliseconds; the default is the host's.
  */
-export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
+export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule, clock }){
     const later = schedule ?? ((fn, ms)=>setTimeout(fn, ms));
+    const now = clock ?? (()=>performance.now());
+    /** How long the last save took, from its snapshot to the store's answer. */
+    let lastMs = 0;
+    const wait = ()=>Math.max(settleMs, lastMs * (1 / SAVE_SHARE - 1));
     /** @type {Map<string, SessionChange>} by path, or by kind for a change without one */
     let pending = new Map();
     /** @type {unknown} */
@@ -760,11 +774,13 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
         }
         const changes = [...pending.values()];
         pending = new Map();
+        const began = now();
         inFlight = Promise.resolve(persist(snapshot(), changes)).finally(()=>{
+            lastMs = now() - began;
             inFlight = null;
             if (pending.size > 0 && timer === null)
             {
-                timer = later(flush, settleMs);
+                timer = later(flush, wait());
             }
         });
         return inFlight;
@@ -781,7 +797,7 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
             }
             if (timer === null && !inFlight)
             {
-                timer = later(flush, settleMs);
+                timer = later(flush, wait());
             }
         },
         /** Saves what is pending now rather than after it settles. */
