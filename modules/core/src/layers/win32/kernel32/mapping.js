@@ -867,6 +867,8 @@ export function createMappingFunctions(host){
                 }
                 if (mapping.image)
                 {
+                    // Held as a view of the file is, and given back at its unmap.
+                    host.files.retain(mapping.node);
                     return deliver(mapping.image.slice(offset, offset + wanted));
                 }
                 // The view holds the file from here to its unmap, so closing the

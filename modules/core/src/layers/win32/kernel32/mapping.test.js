@@ -24,6 +24,8 @@ function setup(names = {}){
     const bytes = new Uint8Array(0x100000);
     /** Where a view was placed by address, so a second one there is refused. */
     const placed = new Set();
+    /** Holds taken on the file and not given back. */
+    let holds = 0;
     /** @type {Map<number, { type: string, object: any }>} */
     const table = new Map();
     let nextHandle = 4;
@@ -106,8 +108,12 @@ function setup(names = {}){
             },
             /** @param {any} node */
             size: node=>node.data.length,
-            retain: ()=>{},
-            close: ()=>{},
+            retain: ()=>{
+                holds++;
+            },
+            close: ()=>{
+                holds--;
+            },
         },
     });
 
@@ -116,7 +122,9 @@ function setup(names = {}){
     // Shaped as kernel32 keeps an open file: the volume's node is a field of
     // the record a handle resolves to, not the record itself.
     table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
-    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table };
+    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table,
+        /** How many holds on the file are taken and not given back. */
+        held: ()=>holds };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -470,6 +478,7 @@ test('a SEC_IMAGE view is the file laid out as its image: each section at its ad
     assert.notEqual(mapping, 0);
     assert.equal(basicInformation(at, mapping).size, 0x2000,
         'the size of the image, not of the file');
+    const before = at.held();
     const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
     assert.notEqual(view, 0);
     assert.deepEqual([...bytes.subarray(view, view + 2)], [0x4d, 0x5a], 'the headers at the start');
@@ -477,6 +486,8 @@ test('a SEC_IMAGE view is the file laid out as its image: each section at its ad
         'the section at its virtual address');
     assert.deepEqual([...bytes.subarray(view + 0x200, view + 0x204)], [0, 0, 0, 0],
         'and not where it lies in the file');
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+    assert.equal(at.held(), before, 'the view gave back the hold it took on the file');
 });
 
 test('a read-write mapping that names its commit is still written back to its file', ()=>{
