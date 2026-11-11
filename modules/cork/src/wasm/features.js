@@ -99,8 +99,9 @@ export { ValType };
  * A `memory64` memory of `bytes`, made whole (`initial` = `maximum`): a shared
  * one of 16 GiB is refused growing from a page and made at its size. The JS
  * API asks for it as `address: 'i64'` with BigInt sizes (the standard, as
- * Chrome takes it) or as `index: 'i64'` with numbers (node 22, behind
- * `--experimental-wasm-memory64`); the first the engine takes is made.
+ * Chrome takes it) or as `index: 'i64'` with numbers (node 22, whose V8 had it
+ * behind `--experimental-wasm-memory64` before taking it by default:
+ * `testing/memory64.js`); the first the engine takes is made.
  *
  * @param {number} bytes  a multiple of a wasm page
  * @param {boolean} [shared]
