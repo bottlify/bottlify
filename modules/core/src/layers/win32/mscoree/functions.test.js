@@ -80,6 +80,23 @@ function machine(shape = {}){
     return { host, calls, exits, said, environment };
 }
 
+test('_CorExeMain hands the program to the installed .NET Framework\'s own shim', async()=>{
+    const { host, calls, exits } = machine();
+    const shim = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\v4.0.30319\\mscoreei.dll';
+    /** @type {string[]} */
+    const loaded = [];
+    host.windowsDirectory = ()=>'C:\\WINDOWS';
+    host.exists = path=>path === shim;
+    host.loadLibrary = async path=>(loaded.push(path), 0x9000);
+    host.procAddress = async(module, name)=>(module === 0x9000 && name === '_CorExeMain'
+        ? 0x9100 : 0);
+    host.callGuest = async({ entry, thread })=>(calls.push({ entry, thread }), 7);
+    assert.equal(await createMscoreeFunctions(host)._CorExeMain.handler(), 7);
+    assert.deepEqual(loaded, [shim]);
+    assert.deepEqual(calls, [{ entry: 0x9100, thread: 'main' }], 'no Mono is started');
+    assert.deepEqual(exits, [7], 'the process ends with what the CLR answered');
+});
+
 test('_CorExeMain runs the process\'s assembly under the bottle\'s Mono, ends with Main\'s code',
     async()=>{
         const { host, calls, exits, said } = machine();
