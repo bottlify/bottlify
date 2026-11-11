@@ -2513,6 +2513,31 @@ export function createTokenFunctions(host){
         },
 
         /**
+         * BOOL DeleteAce(PACL pAcl, DWORD dwAceIndex)
+         *
+         * The ACE at an index taken out, the ones after it moved down over it
+         * and the count lowered; an index past the last is
+         * ERROR_INVALID_PARAMETER.
+         */
+        DeleteAce: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([acl, index])=>{
+                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
+                if (aces === null || (index >>> 0) >= aces.length)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const gone = aces[index >>> 0];
+                const end = aces[aces.length - 1].next;
+                const moved = host.readMemory((acl >>> 0) + gone.next, end - gone.next).slice();
+                host.writeMemory((acl >>> 0) + gone.at, moved);
+                writeWord((acl >>> 0) + ACL.COUNT, aces.length - 1);
+                return 1;
+            },
+        },
+
+        /**
          * DWORD SetEntriesInAclA(ULONG, PEXPLICIT_ACCESS_A, PACL OldAcl, PACL *NewAcl)
          * DWORD SetEntriesInAclW(ULONG, PEXPLICIT_ACCESS_W, PACL OldAcl, PACL *NewAcl)
          *
