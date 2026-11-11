@@ -29,26 +29,10 @@ event, an error. Neither stops the program.
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
   title's code uses.
-- A .NET program in a bottle the .NET Framework 4 was installed into runs on Microsoft's own
-  runtime: `mscoree.dll`'s `_CorExeMain` hands it to the Framework's shim,
-  `C:\WINDOWS\Microsoft.NET\Framework\v4.0.30319\mscoreei.dll`, as Windows' own `mscoree.dll`
-  does. Otherwise it runs under Mono: `_CorExeMain` loads the bottle's runtime from
-  `C:\Windows\Mono` (Mono's own Windows build: `bin\libmono-2.0-x86.dll`, `lib\mono\4.5`,
-  `etc\mono`), which the bottle has to hold; with neither the program does not run and the loss
-  is said. A native program hosts the same runtime through the shim (`CLRCreateInstance`,
-  `ICLRMetaHost`, `ICLRRuntimeInfo`, `ICorRuntimeHost`, `ICLRRuntimeHost`, `GetCORVersion` and
-  kin), which reports runtimes 2.0.50727 and 4.0.30319 and hands application domains out through
-  Mono's COM interop; logical thread state, mapped files, domain enumeration, evidence and
-  unloading are refused (`E_NOTIMPL`), and a runtime-loaded callback's thread mark changes
-  nothing. Only 32-bit console programs are tested so far; WinForms, WPF, XNA and mixed C++/CLI
-  assemblies are not.
-- The global assembly cache (`fusion.dll`) is the Windows folders `C:\WINDOWS\assembly` and
-  `C:\WINDOWS\Microsoft.NET\assembly`: a strongly named assembly installed lands there, and a
-  query or an enumeration reads what is there; Mono's own cache under `C:\Windows\Mono` is not
-  part of it. There is no download cache, no native image cache and no install references: an
-  enumeration of either cache is empty, a reference passed in is not kept (and said), and
-  installing from streams (`IAssemblyCacheItem`), the scavenger, `CopyPDBs` and
-  `CreateApplicationContext` are refused (`E_NOTIMPL`) and said.
+- The engine has no .NET runtime of its own: `mscoree.dll`, the runtime and its assembly cache
+  (`fusion.dll`) are the .NET Framework's, which the bottle has once its setup ran there (a Steam
+  app's `_CommonRedist\DotNet` installer, run as any program is). A managed program in a bottle
+  without it does not start: `mscoree.dll` is not found, as on a Windows without .NET.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
 - The WebBrowser control (ieframe, shdocvw) is there without an HTML engine

@@ -542,9 +542,6 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  * @property {(name: string) => string | null} [homeOf]
  *           The folder a library is installed in when it is not the system
  *           folder -- the Steam client's, in Steam's -- or null.
- * @property {(name: string) => string[]} [alsoIn]
- *           The other folders a library stands in, each while it is there: a
- *           .NET runtime's folder holds the runtime's own libraries.
  * @property {(name: string) => Uint8Array | null} [imageOf]
  *           The library's image as the engine made it, which its file holds.
  */
@@ -585,13 +582,7 @@ export function withSystemLibraries(real, libraries, where = {}){
             return null;
         }
         const home = where.homeOf?.(library)?.toLowerCase() ?? system;
-        const folder = lower.slice(0, cut);
-        if (folder === home)
-        {
-            return library;
-        }
-        const other = where.alsoIn?.(library).find(each=>each.toLowerCase() === folder);
-        return other !== undefined && real.stat(other)?.isDirectory ? library : null;
+        return lower.slice(0, cut) === home ? library : null;
     };
     /** @param {string} library */
     const entryOf = library=>({ exists: true, isDirectory: false,

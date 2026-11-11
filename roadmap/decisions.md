@@ -1999,6 +1999,8 @@ Mono maps. Before it starts, `explicit-null-checks` is added to the process's `M
 through a null pointer finds zeros here (A79), and Mono's JIT otherwise finds a null reference only
 by the fault such a read raises on Windows. A bottle without the runtime runs no managed program,
 as a machine without .NET runs none, and the loss is said. *2026-11-08.*
+*Withdrawn 2026-11-11: the engine has no .NET runtime, mscoree or fusion of its own; a bottle
+runs the .NET Framework its setup installed.*
 
 **A236. D3DX 10's TRIANGLE filter is a tent, and its blocks are made by our own BC encoder.**
 Wine's d3dx11 tests measured D3DX's filters on Windows: POINT (a 16.16 fixed-point step), BOX
@@ -2023,6 +2025,8 @@ is carried out with an install section's files: the folder each line names is ma
 that does not stand there afterwards - `ngen.exe`, `mscorwks.dll` and the other runtime parts
 wine-mono places as Wine's fake images - is said as not provided. The global assembly cache is
 the Windows folders and nothing beside them; Mono's own cache is not listed in it. *2026-11-08.*
+*Withdrawn 2026-11-11: the engine has no .NET runtime, mscoree or fusion of its own; a bottle
+runs the .NET Framework its setup installed.*
 
 **A238. Media Foundation describes media and plays none.** `mfplat`'s objects (attributes, media
 types, memory buffers, samples, events) are whole, but there is no pipeline behind them: no
