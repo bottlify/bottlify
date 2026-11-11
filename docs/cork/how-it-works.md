@@ -88,7 +88,8 @@ own code runs: a span that reaches a closed page or translated code itself, an a
 4 GiB, a `sqrt` of a negative number or a NaN (which sets `errno`), a `floor` or `ceil` of an
 infinity or a NaN, a divide by zero, a stack that `__chkstk` would probe into a closed page. A copy
 or fill into a page that only holds code elsewhere, or is watched for writes, is made in place, the
-watched page marked written as a store marks it.
+watched page marked written as a store marks it. A process over a wide window (a 64-bit image at
+0x140000000) forms its copies, fills and string lengths over the whole window, past 4 GiB too.
 
 The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 2022), 32-bit and
 x86-64. `tools/crt-dictionary.mjs` reads a signature out of a runtime's DLL, looks it up in other

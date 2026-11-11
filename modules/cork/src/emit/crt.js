@@ -18,12 +18,14 @@
  * changed left as they were, which a compiled caller cannot tell from any
  * value.
  *
- * What the operation cannot do here it does not start: a span reaching a page
- * that is not plain -- inaccessible, holding translated code, watched for
- * writes -- or past RAM, a copy of `memcpy` whose source and destination
- * overlap, an address past 4 GiB, a size past `CRT_LIMIT`. Then the block
- * leaves before the call with nothing written, and the call is made as it
- * was: the function's own body, wherever it runs, does it, faults included.
+ * What the operation cannot do here it does not start: a span reaching a
+ * closed page, translated code itself or past RAM, a copy of `memcpy` whose
+ * source and destination overlap, an address past 4 GiB outside a wide
+ * window, a size past `CRT_LIMIT`. Then the block leaves before the call with
+ * nothing written, and the call is made as it was: the function's own body,
+ * wherever it runs, does it, faults included. A wide window (`wideLayout`)
+ * forms the copies, fills and string lengths, its pointers the whole of rcx
+ * and rdx and its RAM the memory of its own.
  */
 
 import { EMPTY } from '../wasm/encoder.js';
@@ -59,42 +61,67 @@ const R8 = 8;
  * @returns {boolean} false where the region's build cannot take it
  */
 export function emitCrt(e, instruction){
-    if (e.context.undo !== undefined || e.layout.window !== undefined)
+    const operation = instruction.crt;
+    if (e.context.undo !== undefined || isWide(e) && !WIDE_OPERATIONS.has(String(operation)))
     {
-        // A build that logs every store for an undo, and a wide window's
-        // addresses past 4 GiB: the call is made as it was.
+        // A build that logs every store for an undo: the call is made as it was.
         return false;
     }
-    const operation = instruction.crt;
+    const { b } = e;
+    // The RAM's memory: a wide window's own (`wideLayout`), else the one.
+    const ram = e.layout.ramMemory ?? 0;
     switch (operation)
     {
         case 'memmove': case 'memcpy': case 'memset':
+        {
             arguments3(e);
-            spans(e, operation);
+            const [dst, src] = pointers(e);
+            spans(e, operation, dst, src);
             leaveUnless(e, instruction);
             charge(e);
+            guestAddress(e, dst);
             if (operation === 'memset')
             {
-                guestAddress(e, Local.t0);
-                e.b.localGet(Local.t1).localGet(Local.t2).op(0xfc, [0x0b, 0x00]); // memory.fill
+                if (isWide(e))
+                {
+                    b.localGet(registerLocal(e, RDX)).op(I64.wrap);
+                }
+                else
+                {
+                    b.localGet(Local.t1);
+                }
+                size(e);
+                b.op(0xfc, [0x0b, ram]); // memory.fill
             }
             else
             {
-                guestAddress(e, Local.t0);
-                guestAddress(e, Local.t1);
-                e.b.localGet(Local.t2).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+                guestAddress(e, src);
+                size(e);
+                b.op(0xfc, [0x0a, ram, ram]); // memory.copy
             }
-            result(e, Local.t0);
+            result(e, dst);
             return true;
+        }
         case 'strlen':
-            e.b.i32const(0).localSet(Local.addr);
-            argument(e, 0, Local.t0);
-            length(e);
+        {
+            b.i32const(0).localSet(Local.addr);
+            if (!isWide(e))
+            {
+                argument(e, 0, Local.t0);
+            }
+            const [string] = pointers(e);
+            length(e, string);
             leaveUnless(e, instruction);
-            e.b.localGet(Local.t1).localSet(Local.t2);
+            b.localGet(Local.t1).localSet(Local.t2);
             charge(e);
-            result(e, Local.t1);
+            b.localGet(Local.t1);
+            if (isLong(e))
+            {
+                b.op(I64.extendU);
+            }
+            b.localSet(registerLocal(e, RAX));
             return true;
+        }
         case 'sqrt':
             sqrtArgument(e);
             leaveUnless(e, instruction);
@@ -222,6 +249,33 @@ function helper32(e, instruction){
 const isLong = e=>e.width.bits === 64;
 
 /**
+ * Whether the region is a wide window's (`wideLayout`): its pointers are the
+ * whole i64 registers, the RAM a `memory64` memory of its own.
+ * @param {E} e
+ */
+const isWide = e=>e.layout.window !== undefined;
+
+/** What a wide window forms: the operations on its RAM, not the 32-bit helpers. */
+const WIDE_OPERATIONS = new Set(['memmove', 'memcpy', 'memset', 'strlen']);
+
+/**
+ * The locals the destination and the source (or the string) are read from:
+ * t0 and t1, or in a wide window rcx and rdx themselves, i64.
+ * @param {E} e @returns {[number, number]}
+ */
+const pointers = e=>(isWide(e) ? [registerLocal(e, RCX), registerLocal(e, RDX)]
+    : [Local.t0, Local.t1]);
+
+/** The size in t2 as the memory's addresses are: i64 in a wide window. @param {E} e */
+function size(e){
+    e.b.localGet(Local.t2);
+    if (isWide(e))
+    {
+        e.b.op(I64.extendU);
+    }
+}
+
+/**
  * An argument into an i32 local: the stack's dword `index` (32-bit code) or a
  * register (long mode); a register's high half not zero marks the call as one
  * to make as it was (`Local.addr` -1).
@@ -244,9 +298,26 @@ function argument(e, index, local){
     b.end();
 }
 
-/** The three arguments in t0, t1 and t2; `Local.addr` 0 unless one cannot be taken. @param {E} e */
+/**
+ * The three arguments in t0, t1 and t2; `Local.addr` 0 unless one cannot be
+ * taken. A wide window's pointers stay in rcx and rdx (`pointers`), its size
+ * in t2 where it is within `CRT_LIMIT`.
+ *
+ * @param {E} e
+ */
 function arguments3(e){
-    e.b.i32const(0).localSet(Local.addr);
+    const { b } = e;
+    b.i32const(0).localSet(Local.addr);
+    if (isWide(e))
+    {
+        const n = registerLocal(e, R8);
+        b.localGet(n).op(I64.wrap).localSet(Local.t2);
+        b.localGet(n).i64const(BigInt(CRT_LIMIT)).op(I64.gtU);
+        b.if(EMPTY);
+        b.i32const(-1).localSet(Local.addr);
+        b.end();
+        return;
+    }
     argument(e, 0, Local.t0);
     argument(e, 1, Local.t1);
     argument(e, 2, Local.t2);
@@ -261,10 +332,11 @@ function arguments3(e){
  * which marks a watched page written as a store to it does: only a span
  * reaching code itself makes the call.
  *
- * @param {E} e @param {string} operation
+ * @param {E} e @param {string} operation @param {number} dst @param {number} src
  */
-function spans(e, operation){
+function spans(e, operation, dst, src){
     const { b } = e;
+    const ops = isWide(e) ? I64 : I32;
     b.localGet(Local.t2).i32const(CRT_LIMIT).op(I32.gtU);
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);
@@ -272,8 +344,12 @@ function spans(e, operation){
     if (operation === 'memcpy')
     {
         // Apart: dst - src >=u n and src - dst >=u n.
-        b.localGet(Local.t0).localGet(Local.t1).op(I32.sub).localGet(Local.t2).op(I32.ltU);
-        b.localGet(Local.t1).localGet(Local.t0).op(I32.sub).localGet(Local.t2).op(I32.ltU);
+        b.localGet(dst).localGet(src).op(ops.sub);
+        size(e);
+        b.op(ops.ltU);
+        b.localGet(src).localGet(dst).op(ops.sub);
+        size(e);
+        b.op(ops.ltU);
         b.op(I32.or);
         b.if(EMPTY);
         b.i32const(-1).localSet(Local.addr);
@@ -281,17 +357,20 @@ function spans(e, operation){
     }
     if (operation !== 'memset')
     {
-        span(e, Local.t1, PageFlag.INACCESSIBLE);
+        span(e, src, PageFlag.INACCESSIBLE);
     }
     b.i32const(0).localSet(Local.pflags);
-    span(e, Local.t0, PageFlag.INACCESSIBLE, true);
+    span(e, dst, PageFlag.INACCESSIBLE, true);
     // The destination's pages held code or a watch: tested to the granule.
     b.localGet(Local.addr).i32const(-1).op(I32.ne)
         .localGet(Local.pflags).i32const(STORE_FLAGS).op(I32.and).i32const(0).op(I32.ne)
         .op(I32.and);
     b.if(EMPTY);
-    b.localGet(Local.t0).localGet(Local.t0).localGet(Local.t2).op(I32.add).i32const(1)
-        .op(I32.sub).call(e.context.spanHit);
+    b.localGet(dst).localGet(dst);
+    size(e);
+    b.op(ops.add);
+    constant(e, 1);
+    b.op(ops.sub).call(e.context.spanHit);
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);
     b.end();
@@ -302,7 +381,7 @@ function spans(e, operation){
  * `[pointer, pointer + t2)`'s pages tested for `bits`, unless `Local.addr` is
  * already -1, which it is set to when one has any or the span leaves RAM. A
  * span of no bytes is plain. With `collect`, every page's flags are or'd
- * into `Local.pflags`.
+ * into `Local.pflags`. The pointer is i64 in a wide window (`pointers`).
  *
  * @param {E} e @param {number} pointer @param {number} bits @param {boolean} [collect]
  */
@@ -310,17 +389,40 @@ function span(e, pointer, bits, collect = false){
     const { b } = e;
     const table = pageFlagsAt(e.layout);
     const { ramSize } = e.layout;
+    const ops = isWide(e) ? I64 : I32;
+    /** The page of the pointer, or of the span's last byte. @param {boolean} last */
+    const page = last=>{
+        b.localGet(pointer);
+        if (last)
+        {
+            size(e);
+            b.op(ops.add);
+            constant(e, 1);
+            b.op(ops.sub);
+        }
+        constant(e, 12);
+        b.op(ops.shrU);
+        if (isWide(e))
+        {
+            b.op(I64.wrap);
+        }
+    };
     b.localGet(Local.addr).i32const(-1).op(I32.ne)
         .localGet(Local.t2).i32const(0).op(I32.ne).op(I32.and);
     b.if(EMPTY);
     // In RAM: pointer <=u ramSize and t2 <=u ramSize - pointer.
-    b.localGet(pointer).i32const(ramSize).op(I32.gtU)
-        .localGet(Local.t2).i32const(ramSize).localGet(pointer).op(I32.sub).op(I32.gtU)
+    b.localGet(pointer);
+    constant(e, ramSize);
+    b.op(ops.gtU);
+    size(e);
+    constant(e, ramSize);
+    b.localGet(pointer).op(ops.sub).op(ops.gtU)
         .op(I32.or);
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);
     b.else();
-    b.localGet(pointer).i32const(12).op(I32.shrU).localSet(Local.addr);
+    page(false);
+    b.localSet(Local.addr);
     b.block(EMPTY);
     b.loop(EMPTY);
     if (collect)
@@ -334,9 +436,9 @@ function span(e, pointer, bits, collect = false){
     b.br(2);
     b.end();
     // The last page: (pointer + t2 - 1) >> 12.
-    b.localGet(Local.addr)
-        .localGet(pointer).localGet(Local.t2).op(I32.add).i32const(1).op(I32.sub)
-        .i32const(12).op(I32.shrU).op(I32.eq).brIf(1);
+    b.localGet(Local.addr);
+    page(true);
+    b.op(I32.eq).brIf(1);
     b.localGet(Local.addr).i32const(1).op(I32.add).localSet(Local.addr);
     b.br(0);
     b.end();
@@ -346,38 +448,69 @@ function span(e, pointer, bits, collect = false){
 }
 
 /**
- * The length of the string at t0 into t1, its bytes read up to the first
- * zero; `Local.addr` -1 where a page it reaches is inaccessible or past RAM,
- * or it runs past `CRT_LIMIT`.
+ * The length of the string at `string` into t1, its bytes read up to the
+ * first zero; `Local.addr` -1 where a page it reaches is inaccessible or past
+ * RAM, or it runs past `CRT_LIMIT`. A wide window's string is at an i64
+ * address, its byte's address kept in t64.
  *
- * @param {E} e
+ * @param {E} e @param {number} string
  */
-function length(e){
+function length(e, string){
     const { b } = e;
     const table = pageFlagsAt(e.layout);
     const { ramBase, ramSize } = e.layout;
+    const wide = isWide(e);
+    const ops = wide ? I64 : I32;
+    const at = wide ? Local.t64 : Local.t2;
     b.i32const(0).localSet(Local.t1);
     b.localGet(Local.addr).i32const(-1).op(I32.ne);
     b.if(EMPTY);
     b.block(EMPTY);
     b.loop(EMPTY);
+    // The byte's address, t1 past the string's.
+    b.localGet(string).localGet(Local.t1);
+    if (wide)
+    {
+        b.op(I64.extendU);
+    }
+    b.op(ops.add).localSet(at);
     // At the string's first byte and at each page's: the page tested.
     b.localGet(Local.t1).i32const(0).op(I32.eq)
-        .localGet(Local.t0).localGet(Local.t1).op(I32.add).i32const(0xfff).op(I32.and)
-        .i32const(0).op(I32.eq).op(I32.or);
+        .localGet(at);
+    if (wide)
+    {
+        b.op(I64.wrap);
+    }
+    b.i32const(0xfff).op(I32.and).i32const(0).op(I32.eq).op(I32.or);
     b.if(EMPTY);
-    b.localGet(Local.t0).localGet(Local.t1).op(I32.add).localTee(Local.t2)
-        .i32const(ramSize).op(I32.geU)
+    b.localGet(at);
+    constant(e, ramSize);
+    b.op(ops.geU)
         .localGet(Local.t1).i32const(CRT_LIMIT).op(I32.geU).op(I32.or)
-        .localGet(Local.t2).i32const(12).op(I32.shrU).load('i32_8u', { offset: table })
+        .localGet(at);
+    constant(e, 12);
+    b.op(ops.shrU);
+    if (wide)
+    {
+        b.op(I64.wrap);
+    }
+    b.load('i32_8u', { offset: table })
         .i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.or);
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);
     b.br(3);
     b.end();
     b.end();
-    b.localGet(Local.t0).localGet(Local.t1).op(I32.add)
-        .load('i32_8u', { guest: true, offset: ramBase }).op(I32.eqz).brIf(1);
+    b.localGet(at);
+    if (wide)
+    {
+        b.load('i32_8u', { memory: e.layout.ramMemory });
+    }
+    else
+    {
+        b.load('i32_8u', { guest: true, offset: ramBase });
+    }
+    b.op(I32.eqz).brIf(1);
     b.localGet(Local.t1).i32const(1).op(I32.add).localSet(Local.t1);
     b.br(0);
     b.end();
@@ -428,12 +561,28 @@ function leaveUnless(e, instruction){
     e.close();
 }
 
-/** The wasm address of the guest address in `local`. @param {E} e @param {number} local */
+/**
+ * The RAM's address of the guest address in `local`: a wide window's is the
+ * i64 itself, in its own memory.
+ * @param {E} e @param {number} local
+ */
 function guestAddress(e, local){
     e.b.localGet(local);
     if (e.layout.ramBase !== 0)
     {
         e.b.i32const(e.layout.ramBase).op(I32.add);
+    }
+}
+
+/** A constant as the pointers are: i64 in a wide window. @param {E} e @param {number} value */
+function constant(e, value){
+    if (isWide(e))
+    {
+        e.b.i64const(BigInt(value));
+    }
+    else
+    {
+        e.b.i32const(value);
     }
 }
 
@@ -445,11 +594,14 @@ function charge(e){
         .i32const(UNIT_SHIFT).op(I32.shrU).op(I32.sub).localSet(Local.budget);
 }
 
-/** eax (rax) given the i32 in `local`. @param {E} e @param {number} local */
+/**
+ * eax (rax) given the pointer in `local`: an i32, or a wide window's i64.
+ * @param {E} e @param {number} local
+ */
 function result(e, local){
     const { b } = e;
     b.localGet(local);
-    if (isLong(e))
+    if (isLong(e) && !isWide(e))
     {
         b.op(I64.extendU);
     }

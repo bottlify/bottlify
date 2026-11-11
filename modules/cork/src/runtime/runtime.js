@@ -253,7 +253,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         leafCalls: true,
         // A call to a function of a compiler's or C runtime's the dictionary
         // knows by its bytes formed as what it does (`helpers.js`, `emit/crt.js`;
-        // false: every such call made as it is).
+        // false: every such call made as it is; a list of entries: those alone).
         helpers: true,
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
@@ -520,9 +520,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         leafBytes: settings.leafBytes, formDepth: settings.formDepth,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {},
-        // A wide window's guest addresses past 4 GiB are not the C runtime
-        // operations' (`emit/crt.js`): its calls are made as they are.
-        ...layout.window !== undefined || settings.helpers === false ? { helpers: false } : {} };
+        // The dictionary's functions formed as what they do (`emit/crt.js`), or
+        // none; a list of entries in place of the dictionary is a test's.
+        ...settings.helpers === true || settings.helpers === undefined ? {}
+            : { helpers: settings.helpers } };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
      * worker is sent `formOptions`, which a function cannot cross in. */
     const formHere = readBytes === undefined ? formOptions
