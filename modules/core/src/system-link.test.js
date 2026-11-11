@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createLinkMemory, openLink } from './system/link.js';
-import { systemHandlers } from './system-link.js';
+import { REGISTRY, systemHandlers } from './system-link.js';
 import { createRegistryService } from './layers/win32/advapi32/registry-service.js';
 import { HKEY_LOCAL_MACHINE, createHive } from './layers/win32/advapi32/registry.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
@@ -81,4 +81,13 @@ test('a process across a link writes the run\'s registry, takes the run\'s ids, 
         'the value the other thread set is in the run\'s registry');
     link.close();
     await serving;
+});
+
+test('every registry call a process makes reaches the run\'s registry from a worker', ()=>{
+    // RegQueryInfoKey asks the key's class: a process in a worker (ngen under
+    // concurrency) that could not ask it ended in a TypeError.
+    const systemOnly = new Set(['onChanged', 'toJSON', 'fromJSON', 'fillFromJSON']);
+    const service = createRegistryService(createHive());
+    assert.deepEqual(Object.keys(service).filter(name=>!systemOnly.has(name)).sort(),
+        [...REGISTRY].sort());
 });
