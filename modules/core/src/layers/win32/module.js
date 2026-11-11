@@ -74,7 +74,7 @@ import {
     ADMINISTRATORS_SID, USER_SID_TEXT, RECORD_OBJECT_SECURITY, accountNamed, createTokenFunctions,
     isTokenMember,
 } from './advapi32/tokens.js';
-import { SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
+import { SERVICE_BY_NAME, SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
     DIRECTX_RELEASES, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
@@ -4834,6 +4834,9 @@ export function createWin32Module(){
                         security: fileSecurity,
                         /** @param {string} path */
                         resolvePath: path=>filesystem.resolve(path).path,
+                        // A service's security by name is the service manager's.
+                        services: ()=>/** @type {any} */ (libraries['ADVAPI32.dll'])
+                            ?.[SERVICE_BY_NAME] ?? null,
                         divergence: config?.divergence,
                         // The events a change notification signals: kernel32's own.
                         events: {

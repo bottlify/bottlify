@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNamedSecurityFunctions } from './named-security.js';
 import { createRegistryService } from './registry-service.js';
-import { createHive } from './registry.js';
+import { HKEY_LOCAL_MACHINE, createHive } from './registry.js';
+import { SERVICE_BY_NAME, createServiceFunctions } from './services.js';
 import { createTokenFunctions } from './tokens.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
@@ -17,6 +18,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INVALID_ACL = 1336;
 const ERROR_INVALID_SID = 1337;
+const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 
 const SE_FILE_OBJECT = 1;
 const SE_SERVICE = 2;
@@ -212,6 +214,37 @@ test('an object kind with no security by name here says so, and an unknown kind 
         assert.equal(fns.SetNamedSecurityInfoA.handler([narrow('C:\\WINDOWS'), 99, DACL,
             0, 0, 0, 0]), ERROR_INVALID_PARAMETER);
     });
+
+test('a service by name has the service manager\'s security, and what is set is its', ()=>{
+    // An installer's secure-objects step (WiX's ExecSecureObjects) reads a
+    // service's DACL by its name, merges an entry and sets it back.
+    const { bytes, host, fns, dword, narrow, wide } = setup();
+    const services = createServiceFunctions({ readCString: host.readCString,
+        readMemory: host.readMemory, writeMemory: host.writeMemory, hive: host.hive });
+    const manager = /** @type {any} */ (services)[SERVICE_BY_NAME];
+    /** @type {any} */ (host).services = ()=>manager;
+    const hklm = /** @type {number} */ (host.hive.root(HKEY_LOCAL_MACHINE));
+    host.hive.create(hklm, 'SYSTEM\\CurrentControlSet\\Services\\FontCache');
+
+    assert.equal(fns.GetNamedSecurityInfoA.handler([narrow('NoSuchService'), SE_SERVICE, DACL,
+        0, 0, DACL_OUT, 0, SD_OUT]), ERROR_SERVICE_DOES_NOT_EXIST);
+    assert.equal(fns.GetNamedSecurityInfoW.handler([wide('FontCache'), SE_SERVICE,
+        OWNER | DACL, OWNER_OUT, 0, DACL_OUT, 0, SD_OUT]), 0);
+    const block = dword(SD_OUT);
+    assert.equal(dword(OWNER_OUT), block + dword(block + 4), 'the owner points into the block');
+    assert.deepEqual([...bytes.subarray(dword(OWNER_OUT), dword(OWNER_OUT) + 12)], SYSTEM,
+        'a service is the system\'s');
+    assert.notEqual(dword(DACL_OUT), 0);
+
+    const ACL_AT = PART;
+    bytes.set([2, 0, 8, 0, 0, 0, 0, 0], ACL_AT);
+    assert.equal(fns.SetNamedSecurityInfoA.handler([narrow('FontCache'), SE_SERVICE, DACL,
+        0, 0, ACL_AT, 0]), 0);
+    assert.deepEqual([...manager.describe('FontCache', DACL)].slice(-8), [2, 0, 8, 0, 0, 0, 0, 0],
+        'the manager answers the empty DACL that was set');
+    assert.equal(fns.SetNamedSecurityInfoA.handler([narrow('NoSuchService'), SE_SERVICE, DACL,
+        0, 0, ACL_AT, 0]), ERROR_SERVICE_DOES_NOT_EXIST);
+});
 
 test('setting a file\'s security keeps it for the run; a key\'s is accepted and kept nowhere',
     ()=>{

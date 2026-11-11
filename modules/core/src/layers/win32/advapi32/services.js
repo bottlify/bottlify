@@ -164,6 +164,14 @@ const HANDLE_BASE = 0x5c000000;
  * answers null for a handle that is not a service's.
  */
 export const SERVICE_SECURITY = Symbol('serviceSecurity');
+
+/**
+ * A service's security by its name, for GetNamedSecurityInfo and
+ * SetNamedSecurityInfo with SE_SERVICE: `describe(name, wanted)` is the
+ * descriptor QueryServiceObjectSecurity would give, null for no such
+ * service; `keep(name, parts)` sets parts as SetServiceObjectSecurity does.
+ */
+export const SERVICE_BY_NAME = Symbol('serviceByName');
 const HANDLE_STRIDE = 4;
 
 /**
@@ -1298,8 +1306,20 @@ export function createServiceFunctions(host){
         ...extras,
 
         /** @param {number} handle @param {number} wanted */
-        [SERVICE_SECURITY]: (handle, wanted)=>(held(handle, 'service')
-            ? serviceDescriptor(wanted) : null),
+        [SERVICE_SECURITY]: (handle, wanted)=>{
+            const object = held(handle, 'service');
+            return object ? describe(/** @type {string} */ (object.name), wanted) : null;
+        },
+
+        [SERVICE_BY_NAME]: {
+            /** @param {string} name @param {number} wanted */
+            describe: (name, wanted)=>(name !== '' && serviceKey(name)
+                ? describe(name, wanted) : null),
+            /** @param {string} name @param {ServiceSecurity} parts */
+            keep: (name, parts)=>{
+                security.set(name, { ...security.get(name), ...parts });
+            },
+        },
 
         /**
          * SC_HANDLE OpenSCManagerA/W(LPCTSTR lpMachineName, LPCTSTR lpDatabaseName,

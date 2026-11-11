@@ -55,6 +55,8 @@ const ERROR_INVALID_SECURITY_DESCR = 1338;
 
 /** SE_OBJECT_TYPE: what kind of object a name names. */
 const SE_FILE_OBJECT = 1;
+const SE_SERVICE = 2;
+const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 const SE_REGISTRY_KEY = 4;
 const SE_REGISTRY_WOW64_32KEY = 12;
 
@@ -204,6 +206,11 @@ const parentOf = path=>{
  * @property {(path: string) => void} [dropSecurity]  Drops a path's entry on delete.
  * @property {(from: string, to: string) => void} [moveSecurity]  Moves it on rename.
  * @property {(code: number) => void} [setLastError]  For the BOOL file-security calls.
+ * @property {() => { describe: (name: string, wanted: number) => Uint8Array | null,
+ *              keep: (name: string, parts: { owner?: Uint8Array, group?: Uint8Array,
+ *                     dacl?: Uint8Array | null }) => void } | null} [services]
+ *           The service manager's security by a service's name; without it a
+ *           service has none by name here.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -267,12 +274,13 @@ export function createNamedSecurityFunctions(host){
 
     /**
      * The kind of object a name names, or the error that says there is none.
-     * The kinds of object this machine keeps nothing about by name -- a
-     * service, a printer, a share, a kernel object -- are reported and
-     * answered as not implemented, which a caller can tell from "not there".
+     * A service is the service manager's, by its name. The kinds of object
+     * this machine keeps nothing about by name - a printer, a share, a kernel
+     * object - are reported and answered as not implemented, which a caller
+     * can tell from "not there".
      *
      * @param {string} api @param {number} pointer @param {number} type @param {boolean} wide
-     * @returns {{ kind: 'file' | 'key', name: string } | number}
+     * @returns {{ kind: 'file' | 'key' | 'service', name: string } | number}
      */
     const objectOf = (api, pointer, type, wide)=>{
         if ((pointer >>> 0) === 0)
@@ -289,6 +297,16 @@ export function createNamedSecurityFunctions(host){
                 return error === ERROR_SUCCESS ? { kind: /** @type {const} */ ('file'), name }
                     : error;
             }
+            case SE_SERVICE:
+            {
+                const services = host.services?.();
+                if (services)
+                {
+                    return services.describe(name, 0) === null ? ERROR_SERVICE_DOES_NOT_EXIST
+                        : { kind: /** @type {const} */ ('service'), name };
+                }
+                break;
+            }
             case SE_REGISTRY_KEY:
             case SE_REGISTRY_WOW64_32KEY:
             {
@@ -297,13 +315,14 @@ export function createNamedSecurityFunctions(host){
                     : error;
             }
             default:
-                if ((type >>> 0) === 0 || (type >>> 0) > SE_REGISTRY_WOW64_32KEY)
-                {
-                    return ERROR_INVALID_PARAMETER;
-                }
-                host.divergence?.(api, `object type ${type >>> 0} has no security by name here`);
-                return ERROR_CALL_NOT_IMPLEMENTED;
+                break;
         }
+        if ((type >>> 0) === 0 || (type >>> 0) > SE_REGISTRY_WOW64_32KEY)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        host.divergence?.(api, `object type ${type >>> 0} has no security by name here`);
+        return ERROR_CALL_NOT_IMPLEMENTED;
     };
 
     /**
@@ -314,11 +333,24 @@ export function createNamedSecurityFunctions(host){
      * A directory's DACL is inheritable, a file's inherited, and a mask set
      * with the generic rights reads back as a file's specific ones.
      *
-     * @param {'file' | 'key'} kind @param {string} name @param {number} wanted
+     * A service's is the service manager's, as QueryServiceObjectSecurity
+     * answers it.
+     *
+     * @param {'file' | 'key' | 'service'} kind @param {string} name @param {number} wanted
+     * @returns {{ bytes: Uint8Array, offsets: { owner: number, group: number, dacl: number,
+     *             sacl: number } }}
      */
     const descriptorOf = (kind, name, wanted)=>{
         /** @param {number} bit */
         const asked = bit=>(wanted & bit) !== 0;
+        if (kind === 'service')
+        {
+            const bytes = /** @type {Uint8Array} */ (host.services?.()?.describe(name, wanted));
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+            return { bytes, offsets: { owner: view.getUint32(4, true),
+                group: view.getUint32(8, true), sacl: view.getUint32(12, true),
+                dacl: view.getUint32(16, true) } };
+        }
         if (kind === 'file')
         {
             const held = store.get(pathKey(name));
@@ -352,7 +384,19 @@ export function createNamedSecurityFunctions(host){
      * @param {number} dacl
      */
     const keepFileSecurity = (name, given, owner, group, dacl)=>{
-        const held = { ...store.get(pathKey(name)) };
+        store.set(pathKey(name), { ...store.get(pathKey(name)),
+            ...partsGiven(given, owner, group, dacl) });
+    };
+
+    /**
+     * The parts a caller gave, each only where its bit is in `given`: the
+     * SIDs and the DACL as bytes, the DACL null for the null DACL.
+     *
+     * @param {number} given @param {number} owner @param {number} group @param {number} dacl
+     */
+    const partsGiven = (given, owner, group, dacl)=>{
+        /** @type {{ owner?: Uint8Array, group?: Uint8Array, dacl?: Uint8Array | null }} */
+        const held = {};
         if ((given & OWNER_SECURITY_INFORMATION) !== 0)
         {
             const sid = codec.sidAt(owner);
@@ -382,7 +426,7 @@ export function createNamedSecurityFunctions(host){
                 held.dacl = host.readMemory(dacl >>> 0, size).slice();
             }
         }
-        store.set(pathKey(name), held);
+        return held;
     };
 
     /**
@@ -527,6 +571,10 @@ export function createNamedSecurityFunctions(host){
             if (object.kind === 'file')
             {
                 keepFileSecurity(object.name, given >>> 0, owner, group, dacl);
+            }
+            else if (object.kind === 'service')
+            {
+                host.services?.()?.keep(object.name, partsGiven(given >>> 0, owner, group, dacl));
             }
             return ERROR_SUCCESS;
         },
