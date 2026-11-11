@@ -49,6 +49,7 @@ const UNIT_SHIFT = 4;
 const RAX = 0;
 const RCX = 1;
 const RDX = 2;
+const RBX = 3;
 const ESP = 4;
 const R8 = 8;
 
@@ -99,8 +100,118 @@ export function emitCrt(e, instruction){
             leaveUnless(e, instruction);
             return true;
         default:
-            return false;
+            return !isLong(e) && helper32(e, instruction);
     }
+}
+
+/** The compiler's quadword helpers that take their operands on the stack and pop them. */
+const QUAD_OPERATIONS = new Map([
+    ['allmul', I64.mul], ['alldiv', I64.divS], ['aulldiv', I64.divU], ['allrem', I64.remS],
+    ['aullrem', I64.remU], ['alldvrm', I64.divS], ['aulldvrm', I64.divU],
+]);
+
+/**
+ * The compiler's own helpers of 32-bit code: quadword arithmetic on two
+ * operands it pops (`ret 16`), edx:eax the result -- and for the divide and
+ * remainder helpers ebx:ecx the remainder; quadword shifts of edx:eax by cl,
+ * the whole of cl counted; and `__chkstk`, which moves esp down by eax past
+ * the call's return. A divide by zero, and a signed divide of the least
+ * quadword by -1 (whose quotient the helper's own unsigned way answers and
+ * wasm traps on), make the call as it was, as does a stack not open the
+ * whole way down.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function helper32(e, instruction){
+    const { b } = e;
+    const operation = String(instruction.crt);
+    const eax = registerLocal(e, RAX);
+    const edx = registerLocal(e, RDX);
+    const esp = registerLocal(e, ESP);
+    /** edx:eax from the i64 on the stack. */
+    const resultInEdxEax = ()=>{
+        b.localTee(Local.t64).op(I64.wrap).localSet(eax);
+        b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).localSet(edx);
+    };
+    /** The quadword at [esp + offset]. @param {number} offset */
+    const quad = offset=>b.localGet(esp).load('i64', { guest: true,
+        offset: e.layout.ramBase + offset });
+    const arithmetic = QUAD_OPERATIONS.get(operation);
+    if (arithmetic !== undefined)
+    {
+        const divides = arithmetic !== I64.mul;
+        b.i32const(0).localSet(Local.addr);
+        if (divides)
+        {
+            quad(8).op(I64.eqz);
+            if (operation === 'alldiv' || operation === 'alldvrm')
+            {
+                quad(0).i64const(-(1n << 63n)).op(I64.eq);
+                quad(8).i64const(-1n).op(I64.eq).op(I32.and).op(I32.or);
+            }
+            b.if(EMPTY);
+            b.i32const(-1).localSet(Local.addr);
+            b.end();
+            leaveUnless(e, instruction);
+        }
+        if (operation === 'alldvrm' || operation === 'aulldvrm')
+        {
+            quad(0);
+            quad(8);
+            b.op(operation === 'alldvrm' ? I64.remS : I64.remU).localTee(Local.t64b)
+                .op(I64.wrap).localSet(registerLocal(e, RCX));
+            b.localGet(Local.t64b).i64const(32n).op(I64.shrU).op(I64.wrap)
+                .localSet(registerLocal(e, RBX));
+        }
+        quad(0);
+        quad(8);
+        b.op(arithmetic);
+        resultInEdxEax();
+        b.localGet(esp).i32const(16).op(I32.add).localSet(esp);
+        return true;
+    }
+    if (operation === 'allshl' || operation === 'allshr' || operation === 'aullshr')
+    {
+        // edx:eax, and the count: cl whole, 64 and past it all out.
+        b.localGet(edx).op(I64.extendU).i64const(32n).op(I64.shl)
+            .localGet(eax).op(I64.extendU).op(I64.or).localSet(Local.t64);
+        b.localGet(registerLocal(e, RCX)).i32const(0xff).op(I32.and).localSet(Local.t0);
+        b.localGet(Local.t64);
+        b.localGet(Local.t0).i32const(63).localGet(Local.t0).i32const(63).op(I32.ltU).select()
+            .op(I64.extendU);
+        b.op(operation === 'allshl' ? I64.shl : operation === 'allshr' ? I64.shrS : I64.shrU);
+        if (operation !== 'allshr')
+        {
+            // 63 is a shift too few for a count past it: nothing is left.
+            b.i64const(0n).localGet(Local.t0).i32const(64).op(I32.ltU).select();
+        }
+        resultInEdxEax();
+        // A count from 32 to 63 the helper takes as cl & 31, which it leaves in cl.
+        b.localGet(Local.t0).i32const(32).op(I32.sub).i32const(32).op(I32.ltU);
+        b.if(EMPTY);
+        b.localGet(registerLocal(e, RCX)).i32const(~0xe0).op(I32.and)
+            .localSet(registerLocal(e, RCX));
+        b.end();
+        return true;
+    }
+    if (operation === 'chkstk')
+    {
+        // The stack from esp less eax to esp open: else the helper's own probe.
+        b.localGet(esp).localGet(eax).op(I32.sub).localSet(Local.t0);
+        b.localGet(eax).localSet(Local.t2);
+        b.i32const(0).localSet(Local.addr);
+        b.localGet(eax).localGet(esp).op(I32.gtU);
+        b.if(EMPTY);
+        b.i32const(-1).localSet(Local.addr);
+        b.end();
+        span(e, Local.t0, PageFlag.INACCESSIBLE);
+        leaveUnless(e, instruction);
+        b.localGet(Local.t0).localSet(esp);
+        // eax: the call's return address, as the helper leaves it.
+        b.i32const((instruction.eip + instruction.length) | 0).localSet(eax);
+        return true;
+    }
+    return false;
 }
 
 /** Whether the region is long mode's. @param {E} e */

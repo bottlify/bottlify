@@ -69,8 +69,33 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * destination or string the arguments say, the callee-saved registers as
  * they were.
  *
- * @typedef {'memmove' | 'memcpy' | 'memset' | 'strlen' | 'sqrt'} Crt
+ * And the compiler's own helpers of 32-bit code (`emit/crt.js`): `allmul`, `alldiv`,
+ * `aulldiv`, `allrem`, `aullrem`, `alldvrm`, `aulldvrm` (quadwords off the stack,
+ * popped), `allshl`, `allshr`, `aullshr` (edx:eax by cl) and `chkstk` (esp down
+ * by eax).
+ *
+ * @typedef {'memmove' | 'memcpy' | 'memset' | 'strlen' | 'sqrt' | 'allmul' | 'alldiv'
+ *     | 'aulldiv' | 'allrem' | 'aullrem' | 'alldvrm' | 'aulldvrm' | 'allshl' | 'allshr'
+ *     | 'aullshr' | 'chkstk'} Crt
  */
+
+/**
+ * What each operation leaves changed of the registers, as the forming's
+ * register model (`emit/memory.js`) takes it: those it writes, and what it
+ * moves esp by (`null`: by a count it reads).
+ *
+ * @type {Readonly<Record<Crt, { writes: readonly number[], esp: number | null }>>}
+ */
+export const CRT_EFFECTS = Object.freeze({
+    memmove: { writes: [0], esp: 0 }, memcpy: { writes: [0], esp: 0 },
+    memset: { writes: [0], esp: 0 }, strlen: { writes: [0], esp: 0 }, sqrt: { writes: [], esp: 0 },
+    allmul: { writes: [0, 2], esp: 16 }, alldiv: { writes: [0, 2], esp: 16 },
+    aulldiv: { writes: [0, 2], esp: 16 }, allrem: { writes: [0, 2], esp: 16 },
+    aullrem: { writes: [0, 2], esp: 16 }, alldvrm: { writes: [0, 1, 2, 3], esp: 16 },
+    aulldvrm: { writes: [0, 1, 2, 3], esp: 16 }, allshl: { writes: [0, 1, 2], esp: 0 },
+    allshr: { writes: [0, 1, 2], esp: 0 }, aullshr: { writes: [0, 1, 2], esp: 0 },
+    chkstk: { writes: [0], esp: null },
+});
 
 /** @type {RuntimeHelper} MSVC 7.1 and 8's `_ftol2`. */
 export const FTOL2 = Object.freeze({

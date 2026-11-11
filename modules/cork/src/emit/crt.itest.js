@@ -311,3 +311,168 @@ test('a call to a function that is not the dictionary\'s, by a byte, is made as 
         assert.equal(region.blocks[0].instructions.some(one=>one.op === 'crt'), formed);
     }
 });
+
+/**
+ * The compiler's quadword helpers and `__chkstk`, judged by what they compute
+ * (their own bytes are judged against the operations by
+ * `tools/crt-dictionary.mjs --verify`): a call to a function the dictionary
+ * names one of them -- its bytes this test's own, never run -- answers as the
+ * helper does, and where the helper would fault (a divide by zero, the least
+ * quadword by -1, a stack closed below) leaves before the call, nothing
+ * written.
+ */
+const HELPER_AT = 0x9800;
+const FILLER = [0x90, 0x90, 0x90, 0x90, 0xc3];
+
+/** @param {string} does @returns {import('../helpers.js').RuntimeHelper} */
+const helperOf = does=>({ name: does, does: /** @type {any} */ (does), length: FILLER.length,
+    hash: fingerprint(at=>FILLER[at - HELPER_AT] ?? 0, HELPER_AT, FILLER.length) });
+
+const MASK = (1n << 64n) - 1n;
+/** @param {bigint} v */
+const signed = v=>BigInt.asIntN(64, v);
+
+/**
+ * What each helper answers: edx:eax, and for the dvrm ones ebx:ecx; null where
+ * it faults.
+ *
+ * @param {string} does @param {bigint} a @param {bigint} b @param {number} count
+ * @returns {{ result: bigint, rest?: bigint } | null}
+ */
+function expected(does, a, b, count){
+    const least = -(1n << 63n);
+    switch (does)
+    {
+        case 'allmul': return { result: (a * b) & MASK };
+        case 'aulldiv': return b === 0n ? null : { result: a / b };
+        case 'aullrem': return b === 0n ? null : { result: a % b };
+        case 'aulldvrm': return b === 0n ? null : { result: a / b, rest: a % b };
+        case 'alldiv': case 'allrem': case 'alldvrm':
+        {
+            const [x, y] = [signed(a), signed(b)];
+            if (y === 0n || (does !== 'allrem' && x === least && y === -1n))
+            {
+                return null;
+            }
+            const quotient = (x / y) & MASK;
+            const rest = (y === -1n ? 0n : x % y) & MASK;
+            return does === 'alldiv' ? { result: quotient } : does === 'allrem'
+                ? { result: rest } : { result: quotient, rest };
+        }
+        case 'allshl': return { result: count >= 64 ? 0n : (a << BigInt(count)) & MASK };
+        case 'aullshr': return { result: count >= 64 ? 0n : a >> BigInt(count) };
+        case 'allshr':
+            return { result: (signed(a) >> BigInt(Math.min(count, 63))) & MASK };
+        default: throw new Error(does);
+    }
+}
+
+for (const does of ['allmul', 'alldiv', 'aulldiv', 'allrem', 'aullrem', 'alldvrm', 'aulldvrm',
+    'allshl', 'allshr', 'aullshr'])
+{
+    test(`${does}: seeded operands answer as the helper does, a fault left to it`, ()=>{
+        const helpers = [helperOf(does)];
+        const shift = does.endsWith('shl') || does.endsWith('shr');
+        let left = 0;
+        for (let seed = 1; seed <= 200; seed++)
+        {
+            const next = random(seed * 31 + does.length);
+            const word = ()=>Math.floor(next() * 2 ** 32) >>> 0;
+            const pick = ()=>{
+                const kind = Math.floor(next() * 6);
+                return kind === 0 ? 0n : kind === 1 ? MASK : kind === 2 ? 1n << 63n
+                    : kind === 3 ? BigInt(word()) : (BigInt(word()) << 32n) | BigInt(word());
+            };
+            const a = pick();
+            const b = next() < 0.1 ? MASK : pick();
+            const count = Math.floor(next() * 256);
+            const m = createTestMachine({ ramSize: RAM });
+            m.write(HELPER_AT, FILLER);
+            const code = shift
+                ? [0xe8, ...rel(PROGRAM, HELPER_AT)]
+                : [0x68, ...u32(Number(b >> 32n)), 0x68, ...u32(Number(b & 0xffffffffn)),
+                    0x68, ...u32(Number(a >> 32n)), 0x68, ...u32(Number(a & 0xffffffffn))];
+            if (!shift)
+            {
+                code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+            }
+            code.push(0xa3, ...u32(OUT), 0x89, 0x15, ...u32(OUT + 4));   // mov [OUT], eax/edx
+            code.push(0x50, 0x58);                                       // push eax; pop eax
+            code.push(0xf4);
+            m.write(PROGRAM, code);
+            ['ebx', 'ebp', 'esi', 'edi'].forEach((r, i)=>m.setReg(r, 0x1000 * (i + 1)));
+            m.setReg('eax', Number(a & 0xffffffffn));
+            m.setReg('edx', Number(a >> 32n));
+            m.setReg('ecx', count | 0x5a00);
+            m.setReg('esp', STACK);
+            const exit = m.runProgram(PROGRAM, { helpers });
+            const want = expected(does, a, b, count);
+            if (want === null)
+            {
+                assert.equal(exit.kind, -2, `seed ${seed}: left before the call`);
+                assert.equal(m.eip(), PROGRAM + 20, 'at the call');
+                assert.equal(m.reg('esp'), STACK - 16, 'its operands pushed, none popped');
+                assert.equal(m.reg('ebx'), 0x1000);
+                left++;
+                continue;
+            }
+            assert.equal(exit.kind, 3, `seed ${seed}: ran to its end`);
+            const out = new DataView(m.read(OUT, 8).buffer);
+            assert.equal(out.getBigUint64(0, true), want.result,
+                `seed ${seed}: ${does}(${a}, ${shift ? count : b})`);
+            assert.equal(m.reg('esp'), STACK, 'the operands popped');
+            if (want.rest !== undefined)
+            {
+                assert.equal((BigInt(m.reg('ebx') >>> 0) << 32n) | BigInt(m.reg('ecx') >>> 0),
+                    want.rest, `seed ${seed}: the remainder in ebx:ecx`);
+            }
+            else
+            {
+                assert.equal(m.reg('ebx'), 0x1000);
+            }
+            assert.deepEqual(['ebp', 'esi', 'edi'].map(r=>m.reg(r)), [0x2000, 0x3000, 0x4000]);
+            if (shift)
+            {
+                // cl as the helper leaves it: a count from 32 to 63 masked to 31.
+                assert.equal(m.reg('ecx'), count >= 32 && count < 64
+                    ? (count | 0x5a00) & ~0xe0 : count | 0x5a00, `seed ${seed}: cl`);
+            }
+        }
+        if (does.includes('div') || does.includes('rem') || does.includes('dvrm'))
+        {
+            assert.ok(left > 0, 'some divides by zero');
+        }
+    });
+}
+
+test('chkstk moves esp down by eax past the call, its return address in eax; a stack closed'
+    + ' below leaves before the call', ()=>{
+    const helpers = [helperOf('chkstk')];
+    for (const [size, closed] of /** @type {[number, boolean][]} */ ([[0x10, false], [0x3000, false],
+        [0x3000, true], [0, false]]))
+    {
+        const m = createTestMachine({ ramSize: RAM });
+        m.write(HELPER_AT, FILLER);
+        const code = [0xb8, ...u32(size), 0xe8, ...rel(PROGRAM + 5, HELPER_AT),
+            0x89, 0x25, ...u32(OUT), 0xa3, ...u32(OUT + 4), 0xf4];   // mov [OUT], esp; [OUT+4], eax
+        m.write(PROGRAM, code);
+        m.setReg('esp', STACK);
+        m.setReg('ecx', 0x77);
+        if (closed)
+        {
+            m.pages.markRange(STACK - 0x2800, 1, PageFlag.INACCESSIBLE);
+        }
+        const exit = m.runProgram(PROGRAM, { helpers });
+        if (closed)
+        {
+            assert.equal(exit.kind, -2);
+            assert.equal(m.reg('esp'), STACK);
+            continue;
+        }
+        assert.equal(exit.kind, 3);
+        const out = new DataView(m.read(OUT, 8).buffer);
+        assert.equal(out.getUint32(0, true), STACK - size);
+        assert.equal(out.getUint32(4, true), PROGRAM + 10);
+        assert.equal(m.reg('ecx'), 0x77);
+    }
+});

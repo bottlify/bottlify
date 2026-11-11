@@ -18,6 +18,7 @@
  * or per window of accesses (see the groups below).
  */
 
+import { CRT_EFFECTS } from '../helpers.js';
 import { registerLocal } from './width.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
@@ -1640,8 +1641,20 @@ function effect(ins, values, forward = false, word = 4){
     }
     if (op === 'crt')
     {
-        // A C runtime operation (`crt.js`): its result in eax, the rest as it was.
-        bumpReg(values, 0);
+        // A C runtime operation (`crt.js`): what it writes, and esp as it moves it.
+        const { writes, esp } = CRT_EFFECTS[/** @type {import('../helpers.js').Crt} */ (ins.crt)];
+        for (const r of writes)
+        {
+            bumpReg(values, r);
+        }
+        if (esp === null)
+        {
+            bumpReg(values, 4);
+        }
+        else
+        {
+            delta[4] += esp;
+        }
         return;
     }
     if (op === 'cdq' || op === 'cwde')

@@ -300,6 +300,18 @@ export function extentOf(mapped, image, entry, exported){
     return [entry, Math.min(after ?? Infinity, entry + EXTENT_LIMIT)];
 }
 
+/**
+ * A function of the library by its export's name, or by its RVA (`0x...`) for
+ * one the library has but does not export (the compiler's helpers in a runtime).
+ *
+ * @param {any[]} exports @param {string} name
+ * @returns {{ rva: number } | undefined}
+ */
+function findFunction(exports, name){
+    return /^0x[0-9a-f]+$/i.test(name) ? { rva: Number.parseInt(name, 16) }
+        : exports.find(e=>e.name === name);
+}
+
 /** A seeded generator (mulberry32). @param {number} seed */
 function random(seed){
     let state = seed >>> 0;
@@ -344,7 +356,7 @@ async function verify(library, specs){
     {
         const [name, rest] = spec.split('=');
         const [operation, exportName = name] = rest.split('@');
-        const found = exports.find(e=>e.name === exportName);
+        const found = findFunction(exports, exportName);
         if (found === undefined)
         {
             console.log(`${name}: not exported`);
@@ -431,13 +443,48 @@ async function verify(library, specs){
                 args = [dst, Math.max(DATA, Math.min(src, DATA + DATA_BYTES - length)), length];
             }
             const program = [];
-            for (const arg of [...args].reverse())
+            const call = ()=>program.push(0xe8,
+                ...u32((entry - (PROGRAM + program.length + 5)) >>> 0));
+            // mov [OUT+k], reg for each register: eax, edx, ecx, ebx, esp.
+            const stores = ()=>[[0x05, 0], [0x15, 4], [0x0d, 8], [0x1d, 12], [0x25, 16]]
+                .forEach(([modrm, k])=>program.push(0x89, modrm, ...u32(OUT + k)));
+            const quads = ['allmul', 'alldiv', 'aulldiv', 'allrem', 'aullrem', 'alldvrm',
+                'aulldvrm'];
+            if (quads.includes(operation))
             {
-                program.push(0x68, ...u32(arg));
+                const word = ()=>[0, 1, 0xffffffff, 0x80000000, int(2 ** 32) >>> 0,
+                    int(16)][int(6)];
+                for (let k = 0; k < 4; k++)
+                {
+                    program.push(0x68, ...u32(word()));
+                }
+                call();
+                stores();
             }
-            program.push(0xe8, ...u32((entry - (PROGRAM + program.length + 5)) >>> 0));
-            program.push(0x83, 0xc4, 4 * args.length);
-            program.push(...operation === 'sqrt' ? [0xdd, 0x1d, ...u32(OUT)] : [0xa3, ...u32(OUT)]);
+            else if (operation.endsWith('shl') || operation.endsWith('shr'))
+            {
+                program.push(0xb8, ...u32(int(2 ** 32) >>> 0), 0xba, ...u32(int(2 ** 32) >>> 0),
+                    0xb9, ...u32([int(256), int(32), 32 + int(32), 64, 63, 0][int(6)]));
+                call();
+                stores();
+            }
+            else if (operation === 'chkstk')
+            {
+                program.push(0xb8, ...u32([0, 4, 0x1000, 0x2345, 0x10000][int(5)]));
+                call();
+                stores();
+            }
+            else
+            {
+                for (const arg of [...args].reverse())
+                {
+                    program.push(0x68, ...u32(arg));
+                }
+                call();
+                program.push(0x83, 0xc4, 4 * args.length);
+                program.push(...operation === 'sqrt' ? [0xdd, 0x1d, ...u32(OUT)]
+                    : [0xa3, ...u32(OUT)]);
+            }
             program.push(0xf4);
             const run = (/** @type {any} */ helpers)=>{
                 const m = createTestMachine({ ramSize: RAM });
@@ -452,7 +499,14 @@ async function verify(library, specs){
                 {
                     exit = m.runProgram(exit.eip, { helpers: false, budget: 1e8 });
                 }
-                return { left, seen: JSON.stringify({ kind: exit.kind, out: [...m.read(OUT, 8)],
+                // ecx is the helper's to spoil where it is no result (cdecl's and
+                // the helpers' convention alike), and not compared there.
+                const out = [...m.read(OUT, 20)];
+                if (['allmul', 'alldiv', 'aulldiv', 'allrem', 'aullrem'].includes(operation))
+                {
+                    out.fill(0, 8, 12);
+                }
+                return { left, seen: JSON.stringify({ kind: exit.kind, out,
                     data: [...m.read(DATA, DATA_BYTES)],
                     regs: ['ebx', 'ebp', 'esi', 'edi', 'esp'].map(r=>m.reg(r)) }) };
             };
@@ -519,7 +573,7 @@ async function verify64(bytes, image, mapped, exports, specs){
     {
         const [name, rest] = spec.split('=');
         const [operation, exportName = name] = rest.split('@');
-        const found = exports.find(e=>e.name === exportName);
+        const found = findFunction(exports, exportName);
         if (found === undefined)
         {
             console.log(`${name}: not exported`);
@@ -673,7 +727,7 @@ async function main(){
     for (const spec of names)
     {
         const [name, exportName = name] = spec.split('=');
-        const found = exports.find(e=>e.name === exportName);
+        const found = findFunction(exports, exportName);
         if (found === undefined)
         {
             console.log(`${name}: not exported`);

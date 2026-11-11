@@ -7,15 +7,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CRT_DICTIONARY } from './crt-dictionary.js';
-import { RUNTIME_HELPERS, helperExtent, helperInstructions } from './helpers.js';
+import { CRT_EFFECTS, RUNTIME_HELPERS, helperExtent, helperInstructions } from './helpers.js';
 import { decode } from './decode/decoder.js';
 
 /**
- * The fewest bytes a signature leaves unmasked: a short stub whose meaning is
- * the address it jumps to -- the address masked -- is every other such stub
- * (MSVC's `_CIsqrt` matched eight of them in one image).
+ * The fewest bytes a signature leaves unmasked, and the most of it masked: a
+ * short stub whose meaning is the address it jumps to -- the address masked --
+ * is every other such stub (MSVC's `_CIsqrt`, 8 of its 20 bytes masked,
+ * matched eight of them in one image), where a helper of 31 bytes none of
+ * them masked is itself.
  */
-const SIGNIFICANT_BYTES = 64;
+const SIGNIFICANT_BYTES = 24;
+const MASKED_SHARE = 1 / 3;
 
 test('every entry of the dictionary is a signature that tells its function apart', ()=>{
     const hashes = new Set();
@@ -33,11 +36,11 @@ test('every entry of the dictionary is a signature that tells its function apart
         assert.ok(masks.every((at, i)=>inSpans(at) && (i === 0 || at > masks[i - 1])),
             `${name}: masks in order, each in a span`);
         const code = spans.reduce((sum, [, n])=>sum + n, 0);
-        assert.ok(code - masks.length >= SIGNIFICANT_BYTES,
-            `${name}: ${code - masks.length} bytes unmasked`);
+        assert.ok(code - masks.length >= SIGNIFICANT_BYTES && masks.length <= code * MASKED_SHARE,
+            `${name}: ${code - masks.length} bytes unmasked of ${code}`);
         const [first, end] = helperExtent(entry);
         assert.equal(entry.length, end - first);
-        assert.ok(['memmove', 'memcpy', 'memset', 'strlen', 'sqrt'].includes(String(entry.does)));
+        assert.ok(entry.does !== undefined && entry.does in CRT_EFFECTS, `${name}: does what`);
         assert.ok(RUNTIME_HELPERS.includes(entry), `${name}: looked up by forming`);
     }
 });
