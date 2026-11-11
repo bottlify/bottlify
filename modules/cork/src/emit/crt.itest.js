@@ -87,6 +87,45 @@ const FUNCTIONS = {
         0xd9, 0xfa,                         // fsqrt
         0xc3,                               // ret
     ],
+    memcmp: [
+        0x56, 0x57,                         // push esi; push edi
+        0x8b, 0x74, 0x24, 0x0c,             // mov esi, [esp+12]
+        0x8b, 0x7c, 0x24, 0x10,             // mov edi, [esp+16]
+        0x8b, 0x4c, 0x24, 0x14,             // mov ecx, [esp+20]
+        0x31, 0xc0,                         // xor eax, eax
+        0x85, 0xc9, 0x74, 0x09,             // test ecx, ecx; jz done
+        0xf3, 0xa6, 0x74, 0x05,             // repe cmpsb; je done
+        0x19, 0xc0, 0x83, 0xc8, 0x01,       // sbb eax, eax; or eax, 1
+        0x5f, 0x5e, 0xc3,                   // done: pop edi; pop esi; ret
+    ],
+    strcmp: [
+        0x8b, 0x4c, 0x24, 0x04,             // mov ecx, [esp+4]
+        0x8b, 0x54, 0x24, 0x08,             // mov edx, [esp+8]
+        0x8a, 0x01, 0x3a, 0x02,             // again: mov al, [ecx]; cmp al, [edx]
+        0x75, 0x08,                         // jne apart
+        0x84, 0xc0, 0x74, 0x0a,             // test al, al; jz same
+        0x41, 0x42, 0xeb, 0xf2,             // inc ecx; inc edx; jmp again
+        0x19, 0xc0, 0x83, 0xc8, 0x01, 0xc3, // apart: sbb eax, eax; or eax, 1; ret
+        0x31, 0xc0, 0xc3,                   // same: xor eax, eax; ret
+    ],
+    memchr: [
+        0x8b, 0x44, 0x24, 0x04,             // mov eax, [esp+4]
+        0x8b, 0x54, 0x24, 0x08,             // mov edx, [esp+8]
+        0x8b, 0x4c, 0x24, 0x0c,             // mov ecx, [esp+12]
+        0x85, 0xc9, 0x74, 0x08,             // again: test ecx, ecx; jz none
+        0x38, 0x10, 0x74, 0x06,             // cmp [eax], dl; je found
+        0x40, 0x49, 0xeb, 0xf4,             // inc eax; dec ecx; jmp again
+        0x31, 0xc0, 0xc3,                   // none: xor eax, eax; found: ret
+    ],
+    strchr: [
+        0x8b, 0x44, 0x24, 0x04,             // mov eax, [esp+4]
+        0x8b, 0x54, 0x24, 0x08,             // mov edx, [esp+8]
+        0x8a, 0x08, 0x38, 0xd1,             // again: mov cl, [eax]; cmp cl, dl
+        0x74, 0x09,                         // je found
+        0x84, 0xc9, 0x74, 0x03,             // test cl, cl; jz none
+        0x40, 0xeb, 0xf3,                   // inc eax; jmp again
+        0x31, 0xc0, 0xc3,                   // none: xor eax, eax; found: ret
+    ],
 };
 
 
@@ -271,11 +310,64 @@ function caseOf(name, seed){
     {
         return { name, args: [dst, int(2 ** 32) >>> 0, length], data, flags, regs };
     }
+    if (name === 'memcmp' || name === 'strcmp' || name === 'memchr' || name === 'strchr')
+    {
+        return { name, args: scanArgs(name, data, int, Math.min(length, DATA_BYTES / 2 - 1),
+            dst, Math.max(DATA, Math.min(src, DATA + DATA_BYTES - length - 1))), data, flags,
+        regs };
+    }
     return { name, args: [dst, src, length], data, flags, regs };
 }
 
+/**
+ * A comparison's or search's arguments, the data made for it: two spans equal
+ * up to a seeded first difference (or wholly), a string's zero after `length`
+ * bytes, the byte sought in the span, its zero, or neither.
+ *
+ * @param {string} name @param {Uint8Array} data @param {(n: number) => number} int
+ * @param {number} length @param {number} dst @param {number} src
+ */
+function scanArgs(name, data, int, length, dst, src){
+    if (name === 'strcmp' || name === 'strchr')
+    {
+        data.forEach((v, i)=>{
+            data[i] = v === 0 ? 1 : v;
+        });
+    }
+    if (name === 'memchr' || name === 'strchr')
+    {
+        const sought = [data[src - DATA + int(length + 1)], 0, int(256), data[src - DATA]][int(4)];
+        if (name === 'strchr')
+        {
+            data[src - DATA + length] = 0;
+            return [src, sought | int(2) * 0x3400];
+        }
+        return [src, sought | int(2) * 0x1200, length];
+    }
+    const apart = Math.abs(dst - src) >= length;
+    const k = int(length + 1);
+    if (apart)
+    {
+        data.copyWithin(dst - DATA, src - DATA, src - DATA + k);
+        if (k < length && int(2) === 0)
+        {
+            data[dst - DATA + k] = data[src - DATA + k] ^ 1 << int(8);
+        }
+    }
+    if (name === 'strcmp')
+    {
+        data[src - DATA + length] = 0;
+        if (apart && k === length)
+        {
+            data[dst - DATA + length] = int(2) === 0 ? 0 : 1 + int(255);
+        }
+        return [dst, src];
+    }
+    return [dst, src, length];
+}
+
 for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
-    ['memmove', 'memcpy', 'memset', 'strlen', 'sqrt']))
+    ['memmove', 'memcpy', 'memset', 'strlen', 'sqrt', 'memcmp', 'strcmp', 'memchr', 'strchr']))
 {
     test(`${name}: seeded calls answer the same made as the operation as through the body`, ()=>{
         const helpers = [entryOf(name)];
@@ -309,7 +401,7 @@ for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
         }
         assert.ok(formed > 60, `${formed} calls formed as the operation`);
         assert.ok(made > 0, `${made} calls made as they were`);
-        assert.ok(watched > 0 || name === 'strlen' || name === 'sqrt',
+        assert.ok(watched > 0 || !['memmove', 'memcpy', 'memset'].includes(name),
             `${watched} stores beside code or a watch formed`);
     });
 }

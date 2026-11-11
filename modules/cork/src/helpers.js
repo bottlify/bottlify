@@ -80,7 +80,7 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * @typedef {'memmove' | 'memcpy' | 'memset' | 'strlen' | 'sqrt' | 'floor' | 'ceil'
  *     | 'allmul' | 'alldiv'
  *     | 'aulldiv' | 'allrem' | 'aullrem' | 'alldvrm' | 'aulldvrm' | 'allshl' | 'allshr'
- *     | 'aullshr' | 'chkstk' | 'chkstk64'} Crt
+ *     | 'aullshr' | 'chkstk' | 'chkstk64' | 'memcmp' | 'strcmp' | 'memchr' | 'strchr'} Crt
  */
 
 /**
@@ -100,6 +100,8 @@ export const CRT_EFFECTS = Object.freeze({
     aulldvrm: { writes: [0, 1, 2, 3], esp: 16 }, allshl: { writes: [0, 1, 2], esp: 0 },
     allshr: { writes: [0, 1, 2], esp: 0 }, aullshr: { writes: [0, 1, 2], esp: 0 },
     chkstk: { writes: [0], esp: null }, chkstk64: { writes: [], esp: 0 },
+    memcmp: { writes: [0], esp: 0 }, strcmp: { writes: [0], esp: 0 },
+    memchr: { writes: [0], esp: 0 }, strchr: { writes: [0], esp: 0 },
 });
 
 /** @type {RuntimeHelper} MSVC 7.1 and 8's `_ftol2`. */

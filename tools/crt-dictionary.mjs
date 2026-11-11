@@ -47,6 +47,59 @@ import { CRT_BODIES } from '../modules/cork/src/crt-dictionary.js';
 /** The operations on a double argument, returned in ST0. */
 const FLOATS = ['sqrt', 'floor', 'ceil'];
 
+/** The comparisons and searches, whose cases are made by `scanCase`. */
+const SCANS = ['memcmp', 'strcmp', 'memchr', 'strchr'];
+
+/**
+ * A comparison's or search's arguments, the data made for it: two spans equal
+ * up to a seeded first difference (or none), a string's zero after `length`
+ * bytes, the byte sought in it, its zero or neither.
+ *
+ * @param {string} operation @param {Uint8Array} data @param {number} at  data's address
+ * @param {(n: number) => number} int @param {number} length @param {number} dst
+ * @param {number} src
+ * @returns {number[]}
+ */
+function scanCase(operation, data, at, int, length, dst, src){
+    if (operation === 'strcmp' || operation === 'strchr')
+    {
+        data.forEach((v, i)=>{
+            data[i] = v === 0 ? 1 : v;
+        });
+    }
+    if (operation === 'memchr' || operation === 'strchr')
+    {
+        const sought = [data[src - at + int(length + 1)], 0, int(256), data[src - at]][int(4)];
+        if (operation === 'strchr')
+        {
+            data[src - at + length] = 0;
+        }
+        return operation === 'memchr' ? [src, sought | int(2) * 0x1200, length]
+            : [src, sought | int(2) * 0x3400];
+    }
+    // Two spans equal to a first difference at `k`, or wholly.
+    const apart = Math.abs(dst - src) >= length;
+    const k = int(length + 1);
+    if (apart)
+    {
+        data.copyWithin(dst - at, src - at, src - at + k);
+        if (k < length && int(2) === 0)
+        {
+            data[dst - at + k] = data[src - at + k] ^ (1 << int(8));
+        }
+    }
+    if (operation === 'strcmp')
+    {
+        data[src - at + length] = 0;
+        if (apart && k === length)
+        {
+            data[dst - at + length] = int(2) === 0 ? 0 : 1 + int(255);
+        }
+        return [dst, src];
+    }
+    return [dst, src, length];
+}
+
 const DIR_EXCEPTION = 3;
 const DIR_BASERELOC = 5;
 /** The farthest a 32-bit function's extent reaches when no export follows it. */
@@ -446,6 +499,11 @@ async function verify(library, specs){
             {
                 args = [dst, int(2 ** 32) >>> 0, length];
             }
+            else if (SCANS.includes(operation))
+            {
+                args = scanCase(operation, data, DATA, int, Math.min(length, DATA_BYTES / 2 - 1),
+                    dst, Math.max(DATA, Math.min(src, DATA + DATA_BYTES - length - 1)));
+            }
             else
             {
                 args = [dst, Math.max(DATA, Math.min(src, DATA + DATA_BYTES - length)), length];
@@ -650,7 +708,11 @@ async function verify64(bytes, image, mapped, exports, specs){
             const src = Math.max(DATA, Math.min(int(4) === 0 ? dst + int(64) - 32 : place(),
                 DATA + DATA_BYTES - length));
             const args = operation === 'memset' ? [dst, int(2 ** 32), length]
-                : operation === 'strlen' ? [src] : [dst, src, length];
+                : operation === 'strlen' ? [src]
+                    : SCANS.includes(operation) ? scanCase(operation, data, DATA, int,
+                        Math.min(length, DATA_BYTES / 2 - 1),
+                        dst, Math.max(DATA, Math.min(src, DATA + DATA_BYTES - length - 1)))
+                        : [dst, src, length];
             // __chkstk: rax the bytes to have below rsp, the thread block in the data
             // with its StackLimit at the stack's open bottom or above it (a stack
             // to grow, its probe writing into the pages between).

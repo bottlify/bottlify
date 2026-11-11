@@ -215,4 +215,47 @@ export const CRT_DICTIONARY = Object.freeze([
         spans: [[0, 285]],
         masks: [[2, 4], [9, 4], [58, 4], [74, 4], [99, 4], [182, 4], [231, 4], [252, 4], [261, 4],
             [270, 4]] }),
+    // memcmp, strcmp, memchr and strchr: the bytes compared or searched in order, -1, 0 or
+    // 1 the comparisons' answer, the byte's address or 0 the searches'.
+    // memcmp, MSVC 7.1
+    entry({ name: 'memcmp', does: 'memcmp', quick: '7e912cf20524b1a0', hash: 'f0b018c261345d54',
+        spans: [[0, 184]], masks: [] }),
+    // strcmp, MSVC 7.1
+    entry({ name: 'strcmp', does: 'strcmp', quick: 'c752d729f18891e3', hash: '9069088de8c503cc',
+        spans: [[0, 135]], masks: [] }),
+    // memchr, MSVC 7.1
+    entry({ name: 'memchr', does: 'memchr', quick: '4285aa4bc72270ed', hash: '166e2970f41391ad',
+        spans: [[0, 171]], masks: [] }),
+    // strchr, MSVC 7.1, 8 and 10
+    entry({ name: 'strchr', does: 'strchr', quick: '8922dff0b20c61de', hash: '8b67473fc82f9232',
+        spans: [[0, 190]], masks: [[29, 4]] }),
+    // memcmp, MSVC 8
+    entry({ name: 'memcmp', does: 'memcmp', quick: '206aa105233e00a7', hash: '362944264f6813ef',
+        spans: [[0, 5630]], masks: [[1224, 4]] }),
+    // strcmp, MSVC 8 and 10
+    entry({ name: 'strcmp', does: 'strcmp', quick: 'c852d8bcf68899c2', hash: '64c3b0050f175260',
+        spans: [[0, 67], [68, 68]], masks: [] }),
+    // memchr, MSVC 8, 10 and 14 (2015-2022)
+    entry({ name: 'memchr', does: 'memchr', quick: '4285aa4bc72270ed', hash: 'b111a89309e667f5',
+        spans: [[0, 173]], masks: [] }),
+    // memcmp, MSVC 10
+    entry({ name: 'memcmp', does: 'memcmp', quick: '942807945a748a0e', hash: '83a7f3ba0e137153',
+        spans: [[0, 272], [416, 11], [433, 4]],
+        masks: [[24, 4], [31, 4], [38, 4], [45, 4], [73, 4], [95, 4], [117, 4], [139, 4],
+            [161, 4], [183, 4], [205, 4], [227, 4], [268, 4]] }),
+    // memcmp, MSVC 14 (2015-2022)
+    entry({ name: 'memcmp', does: 'memcmp', quick: '1c64830bf8b6ec0d', hash: '9e94be08da26a872',
+        spans: [[0, 4929]], masks: [[1092, 4]] }),
+    // strchr, MSVC 14 (2015-2022)
+    entry({ name: 'strchr', does: 'strchr', quick: 'f4ae34772f35b6a5', hash: 'ac3265b3112c9a62',
+        spans: [[0, 299]], masks: [[2, 4]] }),
+    // memcmp, MSVC 14 (2015-2022), x86-64
+    entry({ name: 'memcmp', does: 'memcmp', bits: 64, quick: 'cf517f1fd43d9441',
+        hash: 'e26cdbce219a6b23', spans: [[0, 73], [74, 125]], masks: [] }),
+    // memchr, MSVC 14 (2015-2022), x86-64
+    entry({ name: 'memchr', does: 'memchr', bits: 64, quick: '128fd291afd3a53f',
+        hash: '361b2fe75f9d0f55', spans: [[0, 144]], masks: [] }),
+    // strchr, MSVC 14 (2015-2022), x86-64
+    entry({ name: 'strchr', does: 'strchr', bits: 64, quick: '3984ba71f976343b',
+        hash: 'b90c34bebd4489c7', spans: [[0, 126]], masks: [] }),
 ]);

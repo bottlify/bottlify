@@ -5,12 +5,13 @@
  */
 
 /**
- * The gate of the C runtime's operations in a wide window (`emit/crt.js`,
- * `wideLayout`): long-mode calls to a memmove, memcpy, memset and strlen of
- * the test's own, made as the operation and through the function's body,
- * answer the same -- the result, the registers a callee keeps, the bytes,
- * the page marks, a fault -- with the data in the 4 GiB block past the first,
- * where every pointer's high half counts.
+ * The gate of the C runtime's operations in long mode (`emit/crt.js`): calls
+ * to a memmove, memcpy, memset, strlen, memcmp, memchr and strchr of the
+ * test's own, made as the operation and through the function's body, answer
+ * the same -- the result, the registers a callee keeps, the bytes, the page
+ * marks, a fault. In 4 GiB, and in a wide window (`wideLayout`) the copies,
+ * fills and lengths with the data in the 4 GiB block past the first, where
+ * every pointer's high half counts.
  */
 
 import { test } from 'node:test';
@@ -30,10 +31,24 @@ const FUNCTIONS = {
         0x14, 0x11, 0x49, 0xff, 0xc2, 0x4d, 0x39, 0xc2, 0x75, 0xf4, 0xc3],
     strlen: [0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x48, 0xff, 0xc0, 0x80, 0x3c, 0x01,
         0x00, 0x75, 0xf7, 0xc3],
+    // -1, 0 or 1 by the first pair of bytes apart, unsigned (`sbb; or`).
+    memcmp: [0x31, 0xc0, 0x4d, 0x85, 0xc0, 0x74, 0x19, 0x44, 0x8a, 0x09, 0x44, 0x3a, 0x0a, 0x75,
+        0x0c, 0x48, 0xff, 0xc1, 0x48, 0xff, 0xc2, 0x49, 0xff, 0xc8, 0x75, 0xed, 0xc3, 0x19, 0xc0,
+        0x83, 0xc8, 0x01, 0xc3],
+    memchr: [0x48, 0x89, 0xc8, 0x4d, 0x85, 0xc0, 0x74, 0x0c, 0x38, 0x10, 0x74, 0x0a, 0x48, 0xff,
+        0xc0, 0x49, 0xff, 0xc8, 0xeb, 0xef, 0x31, 0xc0, 0xc3],
+    strchr: [0x48, 0x89, 0xc8, 0x44, 0x8a, 0x08, 0x41, 0x38, 0xd1, 0x74, 0x0c, 0x45, 0x84, 0xc9,
+        0x74, 0x05, 0x48, 0xff, 0xc0, 0xeb, 0xee, 0x31, 0xc0, 0xc3],
 };
 
-const WINDOW = 2 ** 33;
-const HIGH = 2 ** 32;
+/** What forms where: a wide window takes the copies, fills and lengths alone. */
+const WHERE = [
+    { title: 'a wide window\'s', window: 2 ** 33, high: 2 ** 32,
+        names: ['memmove', 'memcpy', 'memset', 'strlen'] },
+    { title: 'long mode\'s', window: undefined, high: 0,
+        names: ['memmove', 'memcpy', 'memset', 'strlen', 'memcmp', 'memchr', 'strchr'] },
+];
+
 /** The pages the cases use, past the corpus's data area, and the closed page after them. */
 const AREA = CORPUS.dataAt + 0x10000;
 const AREA_BYTES = 0x10000;
@@ -89,7 +104,7 @@ function codeOf(name, args){
 }
 
 /**
- * @typedef {{ name: keyof typeof FUNCTIONS, args: number[], seed: number,
+ * @typedef {{ name: keyof typeof FUNCTIONS, args: number[], data: Uint8Array,
  *     watch: number[], code: number[], closed: number[] }} Case
  */
 
@@ -97,12 +112,14 @@ function codeOf(name, args){
  * Seeded cases: spans in the area, some overlapping, some reaching the closed
  * page past it, some over a watched page or a page of code.
  *
- * @param {keyof typeof FUNCTIONS} name @param {number} seed
+ * @param {keyof typeof FUNCTIONS} name @param {number} seed @param {number} high
  * @returns {Case}
  */
-function caseOf(name, seed){
+function caseOf(name, seed, high){
     const next = random(seed * 7919 + name.length);
     const int = (/** @type {number} */ n)=>Math.floor(next() * n);
+    // Strings of a few dozen bytes, a zero here and there.
+    const data = new Uint8Array(AREA_BYTES).map(()=>(next() < 0.02 ? 0 : 1 + int(255)));
     const end = AREA + AREA_BYTES;
     const shape = int(10);
     const length = shape === 0 ? 0 : shape === 1 ? 0x1000 + int(0x2000) : int(600);
@@ -118,7 +135,7 @@ function caseOf(name, seed){
         dst = end - length + 1 + int(8);    // into the closed page past the area
     }
     /** @type {Case} */
-    const c = { name, args: [], seed, watch: [], code: [], closed: [] };
+    const c = { name, args: [], data, watch: [], code: [], closed: [] };
     const flagged = int(6);
     if (flagged === 0)
     {
@@ -138,12 +155,54 @@ function caseOf(name, seed){
     }
     if (name === 'strlen')
     {
-        c.args = [src + HIGH];
+        c.args = [src + high];
         return c;
     }
-    c.args = [dst + HIGH, name === 'memset' ? int(2 ** 32) * 2 ** 20 + int(256) : src + HIGH,
+    if (name === 'memcmp' || name === 'memchr' || name === 'strchr')
+    {
+        // The pointers moved by the data's high half; memcmp's are both.
+        c.args = scanArgs(name, data, int, length, dst, src)
+            .map((arg, i)=>(i === 0 || i === 1 && name === 'memcmp' ? arg + high : arg));
+        return c;
+    }
+    c.args = [dst + high, name === 'memset' ? int(2 ** 32) * 2 ** 20 + int(256) : src + high,
         length];
     return c;
+}
+
+/**
+ * A comparison's or search's arguments, the area's data made for it: two
+ * spans equal up to a seeded first difference (or wholly), the byte sought
+ * in the span, its string's zero, or neither.
+ *
+ * @param {string} name @param {Uint8Array} data @param {(n: number) => number} int
+ * @param {number} length @param {number} dst @param {number} src
+ * @returns {number[]}
+ */
+function scanArgs(name, data, int, length, dst, src){
+    if (name === 'memchr' || name === 'strchr')
+    {
+        const sought = [data[src - AREA + int(length)] ?? 0, 0, int(256), data[src - AREA]][int(4)];
+        if (name === 'strchr')
+        {
+            data.forEach((v, i)=>{
+                data[i] = v === 0 ? 1 : v;
+            });
+            data[Math.min(src - AREA + length, AREA_BYTES - 1)] = 0;
+        }
+        return name === 'memchr' ? [src, sought | int(2) * 0x1200, length]
+            : [src, sought | int(2) * 0x3400];
+    }
+    if (Math.abs(dst - src) >= length)
+    {
+        const k = int(length + 1);
+        data.copyWithin(dst - AREA, src - AREA, src - AREA + k);
+        if (k < length && int(2) === 0)
+        {
+            data[dst - AREA + k] = data[src - AREA + k] ^ 1 << int(8);
+        }
+    }
+    return [dst, src, length];
 }
 
 /**
@@ -151,27 +210,24 @@ function caseOf(name, seed){
  * or (`false`) through the bodies.
  *
  * @param {Case} c @param {false | object[]} helpers
+ * @param {{ window?: number, high: number }} where
  */
-function runCase(c, helpers){
-    const m = machine({ window: WINDOW, high: HIGH, config: { helpers } });
-    const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), WINDOW / 4096);
-    const ranges = new Uint8Array(m.memory.buffer, codeRangesAt(m.layout), WINDOW / 4096 * 2);
-    const ram = new Uint8Array(/** @type {WebAssembly.Memory} */ (m.ram).buffer);
-    const from = AREA + HIGH;
+function runCase(c, helpers, { window, high }){
+    const m = machine({ window, high, config: { helpers } });
+    const pages = (window ?? 2 ** 32) / 4096;
+    const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), pages);
+    const ranges = new Uint8Array(m.memory.buffer, codeRangesAt(m.layout), pages * 2);
+    const ram = new Uint8Array((m.ram ?? m.memory).buffer);
+    const from = AREA + high;
     flags.fill(0, from / 4096, (from + AREA_BYTES) / 4096);
-    const next = random(c.seed);
-    for (let at = from; at < from + AREA_BYTES; at++)
-    {
-        // Strings of a few dozen bytes, a zero here and there.
-        ram[at] = next() < 0.02 ? 0 : 1 + Math.floor(next() * 255);
-    }
+    ram.set(c.data, from);
     for (const at of c.watch)
     {
-        flags[(at + HIGH) / 4096 >>> 0] |= PageFlag.WATCH;
+        flags[(at + high) / 4096 >>> 0] |= PageFlag.WATCH;
     }
     for (const at of c.code)
     {
-        const page = (at + HIGH) / 4096 >>> 0;
+        const page = (at + high) / 4096 >>> 0;
         const granule = (at & 0xfff) >>> 5;
         flags[page] |= PageFlag.HAS_CODE;
         ranges[page * 2] = granule;
@@ -179,37 +235,50 @@ function runCase(c, helpers){
     }
     for (const at of c.closed)
     {
-        flags[(at + HIGH) / 4096 >>> 0] = PageFlag.INACCESSIBLE;
+        flags[(at + high) / 4096 >>> 0] = PageFlag.INACCESSIBLE;
     }
     const regs = Array.from({ length: 16 },
         (unused, i)=>(BigInt(i) * 0x1111111111111n).toString(16));
-    regs[4] = (BigInt(STACK + HIGH)).toString(16);
-    load(m, { code: codeOf(c.name, c.args), regs, flags: 0, seed: c.seed, fresh: true });
+    regs[4] = (BigInt(STACK + high)).toString(16);
+    load(m, { code: codeOf(c.name, c.args), regs, flags: 0, seed: 1, fresh: true });
     const seen = run(m, true, 100000);
     // rax, and the registers a callee keeps: rbx, rsp, rbp, rsi, rdi, r12 to r15.
     const kept = [0, 3, 4, 5, 6, 7, 12, 13, 14, 15].map(i=>seen.regs[i]);
     return {
         fault: seen.fault, kept,
         // Not the stack below rsp, where the call left its return address.
-        bytes: [...ram.subarray(SPANS + HIGH, from + AREA_BYTES)],
+        bytes: [...ram.subarray(SPANS + high, from + AREA_BYTES)],
         marks: [...flags.subarray(from / 4096, (from + AREA_BYTES) / 4096 + 1)],
         retired: Number(seen.retired),
     };
 }
 
-for (const [name, does] of /** @type {const} */ ([['memmove', 'memmove'], ['memmove', 'memcpy'],
-    ['memset', 'memset'], ['strlen', 'strlen']]))
+for (const where of WHERE)
 {
-    test(`a wide window's ${does}: seeded calls answer the same made as the operation as`
-        + ' through the body', ()=>{
+    for (const does of where.names)
+    {
+        const name = /** @type {keyof typeof FUNCTIONS} */ (does === 'memcpy' ? 'memmove' : does);
+        test(`${where.title} ${does}: seeded calls answer the same made as the operation as`
+            + ' through the body', ()=>calls(where, name, does));
+    }
+}
+
+/**
+ * Seeded calls of `name`'s function, formed as `does` and through its body.
+ * @param {{ window?: number, high: number }} where
+ * @param {keyof typeof FUNCTIONS} name @param {string} does
+ */
+function calls(where, name, does){
+    const { high } = where;
+    {
         const helpers = [entryOf(name, does)];
         let formed = 0;
         let made = 0;
         for (let seed = 1; seed <= 60; seed++)
         {
-            const c = caseOf(name, seed);
-            const { retired: bodyRetired, ...body } = runCase(c, false);
-            const { retired, ...seen } = runCase(c, helpers);
+            const c = caseOf(name, seed, high);
+            const { retired: bodyRetired, ...body } = runCase(c, false, where);
+            const { retired, ...seen } = runCase(c, helpers, where);
             const { bytes: seenBytes, ...seenRest } = seen;
             const { bytes: bodyBytes, ...bodyRest } = body;
             assert.deepEqual(seenRest, bodyRest, `seed ${seed}: ${JSON.stringify(c)}`);
@@ -219,8 +288,8 @@ for (const [name, does] of /** @type {const} */ ([['memmove', 'memmove'], ['memm
             // A store reaching translated code is the body's to make, which the
             // translation it overwrites is then left for.
             const [dst, , length = 0] = c.args;
-            const hitsCode = name !== 'strlen' && c.code.some(at=>length > 0
-                && (at & ~31) < dst - HIGH + length && (at & ~31) + 32 > dst - HIGH);
+            const hitsCode = (name === 'memmove' || name === 'memset') && c.code.some(at=>length > 0
+                && (at & ~31) < dst - high + length && (at & ~31) + 32 > dst - high);
             assert.ok(!hitsCode || retired >= bodyRetired,
                 `seed ${seed}: a store over code formed`);
             if (retired < bodyRetired)
@@ -234,7 +303,7 @@ for (const [name, does] of /** @type {const} */ ([['memmove', 'memmove'], ['memm
         }
         assert.ok(formed > 30, `${formed} calls formed as the operation`);
         assert.ok(made > 0, `${made} calls made as they were`);
-    });
+    }
 }
 
 /**
@@ -290,7 +359,7 @@ function runChkstk(where, size, limit, helpers){
     };
 }
 
-for (const where of [{ high: 0 }, { window: WINDOW, high: HIGH }])
+for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32 }])
 {
     test(`long mode's __chkstk${where.window === undefined ? '' : ' in a wide window'}: made as`
         + ' the operation as through the body', ()=>{
