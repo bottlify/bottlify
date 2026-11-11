@@ -194,6 +194,19 @@ CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.share',
     'cork.frameShare', 'cork.frameTranslateMs', 'cork.frameLeaves');
 
 /** The cpu layer's module for one graph; see `defaultModules`. */
+
+/**
+ * Whether the host's WebAssembly keeps every instance that imports a table
+ * for as long as the table lives: V8 before 13 (Node.js 22) lists a table's
+ * importers strongly, and each copies the table's dispatch entries, grown with
+ * it. Every module cork instantiates imports its function table. Measured:
+ * 2000 instances of a module importing an 8192-entry table hold 399 MB after
+ * a collection on Node.js 22, 4 MB on 24 and 26 and in Chromium.
+ */
+function keepsTableImporters(){
+    const v8 = globalThis.process?.versions?.v8;
+    return typeof v8 === 'string' && Number(v8.split('.')[0]) < 13;
+}
 export function createCpuModule(){
     /**
      * The instance this module object made last, for `diagnostics()` and
@@ -631,6 +644,14 @@ export function createCpuModule(){
                     const ordered = several && settings.cork?.ordered === true;
                     state.ordered = several ? ordered : null;
                     const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
+                    if (keepsTableImporters())
+                    {
+                        log?.warn?.('cpu', 'this host\'s WebAssembly (V8 before 13, Node.js 22)'
+                            + ' keeps every module that imports a table while the table lives:'
+                            + ' every module the translator made stays, and memory grows with'
+                            + ' all the code the run ever translated. Node.js 24 or later lets'
+                            + ' them go.');
+                    }
                     const hostConfig = {
                         memorySize: settings.memorySize,
                         trapPort: settings.trapPort,

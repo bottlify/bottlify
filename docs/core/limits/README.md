@@ -20,6 +20,10 @@ event, an error. Neither stops the program.
   `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
   refused when it is loaded.
 - Only user mode. There is no kernel underneath; the engine's layers answer every system call.
+- On Node.js 22 (V8 12.4) every module the translator makes stays in memory for the run: that
+  V8 keeps each module importing a table while the table lives. A long run there grows with all
+  the code it ever translated (a run that JITs, the .NET Framework's, by gigabytes); the cpu layer
+  says so once. Node.js 24 and later, and the browsers, let the modules go.
 - Below `0x10000` a write or running code faults, as an access violation, as on Windows; a read
   there finds zeros where Windows would fault too (`roadmap/decisions.md` A79).
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and

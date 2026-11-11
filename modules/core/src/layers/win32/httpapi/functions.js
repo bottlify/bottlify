@@ -41,7 +41,7 @@ const URL_ACL_PATH = 'SYSTEM\\CurrentControlSet\\Services\\HTTP\\Parameters\\Url
 const REG_SZ = 1;
 
 /** A string's length to read, in bytes; longer than any URL prefix or SDDL. */
-const MAX_TEXT = 0x10000;
+const MAX_TEXT_BYTES = 0x10000;
 
 /**
  * @typedef {Object} HttpapiHost
@@ -91,7 +91,7 @@ export function createHttpapiFunctions(host){
     };
     /** @param {number} pointer */
     const wide = pointer=>((pointer >>> 0) === 0 ? null
-        : host.readWideString(pointer >>> 0, MAX_TEXT));
+        : host.readWideString(pointer >>> 0, MAX_TEXT_BYTES));
 
     /** The stores this machine takes and keeps nowhere, each said once. */
     const said = new Set();
