@@ -160,3 +160,27 @@ test('a process on the run\'s volume from afar links a file as one standing on i
     await farLayer.dispose();
     await layer.dispose();
 });
+
+test('a process on the run\'s volume from afar makes a junction the run\'s volume holds', async()=>{
+    // fusion in a setup's process of its own makes the GAC folder a junction
+    // to WinSxS; under concurrency that process stands on the volume from afar.
+    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+        watchers: new Set() };
+    const layer = createFilesystemModule();
+    const local = await layer.create({ volume: run });
+    const handlers = volumeHandlers(run);
+    const farLayer = createFilesystemModule();
+    const far = await farLayer.create({ volume: remoteVolume((method, args)=>
+        /** @type {any} */ (handlers.volume)[method](...args)) });
+    far.createDirectory('C:\\Store');
+    const made = far.open('C:\\Store\\a.dll',
+        { write: true, disposition: far.Disposition.CREATE_NEW });
+    far.write(made, bytes('lib'));
+    far.close(made);
+    far.createDirectory('C:\\Cache');
+    far.setJunction('C:\\Cache', 'C:\\Store');
+    assert.equal(local.stat('C:\\Cache').junction, 'Store');
+    assert.equal(far.stat('C:\\Cache\\a.dll')?.size, 3, 'read through it from afar');
+    await farLayer.dispose();
+    await layer.dispose();
+});
