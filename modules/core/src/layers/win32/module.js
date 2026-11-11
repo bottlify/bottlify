@@ -126,6 +126,7 @@ import { RUNTIME_LIBRARIES, runtimeDirectories } from './mscoree/versions.js';
 import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { createHttpapiFunctions } from './httpapi/functions.js';
+import { createLoadperfFunctions } from './loadperf/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
 import { createUrlMonikers } from './urlmon/monikers.js';
 import { createIeframe } from './ieframe/functions.js';
@@ -4378,6 +4379,9 @@ export function createWin32Module(){
                 // The HTTP Server API's configuration: a setup's URL reservations.
                 'HTTPAPI.dll': createHttpapiFunctions({ readMemory, writeMemory, readWideString,
                     hive, divergence: config?.divergence }),
+                // Performance counter names a setup installs for its service.
+                'loadperf.dll': createLoadperfFunctions({ readWideString, readCString,
+                    divergence: config?.divergence }),
                 'WTSAPI32.dll': { ...createSessionNotificationFunctions(),
                     ...createSessionInformationFunctions({ ...displayHost,
                         // The one user's token: the process's own, which every process has.

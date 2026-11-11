@@ -41,6 +41,26 @@ if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 const YIELD_MS = 4;
 
 /**
+ * This worker's own JavaScript heap, in MiB: a worker that runs out of it is
+ * ended by its host with nothing said by the program, so its growth is the
+ * only warning. Node answers for the worker's isolate, Chrome for the page's;
+ * where neither does, `measured: false`, never a zero.
+ */
+const heapNow = ()=>{
+    const mb = (/** @type {number} */ bytes)=>Math.round(bytes / 1048576);
+    const usage = /** @type {any} */ (globalThis).process?.memoryUsage?.();
+    if (usage)
+    {
+        return { measured: true, usedMb: mb(usage.heapUsed), totalMb: mb(usage.heapTotal),
+            externalMb: mb(usage.external), arrayBuffersMb: mb(usage.arrayBuffers) };
+    }
+    const memory = /** @type {any} */ (globalThis.performance)?.memory;
+    return memory ? { measured: true, usedMb: mb(memory.usedJSHeapSize),
+        totalMb: mb(memory.totalJSHeapSize), limitMb: mb(memory.jsHeapSizeLimit) }
+        : { measured: false };
+};
+
+/**
  * The pictures of this process's surfaces, sent on `port` as the graphics
  * worker sends its frames, for the thread with the GPU to show. What it says
  * back once one is shown is not waited on: this thread blocks while it idles,
@@ -170,7 +190,8 @@ export async function serveProcess(start){
     };
     /** The machine's tables, and what it waited on the system for. */
     const tables = ()=>[...app.diagnostics(),
-        { name: 'link', status: 'ready', metrics: link.diagnostics() }];
+        { name: 'link', status: 'ready', metrics: link.diagnostics() },
+        { name: 'heap', status: 'ready', metrics: heapNow() }];
     /** The tables as data, or a table that says why they could not be read: a
      * report that loses them unsaid looks like a process that had none. */
     const plainTables = ()=>plainOf(tables, message=>[{ name: 'diagnostics', status: 'error',

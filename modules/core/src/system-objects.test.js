@@ -98,3 +98,81 @@ test('a process across the link that ends leaves no wait behind, and abandons th
         assert.equal(object.owner, local, 'its mutex went to the next waiter');
         assert.equal(/** @type {any} */ (local).waitResult, 0x80, 'told it was abandoned');
     });
+
+/**
+ * A process across the link: its kernel's objects, one of them a stand-in of
+ * an event the run's table holds, and one of its threads.
+ */
+function farProcess(){
+    /** @type {any} */
+    let far = null;
+    const { objects } = objectHandlers({ table: new Map(), wake: (token, result)=>{
+        far.wakeRemote(token, result);
+        return Promise.resolve();
+    } });
+    /** @type {any[]} */
+    const woken = [];
+    const scheduler = { block(){}, wake: (/** @type {any} */ one)=>woken.push(one),
+        onTimeout(){} };
+    far = createSyncObjects({ scheduler, remote: {
+        wait: (id, threadId, token)=>objects.wait(id, threadId, token),
+        cancel: token=>objects.cancel(token),
+        poll: (id, threadId)=>objects.poll(id, threadId),
+        set: id=>objects.set(id),
+        reset: id=>objects.reset(id),
+        release: (id, count)=>objects.release(id, count),
+        releaseMutex: (id, threadId)=>objects.releaseMutex(id, threadId),
+    } });
+    const { id } = /** @type {any} */ (objects.create('event', 'Served', { manualReset: false,
+        signalled: false }));
+    const standIn = far.createEvent({ name: 'Served' });
+    standIn.remote = id;
+    const local = far.createEvent({ name: 'Mine' });
+    const thread = { id: 4, suspendCount: 0, waitSet: null, queuedOn: null, state: 'running' };
+    return { objects, far, id, standIn, local, thread, woken };
+}
+
+test('a wait for any of a set with another process\'s event in it ends with whichever comes',
+    ()=>{
+        // ngen under concurrency: its own event and one its worker process
+        // made, in one WaitForMultipleObjects.
+        const one = farProcess();
+        assert.equal(one.far.waitAny([one.local, one.standIn], one.thread), null, 'neither yet');
+        one.objects.set(one.id);
+        assert.deepEqual(one.woken, [one.thread], 'the other process\'s set woke it');
+        assert.equal(/** @type {any} */ (one.thread).waitResult, 1, 'with that object\'s index');
+        assert.deepEqual(one.local.waiters, [], 'and it waits here on nothing');
+
+        const two = farProcess();
+        assert.equal(two.far.waitAny([two.local, two.standIn], two.thread), null);
+        two.far.setEvent(two.local);
+        assert.equal(/** @type {any} */ (two.thread).waitResult, 0, 'its own event came first');
+        two.objects.set(two.id);
+        assert.equal(two.objects.poll(two.id, 9), OBJECT_0,
+            'the other wait was taken back: the set stayed for the next look');
+
+        const ready = farProcess();
+        ready.objects.set(ready.id);
+        assert.deepEqual(ready.far.waitAny([ready.local, ready.standIn], ready.thread),
+            { index: 1, result: OBJECT_0 }, 'signalled already: taken at once');
+    });
+
+test('an object of another process handed over after the wait had ended goes back', ()=>{
+    const one = farProcess();
+    // The other process's set reaches the table, and its word of it is still
+    // on its way when the event here comes.
+    const wake = one.far.wakeRemote;
+    /** @type {[number, number][]} */
+    const late = [];
+    one.far.wakeRemote = (/** @type {number} */ token, /** @type {number} */ result)=>{
+        late.push([token, result]);
+    };
+    assert.equal(one.far.waitAny([one.local, one.standIn], one.thread), null);
+    one.objects.set(one.id);
+    assert.equal(late.length, 1, 'handed over there');
+    one.far.setEvent(one.local);
+    assert.equal(/** @type {any} */ (one.thread).waitResult, 0, 'the event here ended it');
+    wake(...late[0]);
+    assert.equal(/** @type {any} */ (one.thread).waitResult, 0, 'the late word changes nothing');
+    assert.equal(one.objects.poll(one.id, 9), OBJECT_0, 'and the other event was set again');
+});
