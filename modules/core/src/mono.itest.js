@@ -92,3 +92,20 @@ test('a .NET program runs to its end under the bottle\'s Mono',
         assert.deepEqual(output.join('').split(/\r?\n/).filter(Boolean), EXPECTED);
         assert.equal(code, 0, 'every check in the program passed');
     });
+
+test('a .NET program in a bottle without Mono ends with STATUS_DLL_NOT_FOUND, the loss said',
+    { timeout: 60_000 }, async t=>{
+        // _CorExeMain gives up after awaiting the runtime's files: ending the
+        // process from there parked a call no longer on the bridge, and the
+        // engine failed instead of the program ending.
+        const executable = new Uint8Array(await readFile(FIXTURE));
+        const app = await createApp({ executable, imagePath: 'C:\\App\\managed.exe',
+            windows: 'win7', files: [{ path: 'C:\\App\\managed.exe', bytes: executable }] });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const said = [];
+        app.on('loss', (/** @type {any} */ seen)=>said.push(seen.detail));
+        assert.equal(await app.run({ timeoutMs: 50_000 }) >>> 0, 0xc0000135);
+        assert.ok(said.some(detail=>/the managed program does not run/.test(detail)),
+            said.join('\n'));
+    });

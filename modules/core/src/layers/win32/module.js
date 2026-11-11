@@ -4320,7 +4320,10 @@ export function createWin32Module(){
                             heap.free(value);
                         }
                     },
-                    exitProcess: code=>libraries['KERNEL32.dll'].ExitProcess.handler([code]),
+                    // _CorExeMain gives up after awaiting the runtime: it has
+                    // left the bridge, so the process ends without parking it,
+                    // as the C runtime's exit does.
+                    exitProcess: code=>detachAndEnd(code) ?? code,
                     readMemory,
                     readWideString,
                     windowsDirectory: ()=>'C:\\WINDOWS',
