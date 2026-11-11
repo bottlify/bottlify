@@ -105,9 +105,11 @@
   reads, posts and sends to every other process's windows, and they to its), ids, bundle (a block
   it misses is fetched for it), named events, semaphores and mutexes, and the position of a file
   its parent handed it as its output; a named file mapping or waitable timer is its own. A set of
-  objects of which one was named by a process in another worker is answered when polled, with a
-  zero timeout or by a message wait (`MsgWaitForMultipleObjects`, COM's
-  `CoWaitForMultipleHandles`, which polls); a wait that would block on such a set is refused. Its
+  objects of which one was named by a process in another worker is waited on for any of them as
+  any set is: whichever comes first ends the wait with its index, and an object of another
+  process handed over after that is given back (an event set again, a count or a mutex
+  returned), so its other waiters see it a moment later. A wait for all of such a set is
+  refused. Its
   Direct3D 8 and 9 devices draw on the run's graphics worker, and what they present is shown as
   the run's frames. Its sound goes onto the run's track table, in a span its parent lends it,
   where that table is shared memory (none otherwise). The page's input reaches it where its

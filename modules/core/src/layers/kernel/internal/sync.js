@@ -170,6 +170,16 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     let asking = null;
     /** @param {any} thread */
     const stopWaiting = thread=>{
+        if (thread.remoteSet && remote)
+        {
+            // Every wait across the link taken back; one that was handed its
+            // object already ends the wait with it, as a single wait's does.
+            const granted = withdrawSet(thread, null);
+            if (granted !== null)
+            {
+                thread.waitResult = granted;
+            }
+        }
         if (thread.remoteWait && remote)
         {
             // Taken off the queue there -- unless it was handed the object
@@ -335,6 +345,12 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
      */
     const hand = (thread, object)=>{
         const set = thread.waitSet;
+        if (thread.remoteSet && remote)
+        {
+            // An object here ended a wait that also asked other processes:
+            // those waits go back, with anything they were handed.
+            withdrawSet(thread, -1);
+        }
         leaveQueues(thread, object);
         if (set?.all === true)
         {
@@ -367,8 +383,9 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         .map(object=>`${object.kind} "${object.name}"`).join(', ');
 
     /**
-     * A wait on a set holding another process's object is not carried across
-     * a link yet: said, rather than answered as though the object were here.
+     * A wait on all of a set holding another process's object is not carried
+     * across a link yet: said, rather than answered as though the object
+     * were here.
      *
      * @param {any[]} set
      */
@@ -378,6 +395,127 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             throw new Error('a wait on a set of objects one of which is another process\'s,'
                 + ' across a link, is not carried yet');
         }
+    };
+
+    /**
+     * Gives back an object another process holds that a wait on a set was
+     * handed after another of its objects had already ended the wait: an
+     * event is set again, a semaphore's count and a mutex returned. Its
+     * waiters there see it a moment later than they would have, which is all.
+     *
+     * @param {any} object @param {any} thread
+     */
+    const giveBack = (object, thread)=>{
+        const across = /** @type {RemoteObjects} */ (remote);
+        if (object.kind === SyncKind.EVENT)
+        {
+            across.set(object.remote);
+        }
+        else if (object.kind === SyncKind.SEMAPHORE)
+        {
+            across.release(object.remote, 1);
+        }
+        else if (object.kind === SyncKind.MUTEX)
+        {
+            across.releaseMutex(object.remote, thread.id);
+        }
+    };
+
+    /**
+     * Takes back a set wait's waits on other processes' objects, all but
+     * `keep`'s. Each one that was handed its object meanwhile is given back,
+     * except the first in the set's order when nothing has ended the wait
+     * yet (`keep` null): that one ends it, and its answer is returned.
+     *
+     * @param {any} thread @param {number | null} keep
+     * @returns {number | null} the answer, the object's index added, or null
+     */
+    const withdrawSet = (thread, keep)=>{
+        const tokens = /** @type {Map<number, number>} */ (thread.remoteSet);
+        const objects_ = thread.waitSet?.objects ?? thread.remoteObjects ?? [];
+        thread.remoteSet = null;
+        thread.remoteObjects = null;
+        let answer = null;
+        for (const [token, index] of [...tokens].sort((a, b)=>a[1] - b[1]))
+        {
+            remoteWaits.delete(token);
+            if (token === keep)
+            {
+                continue;
+            }
+            const granted = /** @type {RemoteObjects} */ (remote).cancel(token);
+            if (granted === null)
+            {
+                continue;
+            }
+            if (keep === null && answer === null)
+            {
+                answer = (granted + index) >>> 0;
+                continue;
+            }
+            giveBack(objects_[index], thread);
+        }
+        return answer;
+    };
+
+    /**
+     * A wait for any of a set one of whose objects another process holds:
+     * each such object asked for there, the rest queued on here. The first
+     * to come ends the wait; the others are taken back, and an object of
+     * another process handed over meanwhile is given back.
+     *
+     * @param {any[]} objects_ @param {any} thread @param {any} timed
+     * @returns {{ index: number, result: number } | null}
+     */
+    const waitAnyAcross = (objects_, thread, timed)=>{
+        const ready = api.pollAny(objects_, thread);
+        if (ready !== null)
+        {
+            countWait(setKind('any', objects_), 'taken');
+            return ready;
+        }
+        countWait(setKind('any', objects_), 'blocked');
+        const local = objects_.filter(object=>!object.remote);
+        /** @type {Map<number, number>} */
+        const tokens = new Map();
+        thread.remoteSet = tokens;
+        thread.remoteObjects = objects_;
+        for (let index = 0; index < objects_.length; index++)
+        {
+            const object = objects_[index];
+            if (!object.remote)
+            {
+                continue;
+            }
+            const token = nextToken++;
+            asking = { token, result: null };
+            let now;
+            try
+            {
+                now = /** @type {RemoteObjects} */ (remote).wait(object.remote, thread.id, token)
+                    ?? asking.result;
+            }
+            finally
+            {
+                asking = null;
+            }
+            if (now !== null)
+            {
+                // Handed over at once: the waits already asked for go back.
+                withdrawSet(thread, -1);
+                return { index, result: now };
+            }
+            tokens.set(token, index);
+            remoteWaits.set(token, thread);
+        }
+        thread.waitSet = { objects: objects_, all: false };
+        thread.queuedOn = local;
+        for (const object of local)
+        {
+            object.waiters.push(thread);
+        }
+        scheduler.block(thread, `any of ${describeSet(objects_)}`, timed);
+        return null;
     };
 
     const api = {
@@ -395,6 +533,18 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 {
                     asking.result = result;
                 }
+                return;
+            }
+            if (thread.remoteSet)
+            {
+                // One of a set's objects came: the set's other waits go back,
+                // and the thread leaves the queues of its objects here.
+                const index = /** @type {number} */ (thread.remoteSet.get(token));
+                withdrawSet(thread, token);
+                leaveQueues(thread, null);
+                thread.queuedOn = null;
+                thread.waitResult = (result + index) >>> 0;
+                (thread.scheduler ?? scheduler).wake(thread);
                 return;
             }
             remoteWaits.delete(token);
@@ -776,7 +926,10 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
          * @returns {{ index: number, result: number } | null}
          */
         waitAny(objects_, thread, timed){
-            refuseRemoteSet(objects_);
+            if (remote && objects_.some(object=>object.remote))
+            {
+                return waitAnyAcross(objects_, thread, timed);
+            }
             for (let i = 0; i < objects_.length; i++)
             {
                 const object = objects_[i];
