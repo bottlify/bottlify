@@ -175,3 +175,37 @@ test('StackWalk64 walks the same chain in STACKFRAME64\'s wider layout', ()=>{
     assert.equal(get(frame + 88), 7, 'the first parameter, a DWORD64');
     assert.equal(fns.SymGetModuleBase64.handler([-1, 0x400123, 0]), 0x400000);
 });
+
+test('ImageDirectoryEntryToData finds a directory as the image is mapped or as its file is '
+    + 'laid out',
+()=>{
+    const m = machine();
+    // An image at 0x1000: MZ, its headers at +0x80, one section, the
+    // import directory (1) at RVA 0x2000, 0x50 bytes, raw at file offset 0x600.
+    m.put(0x1000, 0x5a4d);
+    m.put(0x103c, 0x80);
+    m.put(0x1080, 0x4550);
+    m.put(0x1084, 1 << 16);
+    m.put(0x1094, 0xe0);
+    m.put(0x1098, 0x10b);
+    m.put(0x1098 + 60, 0x400);
+    m.put(0x1098 + 92, 16);
+    m.put(0x1098 + 96 + 8, 0x2000);
+    m.put(0x1098 + 96 + 12, 0x50);
+    m.put(0x1178 + 12, 0x2000);
+    m.put(0x1178 + 16, 0x200);
+    m.put(0x1178 + 20, 0x600);
+    const { ImageDirectoryEntryToData: find, ImageDirectoryEntryToDataEx: findEx } = m.fns;
+    assert.equal(find.argBytes, 16);
+    assert.equal(findEx.argBytes, 20);
+
+    assert.equal(find.handler([0x1000, 1, 1, 0x1800]), 0x3000, 'mapped: base plus its RVA');
+    assert.equal(m.get(0x1800), 0x50, 'and its size');
+    assert.equal(findEx.handler([0x1000, 0, 1, 0x1800, 0x1804]), 0x1600,
+        'as a file: through the section it falls in');
+    assert.equal(m.get(0x1804), 0x1178, 'whose header is handed back');
+
+    assert.equal(find.handler([0x1000, 1, 14, 0x1800]), 0, 'a directory it leaves empty');
+    assert.equal(find.handler([0x1000, 1, 16, 0x1800]), 0, 'one past those it has');
+    assert.equal(find.handler([0x1200, 1, 1, 0x1800]), 0, 'and what is not an image');
+});
