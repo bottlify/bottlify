@@ -684,10 +684,12 @@ export function createFileFunctions(host){
     // create or move with "access denied", which is the wrong answer to a
     // question the program never asked. A driver's setup copies its .sys into
     // system32's drivers folder, which every installation has, the same way,
-    // and its INF into the INF directory.
+    // and its INF into the INF directory. Windows Installer keeps its cache in
+    // the Installer folder, and an installer's own deferred actions write
+    // their scripts there (WiX's do).
     for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
         `${SYSTEM_DIRECTORY}\\drivers`, `${SYSTEM_DIRECTORY}\\drivers\\etc`,
-        `${WINDOWS_DIRECTORY}\\inf`, PROGRAM_FILES,
+        `${WINDOWS_DIRECTORY}\\inf`, `${WINDOWS_DIRECTORY}\\Installer`, PROGRAM_FILES,
         `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
     {
         try
