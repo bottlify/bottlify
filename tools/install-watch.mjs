@@ -670,6 +670,13 @@ setInterval(async()=>{
                 suspended: bridge.suspendedCalls, windows: win32.windows,
                 procedures: win32.windowProcedures, messages: win32.messages,
             }).slice(0, 1500));
+            // A process in a worker of its own: that worker's heap, which ends
+            // the process unsaid when it runs out.
+            if (diagnostics.some((/** @type {any} */ entry)=>entry.name === 'heap'))
+            {
+                console.log(seconds(), 'HEAP', image.split('\\').pop(),
+                    JSON.stringify(metrics('heap')));
+            }
             const cpu = metrics('cpu');
             console.log(seconds(), 'CPU', image.split('\\').pop(), JSON.stringify({
                 recent: (cpu.recent ?? []).slice(-4), ran: ranSince(image, cpu),
