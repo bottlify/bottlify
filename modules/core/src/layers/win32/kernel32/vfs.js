@@ -267,6 +267,7 @@ export function createVolume(fs, fetchBlocks = null){
     const marks = entry=>({
         ...entry.readOnly ? { readOnly: true } : {},
         ...entry.hidden ? { hidden: true } : {},
+        ...entry.junction ? { junction: entry.junction } : {},
     });
 
     /**
@@ -455,7 +456,8 @@ export function createVolume(fs, fetchBlocks = null){
          * @param {string} path
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
          *             modified: number, readOnly?: boolean, hidden?: boolean,
-         *             attributes?: number, links?: number, identity?: string } | null}
+         *             attributes?: number, links?: number, identity?: string,
+         *             junction?: string } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
@@ -492,6 +494,30 @@ export function createVolume(fs, fetchBlocks = null){
                 }
             }
             return true;
+        },
+
+        /**
+         * Makes the empty directory at `path` a junction standing for the
+         * directory `target` on its drive, or with null a directory again:
+         * null when it did, or the volume's code for why not.
+         *
+         * @param {string} path @param {string | null} target
+         * @returns {string | null}
+         */
+        setJunction(path, target){
+            try
+            {
+                fs.setJunction(path, target);
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+            return null;
         },
 
         /**

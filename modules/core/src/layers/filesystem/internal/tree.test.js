@@ -260,6 +260,51 @@ test('a link to a source file copies it up; a directory or a taken name is refus
     assert.equal(text(tree.read(['Game', 'Readme2.TXT'], 0, 7)), 'Read me');
 });
 
+test('a junction shows the directory it stands for; removing it leaves that directory', ()=>{
+    // The .NET Framework's assembly cache: fusion moves an assembly into
+    // WinSxS and makes its GAC folder a mount point standing for it, then
+    // reads the files back through the GAC path.
+    const { tree } = mounted();
+    tree.createDirectory(['Store']);
+    tree.createDirectory(['Store', 'Lib']);
+    tree.createFile(['Store', 'Lib', 'A.DLL']);
+    tree.write(['Store', 'Lib', 'A.DLL'], 0, bytes('lib'));
+    tree.createDirectory(['Cache']);
+    tree.setJunction(['Cache'], ['Store', 'Lib']);
+
+    assert.equal(tree.stat(['Cache'])?.junction, 'Store\\Lib');
+    assert.equal(tree.stat(['Cache'])?.directory, true);
+    assert.equal(text(tree.read(['cache', 'a.dll'], 0, 3)), 'lib', 'a path goes through it');
+    assert.deepEqual(tree.list(['Cache']).map(entry=>entry.name), ['A.DLL'],
+        'its listing is the target\'s');
+    tree.createFile(['Cache', 'B.DLL']);
+    assert.ok(tree.stat(['Store', 'Lib', 'B.DLL']), 'what is made through it is the target\'s');
+
+    const records = tree.links();
+    assert.deepEqual(records, [{ owner: 'Store\\Lib', names: ['Cache'], junction: true }]);
+    tree.removeDirectory(['Cache']);
+    assert.equal(tree.stat(['Cache']), null);
+    assert.ok(tree.stat(['Store', 'Lib', 'A.DLL']), 'the target stays');
+
+    tree.createDirectory(['Cache']);
+    tree.restoreLinks(records);
+    assert.equal(text(tree.read(['Cache', 'A.DLL'], 0, 3)), 'lib', 'a session gives it back');
+    tree.setJunction(['Cache'], null);
+    assert.deepEqual(tree.list(['Cache']), [], 'undone, an empty directory again');
+});
+
+test('a junction is made of an empty directory only, and undone only of a junction', ()=>{
+    const { tree } = mounted();
+    tree.createDirectory(['Full']);
+    tree.createFile(['Full', 'X.TXT']);
+    assert.throws(()=>tree.setJunction(['Full'], ['Game']), { code: 'DIRECTORY_NOT_EMPTY' });
+    assert.throws(()=>tree.setJunction(['Readme.TXT'], ['Game']), { code: 'NOT_A_DIRECTORY' });
+    assert.throws(()=>tree.setJunction(['Full'], null), { code: 'NOT_A_REPARSE_POINT' });
+    tree.createDirectory(['Loop']);
+    tree.setJunction(['Loop'], ['Loop']);
+    assert.equal(tree.stat(['Loop', 'X']), null, 'a junction to itself stands for nothing');
+});
+
 test('a drive remounted from its files and links has the same names', ()=>{
     const { tree, writable } = mounted();
     tree.createFile(['A.DAT']);

@@ -504,7 +504,7 @@ test('a write to a standard handle goes to the console, not to the filesystem', 
     assert.deepEqual(console, [{ handle: HANDLE_STDOUT, text: 'hello' }]);
     assert.equal(memory.dword(OUT_COUNT), 5);
     // The volume holds what it held plus the machine's own directories.
-    assert.equal(files.nodes.size, 10, 'nothing was created for it');
+    assert.equal(files.nodes.size, 11, 'nothing was created for it');
 });
 
 test('a write to a file lands at the position and moves it on', ()=>{
@@ -1886,6 +1886,8 @@ test('the directories the machine promises exist before a program asks', ()=>{
         'C:\\WINDOWS\\system32\\drivers', 'C:\\WINDOWS\\system32\\drivers\\etc',
         // GetWindowsDirectory and "inf": where a driver's setup puts its INF.
         'C:\\WINDOWS\\inf',
+        // Windows Installer's cache, where WiX's deferred actions keep their scripts.
+        'C:\\WINDOWS\\Installer',
     ];
     for (const path of promised)
     {
@@ -2556,6 +2558,81 @@ test('CreateHardLink links through the volume and answers its refusals as Window
     assert.equal(fns.CreateSymbolicLinkA.handler([NAME2, NAME, 0]), 0);
     assert.equal(error.code, 1314, 'ERROR_PRIVILEGE_NOT_HELD');
     assert.equal(said.at(-1), 'CreateSymbolicLink');
+});
+
+test('a directory handle sets, reads and deletes a mount point through DeviceIoControl', ()=>{
+    // fusion makes an assembly's GAC folder a junction to its WinSxS copy:
+    // FSCTL_SET_REPARSE_POINT on the folder opened with backup semantics.
+    const { memory, files, fns, error, at } = setup();
+    const anyFiles = /** @type {any} */ (files);
+    files.mkdir('C:\\GAME\\LIB');
+    /** @type {[string, string | null][]} */
+    const asked = [];
+    let junction = /** @type {string | null} */ (null);
+    let refusal = /** @type {string | null} */ (null);
+    anyFiles.setJunction = (/** @type {string} */ path, /** @type {string | null} */ target)=>{
+        asked.push([path, target]);
+        if (refusal === null)
+        {
+            junction = target;
+        }
+        return refusal;
+    };
+    const stat = anyFiles.stat.bind(files);
+    anyFiles.stat = (/** @type {string} */ path)=>{
+        const entry = stat(path);
+        return entry && junction ? { ...entry, junction } : entry;
+    };
+    const folder = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\LIB'), GENERIC_READ, 0, 0,
+        OPEN_EXISTING, 0x02200000, 0]);
+    assert.notEqual(folder, INVALID_HANDLE_VALUE);
+
+    const SET = 0x900a4;
+    const GET = 0x900a8;
+    const UNSET = 0x900ac;
+    const target = '\\??\\C:\\SXS\\LIB';
+    const input = 0x600;
+    const buffer = new Uint8Array(16 + target.length * 2 + 2 + 2);
+    const view = new DataView(buffer.buffer);
+    view.setUint32(0, 0xa0000003, true);
+    view.setUint16(4, buffer.length - 8, true);
+    view.setUint16(10, target.length * 2, true);
+    view.setUint16(12, target.length * 2 + 2, true);
+    for (let i = 0; i < target.length; i++)
+    {
+        view.setUint16(16 + i * 2, target.charCodeAt(i), true);
+    }
+    memory.writeMemory(input, buffer);
+    assert.equal(fns.DeviceIoControl.handler(
+        [folder, SET, input, buffer.length, 0, 0, 0x500, 0]), 1);
+    assert.deepEqual(asked, [['C:\\GAME\\LIB', 'C:\\SXS\\LIB']], 'the NT prefix is taken off');
+
+    assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 4, 0x500, 0]), 0);
+    assert.equal(error.code, 122, 'smaller than the header: ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 0x100, 0x500, 0]), 1);
+    assert.equal(memory.dword(0x800), 0xa0000003);
+    const length = memory.bytes[0x800 + 10] | memory.bytes[0x800 + 11] << 8;
+    const read = String.fromCharCode(...new Uint16Array(
+        memory.readMemory(0x800 + 16, length).slice().buffer));
+    assert.equal(read, target, 'the substitute name comes back with its prefix');
+    assert.equal(memory.dword(0x500), 8 + (memory.bytes[0x804] | memory.bytes[0x805] << 8));
+    assert.equal(fns.GetFileAttributesA.handler([NAME]) & 0x410, 0x410,
+        'a junction is a directory and a reparse point');
+
+    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0, 0, 0, 0, 0]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 8, 0, 0, 0x500, 0]), 1);
+    assert.deepEqual(asked.at(-1), ['C:\\GAME\\LIB', null]);
+    assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 0x100, 0x500, 0]), 0);
+    assert.equal(error.code, 4390, 'ERROR_NOT_A_REPARSE_POINT');
+
+    refusal = 'DIRECTORY_NOT_EMPTY';
+    memory.writeMemory(input, buffer);
+    assert.equal(fns.DeviceIoControl.handler(
+        [folder, SET, input, buffer.length, 0, 0, 0x500, 0]), 0);
+    assert.equal(error.code, 145, 'ERROR_DIR_NOT_EMPTY');
+    memory.writeMemory(input, new Uint8Array([0x0c, 0, 0, 0xa0, 0, 0, 0, 0]));
+    assert.equal(fns.DeviceIoControl.handler([folder, SET, input, 8, 0, 0, 0x500, 0]), 0);
+    assert.equal(error.code, 4393, 'a symbolic link tag: ERROR_REPARSE_TAG_INVALID');
 });
 
 test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{
