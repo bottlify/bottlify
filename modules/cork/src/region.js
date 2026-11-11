@@ -895,7 +895,7 @@ export function formRegion(read, entry,
             {
                 // A compiler's runtime helper: its call is formed as the
                 // instructions it amounts to, and the block goes on (helpers.js).
-                block.instructions.push(...helperInstructions(helper, decoded, called));
+                block.instructions.push(...helperInstructions(helper, decoded, called, read));
                 bytes += decoded.length;
                 eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;

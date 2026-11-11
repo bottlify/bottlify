@@ -131,6 +131,14 @@ export function emitCrt(e, instruction){
             finiteArgument(e);
             leaveUnless(e, instruction);
             return true;
+        case 'ftol2sse':
+            if (isLong(e) || instruction.crtWord === undefined)
+            {
+                return false;
+            }
+            flagSet(e, instruction.crtWord);
+            leaveUnless(e, instruction);
+            return true;
         case 'chkstk64':
             return isLong(e) && chkstk64(e, instruction);
         case 'memcmp': case 'strcmp':
@@ -861,6 +869,33 @@ function sqrtArgument(e){
     b.localGet(registerLocal(e, ESP)).load('f64', { guest: true, offset: e.layout.ramBase })
         .f64const(0).op(0x66); // f64.ge: false for a NaN
     b.select().localSet(Local.addr);
+}
+
+/**
+ * The runtime's flag at `address` (`crtWord`) read: `Local.addr` -1 where it is
+ * 0, or its page is closed or past RAM -- the function's own other way.
+ *
+ * @param {E} e @param {number} address
+ */
+function flagSet(e, address){
+    const { b } = e;
+    const page = address >>> 12;
+    if (address + 4 > e.layout.ramSize || (address & 0xfff) > 0xffc)
+    {
+        b.i32const(-1).localSet(Local.addr);
+        return;
+    }
+    b.i32const(0).localSet(Local.addr);
+    b.i32const(page).load('i32_8u', { offset: pageFlagsAt(e.layout) })
+        .i32const(PageFlag.INACCESSIBLE).op(I32.and);
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.else();
+    b.i32const(address).load('i32', { guest: true, offset: e.layout.ramBase }).op(I32.eqz);
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.end();
+    b.end();
 }
 
 /**

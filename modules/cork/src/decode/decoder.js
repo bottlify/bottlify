@@ -88,6 +88,8 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {number} [thunk]       that thunk's address: the call retires its jump as well
  * @property {import('../helpers.js').Crt} [crt]  of a `crt`: the C runtime operation a call
  *           to a function the dictionary knows is formed as (`emit/crt.js`)
+ * @property {number} [crtWord]  of a `crt`: the address its helper reads a dword at as it
+ *           runs (`RuntimeHelper.word`)
  */
 
 /**

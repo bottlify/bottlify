@@ -50,13 +50,23 @@ const roundBody = mode=>Object.freeze([
 ]);
 
 /**
+ * `_ftol2_sse`'s own way with the runtime's SSE2 flag set: ST0 stored as a
+ * double, popped, and truncated to eax by `cvttsd2si` (0x80000000 past an
+ * int's range or for a NaN); edx as it was.
+ */
+const FTOL2_SSE_BODY = Object.freeze([
+    0xdd, 0x5c, 0x24, 0xf8,                 // fstp qword [esp-8]
+    0xf2, 0x0f, 0x2c, 0x44, 0x24, 0xf8,     // cvttsd2si eax, qword [esp-8]
+]);
+
+/**
  * The body a call to a function doing `does` goes on with after its test
  * (`emit/crt.js`), for the operations that have one.
  *
  * @type {Readonly<Partial<Record<import('./helpers.js').Crt, readonly number[]>>>}
  */
 export const CRT_BODIES = Object.freeze({
-    sqrt: SQRT_BODY, floor: roundBody(1), ceil: roundBody(2),
+    sqrt: SQRT_BODY, floor: roundBody(1), ceil: roundBody(2), ftol2sse: FTOL2_SSE_BODY,
 });
 
 /**
@@ -64,7 +74,8 @@ export const CRT_BODIES = Object.freeze({
  * spans.
  *
  * @param {{ name: string, does: import('./helpers.js').Crt, quick: string, hash: string,
- *     body?: readonly number[], spans: number[][], masks: number[][], bits?: 32 | 64 }} given
+ *     body?: readonly number[], spans: number[][], masks: number[][], bits?: 32 | 64,
+ *     word?: number }} given
  * @returns {RuntimeHelper}
  */
 function entry({ masks, ...given }){
@@ -258,4 +269,9 @@ export const CRT_DICTIONARY = Object.freeze([
     // strchr, MSVC 14 (2015-2022), x86-64
     entry({ name: 'strchr', does: 'strchr', bits: 64, quick: '3984ba71f976343b',
         hash: 'b90c34bebd4489c7', spans: [[0, 126]], masks: [] }),
+    // _ftol2_sse, the compiler's own (ftol2.obj), MSVC 8 to 10 alike (Call of Duty 4's,
+    // 3DMark 11's): with the runtime's __sse2_available (`word`) set, ST0 truncated by
+    // cvttsd2si; else its _ftol2, made as the call was.
+    entry({ name: '_ftol2_sse', does: 'ftol2sse', word: 2, quick: 'b06f592c2e902cee',
+        hash: '643f053f63789de9', spans: [[0, 28], [54, 117]], masks: [[2, 4]] }),
 ]);

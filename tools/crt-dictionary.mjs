@@ -42,10 +42,13 @@ import { decode, MODE_64 } from '../modules/cork/src/decode/decoder.js';
 import { applyRelocations, parsePe, readExports }
     from '../modules/core/src/layers/loader/internal/pe.js';
 import { maskedFingerprint, QUICK_BYTES } from '../modules/cork/src/helpers.js';
-import { CRT_BODIES } from '../modules/cork/src/crt-dictionary.js';
+import { CRT_BODIES, CRT_DICTIONARY } from '../modules/cork/src/crt-dictionary.js';
 
 /** The operations on a double argument, returned in ST0. */
 const FLOATS = ['sqrt', 'floor', 'ceil'];
+
+/** The global a dictionary entry of these bytes reads (`word`). @param {string} hash */
+const wordOf = hash=>CRT_DICTIONARY.find(known=>known.hash === hash)?.word;
 
 /** The comparisons and searches, whose cases are made by `scanCase`. */
 const SCANS = ['memcmp', 'strcmp', 'memchr', 'strchr'];
@@ -462,7 +465,10 @@ async function verify(library, specs){
         const helper = { name, does: /** @type {any} */ (operation), bits: 32,
             spans: signature.spans, masks: signature.masks, quick: signature.quick,
             hash: signature.hash, length: extent[1] - extent[0],
-            ...CRT_BODIES[operation] === undefined ? {} : { body: CRT_BODIES[operation] } };
+            ...CRT_BODIES[operation] === undefined ? {} : { body: CRT_BODIES[operation] },
+            // The global the operation reads, where the dictionary's entry of these bytes
+            // names one.
+            ...wordOf(signature.hash) === undefined ? {} : { word: wordOf(signature.hash) } };
         let apart = 0;
         let formed = 0;
         const cases = 400;
@@ -540,6 +546,20 @@ async function verify(library, specs){
                 call();
                 stores();
             }
+            else if (operation === 'ftol2sse')
+            {
+                // ST0 from a seeded double at DATA, the call, the registers, then the
+                // x87 status word and MXCSR (the truncation's flags) at OUT+20 and +24.
+                const values = [0, -0, 0.5, -0.5, 1.5, -1.5, 2147483647.9, 2147483648,
+                    -2147483648.5, -2147483649, 4294967296.5, 1e300, -1e300, Infinity,
+                    -Infinity, NaN, 1e-310, (next() - 0.5) * 2 ** int(40)];
+                new DataView(data.buffer).setFloat64(0, values[int(values.length)], true);
+                program.push(0xdd, 0x05, ...u32(DATA));
+                call();
+                stores();
+                program.push(0xdf, 0xe0, 0xa3, ...u32(OUT + 20));  // fnstsw ax; to OUT+20
+                program.push(0x0f, 0xae, 0x1d, ...u32(OUT + 24));  // stmxcsr [OUT+24]
+            }
             else
             {
                 for (const arg of [...args].reverse())
@@ -574,7 +594,7 @@ async function verify(library, specs){
                 }
                 // ecx is the helper's to spoil where it is no result (cdecl's and
                 // the helpers' convention alike), and not compared there.
-                const out = [...m.read(OUT, 20)];
+                const out = [...m.read(OUT, operation === 'ftol2sse' ? 28 : 20)];
                 if (['allmul', 'alldiv', 'aulldiv', 'allrem', 'aullrem'].includes(operation))
                 {
                     out.fill(0, 8, 12);

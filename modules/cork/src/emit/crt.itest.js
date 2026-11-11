@@ -641,3 +641,73 @@ test('floor, ceil and sqrt answer as the x87 would at the control word\'s precis
         }
     }
 });
+
+/** Where the test's `_ftol2_sse` finds the runtime's SSE2 flag. */
+const SSE2_FLAG = 0xa800;
+/** A double for `_ftol2_sse`'s ST0. */
+const VALUE = 0xa900;
+
+/**
+ * The test's own `_ftol2_sse`, as the compiler's does it: with the runtime's
+ * SSE2 flag set, ST0 stored as a double and truncated to eax by `cvttsd2si`;
+ * else its own `_ftol2`, the quadword in edx:eax by `fisttp`.
+ */
+const FTOL2_SSE = [
+    0x83, 0x3d, ...u32(SSE2_FLAG), 0x00,    // cmp dword [flag], 0
+    0x74, 0x13,                             // je slow
+    0x55, 0x8b, 0xec,                       // push ebp; mov ebp, esp
+    0x83, 0xec, 0x08, 0x83, 0xe4, 0xf8,     // sub esp, 8; and esp, -8
+    0xdd, 0x1c, 0x24,                       // fstp qword [esp]
+    0xf2, 0x0f, 0x2c, 0x04, 0x24,           // cvttsd2si eax, qword [esp]
+    0xc9, 0xc3,                             // leave; ret
+    0x83, 0xec, 0x08,                       // slow: sub esp, 8
+    0xdd, 0x0c, 0x24,                       // fisttp qword [esp]
+    0x58, 0x5a, 0xc3,                       // pop eax; pop edx; ret
+];
+
+test('_ftol2_sse made as cvttsd2si where the runtime\'s flag is set answers as its body,'
+    + ' and with the flag clear leaves the call to it', ()=>{
+    const helpers = [{ name: '_ftol2_sse', does: /** @type {'ftol2sse'} */ ('ftol2sse'),
+        word: 2, length: FTOL2_SSE.length, body: CRT_BODIES.ftol2sse,
+        hash: fingerprint(at=>FTOL2_SSE[at - HELPER_AT] ?? 0, HELPER_AT, FTOL2_SSE.length) }];
+    const values = [0, -0, 0.5, -0.5, 1.5, -2.5, 2147483647.75, 2147483648, -2147483648.5,
+        -2147483649, 1e300, -1e300, Infinity, -Infinity, NaN, 1e-310, 123456.789];
+    let formed = 0;
+    for (const flag of [1, 0])
+    {
+        for (const value of values)
+        {
+            /** @param {false | import('../helpers.js').RuntimeHelper[]} given */
+            const once = given=>{
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(HELPER_AT, FTOL2_SSE);
+                m.write(SSE2_FLAG, u32(flag));
+                const bits = new DataView(new ArrayBuffer(8));
+                bits.setFloat64(0, value, true);
+                m.write(VALUE, [...new Uint8Array(bits.buffer)]);
+                const code = [0xdd, 0x05, ...u32(VALUE)];          // fld qword [value]
+                code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+                code.push(0xa3, ...u32(OUT), 0x89, 0x15, ...u32(OUT + 4),  // eax, edx
+                    0xdf, 0xe0, 0xa3, ...u32(OUT + 8),             // fnstsw ax; to OUT+8
+                    0x0f, 0xae, 0x1d, ...u32(OUT + 12), 0xf4);     // stmxcsr [OUT+12]; hlt
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                m.setReg('edx', 0x5eed);
+                let exit = m.runProgram(PROGRAM, { helpers: given });
+                const left = exit.kind === -2;
+                if (left)
+                {
+                    exit = m.runProgram(exit.eip, { helpers: false });
+                }
+                return { left, seen: { kind: exit.kind, out: [...m.read(OUT, 16)],
+                    esp: m.reg('esp'), ebp: m.reg('ebp') } };
+            };
+            const body = once(false);
+            const made = once(helpers);
+            assert.deepEqual(made.seen, body.seen, `flag ${flag}, ${value}`);
+            assert.equal(made.left, flag === 0, `flag ${flag}, ${value}: made as the call`);
+            formed += made.left ? 0 : 1;
+        }
+    }
+    assert.equal(formed, values.length);
+});

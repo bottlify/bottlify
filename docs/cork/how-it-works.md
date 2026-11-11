@@ -70,7 +70,8 @@ is one instruction, where an offset of 64 KiB took two more. A program that may 
 
 ## Functions cork knows by their bytes
 
-A compiler links the same functions into every program it builds: its own helpers (`_ftol2`, the
+A compiler links the same functions into every program it builds: its own helpers (`_ftol2` and
+`_ftol2_sse`, the latter formed as `cvttsd2si` while the runtime's SSE2 flag is set, the
 32-bit quadword arithmetic `_allmul`, `_alldiv`, `_aulldiv`, `_allrem`, `_aullrem`, `_aulldvrm`,
 the quadword shifts and `__chkstk`, 32-bit and x86-64), and the C runtime's `memcpy`, `memmove`,
 `memset`, `strlen`, `memcmp`, `strcmp`, `memchr`, `strchr`, `sqrt`, `floor` and `ceil` in a program

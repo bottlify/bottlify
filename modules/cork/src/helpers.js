@@ -52,6 +52,8 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * @property {readonly number[]} [masks]  the offsets read as zeroes: what differs
  *     between copies linked at two places (`tools/crt-dictionary.mjs`)
  * @property {string} [quick]  the fingerprint of its first `QUICK_BYTES` bytes, masked
+ * @property {number} [word]   the offset in it of an absolute address the operation reads
+ *     a dword at when it runs (a global the runtime set), taken as linked (`crtWord`)
  */
 
 /**
@@ -80,7 +82,8 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * @typedef {'memmove' | 'memcpy' | 'memset' | 'strlen' | 'sqrt' | 'floor' | 'ceil'
  *     | 'allmul' | 'alldiv'
  *     | 'aulldiv' | 'allrem' | 'aullrem' | 'alldvrm' | 'aulldvrm' | 'allshl' | 'allshr'
- *     | 'aullshr' | 'chkstk' | 'chkstk64' | 'memcmp' | 'strcmp' | 'memchr' | 'strchr'} Crt
+ *     | 'aullshr' | 'chkstk' | 'chkstk64' | 'memcmp' | 'strcmp' | 'memchr' | 'strchr'
+ *     | 'ftol2sse'} Crt
  */
 
 /**
@@ -102,6 +105,7 @@ export const CRT_EFFECTS = Object.freeze({
     chkstk: { writes: [0], esp: null }, chkstk64: { writes: [], esp: 0 },
     memcmp: { writes: [0], esp: 0 }, strcmp: { writes: [0], esp: 0 },
     memchr: { writes: [0], esp: 0 }, strchr: { writes: [0], esp: 0 },
+    ftol2sse: { writes: [], esp: 0 },
 });
 
 /** @type {RuntimeHelper} MSVC 7.1 and 8's `_ftol2`. */
@@ -248,9 +252,10 @@ export function helperExtent(helper){
  * @param {RuntimeHelper} helper
  * @param {import('./decode/decoder.js').Instruction} call
  * @param {number} target
+ * @param {(address: number) => number} [read]  the guest's bytes, for a helper's `word`
  * @returns {import('./decode/decoder.js').Instruction[]}
  */
-export function helperInstructions(helper, call, target){
+export function helperInstructions(helper, call, target, read){
     const [first, end] = helperExtent(helper);
     const named = { name: helper.name, address: target + first, length: end - first };
     const body = helper.body ?? [];
@@ -263,6 +268,9 @@ export function helperInstructions(helper, call, target){
             crt: helper.does, operands: [], size: call.size,
             flagsRead: 0, flagsWritten: 0, flagsUndefined: ARITH_FLAGS, faults: 'none',
             memory: false, prefixes: call.prefixes, opcode: call.opcode, helper: named,
+            ...helper.word === undefined || read === undefined ? {}
+                : { crtWord: [0, 1, 2, 3].reduce((word, k)=>word
+                    + read(target + /** @type {number} */ (helper.word) + k) * 2 ** (8 * k), 0) },
         });
     }
     const mode = (helper.bits ?? 32) === 64 ? MODE_64 : undefined;
