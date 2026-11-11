@@ -67,3 +67,25 @@ program never maps:
 Memory addressed from its start is shorter machine code: on ARM a load of the program's memory
 is one instruction, where an offset of 64 KiB took two more. A program that may use its first
 64 KiB gets cork's own default instead: its address `a` at `0x10000 + a`, the state below it.
+
+## Functions cork knows by their bytes
+
+A compiler links the same functions into every program it builds: its own helpers, and the
+C runtime's `memcpy`, `memmove`, `memset`, `strlen` and `sqrt` in a program linked with the
+runtime statically. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
+`helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
+that differ where it is linked (relocated addresses, RIP-relative offsets, calls out of it)
+left out. A direct call whose target matches is not made: it is formed as what the function
+does, a copy as one `memory.copy`, a fill as one `memory.fill`, a string's length as a loop over
+its bytes, a square root as SSE2's. The result lands where the function leaves it and no other
+register changes.
+
+Where the operation cannot be done whole in place, the call is made as it was and the function's
+own code runs: a span that reaches a page that is closed, holds translated code or is watched for
+writes, an address past 4 GiB, a `sqrt` of a negative number or a NaN (which sets `errno`).
+
+The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 2022), 32-bit and
+x86-64. `tools/crt-dictionary.mjs` reads a signature out of a runtime's DLL, looks it up in other
+images (`--find`), and runs the DLL's own function against its operation on seeded arguments
+(`--verify`). An entry goes in only once `--verify` finds no difference on any of the function's
+paths. The `helpers` setting turns the dictionary off.

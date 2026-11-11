@@ -69,6 +69,11 @@ const LONG_SIMD_QUAD = new Set(['movd', 'cvtsi2ss', 'cvtsi2sd', 'cvttss2si', 'cv
  */
 export function translatesLong(instruction){
     const { op, operands, prefixes, cc } = instruction;
+    if (op === 'crt')
+    {
+        // A C runtime operation (`crt.js`), at either width.
+        return true;
+    }
     if (prefixes.lock && (!LOCKABLE.has(op) || instruction.memory !== true)
         || (op === 'jmp' || op === 'call') && operands[0].kind !== 'rel'
         && operands[0].size !== 8)

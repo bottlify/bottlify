@@ -22,6 +22,7 @@
  * the other executor to run.
  */
 
+import { emitCrt } from './crt.js';
 import { LONG_WIDE, registerLocal } from './width.js';
 
 export { translatesLong } from './long-ops.js';
@@ -684,6 +685,8 @@ export function emitInstruction(e, instruction, flagsLive){
             e.exitAt(next, Exit.HALT);
             e.dead = true;
             return true;
+        case 'crt':
+            return emitCrt(e, instruction);
         case 'xlat':
         {
             // AL = [EBX + AL], through DS unless an fs: override says

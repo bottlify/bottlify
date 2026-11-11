@@ -1638,6 +1638,12 @@ function effect(ins, values, forward = false, word = 4){
         }
         return;
     }
+    if (op === 'crt')
+    {
+        // A C runtime operation (`crt.js`): its result in eax, the rest as it was.
+        bumpReg(values, 0);
+        return;
+    }
     if (op === 'cdq' || op === 'cwde')
     {
         bumpReg(values, op === 'cdq' ? 2 : 0);
