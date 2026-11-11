@@ -5,9 +5,10 @@
  */
 
 /**
- * logf in a 64-bit process, through `createApp`: guest code, not a trap -- a
- * world built procedurally asks for it a hundred thousand times a second.
- * logf(e) is 1; logf(0) is still the host's, minus infinity with errno set.
+ * logf and expf in a 64-bit process, through `createApp`: guest code, not a
+ * trap -- a world built procedurally asks for them a hundred thousand times a
+ * second. logf(e) is 1, expf(2) 7.39; logf(0) is still the host's, minus
+ * infinity with errno set.
  */
 
 import { test } from 'node:test';
@@ -18,11 +19,11 @@ import { buildExe } from '../../../tools/make-pe.mjs';
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
-test('a 64-bit process\'s logf runs in the guest, and hands only its edges to the host',
+test('a 64-bit process\'s logf and expf run in the guest, and hands only its edges to the host',
     { timeout: 60000 }, async t=>{
         const program = buildExe({
             bits: 64, codeSize: 0x100,
-            imports: { 'KERNEL32.dll': ['ExitProcess'], 'ucrtbase.dll': ['logf'] },
+            imports: { 'KERNEL32.dll': ['ExitProcess'], 'ucrtbase.dll': ['logf', 'expf'] },
             code: ({ iat, code })=>{
                 /** @type {number[]} */
                 const bytes = [];
@@ -34,6 +35,9 @@ test('a 64-bit process\'s logf runs in the guest, and hands only its edges to th
                 bytes.push(0xb8, ...u32(0x402df854), 0x66, 0x0f, 0x6e, 0xc0); // xmm0 = e
                 call('logf');
                 bytes.push(0xf3, 0x0f, 0x2d, 0xd8); // cvtss2si ebx, xmm0: 1
+                bytes.push(0xb8, ...u32(0x40000000), 0x66, 0x0f, 0x6e, 0xc0); // xmm0 = 2
+                call('expf');
+                bytes.push(0xf3, 0x0f, 0x2d, 0xc0, 0x01, 0xc3); // ebx += expf(2), 7
                 bytes.push(0x0f, 0x57, 0xc0); // xorps xmm0, xmm0
                 call('logf');
                 bytes.push(0x66, 0x0f, 0x7e, 0xc0); // movd eax, xmm0: -inf's bits
@@ -45,10 +49,12 @@ test('a 64-bit process\'s logf runs in the guest, and hands only its edges to th
         });
         const app = await createApp({ executable: program });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 50000 }), 17,
-            'logf(e) is 1, logf(0) minus infinity');
+        assert.equal(await app.run({ timeoutMs: 50000 }), 24,
+            'logf(e) is 1, expf(2) 7, logf(0) minus infinity');
         const calls = /** @type {any} */ (app.diagnostics()
             .find((/** @type {any} */ layer)=>layer.name === 'bridge'))?.metrics?.byFunction ?? [];
         const logf = calls.find((/** @type {string} */ line)=>line.startsWith('ucrtbase.dll!logf '));
         assert.match(logf ?? '', /^ucrtbase\.dll!logf 1 /, 'the host saw logf(0) alone');
+        assert.equal(calls.find((/** @type {string} */ line)=>line.startsWith('ucrtbase.dll!expf ')),
+            undefined, 'and no expf');
     });

@@ -1932,3 +1932,41 @@ export function logf({ floatBits, floatOfBits, host }, x){
         + SERIES1;
     return Math.fround(k * LN2 + p * s);
 }
+
+/** 1 / ln 2, and the series' coefficients 1 / i!, i = 2..11 (`expf`). */
+const INVERSE_LN2 = 1.4426950408889634;
+const FACTORIAL2 = 1 / 2;
+const FACTORIAL3 = 1 / 6;
+const FACTORIAL4 = 1 / 24;
+const FACTORIAL5 = 1 / 120;
+const FACTORIAL6 = 1 / 720;
+const FACTORIAL7 = 1 / 5040;
+const FACTORIAL8 = 1 / 40320;
+const FACTORIAL9 = 1 / 362880;
+const FACTORIAL10 = 1 / 3628800;
+const FACTORIAL11 = 1 / 39916800;
+
+/**
+ * expf, which a physics or animation step asks for as often as logf: x = k ln 2
+ * + r with k the nearest integer and |r| <= ln 2 / 2, e^r summed to r^11 in
+ * doubles (the rest is below a double's precision), and 2^k put in as a
+ * float's exponent. Within a float's step of the exponential; |x| above 87,
+ * where the result leaves the normal floats, an infinity or a NaN is the
+ * host's, which sets errno.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function expf({ floatBits, floatOfBits, host }, x){
+    if ((floatBits(x) & 0x7fffffff) > 0x42ae0000)
+    {
+        return host();
+    }
+    const k = Math.floor(x * INVERSE_LN2 + 0.5) | 0;
+    const r = x - k * LN2;
+    const p = ((((((((((FACTORIAL11 * r + FACTORIAL10) * r + FACTORIAL9) * r + FACTORIAL8) * r
+        + FACTORIAL7) * r + FACTORIAL6) * r + FACTORIAL5) * r + FACTORIAL4) * r + FACTORIAL3) * r
+        + FACTORIAL2) * r + 1) * r + 1;
+    return Math.fround(p * floatOfBits(k + 127 << 23));
+}
