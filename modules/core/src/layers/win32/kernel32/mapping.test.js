@@ -443,6 +443,42 @@ test('the SEC_* combinations Windows refuses are refused, each with its own erro
     assert.notEqual(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 9, 0]), 0);
 });
 
+test('a SEC_IMAGE view is the file laid out as its image: each section at its address', ()=>{
+    // fusion maps a managed library so and reads its manifest by RVA; a view
+    // of the file as it lies put the metadata elsewhere, and the .NET
+    // Framework's setup could not put one assembly into the cache.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    const pe = new Uint8Array(0x210);
+    const head = new DataView(pe.buffer);
+    pe.set([0x4d, 0x5a]);
+    head.setUint32(0x3c, 0x40, true);
+    head.setUint32(0x40, 0x4550, true);
+    head.setUint16(0x46, 1, true);
+    head.setUint16(0x54, 0xe0, true);
+    head.setUint32(0x58 + 56, 0x2000, true);
+    head.setUint32(0x58 + 60, 0x200, true);
+    const section = 0x58 + 0xe0;
+    head.setUint32(section + 8, 0x10, true);
+    head.setUint32(section + 12, 0x1000, true);
+    head.setUint32(section + 16, 0x10, true);
+    head.setUint32(section + 20, 0x200, true);
+    pe.set([9, 8, 7, 6], 0x200);
+    file.data = pe;
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    assert.notEqual(mapping, 0);
+    assert.equal(basicInformation(at, mapping).size, 0x2000,
+        'the size of the image, not of the file');
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.deepEqual([...bytes.subarray(view, view + 2)], [0x4d, 0x5a], 'the headers at the start');
+    assert.deepEqual([...bytes.subarray(view + 0x1000, view + 0x1004)], [9, 8, 7, 6],
+        'the section at its virtual address');
+    assert.deepEqual([...bytes.subarray(view + 0x200, view + 0x204)], [0, 0, 0, 0],
+        'and not where it lies in the file');
+});
+
 test('a read-write mapping that names its commit is still written back to its file', ()=>{
     // PAGE_READWRITE | SEC_COMMIT is how many programs spell an ordinary
     // read-write mapping; read as one number it is no PAGE_* at all, and the
