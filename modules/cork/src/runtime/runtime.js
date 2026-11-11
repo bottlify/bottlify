@@ -906,6 +906,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
+    /**
+     * By C runtime operation (`emit/crt.js`), the calls formed as it in the
+     * regions published, each publication of a region counted.
+     * @type {Record<string, number>}
+     */
+    const crtFormed = {};
     /** @type {Map<number, RegionRecord>} entry index → the region that made it */
     const recordOf = new Map();
     /**
@@ -2781,6 +2787,16 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         }
         countExtents(record, 1);
         regions.add(record);
+        for (const block of region.blocks)
+        {
+            for (const instruction of block.instructions)
+            {
+                if (instruction.crt !== undefined)
+                {
+                    crtFormed[instruction.crt] = (crtFormed[instruction.crt] ?? 0) + 1;
+                }
+            }
+        }
         if (record.loose && !loose && throughStack(region))
         {
             // Its own code lies on a stack (`stackCodeSeen` above, which ran before
@@ -5653,6 +5669,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                         transferTargets: transferTargets(view(), layout) }
                     : {}),
                 regions: regions.size,
+                crtFormed: { ...crtFormed },
                 // Counted only by a run that asked (`countTransfers`); absent otherwise,
                 // where a 0 would read as none made.
                 ...(transfersCounted
