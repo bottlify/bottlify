@@ -75,7 +75,7 @@ export const CRT_BODIES = Object.freeze({
  *
  * @param {{ name: string, does: import('./helpers.js').Crt, quick: string, hash: string,
  *     body?: readonly number[], spans: number[][], masks: number[][], bits?: 32 | 64,
- *     word?: number }} given
+ *     word?: number, wordRip?: boolean, shape?: boolean }} given
  * @returns {RuntimeHelper}
  */
 function entry({ masks, ...given }){
@@ -274,4 +274,21 @@ export const CRT_DICTIONARY = Object.freeze([
     // cvttsd2si; else its _ftol2, made as the call was.
     entry({ name: '_ftol2_sse', does: 'ftol2sse', word: 2, quick: 'b06f592c2e902cee',
         hash: '643f053f63789de9', spans: [[0, 28], [54, 117]], masks: [[2, 4]] }),
+    // __security_check_cookie (gs_report.obj), as every function a /GS build guards with a
+    // buffer calls it on its way out: ecx against the runtime's cookie (`word`), a return
+    // when equal, else a jump to the report (masked). Its own bytes are too few for a
+    // signature, and the shape is the operation: what these bytes do whatever the cookie's
+    // address and the report's (`shape`). MSVC 8 to 14 (`rep ret`, 130 images here: Call
+    // of Duty 4, its Miles and Bink libraries) and MSVC 7.1 (`ret`, 21: PhysX, Miles' filters).
+    entry({ name: '__security_check_cookie', does: 'gscookie', word: 2, shape: true,
+        quick: '765e53d60506e257', hash: '765e53d60506e257', spans: [[0, 15]],
+        masks: [[2, 4], [11, 4]] }),
+    entry({ name: '__security_check_cookie', does: 'gscookie', word: 2, shape: true,
+        quick: 'ee0754fe65c7d77b', hash: 'ee0754fe65c7d77b', spans: [[0, 14]],
+        masks: [[2, 4], [10, 4]] }),
+    // __security_check_cookie, x86-64, MSVC 14: rcx against the cookie (`word`, RIP-relative),
+    // its high 16 bits clear, returned rotated left by 16 as the function leaves it.
+    entry({ name: '__security_check_cookie', does: 'gscookie64', bits: 64, word: 3,
+        wordRip: true, shape: true, quick: 'b05eca804d551dc2', hash: 'd413b6519e3eebc8',
+        spans: [[0, 30]], masks: [[3, 4], [26, 4]] }),
 ]);

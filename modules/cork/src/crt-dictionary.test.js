@@ -36,8 +36,14 @@ test('every entry of the dictionary is a signature that tells its function apart
         assert.ok(masks.every((at, i)=>inSpans(at) && (i === 0 || at > masks[i - 1])),
             `${name}: masks in order, each in a span`);
         const code = spans.reduce((sum, [, n])=>sum + n, 0);
-        assert.ok(code - masks.length >= SIGNIFICANT_BYTES && masks.length <= code * MASKED_SHARE,
+        // A stub whose shape is its operation (`shape`) is told by its every unmasked byte:
+        // masked, only addresses its operation reads or makes the call to.
+        const significant = code - masks.length >= SIGNIFICANT_BYTES
+            && masks.length <= code * MASKED_SHARE;
+        assert.ok(entry.shape === true || significant,
             `${name}: ${code - masks.length} bytes unmasked of ${code}`);
+        assert.ok(entry.shape !== true || entry.word !== undefined,
+            `${name}: a shape is a test of a global`);
         const [first, end] = helperExtent(entry);
         assert.equal(entry.length, end - first);
         assert.ok(entry.does !== undefined && entry.does in CRT_EFFECTS, `${name}: does what`);

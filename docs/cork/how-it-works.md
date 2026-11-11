@@ -73,7 +73,8 @@ is one instruction, where an offset of 64 KiB took two more. A program that may 
 A compiler links the same functions into every program it builds: its own helpers (`_ftol2` and
 `_ftol2_sse`, the latter formed as `cvttsd2si` while the runtime's SSE2 flag is set, the
 32-bit quadword arithmetic `_allmul`, `_alldiv`, `_aulldiv`, `_allrem`, `_aullrem`, `_aulldvrm`,
-the quadword shifts and `__chkstk`, 32-bit and x86-64), and the C runtime's `memcpy`, `memmove`,
+the quadword shifts, `__chkstk` and `__security_check_cookie`, 32-bit and x86-64), and the C
+runtime's `memcpy`, `memmove`,
 `memset`, `strlen`, `memcmp`, `strcmp`, `memchr`, `strchr`, `sqrt`, `floor` and `ceil` in a program
 linked with the runtime statically. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
 `helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
@@ -100,4 +101,7 @@ The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 202
 x86-64. `tools/crt-dictionary.mjs` reads a signature out of a runtime's DLL, looks it up in other
 images (`--find`), and runs the DLL's own function against its operation on seeded arguments
 (`--verify`). An entry goes in only once `--verify` finds no difference on any of the function's
-paths. The `helpers` setting turns the dictionary off.
+paths. A stub too short for its bytes to tell it apart, `__security_check_cookie`'s compare
+of an argument with a global and return, is known by its shape instead: those bytes are that
+test whatever global and report they name, and only the test is formed, the report left to the
+call. The `helpers` setting turns the dictionary off.

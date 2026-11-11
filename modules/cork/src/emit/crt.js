@@ -131,6 +131,14 @@ export function emitCrt(e, instruction){
             finiteArgument(e);
             leaveUnless(e, instruction);
             return true;
+        case 'gscookie': case 'gscookie64':
+            if (isLong(e) !== (operation === 'gscookie64') || instruction.crtWord === undefined)
+            {
+                return false;
+            }
+            cookie(e, instruction, instruction.crtWord
+                + (instruction.crtWordInBlock === true ? e.layout.codeBase ?? 0 : 0));
+            return true;
         case 'ftol2sse':
             if (isLong(e) || instruction.crtWord === undefined)
             {
@@ -586,7 +594,7 @@ const isWide = e=>e.layout.window !== undefined;
 
 /** What a wide window forms: the operations on its RAM, not the 32-bit helpers. */
 const WIDE_OPERATIONS = new Set(['memmove', 'memcpy', 'memset', 'strlen', 'chkstk64', 'memcmp',
-    'strcmp', 'memchr', 'strchr']);
+    'strcmp', 'memchr', 'strchr', 'gscookie64']);
 
 /**
  * The locals the destination and the source (or the string) are read from:
@@ -869,6 +877,54 @@ function sqrtArgument(e){
     b.localGet(registerLocal(e, ESP)).load('f64', { guest: true, offset: e.layout.ramBase })
         .f64const(0).op(0x66); // f64.ge: false for a NaN
     b.select().localSet(Local.addr);
+}
+
+/**
+ * `__security_check_cookie`: the argument (ecx, rcx) the cookie at `address`
+ * (`crtWord`) -- and at 64 bits with its high 16 bits clear, which the
+ * function tests after rotating rcx left by 16 and returns rotated -- or the
+ * call is made as it was, to its report of the overrun. A cookie whose page
+ * is closed or past RAM makes the call too.
+ *
+ * @param {E} e @param {Instruction} instruction @param {number} address
+ */
+function cookie(e, instruction, address){
+    const { b } = e;
+    const long = isLong(e);
+    const bytes = long ? 8 : 4;
+    const value = registerLocal(e, RCX);
+    if (address + bytes > e.layout.ramSize || (address % 4096) > 4096 - bytes)
+    {
+        b.i32const(-1).localSet(Local.addr);
+        leaveUnless(e, instruction);
+        return;
+    }
+    b.i32const(-1).localSet(Local.addr);
+    b.i32const(Math.floor(address / 4096)).load('i32_8u', { offset: pageFlagsAt(e.layout) })
+        .i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.eqz);
+    b.if(EMPTY);
+    if (isWide(e))
+    {
+        b.i64const(BigInt(address)).load('i64', { memory: e.layout.ramMemory });
+    }
+    else
+    {
+        b.i32const(address).load(long ? 'i64' : 'i32', { guest: true, offset: e.layout.ramBase });
+    }
+    b.localGet(value).op(long ? I64.eq : I32.eq);
+    if (long)
+    {
+        b.localGet(value).i64const(48n).op(I64.shrU).op(I64.eqz).op(I32.and);
+    }
+    b.if(EMPTY);
+    b.i32const(0).localSet(Local.addr);
+    b.end();
+    b.end();
+    leaveUnless(e, instruction);
+    if (long)
+    {
+        b.localGet(value).i64const(16n).op(I64.rotl).localSet(value);
+    }
 }
 
 /**

@@ -24,7 +24,7 @@ import { createTestMachine } from '../testing/machine.js';
 import { fingerprint, maskedFingerprint, QUICK_BYTES } from '../helpers.js';
 import { PageFlag } from '../runtime/pages.js';
 import { formRegion } from '../region.js';
-import { CRT_BODIES } from '../crt-dictionary.js';
+import { CRT_BODIES, CRT_DICTIONARY } from '../crt-dictionary.js';
 
 const PROGRAM = 0x8000;
 const FUNCTION = 0x9000;
@@ -710,4 +710,58 @@ test('_ftol2_sse made as cvttsd2si where the runtime\'s flag is set answers as i
         }
     }
     assert.equal(formed, values.length);
+});
+
+/** Where the cookie checks find the runtime's cookie, and their report. */
+const COOKIE = 0xa880;
+const REPORT = 0x9f00;
+
+test('__security_check_cookie of every shape the dictionary knows returns where ecx is the'
+    + ' cookie and leaves the call to its report where it is not, or its page is closed', ()=>{
+    const entries = CRT_DICTIONARY.filter(entry=>entry.does === 'gscookie');
+    assert.equal(entries.length, 2);
+    for (const entry of entries)
+    {
+        const at = HELPER_AT;
+        // The shape's own bytes: cmp ecx, [cookie]; jne +n; (rep) ret; jmp report.
+        const ret = entry.length === 15 ? [0xf3, 0xc3] : [0xc3];
+        const head = [0x3b, 0x0d, ...u32(COOKIE), 0x75, ret.length, ...ret];
+        const stub = [...head, 0xe9, ...rel(at + head.length, REPORT)];
+        assert.equal(stub.length, entry.length);
+        for (const [cookieValue, argument, closed] of /** @type {[number, number, boolean][]} */ (
+            [[0xbb40e64e, 0xbb40e64e, false], [0xbb40e64e, 0xbb40e64f, false],
+                [0x12345678, 0x12345678, true], [0, 0, false]]))
+        {
+            /** @param {false | import('../helpers.js').RuntimeHelper[]} given */
+            const once = given=>{
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(at, stub);
+                // The report: a mark, then a halt.
+                m.write(REPORT, [0xc7, 0x05, ...u32(OUT + 4), ...u32(0xdead), 0xf4]);
+                m.write(COOKIE, u32(cookieValue));
+                const code = [0xb9, ...u32(argument)];
+                code.push(0xe8, ...rel(PROGRAM + code.length, at));
+                code.push(0x89, 0x0d, ...u32(OUT), 0xf4);           // mov [OUT], ecx; hlt
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                if (closed)
+                {
+                    m.pages.markRange(COOKIE, 4, PageFlag.INACCESSIBLE);
+                }
+                let exit = m.runProgram(PROGRAM, { helpers: given });
+                const left = exit.kind === -2;
+                if (left)
+                {
+                    exit = m.runProgram(exit.eip, { helpers: false });
+                }
+                return { left, seen: { kind: exit.kind, eip: m.eip(), out: [...m.read(OUT, 8)],
+                    esp: m.reg('esp') } };
+            };
+            const body = once(false);
+            const made = once([entry]);
+            const label = `${entry.length} bytes, cookie ${cookieValue}, ecx ${argument}`;
+            assert.deepEqual(made.seen, body.seen, label);
+            assert.equal(made.left, closed || cookieValue !== argument, label);
+        }
+    }
 });

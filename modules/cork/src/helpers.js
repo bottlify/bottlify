@@ -54,6 +54,12 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * @property {string} [quick]  the fingerprint of its first `QUICK_BYTES` bytes, masked
  * @property {number} [word]   the offset in it of an absolute address the operation reads
  *     a dword at when it runs (a global the runtime set), taken as linked (`crtWord`)
+ * @property {boolean} [wordRip]  `word` is a RIP-relative displacement, its instruction
+ *     ending four bytes past it
+ * @property {boolean} [shape]  the operation is what these bytes do whatever their masked
+ *     ones hold: a short stub too few of whose bytes are its own for a signature to tell it
+ *     apart, formed as the test it makes of a global and of its argument, its other way
+ *     (where the masked jump goes) made as the call was
  */
 
 /**
@@ -83,7 +89,7 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  *     | 'allmul' | 'alldiv'
  *     | 'aulldiv' | 'allrem' | 'aullrem' | 'alldvrm' | 'aulldvrm' | 'allshl' | 'allshr'
  *     | 'aullshr' | 'chkstk' | 'chkstk64' | 'memcmp' | 'strcmp' | 'memchr' | 'strchr'
- *     | 'ftol2sse'} Crt
+ *     | 'ftol2sse' | 'gscookie' | 'gscookie64'} Crt
  */
 
 /**
@@ -105,7 +111,8 @@ export const CRT_EFFECTS = Object.freeze({
     chkstk: { writes: [0], esp: null }, chkstk64: { writes: [], esp: 0 },
     memcmp: { writes: [0], esp: 0 }, strcmp: { writes: [0], esp: 0 },
     memchr: { writes: [0], esp: 0 }, strchr: { writes: [0], esp: 0 },
-    ftol2sse: { writes: [], esp: 0 },
+    ftol2sse: { writes: [], esp: 0 }, gscookie: { writes: [], esp: 0 },
+    gscookie64: { writes: [1], esp: 0 },
 });
 
 /** @type {RuntimeHelper} MSVC 7.1 and 8's `_ftol2`. */
@@ -241,6 +248,19 @@ export function helperExtent(helper){
 }
 
 /**
+ * The address a helper's `word` names, as linked: the dword there, or past the
+ * end of its instruction by the displacement there (`wordRip`).
+ *
+ * @param {RuntimeHelper} helper @param {number} target
+ * @param {(address: number) => number} read
+ */
+function wordOf(helper, target, read){
+    const at = target + /** @type {number} */ (helper.word);
+    const word = [0, 1, 2, 3].reduce((sum, k)=>sum + read(at + k) * 2 ** (8 * k), 0);
+    return helper.wordRip === true ? at + 4 + (word | 0) : word;
+}
+
+/**
  * The instructions a call to `helper` at `call` is formed as. Each carries the
  * call's own address, so an exit before any of them re-runs the call on the
  * host; the last carries the call's length, so what follows is the call's
@@ -269,8 +289,8 @@ export function helperInstructions(helper, call, target, read){
             flagsRead: 0, flagsWritten: 0, flagsUndefined: ARITH_FLAGS, faults: 'none',
             memory: false, prefixes: call.prefixes, opcode: call.opcode, helper: named,
             ...helper.word === undefined || read === undefined ? {}
-                : { crtWord: [0, 1, 2, 3].reduce((word, k)=>word
-                    + read(target + /** @type {number} */ (helper.word) + k) * 2 ** (8 * k), 0) },
+                : { crtWord: wordOf(helper, target, read),
+                    ...helper.wordRip === true ? { crtWordInBlock: true } : {} },
         });
     }
     const mode = (helper.bits ?? 32) === 64 ? MODE_64 : undefined;
