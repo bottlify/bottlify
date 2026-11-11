@@ -56,6 +56,22 @@ for (const [i386, long] of /** @type {[Record<string, CompiledGuestCode>,
  */
 export const longCodeOf = compiled=>LONG_CODE.get(compiled);
 
+/** The helpers that take a float apart, which read no guest memory. */
+const FLOAT_BITS = ['floatBits', 'floatOfBits'];
+const bitsView = new DataView(new ArrayBuffer(4));
+const FLOAT_BIT_HELPERS = {
+    /** @param {number} value */
+    floatBits: value=>{
+        bitsView.setFloat32(0, value, true);
+        return bitsView.getUint32(0, true);
+    },
+    /** @param {number} bits */
+    floatOfBits: bits=>{
+        bitsView.setUint32(0, bits >>> 0, true);
+        return bitsView.getFloat32(0, true);
+    },
+};
+
 /** @typedef {number} i32  A signed 32-bit stack slot, or EAX. */
 /** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX. */
 /** @typedef {number} f64  A double: two stack slots, or ST0 as a result. */
@@ -114,6 +130,8 @@ export const longCodeOf = compiled=>LONG_CODE.get(compiled);
  * @property {(address: number) => number} i32
  * @property {(address: number) => number} f32
  * @property {(address: number) => number} f64
+ * @property {(value: number) => number} floatBits  the dword of `Math.fround(value)`
+ * @property {(bits: number) => number} floatOfBits  the float a dword is
  * @property {(address: number, value: number) => void} setU8
  * @property {(address: number, value: number) => void} setU16
  * @property {(address: number, value: number) => void} setU32
@@ -226,6 +244,7 @@ export function guestMemory(host){
         i32: address=>view(address, 4).getInt32(0, true),
         f32: address=>view(address, 4).getFloat32(0, true),
         f64: address=>view(address, 8).getFloat64(0, true),
+        ...FLOAT_BIT_HELPERS,
         setU8,
         setU16: (address, value)=>write(address, 2, v=>v.setUint16(0, value, true)),
         setU32: (address, value)=>write(address, 4, v=>v.setUint32(0, value, true)),
@@ -417,17 +436,19 @@ export function guestEntry(source, compiled, host, fallback){
             + '(guestExport)');
     }
     const { readMemory, writeMemory, fillMemory, call } = host;
-    const memoryUsed = uses.some(use=>use !== 'host' && !X87_WORDS.includes(use));
+    const memoryUsed = uses.some(use=>use !== 'host' && !X87_WORDS.includes(use)
+        && !FLOAT_BITS.includes(use));
     if (memoryUsed && (!readMemory || !writeMemory))
     {
         throw new Error('guest code: a function that reads the guest wants its memory');
     }
     const words = uses.some(use=>X87_WORDS.includes(use)) ? x87Words(host.fpu) : {};
+    const bits = uses.some(use=>FLOAT_BITS.includes(use)) ? FLOAT_BIT_HELPERS : {};
     /** @type {Guest | null} */
     const guest = uses.length === 0 ? null : readMemory && writeMemory
         ? /** @type {Guest} */ ({ ...guestMemory({ readMemory, writeMemory,
-            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {} }), ...words })
-        : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words,
+            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {} }), ...words, ...bits })
+        : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words, ...bits,
             host: ()=>{
                 throw new Error('guest code: host() is answered only in a handler with a '
                     + 'fallback');

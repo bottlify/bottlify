@@ -335,8 +335,17 @@ const FLOAT_STORES = new Set(['setF32', 'setF64']);
 const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clearExceptions',
     'mxcsr', 'setMxcsr']);
 
+/**
+ * A float's bits and back: `floatBits(x)` the dword of `Math.fround(x)`,
+ * `floatOfBits(n)` the float a dword is -- `movd` between an XMM register and
+ * EAX at 64 bits, a dword of the stack at 32. What a maths routine takes a
+ * float apart by, into its exponent and mantissa.
+ */
+const FLOAT_BITS = ['floatBits', 'floatOfBits'];
+
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS]);
+    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
+    ...FLOAT_BITS]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -1024,15 +1033,6 @@ class FunctionCompiler {
         {
             this.fail(node, `${name}: an i64 is EDX:EAX at 32 bits, refused at 64 bits`);
         }
-        const doubleParam = params.some(param=>isFloat(declared.get(param.name) ?? ''));
-        if (this.long && this.helpers.has('host') && (isFloat(this.returns) || doubleParam))
-        {
-            // The trap of a 64-bit process reads RCX, RDX, R8, R9 and the
-            // stack, and answers RAX: a double's XMM register it neither reads
-            // nor writes.
-            this.fail(node, `${name}: a double in an XMM register is no argument or answer the `
-                + '64-bit trap carries, so the function has no host to hand over to at 64 bits');
-        }
         /** @type {ParamType[]} */
         const types = [];
         /** @type {Variable[]} */
@@ -1422,9 +1422,15 @@ class FunctionCompiler {
         {
             out.label(this.toHost);
             takeDown();
+            // The arguments as they came: a double or a float back into the
+            // XMM register of its place, which the trap reads it from (the
+            // bridge's `floats`), and answers it in.
             for (let i = 0; i < inRegisterArguments; i++)
             {
-                out.emit(...loadQuad(ARGUMENTS_64[i], 8 + 8 * i));        // mov arg, [rsp+8+8i]
+                out.emit(...isFloat(types[i])
+                    ? [types[i] === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x10,
+                        ...memory(i, { base: ESP, disp: 8 + 8 * i })]     // movsd/movss xmm, [slot]
+                    : loadQuad(ARGUMENTS_64[i], 8 + 8 * i));              // mov arg, [rsp+8+8i]
             }
             out.emit(0xe9).label('hostJump').emit(0, 0, 0, 0);       // jmp the handler's trap
         }
@@ -4106,6 +4112,49 @@ class FunctionCompiler {
                 this.op(...load.op, ...modrm);
                 this.noteLoad(modrm.length - 1);
                 return { where: 'eax', type: load.type };
+            }
+            if (name === 'floatBits')
+            {
+                this.arity(node, 1);
+                const value = this.expr(node.arguments[0]);
+                if (this.long)
+                {
+                    this.toXmm(value, node.arguments[0]);
+                    const x = this.fpu - 1;
+                    this.sse(0xf2, 0x5a, x, x);                            // cvtsd2ss
+                    a.emit(0x66, 0x0f, 0x7e, 0xc0 | (x & 7) << 3);         // movd eax, xmm
+                    this.fpu--;
+                    return { where: 'eax', type: 'u32' };
+                }
+                this.toSt0(value, node.arguments[0]);
+                a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
+                a.emit(0xd9, 0x1c, 0x24);                                  // fstp dword [esp]
+                a.emit(0x58);                                              // pop eax
+                this.fpu--;
+                return { where: 'eax', type: 'u32' };
+            }
+            if (name === 'floatOfBits')
+            {
+                this.arity(node, 1);
+                this.toEax(this.expr(node.arguments[0]), node.arguments[0]);
+                if (this.long)
+                {
+                    const x = this.pushXmm(node);
+                    a.emit(0x66, 0x0f, 0x6e, 0xc0 | (x & 7) << 3);         // movd xmm, eax
+                    this.sse(0xf3, 0x5a, x, x);                            // cvtss2sd
+                    return { where: 'st0', type: 'f32' };
+                }
+                this.x87Clean = false;
+                this.x87Used = true;
+                if (++this.fpu > X87_DEPTH)
+                {
+                    this.fail(node, 'the expression holds more doubles at once than the x87 has '
+                        + 'room for');
+                }
+                a.emit(0x50);                                              // push eax
+                a.emit(0xd9, 0x04, 0x24);                                  // fld dword [esp]
+                a.emit(0x83, 0xc4, 0x04);                                  // add esp, 4
+                return { where: 'st0', type: 'f32' };
             }
             if (name === 'call' || name === 'callStd')
             {

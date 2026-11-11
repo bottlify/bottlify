@@ -76,8 +76,13 @@ the i386 one: `inguest.js` into `inguest.x64.js`, whose `COMPILED` has the code 
 - **Doubles**: scalar SSE2, exact as JavaScript's doubles are. A double or float argument comes
   in the XMM register of its place, the result goes in XMM0, and an expression's doubles are
   XMM0 to XMM3. `+ - * /`, unary `-`, `Math.sqrt`, `abs`, `fround`, `floor`, `ceil` and
-  `trunc`, the comparisons, `| 0`, `>>> 0`, `f32`/`f64` loads and stores. A function with a
-  double argument or result has no `host()`: the 64-bit trap carries no XMM register.
+  `trunc`, the comparisons, `| 0`, `>>> 0`, `f32`/`f64` loads and stores. `host()` in a function
+  with a double or float argument reloads it into its XMM register from the home space, where
+  the bridge's 64-bit trap reads it (the export declares `floats`).
+- **A float's bits**: `floatBits(x)` is the IEEE single of a double as a `u32`, and
+  `floatOfBits(n)` the double a `u32`'s single holds - what a libm routine splits an argument
+  into exponent and mantissa with. Both run in the handler as well, taken from the first
+  parameter like the memory helpers.
 - **Refused at 64 bits**: what only the x87 does (`%` of doubles, `Math.sin` and the other
   transcendentals, `X87`), x87 arguments, the x87's control and status words, an `i64`
   result, more than four doubles at once, and a function `LONG` names for a pointer its
