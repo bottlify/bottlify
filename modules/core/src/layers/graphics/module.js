@@ -103,16 +103,17 @@ function windowTree(windows){
 }
 
 /**
- * Whether a window is shown, its client area covers the whole screen, and no
- * shown top-level window over its own reaches the screen (a minimised one
- * lies off it): nothing on the screen is then anything but that window's
- * client area.
+ * Whether a window is shown and no shown top-level window over its own
+ * reaches into its client area on the screen (a minimised one lies off it):
+ * what is seen there is then that window's client area and nothing else, so
+ * a device's frame presented into it is the picture - full screen or a
+ * window smaller than the screen alike.
  *
  * @param {ListedWindow[]} windows  bottom to top
  * @param {number} handle
  * @param {{ width: number, height: number }} screen
  */
-export function fillsScreen(windows, handle, screen){
+export function clientUncovered(windows, handle, screen){
     const tree = windowTree(windows);
     const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
     if (!window || !tree.shown(window))
@@ -120,14 +121,13 @@ export function fillsScreen(windows, handle, screen){
         return false;
     }
     const { client } = window;
-    if (client.left > 0 || client.top > 0 || client.right < screen.width
-        || client.bottom < screen.height)
-    {
-        return false;
-    }
+    const left = Math.max(client.left, 0);
+    const top = Math.max(client.top, 0);
+    const right = Math.min(client.right, screen.width);
+    const bottom = Math.min(client.bottom, screen.height);
     const above = tree.topLevels.slice(tree.topLevels.indexOf(tree.topLevelOf(window)) + 1);
-    return !above.some(({ rect })=>rect.right > 0 && rect.bottom > 0 && rect.left < screen.width
-        && rect.top < screen.height);
+    return !above.some(({ rect })=>rect.right > left && rect.bottom > top && rect.left < right
+        && rect.top < bottom);
 }
 
 /**
@@ -1552,10 +1552,13 @@ export function createGraphicsModule(){
                     // A DXGI swap chain's frames are its window's
                     // client area, which DWM shows in place of what GDI drew
                     // there; here a process's picture is its desktop or its
-                    // device's frame, so while that window fills the screen
-                    // from the top, the desktop composed again -- the window's
-                    // own surface, black -- would hide every frame between
-                    // two presents. The same ceiling as above.
+                    // device's frame, so while nothing over that window
+                    // reaches its client area - full screen or a window
+                    // smaller than the screen - the desktop composed again,
+                    // the window's own surface black or white, would hide
+                    // every frame between two presents: a click that repaints
+                    // the window's border flashed it. The ceiling: the desktop
+                    // around a smaller window is not shown.
                     // DWM shows it whether or not its application is active.
                     // A full-screen swap chain's window is the screen while
                     // it is shown, as a full-screen Direct3D 8 or 9 device's.
@@ -1570,7 +1573,7 @@ export function createGraphicsModule(){
                         desktops.client = window?.client ?? null;
                         desktops.screen = { width: screen.width, height: screen.height };
                         if (into.fullscreen ? window?.visible === true
-                            : fillsScreen(listed, into.window, screen))
+                            : clientUncovered(listed, into.window, screen))
                         {
                             desktops.keptBack++;
                             return;

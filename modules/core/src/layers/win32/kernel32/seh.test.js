@@ -371,6 +371,20 @@ test('an instruction the processor refused is traced with its bytes', async()=>{
         said.join('\n'));
 });
 
+test('a refused access met in a host function is traced with that function\'s name', async()=>{
+    // The address it was raised at is the function's trap, which names
+    // nothing: the function and the pointer it was handed are the lead.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    /** @type {string[]} */
+    const said = [];
+    const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+    m.registerFrames([0x51000]);
+    await seh.raiseAccess({ address: 0x801601e0, mode: 'read',
+        call: 'KERNEL32.dll!LCMapStringEx' });
+    assert.ok(said.some(line=>line.includes('reading 0x801601e0 in KERNEL32.dll!LCMapStringEx, '
+        + 'raised from')), said.join('\n'));
+});
+
 test('a fault\'s context holds the registers the faulting code had', async()=>{
     // The stub that reported the fault has moved the stack and spent two
     // registers; the handler has to see the program's, not the stub's.

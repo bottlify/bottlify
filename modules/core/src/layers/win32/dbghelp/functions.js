@@ -17,6 +17,9 @@
  */
 
 const ERROR_INVALID_ADDRESS = 487;
+/** The signatures an image begins with: MZ, and PE with two zero bytes. */
+const IMAGE_DOS_SIGNATURE = 0x5a4d;
+const IMAGE_NT_SIGNATURE = 0x00004550;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_INVALID_PARAMETER = 87;
@@ -104,6 +107,85 @@ export function createDbghelpFunctions(host){
             void e;
             return null;
         }
+    };
+
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>{
+        host.writeMemory(address >>> 0, Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
+            value >>> 16 & 0xff, value >>> 24 & 0xff));
+    };
+
+    /**
+     * Where an image's data directory lies (IMAGE_DIRECTORY_ENTRY_*), read
+     * from its own headers: as the loader placed it, or, for an image read as
+     * a file, through the section the directory's RVA falls in. Its size and
+     * that section's header go where asked; anything that is not an image, a
+     * directory past the ones it has or one it leaves empty is NULL.
+     *
+     * @param {number} base @param {number} mapped @param {number} entry
+     * @param {number} sizeOut @param {number} sectionOut  0 where not asked for
+     */
+    const directoryEntry = (base, mapped, entry, sizeOut, sectionOut)=>{
+        const at = base >>> 0;
+        if (sectionOut)
+        {
+            writeU32(sectionOut, 0);
+        }
+        if (at === 0 || ((readU32(at) ?? 0) & 0xffff) !== IMAGE_DOS_SIGNATURE)
+        {
+            return 0;
+        }
+        const nt = (at + (readU32(at + 0x3c) ?? 0)) >>> 0;
+        if (readU32(nt) !== IMAGE_NT_SIGNATURE)
+        {
+            return 0;
+        }
+        const optional = nt + 24;
+        const magic = (readU32(optional) ?? 0) & 0xffff;
+        const wide = magic === 0x20b;
+        if (!wide && magic !== 0x10b)
+        {
+            return 0;
+        }
+        const count = readU32(optional + (wide ? 108 : 92)) ?? 0;
+        const index = entry & 0xffff;
+        if (index >= count)
+        {
+            return 0;
+        }
+        const directory = optional + (wide ? 112 : 96) + index * 8;
+        const rva = readU32(directory) ?? 0;
+        if (rva === 0)
+        {
+            return 0;
+        }
+        if (sizeOut)
+        {
+            writeU32(sizeOut, readU32(directory + 4) ?? 0);
+        }
+        const headersSize = readU32(optional + 60) ?? 0;
+        if ((mapped & 0xff) !== 0 || rva < headersSize)
+        {
+            return (at + rva) >>> 0;
+        }
+        const header = readU32(nt + 4) ?? 0;
+        const sections = header >>> 16;
+        const first = optional + ((readU32(nt + 20) ?? 0) & 0xffff);
+        for (let n = 0; n < sections; n++)
+        {
+            const section = first + n * 40;
+            const start = readU32(section + 12) ?? 0;
+            const raw = readU32(section + 16) ?? 0;
+            if (rva >= start && rva < start + raw)
+            {
+                if (sectionOut)
+                {
+                    writeU32(sectionOut, section >>> 0);
+                }
+                return (at + rva - start + (readU32(section + 20) ?? 0)) >>> 0;
+            }
+        }
+        return 0;
     };
 
     /** @param {number} address */
@@ -474,6 +556,31 @@ export function createDbghelpFunctions(host){
          * asks for anything else.
          */
         SearchTreeForFile: { argBytes: 12, handler: ()=>fail(0, ERROR_FILE_NOT_FOUND) },
+
+        /**
+         * PVOID ImageDirectoryEntryToData(PVOID Base, BOOLEAN MappedAsImage,
+         *     USHORT DirectoryEntry, PULONG Size)
+         *
+         * What a crash reporter reads an image's import or export table
+         * through.
+         */
+        ImageDirectoryEntryToData: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([base, mapped, entry, size])=>
+                directoryEntry(base, mapped, entry, size >>> 0, 0),
+        },
+
+        /**
+         * PVOID ImageDirectoryEntryToDataEx(PVOID Base, BOOLEAN MappedAsImage,
+         *     USHORT DirectoryEntry, PULONG Size, PIMAGE_SECTION_HEADER *FoundHeader)
+         */
+        ImageDirectoryEntryToDataEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([base, mapped, entry, size, found])=>
+                directoryEntry(base, mapped, entry, size >>> 0, found >>> 0),
+        },
 
         /**
          * DWORD UnDecorateSymbolName(PCSTR name, PSTR outputString, DWORD maxStringLength,
