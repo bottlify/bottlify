@@ -822,19 +822,51 @@ export function createFilesystemModule(){
                 },
 
                 /**
+                 * Makes the empty directory at `path` a junction standing for
+                 * the directory `target` on the same drive, what a mount point
+                 * set by FSCTL_SET_REPARSE_POINT is; with `target` null it is
+                 * a directory again. What is under the junction is the
+                 * target's, reached and listed through it; removing the
+                 * junction leaves the target as it was.
+                 *
+                 * @param {string} path @param {string | null} target
+                 */
+                setJunction(path, target){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const at = locate(path);
+                    if (target === null)
+                    {
+                        at.tree.setJunction(at.components, null);
+                        return;
+                    }
+                    const to = locate(target);
+                    if (to.tree !== at.tree)
+                    {
+                        throw fsError(ErrorCode.NOT_SAME_DEVICE,
+                            `"${path}" and "${target}" are on different drives`);
+                    }
+                    at.tree.setJunction(at.components, to.components);
+                },
+
+                /**
                  * The files with more than one name, as full paths: the path
                  * each one's bytes travel under in `export`, and its other
-                 * names -- the part of a session `export` cannot carry.
+                 * names - the part of a session `export` cannot carry. A
+                 * junction is one too: the directory it stands for as the
+                 * owner, the junction as its name, `junction` set.
                  *
                  * @param {string} [letter]
-                 * @returns {{ owner: string, names: string[] }[]}
+                 * @returns {{ owner: string, names: string[], junction?: boolean }[]}
                  */
                 exportLinks(letter){
                     if (!live())
                     {
                         return [];
                     }
-                    /** @type {{ owner: string, names: string[] }[]} */
+                    /** @type {{ owner: string, names: string[], junction?: boolean }[]} */
                     const out = [];
                     for (const [key, tree] of state.drives)
                     {
@@ -846,7 +878,8 @@ export function createFilesystemModule(){
                         {
                             out.push({ owner: formatPath(key, splitComponents(record.owner)),
                                 names: record.names.map((/** @type {string} */ path)=>
-                                    formatPath(key, splitComponents(path))) });
+                                    formatPath(key, splitComponents(path))),
+                                ...record.junction ? { junction: true } : {} });
                         }
                     }
                     return out;
@@ -857,7 +890,7 @@ export function createFilesystemModule(){
                  * `apply` has put the files themselves in. A record whose names
                  * span drives, or whose file is not there, is passed over.
                  *
-                 * @param {{ owner: string, names: string[] }[]} records
+                 * @param {{ owner: string, names: string[], junction?: boolean }[]} records
                  */
                 applyLinks(records){
                     if (!live())
@@ -870,7 +903,8 @@ export function createFilesystemModule(){
                         const names = record.names.map(path=>locate(path))
                             .filter(at=>at.tree === owner.tree);
                         owner.tree.restoreLinks([{ owner: owner.components.join('\\'),
-                            names: names.map(at=>at.components.join('\\')) }]);
+                            names: names.map(at=>at.components.join('\\')),
+                            ...record.junction ? { junction: true } : {} }]);
                     }
                 },
 

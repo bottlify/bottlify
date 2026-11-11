@@ -71,6 +71,17 @@ const WIN32_FILE_ATTRIBUTE_DATA_SIZE = 36;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
+/** FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT. */
+const FSCTL_SET_REPARSE_POINT = 0x900a4;
+const FSCTL_GET_REPARSE_POINT = 0x900a8;
+const FSCTL_DELETE_REPARSE_POINT = 0x900ac;
+/** A junction's reparse tag: a mount point. */
+const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+/** The NT prefix a mount point's substitute name carries before its path. */
+const NT_PREFIX = '\\??\\';
+const ERROR_INSUFFICIENT_BUFFER_FOR_REPARSE = 122;
+const ERROR_REPARSE_TAG_INVALID = 4393;
+const ERROR_NOT_A_REPARSE_POINT_FILE = 4390;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_SHARING_VIOLATION = 32;
 const ERROR_USER_MAPPED_FILE = 1224;
@@ -306,6 +317,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {number} [links]  How many names the file has; one when absent.
  * @property {string} [identity]  What the file is known by whatever its names:
  *           its own path unless it has others.
+ * @property {string} [junction]  For a junction, the directory it stands for.
  */
 
 /**
@@ -386,6 +398,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => string | null} [mappedAs]  how a section maps the file
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
+ * @property {(path: string, target: string | null) => string | null} [setJunction]
+ *           Makes an empty directory a junction (null target: a directory again).
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
  * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
  *     Uint8Array | Promise<Uint8Array>} read
@@ -1454,6 +1468,98 @@ export function createFileFunctions(host){
         NOT_A_DIRECTORY: ERROR_PATH_NOT_FOUND, WRITE_PROTECTED: ERROR_WRITE_PROTECT,
         INVALID_PATH: ERROR_INVALID_NAME, NO_SUCH_DRIVE: ERROR_PATH_NOT_FOUND,
     });
+
+    /** The file-system controls a directory's handle answers: its reparse point. */
+    const REPARSE_CONTROLS = new Set([FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT,
+        FSCTL_DELETE_REPARSE_POINT]);
+
+    /**
+     * A directory's reparse point through DeviceIoControl: a mount point (a
+     * junction) set, read back or taken off. The REPARSE_DATA_BUFFER is the
+     * tag, the data's length, then four offsets and lengths into the names
+     * after them, the substitute name (\??\C:\...) and the printed one.
+     * Only a mount point is a reparse point this volume keeps; another tag
+     * is said and refused.
+     *
+     * @param {string} path @param {number} code @param {number} input
+     * @param {number} inLength @param {number} output @param {number} outLength
+     * @param {number} returned
+     */
+    const reparseControl = (path, code, input, inLength, output, outLength, returned)=>{
+        const refusedBy = (/** @type {string | null} */ refused)=>(refused === null
+            ? (host.setLastError(ERROR_SUCCESS), 1)
+            : fail(refused === 'DIRECTORY_NOT_EMPTY' ? ERROR_DIR_NOT_EMPTY
+                : refused === 'NOT_A_REPARSE_POINT' ? ERROR_NOT_A_REPARSE_POINT_FILE
+                    : LINK_ERRORS[/** @type {keyof typeof LINK_ERRORS} */ (refused)]
+                        ?? ERROR_ACCESS_DENIED));
+        if (!files.setJunction)
+        {
+            host.divergence?.('DeviceIoControl', `the volume keeps no junctions; ${path} not made`);
+            return fail(ERROR_INVALID_FUNCTION);
+        }
+        if (code === FSCTL_GET_REPARSE_POINT)
+        {
+            const target = files.stat(path)?.junction;
+            if (!target)
+            {
+                return fail(ERROR_NOT_A_REPARSE_POINT_FILE);
+            }
+            const substitute = utf16(`${NT_PREFIX}${target}`);
+            const printed = utf16(target);
+            const data = new Uint8Array(8 + 8 + substitute.length + 2 + printed.length + 2);
+            const view = new DataView(data.buffer);
+            view.setUint32(0, IO_REPARSE_TAG_MOUNT_POINT, true);
+            view.setUint16(4, data.length - 8, true);
+            view.setUint16(8, 0, true);
+            view.setUint16(10, substitute.length, true);
+            view.setUint16(12, substitute.length + 2, true);
+            view.setUint16(14, printed.length, true);
+            data.set(substitute, 16);
+            data.set(printed, 16 + substitute.length + 2);
+            if (outLength < 8)
+            {
+                return fail(ERROR_INSUFFICIENT_BUFFER_FOR_REPARSE);
+            }
+            host.writeMemory(output, data.subarray(0, Math.min(outLength, data.length)));
+            if (returned !== 0)
+            {
+                writeDword(returned, Math.min(outLength, data.length));
+            }
+            return outLength < data.length ? fail(ERROR_MORE_DATA)
+                : (host.setLastError(ERROR_SUCCESS), 1);
+        }
+        if (input === 0 || inLength < 8)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const head = new DataView(host.readMemory(input, 8).slice().buffer);
+        if (head.getUint32(0, true) !== IO_REPARSE_TAG_MOUNT_POINT)
+        {
+            host.divergence?.('DeviceIoControl', `reparse tag 0x${head.getUint32(0, true)
+                .toString(16)} on ${path}: only a mount point is kept`);
+            return fail(ERROR_REPARSE_TAG_INVALID);
+        }
+        if (code === FSCTL_DELETE_REPARSE_POINT)
+        {
+            return refusedBy(files.setJunction(path, null));
+        }
+        if (inLength < 16)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const fields = new DataView(host.readMemory(input + 8, 8).slice().buffer);
+        const at = fields.getUint16(0, true);
+        const length = fields.getUint16(2, true);
+        if (16 + at + length > inLength)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        // The names need not end in a NUL inside their lengths, so they are read as counted.
+        const name = String.fromCharCode(...new Uint16Array(
+            host.readMemory(input + 16 + at, length & ~1).slice().buffer));
+        const target = name.startsWith(NT_PREFIX) ? name.slice(NT_PREFIX.length) : name;
+        return refusedBy(files.setJunction(path, target));
+    };
 
     /**
      * BOOL CreateHardLink(LPCTSTR lpFileName, LPCTSTR lpExistingFileName,
@@ -4551,6 +4657,13 @@ export function createFileFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([handle, code, input, inLength, output, outLength, returned])=>{
+                const opened = object(handle, 'file');
+                const folder = opened?.directory ? opened : object(handle, 'directory');
+                if (folder && REPARSE_CONTROLS.has(code >>> 0))
+                {
+                    return reparseControl(folder.path, code >>> 0, input >>> 0, inLength >>> 0,
+                        output >>> 0, outLength >>> 0, returned >>> 0);
+                }
                 if (object(handle, 'device') === null)
                 {
                     return fail(ERROR_INVALID_FUNCTION);

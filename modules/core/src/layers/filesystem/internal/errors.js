@@ -38,6 +38,8 @@ export const ErrorCode = {
     /** Two names that have to be on one drive -- a file and its hard link -- are not. */
     NOT_SAME_DEVICE: 'NOT_SAME_DEVICE',
     INVALID_HANDLE: 'INVALID_HANDLE',
+    /** A junction's undoing asked of a directory that is no junction. */
+    NOT_A_REPARSE_POINT: 'NOT_A_REPARSE_POINT',
 };
 
 /**

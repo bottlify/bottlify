@@ -56,6 +56,9 @@ import { bytesOf } from './memory-store.js';
  * @property {number} modified    Milliseconds since the epoch; when it was last written.
  * @property {boolean} hidden     The source records it as hidden.
  * @property {Body | null} body   For a file with more than one name: what its names share.
+ * @property {string[] | null} junction  For a directory that is a junction (a
+ *                                mount point): the directory on this drive it
+ *                                stands for, whose contents are seen through it.
  */
 
 /**
@@ -82,6 +85,7 @@ import { bytesOf } from './memory-store.js';
  * @property {boolean} readOnly  On a volume nothing can be written to.
  * @property {number} links  How many names the file has.
  * @property {string} identity  What the file is known by under any of its names.
+ * @property {string | null} [junction]  For a junction, the directory it stands for.
  */
 
 /**
@@ -91,6 +95,9 @@ import { bytesOf } from './memory-store.js';
  * the DOS calendar is the oldest date every convention can still express.
  */
 export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
+
+/** How many junctions a path may pass through before it is a loop. */
+const MAX_JUNCTIONS = 32;
 
 /** @param {string} directory @param {string} name */
 const joinPath = (directory, name)=>(directory.length === 0 ? name : `${directory}\\${name}`);
@@ -114,6 +121,7 @@ function makeNode(parent, name){
         modified: SOURCE_MODIFIED_MS,
         hidden: false,
         body: null,
+        junction: null,
     };
 }
 
@@ -258,11 +266,12 @@ export function createOverlay({
         let node = root;
         for (const part of components)
         {
-            if (!node.directory)
+            const inside = follow(node);
+            if (!inside?.directory)
             {
                 return null;
             }
-            const child = node.children.get(foldName(part));
+            const child = inside.children.get(foldName(part));
             if (!child || child.tombstone)
             {
                 return null;
@@ -273,6 +282,27 @@ export function createOverlay({
     };
 
     /**
+     * The directory a junction stands for, followed to the end of a chain of
+     * them; any other node itself. A junction whose directory is gone, or a
+     * chain that loops, stands for nothing.
+     *
+     * @param {Node} node
+     * @returns {Node | null}
+     */
+    const follow = node=>{
+        let at = /** @type {Node | null} */ (node);
+        for (let depth = 0; at?.junction; depth++)
+        {
+            if (depth === MAX_JUNCTIONS)
+            {
+                return null;
+            }
+            at = find(at.junction);
+        }
+        return at;
+    };
+
+    /**
      * The parent a create or a delete has to act on. Missing it is a different
      * failure from missing the file itself, and Win32 reports it differently.
      *
@@ -280,7 +310,8 @@ export function createOverlay({
      * @returns {Node}
      */
     const parentOf = components=>{
-        const node = find(components.slice(0, -1));
+        const found = find(components.slice(0, -1));
+        const node = found && follow(found);
         if (!node)
         {
             throw fsError(ErrorCode.PATH_NOT_FOUND,
@@ -585,6 +616,7 @@ export function createOverlay({
                     readOnly,
                     links: node.body?.names.size ?? 1,
                     identity: storePath(node),
+                    junction: node.junction ? node.junction.join('\\') : null,
                 }
                 : null;
         },
@@ -611,7 +643,12 @@ export function createOverlay({
          * @returns {Entry[]}
          */
         list(components, pattern){
-            const node = mustFind(components);
+            const node = follow(mustFind(components));
+            if (!node)
+            {
+                throw fsError(ErrorCode.PATH_NOT_FOUND,
+                    `The junction "${components.join('\\')}" stands for nothing`);
+            }
             if (!node.directory)
             {
                 throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
@@ -633,6 +670,7 @@ export function createOverlay({
                     readOnly,
                     links: child.body?.names.size ?? 1,
                     identity: storePath(child),
+                    junction: child.junction ? child.junction.join('\\') : null,
                 });
             }
             return entries;
@@ -959,6 +997,41 @@ export function createOverlay({
         },
 
         /**
+         * Makes the empty directory at `components` a junction standing for
+         * the directory at `target` on this drive - FSCTL_SET_REPARSE_POINT
+         * with a mount point - or, with `target` null, a directory again. A
+         * directory with anything in it is DIRECTORY_NOT_EMPTY; a junction is
+         * given another target as Windows replaces a mount point's.
+         *
+         * @param {string[]} components @param {string[] | null} target
+         */
+        setJunction(components, target){
+            mustBeWritable(components);
+            const node = mustFind(components);
+            if (!node.directory)
+            {
+                throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
+            }
+            if (target === null)
+            {
+                if (!node.junction)
+                {
+                    throw fsError(ErrorCode.NOT_A_REPARSE_POINT,
+                        `"${node.path}" is not a junction`);
+                }
+                node.junction = null;
+                changed(node.path, 'written');
+                return;
+            }
+            if ([...node.children.values()].some(child=>!child.tombstone))
+            {
+                throw fsError(ErrorCode.DIRECTORY_NOT_EMPTY, `"${node.path}" is not empty`);
+            }
+            node.junction = [...target];
+            changed(node.path, 'written');
+        },
+
+        /**
          * Every name the file at `components` has, as paths: itself alone
          * unless it is linked.
          *
@@ -978,6 +1051,8 @@ export function createOverlay({
         links(){
             /** @type {Set<Body>} */
             const bodies = new Set();
+            /** @type {{ owner: string, names: string[], junction: true }[]} */
+            const junctions = [];
             /** @param {Node} node */
             const walk = node=>{
                 for (const child of node.children.values())
@@ -986,6 +1061,11 @@ export function createOverlay({
                     {
                         bodies.add(child.body);
                     }
+                    if (child.junction && !child.tombstone)
+                    {
+                        junctions.push({ owner: child.junction.join('\\'), names: [child.path],
+                            junction: true });
+                    }
                     if (child.directory)
                     {
                         walk(child);
@@ -993,8 +1073,9 @@ export function createOverlay({
                 }
             };
             walk(root);
-            return [...bodies].map(body=>({ owner: body.owner.path,
-                names: [...body.names].filter(name=>name !== body.owner).map(name=>name.path) }));
+            return [...[...bodies].map(body=>({ owner: body.owner.path,
+                names: [...body.names].filter(name=>name !== body.owner).map(name=>name.path) })),
+            ...junctions];
         },
 
         /**
@@ -1002,11 +1083,32 @@ export function createOverlay({
          * once the files themselves are on the drive. A name that a file
          * already holds is taken over: the session is what the program left.
          *
-         * @param {{ owner: string, names: string[] }[]} records
+         * @param {{ owner: string, names: string[], junction?: boolean }[]} records
          */
         restoreLinks(records){
             for (const record of records)
             {
+                if (record.junction)
+                {
+                    for (const path of record.names)
+                    {
+                        const components = path.split('\\').filter(part=>part.length > 0);
+                        for (let depth = 1; depth <= components.length; depth++)
+                        {
+                            if (!find(components.slice(0, depth)))
+                            {
+                                overlay.createDirectory(components.slice(0, depth));
+                            }
+                        }
+                        const node = find(components);
+                        if (node?.directory && !node.junction)
+                        {
+                            node.junction = record.owner.split('\\')
+                                .filter(part=>part.length > 0);
+                        }
+                    }
+                    continue;
+                }
                 const owner = find(record.owner.split('\\').filter(part=>part.length > 0));
                 if (!owner || owner.directory)
                 {

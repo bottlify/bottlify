@@ -304,6 +304,7 @@ const FILE_ATTRIBUTE_HIDDEN = 0x02;
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE = 0x20;
 const FILE_ATTRIBUTE_NORMAL = 0x80;
+const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 
 /**
  * The attributes a name on the volume is reported with.
@@ -318,12 +319,15 @@ const FILE_ATTRIBUTE_NORMAL = 0x80;
  * FILE_ATTRIBUTE_NORMAL means "no other attribute" and is only ever answered
  * alone: a directory set to it is just a directory.
  *
+ * A junction is a directory with the reparse-point bit, whatever else it is.
+ *
  * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean,
- *           attributes?: number } | null | undefined} entry
+ *           attributes?: number, junction?: string } | null | undefined} entry
  * @returns {number}
  */
 export function fileAttributes(entry){
-    const kind = entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+    const kind = (entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0)
+        | (entry?.junction ? FILE_ATTRIBUTE_REPARSE_POINT : 0);
     const hidden = entry?.hidden ? FILE_ATTRIBUTE_HIDDEN : 0;
     const media = entry?.readOnly ? FILE_ATTRIBUTE_READONLY : 0;
     if (entry?.attributes !== undefined)
