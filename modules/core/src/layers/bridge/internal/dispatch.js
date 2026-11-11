@@ -158,12 +158,13 @@ const KEPT_ARGS = 12;
  * What a handler's call becomes in the guest rather than the end of the run,
  * told by its code: this layer imports neither memory's nor win32's. Memory's
  * refused guest access (`memory/internal/faults.js`), and an exception a
- * handler raises on purpose (`win32/common/raise.js`).
+ * handler raises on purpose (`win32/common/raise.js`). `call` is the host
+ * function it was met in, which the trace names.
  *
  * @typedef {Error & { code: 'GUEST_ACCESS', address: number, length: number,
- *     mode: 'read' | 'write' | 'execute' }} GuestAccess
+ *     mode: 'read' | 'write' | 'execute', call?: string }} GuestAccess
  * @typedef {Error & { code: 'GUEST_EXCEPTION', status: number, flags: number,
- *     parameters: number[] }} GuestException
+ *     parameters: number[], call?: string }} GuestException
  * @typedef {GuestAccess | GuestException} GuestRaise
  */
 
@@ -1545,7 +1546,8 @@ class Dispatcher {
                 {
                     // The same fault, met after the handler waited.
                     result = /** @type {Promise<number>} */ (result).catch(
-                        (/** @type {unknown} */ e)=>(isGuestRaise(e) ? raise(e) : Promise.reject(e)));
+                        (/** @type {unknown} */ e)=>(isGuestRaise(e)
+                            ? raise(Object.assign(e, { call: entry.name })) : Promise.reject(e)));
                 }
             }
             else
@@ -1566,7 +1568,7 @@ class Dispatcher {
             {
                 throw e;
             }
-            result = this.guestFault(e);
+            result = this.guestFault(Object.assign(e, { call: entry.name }));
             kinds[at] = WAITING;
             late = true;
         }

@@ -495,7 +495,8 @@ export function createSeh(host){
      * exception or the chain runs out.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
-     *     raisedFrom?: number }} what  `raisedFrom` the return address of RaiseException's caller
+     *     raisedFrom?: number, call?: string }} what  `raisedFrom` the return address of
+     *     RaiseException's caller, `call` the host function it was met in
      * @param {Record<string, number>} [given]  The registers at the exception,
      *        when they are not the processor's right now -- a fault is
      *        reported from a stub that has already moved the stack and spent
@@ -541,7 +542,10 @@ export function createSeh(host){
         // return address -- the call's own place -- is the only lead.
         // A raised one's address is inside RaiseException; who raised it is
         // the call's return address.
-        const caller = what.raisedFrom !== undefined ? `, raised from ${hex(what.raisedFrom)}`
+        // Met in a host function, that function is named: its address is a
+        // trap's, which says nothing.
+        const caller = what.raisedFrom !== undefined
+            ? `${what.call ? ` in ${what.call}` : ''}, raised from ${hex(what.raisedFrom)}`
             : (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
                 ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
         // An instruction the processor refused is named by its bytes: a
@@ -758,7 +762,8 @@ export function createSeh(host){
      * raising call should do next. Nothing handled means the process ends.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
-     *     raisedFrom?: number }} what  `raisedFrom` the return address of RaiseException's caller
+     *     raisedFrom?: number, call?: string }} what  `raisedFrom` the return address of
+     *     RaiseException's caller, `call` the host function it was met in
      */
     const raise = async what=>{
         const result = await dispatch(what);
@@ -778,8 +783,9 @@ export function createSeh(host){
      * zero, with the context it continued from.
      *
      * @param {number} code @param {number} flags @param {number[]} parameters
+     * @param {string} [call]  the host function it was met in, for the trace
      */
-    const raiseFromCall = (code, flags, parameters)=>{
+    const raiseFromCall = (code, flags, parameters, call)=>{
         const registers = host.registers();
         return raise({
             code: code >>> 0,
@@ -787,6 +793,7 @@ export function createSeh(host){
             address: registers.eip,
             parameters,
             raisedFrom: readU32(registers.esp >>> 0),
+            ...call ? { call } : {},
         }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
     };
 
@@ -804,22 +811,23 @@ export function createSeh(host){
          * one that continues gets the call back answering zero. Unhandled,
          * the process ends with it, as on Windows.
          *
-         * @param {{ address: number, mode: 'read' | 'write' | 'execute' }} fault
+         * @param {{ address: number, mode: 'read' | 'write' | 'execute', call?: string }} fault
          * @returns {Promise<any>}
          */
         raiseAccess: fault=>raiseFromCall(STATUS.ACCESS_VIOLATION, 0,
-            [fault.mode === 'write' ? 1 : fault.mode === 'execute' ? 8 : 0, fault.address >>> 0]),
+            [fault.mode === 'write' ? 1 : fault.mode === 'execute' ? 8 : 0, fault.address >>> 0],
+            fault.call),
 
         /**
          * An exception a host handler raises as Windows' function raises it
          * (`win32/common/raise.js`): the code, flags and information given,
          * at the call. Answered as RaiseException's is.
          *
-         * @param {{ status: number, flags: number, parameters: number[] }} raised
+         * @param {{ status: number, flags: number, parameters: number[], call?: string }} raised
          * @returns {Promise<any>}
          */
         raiseException: raised=>raiseFromCall(raised.status,
-            raised.flags & EXCEPTION_NONCONTINUABLE, raised.parameters),
+            raised.flags & EXCEPTION_NONCONTINUABLE, raised.parameters, raised.call),
 
         /**
          * Whether a processor exception is one a program can be handed.
