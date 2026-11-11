@@ -4821,18 +4821,18 @@ test('GetQueueStatus answers only about the classes it was asked about', ()=>{
 test('GetInputState says whether a key or a click is waiting, and is not a look', ()=>{
     const { fns, queue } = setup();
     assert.equal(fns.GetInputState.argBytes, 0);
-    assert.equal(fns.GetInputState.handler([]), 0, 'an empty queue');
+    assert.equal(fns.GetInputState.handler(), 0, 'an empty queue');
     queue.post({ hwnd: 0, message: WM_USER, wParam: 0, lParam: 0 });
-    assert.equal(fns.GetInputState.handler([]), 0, 'a posted message is not input');
+    assert.equal(fns.GetInputState.handler(), 0, 'a posted message is not input');
 
     queue.post({ hwnd: 0x40, message: WM_LBUTTONDOWN, wParam: 0, lParam: 0 });
-    assert.equal(fns.GetInputState.handler([]), 1, 'a click is');
+    assert.equal(fns.GetInputState.handler(), 1, 'a click is');
     assert.equal(fns.GetQueueStatus.handler([QS_MOUSEBUTTON]) & QS_MOUSEBUTTON, QS_MOUSEBUTTON,
         'and it is still news to GetQueueStatus');
 
     const keys = setup();
     keys.queue.post({ hwnd: 0x40, message: WM_KEYDOWN, wParam: 0x41, lParam: 0 });
-    assert.equal(keys.fns.GetInputState.handler([]), 1, 'so is a key');
+    assert.equal(keys.fns.GetInputState.handler(), 1, 'so is a key');
 });
 
 test('GetQueueStatus and the thread post pop the stack they were pushed', ()=>{

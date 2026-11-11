@@ -69,7 +69,7 @@ test('composition on, a window\'s frame its rectangle, attributes kept as set', 
     assert.equal(view.getUint32(0x100, true), 1);
     assert.equal(DWMAPI_ORDINALS[102], 'DwmEnableComposition', 'by its number, as exported');
     assert.equal(fns.DwmEnableMMCSS.argBytes, 4);
-    assert.equal(fns.DwmEnableMMCSS.handler([1]), 0, 'MMCSS on is accepted');
+    assert.equal(fns.DwmEnableMMCSS.handler(), 0, 'MMCSS on is accepted');
 });
 
 test('the console session, active, the machine\'s user\'s', ()=>{
