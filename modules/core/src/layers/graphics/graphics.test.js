@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clientDrawable, fillsScreen, graphicsModule, uncoveredRegion } from './module.js';
+import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
@@ -1215,7 +1215,7 @@ test('OpenGL draws on a window\'s client area, whichever of its DCs names it', (
     assert.equal(clientDrawable(null, windows), null);
 });
 
-test('a window fills the screen when its client area covers it and it is the topmost shown', ()=>{
+test('a device\'s window is the picture while nothing over it reaches its client', ()=>{
     // 3DMark 11's demo presents a windowed swap chain into a window the size
     // of the screen; the desktop composed at each paint put the window's own
     // surface, black, over every frame but the moment after a present.
@@ -1225,19 +1225,26 @@ test('a window fills the screen when its client area covers it and it is the top
         client: { left: -31997, top: -31978, right: -31997, bottom: -31978 }, visible: true,
         parent: null };
     const demo = { hwnd: '0x36', rect: whole, client: whole, visible: true, parent: null };
-    assert.equal(fillsScreen([gui, demo], 0x36, size), true);
-    assert.equal(fillsScreen([demo, gui], 0x36, size), true,
+    assert.equal(clientUncovered([gui, demo], 0x36, size), true);
+    assert.equal(clientUncovered([demo, gui], 0x36, size), true,
         'a minimised window over it is off the screen');
     const dialog = { hwnd: '0x50', rect: { left: 100, top: 100, right: 300, bottom: 200 },
         client: { left: 103, top: 122, right: 297, bottom: 197 }, visible: true, parent: null };
-    assert.equal(fillsScreen([demo, dialog], 0x36, size), false, 'a window over it shows');
-    assert.equal(fillsScreen([dialog, demo], 0x36, size), true, 'one under it does not');
-    assert.equal(fillsScreen([gui, { ...demo, visible: false }], 0x36, size), false);
-    assert.equal(fillsScreen([gui, { ...demo, client: { ...whole, right: 1000 } }], 0x36, size),
-        false, 'a window that leaves part of the screen to the desktop');
-    assert.equal(fillsScreen([gui, demo], 0x99, size), false, 'no such window');
+    assert.equal(clientUncovered([demo, dialog], 0x36, size), false, 'a window over it shows');
+    assert.equal(clientUncovered([dialog, demo], 0x36, size), true, 'one under it does not');
+    assert.equal(clientUncovered([gui, { ...demo, visible: false }], 0x36, size), false);
+    // A windowed game smaller than the screen: its window repainting its frame
+    // at a click composed the desktop over the frame, its own surface white.
+    const small = { ...demo, client: { left: 100, top: 100, right: 900, bottom: 600 } };
+    assert.equal(clientUncovered([gui, small], 0x36, size), true,
+        'a window smaller than the screen, nothing over it');
+    assert.equal(clientUncovered([small, dialog], 0x36, size), false, 'a window over its client');
+    const aside = { ...dialog, rect: { left: 950, top: 100, right: 1200, bottom: 200 } };
+    assert.equal(clientUncovered([small, aside], 0x36, size), true,
+        'one over the desktop beside it is not over the picture');
+    assert.equal(clientUncovered([gui, demo], 0x99, size), false, 'no such window');
     const pane = { hwnd: '0x40', rect: whole, client: whole, visible: true, child: true,
         parent: '0x36' };
-    assert.equal(fillsScreen([gui, demo, pane], 0x40, size), true,
+    assert.equal(clientUncovered([gui, demo, pane], 0x40, size), true,
         'a child window filling it, its top-level window topmost');
 });
