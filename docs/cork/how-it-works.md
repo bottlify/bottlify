@@ -84,10 +84,11 @@ own. The result lands
 where the function leaves it and no other register changes.
 
 Where the operation cannot be done whole in place, the call is made as it was and the function's
-own code runs: a span that reaches a page that is closed, holds translated code or is watched for
-writes, an address past 4 GiB, a `sqrt` of a negative number or a NaN (which sets `errno`), a
-`floor` or `ceil` of an infinity or a NaN, a
-divide by zero, a stack that `__chkstk` would probe into a closed page.
+own code runs: a span that reaches a closed page or translated code itself, an address past
+4 GiB, a `sqrt` of a negative number or a NaN (which sets `errno`), a `floor` or `ceil` of an
+infinity or a NaN, a divide by zero, a stack that `__chkstk` would probe into a closed page. A copy
+or fill into a page that only holds code elsewhere, or is watched for writes, is made in place, the
+watched page marked written as a store marks it.
 
 The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 2022), 32-bit and
 x86-64. `tools/crt-dictionary.mjs` reads a signature out of a runtime's DLL, looks it up in other

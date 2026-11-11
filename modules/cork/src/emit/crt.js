@@ -254,9 +254,12 @@ function arguments3(e){
 
 /**
  * Tests the spans of a copy or fill, setting `Local.addr` to -1 where the
- * call is to be made as it was: the destination `[t0, t0 + t2)` plain for a
- * store, the source `[t1, t1 + t2)` accessible, both in RAM, the size within
- * `CRT_LIMIT`, and for `memcpy` the two apart.
+ * call is to be made as it was: the source `[t1, t1 + t2)` accessible, the
+ * destination `[t0, t0 + t2)` too, both in RAM, the size within `CRT_LIMIT`,
+ * for `memcpy` the two apart -- and where a page of the destination holds
+ * translated code or is watched, the span tested to the granule (`spanHit`),
+ * which marks a watched page written as a store to it does: only a span
+ * reaching code itself makes the call.
  *
  * @param {E} e @param {string} operation
  */
@@ -276,21 +279,34 @@ function spans(e, operation){
         b.i32const(-1).localSet(Local.addr);
         b.end();
     }
-    span(e, Local.t0, PageFlag.INACCESSIBLE | STORE_FLAGS);
     if (operation !== 'memset')
     {
         span(e, Local.t1, PageFlag.INACCESSIBLE);
     }
+    b.i32const(0).localSet(Local.pflags);
+    span(e, Local.t0, PageFlag.INACCESSIBLE, true);
+    // The destination's pages held code or a watch: tested to the granule.
+    b.localGet(Local.addr).i32const(-1).op(I32.ne)
+        .localGet(Local.pflags).i32const(STORE_FLAGS).op(I32.and).i32const(0).op(I32.ne)
+        .op(I32.and);
+    b.if(EMPTY);
+    b.localGet(Local.t0).localGet(Local.t0).localGet(Local.t2).op(I32.add).i32const(1)
+        .op(I32.sub).call(e.context.spanHit);
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.end();
+    b.end();
 }
 
 /**
  * `[pointer, pointer + t2)`'s pages tested for `bits`, unless `Local.addr` is
  * already -1, which it is set to when one has any or the span leaves RAM. A
- * span of no bytes is plain.
+ * span of no bytes is plain. With `collect`, every page's flags are or'd
+ * into `Local.pflags`.
  *
- * @param {E} e @param {number} pointer @param {number} bits
+ * @param {E} e @param {number} pointer @param {number} bits @param {boolean} [collect]
  */
-function span(e, pointer, bits){
+function span(e, pointer, bits, collect = false){
     const { b } = e;
     const table = pageFlagsAt(e.layout);
     const { ramSize } = e.layout;
@@ -307,6 +323,11 @@ function span(e, pointer, bits){
     b.localGet(pointer).i32const(12).op(I32.shrU).localSet(Local.addr);
     b.block(EMPTY);
     b.loop(EMPTY);
+    if (collect)
+    {
+        b.localGet(Local.addr).load('i32_8u', { offset: table })
+            .localGet(Local.pflags).op(I32.or).localSet(Local.pflags);
+    }
     b.localGet(Local.addr).load('i32_8u', { offset: table }).i32const(bits).op(I32.and);
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);

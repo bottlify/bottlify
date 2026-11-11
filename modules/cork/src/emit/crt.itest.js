@@ -168,7 +168,15 @@ function run(c, helpers){
     m.write(RAM - 0x1000, c.data.subarray(0, 0x1000));
     for (const [at, length, flag] of c.flags)
     {
-        m.pages.markRange(at, length, flag);
+        // Code is marked as translation marks it: the page and its granules.
+        if (flag === PageFlag.HAS_CODE)
+        {
+            m.pages.markCode(at, length);
+        }
+        else
+        {
+            m.pages.markRange(at, length, flag);
+        }
     }
     ['ebx', 'ebp', 'esi', 'edi'].forEach((name, i)=>m.setReg(name, c.regs[i]));
     m.setReg('esp', STACK);
@@ -226,6 +234,12 @@ function caseOf(name, seed){
     {
         flags.push([dst + int(length + 1), 1, PageFlag.HAS_CODE]);
     }
+    else if (flagged === 3 && shape !== 3)
+    {
+        // Code on a page of the destination but in a granule it does not
+        // reach: the store is made in place.
+        flags.push([dst + length + 32 + int(64), 1, PageFlag.HAS_CODE]);
+    }
     else if (flagged === 2 && name !== 'memset')
     {
         flags.push([src + int(length + 1), 1, PageFlag.INACCESSIBLE]);
@@ -267,6 +281,7 @@ for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
         const helpers = [entryOf(name)];
         let formed = 0;
         let made = 0;
+        let watched = 0;
         for (let seed = 1; seed <= 120; seed++)
         {
             const c = caseOf(name, seed);
@@ -284,10 +299,18 @@ for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
             else
             {
                 formed++;
+                // A store into a watched page, or a page of code away from it,
+                // made in place.
+                const [dst, , length] = c.args;
+                watched += c.flags.some(([at, , flag])=>flag !== PageFlag.INACCESSIBLE
+                    && length > 0 && at >>> 12 >= dst >>> 12
+                    && at >>> 12 <= (dst + length - 1) >>> 12) ? 1 : 0;
             }
         }
         assert.ok(formed > 60, `${formed} calls formed as the operation`);
         assert.ok(made > 0, `${made} calls made as they were`);
+        assert.ok(watched > 0 || name === 'strlen' || name === 'sqrt',
+            `${watched} stores beside code or a watch formed`);
     });
 }
 
