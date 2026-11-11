@@ -41,6 +41,7 @@ import {
     compatibilityOf,
     createApp,
     versionResourceOf,
+    imageInMemory,
     runProcessId,
     withCpuSetup,
     withoutFaultingTailCalls,
@@ -1764,6 +1765,30 @@ test('a file\'s version block is read without reading the file', ()=>{
     view.setUint32(0x98 + 96 + 2 * 8 + 4, 0, true);
     assert.equal(versionResourceOf(filesystem, 'C:\\Game\\content.gcf'), null,
         'an image with no resources has no version');
+});
+
+test('a synthesised library is read out of memory a page at a time, across its regions', ()=>{
+    // Its code and its .data are two regions; one read the image's size long
+    // ran off the first, and a setup that asked the version of every module
+    // in its process ended with an access violation.
+    const pages = new Map([[0x10000, 1], [0x11000, 2], [0x13000, 4]]);
+    const memory = {
+        readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            const fill = pages.get(address);
+            if (fill === undefined || length > 0x1000)
+            {
+                throw Object.assign(new Error('unmapped'), { code: 'GUEST_ACCESS' });
+            }
+            return new Uint8Array(length).fill(fill);
+        },
+    };
+    const image = imageInMemory(memory, { base: 0x10000, size: 0x3800 });
+    assert.equal(image.length, 0x3800);
+    assert.deepEqual([image[0], image[0x1000], image[0x2000], image[0x3000]], [1, 2, 0, 4],
+        'each mapped page in its place, an unmapped one zeros');
+    assert.throws(()=>imageInMemory({ readBytes: ()=>{
+        throw new Error('not a fault');
+    } }, { base: 0, size: 0x1000 }), /not a fault/, 'any other error is not swallowed');
 });
 
 test('the version block of a bundle file whose bytes are still coming is waited for, as a read '
