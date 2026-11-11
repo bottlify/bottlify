@@ -2698,3 +2698,21 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   version and power plan not recorded.
 - **Decision.** Batch sizes and the worker left as they are; the two unexplained stalls are open
   questions.
+
+### 2026-11-11: a shared translation store does not speed up the .NET Framework 4 setup's ngen (cork, multi-process)
+
+- **Idea.** The setup's `ngen executeQueuedItems` starts one `mscorsvw.exe` per assembly, about 45
+  in all, and each loads `clr.dll` and `clrjit.dll` afresh; under `tools/install-watch.mjs` in Node
+  there is no translation store, so the guess was that every worker translated the runtime again.
+- **Workload.** `dotNetFx40_Full_x86_x64.exe /q /norestart` (4.0.30319, from a Steam game's
+  `_CommonRedist`) under `install-watch.mjs`, one run each arm; the store arm had a folder-backed
+  `createDirectoryTranslationStore` passed as `cork.config.store` (790 MiB written by the fourth
+  worker). Hash of the setup not recorded.
+- **Values.** Seconds between consecutive `mscorsvw.exe` starts, first five: without the store 78,
+  18, 65, 70, 42; with it 103, 15, 65, 71. The setup reached ngen at 114 s without the store and
+  155 s with it.
+- **Why.** The time is the CLR's JIT compiling assemblies as guest code, not cork translating the
+  runtime; a store spends its writes for nothing a worker reuses.
+- **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, Node 22.21; power plan not recorded.
+- **Decision.** No store flag in `install-watch`; the Framework is installed once and its layer
+  reused, rather than the ngen pass made faster.
