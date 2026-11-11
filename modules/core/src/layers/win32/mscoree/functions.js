@@ -172,11 +172,11 @@ export function createMscoreeFunctions(host){
         _CorExeMain: {
             argBytes: 0,
             handler: async()=>{
+                const thread = host.currentThread();
                 const shim = await frameworkShim('_CorExeMain');
                 if (shim !== 0)
                 {
-                    const code = await host.callGuest({ entry: shim, args: [],
-                        thread: host.currentThread() });
+                    const code = await host.callGuest({ entry: shim, args: [], thread });
                     await host.exitProcess(code >>> 0);
                     return code;
                 }
