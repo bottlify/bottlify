@@ -24,8 +24,8 @@
  * window, a size past `CRT_LIMIT`. Then the block leaves before the call with
  * nothing written, and the call is made as it was: the function's own body,
  * wherever it runs, does it, faults included. A wide window (`wideLayout`)
- * forms the copies, fills and string lengths, its pointers the whole of rcx
- * and rdx and its RAM the memory of its own.
+ * forms the copies, fills, string lengths, comparisons and searches, its
+ * pointers the whole of rcx and rdx and its RAM the memory of its own.
  */
 
 import { EMPTY } from '../wasm/encoder.js';
@@ -310,76 +310,146 @@ function chkstk64(e, instruction){
 }
 
 /**
- * Pushes 1 where the byte at the i32 guest address in `local` is past RAM or
- * in a closed page.
+ * The locals a comparison's or search's two pointers are walked in: t0 and
+ * t1, or in a wide window the i64 t64 and t64b.
+ * @param {E} e @returns {[number, number]}
+ */
+const walkers = e=>(isWide(e) ? [Local.t64, Local.t64b] : [Local.t0, Local.t1]);
+
+/**
+ * The argument `index` taken as a pointer into `local` (`walkers`): a wide
+ * window's register whole.
+ * @param {E} e @param {number} index @param {number} local
+ */
+function pointerArgument(e, index, local){
+    if (isWide(e))
+    {
+        e.b.localGet(registerLocal(e, [RCX, RDX][index])).localSet(local);
+    }
+    else
+    {
+        argument(e, index, local);
+    }
+}
+
+/** The third argument, a size, into t2; past `CRT_LIMIT` the call is made as it was. @param {E} e */
+function sizeArgument(e){
+    const { b } = e;
+    if (isWide(e))
+    {
+        const n = registerLocal(e, R8);
+        b.localGet(n).op(I64.wrap).localSet(Local.t2);
+        b.localGet(n).i64const(BigInt(CRT_LIMIT)).op(I64.gtU);
+    }
+    else
+    {
+        argument(e, 2, Local.t2);
+        b.localGet(Local.t2).i32const(CRT_LIMIT).op(I32.gtU);
+    }
+    b.if(EMPTY);
+    b.i32const(-1).localSet(Local.addr);
+    b.end();
+}
+
+/**
+ * Pushes 1 where the byte at the guest address in `local` (`walkers`) is past
+ * RAM or in a closed page.
  * @param {E} e @param {number} local
  */
 function closedAt(e, local){
-    e.b.localGet(local).i32const(e.layout.ramSize).op(I32.geU)
-        .localGet(local).i32const(12).op(I32.shrU).load('i32_8u', { offset: pageFlagsAt(e.layout) })
+    const { b } = e;
+    const ops = isWide(e) ? I64 : I32;
+    b.localGet(local);
+    constant(e, e.layout.ramSize);
+    b.op(ops.geU).localGet(local);
+    constant(e, 12);
+    b.op(ops.shrU);
+    if (isWide(e))
+    {
+        b.op(I64.wrap);
+    }
+    b.load('i32_8u', { offset: pageFlagsAt(e.layout) })
         .i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.or);
 }
 
 /**
- * Pushes 1 at the first byte and at each page's of the bytes at t0 (and t1
- * with `two`), the t2-th of them: where the page is to be tested again.
- * @param {E} e @param {boolean} two
+ * Pushes 1 at the first byte and at each page's of the bytes at `locals`
+ * (`walkers`), the t2-th of them: where the pages are to be tested again.
+ * @param {E} e @param {number[]} locals
  */
-function pageStart(e, two){
+function pageStart(e, locals){
     const { b } = e;
-    b.localGet(Local.t2).op(I32.eqz)
-        .localGet(Local.t0).i32const(0xfff).op(I32.and).op(I32.eqz).op(I32.or);
-    if (two)
+    b.localGet(Local.t2).op(I32.eqz);
+    for (const local of locals)
     {
-        b.localGet(Local.t1).i32const(0xfff).op(I32.and).op(I32.eqz).op(I32.or);
+        b.localGet(local);
+        if (isWide(e))
+        {
+            b.op(I64.wrap);
+        }
+        b.i32const(0xfff).op(I32.and).op(I32.eqz).op(I32.or);
     }
 }
 
-/** The guest's byte at the i32 address in `local`. @param {E} e @param {number} local */
-const byteAt = (e, local)=>e.b.localGet(local).load('i32_8u', { guest: true,
-    offset: e.layout.ramBase });
+/** The guest's byte at the address in `local` (`walkers`). @param {E} e @param {number} local */
+function byteAt(e, local){
+    e.b.localGet(local);
+    if (isWide(e))
+    {
+        e.b.load('i32_8u', { memory: e.layout.ramMemory });
+    }
+    else
+    {
+        e.b.load('i32_8u', { guest: true, offset: e.layout.ramBase });
+    }
+    return e.b;
+}
+
+/** The pointer in `local` (`walkers`) one byte on. @param {E} e @param {number} local */
+function stepOn(e, local){
+    e.b.localGet(local);
+    constant(e, 1);
+    e.b.op(isWide(e) ? I64.add : I32.add).localSet(local);
+}
 
 /**
- * memcmp and strcmp: the bytes at t0 and t1 compared up to the first that
- * differ -- or, for memcmp, t2 of them, for strcmp to the first zero -- the
- * answer -1, 0 or 1 by the first pair's unsigned order. memcmp's spans are tested whole
- * before; strcmp's pages as the bytes reach them, the call made as it was
- * past `CRT_LIMIT` or at a closed page.
+ * memcmp and strcmp: the bytes at the two pointers compared up to the first
+ * that differ -- or, for memcmp, t2 of them, for strcmp to the first zero --
+ * the answer -1, 0 or 1 by the first pair's unsigned order. memcmp's spans
+ * are tested whole before; strcmp's pages as the bytes reach them, the call
+ * made as it was past `CRT_LIMIT` or at a closed page.
  *
  * @param {E} e @param {Instruction} instruction @param {string} operation
  */
 function compare(e, instruction, operation){
     const { b } = e;
     const strings = operation === 'strcmp';
+    const [one, two] = walkers(e);
     b.i32const(0).localSet(Local.addr);
-    argument(e, 0, Local.t0);
-    argument(e, 1, Local.t1);
+    pointerArgument(e, 0, one);
+    pointerArgument(e, 1, two);
     if (strings)
     {
         b.i32const(0).localSet(Local.t2);
     }
     else
     {
-        argument(e, 2, Local.t2);
-        b.localGet(Local.t2).i32const(CRT_LIMIT).op(I32.gtU);
-        b.if(EMPTY);
-        b.i32const(-1).localSet(Local.addr);
-        b.end();
-        span(e, Local.t0, PageFlag.INACCESSIBLE);
-        span(e, Local.t1, PageFlag.INACCESSIBLE);
+        sizeArgument(e);
+        span(e, one, PageFlag.INACCESSIBLE);
+        span(e, two, PageFlag.INACCESSIBLE);
         leaveUnless(e, instruction);
         charge(e);
     }
-    // pflags: the first pair's difference; count: t0's byte.
+    // pflags: the first pair's difference; count: the first pointer's byte.
     b.i32const(0).localSet(Local.pflags);
     b.block(EMPTY);
     b.loop(EMPTY);
     if (strings)
     {
-        pageStart(e, true);
+        pageStart(e, [one, two]);
         b.if(EMPTY);
-        closedAt(e, Local.t0);
-        closedAt(e, Local.t1);
+        closedAt(e, one);
+        closedAt(e, two);
         b.op(I32.or).localGet(Local.t2).i32const(CRT_LIMIT).op(I32.geU).op(I32.or);
         b.if(EMPTY);
         b.i32const(-1).localSet(Local.addr);
@@ -391,14 +461,14 @@ function compare(e, instruction, operation){
     {
         b.localGet(Local.t2).op(I32.eqz).brIf(1);
     }
-    byteAt(e, Local.t0).localTee(Local.count);
-    byteAt(e, Local.t1).op(I32.sub).localTee(Local.pflags).brIf(1);
+    byteAt(e, one).localTee(Local.count);
+    byteAt(e, two).op(I32.sub).localTee(Local.pflags).brIf(1);
     if (strings)
     {
         b.localGet(Local.count).op(I32.eqz).brIf(1);
     }
-    b.localGet(Local.t0).i32const(1).op(I32.add).localSet(Local.t0);
-    b.localGet(Local.t1).i32const(1).op(I32.add).localSet(Local.t1);
+    stepOn(e, one);
+    stepOn(e, two);
     b.localGet(Local.t2).i32const(strings ? 1 : -1).op(I32.add).localSet(Local.t2);
     b.br(0);
     b.end();
@@ -408,17 +478,21 @@ function compare(e, instruction, operation){
         leaveUnless(e, instruction);
         charge(e);
     }
-    // The sign: 1, 0 or -1.
+    // The sign: 1, 0 or -1, an int (rax's high half zero).
     b.localGet(Local.pflags).i32const(0).op(I32.gtS)
-        .localGet(Local.pflags).i32const(0).op(I32.ltS).op(I32.sub).localSet(Local.pflags);
-    result(e, Local.pflags);
+        .localGet(Local.pflags).i32const(0).op(I32.ltS).op(I32.sub);
+    if (isLong(e))
+    {
+        b.op(I64.extendU);
+    }
+    b.localSet(registerLocal(e, RAX));
 }
 
 /**
- * memchr and strchr: the first byte from t0 that is the argument's low byte
- * -- among t2 of them (memchr, its span tested whole before), or up to and
- * with the string's zero (strchr, the pages tested as the bytes reach them,
- * the call made as it was past `CRT_LIMIT` or at a closed page) -- its
+ * memchr and strchr: the first byte from the pointer that is the argument's
+ * low byte -- among t2 of them (memchr, its span tested whole before), or up
+ * to and with the string's zero (strchr, the pages tested as the bytes reach
+ * them, the call made as it was past `CRT_LIMIT` or at a closed page) -- its
  * address the answer, else 0.
  *
  * @param {E} e @param {Instruction} instruction @param {string} operation
@@ -426,8 +500,9 @@ function compare(e, instruction, operation){
 function find(e, instruction, operation){
     const { b } = e;
     const string = operation === 'strchr';
+    const [at] = walkers(e);
     b.i32const(0).localSet(Local.addr);
-    argument(e, 0, Local.t0);
+    pointerArgument(e, 0, at);
     // The argument's low byte, whatever the high half of its register.
     if (isLong(e))
     {
@@ -444,12 +519,8 @@ function find(e, instruction, operation){
     }
     else
     {
-        argument(e, 2, Local.t2);
-        b.localGet(Local.t2).i32const(CRT_LIMIT).op(I32.gtU);
-        b.if(EMPTY);
-        b.i32const(-1).localSet(Local.addr);
-        b.end();
-        span(e, Local.t0, PageFlag.INACCESSIBLE);
+        sizeArgument(e);
+        span(e, at, PageFlag.INACCESSIBLE);
         leaveUnless(e, instruction);
         charge(e);
     }
@@ -459,9 +530,9 @@ function find(e, instruction, operation){
     b.loop(EMPTY);
     if (string)
     {
-        pageStart(e, false);
+        pageStart(e, [at]);
         b.if(EMPTY);
-        closedAt(e, Local.t0);
+        closedAt(e, at);
         b.localGet(Local.t2).i32const(CRT_LIMIT).op(I32.geU).op(I32.or);
         b.if(EMPTY);
         b.i32const(-1).localSet(Local.addr);
@@ -473,13 +544,13 @@ function find(e, instruction, operation){
     {
         b.localGet(Local.t2).op(I32.eqz).brIf(1);
     }
-    byteAt(e, Local.t0).localTee(Local.count).localGet(Local.t1).op(I32.eq)
+    byteAt(e, at).localTee(Local.count).localGet(Local.t1).op(I32.eq)
         .localTee(Local.pflags).brIf(1);
     if (string)
     {
         b.localGet(Local.count).op(I32.eqz).brIf(1);
     }
-    b.localGet(Local.t0).i32const(1).op(I32.add).localSet(Local.t0);
+    stepOn(e, at);
     b.localGet(Local.t2).i32const(string ? 1 : -1).op(I32.add).localSet(Local.t2);
     b.br(0);
     b.end();
@@ -489,8 +560,10 @@ function find(e, instruction, operation){
         leaveUnless(e, instruction);
         charge(e);
     }
-    b.localGet(Local.t0).i32const(0).localGet(Local.pflags).select().localSet(Local.t0);
-    result(e, Local.t0);
+    b.localGet(at);
+    constant(e, 0);
+    b.localGet(Local.pflags).select().localSet(at);
+    result(e, at);
 }
 
 /** Whether the region is long mode's. @param {E} e */
@@ -504,7 +577,8 @@ const isLong = e=>e.width.bits === 64;
 const isWide = e=>e.layout.window !== undefined;
 
 /** What a wide window forms: the operations on its RAM, not the 32-bit helpers. */
-const WIDE_OPERATIONS = new Set(['memmove', 'memcpy', 'memset', 'strlen', 'chkstk64']);
+const WIDE_OPERATIONS = new Set(['memmove', 'memcpy', 'memset', 'strlen', 'chkstk64', 'memcmp',
+    'strcmp', 'memchr', 'strchr']);
 
 /**
  * The locals the destination and the source (or the string) are read from:

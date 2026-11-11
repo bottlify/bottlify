@@ -41,10 +41,10 @@ const FUNCTIONS = {
         0x74, 0x05, 0x48, 0xff, 0xc0, 0xeb, 0xee, 0x31, 0xc0, 0xc3],
 };
 
-/** What forms where: a wide window takes the copies, fills and lengths alone. */
+/** Where the operations are formed: in 4 GiB, and in a wide window past it. */
 const WHERE = [
     { title: 'a wide window\'s', window: 2 ** 33, high: 2 ** 32,
-        names: ['memmove', 'memcpy', 'memset', 'strlen'] },
+        names: ['memmove', 'memcpy', 'memset', 'strlen', 'memcmp', 'memchr', 'strchr'] },
     { title: 'long mode\'s', window: undefined, high: 0,
         names: ['memmove', 'memcpy', 'memset', 'strlen', 'memcmp', 'memchr', 'strchr'] },
 ];
