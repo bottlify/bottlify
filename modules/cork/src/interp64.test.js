@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { STATE_BLOCK_SIZE_64, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
-import v8 from 'node:v8';
+import { allowMemory64 } from './testing/memory64.js';
 import { Fault } from './ir.js';
 import { memory64 } from './wasm/features.js';
 import { blockState64, interpret64 } from './interp64.js';
@@ -127,7 +127,7 @@ test('a jump begins a run the host is asked about', ()=>{
 for (const window of [2 ** 33, 2 ** 34])
 {
     test(`a ${window / 2 ** 30} GiB window: code, stack and data past 4 GiB, RAM apart`, ()=>{
-        v8.setFlagsFromString('--experimental-wasm-memory64');
+        allowMemory64();
         // Where a 64-bit image without relocations asks to be (0x140000000), the stack past it.
         const code = 0x140001000;
         const stack = 0x150000000;

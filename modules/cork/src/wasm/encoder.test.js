@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Body, EMPTY, ModuleBuilder, ValType, leb128s32, leb128s64, leb128u } from './encoder.js';
-import v8 from 'node:v8';
+import { allowMemory64 } from '../testing/memory64.js';
 import { features, memory64 } from './features.js';
 
 /**
@@ -349,7 +349,7 @@ test('atomic read-modify-writes on a shared memory answer the old value at every
 });
 
 test('a second memory, memory64, read and written past 4 GiB beside the first', ()=>{
-    v8.setFlagsFromString('--experimental-wasm-memory64');
+    allowMemory64();
     const state = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
     const ram = memory64(2 ** 33, true);
     const high = 2 ** 32 + 0x1230;
@@ -369,7 +369,7 @@ test('a second memory, memory64, read and written past 4 GiB beside the first', 
 });
 
 test('a guest access in a wide window: the i32 address widened by the high local', ()=>{
-    v8.setFlagsFromString('--experimental-wasm-memory64');
+    allowMemory64();
     const ram = memory64(2 ** 33);
     const at = 2 ** 32 + 0x5000;
     new DataView(ram.buffer).setUint32(at, 0x1234567, true);

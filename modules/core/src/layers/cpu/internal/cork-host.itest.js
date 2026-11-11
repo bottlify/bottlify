@@ -12,10 +12,10 @@
  */
 
 import { test } from 'node:test';
-import v8 from 'node:v8';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { allowMemory64 } from '../../../../../cork/src/testing/memory64.js';
 
 const ENTRY_VECTOR = 0x7000;
 
@@ -259,7 +259,7 @@ function hex(text){
 
 test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, its data past 4 GiB',
     async()=>{
-        v8.setFlagsFromString('--experimental-wasm-memory64');
+        allowMemory64();
         const code = 0x140001000;
         const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
             entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
@@ -288,7 +288,7 @@ test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, i
     });
 
 test('over a wide window the host reaches the image through its low dword', ()=>{
-    v8.setFlagsFromString('--experimental-wasm-memory64');
+    allowMemory64();
     const image = 0x140000000;
     const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,

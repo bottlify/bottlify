@@ -891,6 +891,7 @@ class BlockState {
         const f80Bytes = new ArrayBuffer(64);
         this.f80Values = new Float64Array(f80Bytes);
         this.f80Words = new BigInt64Array(f80Bytes);
+        this.f80Halves = new Uint32Array(f80Bytes);
         this.xmmWords = new Uint32Array(32);
         this.x87In = false;
         this.xmmIn = false;
@@ -901,7 +902,11 @@ class BlockState {
         {
             for (let i = 0; i < 8; i++)
             {
-                this.f80Values[i] = this.view.getFloat64(this.layout.x87 + i * 16, true);
+                // By their words: a signalling NaN read as a double and stored
+                // as one may come back quieted (`regWords` in `ir-x87.js`).
+                const at = this.layout.x87 + i * 16;
+                this.f80Halves[2 * i] = this.view.getUint32(at, true);
+                this.f80Halves[2 * i + 1] = this.view.getUint32(at + 4, true);
             }
             this.x87In = true;
         }
@@ -926,6 +931,11 @@ class BlockState {
     get f80bits(){
         this.loadX87();
         return this.f80Words;
+    }
+
+    get f80words(){
+        this.loadX87();
+        return this.f80Halves;
     }
 
     get xmm(){
@@ -1033,7 +1043,8 @@ class BlockState {
         {
             for (let i = 0; i < 8; i++)
             {
-                view.setFloat64(layout.x87 + i * 16, this.f80Values[i], true);
+                view.setUint32(layout.x87 + i * 16, this.f80Halves[2 * i], true);
+                view.setUint32(layout.x87 + i * 16 + 4, this.f80Halves[2 * i + 1], true);
             }
         }
         if (this.xmmIn)

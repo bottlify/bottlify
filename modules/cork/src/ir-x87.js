@@ -59,10 +59,13 @@ const fromBits = value=>{
     scratchI[0] = BigInt.asIntN(64, value);
     return scratchF[0];
 };
-/** The processor's negative quiet NaN. */
+/** The processor's negative quiet NaN, for what computes with it. */
 const INDEFINITE = fromBits(0xfff8000000000000n);
+/** Its words, for what a register or memory is given: an optimizer may store a NaN it
+ * knows for a constant as its own canonical one (V8 14's Maglev does). */
+const INDEFINITE_WORDS = Object.freeze([0, 0xfff80000]);
 
-/** Pushes the indefinite when the guard fired. @param {number} value @param {number} t1 */
+/** The indefinite where the guard fired, else the value: what an integer store reads. @param {number} value @param {number} t1 */
 const orIndefinite = (value, t1)=>t1 !== 0 ? INDEFINITE : value;
 
 /** The forms that write no register: what a quadword `fild` left stays exact across them. */
@@ -169,6 +172,140 @@ const pushOf = (state, value)=>{
     state.top = top;
 };
 
+// A register is moved, stored and asked about by its words, never as a
+// JavaScript number: a signalling NaN (an MMX value, one an extended load or
+// a run left) that becomes a number is quieted by the next store of it as a
+// double wherever the engine compiled that store so (V8 14's Maglev does,
+// into a Float64Array and through a DataView), and the processor moves and
+// stores it whole. A register becomes a number only where an operation
+// computes with it, which quiets a signalling NaN anyway, and a number goes
+// into a register only when it is no NaN or one an operation made at run
+// time: the same Maglev stores a NaN it knows for a constant, the indefinite
+// among them, as its own canonical one.
+
+/** @param {ArrayLike<number>} words a double's low and high words @returns {boolean} */
+const isNaNWords = words=>(words[1] & 0x7ff00000) === 0x7ff00000
+    && ((words[1] & 0xfffff) !== 0 || words[0] !== 0);
+
+/** @param {ArrayLike<number>} words */
+const signalling = words=>isNaNWords(words) && (words[1] & 0x80000) === 0;
+
+/**
+ * Physical register `k`'s two words, into `into`.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} k @param {Uint32Array} into
+ * @returns {boolean} whether it holds a NaN
+ */
+const regWords = (state, k, into)=>{
+    into[0] = state.f80words[2 * k];
+    into[1] = state.f80words[2 * k + 1];
+    return isNaNWords(into);
+};
+
+/** Physical register `k` from two words, held after it. @param {import('./ir.js').EvalState} state @param {number} k @param {ArrayLike<number>} words */
+const putWords = (state, k, words)=>{
+    state.f80words[2 * k] = words[0];
+    state.f80words[2 * k + 1] = words[1];
+    state.empty &= ~(1 << k);
+};
+
+/** ST(i) the indefinite, held after it. @param {import('./ir.js').EvalState} state @param {number} i */
+const setIndefinite = (state, i)=>putWords(state, (state.top + i) & 7, INDEFINITE_WORDS);
+
+/** Pushes the indefinite. @param {import('./ir.js').EvalState} state */
+const pushIndefinite = state=>{
+    const top = (state.top - 1) & 7;
+    putWords(state, top, INDEFINITE_WORDS);
+    state.top = top;
+};
+
+/**
+ * ST(i) the value, or the indefinite where the guard fired: a value that is no
+ * NaN, or one an operation made at run time (no signalling one, no constant).
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} i
+ * @param {number} value @param {number} t1
+ */
+const setOr = (state, i, value, t1)=>{
+    if (t1 !== 0)
+    {
+        setIndefinite(state, i);
+    }
+    else
+    {
+        setStOf(state, i, value);
+    }
+};
+
+/** Pushes as `setOr` sets. @param {import('./ir.js').EvalState} state @param {number} value @param {number} t1 */
+const pushOr = (state, value, t1)=>{
+    if (t1 !== 0)
+    {
+        pushIndefinite(state);
+    }
+    else
+    {
+        pushOf(state, value);
+    }
+};
+
+/**
+ * ST(i) an operation's result, whose operands' words are in `left` and `right`
+ * (the same twice for one operand): the indefinite where the guard fired; a
+ * NaN by words, the NaN operand's quieted (of two the x87's choice, `nanOf`)
+ * or the indefinite where no operand was one, as the processor answers an
+ * invalid operation; the number otherwise.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} i
+ * @param {number} value @param {number} t1
+ */
+const putResult = (state, i, value, t1)=>{
+    if (t1 !== 0 || !Number.isNaN(value))
+    {
+        setOr(state, i, value, t1);
+    }
+    else if (isNaNWords(left) || isNaNWords(right))
+    {
+        nanOf(left, right);
+        putWords(state, (state.top + i) & 7, scratchU32);
+    }
+    else
+    {
+        setIndefinite(state, i);
+    }
+};
+
+/** Physical register `from`'s bits into `to`, held after it. @param {import('./ir.js').EvalState} state @param {number} from @param {number} to */
+const copyReg = (state, from, to)=>{
+    const words = state.f80words;
+    words[2 * to] = words[2 * from];
+    words[2 * to + 1] = words[2 * from + 1];
+    state.empty &= ~(1 << to);
+};
+
+/** An operation's two operands' words, for `putResult` and the signalling tests. */
+const left = new Uint32Array(2);
+const right = new Uint32Array(2);
+
+/**
+ * A number's two words, into `into`: for an operand that is no register, which
+ * is no signalling NaN (a single or double loads quieted, an integer is none).
+ *
+ * @param {number} value @param {Uint32Array} into
+ */
+const numberWords = (value, into)=>{
+    scratchF[0] = value;
+    into[0] = scratchU32[0];
+    into[1] = scratchU32[1];
+};
+
+/** Pushes physical register `from`'s bits. @param {import('./ir.js').EvalState} state @param {number} from */
+const pushReg = (state, from)=>{
+    const top = (state.top - 1) & 7;
+    copyReg(state, from, top);
+    state.top = top;
+};
+
 /**
  * Carries an exact quadword with its value, between physical registers.
  *
@@ -207,6 +344,29 @@ const ARITHMETIC_FORMS = new Map([...ARITHMETIC].map(op=>{
     return [op, Object.freeze({ kind: reversed ? base.slice(0, -1) : base, reversed,
         integer: op.startsWith('fi'), pops: op.endsWith('p') })];
 }));
+
+/**
+ * The operands of `fyl2x` and `fyl2xp1`'s product into `left` and `right`:
+ * ST(1), and the logarithm, which is ST(0) itself where that is a NaN and
+ * the indefinite where the argument was out of the domain.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} log
+ */
+function logOperands(state, log){
+    regWords(state, (state.top + 1) & 7, left);
+    if (regWords(state, state.top, right))
+    {
+        return;
+    }
+    if (Number.isNaN(log))
+    {
+        right.set(INDEFINITE_WORDS);
+    }
+    else
+    {
+        numberWords(log, right);
+    }
+}
 
 /**
  * The stack-fault check: t1 is set when a source ST(i) is empty or a push
@@ -390,40 +550,18 @@ export function fpremStatus(a, c, nearest){
 }
 
 /**
- * A NaN the host made of operands none of which was one, given the sign the
- * processor's indefinite has.
- *
- * @param {number} value @param {number} a @param {number} c  the operands
- */
-function hostNaN(value, a, c){
-    if (!Number.isNaN(value) || Number.isNaN(a) || Number.isNaN(c))
-    {
-        return value;
-    }
-    scratchF[0] = value;
-    scratchU32[1] |= 0x80000000;
-    return scratchF[0];
-}
-
-/**
  * A double's two words, into `scratchU32`. A NaN's bits are taken from its value
  * this way before anything asks whether it is one: once the optimizer knows a
  * value is a NaN it may use the canonical NaN in its place, and the payload is
  * lost -- the same instruction then gave another result once its code was
- * optimized.
+ * optimized. Not for a register's value: `regWords`.
  *
  * @param {number} value
  * @returns {boolean} whether it is a NaN
  */
 function nanWords(value){
     scratchF[0] = value;
-    return (scratchU32[1] & 0x7ff00000) === 0x7ff00000
-        && ((scratchU32[1] & 0xfffff) !== 0 || scratchU32[0] !== 0);
-}
-
-/** @param {number} value */
-function signalling(value){
-    return nanWords(value) && (scratchU32[1] & 0x80000) === 0;
+    return isNaNWords(scratchU32);
 }
 
 /**
@@ -443,27 +581,26 @@ function quiet(value){
 }
 
 /**
- * The NaN an operation of two NaN operands gives, chosen as the x87 chooses it:
- * a quiet one over a signalling one, then the larger significand, then the
- * positive, quieted. The host's own operation returns the one its compiler
- * happened to put first, which is not the same from one compiled version of
- * this code to the next.
+ * The NaN an operation of a NaN operand gives, into `scratchU32`: that one,
+ * quieted, and of two the one the x87 chooses (a quiet one over a signalling
+ * one, then the larger significand, then the positive). The host's own
+ * operation returns the one its compiler happened to put first, which is not
+ * the same from one compiled version of this code to the next.
  *
- * @param {number} value the operation's result @param {number} a @param {number} c
+ * @param {Uint32Array} a @param {Uint32Array} c the operands' words, one a NaN's at least
  */
-function twoNaN(value, a, c){
-    if (!nanWords(a))
+function nanOf(a, c){
+    if (!isNaNWords(a) || !isNaNWords(c))
     {
-        return value;
+        const one = isNaNWords(a) ? a : c;
+        scratchU32[0] = one[0];
+        scratchU32[1] = one[1] | 0x80000;
+        return;
     }
-    const aHigh = scratchU32[1];
-    const aLow = scratchU32[0];
-    if (!nanWords(c))
-    {
-        return value;
-    }
-    const cHigh = scratchU32[1];
-    const cLow = scratchU32[0];
+    const aHigh = a[1];
+    const aLow = a[0];
+    const cHigh = c[1];
+    const cLow = c[0];
     const aQuiet = (aHigh & 0x80000) !== 0;
     const cQuiet = (cHigh & 0x80000) !== 0;
     const aFraction = (aHigh & 0xfffff) * 4294967296 + aLow;
@@ -472,7 +609,6 @@ function twoNaN(value, a, c){
         : aFraction !== cFraction ? aFraction > cFraction : (aHigh & 0x80000000) === 0;
     scratchU32[1] = (pickA ? aHigh : cHigh) | 0x80000;
     scratchU32[0] = pickA ? aLow : cLow;
-    return scratchF[0];
 }
 
 /** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size */
@@ -588,15 +724,35 @@ function f80ToF64(lowWord, highWord, high){
 }
 
 /**
- * The double as the ten-byte extended value, in words: a denormal's fraction
- * shifted up until the integer bit is set.
+ * Physical register `k` as the ten-byte extended value at `at` makes it,
+ * leaving its empty mark: a NaN by the words `f80ToF64` left, which may be a
+ * signalling one's.
  *
- * @param {import('./ir.js').EvalState} state @param {number} at @param {number} value
+ * @param {import('./ir.js').EvalState} state @param {number} k @param {number} at
  */
-function writeF80(state, at, value){
-    scratchF[0] = value;
-    const hi = scratchU32[1];
-    const lo = scratchU32[0];
+function restoreF80(state, k, at){
+    const value = f80ToF64(state.memory.read(at, 4), state.memory.read(at + 4, 4),
+        state.memory.read(at + 8, 2));
+    if (Number.isNaN(value))
+    {
+        state.f80words[2 * k] = scratchU32[0];
+        state.f80words[2 * k + 1] = scratchU32[1];
+    }
+    else
+    {
+        state.f80[k] = value;
+    }
+}
+
+/**
+ * The double whose words `words` holds as the ten-byte extended value, in
+ * words: a denormal's fraction shifted up until the integer bit is set.
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} at @param {ArrayLike<number>} words
+ */
+function writeF80(state, at, words){
+    const hi = words[1];
+    const lo = words[0];
     const rawExponent = hi >>> 20 & 0x7ff;
     const fraction = hi & 0xfffff;
     let signExponent = (hi >>> 31) << 15;
@@ -680,23 +836,27 @@ function loadFloat(state, address, size){
     return scratchF[0];
 }
 
-/** @param {import('./ir.js').EvalState} state @param {number} address @param {number} size @param {number} value */
-function storeFloat(state, address, size, value){
+/**
+ * Stores the double whose words are in `scratchU32` (`regWords`).
+ *
+ * @param {import('./ir.js').EvalState} state @param {number} address @param {number} size
+ */
+function storeFloat(state, address, size){
     if (size === 10)
     {
-        writeF80(state, address, value);
+        writeF80(state, address, scratchU32);
         return;
     }
     // A signalling NaN stored to a single or a double raises IE and goes out
     // quiet (the SDM's FST); the extended format takes it as it is.
-    if (nanWords(value) && (scratchU32[1] & 0x80000) === 0)
+    if (signalling(scratchU32))
     {
         state.status |= Status.IE;
         scratchU32[1] |= 0x80000;
-        value = scratchF[0];
     }
     if (size === 4)
     {
+        const value = scratchF[0];
         if (Math.abs(value) < 2 ** -126 && value !== 0)
         {
             state.status |= Status.UE;
@@ -705,7 +865,6 @@ function storeFloat(state, address, size, value){
         state.memory.write(address, 4, scratchU32[0]);
         return;
     }
-    scratchF[0] = value;
     writeWords(state, address);
 }
 
@@ -745,7 +904,8 @@ function storeInt(state, address, size, value, truncate){
 
 /**
  * Compares `a` and `c` into C3 C2 C0; C1 is cleared. Ordered (fcom) raises IE
- * on any NaN, unordered (fucom) on a signalling one.
+ * on any NaN, unordered (fucom) on a signalling one, which `left` and `right`
+ * tell by the operands' words.
  *
  * @param {import('./ir.js').EvalState} state @param {number} a @param {number} c
  * @param {boolean} ordered @param {number} t1
@@ -755,7 +915,7 @@ function conditionBits(state, a, c, ordered, t1){
     if (Number.isNaN(a) || Number.isNaN(c) || t1 !== 0)
     {
         state.status |= Status.C3 | Status.C2 | Status.C0;
-        if (ordered || signalling(a) || signalling(c))
+        if (ordered || signalling(left) || signalling(right))
         {
             state.status |= Status.IE;
         }
@@ -799,7 +959,8 @@ export function fxsave(state, where){
     put(28, 4, 0xffbf);
     for (let i = 0; i < 8; i++)
     {
-        writeF80(state, where + 32 + 16 * i, state.f80[(state.top + i) & 7]);
+        regWords(state, (state.top + i) & 7, scratchU32);
+        writeF80(state, where + 32 + 16 * i, scratchU32);
         put(32 + 16 * i + 10, 2, 0);
         put(32 + 16 * i + 12, 4, 0);
         for (let j = 0; j < 4; j++)
@@ -824,10 +985,7 @@ export function fxrstor(state, where){
     state.x87Exact = 0;
     for (let i = 0; i < 8; i++)
     {
-        const at = where + 32 + 16 * i;
-        const lo = state.memory.read(at, 4);
-        const hi = state.memory.read(at + 4, 4);
-        state.f80[(state.top + i) & 7] = f80ToF64(lo, hi, state.memory.read(at + 8, 2));
+        restoreF80(state, (state.top + i) & 7, where + 32 + 16 * i);
         for (let j = 0; j < 4; j++)
         {
             state.xmm[i * 4 + j] = state.memory.read(where + 160 + 16 * i + 4 * j, 4) >>> 0;
@@ -889,29 +1047,45 @@ function stepX87(instruction, state, address){
             {
                 const from = (state.top + Number(src.reg)) & 7;
                 const t1 = guard(state, ONE_SOURCE[Number(src.reg)], true);
-                pushOf(state, orIndefinite(stOf(state, Number(src.reg)), t1));
-                if (t1 === 0)
+                if (t1 !== 0)
                 {
+                    pushIndefinite(state);
+                }
+                else
+                {
+                    pushReg(state, from);
                     copyExactOf(state, from, state.top);
                 }
             }
             else
             {
                 const value = loadFloat(state, address(src), src.size);
-                pushOf(state, orIndefinite(value, guard(state, NO_SOURCE, true)));
+                const t1 = guard(state, NO_SOURCE, true);
+                if (t1 === 0 && src.size === 10 && Number.isNaN(value))
+                {
+                    // The words `f80ToF64` left, which may be a signalling
+                    // NaN's: the narrower loads quiet one.
+                    const top = (state.top - 1) & 7;
+                    putWords(state, top, scratchU32);
+                    state.top = top;
+                }
+                else
+                {
+                    pushOr(state, value, t1);
+                }
             }
             return true;
         case 'fild':
         {
             if (src.size !== 8)
             {
-                pushOf(state, orIndefinite(readInt(state, address(src), src.size),
-                    guard(state, NO_SOURCE, true)));
+                pushOr(state, readInt(state, address(src), src.size),
+                    guard(state, NO_SOURCE, true));
                 return true;
             }
             const value = readMem(state, address(src), 8);
             const t1 = guard(state, NO_SOURCE, true);
-            pushOf(state, orIndefinite(Number(BigInt.asIntN(64, value)), t1));
+            pushOr(state, Number(BigInt.asIntN(64, value)), t1);
             if (t1 === 0)
             {
                 // The quadword beside the double it rounds to, for a quadword
@@ -923,23 +1097,34 @@ function stepX87(instruction, state, address){
         }
         case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e': case 'fldln2': case 'fldlg2':
         case 'fldl2t':
-            pushOf(state, orIndefinite(CONSTANTS[op] ?? 0, guard(state, NO_SOURCE, true)));
+            pushOr(state, CONSTANTS[op] ?? 0, guard(state, NO_SOURCE, true));
             return true;
         case 'fst': case 'fstp':
         {
             const t1 = guard(state, ONE_SOURCE[0], false);
-            const value = orIndefinite(stOf(state, 0), t1);
             if (dst.kind === 'x87')
             {
-                setStOf(state, Number(dst.reg), value);
-                if (t1 === 0)
+                if (t1 !== 0)
                 {
+                    setIndefinite(state, Number(dst.reg));
+                }
+                else
+                {
+                    copyReg(state, state.top, (state.top + Number(dst.reg)) & 7);
                     copyExactOf(state, state.top, (state.top + Number(dst.reg)) & 7);
                 }
             }
             else
             {
-                storeFloat(state, address(dst), dst.size, value);
+                if (t1 !== 0)
+                {
+                    scratchU32.set(INDEFINITE_WORDS);
+                }
+                else
+                {
+                    regWords(state, state.top, scratchU32);
+                }
+                storeFloat(state, address(dst), dst.size);
             }
             if (op === 'fstp')
             {
@@ -982,13 +1167,16 @@ function stepX87(instruction, state, address){
             {
                 if ((state.empty >>> k & 1) !== 0)
                 {
-                    state.f80[k] = INDEFINITE;
-                    state.empty &= ~(1 << k);
+                    putWords(state, k, INDEFINITE_WORDS);
                 }
             }
-            const swap = state.f80[a];
-            state.f80[a] = state.f80[c];
-            state.f80[c] = swap;
+            const words = state.f80words;
+            const low = words[2 * a];
+            const high = words[2 * a + 1];
+            words[2 * a] = words[2 * c];
+            words[2 * a + 1] = words[2 * c + 1];
+            words[2 * c] = low;
+            words[2 * c + 1] = high;
             // The SDM's FXCH, FINCSTP, FDECSTP, FCHS and FABS clear C1.
             state.status &= ~Status.C1;
             // An exact quadword's mark and shadow go with its value.
@@ -1020,17 +1208,23 @@ function stepX87(instruction, state, address){
             state.top = (state.top - 1) & 7;
             state.status &= ~Status.C1;
             return true;
-        case 'fchs':
-            setStOf(state, 0, orIndefinite(-stOf(state, 0), guard(state, ONE_SOURCE[0], false)));
+        case 'fchs': case 'fabs':
+            // The sign bit alone, as the processor changes it: a signalling
+            // NaN stays one.
+            if (guard(state, ONE_SOURCE[0], false) !== 0)
+            {
+                setIndefinite(state, 0);
+            }
+            else if (op === 'fchs')
+            {
+                state.f80words[2 * state.top + 1] ^= 0x80000000;
+            }
+            else
+            {
+                state.f80words[2 * state.top + 1] &= 0x7fffffff;
+            }
             state.status &= ~Status.C1;
             return true;
-        case 'fabs':
-        {
-            const t1 = guard(state, ONE_SOURCE[0], false);
-            setStOf(state, 0, orIndefinite(Math.abs(stOf(state, 0)), t1));
-            state.status &= ~Status.C1;
-            return true;
-        }
         case 'fsqrt':
         {
             const t1 = guard(state, ONE_SOURCE[0], false);
@@ -1039,8 +1233,9 @@ function stepX87(instruction, state, address){
                 state.status |= Status.IE;
             }
             const value = stOf(state, 0);
-            setStOf(state, 0, orIndefinite(byPrecision(hostNaN(Math.sqrt(value), value, value),
-                state), t1));
+            regWords(state, state.top, left);
+            regWords(state, state.top, right);
+            putResult(state, 0, byPrecision(Math.sqrt(value), state), t1);
             return true;
         }
         case 'fldcw':
@@ -1048,8 +1243,15 @@ function stepX87(instruction, state, address){
             return true;
         case 'frndint':
         {
-            const t1 = guard(state, ONE_SOURCE[0], false);
-            setStOf(state, 0, orIndefinite(roundBy(stOf(state, 0), state.control), t1));
+            if (guard(state, ONE_SOURCE[0], false) !== 0)
+            {
+                setIndefinite(state, 0);
+            }
+            else if (!regWords(state, state.top, scratchU32))
+            {
+                // A NaN stays as it is, by its bits.
+                setStOf(state, 0, roundBy(stOf(state, 0), state.control));
+            }
             return true;
         }
         case 'fscale':
@@ -1064,7 +1266,9 @@ function stepX87(instruction, state, address){
                 value *= 2 ** k;
                 count -= k;
             }
-            setStOf(state, 0, orIndefinite(value, t1));
+            regWords(state, state.top, left);
+            regWords(state, state.top, right);
+            putResult(state, 0, value, t1);
             return true;
         }
         case 'fxtract':
@@ -1072,13 +1276,25 @@ function stepX87(instruction, state, address){
             const t1 = guard(state, ONE_SOURCE[0], true);
             const original = stOf(state, 0);
             // An infinity is its own significand with an exponent of +inf, a
-            // NaN both (its bits as it came, taken before it is asked about).
-            const nan = nanWords(original);
+            // NaN both (its bits as it came, copied).
+            const k = state.top;
+            const nan = regWords(state, k, scratchU32);
             if (nan || Math.abs(original) === Infinity)
             {
-                const same = nan ? scratchF[0] : original;
-                setStOf(state, 0, orIndefinite(nan ? same : Infinity, t1));
-                pushOf(state, orIndefinite(same, t1));
+                if (t1 !== 0)
+                {
+                    setIndefinite(state, 0);
+                    pushIndefinite(state);
+                }
+                else if (nan)
+                {
+                    pushReg(state, k);
+                }
+                else
+                {
+                    setStOf(state, 0, Infinity);
+                    pushOf(state, original);
+                }
                 return true;
             }
             let value = original;
@@ -1105,8 +1321,8 @@ function stepX87(instruction, state, address){
                 exponent += Number(word >> 52n & 0x7ffn) - 1023;
                 significand = fromBits(word & -0x7ff0000000000001n | 0x3ff0000000000000n);
             }
-            setStOf(state, 0, orIndefinite(exponent, t1));
-            pushOf(state, orIndefinite(significand, t1));
+            setOr(state, 0, exponent, t1);
+            pushOr(state, significand, t1);
             return true;
         }
         case 'fsin': case 'fcos': case 'fsincos': case 'fptan':
@@ -1133,10 +1349,10 @@ function stepX87(instruction, state, address){
             }
             else if (Number.isNaN(value) || t1 !== 0)
             {
-                setStOf(state, 0, INDEFINITE);
+                setIndefinite(state, 0);
                 if (op === 'fsincos' || op === 'fptan')
                 {
-                    pushOf(state, INDEFINITE);
+                    pushIndefinite(state);
                 }
             }
             else
@@ -1148,14 +1364,14 @@ function stepX87(instruction, state, address){
         case 'fpatan':
         {
             const t1 = guard(state, TWO_SOURCES[0][1], false);
-            setStOf(state, 1, orIndefinite(Math.atan2(stOf(state, 1), stOf(state, 0)), t1));
+            setOr(state, 1, Math.atan2(stOf(state, 1), stOf(state, 0)), t1);
             popOf(state, 1);
             return true;
         }
         case 'f2xm1':
         {
             const t1 = guard(state, ONE_SOURCE[0], false);
-            setStOf(state, 0, orIndefinite(Math.expm1(stOf(state, 0) * Math.LN2), t1));
+            setOr(state, 0, Math.expm1(stOf(state, 0) * Math.LN2), t1);
             return true;
         }
         case 'fyl2x': case 'fyl2xp1':
@@ -1178,7 +1394,8 @@ function stepX87(instruction, state, address){
                 // host's logarithm keeps no NaN's bits.
                 const x = stOf(state, 0);
                 const log = Number.isNaN(x) ? x : x < 0 ? INDEFINITE : quiet(Math.log2(x));
-                result = twoNaN(stOf(state, 1) * log, stOf(state, 1), log);
+                logOperands(state, log);
+                result = stOf(state, 1) * log;
             }
             else
             {
@@ -1189,9 +1406,10 @@ function stepX87(instruction, state, address){
                 const x = stOf(state, 0);
                 const log = Number.isNaN(x) ? x
                     : x < -1 ? INDEFINITE : quiet(Math.log1p(x)) / Math.LN2;
-                result = twoNaN(stOf(state, 1) * log, stOf(state, 1), log);
+                logOperands(state, log);
+                result = stOf(state, 1) * log;
             }
-            setStOf(state, 1, orIndefinite(result, t1));
+            putResult(state, 1, result, t1);
             popOf(state, 1);
             return true;
         }
@@ -1209,15 +1427,18 @@ function stepX87(instruction, state, address){
                 state.status &= ~(Status.C1 | Status.C2);
                 if (t1 === 0 && (Number.isNaN(a) || Number.isNaN(c)))
                 {
-                    if (signalling(a) || signalling(c))
+                    regWords(state, state.top, left);
+                    regWords(state, (state.top + 1) & 7, right);
+                    if (signalling(left) || signalling(right))
                     {
                         state.status |= Status.IE;
                     }
-                    setStOf(state, 0, twoNaN(quiet(Number.isNaN(a) ? a : c), a, c));
+                    nanOf(left, right);
+                    putWords(state, state.top, scratchU32);
                     return true;
                 }
                 state.status |= Status.IE;
-                setStOf(state, 0, INDEFINITE);
+                setIndefinite(state, 0);
                 return true;
             }
             state.status &= ~(Status.C2 | Status.C0 | Status.C3 | Status.C1);
@@ -1236,18 +1457,18 @@ function stepX87(instruction, state, address){
             const t1 = guard(state, src.kind === 'x87'
                 ? TWO_SOURCES[target][Number(src.reg)] : ONE_SOURCE[target], false);
             const a0 = stOf(state, target);
+            regWords(state, (state.top + target) & 7, left);
             let c0;
             if (src.kind === 'x87')
             {
                 c0 = stOf(state, Number(src.reg));
-            }
-            else if (integer)
-            {
-                c0 = readInt(state, address(src), src.size);
+                regWords(state, (state.top + Number(src.reg)) & 7, right);
             }
             else
             {
-                c0 = loadFloat(state, address(src), src.size);
+                c0 = integer ? readInt(state, address(src), src.size)
+                    : loadFloat(state, address(src), src.size);
+                numberWords(c0, right);
             }
             const a = reversed ? c0 : a0;
             const c = reversed ? a0 : c0;
@@ -1268,8 +1489,8 @@ function stepX87(instruction, state, address){
             {
                 result = a / c;
             }
-            result = twoNaN(hostNaN(byPrecision(result, state), a0, c0), a0, c0);
-            setStOf(state, target, orIndefinite(result, t1));
+            result = byPrecision(result, state);
+            putResult(state, target, result, t1);
             if (t1 === 0)
             {
                 if (kind === 'fdiv' && c === 0 && a !== 0 && Math.abs(a) < Infinity)
@@ -1279,7 +1500,7 @@ function stepX87(instruction, state, address){
                 // A NaN made of operands that were not, or a register that held
                 // a signalling one (a memory operand's raised IE as it loaded).
                 if (Number.isNaN(result) && (!Number.isNaN(a0) && !Number.isNaN(c0)
-                    || signalling(a0) || signalling(c0)))
+                    || signalling(left) || signalling(right)))
                 {
                     state.status |= Status.IE;
                 }
@@ -1320,6 +1541,16 @@ function stepX87(instruction, state, address){
                 t1 = guard(state, ONE_SOURCE[0], false);
                 c0 = loadFloat(state, address(src), src.size);
             }
+            regWords(state, state.top, left);
+            if (op === 'fcompp' || op === 'fucompp' || src?.kind === 'x87')
+            {
+                regWords(state, (state.top + (op.endsWith('pp') ? 1 : Number(src.reg))) & 7,
+                    right);
+            }
+            else
+            {
+                numberWords(c0, right);
+            }
             conditionBits(state, stOf(state, 0), c0, !op.startsWith('fu'), t1);
             popOf(state, op.endsWith('pp') ? 2 : op.endsWith('p') ? 1 : 0);
             return true;
@@ -1343,7 +1574,9 @@ function stepX87(instruction, state, address){
             {
                 state.eflags |= 0x01;
             }
-            if (t1 && (!op.startsWith('fu') || signalling(a) || signalling(c)))
+            regWords(state, state.top, left);
+            regWords(state, (state.top + Number(src.reg)) & 7, right);
+            if (t1 && (!op.startsWith('fu') || signalling(left) || signalling(right)))
             {
                 state.status |= Status.IE;
             }
@@ -1357,11 +1590,11 @@ function stepX87(instruction, state, address){
             // condition, as the processor answers it.
             if (guard(state, TWO_SOURCES[0][Number(src.reg)], false) !== 0)
             {
-                setStOf(state, 0, INDEFINITE);
+                setIndefinite(state, 0);
             }
             else if (condition(/** @type {number} */ (instruction.cc), state.eflags))
             {
-                setStOf(state, 0, stOf(state, Number(src.reg)));
+                copyReg(state, (state.top + Number(src.reg)) & 7, state.top);
             }
             return true;
         case 'fxam':
@@ -1369,9 +1602,8 @@ function stepX87(instruction, state, address){
             const value = stOf(state, 0);
             state.status &= ~Status.CONDITION;
             state.status &= ~Status.C1;
-            scratchF[0] = value;
             // The sign of what the register holds, empty or not.
-            if ((scratchU32[1] & 0x80000000) !== 0)
+            if ((state.f80words[2 * state.top + 1] & 0x80000000) !== 0)
             {
                 state.status |= Status.C1;
             }
@@ -1430,7 +1662,8 @@ function stepX87(instruction, state, address){
             {
                 for (let i = 0; i < 8; i++)
                 {
-                    writeF80(state, where + 28 + 10 * i, stOf(state, i));
+                    regWords(state, (state.top + i) & 7, scratchU32);
+                    writeF80(state, where + 28 + 10 * i, scratchU32);
                 }
                 state.top = 0;
                 state.empty = 0xff;
@@ -1460,11 +1693,7 @@ function stepX87(instruction, state, address){
             {
                 for (let k = 0; k < 8; k++)
                 {
-                    const index = (k - state.top) & 7;
-                    const at = where + 28 + 10 * index;
-                    const lo = state.memory.read(at, 4);
-                    const hi = state.memory.read(at + 4, 4);
-                    state.f80[k] = f80ToF64(lo, hi, state.memory.read(at + 8, 2));
+                    restoreF80(state, k, where + 28 + 10 * ((k - state.top) & 7));
                 }
             }
             return true;
@@ -1521,7 +1750,7 @@ function stepX87(instruction, state, address){
             }
             const value = Number(digits);
             const negative = (state.memory.read(where + 9, 1) & 0x80) !== 0;
-            pushOf(state, orIndefinite(negative ? -value : value, guard(state, NO_SOURCE, true)));
+            pushOr(state, negative ? -value : value, guard(state, NO_SOURCE, true));
             return true;
         }
         case 'fxsave': case 'fxrstor':

@@ -14,9 +14,9 @@
  */
 
 import { test } from 'node:test';
-import v8 from 'node:v8';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
 
 const FIXTURE = new URL('../test/fixtures/hello64.exe', import.meta.url);
@@ -60,7 +60,7 @@ test('fed every slice, as a program that presents frames is, a 64-bit process\'s
 
 test('linked at 0x140000000 with no relocations, it runs there, over an 8 GiB window',
     { timeout: 120000 }, async t=>{
-        v8.setFlagsFromString('--experimental-wasm-memory64');
+        allowMemory64();
         // The fixture as a 64-bit game ships: its relocations stripped, its base fixed.
         const bytes = new Uint8Array(await readFile(FIXTURE));
         const view = new DataView(bytes.buffer);
