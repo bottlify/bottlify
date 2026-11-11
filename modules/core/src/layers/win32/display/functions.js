@@ -244,6 +244,13 @@ export function createDwmapiFunctions(host){
          * turned off - DwmIsCompositionEnabled above says the same.
          */
         DwmEnableComposition: { argBytes: 4, handler: ()=>S_OK },
+
+        /**
+         * HRESULT DwmEnableMMCSS(BOOL fEnableMMCSS): the window manager's
+         * multimedia scheduling, which has no thread here to raise. S_OK, as
+         * a program that looks it up calls it without checking the lookup.
+         */
+        DwmEnableMMCSS: { argBytes: 4, handler: ()=>S_OK },
     };
 }
 
