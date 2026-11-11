@@ -24,6 +24,7 @@ import { createTestMachine } from '../testing/machine.js';
 import { fingerprint, maskedFingerprint, QUICK_BYTES } from '../helpers.js';
 import { PageFlag } from '../runtime/pages.js';
 import { formRegion } from '../region.js';
+import { CRT_BODIES } from '../crt-dictionary.js';
 
 const PROGRAM = 0x8000;
 const FUNCTION = 0x9000;
@@ -88,13 +89,6 @@ const FUNCTIONS = {
     ],
 };
 
-/** The square root's body, as the dictionary's entries of a runtime's sqrt carry it. */
-const SQRT_BODY = [
-    0xf2, 0x0f, 0x10, 0x04, 0x24,           // movsd xmm0, [esp]
-    0xf2, 0x0f, 0x51, 0xc0,                 // sqrtsd xmm0, xmm0
-    0xf2, 0x0f, 0x11, 0x44, 0x24, 0xf8,     // movsd [esp-8], xmm0
-    0xdd, 0x44, 0x24, 0xf8,                 // fld qword [esp-8]
-];
 
 /**
  * The dictionary's entry of one of `FUNCTIONS`: memset's by spans and masks
@@ -106,7 +100,7 @@ const SQRT_BODY = [
 function entryOf(name){
     const bytes = FUNCTIONS[name];
     const read = (/** @type {number} */ at)=>bytes[at - FUNCTION] ?? 0;
-    const body = name === 'sqrt' ? { body: SQRT_BODY } : {};
+    const body = name === 'sqrt' ? { body: CRT_BODIES.sqrt } : {};
     if (name === 'memset')
     {
         const spans = [[0, bytes.length]];
@@ -474,5 +468,61 @@ test('chkstk moves esp down by eax past the call, its return address in eax; a s
         assert.equal(out.getUint32(0, true), STACK - size);
         assert.equal(out.getUint32(4, true), PROGRAM + 10);
         assert.equal(m.reg('ecx'), 0x77);
+    }
+});
+
+/**
+ * A double's significand rounded to 24 bits, to nearest even, its exponent
+ * whatever it is: what the x87 at single precision keeps.
+ *
+ * @param {number} x
+ */
+function single(x){
+    const scale = 2 ** Math.floor(Math.log2(Math.abs(x)));
+    return Math.fround(x / scale) * scale;
+}
+
+test('floor, ceil and sqrt answer as the x87 would at the control word\'s precision, a NaN,'
+    + ' an infinity or a negative root left to the function', ()=>{
+    for (const does of ['floor', 'ceil', 'sqrt'])
+    {
+        const helpers = [{ ...helperOf(does), body: CRT_BODIES[/** @type {'sqrt'} */ (does)] }];
+        const values = [0, -0, 0.5, -0.5, 2.5, -2.5, 1e300, -1e300, 16777217.5, 2 ** 52 + 0.5,
+            -(2 ** 31) - 0.25, Math.PI, Infinity, -Infinity, NaN, -1, 2, 1e-300];
+        for (const control of [0x37f, 0x27f, 0x7f])
+        {
+            for (const value of values)
+            {
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(HELPER_AT, FILLER);
+                const bits = new DataView(new ArrayBuffer(8));
+                bits.setFloat64(0, value, true);
+                const code = [0x68, ...u32(bits.getUint32(4, true)),
+                    0x68, ...u32(bits.getUint32(0, true))];
+                code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+                code.push(0x83, 0xc4, 8, 0xdd, 0x1d, ...u32(OUT), 0xf4);
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                const view = new DataView(m.memory.buffer);
+                view.setUint16(m.layout.x87Control, control, true);
+                const exit = m.runProgram(PROGRAM, { helpers });
+                const left = does === 'sqrt' ? !(value >= 0) : !Number.isFinite(value);
+                if (left)
+                {
+                    assert.equal(exit.kind, -2, `${does}(${value}): left before the call`);
+                    continue;
+                }
+                assert.equal(exit.kind, 3, `${does}(${value})`);
+                const got = new DataView(m.read(OUT, 8).buffer).getFloat64(0, true);
+                const exact = does === 'floor' ? Math.floor(value) : does === 'ceil'
+                    ? Math.ceil(value) : Math.sqrt(value);
+                // Single precision rounds a root (a normal one) to 24 bits; a whole
+                // number from floor and ceil is exact at any precision.
+                const want = does === 'sqrt' && control === 0x7f && exact !== 0
+                    && Number.isFinite(exact) ? single(exact) : exact;
+                assert.ok(Object.is(got, want), `${does}(${value}) at ${control.toString(16)}:`
+                    + ` ${got}, not ${want}`);
+            }
+        }
     }
 });

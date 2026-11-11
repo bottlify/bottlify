@@ -27,16 +27,37 @@
 
 /**
  * The square root a `sqrt` call is formed as once its argument is not below
- * zero: SSE2's, rounded to a double whatever the x87's precision control
- * says, as each of these runtimes' own takes it on a processor with SSE2,
- * returned in ST0.
+ * zero: the x87's, rounded as the control word's precision says -- each of
+ * these runtimes takes `fsqrt` there, and a Direct3D 9 program runs with the
+ * precision at single -- returned in ST0.
  */
 const SQRT_BODY = Object.freeze([
+    0xdd, 0x04, 0x24,                       // fld qword [esp]
+    0xd9, 0xfa,                             // fsqrt
+]);
+
+/**
+ * floor's and ceil's rounding once its argument is finite: SSE4.1's `roundsd`
+ * toward minus or plus infinity, exact, returned in ST0.
+ *
+ * @param {number} mode  roundsd's immediate: 1 down, 2 up
+ */
+const roundBody = mode=>Object.freeze([
     0xf2, 0x0f, 0x10, 0x04, 0x24,           // movsd xmm0, [esp]
-    0xf2, 0x0f, 0x51, 0xc0,                 // sqrtsd xmm0, xmm0
+    0x66, 0x0f, 0x3a, 0x0b, 0xc0, mode,     // roundsd xmm0, xmm0, mode
     0xf2, 0x0f, 0x11, 0x44, 0x24, 0xf8,     // movsd [esp-8], xmm0
     0xdd, 0x44, 0x24, 0xf8,                 // fld qword [esp-8]
 ]);
+
+/**
+ * The body a call to a function doing `does` goes on with after its test
+ * (`emit/crt.js`), for the operations that have one.
+ *
+ * @type {Readonly<Partial<Record<import('./helpers.js').Crt, readonly number[]>>>}
+ */
+export const CRT_BODIES = Object.freeze({
+    sqrt: SQRT_BODY, floor: roundBody(1), ceil: roundBody(2),
+});
 
 /**
  * An entry: its masks given as runs `[offset, length]`, its length from its
@@ -47,10 +68,12 @@ const SQRT_BODY = Object.freeze([
  * @returns {RuntimeHelper}
  */
 function entry({ masks, ...given }){
+    const body = CRT_BODIES[given.does];
     const first = Math.min(...given.spans.map(([offset])=>offset));
     const end = Math.max(...given.spans.map(([offset, length])=>offset + length));
     return Object.freeze({
         ...given,
+        ...body === undefined ? {} : { body },
         length: end - first,
         masks: Object.freeze(masks.flatMap(([offset, length])=>
             Array.from({ length }, (unused, k)=>/** @type {number} */ (offset + k)))),
@@ -79,7 +102,6 @@ export const CRT_DICTIONARY = Object.freeze([
         masks: [[17, 4], [69, 4], [80, 4]] }),
     // sqrt, MSVC 7.1, MSVC 8
     entry({ name: 'sqrt', does: 'sqrt', quick: 'f737d75f53119de9', hash: '5ed76b363121c76f',
-        body: SQRT_BODY,
         spans: [[0, 166]],
         masks: [[5, 4], [29, 4], [44, 4], [51, 4], [62, 4], [67, 4], [95, 4], [126, 4], [137, 4],
             [144, 4], [155, 4], [160, 4]] }),
@@ -160,4 +182,34 @@ export const CRT_DICTIONARY = Object.freeze([
     // _allshr, the compiler's own (llmath, chkstk): the same bytes in every MSVC
     entry({ name: '_allshr', does: 'allshr', quick: '95d4a299b46ad05f', hash: '0ad55242ad9d7388',
         spans: [[0, 33]], masks: [] }),
+    // floor, MSVC 7.1
+    entry({ name: 'floor', does: 'floor', quick: '2321354bdf2f6e59', hash: 'e505cb340ab6f745',
+        spans: [[0, 287]],
+        masks: [[2, 4], [9, 4], [58, 4], [72, 4], [97, 4], [180, 4], [229, 4], [255, 4], [264, 4],
+            [272, 4]] }),
+    // ceil, MSVC 7.1
+    entry({ name: 'ceil', does: 'ceil', quick: '2321354bdf2f6e59', hash: '88842ed3d6e1a9da',
+        spans: [[0, 283]],
+        masks: [[2, 4], [9, 4], [58, 4], [72, 4], [97, 4], [180, 4], [229, 4], [250, 4], [259, 4],
+            [268, 4]] }),
+    // floor, MSVC 8
+    entry({ name: 'floor', does: 'floor', quick: '2321354bdf2f6e59', hash: '2b61b9f2e37ddde0',
+        spans: [[0, 289]],
+        masks: [[2, 4], [9, 4], [58, 4], [74, 4], [99, 4], [182, 4], [231, 4], [257, 4], [266, 4],
+            [274, 4]] }),
+    // ceil, MSVC 8
+    entry({ name: 'ceil', does: 'ceil', quick: '2321354bdf2f6e59', hash: '625102f994c32f57',
+        spans: [[0, 285]],
+        masks: [[2, 4], [9, 4], [58, 4], [74, 4], [99, 4], [182, 4], [231, 4], [252, 4], [261, 4],
+            [270, 4]] }),
+    // floor, MSVC 10
+    entry({ name: 'floor', does: 'floor', quick: '2321354bdf2f6e59', hash: '7f72235226afa980',
+        spans: [[0, 289]],
+        masks: [[2, 4], [9, 4], [58, 4], [74, 4], [99, 4], [182, 4], [231, 4], [257, 4], [266, 4],
+            [274, 4]] }),
+    // ceil, MSVC 10
+    entry({ name: 'ceil', does: 'ceil', quick: '2321354bdf2f6e59', hash: 'fbed3019a6e15c77',
+        spans: [[0, 285]],
+        masks: [[2, 4], [9, 4], [58, 4], [74, 4], [99, 4], [182, 4], [231, 4], [252, 4], [261, 4],
+            [270, 4]] }),
 ]);

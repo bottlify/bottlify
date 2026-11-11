@@ -74,7 +74,11 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * popped), `allshl`, `allshr`, `aullshr` (edx:eax by cl) and `chkstk` (esp down
  * by eax).
  *
- * @typedef {'memmove' | 'memcpy' | 'memset' | 'strlen' | 'sqrt' | 'allmul' | 'alldiv'
+ * And `floor` and `ceil`: as `sqrt`, the call made as it was unless the argument is
+ * finite, the `body` after it the rounding.
+ *
+ * @typedef {'memmove' | 'memcpy' | 'memset' | 'strlen' | 'sqrt' | 'floor' | 'ceil'
+ *     | 'allmul' | 'alldiv'
  *     | 'aulldiv' | 'allrem' | 'aullrem' | 'alldvrm' | 'aulldvrm' | 'allshl' | 'allshr'
  *     | 'aullshr' | 'chkstk'} Crt
  */
@@ -89,6 +93,7 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
 export const CRT_EFFECTS = Object.freeze({
     memmove: { writes: [0], esp: 0 }, memcpy: { writes: [0], esp: 0 },
     memset: { writes: [0], esp: 0 }, strlen: { writes: [0], esp: 0 }, sqrt: { writes: [], esp: 0 },
+    floor: { writes: [], esp: 0 }, ceil: { writes: [], esp: 0 },
     allmul: { writes: [0, 2], esp: 16 }, alldiv: { writes: [0, 2], esp: 16 },
     aulldiv: { writes: [0, 2], esp: 16 }, allrem: { writes: [0, 2], esp: 16 },
     aullrem: { writes: [0, 2], esp: 16 }, alldvrm: { writes: [0, 1, 2, 3], esp: 16 },

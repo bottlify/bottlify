@@ -73,17 +73,20 @@ is one instruction, where an offset of 64 KiB took two more. A program that may 
 A compiler links the same functions into every program it builds: its own helpers (`_ftol2`, the
 32-bit quadword arithmetic `_allmul`, `_alldiv`, `_aulldiv`, `_allrem`, `_aullrem`, `_aulldvrm`,
 the quadword shifts and `__chkstk`), and the C runtime's `memcpy`, `memmove`, `memset`, `strlen`
-and `sqrt` in a program linked with the runtime statically. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
+`sqrt`, `floor` and `ceil` in a program linked with the runtime statically. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
 `helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
 that differ where it is linked (relocated addresses, RIP-relative offsets, calls out of it)
 left out. A direct call whose target matches is not made: it is formed as what the function
 does, a copy as one `memory.copy`, a fill as one `memory.fill`, a string's length as a loop over
-its bytes, a square root as SSE2's, a quadword multiply or divide as wasm's own. The result lands
+its bytes, a square root as the x87's at the precision the control word says (as the runtime
+takes it), `floor` and `ceil` as SSE4.1's exact rounding, a quadword multiply or divide as wasm's
+own. The result lands
 where the function leaves it and no other register changes.
 
 Where the operation cannot be done whole in place, the call is made as it was and the function's
 own code runs: a span that reaches a page that is closed, holds translated code or is watched for
 writes, an address past 4 GiB, a `sqrt` of a negative number or a NaN (which sets `errno`), a
+`floor` or `ceil` of an infinity or a NaN, a
 divide by zero, a stack that `__chkstk` would probe into a closed page.
 
 The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 2022), 32-bit and

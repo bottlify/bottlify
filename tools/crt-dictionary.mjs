@@ -42,6 +42,10 @@ import { decode, MODE_64 } from '../modules/cork/src/decode/decoder.js';
 import { applyRelocations, parsePe, readExports }
     from '../modules/core/src/layers/loader/internal/pe.js';
 import { maskedFingerprint, QUICK_BYTES } from '../modules/cork/src/helpers.js';
+import { CRT_BODIES } from '../modules/cork/src/crt-dictionary.js';
+
+/** The operations on a double argument, returned in ST0. */
+const FLOATS = ['sqrt', 'floor', 'ceil'];
 
 const DIR_EXCEPTION = 3;
 const DIR_BASERELOC = 5;
@@ -380,7 +384,11 @@ async function verify(library, specs){
                     {
                         break;
                     }
-                    for (const operand of ins.operands)
+                    // Only a global the code tests (`cmp`/`test` with a constant):
+                    // a table of constants it reads is no feature to set.
+                    const tested = (ins.op === 'cmp' || ins.op === 'test')
+                        && ins.operands[1]?.kind === 'imm';
+                    for (const operand of tested ? ins.operands : [])
                     {
                         const rva = (operand.disp ?? 0) - image.imageBase;
                         if (operand.kind === 'mem' && operand.base === -1 && operand.index === -1
@@ -401,8 +409,7 @@ async function verify(library, specs){
         const helper = { name, does: /** @type {any} */ (operation), bits: 32,
             spans: signature.spans, masks: signature.masks, quick: signature.quick,
             hash: signature.hash, length: extent[1] - extent[0],
-            ...operation === 'sqrt' ? { body: [0xf2, 0x0f, 0x10, 0x04, 0x24, 0xf2, 0x0f, 0x51,
-                0xc0, 0xf2, 0x0f, 0x11, 0x44, 0x24, 0xf8, 0xdd, 0x44, 0x24, 0xf8] } : {} };
+            ...CRT_BODIES[operation] === undefined ? {} : { body: CRT_BODIES[operation] } };
         let apart = 0;
         let formed = 0;
         const cases = 400;
@@ -426,10 +433,11 @@ async function verify(library, specs){
                 data[src - DATA + length] = 0;
                 args = [src];
             }
-            else if (operation === 'sqrt')
+            else if (FLOATS.includes(operation))
             {
                 const values = [0, -0, 1, 2, 0.25, 1e300, 1e-310, Infinity, -1, NaN,
-                    next() * 1e6, 2 ** 52 + int(1000)];
+                    next() * 1e6, 2 ** 52 + int(1000), -2.5, -0.5, 0.5, (next() - 0.5) * 1e3,
+                    -Infinity, 2 ** 53 - 0.5, -(2 ** 31) - 0.5, 1e-300 * (next() - 0.5)];
                 const view = new DataView(new ArrayBuffer(8));
                 view.setFloat64(0, values[int(values.length)], true);
                 args = [view.getUint32(0, true), view.getUint32(4, true)];
@@ -482,7 +490,7 @@ async function verify(library, specs){
                 }
                 call();
                 program.push(0x83, 0xc4, 4 * args.length);
-                program.push(...operation === 'sqrt' ? [0xdd, 0x1d, ...u32(OUT)]
+                program.push(...FLOATS.includes(operation) ? [0xdd, 0x1d, ...u32(OUT)]
                     : [0xa3, ...u32(OUT)]);
             }
             program.push(0xf4);
@@ -493,6 +501,13 @@ async function verify(library, specs){
                 m.write(DATA, data);
                 ['ebx', 'ebp', 'esi', 'edi'].forEach((r, i)=>m.setReg(r, 0x11111111 * (i + 1)));
                 m.setReg('esp', STACK);
+                if (process.env.CRT_CONTROL !== undefined)
+                {
+                    // The x87's control word (CRT_CONTROL, 0x7f: single precision, as
+                    // Direct3D 9 leaves it).
+                    new DataView(m.memory.buffer).setUint16(m.layout.x87Control,
+                        Number(process.env.CRT_CONTROL), true);
+                }
                 let exit = m.runProgram(PROGRAM, { helpers, budget: 1e8 });
                 const left = exit.kind === -2;
                 if (left)
@@ -519,6 +534,10 @@ async function verify(library, specs){
                 if (apart <= 3)
                 {
                     console.log(`  ${name} apart: ${JSON.stringify(args)}`);
+                    if (process.env.CRT_SHOW !== undefined)
+                    {
+                        console.log(`   ${body.seen.slice(0, 160)}\n   ${made.seen.slice(0, 160)}`);
+                    }
                 }
             }
         }
@@ -595,7 +614,9 @@ async function verify64(bytes, image, mapped, exports, specs){
                         {
                             break;
                         }
-                        for (const operand of ins.operands)
+                        const tested = (ins.op === 'cmp' || ins.op === 'test')
+                            && ins.operands[1]?.kind === 'imm';
+                        for (const operand of tested ? ins.operands : [])
                         {
                             if (operand.kind === 'mem' && operand.rip)
                             {

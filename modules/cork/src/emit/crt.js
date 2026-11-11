@@ -99,6 +99,10 @@ export function emitCrt(e, instruction){
             sqrtArgument(e);
             leaveUnless(e, instruction);
             return true;
+        case 'floor': case 'ceil':
+            finiteArgument(e);
+            leaveUnless(e, instruction);
+            return true;
         default:
             return !isLong(e) && helper32(e, instruction);
     }
@@ -372,6 +376,22 @@ function sqrtArgument(e){
     b.i32const(0).i32const(-1);
     b.localGet(registerLocal(e, ESP)).load('f64', { guest: true, offset: e.layout.ramBase })
         .f64const(0).op(0x66); // f64.ge: false for a NaN
+    b.select().localSet(Local.addr);
+}
+
+/**
+ * floor's and ceil's argument tested: a finite number, or `Local.addr` -1 --
+ * an infinity or a NaN is the function's own to answer (`_handle_qnan1`).
+ * The `body` after this rounds it with SSE4.1's `roundsd`, which is exact.
+ *
+ * @param {E} e
+ */
+function finiteArgument(e){
+    const { b } = e;
+    b.i32const(0).i32const(-1);
+    b.localGet(registerLocal(e, ESP)).load('f64', { guest: true, offset: e.layout.ramBase })
+        .op(0x99) // f64.abs
+        .f64const(Infinity).op(0x63); // f64.lt: false for a NaN and an infinity
     b.select().localSet(Local.addr);
 }
 
