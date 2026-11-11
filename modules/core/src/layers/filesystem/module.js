@@ -134,6 +134,34 @@ export function createFilesystemModule(){
                 }
             };
             /**
+             * Every file under a directory, as `export` hands each on, into
+             * `out`: what a junction shows, taken as files of its own. A chain
+             * of junctions deeper than any a program makes is a loop, and stops.
+             *
+             * @param {any} tree @param {string} key @param {string[]} components
+             * @param {{ path: string, bytes: Uint8Array }[]} out @param {number} depth
+             */
+            const filesUnder = (tree, key, components, out, depth)=>{
+                if (depth > 64)
+                {
+                    return;
+                }
+                for (const entry of tree.list(components))
+                {
+                    const child = [...components, entry.name];
+                    if (entry.directory)
+                    {
+                        filesUnder(tree, key, child, out, depth + 1);
+                        continue;
+                    }
+                    const file = exported(tree, child, formatPath(key, child));
+                    if (file)
+                    {
+                        out.push(file);
+                    }
+                }
+            };
+            /**
              * The drives every process of a run shares, where this one was
              * handed them: one volume, as one Windows has. What each drive
              * changes is told to every process standing on it; the open
@@ -540,6 +568,16 @@ export function createFilesystemModule(){
                         }
                         for (const record of options?.everyName ? tree.links() : [])
                         {
+                            // A junction's files go under its name as well:
+                            // a reader that keeps no links keeps no junction.
+                            if (record.junction)
+                            {
+                                for (const name of record.names)
+                                {
+                                    filesUnder(tree, key, splitComponents(name), out, 0);
+                                }
+                                continue;
+                            }
                             for (const name of record.names)
                             {
                                 const components = splitComponents(name);
