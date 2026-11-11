@@ -16,7 +16,8 @@
  * class asked for, and the queue behaves the way a message loop expects.
  */
 
-import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER, threadIdOf } from './messages.js';
+import { ANY_WINDOW, QS_KEY, QS_MOUSEBUTTON, WM_PAINT, WM_QUIT, WM_TIMER, threadIdOf }
+    from './messages.js';
 import { characterOf } from './keys.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import {
@@ -9106,6 +9107,22 @@ export function createWindowFunctions(host){
                 const { inQueue, changed } = host.queue.status(
                     threadIdOf(host.callerThread?.()), mask);
                 return (((inQueue & mask) << 16) | (changed & mask)) >>> 0;
+            },
+        },
+
+        /**
+         * BOOL GetInputState(void)
+         *
+         * Whether a key or mouse button message is waiting in the caller's
+         * queue: a game's frame loop asks it to decide whether to pump at all.
+         * It is not a look, so GetQueueStatus's news is left as it was.
+         */
+        GetInputState: {
+            argBytes: 0,
+            handler: ()=>{
+                hasQueue(host.callerThread?.());
+                return (host.queue.waiting(threadIdOf(host.callerThread?.()))
+                    & (QS_KEY | QS_MOUSEBUTTON)) !== 0 ? 1 : 0;
             },
         },
 
