@@ -338,15 +338,14 @@ async function* entryFiles(folder){
     }
 }
 
-/** @param {string} path @param {Uint8Array} bytes */
-const entryOf = (path, bytes)=>{
+/** An entry's magic and name, which its bytes follow. @param {string} path */
+const entryHeader = path=>{
     const name = new TextEncoder().encode(path);
-    const out = new Uint8Array(8 + name.length + bytes.length);
+    const out = new Uint8Array(8 + name.length);
     const view = new DataView(out.buffer);
     view.setUint32(0, ENTRY_MAGIC, true);
     view.setUint32(4, name.length, true);
     out.set(name, 8);
-    out.set(bytes, 8 + name.length);
     return out;
 };
 
@@ -401,11 +400,24 @@ export function opfsSession(key, directory){
     /** @type {string | null} */
     let linksSaved = null;
 
-    /** @param {any} folder @param {string} path @param {Uint8Array} bytes */
-    const put = async(folder, path, bytes)=>{
+    /**
+     * An entry: its header, then the file's bytes in the parts its store keeps
+     * them in. A file an installer writes a piece at a time is in every save
+     * while it grows, and joining it into one array, then into a record, made
+     * two copies of all of it each time.
+     *
+     * @param {any} folder @param {string} path
+     * @param {Uint8Array | { bytes: Uint8Array, pieces?: () => Uint8Array[] }} file
+     */
+    const put = async(folder, path, file)=>{
+        const parts = file instanceof Uint8Array ? [file] : file.pieces?.() ?? [file.bytes];
         const handle = await folder.getFileHandle(await entryName(path), { create: true });
         const stream = await handle.createWritable();
-        await stream.write(entryOf(path, bytes));
+        await stream.write(entryHeader(path));
+        for (const part of parts)
+        {
+            await stream.write(part);
+        }
         await stream.close();
     };
     /** @param {any} folder @param {string} name */
@@ -618,7 +630,7 @@ export function opfsSession(key, directory){
                     for (const file of files)
                     {
                         keep.add(await entryName(file.path));
-                        await put(folder, file.path, file.bytes);
+                        await put(folder, file.path, file);
                     }
                     if (registry)
                     {
@@ -663,7 +675,7 @@ export function opfsSession(key, directory){
                     const file = byPath.get(path);
                     if (file)
                     {
-                        await put(folder, path, file.bytes);
+                        await put(folder, path, file);
                     }
                     else
                     {

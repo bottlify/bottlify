@@ -100,8 +100,12 @@ function fakeDirectory(){
                         let written = new Uint8Array(0);
                         return {
                             /** @param {Uint8Array} chunk */
+                            // Appended at the stream's position, as the browser's does.
                             write: async chunk=>{
-                                written = chunk.slice();
+                                const grown = new Uint8Array(written.length + chunk.length);
+                                grown.set(written);
+                                grown.set(chunk, written.length);
+                                written = grown;
                             },
                             close: async()=>{
                                 writes++;
@@ -140,6 +144,29 @@ function fakeDirectory(){
     };
     return { root: folder(), entries, writes: ()=>writes };
 }
+
+test('a file the volume keeps in pieces is saved a piece at a time and read back whole', async()=>{
+    const { filesystemModule } = await import('./layers/filesystem/module.js');
+    const { PIECE_SIZE } = await import('./layers/filesystem/internal/memory-store.js');
+    const volume = /** @type {any} */ (await filesystemModule.create(undefined));
+    const handle = volume.open('C:\\big.bin',
+        { write: true, disposition: volume.Disposition.CREATE_NEW });
+    // The first piece and the third written, the second never: zeros.
+    volume.write(handle, new Uint8Array(PIECE_SIZE).fill(1));
+    volume.seek(handle, PIECE_SIZE * 2);
+    volume.write(handle, new Uint8Array([3, 3]));
+    volume.close(handle);
+    const files = volume.export();
+    await filesystemModule.dispose();
+    const disk = fakeDirectory();
+    const store = opfsSession('pieces', async()=>disk.root);
+    await store.save({ files, registry: null });
+    const back = (await store.load()).files[0];
+    assert.equal(back.path, 'C:\\big.bin');
+    assert.equal(back.bytes.length, PIECE_SIZE * 2 + 2);
+    assert.deepEqual([back.bytes[0], back.bytes[PIECE_SIZE - 1], back.bytes[PIECE_SIZE],
+        back.bytes[PIECE_SIZE * 2 - 1], back.bytes[PIECE_SIZE * 2 + 1]], [1, 1, 0, 0, 3]);
+});
 
 test('a session in the origin file system is kept a file to each file and read back', async()=>{
     const disk = fakeDirectory();

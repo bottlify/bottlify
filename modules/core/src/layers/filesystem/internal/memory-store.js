@@ -146,6 +146,32 @@ export function bytesOf(contents){
 }
 
 /**
+ * The bytes of contents a store handed out, in its own pieces and in order,
+ * none copied: what a writer that takes them a part at a time - a session
+ * saved to the origin's files - is given instead of one whole array.
+ *
+ * @param {FileContents} contents
+ * @returns {Uint8Array[]}
+ */
+export function piecesOf(contents){
+    if (contents.flat)
+    {
+        return [contents.flat];
+    }
+    /** @type {Uint8Array[]} */
+    const out = [];
+    for (let at = 0, index = 0; at < contents.size; at += PIECE_SIZE, index++)
+    {
+        const length = Math.min(PIECE_SIZE, contents.size - at);
+        const piece = contents.pieces[index];
+        // A piece never written is zeros, as a read of it answers.
+        out.push(piece ? (piece.length >= length ? piece.subarray(0, length)
+            : Uint8Array.from({ length }, (_, i)=>piece[i] ?? 0)) : new Uint8Array(length));
+    }
+    return out;
+}
+
+/**
  * Builds a store, optionally seeded.
  *
  * A seed maps a path to its contents; `null` seeds a directory. Parent
