@@ -28,7 +28,7 @@ function engineWith(options = {}){
         session: {
             db: { readStream: async()=>Uint8Array.of(1, 2, 3) },
             getProperty: ()=>'',
-            mode: { scheduled: false },
+            scripting: false,
             formatText: (/** @type {string} */ text)=>text,
         },
         ran: new Set(),

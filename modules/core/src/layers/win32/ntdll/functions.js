@@ -109,6 +109,9 @@ const KERNEL32_ALIASES = Object.freeze({
     NtGetCurrentProcessorNumber: 'GetCurrentProcessorNumber',
     // kernel32's is ntdll's under the same name (kernel32.spec forwards it).
     RtlCaptureStackBackTrace: 'RtlCaptureStackBackTrace',
+    // kernel32's is ntdll's on Windows (kernel32.spec forwards it); clr.dll
+    // imports it from ntdll to raise its exceptions.
+    RtlCaptureContext: 'RtlCaptureContext',
 });
 
 /**

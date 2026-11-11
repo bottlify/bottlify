@@ -189,6 +189,7 @@ function databaseObject(db, format){
  * @property {(kind: number, record: import('./record.js').Record) => Promise<number> | number}
  *     message
  * @property {ExternalObject} installer
+ * @property {boolean} [deferred]  Run from the script: the one case MSIRUNMODE_SCHEDULED holds.
  */
 
 /**
@@ -243,6 +244,10 @@ export function sessionObject(engine, host){
             Mode: {
                 get: ([flag])=>{
                     const name = /** @type {Record<number, string>} */ (RUN_MODES)[integer(flag)];
+                    if (name === 'scheduled')
+                    {
+                        return Boolean(host.deferred);
+                    }
                     return Boolean(name
                         && /** @type {Record<string, boolean>} */ (session.mode)[name]);
                 },

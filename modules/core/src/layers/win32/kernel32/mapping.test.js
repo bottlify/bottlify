@@ -24,6 +24,8 @@ function setup(names = {}){
     const bytes = new Uint8Array(0x100000);
     /** Where a view was placed by address, so a second one there is refused. */
     const placed = new Set();
+    /** Holds taken on the file and not given back. */
+    let holds = 0;
     /** @type {Map<number, { type: string, object: any }>} */
     const table = new Map();
     let nextHandle = 4;
@@ -106,8 +108,12 @@ function setup(names = {}){
             },
             /** @param {any} node */
             size: node=>node.data.length,
-            retain: ()=>{},
-            close: ()=>{},
+            retain: ()=>{
+                holds++;
+            },
+            close: ()=>{
+                holds--;
+            },
         },
     });
 
@@ -116,7 +122,9 @@ function setup(names = {}){
     // Shaped as kernel32 keeps an open file: the volume's node is a field of
     // the record a handle resolves to, not the record itself.
     table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
-    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table };
+    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table,
+        /** How many holds on the file are taken and not given back. */
+        held: ()=>holds };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -441,6 +449,45 @@ test('the SEC_* combinations Windows refuses are refused, each with its own erro
     assert.equal(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READONLY, 0, 9, 0]), 0);
     assert.equal(errors.at(-1), ERROR_NOT_ENOUGH_MEMORY);
     assert.notEqual(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 9, 0]), 0);
+});
+
+test('a SEC_IMAGE view is the file laid out as its image: each section at its address', ()=>{
+    // fusion maps a managed library so and reads its manifest by RVA; a view
+    // of the file as it lies put the metadata elsewhere, and the .NET
+    // Framework's setup could not put one assembly into the cache.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    const pe = new Uint8Array(0x210);
+    const head = new DataView(pe.buffer);
+    pe.set([0x4d, 0x5a]);
+    head.setUint32(0x3c, 0x40, true);
+    head.setUint32(0x40, 0x4550, true);
+    head.setUint16(0x46, 1, true);
+    head.setUint16(0x54, 0xe0, true);
+    head.setUint32(0x58 + 56, 0x2000, true);
+    head.setUint32(0x58 + 60, 0x200, true);
+    const section = 0x58 + 0xe0;
+    head.setUint32(section + 8, 0x10, true);
+    head.setUint32(section + 12, 0x1000, true);
+    head.setUint32(section + 16, 0x10, true);
+    head.setUint32(section + 20, 0x200, true);
+    pe.set([9, 8, 7, 6], 0x200);
+    file.data = pe;
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    assert.notEqual(mapping, 0);
+    assert.equal(basicInformation(at, mapping).size, 0x2000,
+        'the size of the image, not of the file');
+    const before = at.held();
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.deepEqual([...bytes.subarray(view, view + 2)], [0x4d, 0x5a], 'the headers at the start');
+    assert.deepEqual([...bytes.subarray(view + 0x1000, view + 0x1004)], [9, 8, 7, 6],
+        'the section at its virtual address');
+    assert.deepEqual([...bytes.subarray(view + 0x200, view + 0x204)], [0, 0, 0, 0],
+        'and not where it lies in the file');
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+    assert.equal(at.held(), before, 'the view gave back the hold it took on the file');
 });
 
 test('a read-write mapping that names its commit is still written back to its file', ()=>{

@@ -89,9 +89,56 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * view of it can be written back, its size, and its SEC_* attributes.
  *
  * @typedef {{ node: any, writable: boolean, size: number, attributes: number,
- *     writesFile?: boolean }} Section
+ *     writesFile?: boolean, image?: Uint8Array }} Section
  *     `writesFile`: its views' writes reach the file, as a copy-on-write one's do not.
+ *     `image`: a SEC_IMAGE section's file laid out as its image, what every view shows.
  */
+
+/**
+ * A PE file laid out as the image it describes: its headers, then each
+ * section's raw data at its virtual address, the rest zeros. Null when the
+ * headers do not describe an image the file holds.
+ *
+ * @param {Uint8Array} file
+ * @returns {Uint8Array | null}
+ */
+export function layOutImage(file){
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const pe = file.length >= 0x40 ? view.getUint32(0x3c, true) : 0;
+    if (pe === 0 || pe + 24 > file.length || view.getUint32(pe, true) !== 0x4550)
+    {
+        return null;
+    }
+    const sections = view.getUint16(pe + 6, true);
+    const optional = pe + 24;
+    const table = optional + view.getUint16(pe + 20, true);
+    if (optional + 64 > file.length || table + sections * 40 > file.length)
+    {
+        return null;
+    }
+    // SizeOfImage and SizeOfHeaders stand at the same place in PE32 and PE32+.
+    const size = view.getUint32(optional + 56, true);
+    const headers = Math.min(view.getUint32(optional + 60, true), file.length, size);
+    if (size === 0 || size > 0x40000000)
+    {
+        return null;
+    }
+    const image = new Uint8Array(size);
+    image.set(file.subarray(0, headers));
+    for (let at = table; at < table + sections * 40; at += 40)
+    {
+        const address = view.getUint32(at + 12, true);
+        const raw = view.getUint32(at + 16, true);
+        const from = view.getUint32(at + 20, true);
+        const length = Math.min(raw, view.getUint32(at + 8, true) || raw, file.length - from,
+            size - address);
+        if (from < file.length && address < size && length > 0)
+        {
+            image.set(file.subarray(from, from + length), address);
+        }
+    }
+    return image;
+}
 
 /**
  * Runs `then` on a value now, or on a promise's when it comes.
@@ -277,14 +324,24 @@ export function createMappingFunctions(host){
             {
                 return { status: STATUS.INVALID_FILE_FOR_SECTION };
             }
-            return settle(host.files.read(node, 0, 2), head=>{
-                if (head[0] !== 0x4d || head[1] !== 0x5a)
+            return settle(host.files.read(node, 0, length), file=>{
+                if (file[0] !== 0x4d || file[1] !== 0x5a)
                 {
                     return { status: STATUS.INVALID_IMAGE_NOT_MZ };
                 }
+                // Laid out as the loader lays it, which is where a program
+                // reads an image's metadata by RVA (fusion reads a managed
+                // library's manifest so). A view elsewhere than the image's
+                // base is not relocated.
+                const image = layOutImage(file);
+                if (!image)
+                {
+                    return { status: STATUS.INVALID_IMAGE_FORMAT };
+                }
                 host.divergence?.('NtCreateSection',
-                    'a SEC_IMAGE view holds the file as it lies, not laid out as an image');
-                return { node, writable: false, size: length, attributes: SEC_FILE | SEC_IMAGE };
+                    'a SEC_IMAGE view is laid out as its image but not relocated');
+                return { node, writable: false, size: image.length,
+                    attributes: SEC_FILE | SEC_IMAGE, image };
             });
         }
         if (asked === 0 && length === 0)
@@ -807,6 +864,12 @@ export function createMappingFunctions(host){
                 {
                     return deliver(mapping.contents?.().subarray(offset, offset + wanted)
                         ?? new Uint8Array(0));
+                }
+                if (mapping.image)
+                {
+                    // Held as a view of the file is, and given back at its unmap.
+                    host.files.retain(mapping.node);
+                    return deliver(mapping.image.slice(offset, offset + wanted));
                 }
                 // The view holds the file from here to its unmap, so closing the
                 // mapping and the file handle first leaves it a file to be

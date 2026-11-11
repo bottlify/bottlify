@@ -796,8 +796,14 @@ export function createSession(options){
         getProperty, setProperty, evaluate, format, formatText,
         resolveTargets, setTargetPath, sourcePath, settleStates,
         packagePath, sourceDir, machine,
+        /**
+         * Whether the installation script is being written (InstallInitialize to
+         * InstallFinalize): work goes into it rather than being done. Not
+         * MSIRUNMODE_SCHEDULED, which only an action run from the script is in.
+         */
+        scripting: false,
         /** Set when a sequence is running; MsiGetMode answers from these. */
-        mode: { scheduled: false, rollback: false, commit: false, admin: false,
+        mode: { rollback: false, commit: false, admin: false,
             advertise: false, maintenance: getProperty('Installed') !== '', rollbackEnabled: true,
             logEnabled: false, operations: false, rebootAtEnd: false, rebootNow: false,
             cabinet: false, sourceShortNames: false, targetShortNames: false, windows9x: false,

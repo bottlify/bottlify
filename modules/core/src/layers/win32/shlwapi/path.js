@@ -611,6 +611,27 @@ export function createPathFunctions(host, { A, W }){
         }),
 
         /**
+         * LPSTR PathRemoveBackslashA(LPSTR pszPath)
+         *
+         * The last character dropped when it is a backslash and the path is
+         * not a root, answering where it stood -- the terminator now, or the
+         * last character when it was kept; NULL for NULL.
+         */
+        ...both('PathRemoveBackslash', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            const last = (pointer >>> 0) + Math.max(path.length - 1, 0) * width.unit;
+            if (path.endsWith('\\') && !isRoot(path))
+            {
+                host.writeMemory(last, width.sz(''));
+            }
+            return last;
+        }),
+
+        /**
          * BOOL PathCanonicalizeA(LPSTR pszBuf, LPCSTR pszPath)
          *
          * The `.` and `..` components resolved; an empty path is the root,

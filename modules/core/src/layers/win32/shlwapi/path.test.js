@@ -190,6 +190,28 @@ test('PathIsRoot is a lone backslash, a bare drive root, or a server and share',
     }
 });
 
+test('PathRemoveBackslash drops a trailing backslash but that of a root, answering where it stood',
+    ()=>{
+        // Wine's shlwapi tests: the answer is the terminator that replaced it,
+        // or the last character when it was kept.
+        const cases = /** @type {[string, string, number][]} */ ([
+            ['C:\\dir\\', 'C:\\dir', 6], ['C:\\dir', 'C:\\dir', 5],
+            ['C:\\', 'C:\\', 2], ['\\', '\\', 0], ['', '', 0],
+        ]);
+        for (const [suffix, wide] of WIDTHS)
+        {
+            const m = shlwapiMachine();
+            for (const [path, left, at] of cases)
+            {
+                const where = m.put(path, wide);
+                assert.equal(m.fns[`PathRemoveBackslash${suffix}`].handler([where]),
+                    where + at * (wide ? 2 : 1), path);
+                assert.equal(m.read(where, wide), left, path);
+            }
+            assert.equal(m.fns[`PathRemoveBackslash${suffix}`].handler([0]), 0);
+        }
+    });
+
 test('PathSkipRoot answers a pointer just past the root, or NULL', ()=>{
     const cases = /** @type {[string, number | null][]} */ ([
         ['C:\\dir\\file', 3], ['C:\\', 3], ['C:', null], ['C:dir', null], ['\\dir', null],
@@ -375,7 +397,7 @@ test('each path function declares the arguments it pops, in both spellings', ()=
         PathCanonicalize: 8, PathCreateFromUrl: 16, PathFileExists: 4, PathIsRoot: 4,
         PathIsURL: 4, PathRemoveBlanks: 4, PathRemoveFileSpec: 4, PathRenameExtension: 8,
         PathSearchAndQualify: 12, PathSkipRoot: 4, PathIsRelative: 4, PathCommonPrefix: 12,
-        PathRelativePathTo: 20,
+        PathRelativePathTo: 20, PathRemoveBackslash: 4,
     });
     for (const [name, bytes] of Object.entries(expected))
     {

@@ -2465,6 +2465,36 @@ export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
 export const BOTTLE_DRIVE_PATH = '.bottlify\\drive_c';
 
 /**
+ * A library the engine synthesised, read out of guest memory as its file
+ * would hold it: every page of its image, those nothing maps as zeros.
+ *
+ * @param {{ readBytes: (address: number, length: number) => Uint8Array }} memory
+ * @param {{ base: number, size: number }} module
+ * @returns {Uint8Array}
+ */
+export function imageInMemory(memory, module){
+    const PAGE = 0x1000;
+    const image = new Uint8Array(module.size);
+    // A page at a time: a synthesised library is several regions (its code,
+    // its .data), and one read across them runs off the first.
+    for (let at = 0; at < module.size; at += PAGE)
+    {
+        try
+        {
+            image.set(memory.readBytes(module.base + at, Math.min(PAGE, module.size - at)), at);
+        }
+        catch (e){
+            // A page the image reserves and nothing maps stays zeros, as its file has.
+            if (/** @type {{ code?: unknown }} */ (e)?.code !== 'GUEST_ACCESS')
+            {
+                throw e;
+            }
+        }
+    }
+    return image;
+}
+
+/**
  * The version resource of a file on the volume, or null: for a file that is
  * not there, is not an image or carries none. A file of a bundle whose bytes
  * have not arrived answers with a promise: the blocks the read missed are
@@ -5548,8 +5578,7 @@ async function buildApp(options){
                  */
                 systemImage: name=>{
                     const module = byName.get(moduleKeyOf(name));
-                    return module && !module.file
-                        ? memory.readBytes(module.base, module.size) : null;
+                    return module && !module.file ? imageInMemory(memory, module) : null;
                 },
             },
             commandLine: options.commandLine,

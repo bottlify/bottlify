@@ -159,7 +159,7 @@ export async function runCustomAction(engine, row){
             engine.commit.push(step);
             return ERROR_SUCCESS;
         }
-        if (!session.mode.scheduled)
+        if (!session.scripting)
         {
             // Deferred, but no script is being written: as Windows, it runs
             // at once with what it would have been given.

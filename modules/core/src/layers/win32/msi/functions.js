@@ -677,6 +677,7 @@ export function createMsiFunctions(host){
             sequence: table=>runSequence(engine, table),
             message: (kind, record)=>deliver(kind, record, session, engine.thread),
             installer,
+            deferred: script.data !== null,
         }));
         try
         {
@@ -2162,9 +2163,11 @@ export function createMsiFunctions(host){
                 {
                     return 0;
                 }
-                if (owner.deferred !== null && name === 'scheduled')
+                // Only an action the script runs is scheduled; one run while the
+                // script is written is immediate, and reads no CustomActionData.
+                if (name === 'scheduled')
                 {
-                    return 1;
+                    return owner.deferred !== null ? 1 : 0;
                 }
                 return /** @type {Record<string, boolean>} */ (owner.session.mode)[name] ? 1 : 0;
             },

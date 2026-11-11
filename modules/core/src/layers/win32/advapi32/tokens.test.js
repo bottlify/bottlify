@@ -738,6 +738,25 @@ test('GetAce points into the ACL at the ACE asked for, and refuses one past the 
     assert.deepEqual(errors, [87, 87, 87], 'ERROR_INVALID_PARAMETER');
 });
 
+test('DeleteAce takes one ACE out, moves the rest down, and refuses one past the last', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    const ACL_AT = 0x400;
+    assert.equal(fns.DeleteAce.argBytes, 8);
+    bytes.set(USERS, SID);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, 0x80, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, 0x20019, SID]), 1);
+    bytes.set(EVERYONE, SID);
+    assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 0x10000, SID]), 1);
+
+    assert.equal(fns.DeleteAce.handler([ACL_AT, 0]), 1);
+    assert.equal(bytes[ACL_AT + 4], 1, 'one ACE left');
+    assert.equal(fns.GetAce.handler([ACL_AT, 0, OUT]), 1);
+    assert.equal(dword(OUT), ACL_AT + 8, 'the second moved to the first place');
+    assert.deepEqual([bytes[dword(OUT)], dword(dword(OUT) + 4)], [1, 0x10000]);
+    assert.equal(fns.DeleteAce.handler([ACL_AT, 1]), 0, 'past the last');
+    assert.deepEqual(errors, [87], 'ERROR_INVALID_PARAMETER');
+});
+
 test('LookupAccountSid names the well-known SIDs as XP does, and sizes as Windows sizes', ()=>{
     // advapi32's security tests (test_LookupAccountSid): what fits is
     // written, its size then its length; what does not fit fails with
