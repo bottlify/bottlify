@@ -89,8 +89,8 @@ test('a junction\'s files are exported under its name for a reader that keeps no
         assert.deepEqual(paths(fs.export()), ['C:\\SxS\\Lib\\a.dll'], 'once, where it is kept');
         const every = fs.export(undefined, { everyName: true });
         assert.deepEqual(paths(every), ['C:\\Gac\\a.dll', 'C:\\SxS\\Lib\\a.dll']);
-        assert.equal(new TextDecoder().decode(every.find((/** @type {any} */ one)=>one.path === 'C:\\Gac\\a.dll')
-            ?.bytes), 'lib');
+        assert.equal(new TextDecoder().decode(every.find((/** @type {any} */ one)=>
+            one.path === 'C:\\Gac\\a.dll')?.bytes), 'lib');
         await filesystemModule.dispose();
     });
 

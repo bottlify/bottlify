@@ -27,8 +27,9 @@ import { takeId } from './layers/kernel/internal/processes.js';
 import { WINDOW_CELLS } from './layers/win32/user32/manager.js';
 
 /** What a process asks of the registry; the rest -- saving, loading -- is the system's. */
-const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getValue', 'setValue',
-    'rename', 'deleteValue', 'placeOf', 'throughClasses', 'detached', 'forget', 'revision'];
+export const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'classOf',
+    'maxSubkeyClassLength', 'values', 'getValue', 'setValue', 'rename', 'deleteValue', 'placeOf',
+    'throughClasses', 'detached', 'forget', 'revision'];
 
 /** What a process asks of the window directory. */
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',

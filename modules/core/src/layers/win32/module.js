@@ -125,6 +125,7 @@ import { createFusionFunctions } from './fusion/functions.js';
 import { RUNTIME_LIBRARIES, runtimeDirectories } from './mscoree/versions.js';
 import { splitCommandLine } from './shell32/commandline.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
+import { createHttpapiFunctions } from './httpapi/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
 import { createUrlMonikers } from './urlmon/monikers.js';
 import { createIeframe } from './ieframe/functions.js';
@@ -4374,6 +4375,9 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes), release: address=>heap.free(address),
                         computerName: COMPUTER_NAME, version: windows }) },
                 'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
+                // The HTTP Server API's configuration: a setup's URL reservations.
+                'HTTPAPI.dll': createHttpapiFunctions({ readMemory, writeMemory, readWideString,
+                    hive, divergence: config?.divergence }),
                 'WTSAPI32.dll': { ...createSessionNotificationFunctions(),
                     ...createSessionInformationFunctions({ ...displayHost,
                         // The one user's token: the process's own, which every process has.
