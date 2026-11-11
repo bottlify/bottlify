@@ -1014,7 +1014,9 @@ export function createPresenter(options = {}){
         // Composed wherever there is a GPU: a page with no canvas of its
         // own -- a harness reading the frames back -- is handed the composed
         // screen as a canvas would be shown it, not each process's in turn.
-        if (frame.source === undefined || !options.windows || !gpu || !queue)
+        // A frame counted with no picture (the graphics worker's `count`) has
+        // nothing to keep or compose.
+        if (frame.source === undefined || !frame.surface || !options.windows || !gpu || !queue)
         {
             showNow(frame);
             return;

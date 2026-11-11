@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
-import { createVolume, FETCHED_PIECE_BYTES, KEPT_READ_MIN } from './vfs.js';
+import { createVolume, FETCHED_PIECE_BYTES, KEPT_READ_MIN, MISS_FETCHES } from './vfs.js';
 
 async function volume(){
     const fs = await filesystemModule.create({});
@@ -165,6 +165,58 @@ test('a read larger than the blocks kept at once arrives whole, a piece at a tim
     const tail = await vol.read(node, size - 100, 1000);
     assert.equal(tail.length, 100, 'a read past the end stops at it');
     vol.close(node);
+});
+
+test('a read whose fetched blocks are gone again before it comes back fetches them again,'
+    + ' and one whose fetch never delivers fails saying so', async()=>{
+    // A cache in the heap is bounded: another thread's reads, landing between
+    // a fetch and the read it was for, push the fetched blocks out, and a read
+    // that waited on another read's request finds nothing when that failed.
+    const fs = await filesystemModule.create({});
+    const writer = createVolume(fs);
+    const made = writer.open('C:\\data.dat', { read: true, write: true, create: true });
+    const contents = new Uint8Array(4096).map((unused, index)=>index * 13 & 0xff);
+    writer.write(made, 0, contents);
+    writer.close(made);
+
+    let resident = false;
+    const bundled = Object.create(fs);
+    bundled.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        if (!resident)
+        {
+            throw Object.assign(new Error('not resident'),
+                { code: 'BLOCK_MISS', blocks: [{ index: 0 }] });
+        }
+        return fs.read(node, length);
+    };
+    /** @param {number} lost  Fetches whose block is gone before the read is back. */
+    const reading = async lost=>{
+        resident = false;
+        let fetches = 0;
+        const vol = /** @type {any} */ (createVolume(bundled, async()=>{
+            fetches++;
+            resident = fetches > lost;
+        }));
+        const node = vol.open('C:\\data.dat', { read: true });
+        try
+        {
+            return { read: await vol.read(node, 100, 1000), fetches };
+        }
+        catch (e){
+            return { error: /** @type {Error} */ (e).message, fetches };
+        }
+        finally
+        {
+            vol.close(node);
+        }
+    };
+
+    const evicted = await reading(1);
+    assert.deepEqual(evicted.read, contents.subarray(100, 1100), 'the read arrives whole');
+    assert.equal(evicted.fetches, 2, 'fetched again once');
+    const never = await reading(Infinity);
+    assert.equal(never.fetches, MISS_FETCHES, 'a bounded number of fetches');
+    assert.match(String(never.error), /still absent after/);
 });
 
 test('an offset is honoured even when it goes backwards', async()=>{

@@ -272,6 +272,8 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
+ * @property {boolean} [helpers]  A call to a compiler's or C runtime's function the dictionary
+ *     knows by its bytes formed as what it does (`memcpy` as one `memory.copy`). Default true.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
  *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.

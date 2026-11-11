@@ -55,7 +55,7 @@ import { emitInstruction } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion, readsWrapped, registersChanged,
+    planLoop, planRegion, readsWrapped, registersChanged, HOST_OPS,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
@@ -3530,9 +3530,13 @@ export class RegionEmitter {
      * @param {number} index
      */
     takesFrom(index){
-        return this.entryTested(index)
-            && /** @type {import('./memory.js').RegionPlan} */ (this.memoryPlan).inherit[index]
-                === this.blockIndex;
+        if (!this.entryTested(index))
+        {
+            return false;
+        }
+        const plan = /** @type {import('./memory.js').RegionPlan} */ (this.memoryPlan);
+        return plan.inherit[index] === this.blockIndex
+            || plan.skips[index]?.has(this.blockIndex) === true;
     }
 
     /**
@@ -5965,14 +5969,6 @@ const CARRY_NEXT = new Set(['fallthrough', 'jcc', 'loop', 'call', 'trap']);
 /** Instructions that look at the budget before they charge it (`planCarries`). */
 const CARRY_STOPS = new Set(['movs', 'stos', 'lods', 'cmps', 'scas', 'ins', 'outs', 'in', 'out',
     'int', 'int1', 'int3', 'into', 'syscall', 'sysenter', 'hlt']);
-
-/**
- * The instructions that may reach the host and come back into the function:
- * a call, a port write, an interrupt -- after which the pages' flags may not
- * be what a test found (`planTestedOnce`).
- */
-const HOST_OPS = new Set(['call', 'out', 'outs', 'in', 'ins', 'int', 'int1', 'int3', 'into',
-    'syscall', 'sysenter', 'hlt']);
 
 /** The entry tests a region's function keeps a local for, at most (`planTestedOnce`). */
 const TESTED_ONCE_MAX = 16;

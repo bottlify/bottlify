@@ -86,6 +86,8 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  *           set on the instructions a call to a compiler's runtime helper is formed as (helpers.js)
  *           and on a call to an import thunk formed as the call through its slot
  * @property {number} [thunk]       that thunk's address: the call retires its jump as well
+ * @property {import('../helpers.js').Crt} [crt]  of a `crt`: the C runtime operation a call
+ *           to a function the dictionary knows is formed as (`emit/crt.js`)
  */
 
 /**

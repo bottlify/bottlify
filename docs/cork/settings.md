@@ -51,6 +51,7 @@ the reference arm of a differential gate.
 | `structure` | `true` | `false` sends every back edge of a region through its dispatch. |
 | `callReturn` | `true` | `false` makes every call and return out of a region a transfer through the entry hash. |
 | `leafCalls` | `true` | `false` forms no leaf callee into its caller. |
+| `helpers` | `true` | `false` makes every call to a compiler's or C runtime's function the dictionary knows as it is, rather than as what it does (`memcpy` as one `memory.copy`). |
 | `formDepth` | 1 | Levels of callees formed in that may keep direct calls of their own (0: leaves alone); 2 and 3 measured slower. |
 | `emptyCalls` | `true` | `false` enters a function that does nothing rather than returning from it in the transfer. |
 | `linkedCalls` | `true` | `false` sends every direct call through the transfer rather than calling the function its first hash slot holds. |

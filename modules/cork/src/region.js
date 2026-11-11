@@ -599,7 +599,8 @@ export function formShared(){
  *     entries a switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
  *     of RUNTIME_HELPERS or of the list given, and a direct call to an import thunk as the
- *     call through its slot (`thunkCall`), neither in long mode; callTargets:
+ *     call through its slot (`thunkCall`), not in long mode, where only helpers of
+ *     64-bit code are; callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each; a call
  *     named with none is `quiet`, its calls no longer sampled;
@@ -616,7 +617,7 @@ export function formShared(){
  *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
  *     `sources` are read so where given, a byte at a time through `read` otherwise;
  *     mode: the decoder's (`MODE_64` for long-mode code: no address past the 4 GiB
- *     window is translatable, and no runtime helper is formed); translates: whether the
+ *     window is translatable, and only a 64-bit runtime helper is formed); translates: whether the
  *     emitter has a case for an instruction -- one it has none for ends its block,
  *     which exits there (`cut`), and keeps a callee from being a leaf (in long mode the
  *     shared emitter's, `translatesLong`, unless named); baseOf: a long-mode
@@ -636,7 +637,6 @@ export function formRegion(read, entry,
     const importThunks = !wide;
     if (wide)
     {
-        helpers = false;
         translates ??= translatesLong;
     }
     // Every page forming reads decides what it forms -- an import slot a call is predicted
@@ -888,7 +888,8 @@ export function formRegion(read, entry,
                 ? /** @type {number} */ (decoded.operands[0].target) : -1;
             const helper = called >= 0 && translatable(called)
                 ? helperAt(read, called, helpers === true ? RUNTIME_HELPERS
-                    : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers))
+                    : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers),
+                wide ? 64 : 32)
                 : null;
             if (helper !== null && !('refused' in decoded))
             {

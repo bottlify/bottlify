@@ -251,6 +251,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
+        // A call to a function of a compiler's or C runtime's the dictionary
+        // knows by its bytes formed as what it does (`helpers.js`, `emit/crt.js`;
+        // false: every such call made as it is; a list of entries: those alone).
+        helpers: true,
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
@@ -515,7 +519,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const formOptions = { maxBlocks: settings.maxRegionBlocks, leafCalls: settings.leafCalls,
         leafBytes: settings.leafBytes, formDepth: settings.formDepth,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
-        ...layout.bits === 64 ? { mode: MODE_64 } : {} };
+        ...layout.bits === 64 ? { mode: MODE_64 } : {},
+        // The dictionary's functions formed as what they do (`emit/crt.js`), or
+        // none; a list of entries in place of the dictionary is a test's.
+        ...settings.helpers === true || settings.helpers === undefined ? {}
+            : { helpers: settings.helpers } };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
      * worker is sent `formOptions`, which a function cannot cross in. */
     const formHere = readBytes === undefined ? formOptions
@@ -899,6 +907,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
+    /**
+     * By C runtime operation (`emit/crt.js`), the calls formed as it in the
+     * regions published, each publication of a region counted.
+     * @type {Record<string, number>}
+     */
+    const crtFormed = {};
     /** @type {Map<number, RegionRecord>} entry index → the region that made it */
     const recordOf = new Map();
     /**
@@ -2774,6 +2788,16 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         }
         countExtents(record, 1);
         regions.add(record);
+        for (const block of region.blocks)
+        {
+            for (const instruction of block.instructions)
+            {
+                if (instruction.crt !== undefined)
+                {
+                    crtFormed[instruction.crt] = (crtFormed[instruction.crt] ?? 0) + 1;
+                }
+            }
+        }
         if (record.loose && !loose && throughStack(region))
         {
             // Its own code lies on a stack (`stackCodeSeen` above, which ran before
@@ -5646,6 +5670,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                         transferTargets: transferTargets(view(), layout) }
                     : {}),
                 regions: regions.size,
+                crtFormed: { ...crtFormed },
                 // Counted only by a run that asked (`countTransfers`); absent otherwise,
                 // where a 0 would read as none made.
                 ...(transfersCounted

@@ -792,3 +792,17 @@ test('with a GPU and no canvas the screen is still composed of every process\'s 
         ?? copy.source.texture.label, copy.size.width, copy.size.height]),
     [['layer of process 1', 8, 4], ['layer of process 2', 8, 4]]);
 });
+
+test('a frame counted with no picture, a process\'s, is handed on as it is, nothing kept', ()=>{
+    // The graphics worker's `count` mode presents no picture: kept as a
+    // process's layer, its absent surface stopped the run at its first frame.
+    const gpu = createFakeDevice();
+    /** @type {any[]} */
+    const handed = [];
+    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>handed.push(frame), windows: ()=>[], foreground: ()=>1 });
+    presenter.show({ surface: null, frameIndex: 1, source: 3 });
+    assert.equal(handed.length, 1);
+    assert.equal(handed[0].surface, null);
+    assert.equal(presenter.diagnostics().layered ?? 0, 0);
+});

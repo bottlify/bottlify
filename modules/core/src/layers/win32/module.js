@@ -3665,7 +3665,7 @@ export function createWin32Module(){
                 'DBGHELP.dll': createDbghelpFunctions({
                     writeMemory, readMemory, files: volume, setRegisters,
                     readCString: (/** @type {number} */ address)=>readCString(address, 260),
-                    readWide: (/** @type {number} */ address)=>readWideString(address, 260),
+                    readWide: (/** @type {number} */ address)=>readWideString(address, 260 * 2),
                     modules: ()=>modules.list?.() ?? [],
                     setLastError: setError,
                 }),

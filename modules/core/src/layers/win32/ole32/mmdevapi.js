@@ -397,7 +397,7 @@ export function registerMmDevApiClasses(host){
                             return E_POINTER;
                         }
                         writePointer(out, 0);
-                        return host.readWideString(id >>> 0, 128) === SPEAKERS.id
+                        return host.readWideString(id >>> 0, 128 * 2) === SPEAKERS.id
                             ? handOutDevice(out) : E_NOTFOUND;
                     } },
                     /** HRESULT RegisterEndpointNotificationCallback(IMMNotificationClient *) */

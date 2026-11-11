@@ -1005,6 +1005,47 @@ test('a trap carries no window, a call and a formed-in return do; a join takes t
         }
     });
 
+test('a branch from up the chain goes past a join\'s test where its group covers the accesses',
+    ()=>{
+        /** `std::min` on references: two stack slots, a pointer to the lesser, read. @param {number} far */
+        const bytes = far=>[
+            0x89, 0x44, 0x24, 0x10,             // mov [esp+0x10], eax
+            0x89, 0x4c, 0x24, 0x3c,             // mov [esp+0x3c], ecx
+            0x39, 0xc8,                         // cmp eax, ecx
+            0x8d, 0xb4, 0x24, ...[far, 0, 0, 0].map((b, k)=>(k === 0 ? far & 0xff
+                : (far >>> (8 * k)) & 0xff)),     // lea esi, [esp+far]
+            0x7c, 0x07,                         // jl S
+            0x8d, 0xb4, 0x24, 0x3c, 0, 0, 0,    // L: lea esi, [esp+0x3c]
+            0x8b, 0x3e,                         // S: mov edi, [esi]
+            0x89, 0x7c, 0x24, 0x14,             // mov [esp+0x14], edi
+            0xf4,                               // hlt
+        ];
+        const near = planRegion(regionOf(bytes(0x10)).blocks, { entry: CODE });
+        assert.deepEqual(near.inherit, [-1, 0, 1], 'S takes from L, L from the branch');
+        assert.ok(near.entry[2].length > 0, 'S tests its windows when entered elsewhere');
+        assert.deepEqual([...near.skips[2] ?? []], [0],
+            'the branch passes S\'s test: esi is esp + 0x10, inside the stack\'s group');
+        const far = planRegion(regionOf(bytes(0x800)).blocks, { entry: CODE });
+        assert.equal(far.skips[2], undefined,
+            'esp + 0x800 lies outside the group: the branch goes through S\'s test');
+        for (const structure of [false, true])
+        {
+            for (const [offset, esp, eax, ecx] of [[0x10, 0x4f00, 1, 2], [0x10, 0x4f00, 2, 1],
+                [0x10, 0x4fd8, 1, 2], [0x800, 0x4f00, 1, 2], [0x800, 0x4f00, 2, 1],
+                [0x800, 0x4700, 1, 2]])
+            {
+                againstInterpreter(m=>{
+                    m.write(CODE, bytes(offset));
+                    m.setReg('esp', esp);
+                    m.setReg('eax', eax);
+                    m.setReg('ecx', ecx);
+                    m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+                }, CODE, structure, `lea esp+${offset.toString(16)} esp ${esp.toString(16)}`
+                    + ` eax ${eax} ecx ${ecx} structure ${structure}`);
+            }
+        }
+    });
+
 test('an entry test that leaves hands the x87 stack over as the block starts with it', ()=>{
     // S takes its windows from Q; P, which moved ebx, goes into S through S's
     // test, whose window -- U's load -- reaches the inaccessible page from

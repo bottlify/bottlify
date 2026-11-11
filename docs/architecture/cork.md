@@ -59,7 +59,10 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   entry there once that region is published. A region runs on through a block another region has
   an entry for: stopping there translated a function's code once, but the hot code it cut crossed
   between regions. A small leaf callee
-  is formed into each caller, for the call it saves.
+  is formed into each caller, for the call it saves. A call to a function cork knows by its bytes
+  (a compiler's helper, the C runtime's `memcpy`, `memset`, `strlen`, `sqrt` linked into the
+  program) is formed as what the function does, and made as it is where that cannot be done whole
+  ([cork's dictionary](../cork/how-it-works.md#functions-cork-knows-by-their-bytes)).
 - **The store.** A translation is keyed by the cache version, the browser's features, the memory
   layout, the bundle id, the entry address, the x87 stack top (any top for a region with no x87 in
   it) and the run's modes. Its record says what forming made of it: a 64-bit FNV hash of the
