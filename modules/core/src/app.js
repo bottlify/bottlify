@@ -849,7 +849,8 @@ export function describeEvent(payload){
             }
             if (Array.isArray(value))
             {
-                return `${key}=[${value.join(' ')}]`;
+                return `${key}=[${value.map(item=>(item !== null && typeof item === 'object'
+                    ? JSON.stringify(item) : item)).join(' ')}]`;
             }
             // A picture's bytes are not a line: a cursor told every frame
             // would fill the journal with its pixels.
