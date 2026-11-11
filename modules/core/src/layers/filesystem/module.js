@@ -6,7 +6,7 @@
 
 import { ErrorCode, fsError } from './internal/errors.js';
 import { Disposition, SeekFrom, createFileTable, createSharing } from './internal/handles.js';
-import { bytesOf, createMemoryStore } from './internal/memory-store.js';
+import { bytesOf, createMemoryStore, piecesOf } from './internal/memory-store.js';
 import { createOverlay } from './internal/tree.js';
 import {
     createDirectoryState,
@@ -54,6 +54,8 @@ const handedOut = (tree, components, path)=>{
     // Not enumerable: a copy of the entry, or one posted to another thread,
     // carries the bytes and not the store's pieces.
     Object.defineProperty(entry, 'contents', { value: contents });
+    // The bytes as the store keeps them, for a writer that takes them in parts.
+    Object.defineProperty(entry, 'pieces', { value: ()=>(whole ? [whole] : piecesOf(contents)) });
     return entry;
 };
 
