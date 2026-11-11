@@ -7807,7 +7807,7 @@ async function buildApp(options){
     kernel.refreshClockWith?.(()=>creditClock());
     // Callers parked on the guest's own queue are suspended calls too, answered
     // at the look each turn gives them.
-    kernel.hostAnsweringWith?.(()=>bridge.suspended() > idlers.length);
+    kernel.hostAnsweringWith?.(()=>bridge.waitingOnHost() > idlers.length);
 
     const breathe = createMacrotask();
     const jsSampler = options.sampleJs ? createJsSampler() : null;
@@ -8025,7 +8025,11 @@ async function buildApp(options){
                     // host. Counted before the look, when every such caller is
                     // parked rather than halfway through looking.
                     const queued = idlers.length;
-                    const onHost = Math.max(0, bridge.suspended() - queued);
+                    // A call running guest code it called back -- a window procedure,
+                    // a COM method a server's message window dispatches -- is not
+                    // one: counted, a server compiling under such a call went to
+                    // the event loop every turn and waited there longer than it ran.
+                    const onHost = Math.max(0, bridge.waitingOnHost() - queued);
                     const turnYield = pacing.yield({
                         suspended: onHost, fetching, idlers: queued, spun,
                     });

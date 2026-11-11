@@ -437,6 +437,32 @@ test('a call that builds its callback before it suspends keeps it', ()=>{
     assert.equal(made.returned(main), true, 'whose frame is still there to return to');
 });
 
+test('a call running the guest it called back waits on nothing from the host', ()=>{
+    // A server's message window dispatching a COM method: two calls out, the
+    // guest at work under both, and nothing for a run loop to wait for.
+    const main = /** @type {any} */ ({ name: 'main', stackLimit: 0x200000, stackTop: 0x300000 });
+    const worker = /** @type {any} */ ({ name: 'worker', stackLimit: 0x100000, stackTop: 0x200000 });
+    const { made } = callbacks([main, worker]);
+    made.reserve();
+    made.call({ thread: main, entry: 0x402000, args: [1, 2, 3, 4], stackAtRest: 0x2ff7e0 });
+    made.suspended(main, { name: 'USER32.dll!DispatchMessageW', restingStack: 0x2ff800,
+        hostReturn: 0x401000 });
+    made.call({ thread: main, entry: 0x403000, args: [1, 2], stackAtRest: 0x2ff100 });
+    made.suspended(main, { name: '<OleMainThreadWndProc>', restingStack: 0x2ff120,
+        hostReturn: 0x402100 });
+    made.suspended(worker, { name: 'KERNEL32.dll!ReadFile', restingStack: 0x1ff800,
+        hostReturn: 0x401000 });
+    assert.deepEqual([made.pendingCalls(), made.waitingOnHost()], [3, 1],
+        'the read waits on the host, the dispatch does not');
+
+    assert.equal(made.returned(main), true);
+    assert.equal(made.waitingOnHost(), 2, 'its method back, the dispatch waits for its answer');
+    made.finish(main, 0);
+    assert.equal(made.waitingOnHost(), 1);
+    worker.state = 'terminated';
+    assert.equal(made.waitingOnHost(), 0, 'a thread that ended waits on nothing');
+});
+
 test('a routine called back returns, for an unwinder, into the code that called the host', ()=>{
     // A 64-bit exception walk undoes the frames of a callback and lands on its
     // return into the sentinel: the guest code that goes on from there is the

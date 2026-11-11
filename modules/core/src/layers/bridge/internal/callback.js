@@ -122,6 +122,29 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     const hostCalls = thread=>(thread.hostCalls ??= []);
 
     /**
+     * The threads whose innermost host call waits on the host, not on guest
+     * code it called back: what a run loop has to hand the thread over for.
+     * A call running a callback -- a window procedure under DispatchMessage, a
+     * COM method under a server's message window -- is its thread at work,
+     * and counted as waiting it sent the loop to the event loop every turn.
+     *
+     * @type {Set<any>}
+     */
+    const onHost = new Set();
+    /** @param {any} thread @param {boolean} waits */
+    const awaitHost = (thread, waits)=>{
+        thread.awaitingHost = waits;
+        if (waits)
+        {
+            onHost.add(thread);
+        }
+        else
+        {
+            onHost.delete(thread);
+        }
+    };
+
+    /**
      * Where a thread's stack is while it is stopped: the lower of where its
      * innermost callback frame began and where its innermost suspended host
      * call left the stack.
@@ -345,7 +368,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         }
         frames.push({ frameBase, extent, settle, epoch, now });
         // Off to run guest code, whatever it was doing before.
-        thread.awaitingHost = false;
+        awaitHost(thread, false);
         return frameBase;
     }
 
@@ -446,7 +469,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // window procedure, a script's message loop inside a COM call --
             // is a wait like any other, and counted runnable it spun the park
             // loop for as long as the wait lasted.
-            thread.awaitingHost = !callingBack;
+            awaitHost(thread, !callingBack);
             // Stamped so a report can say how long it has been waiting. A call
             // that suspends and never answers stops the whole machine -- every
             // thread of it -- and from outside that is indistinguishable from a
@@ -610,7 +633,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             }
             // Back inside whatever host call was waiting for it, which has not
             // answered yet: nothing for this thread to run until it does.
-            thread.awaitingHost = hostCalls(thread).length > 0;
+            awaitHost(thread, hostCalls(thread).length > 0);
             frame.settle(cpu.readReg32('ecx') | 0);
             return true;
         },
@@ -633,7 +656,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 throw new Error('bridge: a host call finished that was never suspended');
             }
             pending--;
-            thread.awaitingHost = false;
+            awaitHost(thread, false);
             if (answered)
             {
                 const open = answered.settle;
@@ -666,7 +689,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 throw new Error('bridge: a host call finished that was never suspended');
             }
             pending--;
-            thread.awaitingHost = false;
+            awaitHost(thread, false);
             if (answered)
             {
                 const open = answered.settle;
@@ -721,7 +744,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             {
                 frames.pop();
             }
-            thread.awaitingHost = false;
+            awaitHost(thread, false);
             if (answered)
             {
                 const open = answered.settle;
@@ -743,6 +766,22 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * would spin until it gave up.
          */
         pendingCalls: ()=>pending,
+
+        /**
+         * How many threads wait on a host call's answer: the suspended calls
+         * less those whose guest code is running. A thread that ended while
+         * waiting waits on nothing.
+         */
+        waitingOnHost: ()=>{
+            for (const thread of onHost)
+            {
+                if (thread.state === 'terminated')
+                {
+                    onHost.delete(thread);
+                }
+            }
+            return onHost.size;
+        },
 
         /** The host call that suspended last, or '' when none has. */
         lastSuspended: ()=>lastSuspended,
