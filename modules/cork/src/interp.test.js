@@ -281,11 +281,11 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     const state = blockState({ memory, layout });
     // The step's fields are the object's own and the accessors its
     // prototype's: one literal holding both fell into V8's dictionary mode.
-    assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'f80Values', 'f80Words',
-        'faultEip', 'halted', 'layout', 'memory', 'ports', 'rdtsc', 'reg', 'retired', 'trapped',
-        'view', 'wasmMemory', 'x87Exact', 'x87In', 'x87Shadow', 'xmmIn', 'xmmWords']);
-    for (const accessor of ['f80', 'f80bits', 'xmm', 'top', 'empty', 'status', 'control',
-        'mxcsr', 'fsBase'])
+    assert.deepEqual(Object.keys(state).sort(), ['eflags', 'eip', 'f80Halves', 'f80Values',
+        'f80Words', 'faultEip', 'halted', 'layout', 'memory', 'ports', 'rdtsc', 'reg', 'retired',
+        'trapped', 'view', 'wasmMemory', 'x87Exact', 'x87In', 'x87Shadow', 'xmmIn', 'xmmWords']);
+    for (const accessor of ['f80', 'f80bits', 'f80words', 'xmm', 'top', 'empty', 'status',
+        'control', 'mxcsr', 'fsBase'])
     {
         assert.ok(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(state), accessor)?.get,
             `${accessor} is the prototype's`);

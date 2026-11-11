@@ -49,7 +49,7 @@ function fakeHost(){
         },
         x87State: ()=>({
             top: x87.top, empty: x87.empty, control: x87.control, status: x87.status,
-            registers: Float64Array.from(x87.registers), raw: Uint8Array.from(x87.raw),
+            registers: x87.registers.slice(), raw: Uint8Array.from(x87.raw),
         }),
         /** @param {import('./snapshot.js').X87State} state */
         restoreX87State: state=>{
@@ -141,6 +141,25 @@ test('an x87 register empty on one side and held on the other is named as such',
     assert.deepEqual(compare(a, b).map(d=>d.name), ['x87.top', 'x87.status']);
     assert.deepEqual(compare(a, b, { statusMask: 0x3800 }).map(d=>d.name), ['x87.top']);
 });
+
+test('a signalling NaN and its quiet twin in an x87 register differ, however often compared',
+    ()=>{
+        // Rounds enough for the engine to optimize the snapshot and the compare:
+        // V8 14's Maglev quiets a signalling NaN stored as a double, so a record
+        // that took a register through a number lost the difference there.
+        const host = fakeHost();
+        const words = new BigUint64Array(host.x87.registers.buffer);
+        let told = 0;
+        for (let round = 0; round < 20000; round++)
+        {
+            words[6] = 0x7ff4000000000000n;
+            const a = snapshot(host, SPANS);
+            words[6] = 0x7ffc000000000000n;
+            const b = snapshot(host, SPANS);
+            told += compare(a, b).length;
+        }
+        assert.equal(told, 20000);
+    });
 
 test('an xmm lane and mxcsr are compared as bit patterns', ()=>{
     const a = snapshot(fakeHost(), SPANS);
