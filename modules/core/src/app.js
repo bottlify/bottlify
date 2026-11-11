@@ -5578,7 +5578,7 @@ async function buildApp(options){
                  */
                 systemImage: name=>{
                     const module = byName.get(moduleKeyOf(name));
-                    return module && !module.file ? imageInMemory(memory, module) : null;
+                    return module && !module.file ? imageInMemory(/** @type {any} */ (memory), module) : null;
                 },
             },
             commandLine: options.commandLine,
