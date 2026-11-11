@@ -3387,3 +3387,60 @@ test('a 16-bit normalised target kept in floats comes back to a staging copy in 
     assert.deepEqual([...codes], [65535, 32768], 'red and green as their 16-bit codes');
     staging.resource.Unmap(0);
 });
+
+test('a 16-bit normalised texture is kept in 32-bit floats where those filter: a browser\'s'
+    + ' tier1 formats sample unfiltered alone', async()=>{
+    for (const { features, format } of [
+        { features: ['texture-formats-tier1', 'float32-filterable'], format: 'rg32float' },
+        { features: ['texture-formats-tier1'], format: 'rg16unorm' },
+    ])
+    {
+        const h = harness({ fake: { features } });
+        sampledTarget(h, DXGI_FORMAT.R16G16_UNORM, 1, D3D10_BIND.SHADER_RESOURCE);
+        assert.equal(h.gpu.of('createTexture').at(-1).descriptor.format, format,
+            features.join(', '));
+    }
+});
+
+test('a BC volume stays compressed only where the GPU has sliced-3d BC; it is decoded where not',
+    ()=>{
+        for (const { features, format } of [
+            { features: ['texture-compression-bc', 'texture-compression-bc-sliced-3d'],
+                format: 'bc1-rgba-unorm' },
+            { features: ['texture-compression-bc'], format: 'rgba8unorm' },
+        ])
+        {
+            const h = harness({ fake: { features }, compressedTextures: true });
+            /** @type {{ resource?: any }} */
+            const volume = {};
+            assert.equal(h.device.CreateTexture3D({ Width: 4, Height: 4, Depth: 4, MipLevels: 1,
+                Format: DXGI_FORMAT.BC1_UNORM, Usage: D3D10_USAGE.DEFAULT,
+                BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: 0 },
+            [{ pSysMem: new Uint8Array(32), SysMemPitch: 8, SysMemSlicePitch: 8 }], volume), S_OK);
+            const made = h.gpu.of('createTexture').filter((/** @type {any} */ call)=>
+                call.descriptor.dimension === '3d');
+            assert.deepEqual(made.map((/** @type {any} */ call)=>call.descriptor.format), [format],
+                features.join(', '));
+        }
+    });
+
+test('a frame\'s replay is timed, and how much of it waited on its pipelines', async()=>{
+    const h = harness();
+    h.device.ClearRenderTargetView(h.renderTargetView, [0, 0, 0, 1]);
+    await h.present();
+    const { replayMs, pipelineWaitMs } = h.device.diagnostics();
+    assert.equal(typeof replayMs, 'number');
+    assert.ok(pipelineWaitMs >= 0 && pipelineWaitMs <= replayMs + 1, 'the wait is part of it');
+});
+
+test('a draw\'s pipeline is built off the queue: one the device refuses loses that draw alone',
+    async()=>{
+        const h = harness({ fake: { refusePipeline: ()=>'the pipeline is refused' } });
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        h.device.Draw(3, 0);
+        await h.present();
+        const diagnostics = h.device.diagnostics();
+        assert.equal(diagnostics.skipped.pipeline, 1, 'the draw skipped');
+        assert.deepEqual(diagnostics.failures, [], 'and the frame not lost with it');
+        assert.equal(h.gpu.count('draw'), 0);
+    });

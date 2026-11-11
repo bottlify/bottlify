@@ -1146,6 +1146,24 @@ test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads b
         fns.GetLayeredWindowAttributes.argBytes], [16, 16]);
 });
 
+test('a window registers for touch that never comes; its display affinity round-trips', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    assert.equal(fns.RegisterTouchWindow.handler([hwnd, 0]), 1);
+    assert.equal(fns.RegisterTouchWindow.handler([0x1234, 0]), 0, 'not a window');
+    assert.equal(fns.IsTouchWindow.handler(), 0);
+    assert.equal(fns.GetTouchInputInfo.handler(), 0,
+        'no touch input handle was ever given');
+    assert.equal(fns.CloseTouchInputHandle.handler(), 0);
+    assert.equal(fns.UnregisterTouchWindow.handler([hwnd]), 1);
+
+    assert.equal(fns.GetWindowDisplayAffinity.handler([hwnd, 0x5000]), 1);
+    assert.equal(memory.u32(0x5000), 0, 'WDA_NONE');
+    assert.equal(fns.SetWindowDisplayAffinity.handler([hwnd, 0x11]), 1);
+    assert.equal(fns.GetWindowDisplayAffinity.handler([hwnd, 0x5000]), 1);
+    assert.equal(memory.u32(0x5000), 0x11, 'WDA_EXCLUDEFROMCAPTURE');
+    assert.equal(fns.SetWindowDisplayAffinity.handler([hwnd, 7]), 0, 'no such affinity');
+});
+
 test('UpdateLayeredWindow places a layered window and refuses one that is not', ()=>{
     const { fns, memory, hwnd, errors, divergences } = withWindow();
     const WS_EX_LAYERED = 0x00080000;

@@ -11,6 +11,7 @@
  * on one and another on the other:
  *
  *  - texture-compression-bc: DXT textures stay compressed on the GPU;
+ *  - texture-compression-bc-sliced-3d: and so do DXT volume textures;
  *  - texture-compression-astc: where there is no BC, a phone's GPU, DXT1
  *    textures stay compressed as ASTC (`internal/astc.js`);
  *  - depth-clip-control: a draw can leave depth unclipped (D3D10's
@@ -34,6 +35,7 @@
  *    pass (`internal/gputime.js`).
  */
 export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
+    'texture-compression-bc-sliced-3d',
     'texture-compression-astc', 'depth-clip-control', 'clip-distances', 'float32-filterable',
     'float32-blendable', 'depth32float-stencil8', 'texture-formats-tier1',
     'rg11b10ufloat-renderable',

@@ -32,7 +32,9 @@
 - FIFA 08 (demo)
 - FlatOut (demo)
 - FlatOut 2 (demo)
-- Half-Life (demo)
+- Grand Theft Auto: San Andreas
+- Half-Life
+- Half-Life 2 (demo)
 - Heroes of Might and Magic III (demo)
 - Hitman: Codename 47 (demo)
 - Hitman 2: Silent Assassin (demo)
@@ -76,9 +78,9 @@
 - Warcraft III (demo)
 - Warcraft III: The Frozen Throne
 - World of Goo
-- World of Warcraft: Classic (relay only)
-- World of Warcraft: The Burning Crusade (relay only)
-- World of Warcraft: Wrath of the Lich King (relay only)
+- World of Warcraft: Classic (networking required)
+- World of Warcraft: The Burning Crusade (networking required)
+- World of Warcraft: Wrath of the Lich King (networking required)
 
 ## Starts, with problems
 

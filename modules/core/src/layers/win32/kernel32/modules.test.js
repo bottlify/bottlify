@@ -480,6 +480,29 @@ test('K32EnumProcessModules hands out the image first and the bytes all of them 
     assert.equal(lastError(), 998, 'ERROR_NOACCESS');
 });
 
+test('a 64-bit process\'s module handles are quadwords, EnumProcessModulesEx\'s as its own', ()=>{
+    const { host } = hostFor({ lookup: { 'game.exe': 0x400000 } });
+    /** @type {Map<number, Uint8Array>} */
+    const written = new Map();
+    const fns = createModuleFunctions({
+        ...host,
+        pointerSize: 8,
+        list: ()=>[{ base: 0x400000, path: 'C:\\App\\game.exe' },
+            { base: 0x10000000, path: 'C:\\App\\engine.dll' }],
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
+    });
+    const u32 = (/** @type {number} */ address, at = 0)=>
+        new DataView(/** @type {Uint8Array} */ (written.get(address)).buffer).getUint32(at, true);
+    for (const name of /** @type {const} */ (['K32EnumProcessModules', 'K32EnumProcessModulesEx']))
+    {
+        written.clear();
+        assert.equal(fns[name].handler([0xffffffff, 0x500, 16, 0x600, 3]), 1);
+        assert.equal(u32(0x600), 16, `${name}: two handles of eight bytes`);
+        assert.deepEqual([0, 4, 8, 12].map(at=>u32(0x500, at)), [0x400000, 0, 0x10000000, 0]);
+    }
+});
+
 test('K32GetModuleFileNameEx and K32GetModuleBaseName answer a path and its file name', ()=>{
     const { host, lastError } = hostFor({ lookup: { 'engine.dll': 0x10000000 } });
     /** @type {Map<number, Uint8Array>} */

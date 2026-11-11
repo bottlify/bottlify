@@ -549,7 +549,7 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
     async()=>{
         const gpu = createFakeDevice();
         Object.assign(gpu.device, { queue: gpu.queue });
-        /** @type {(info: { reason: string }) => void} */
+        /** @type {(info: { reason: string, message?: string }) => void} */
         let loseDevice = ()=>{};
         Object.assign(gpu.device, { lost: new Promise(resolve=>{
             loseDevice = resolve;
@@ -595,9 +595,10 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
             await settle();
             assert.equal(posted.filter(message=>message.type === 'frame').length, 1,
                 'its frames come back to the thread that shows them, as every root\'s do');
-            loseDevice({ reason: 'unknown' });
+            loseDevice({ reason: 'unknown', message: 'the adapter went away' });
             await settle();
-            assert.deepEqual(told, [{ type: 'lost', reason: 'unknown' }],
+            assert.deepEqual(told,
+                [{ type: 'lost', reason: 'unknown', message: 'the adapter went away' }],
                 'and its devices are lost with the GPU');
             assert.ok(posted.some(message=>message.type === 'lost'));
         }

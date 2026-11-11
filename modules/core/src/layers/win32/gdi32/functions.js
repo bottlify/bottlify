@@ -5282,6 +5282,36 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * A bitmap's pixels as 32-bit BGRA, top line first, read as
+         * GetDIBits reads them -- a monochrome one's set bits white -- or
+         * null for a handle that is not a bitmap: what an icon or a cursor a
+         * program makes of two bitmaps is drawn from.
+         *
+         * @param {number} handle
+         * @returns {{ width: number, height: number, bgra: Uint8Array } | null}
+         */
+        bitmapPixels(handle){
+            const record = objects.get(handle >>> 0);
+            if (!record || record.type !== 'bitmap')
+            {
+                return null;
+            }
+            const { width, height } = record.attributes;
+            if (!(width > 0 && height > 0))
+            {
+                return null;
+            }
+            const bgra = new Uint8Array(width * height * 4);
+            const header = { size: 40, width, height: -height, planes: 1, bitCount: 32,
+                compression: 0 };
+            const written = lend(handle >>> 0, (/** @type {number} */ source)=>
+                drawing.bound(source, false)?.getDIBits(source >>> 0, {
+                    header, bits: bgra, masks: [], colors: [], startScan: 0, scanLines: height,
+                }) ?? null);
+            return written ? { width, height, bgra } : null;
+        },
+
+        /**
          * The rectangle a region object holds, or null for a handle that is
          * not a region: what user32 reads when a program names an area to
          * repaint by a region rather than by a rectangle.

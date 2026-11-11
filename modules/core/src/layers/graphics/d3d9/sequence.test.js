@@ -317,4 +317,4 @@ test('recorded: Direct3D 9 frames of lit and shader draws ask the same of the GP
 // still: the offsets bound and the bytes written moved, the bytes each draw
 // reads did not (d3d9/constant-blocks.itest.js; with `keepConstantBlocks: false`
 // these frames are 6015eaf9, fc294022, 1710935d as before).
-const EXPECTED = ['17e78fe4', '3260457f', '54e97657'];
+const EXPECTED = ['acdf54dc', '58f82fb4', 'd4e63050'];

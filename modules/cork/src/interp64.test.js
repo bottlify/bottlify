@@ -166,3 +166,36 @@ for (const window of [2 ** 33, 2 ** 34])
         }
     });
 }
+
+test('pcmpistri leaves its index in rcx, zero-extended, as a dword written in long mode', ()=>{
+    const { layout, view, state } = machine();
+    const set = 0x500000;
+    const text = 0x500100;
+    new Uint8Array(view.buffer).set(Buffer.from('b\0'), set);
+    new Uint8Array(view.buffer).set(Buffer.from('aab\0'), text);
+    // mov rcx, 0xdeadbeefffffffff; movdqu xmm0, [rdi]; pcmpistri xmm0, [rsi], 0 (equal
+    // any, bytes): the first byte of [rsi] in xmm0's set is at 2; hlt
+    new Uint8Array(view.buffer).set([0x48, 0xb9, 0xff, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde,
+        0xf3, 0x0f, 0x6f, 0x07, 0x66, 0x0f, 0x3a, 0x63, 0x06, 0x00, 0xf4], CODE);
+    view.setBigUint64(layout.regs + 7 * 8, BigInt(set), true);
+    view.setBigUint64(layout.regs + 6 * 8, BigInt(text), true);
+    state.syncIn();
+    interpret64(state, 10);
+    state.syncOut();
+    assert.equal(view.getBigUint64(layout.regs + 8, true), 2n);
+});
+
+test('crc32 over a quadword and a byte is CRC-32C: "123456789" checks to 0xE3069283', ()=>{
+    const { layout, view, state } = machine();
+    const data = 0x500000;
+    new Uint8Array(view.buffer).set(Buffer.from('123456789'), data);
+    // mov eax, -1; crc32 rax, qword [rsi]; crc32 eax, byte [rsi + 8]; not eax; hlt
+    new Uint8Array(view.buffer).set([0xb8, 0xff, 0xff, 0xff, 0xff,
+        0xf2, 0x48, 0x0f, 0x38, 0xf1, 0x06, 0xf2, 0x0f, 0x38, 0xf0, 0x46, 0x08,
+        0xf7, 0xd0, 0xf4], CODE);
+    view.setBigUint64(layout.regs + 6 * 8, BigInt(data), true);
+    state.syncIn();
+    interpret64(state, 10);
+    state.syncOut();
+    assert.equal(view.getBigUint64(layout.regs, true), 0xe3069283n);
+});

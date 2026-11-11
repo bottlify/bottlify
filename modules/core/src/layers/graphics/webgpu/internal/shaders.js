@@ -23,6 +23,7 @@
  * @param {Object} options
  * @param {import('../contract.js').GpuDeviceLike} options.device
  * @param {number} [options.ringSize]
+ * @param {() => number} [options.now]
  * @returns {any}
  */
 export function createShaderCache(options){
@@ -33,6 +34,12 @@ export function createShaderCache(options){
     let errors = 0;
     let warnings = 0;
     let builds = 0;
+    let reused = 0;
+    /** Milliseconds from a module's creation until the compiler answered, summed. */
+    let buildMs = 0;
+    const now = options.now ?? (()=>performance.now());
+    /** @type {Map<string, Promise<any>>} each shader's module, by its code */
+    const built = new Map();
 
     /** @param {any} message */
     const record = message=>{
@@ -58,41 +65,23 @@ export function createShaderCache(options){
          * @param {{ code: string, label?: string }} request
          * @returns {Promise<any>}
          */
-        async build(request){
+        build(request){
             const label = request.label === undefined ? 'shader' : request.label;
-            const module = options.device.createShaderModule({ label, code: request.code });
-            builds++;
-            const info = await module.getCompilationInfo();
-            const messages = (info && info.messages) || [];
-            /** @type {string[]} */
-            const fatal = [];
-            for (const message of messages)
+            // One module for one shader's code, however many pipelines or
+            // shader objects take it: a draw state is a pipeline, and a
+            // program may make one shader again.
+            // By the code alone: the label names the first shader that had it.
+            let made = built.get(request.code);
+            if (!made)
             {
-                record({
-                    label,
-                    type: message.type,
-                    message: message.message,
-                    lineNum: message.lineNum,
-                    linePos: message.linePos,
-                });
-                if (message.type === 'error')
-                {
-                    errors++;
-                    // The line it names, so that a report says what was refused.
-                    const line = request.code.split('\n')[message.lineNum - 1]?.trim() ?? '';
-                    fatal.push(`${message.lineNum}:${message.linePos} ${message.message}`
-                        + (line ? ` in \`${line.slice(0, 160)}\`` : ''));
-                }
-                else if (message.type === 'warning')
-                {
-                    warnings++;
-                }
+                made = compile(label, request.code);
+                built.set(request.code, made);
             }
-            if (fatal.length > 0)
+            else
             {
-                throw new Error(`Shader "${label}" was rejected: ${fatal.join('; ')}`);
+                reused++;
             }
-            return module;
+            return made;
         },
 
         /** @returns {any[]} oldest distinct message first. */
@@ -101,7 +90,51 @@ export function createShaderCache(options){
         },
 
         stats(){
-            return { builds, errors, warnings, dropped, distinct: ring.size };
+            return { builds, reused, buildMs: Math.round(buildMs), errors, warnings, dropped,
+                distinct: ring.size };
         },
     };
+
+    /**
+     * @param {string} label @param {string} code
+     * @returns {Promise<any>}
+     */
+    async function compile(label, code){
+        const request = { label, code };
+        const began = now();
+        const module = options.device.createShaderModule({ label, code: request.code });
+        builds++;
+        const info = await module.getCompilationInfo();
+        buildMs += now() - began;
+        const messages = (info && info.messages) || [];
+        /** @type {string[]} */
+        const fatal = [];
+        for (const message of messages)
+        {
+            record({
+                label,
+                type: message.type,
+                message: message.message,
+                lineNum: message.lineNum,
+                linePos: message.linePos,
+            });
+            if (message.type === 'error')
+            {
+                errors++;
+                // The line it names, so that a report says what was refused.
+                const line = request.code.split('\n')[message.lineNum - 1]?.trim() ?? '';
+                fatal.push(`${message.lineNum}:${message.linePos} ${message.message}`
+                    + (line ? ` in \`${line.slice(0, 160)}\`` : ''));
+            }
+            else if (message.type === 'warning')
+            {
+                warnings++;
+            }
+        }
+        if (fatal.length > 0)
+        {
+            throw new Error(`Shader "${label}" was rejected: ${fatal.join('; ')}`);
+        }
+        return module;
+    }
 }

@@ -1094,6 +1094,64 @@ export function createSeh64(host){
             },
 
             /**
+             * WORD RtlCaptureStackBackTrace(DWORD FramesToSkip, DWORD FramesToCapture,
+             *     PVOID *BackTrace, PDWORD BackTraceHash)
+             *
+             * The return addresses from the caller's up, each frame undone as the
+             * exception dispatch undoes it (its .pdata, or a leaf's return address);
+             * the walk stops where no frame can be undone. Each address a quadword;
+             * the hash, where asked, the sum of their low halves.
+             */
+            RtlCaptureStackBackTrace: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([skip, wanted, out, hash])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return 0;
+                    }
+                    const context = callerContext();
+                    const count = Math.min(wanted >>> 0, 0xffff);
+                    /** @type {number[]} */
+                    const frames = [];
+                    for (let depth = 0; frames.length < count && context.rip !== 0
+                        && depth < (skip >>> 0) + count; depth++)
+                    {
+                        if (depth >= (skip >>> 0))
+                        {
+                            frames.push(context.rip);
+                        }
+                        const fn = unwinder.lookup(context.rip);
+                        if (fn)
+                        {
+                            unwinder.virtualUnwind(0, fn, context.rip, context);
+                        }
+                        else if (unwinder.known(context.rip))
+                        {
+                            unwinder.unwindLeaf(context);
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                    let sum = 0;
+                    const bytes = new Uint8Array(frames.length * 8);
+                    const view = new DataView(bytes.buffer);
+                    frames.forEach((address, index)=>{
+                        view.setUint32(index * 8, address >>> 0, true);
+                        sum = (sum + address) >>> 0;
+                    });
+                    host.writeMemory(out >>> 0, bytes);
+                    if ((hash >>> 0) !== 0)
+                    {
+                        host.writeMemory(hash >>> 0, new Uint8Array(Uint32Array.of(sum).buffer));
+                    }
+                    return frames.length;
+                },
+            },
+
+            /**
              * PVOID RtlPcToFileHeader(PVOID PcValue, PVOID *BaseOfImage)
              *
              * The base of the image holding an address, written and answered;

@@ -1030,10 +1030,11 @@ class Dispatcher {
      * four in RCX, RDX, R8 and R9 -- RDX as the stub kept it, in R11, before
      * the trap spent DX -- and the rest on the stack past the return address
      * and the 32 bytes of home space the caller leaves for the four. Each
-     * argument is its slot's low dword: a handler takes dwords, and every
-     * address lies in the window below 4 GiB. A quadword or a float the
-     * function declares (`quadwords`, `floats`) is read whole into the dwords
-     * the 32-bit signature has it in.
+     * argument is its slot's low dword: a handler takes dwords. Its high dword
+     * goes into `args.high` beside it, for a handler that takes a pointer past
+     * 4 GiB whole (`pointerArg`): a wide window's image and its data lie
+     * there. A quadword or a float the function declares (`quadwords`,
+     * `floats`) is read whole into the dwords the 32-bit signature has it in.
      *
      * @param {Entry} entry @param {number} rsp
      * @returns {number} the return address at RSP
@@ -1043,13 +1044,23 @@ class Dispatcher {
         const count = entry.registerArgs + entry.stackWords;
         const registers = LONG_ARGUMENT_REGISTERS;
         const slots = entry.longSlots;
+        const high = /** @type {any} */ (args).high ??= argumentArray(count);
         if (slots === null)
         {
             for (let i = 0; i < count; i++)
             {
-                args[i] = i < 4
-                    ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[i])))
-                    : this.memory.readU32(rsp + 8 + 0x20 + (i - 4) * 8) | 0;
+                if (i < 4)
+                {
+                    const whole = this.cpu.readReg64(registers[i]);
+                    args[i] = Number(BigInt.asIntN(32, whole));
+                    high[i] = Number(BigInt.asUintN(32, whole >> 32n));
+                }
+                else
+                {
+                    const at = rsp + 8 + 0x20 + (i - 4) * 8;
+                    args[i] = this.memory.readU32(at) | 0;
+                    high[i] = this.memory.readU32(at + 4) >>> 0;
+                }
             }
             return this.memory.readU32(rsp);
         }
@@ -1064,6 +1075,7 @@ class Dispatcher {
             {
                 const at = rsp + 8 + 0x20 + (slot - 4) * 8;
                 args[word] = this.memory.readU32(at) | 0;
+                high[word] = this.memory.readU32(at + 4) >>> 0;
                 if (words === 2 && word + 1 < count)
                 {
                     args[word + 1] = this.memory.readU32(at + 4) | 0;
@@ -1082,6 +1094,7 @@ class Dispatcher {
             {
                 const whole = this.cpu.readReg64(registers[slot]);
                 args[word] = Number(BigInt.asIntN(32, whole));
+                high[word] = Number(BigInt.asUintN(32, whole >> 32n));
                 if (words === 2 && word + 1 < count)
                 {
                     args[word + 1] = Number(BigInt.asIntN(32, whole >> 32n));

@@ -80,7 +80,9 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
         v8.setFlagsFromString('--experimental-wasm-memory64');
     }
     const layout = window === undefined ? ownLayout({ ramSize, ramBase: 0, bits: 64 })
-        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window });
+        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,
+            // The code area's 4 GiB block, which its code is translated in.
+            codeBase: Math.floor((CORPUS.codeAt + codeHigh) / 2 ** 32) * 2 ** 32 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
         tablesSize(layout) + (tiered ? WASM_INTERPRETER_AREA : 0)) });
     const ram = window === undefined ? undefined : memory64(window);
@@ -434,7 +436,8 @@ export function load(m, one){
     const disp = CORPUS.codeSize - 8 - (code.length + 6);
     ram.set([0xff, 0x25, disp & 0xff, disp >>> 8 & 0xff, disp >>> 16 & 0xff, disp >>> 24],
         codeAt + code.length);
-    new DataView(ram.buffer).setBigUint64(codeAt + CORPUS.codeSize - 8, BigInt(EXIT), true);
+    new DataView(ram.buffer).setBigUint64(codeAt + CORPUS.codeSize - 8,
+        BigInt(EXIT + (layout.codeBase ?? 0)), true);
     ram.set(fill(one.seed, CORPUS.dataSize), CORPUS.dataAt + high);
     // A register pointing into an area points into it where it lies.
     const moved = (/** @type {bigint} */ value)=>[[CORPUS.dataAt, CORPUS.dataSize, high],
@@ -503,7 +506,7 @@ export function run(m, translated, budget = 7){
             throw e;
         }
         state.syncOut();
-        fault = error.eip === EXIT ? 'exit'
+        fault = error.eip === EXIT + (layout.codeBase ?? 0) ? 'exit'
             : `${error.vector}@${(error.eip ?? 0) - CORPUS.codeAt - m.codeHigh}`;
     }
     const bytes = new Uint8Array(memory.buffer);
@@ -651,6 +654,22 @@ export const HOISTED_SWITCHES = ''
     + '2749634c8df04c01e9ffe14883431003eb16486b53100548895310eb0b48317310eb0548c14b1007'
     + 'ffc681fec800000072c4eb30c7ffffffceffffffd9ffffffdfffffff43ffffff49ffffff4fffffff'
     + '58ffffff75ffffff7bffffff82ffffff89ffffff';
+
+/**
+ * MSVC's switch whose table read writes its index over, two hundred rounds: the
+ * register the jump goes through held the index a moment before.
+ *
+ *         xor esi, esi
+ *     1:  mov eax, esi; and eax, 3; cmp eax, 3; ja next; movsxd rax, eax
+ *         lea rcx, [rip + start]; mov eax, [rcx + rax*4 + table]; add rax, rcx; jmp rax
+ *     c0..c3: add [rbx], 1 / add [rbx], 10 / xor [rbx], rsi / sub [rbx], 7; jmp next
+ *     next: inc esi; cmp esi, 200; jb 1b; jmp done
+ *     table: the cases' offsets from the start
+ */
+export const OVERWRITTEN_SWITCH = ''
+    + '31f689f083e00383f803772b4863c0488d0deaffffff8b8481430000004801c8ffe0'
+    + '48830301eb0f4883030aeb09483133eb0448832b07ffc681fec800000072c1eb10'
+    + '22000000280000002e00000033000000';
 
 /**
  * Two switches whose index the block masks itself, no bound test before it,

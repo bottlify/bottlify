@@ -282,7 +282,7 @@ const hashText = (hash, text)=>{
  * @property {{ cores?: number, eager?: boolean, placement?: 'spread' | 'concentrate',
  *           gcNudge?: boolean | { everyMs?: number, bytes?: number }, grow?: boolean,
  *           executorTranslators?: { add: (index: number, reach: any) => void,
- *               remove: (index: number) => void } }} [cpu]
+ *               remove: (index: number) => void }, hostMemory?: number }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -307,6 +307,8 @@ const hashText = (hash, text)=>{
  *           nowhere else, `false` for none.
  *           `grow`: `false` gives the process its whole `memorySize` from the start
  *           instead of a memory that grows as the program is given more.
+ *           `hostMemory`: the host machine's memory in bytes, when known: a 64-bit image
+ *           past 4 GiB is given a 16 GiB window only where it is 32 GB or more.
  *           `executorTranslators`: the run's own, set for each process on the thread
  *           the run's translation pool is on: its other executors are lent workers
  *           of the pool, as its own is, instead of each opening a translator.
@@ -4094,7 +4096,12 @@ async function buildApp(options){
     // library a game ships can itself be twelve megabytes, and a library
     // placed inside the heap would be overwritten by the first large
     // allocation.
-    const mainImage = programImage(options.executable);
+    const programLoaded = programImage(options.executable, { hostMemory: options.cpu?.hostMemory });
+    // An image past 4 GiB (`wide`) lies apart from the space below, which is laid
+    // out as for an image at the 32-bit programs' base: its libraries, stacks and
+    // heap where any other process has them.
+    const mainImage = programLoaded.wide === undefined ? programLoaded
+        : { ...programLoaded, imageBase: LONG_IMAGE_BASE, sizeOfImage: 0x10000 };
     // An x86-64 program (`roadmap/x64.md`): long mode on cork, one executor,
     // its image in the window below 4 GiB.
     const long = mainImage.bits === 64;
@@ -4115,7 +4122,10 @@ async function buildApp(options){
         executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
     // Past 2 GiB the RAM is all of wasm's 4 GiB, which only a memory that grows
     // holds -- its tables inside the guest's space, not past it: 2 GiB otherwise.
-    const askedMemory = options.memorySize ?? DEFAULT_MEMORY_SIZE;
+    // A wide window's space below is the whole 2 GiB every address it gives out lies in:
+    // its RAM is the window, and the image's low dword span is cut from that heap.
+    const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
+        : options.memorySize ?? DEFAULT_MEMORY_SIZE;
     const memorySize = askedMemory > 2 ** 31 && areaFor(askedMemory) === undefined ? 2 ** 31
         : askedMemory;
     const engineArea = areaFor(memorySize);
@@ -4626,7 +4636,9 @@ async function buildApp(options){
             remoteObjects: options.system?.objects ?? null,
         },
         cpu: {
-            memorySize,
+            // An image past 4 GiB: the RAM the wide window holds, the image in it.
+            memorySize: programLoaded.wide === undefined ? memorySize
+                : programLoaded.wide.window - 4096,
             ...(engineArea ? { engineArea } : {}),
             reused: options.reusedMemory ?? undefined,
             initialStack: mainStack.initialStack,
@@ -4646,6 +4658,12 @@ async function buildApp(options){
             noExecuteBelow: 0x10000,
             executors: long ? 1 : options.cpu?.cores ?? 1,
             bits: processBits,
+            // An image past 4 GiB: the wide window, its RAM the whole of it.
+            ...programLoaded.wide === undefined ? {} : { window: programLoaded.wide.window,
+                codeBase: programLoaded.wide.codeBase,
+                // The image's low dword span: a handler's pointer into it lands there.
+                hostAlias: { at: programLoaded.imageBase % 2 ** 32,
+                    size: programLoaded.sizeOfImage } },
             eagerExecutors: options.cpu?.eager === true,
             executorTranslators: options.cpu?.executorTranslators,
             learnExecutors: options.startedBeside !== true,
@@ -5383,6 +5401,9 @@ async function buildApp(options){
                 setControlWord: word=>core.api('cpu').fpu.setControlWord(word),
                 statusWord: ()=>core.api('cpu').fpu.statusWord(),
                 clearExceptions: ()=>core.api('cpu').fpu.clearExceptions(),
+                mxcsr: ()=>core.api('cpu').fpu.mxcsr(),
+                /** @param {number} word */
+                setMxcsr: word=>core.api('cpu').fpu.setMxcsr(word),
             },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {
@@ -5778,7 +5799,7 @@ async function buildApp(options){
     const stackSize = Math.min(stackReserveOf(mainImage.stackReserve), stackRoom);
 
     memory.register({
-        name: 'entry-vector', base: entryVector, size: 4,
+        name: 'entry-vector', base: entryVector, size: long ? 8 : 4,
         kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
     });
     memory.register({
@@ -5928,7 +5949,9 @@ async function buildApp(options){
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
                 } : {
-                    target: fn.guest && !long
+                    // Guest code placed at bind time runs in a 64-bit process
+                    // too where it says it places its x86-64 there (`guestLong`).
+                    target: fn.guest && (!long || fn.guestLong)
                         ? fn.guest({
                             /** @param {string} label @param {any} trap */
                             register: (label, trap)=>bridge.register(label, trap),
@@ -6953,6 +6976,23 @@ async function buildApp(options){
         throw new Error(`image: 0x${mainImage.imageBase.toString(16)}+0x`
             + `${mainImage.sizeOfImage.toString(16)} lies in the heap and is not free there`);
     }
+    // A wide window's image past 4 GiB: its span at the low dword kept from everything
+    // else, where the host reads a pointer into the image it was handed the low half of
+    // (the cpu's `hostAlias`).
+    const aliasAt = programLoaded.wide === undefined ? null : programLoaded.imageBase % 2 ** 32;
+    if (aliasAt !== null && librarySpace.claim(aliasAt, programLoaded.sizeOfImage) !== aliasAt)
+    {
+        throw new Error(`image: its low dword's span 0x${aliasAt.toString(16)}+0x`
+            + `${programLoaded.sizeOfImage.toString(16)} is not free below 4 GiB`);
+    }
+    if (aliasAt !== null)
+    {
+        // A region of its own, so the host's accesses there pass the map; the image's
+        // pages keep their own protection at its real address.
+        memory.register({ name: 'image (low dword)', base: aliasAt,
+            size: programLoaded.sizeOfImage, kind: memory.RegionKind.RESERVED,
+            access: memory.Access.READ_WRITE_EXECUTE });
+    }
 
     // The program's activation context, before any library is looked for:
     // the assemblies its manifest names decide where some of them are, and a
@@ -7010,7 +7050,7 @@ async function buildApp(options){
         (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
-        bits: processBits, ...long ? { base: mainImage.imageBase } : {} });
+        bits: processBits, ...long ? { base: programLoaded.imageBase } : {} });
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -7374,7 +7414,17 @@ async function buildApp(options){
             return at;
         })();
 
-    memory.writeU32(entryVector, start);
+    // A quadword in long mode: a wide window's image starts past 4 GiB.
+    if (long)
+    {
+        const vector = new Uint8Array(8);
+        new DataView(vector.buffer).setBigUint64(0, BigInt(start), true);
+        memory.writeBytes(entryVector, vector);
+    }
+    else
+    {
+        memory.writeU32(entryVector, start);
+    }
 
     // What FS points at. A program reaches this in code its compiler emitted
     // rather than code anybody wrote -- a thread-local variable is an index off
@@ -7439,7 +7489,9 @@ async function buildApp(options){
             imageInHeap ? mainImage.imageBase + mainImage.sizeOfImage : 0);
         memory.reach?.(placed + (0x80000000 - SHARED_USER_DATA));
     }
-    let sharedAt = growing ? cpu.wrappedAddress(SHARED_USER_DATA) : sharedPageAt(memorySize);
+    // A wide window's RAM reaches 0x7FFE0000 itself: the page is where Windows has it.
+    let sharedAt = growing ? cpu.wrappedAddress(SHARED_USER_DATA)
+        : programLoaded.wide !== undefined ? SHARED_USER_DATA : sharedPageAt(memorySize);
     const wrapped = cpu.wrappedAddress?.(SHARED_USER_DATA) ?? null;
     if (wrapped !== null && wrapped !== sharedAt)
     {
@@ -9990,9 +10042,18 @@ const LONG_IMAGE_BASE = 0x00400000;
  * process gives out stays below 2 GiB, where a dword sign-extended to a
  * quadword is the same address.
  *
+ * One that carries no relocations stays where it was linked, past 4 GiB (a
+ * game at 0x140000000): its process runs over a wide window (`wideWindowFor`),
+ * its code the translator's in the 4 GiB block the image lies in, and every
+ * other address the process gives out below 2 GiB as before (`wide`).
+ *
  * @param {Uint8Array} executable
+ * @param {{ hostMemory?: number }} [machine]  the host's memory in bytes, which a 16 GiB
+ *     window needs 32 GB of
+ * @returns {import('./layers/loader/internal/pe.js').PeImage
+ *     & { wide?: { window: number, codeBase: number } }}
  */
-function programImage(executable){
+function programImage(executable, machine = {}){
     const image = parsePe(executable, { wide: true });
     if (image.bits !== 64 || image.imageBase + image.sizeOfImage <= 0x80000000)
     {
@@ -10000,10 +10061,40 @@ function programImage(executable){
     }
     if (!image.relocatable)
     {
-        throw new Error(`image: an x86-64 program at 0x${image.imageBase.toString(16)} that`
-            + ' carries no relocations cannot be placed below 2 GiB');
+        const window = wideWindowFor(image, machine.hostMemory);
+        if (window === null)
+        {
+            throw new Error(`image: an x86-64 program at 0x${image.imageBase.toString(16)} that`
+                + ' carries no relocations needs a window this machine cannot give it');
+        }
+        return { ...image, wide: { window, codeBase: Math.floor(image.imageBase / 2 ** 32)
+            * 2 ** 32 } };
     }
     return { ...image, imageBase: LONG_IMAGE_BASE };
+}
+
+/**
+ * The window an image past 4 GiB without relocations runs over: 8 GiB where it
+ * fits there, 16 GiB only on a host of 32 GB or more (the user's ruling: the
+ * larger memory is committed whole), its code in one 4 GiB block of it; null
+ * where none holds it.
+ *
+ * @param {{ imageBase: number, sizeOfImage: number }} image
+ * @param {number} [hostMemory]  the host's memory in bytes, when known
+ * @returns {number | null}
+ */
+export function wideWindowFor(image, hostMemory = 0){
+    const end = image.imageBase + image.sizeOfImage;
+    if (image.imageBase < 2 ** 32
+        || Math.floor(image.imageBase / 2 ** 32) !== Math.floor((end - 1) / 2 ** 32))
+    {
+        return null;
+    }
+    if (end <= 2 ** 33 - 4096)
+    {
+        return 2 ** 33;
+    }
+    return end <= 2 ** 34 - 4096 && hostMemory >= 32 * 2 ** 30 ? 2 ** 34 : null;
 }
 
 /**

@@ -65,6 +65,20 @@ export const DXGI_SWAP_CHAIN_DESC = Object.freeze({
     SIZE: 0x3c,
 });
 
+/** The same in a 64-bit process: OutputWindow an HWND, eight bytes on an eight-byte boundary. */
+export const DXGI_SWAP_CHAIN_DESC_64 = Object.freeze({
+    ...DXGI_SWAP_CHAIN_DESC,
+    OutputWindow: 0x30,
+    Windowed: 0x38,
+    SwapEffect: 0x3c,
+    Flags: 0x40,
+    SIZE: 0x48,
+});
+
+/** @param {number} [pointerSize] */
+const swapChainLayout = (pointerSize = 4)=>(pointerSize === 8 ? DXGI_SWAP_CHAIN_DESC_64
+    : DXGI_SWAP_CHAIN_DESC);
+
 /**
  * @typedef {Object} GuestMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -187,20 +201,22 @@ export function writeModeDesc(memory, address, mode){
 /**
  * @param {GuestMemory} memory
  * @param {number} address
+ * @param {number} [pointerSize]  8 in a 64-bit process (`DXGI_SWAP_CHAIN_DESC_64`)
  * @returns {SwapChainFields}
  */
-export function readSwapChainDesc(memory, address){
+export function readSwapChainDesc(memory, address, pointerSize = 4){
+    const layout = swapChainLayout(pointerSize);
     return {
-        bufferDesc: readModeDesc(memory, address + DXGI_SWAP_CHAIN_DESC.BufferDesc),
-        sampleDesc: readSampleDesc(memory, address + DXGI_SWAP_CHAIN_DESC.SampleDesc),
-        bufferUsage: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferUsage),
-        bufferCount: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferCount),
-        outputWindow: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.OutputWindow),
+        bufferDesc: readModeDesc(memory, address + layout.BufferDesc),
+        sampleDesc: readSampleDesc(memory, address + layout.SampleDesc),
+        bufferUsage: readU32(memory, address + layout.BufferUsage),
+        bufferCount: readU32(memory, address + layout.BufferCount),
+        outputWindow: readU32(memory, address + layout.OutputWindow),
         // BOOL is a 32-bit int and any non-zero value is true; a program that
         // sets it from a comparison may well pass something other than one.
-        windowed: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.Windowed) !== 0,
-        swapEffect: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.SwapEffect),
-        flags: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.Flags),
+        windowed: readU32(memory, address + layout.Windowed) !== 0,
+        swapEffect: readU32(memory, address + layout.SwapEffect),
+        flags: readU32(memory, address + layout.Flags),
     };
 }
 
@@ -208,16 +224,22 @@ export function readSwapChainDesc(memory, address){
  * @param {GuestMemory} memory
  * @param {number} address
  * @param {SwapChainFields} desc
+ * @param {number} [pointerSize]  8 in a 64-bit process, the window's high half written zero
  */
-export function writeSwapChainDesc(memory, address, desc){
-    writeModeDesc(memory, address + DXGI_SWAP_CHAIN_DESC.BufferDesc, desc.bufferDesc);
-    writeSampleDesc(memory, address + DXGI_SWAP_CHAIN_DESC.SampleDesc, desc.sampleDesc);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferUsage, desc.bufferUsage);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferCount, desc.bufferCount);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.OutputWindow, desc.outputWindow);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Windowed, desc.windowed ? 1 : 0);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.SwapEffect, desc.swapEffect);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Flags, desc.flags);
+export function writeSwapChainDesc(memory, address, desc, pointerSize = 4){
+    const layout = swapChainLayout(pointerSize);
+    if (pointerSize === 8)
+    {
+        writeU32(memory, address + layout.OutputWindow + 4, 0);
+    }
+    writeModeDesc(memory, address + layout.BufferDesc, desc.bufferDesc);
+    writeSampleDesc(memory, address + layout.SampleDesc, desc.sampleDesc);
+    writeU32(memory, address + layout.BufferUsage, desc.bufferUsage);
+    writeU32(memory, address + layout.BufferCount, desc.bufferCount);
+    writeU32(memory, address + layout.OutputWindow, desc.outputWindow);
+    writeU32(memory, address + layout.Windowed, desc.windowed ? 1 : 0);
+    writeU32(memory, address + layout.SwapEffect, desc.swapEffect);
+    writeU32(memory, address + layout.Flags, desc.flags);
 }
 
 /**

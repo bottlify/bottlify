@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { synthesiseModule, synthesiseProgram } from './synth.js';
-import { parsePe, readImports, rvaToFileOffset } from './pe.js';
+import { parsePe, readExports, readImports, rvaToFileOffset } from './pe.js';
 
 const BASE = 0x70000000;
 
@@ -162,6 +162,26 @@ test('the image parses as a PE32 module mapped at its base', ()=>{
     const section = image.sections[0];
     assert.equal(rvaToFileOffset(image, section.virtualAddress), section.virtualAddress);
 });
+
+test('a 64-bit process\'s module is PE32+: AMD64, its exports where a program walking them looks',
+    ()=>{
+        const module = synthesiseModule({ name: 'KERNEL32.dll', base: BASE, long: true,
+            exports: [{ name: 'VirtualAlloc', target: STUBS.WriteFile },
+                { name: 'ExitProcess', target: STUBS.ExitProcess }] });
+        const view = new DataView(module.bytes.buffer);
+        const pe = view.getUint32(0x3c, true);
+        assert.equal(view.getUint16(pe + 4, true), 0x8664, 'AMD64');
+        assert.equal(view.getUint16(pe + 24, true), 0x20b, 'PE32+');
+        const image = parsePe(module.bytes, { wide: true });
+        assert.equal(image.bits, 64);
+        assert.equal(image.imageBase, BASE);
+        assert.equal(image.sections.length, 1);
+        // The export directory from data directory 0 of the wider header, at 112.
+        assert.equal(view.getUint32(pe + 24 + 112, true), module.exportDirectoryRva);
+        const { exports, refused } = readExports(module.bytes, image);
+        assert.equal(refused, null);
+        assert.deepEqual(exports.map(one=>one.name).sort(), ['ExitProcess', 'VirtualAlloc']);
+    });
 
 test('data directory 0 leads to the export directory', ()=>{
     const module = kernel32();

@@ -400,7 +400,8 @@ test('each root goes with the run\'s frame bound, and the roots\' holds are summ
         await delivered();
 
         assert.deepEqual(end.diagnostics().latency, { limit: 6, counting: true, inFlight: 1,
-            peak: 7, frames: 340, held: 13, heldMs: 104, waiting: 0 });
+            peak: 7, frames: 340, held: 13, heldMs: 104, waiting: 0, timed: 0, toQueueMs: 0,
+            gpuMs: 0 });
     }
     finally
     {
@@ -444,5 +445,20 @@ test('the guest\'s RAM goes only to a root that lends from it', ()=>{
     assert.equal(opengl.lending, null);
     assert.ok(d3d9.lending, 'Direct3D 9 lends');
     assert.equal(d3d9.memory, ram, 'and is handed the RAM it lends from');
+    end.dispose();
+});
+
+test('a lost device is said as a loss with WebGPU\'s reason and message', ()=>{
+    const worker = fakeWorker();
+    /** @type {string[]} */
+    const said = [];
+    let lost = 0;
+    const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{},
+        lost: ()=>lost++,
+        divergence: (api, detail, severity)=>said.push(`${api} ${severity}: ${detail}`) });
+    worker.answer({ type: 'lost', reason: 'unknown', message: 'D3D12 device removed' });
+    assert.equal(lost, 1);
+    assert.deepEqual(said,
+        ['graphics loss: the GPU device was lost (unknown): D3D12 device removed']);
     end.dispose();
 });

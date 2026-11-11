@@ -387,7 +387,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
- * @property {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
+ * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
+ *     Uint8Array | Promise<Uint8Array>} read
  *           Short at the end of the file; empty past it, which is not an error.
  *           A promise when the bytes are not resident yet -- see ReadFile.
  * @property {(node: any, offset: number, bytes: Uint8Array) => number} write
@@ -612,10 +613,14 @@ export function withSystemLibraries(real, libraries, where = {}){
             opened.set(standIn, image);
             return standIn;
         },
-        /** @param {any} node @param {number} offset @param {number} length */
-        read: (node, offset, length)=>{
+        /**
+         * @param {any} node @param {number} offset @param {number} length
+         * @param {boolean} [onlyCopied]
+         */
+        read: (node, offset, length, onlyCopied)=>{
             const image = opened.get(node);
-            return image ? image.slice(offset, offset + length) : real.read(node, offset, length);
+            return image ? image.slice(offset, offset + length)
+                : real.read(node, offset, length, onlyCopied);
         },
         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
         write: (node, offset, bytes)=>(opened.has(node) ? 0 : real.write(node, offset, bytes)),
@@ -3408,6 +3413,34 @@ export function createFileFunctions(host){
          * dwSecurityQosFlags, then the security attributes and the template,
          * which CreateFileW does not look at either.
          */
+        /**
+         * HANDLE ReOpenFile(HANDLE hOriginalFile, DWORD dwDesiredAccess,
+         *     DWORD dwShareMode, DWORD dwFlagsAndAttributes)
+         *
+         * A handle of its own to the file another names, opened again as it stands
+         * (OPEN_EXISTING) with this access, sharing and flags -- an engine reopens
+         * a file it opened for synchronous reads to read it overlapped.
+         */
+        ReOpenFile: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([original, access, share, flags])=>{
+                const path = handlePath(original);
+                if (path === null)
+                {
+                    return fail(ERROR_INVALID_HANDLE, INVALID_HANDLE_VALUE);
+                }
+                const opened = openPath(path, { access: access >>> 0, share: share >>> 0,
+                    disposition: OPEN_EXISTING, flags: flags >>> 0 });
+                if ('error' in opened)
+                {
+                    return fail(opened.error, INVALID_HANDLE_VALUE);
+                }
+                host.setLastError(ERROR_SUCCESS);
+                return opened.handle;
+            },
+        },
+
         CreateFile2: {
             argBytes: 20,
             /** @param {number[]} args */

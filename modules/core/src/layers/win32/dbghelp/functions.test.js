@@ -50,6 +50,25 @@ test('the options are what was last set, undecorated names before that', ()=>{
     assert.equal(fns.SymCleanup.handler([-1]), 1);
 });
 
+test('the wide and 64-bit entry points a crash handler looks up: a session, its search path,'
+    + ' modules by their base, no symbol', ()=>{
+    const { fns, get, lastError } = machine();
+    assert.equal(fns.SymInitializeW.handler([-1, 0, 1]), 1);
+    assert.equal(fns.SymGetSearchPathW.handler([-1, 0x1800, 16]), 1);
+    assert.equal(get(0x1800) & 0xffff, 0, 'an empty path before one is set');
+    assert.equal(fns.SymSetSearchPathW.handler([-1, 0]), 1);
+    assert.equal(fns.SymLoadModuleExW.handler([-1, 0, 0, 0, 0x400000, 0, 0x10000, 0, 0]),
+        0x400000);
+    assert.equal(fns.SymLoadModuleExW.quadwords?.[0], 4, 'BaseOfDll a DWORD64');
+    assert.equal(fns.SymLoadModule64.handler([-1, 0, 0, 0, 0, 0, 0]), 0);
+    assert.equal(lastError(), 126, 'no base: no module');
+    assert.equal(fns.SymUnloadModule64.handler([-1, 0x400000, 0]), 1);
+    assert.equal(fns.SymRefreshModuleList.handler([-1]), 1);
+    assert.equal(fns.SymFromAddrW.handler([-1, 0x401234, 0, 0x1800, 0x1900]), 0);
+    assert.equal(lastError(), 487);
+    assert.equal(fns.SymGetLineFromAddrW64.handler([-1, 0x401234, 0, 0x1800, 0x1900]), 0);
+});
+
 test('a module is known by where it is mapped; a symbol or a line is not found', ()=>{
     const { fns, lastError } = machine();
     assert.equal(fns.SymLoadModule.handler([-1, 0, 0, 0, 0x400000, 0]), 0x400000);

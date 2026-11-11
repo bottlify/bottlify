@@ -1704,6 +1704,9 @@ export function createBackend(options){
          */
         dynamicHeld,
 
+        /** What the shader modules cost: built, reused, and the compiler's time. */
+        shaderStats: ()=>shaders.stats(),
+
         diagnostics(){
             const snapshot = profiler.snapshot();
             return {

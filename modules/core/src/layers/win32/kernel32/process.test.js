@@ -5,12 +5,14 @@
  */
 
 import { test } from 'node:test';
+import { longMachine, callLong } from '../../../../scripts/guest-code/long.mjs';
 import assert from 'node:assert/strict';
 import { TEB, TEB64 } from './teb.js';
 import { createProcessors } from './processor.js';
 import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
     queryPerformanceCounterCode, queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode,
+    queryPerformanceCounterCode64, queryPerformanceFrequencyCode64, tickCountCode64,
     tlsGetValueCode, tlsSetValueCode,
 } from './process.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from './versions.js';
@@ -1234,4 +1236,54 @@ test('GetCurrentThreadId is the field of the block the host fills with the id', 
     assert.deepEqual([...getCurrentThreadIdCode()], [0x64, 0xa1, 0x24, 0, 0, 0, 0xc3]);
     assert.ok(createProcessFunctions(fakeHost()).GetCurrentThreadId.guest,
         'offered as guest code');
+});
+
+test('the clock routines\' x86-64 answers what the i386 ones do, a null left for the trap', ()=>{
+    const m = longMachine();
+    const at = 0x100000;
+    const trap = 0x1f0000;
+    const back = 0xf00;
+    const block = 0x31000;
+    const out = 0x32000;
+    m.write(back, [0xf4]);
+    m.write(trap, [0xf4]);
+    // Each routine at an address of its own: a write does not take back what
+    // the translator made of the bytes there before.
+    /** @param {Uint8Array} code @param {bigint} pointer */
+    const call = (code, pointer)=>{
+        const place = placed.get(code) ?? at + placed.size * 0x1000;
+        if (!placed.has(code))
+        {
+            placed.set(code, place);
+            m.write(place, code);
+        }
+        callLong(m, place, { args: [pointer], returnTo: back });
+        return m.rip() - 1;
+    };
+    /** @type {Map<Uint8Array, number>} */
+    const placed = new Map();
+    const counter = queryPerformanceCounterCode64(at, trap, block);
+    m.setQuad(block + CLOCK.COUNTER, 100n);
+    m.setQuad(block + CLOCK.LAST, 7n);
+    assert.equal(call(counter, BigInt(out)), back);
+    assert.equal(m.reg('rax') & 0xffffffffn, 1n);
+    assert.deepEqual([m.quad(out), m.quad(block + CLOCK.LAST)], [100n, 100n],
+        'the counter, later than the last answer, kept as it');
+    assert.equal(call(counter, BigInt(out)), back);
+    assert.deepEqual([m.quad(out), m.quad(block + CLOCK.LAST)], [101n, 101n],
+        'the counter standing still: the last answer and one tick more');
+    m.setQuad(block + CLOCK.COUNTER, 0x1_0000_0005n);
+    call(counter, BigInt(out));
+    assert.equal(m.quad(out), 0x1_0000_0005n, 'the whole quadword');
+    assert.equal(call(counter, 0n), trap, 'a null pointer is the host\'s');
+    assert.equal(m.reg('rcx'), 0n, 'with RCX as the program passed it');
+
+    const frequency = queryPerformanceFrequencyCode64(at + 0x1000, trap, 0xfedcba98);
+    assert.equal(call(frequency, BigInt(out)), back);
+    assert.equal(m.quad(out), 0xfedcba98n, 'zero-extended, not sign-extended');
+    assert.equal(call(frequency, 0n), trap);
+
+    m.write(block + CLOCK.TICKS, [0x78, 0x56, 0x34, 0x12]);
+    assert.equal(call(tickCountCode64(block), 0n), back);
+    assert.equal(m.reg('rax') & 0xffffffffn, 0x12345678n);
 });

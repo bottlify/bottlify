@@ -261,6 +261,10 @@ function srgbTwin(format){
  * @property {boolean} [compressed]
  * @property {boolean} [depth32Stencil]
  * @property {boolean} [formatsTier1]
+ * @property {boolean} [sixteenBitStandIn]  keep the 16-bit normalised formats
+ *           in 32-bit floats even with tier1: a browser's tier1 formats sample
+ *           unfiltered alone, and a 32-bit float filters where the device has
+ *           float32-filterable
  * @property {boolean} [rg11b10Renderable]
  */
 
@@ -348,7 +352,8 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
             : kept(compressed.decoded, compressed.conversion);
     }
     const format = TEXTURE_FORMAT[typed];
-    if (SIXTEEN_BIT_NORMALISED.has(format) && options.formatsTier1 === false)
+    if (SIXTEEN_BIT_NORMALISED.has(format)
+        && (options.formatsTier1 === false || options.sixteenBitStandIn === true))
     {
         return kept(/** @type {Record<string, string>} */ (SIXTEEN_BIT_STAND_IN)[format],
             /** @type {import('./blocks.js').SixteenBit} */ (format));

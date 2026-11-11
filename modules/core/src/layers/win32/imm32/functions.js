@@ -342,6 +342,7 @@ export function createImmFunctions(host){
          * characters, and the buffer untouched.
          */
         ImmGetDescriptionA: { argBytes: 12, handler: ()=>0 },
+        ImmGetDescriptionW: { argBytes: 12, handler: ()=>0 },
 
         /**
          * DWORD ImmGetProperty(HKL hKL, DWORD fdwIndex)

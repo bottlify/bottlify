@@ -1155,6 +1155,40 @@ test('VirtualQuery on a mapped image answers MEM_IMAGE from the image base', ()=
     assert.equal(view.getUint32(buffer + MBI.Type, true), 0x1000000);
 });
 
+test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reaching the image there',
+    ()=>{
+        // A packer walks the space with `address += RegionSize` up to an image at
+        // 0x140000000: an answer with the high half dropped sent it back below 4 GiB.
+        const regions = [{ base: 0x10000, size: 0x1000 },
+            { base: 0x40000000, size: 0x20000, kind: 'reserved' },
+            { base: 0x140000000, size: 0x20000, kind: 'image' }];
+        const host = { ...regionHost(regions), pointerSize: 8,
+            mappedTop: ()=>0x140020000 };
+        const fns = createHeapFunctions(host);
+        const buffer = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        const quad = (/** @type {number} */ at)=>Number(view.getBigUint64(buffer + at, true));
+        /** @param {number} address */
+        const query = address=>fns.VirtualQuery.handler(Object.assign(
+            [address >>> 0, buffer, 48], { high: [Math.floor(address / 2 ** 32), 0, 0] }));
+
+        assert.equal(query(0x140001234), 48);
+        assert.equal(quad(0), 0x140001000, 'BaseAddress whole');
+        assert.equal(quad(8), 0x140000000, 'AllocationBase, the image\'s');
+        assert.equal(quad(24), 0x1f000, 'RegionSize to the image\'s end');
+        assert.equal(view.getUint32(buffer + 32, true), MEM_COMMIT);
+        assert.equal(view.getUint32(buffer + 40, true), 0x1000000, 'MEM_IMAGE');
+
+        assert.equal(query(0x80000000), 48);
+        assert.equal(quad(24), 0x140000000 - 0x80000000, 'the gap up to the image, in one');
+
+        assert.equal(query(0x40001000), 48);
+        assert.equal(view.getUint32(buffer + 32, true), MEM_RESERVE,
+            'a region kept from everything is reserved, not the image');
+
+        assert.equal(query(0x140030000), 0, 'past the highest region the space ends');
+    });
+
 test('VirtualQuery on a view of a section answers MEM_MAPPED, as long as the view', ()=>{
     // A program opening a section another made learns its size this way.
     const host = { ...fakeHost(),
@@ -1674,4 +1708,28 @@ test('a range kept from the program is no block of its, and the mark of what was
     const first = allocator.allocate(0x1000);
     assert.equal(allocator.handedTo(), first + 0x1000);
     assert.equal(allocator.allocateAt(0x300000, 0x1000), false, 'and it is never handed out');
+});
+
+test('the allocator keeps its free total as blocks come and go', ()=>{
+    const allocator = createHeapAllocator(ARENA);
+    /** @type {number[]} */
+    const held = [];
+    let seed = 7;
+    const next = ()=>(seed = seed * 1103515245 + 12345 >>> 0);
+    for (let step = 0; step < 2000; step++)
+    {
+        if (held.length > 0 && next() % 3 === 0)
+        {
+            allocator.free(held.splice(next() % held.length, 1)[0]);
+        }
+        else
+        {
+            const address = allocator.allocate(1 + next() % 0x3000);
+            if (address)
+            {
+                held.push(address);
+            }
+        }
+        assert.equal(allocator.freeTotal(), allocator.diagnostics().free);
+    }
 });

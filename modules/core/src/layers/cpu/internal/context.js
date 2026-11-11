@@ -40,10 +40,10 @@
  * @property {import('../engine.js').StateLayout} layout
  *
  * In long mode `reg32` holds each of the first eight registers' low dwords and
- * `eip` RIP's: a restore writes them into the low halves and leaves the upper
- * ones as the block has them, so a resume that moves the stack pointer or the
- * accumulator keeps every quadword the thread holds. Every address is below
- * 4 GiB, so the upper half of RSP and RIP is zero.
+ * `eip` RIP whole: a restore writes the registers into the low halves and
+ * leaves the upper ones as the block has them, so a resume that moves the stack
+ * pointer or the accumulator keeps every quadword the thread holds; RIP is
+ * written whole, as a wide window's image runs past 4 GiB.
  */
 
 /**
@@ -100,7 +100,9 @@ export function captureBlockContext(host, into){
     {
         context.reg32[index] = words[registers + index * stride];
     }
-    context.eip = view.getUint32(layout.eip, true) >>> 0;
+    // RIP whole in long mode: a wide window's image runs past 4 GiB.
+    context.eip = layout.bits === 64 ? Number(view.getBigUint64(layout.eip, true))
+        : view.getUint32(layout.eip, true) >>> 0;
     if (layout.bits === 64)
     {
         context.gsBase = Number(view.getBigUint64(layout.gsBase, true));
@@ -133,7 +135,15 @@ export function restoreBlockContext(host, context){
     {
         view.setBigUint64(layout.gsBase, BigInt((context.gsBase ?? 0) >>> 0), true);
     }
-    view.setUint32(layout.eip, context.eip >>> 0, true);
+    if (layout.bits === 64)
+    {
+        const rip = context.eip < 0 ? context.eip >>> 0 : context.eip;
+        view.setBigUint64(layout.eip, BigInt(rip), true);
+    }
+    else
+    {
+        view.setUint32(layout.eip, context.eip >>> 0, true);
+    }
     if (layout.previousIp >= 0)
     {
         view.setUint32(layout.previousIp, context.previousIp >>> 0, true);

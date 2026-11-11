@@ -557,7 +557,12 @@ function returnToCall(e, taken){
     {
         // Long mode's whole return address (`returnLong`), which matching the
         // call's says lies inside the window.
-        b.op(I64.extendU).localGet(Local.t64b).op(I64.eq);
+        b.op(I64.extendU);
+        if (e.layout.codeBase !== undefined)
+        {
+            b.i64const(BigInt(e.layout.codeBase)).op(I64.or);
+        }
+        b.localGet(Local.t64b).op(I64.eq);
     }
     else
     {
@@ -604,7 +609,7 @@ function predictCall(e){
     {
         if (whole)
         {
-            b.localGet(LONG_WIDE).i64const(BigInt(callee)).op(I64.eq);
+            b.localGet(LONG_WIDE).i64const(codeAddress(e, callee)).op(I64.eq);
         }
         else
         {
@@ -1261,7 +1266,7 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             if (isLong(e))
             {
-                push(e, 8, ()=>b.i64const(BigInt(next)));
+                push(e, 8, ()=>b.i64const(codeAddress(e, next)));
             }
             else
             {
@@ -1320,7 +1325,8 @@ export function emitInstruction(e, instruction, flagsLive){
                 {
                     // Pushed already: a far target leaves with rsp put back,
                     // the slot below it written as the interpreter writes it.
-                    b.localGet(LONG_WIDE).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+                    b.localGet(LONG_WIDE);
+                    outsideBlock(e);
                     e.openGuard('far', EMPTY);
                     addStack(e, 8);
                     e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
@@ -1738,6 +1744,23 @@ export function emitInstruction(e, instruction, flagsLive){
 }
 
 /**
+ * A code address as RIP holds it: the translator's, an offset in the code
+ * block, from the block's start (`codeBase`, 0 in 4 GiB).
+ *
+ * @param {E} e @param {number} at
+ */
+const codeAddress = (e, at)=>BigInt(at) + BigInt(e.layout.codeBase ?? 0);
+
+/**
+ * Pushes, as an i32, whether the i64 code address on the stack lies outside
+ * the code block (`codeBase`): its high half not the block's.
+ *
+ * @param {E} e
+ */
+const outsideBlock = e=>e.b.i64const(32n).op(I64.shrU)
+    .i64const(BigInt(e.layout.codeBase ?? 0) >> 32n).op(I64.ne);
+
+/**
  * An indirect jump's or call's target, read, as the dword EIP the region
  * keeps: in long mode one past the window leaves before the instruction,
  * for the interpreter to take it where it goes.
@@ -1750,7 +1773,8 @@ function nearTarget(e, instruction){
         return;
     }
     const { b } = e;
-    b.localTee(LONG_WIDE).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+    b.localTee(LONG_WIDE);
+    outsideBlock(e);
     e.openGuard('far', EMPTY);
     e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
     e.close();
@@ -1776,7 +1800,7 @@ function returnLong(e, instruction){
         .op(I64.wrap).localSet(Local.eip);
     for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
     {
-        b.localGet(Local.t64b).i64const(BigInt(at)).op(I64.eq);
+        b.localGet(Local.t64b).i64const(codeAddress(e, at)).op(I64.eq);
         e.openIf('return');
         addStack(e, popped);
         // Charged here for the jump, which charges what is left again.
@@ -1792,9 +1816,13 @@ function returnLong(e, instruction){
     {
         returnToCall(e, ()=>addStack(e, popped));
     }
-    b.localGet(Local.t64b).i64const(32n).op(I64.shrU).i64const(0n).op(I64.ne);
+    b.localGet(Local.t64b);
+    outsideBlock(e);
     e.openGuard('farReturn', EMPTY);
-    e.exitBefore(instruction.eip, Exit.FAULT, 13);
+    // Past the window, #GP; outside a code block (`codeBase`) but in the
+    // window, the interpreter's to take where it goes.
+    e.exitBefore(instruction.eip, e.layout.codeBase === undefined ? Exit.FAULT
+        : Exit.UNTRANSLATED, e.layout.codeBase === undefined ? 13 : 0);
     e.close();
     addStack(e, popped);
     e.charge();
@@ -2279,7 +2307,7 @@ function windowed(e, operand, store){
         || operand.segment === 4 || operand.segment === 5;
     if (!moved)
     {
-        const disp = operand.disp ?? 0;
+        const disp = (operand.disp ?? 0) + (operand.rip ? e.layout.codeBase ?? 0 : 0);
         if (disp < 0 || disp + size > (e.layout.window ?? 2 ** 32))
         {
             e.exitBefore(e.current.eip, Exit.FAULT, 13);
@@ -2343,7 +2371,7 @@ function emitAddress64(e, operand){
         }
         pushed = true;
     }
-    const disp = operand.disp ?? 0;
+    const disp = (operand.disp ?? 0) + (operand.rip ? e.layout.codeBase ?? 0 : 0);
     if (disp !== 0 || !pushed)
     {
         b.i64const(BigInt(disp));
@@ -5157,7 +5185,8 @@ function casesByEntry(e){
     const { b } = e;
     const table = e.region.blocks[e.blockIndex].exit.table;
     if (table === undefined || isLong(e) || !wrapsRead(e, false)
-        || table.address + 4 * table.entries.length > e.layout.ramSize)
+        || table.address + 4 * table.entries.length > e.layout.ramSize
+        || e.layout.window !== undefined)
     {
         return false;
     }
@@ -5218,6 +5247,24 @@ function switchCases(e){
     }
     // Charged once, at the block's depth, for every way out below.
     e.charge();
+    if (table.before !== undefined)
+    {
+        // The table's read wrote the index over (MSVC's `mov eax, [rcx + rax*4 + d];
+        // add rax, rcx; jmp rax`): the register holds the target, not the index, so
+        // the target alone picks the case, matched with each in turn.
+        // ponytail: a compare per case; a br_table on the index saved at `before`
+        // if a switch of hundreds of cases shows in a profile.
+        for (const target of cases)
+        {
+            e.markArm();
+            // Long mode's alone (`region-switch64.js`): the whole target in `LONG_WIDE`.
+            b.localGet(LONG_WIDE).i64const(codeAddress(e, target)).op(I64.eq);
+            e.openIf('case');
+            e.jumpTo(target);
+            e.close();
+        }
+        return;
+    }
     e.open('switchOut', EMPTY);
     for (let k = cases.length - 1; k >= 0; k--)
     {
@@ -5241,7 +5288,7 @@ function switchCases(e){
         e.markArm();
         if (isLong(e))
         {
-            b.localGet(LONG_WIDE).i64const(BigInt(cases[k])).op(I64.eq);
+            b.localGet(LONG_WIDE).i64const(codeAddress(e, cases[k])).op(I64.eq);
         }
         else
         {

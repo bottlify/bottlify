@@ -855,7 +855,13 @@ function storeIp(context, b, pushEip){
         pushEip();
         if (long)
         {
-            b.op(I64_EXTEND_U).store('i64', { offset });
+            // A code block's offset into RIP (`codeBase`).
+            b.op(I64_EXTEND_U);
+            if (layout.codeBase !== undefined)
+            {
+                b.i64const(BigInt(layout.codeBase)).op(0x84);
+            }
+            b.store('i64', { offset });
         }
         else
         {
@@ -4681,7 +4687,8 @@ export class RegionEmitter {
         if (table === undefined || next.instructions.length !== 1 || this.width.bits !== 32
             || this.x87.active || this.context.precise === true || !readsWrapped(this.context)
             || branch?.op !== 'ja' || compare?.op !== 'cmp'
-            || table.address + 4 * table.entries.length > this.layout.ramSize)
+            || table.address + 4 * table.entries.length > this.layout.ramSize
+        || this.layout.window !== undefined)
         {
             return false;
         }

@@ -397,6 +397,12 @@ export function createMathFunctions(host){
             }
         }
     }
+    // logf in the guest (`inguest.js`): the host answers what sets errno or is
+    // not normal, as the handler above does.
+    if (singles.logf)
+    {
+        singles.logf = guestEntry(inGuest.logf, COMPILED.logf, host, singles.logf);
+    }
 
     const guest = {
         readMemory: host.readMemory,

@@ -20,7 +20,10 @@ import {
     ID3D11DEVICE1_SLOTS, ID3D11DEVICECHILD_SLOTS, ID3D11DEVICECONTEXT_SLOTS, ID3D11DEVICE_SLOTS,
     ID3D11RESOURCEDESC_SLOTS, ID3D11VIEWDESC_SLOTS, miscFlagsIn, miscFlagsOut,
 } from './d3d11.js';
-import { IDXGIKEYEDMUTEX_SLOTS, IDXGIRESOURCE1_SLOTS, IDXGIRESOURCE_SLOTS } from './d3d10.js';
+import {
+    IDXGIDEVICE_SLOTS, IDXGIFACTORY2_SLOTS, IDXGIKEYEDMUTEX_SLOTS, IDXGIRESOURCE1_SLOTS,
+    IDXGIRESOURCE_SLOTS,
+} from './d3d10.js';
 import {
     D3D10_BIND, D3D10_USAGE, D3D_FEATURE_LEVEL, DXGI_FORMAT, E_INVALIDARG, IID, S_FALSE, S_OK,
 } from '../d3d10/constants.js';
@@ -46,7 +49,8 @@ const RELEASE = 2;
  * A flat address space, the bridge's publisher, and the seam over a recording
  * GPU: the device drawn here, or recorded and played elsewhere.
  *
- * @param {{ elsewhere?: boolean, sharedHandles?: { open: (key: number) => number,
+ * @param {{ elsewhere?: boolean, pointerSize?: 4 | 8,
+ *     sharedHandles?: { open: (key: number) => number,
  *     resolve: (handle: number) => number | null } }} [options]
  */
 function seamed(options = {}){
@@ -117,6 +121,7 @@ function seamed(options = {}){
         },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         sharedHandles: options.sharedHandles,
+        ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
     });
     /** @param {number[]} dwords */
     const place = dwords=>{
@@ -176,7 +181,7 @@ function seamed(options = {}){
             context: contextAt ? memory.readU32(contextAt) : 0,
         };
     };
-    return { memory, place, call, answer, query, create, divergences, seam };
+    return { memory, place, placeGuid, call, answer, query, create, divergences, seam };
 }
 
 test('D3D11CreateDevice answers S_FALSE asked for nothing, and makes a device of level 11.0'
@@ -363,6 +368,28 @@ for (const elsewhere of [false, true])
         assert.equal(s.memory.readU32(mappedAt + 4), 16, 'four texels a row');
     });
 }
+
+test('a 64-bit process lays its initial data and its map out whole: pointers of eight bytes',
+    async()=>{
+        const s = seamed({ pointerSize: 8 });
+        const { device, context } = s.create();
+        // D3D11_SUBRESOURCE_DATA at 64 bits: pSysMem a quadword, the pitches past it.
+        const words = s.place([10, 11, 12, 13]);
+        const initial = s.place([words, 0, 0, 0]);
+        const out = s.place([0xcccccccc, 0xcccccccc]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateBuffer'),
+            [s.place([16, D3D10_USAGE.STAGING, 0, 0x20000, 0, 0]), initial, out]), S_OK);
+        assert.equal(s.memory.readU32(out + 4), 0, 'the interface whole, its high half zero');
+        // D3D11_MAPPED_SUBRESOURCE at 64 bits: pData, then RowPitch and DepthPitch at 8.
+        const mapped = s.place([0xdeadbeef, 0xdeadbeef, 0xabab, 0xcdcd]);
+        assert.equal(await s.answer(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'Map'),
+            [s.memory.readU32(out), 0, 1, 0, mapped]) >>> 0, S_OK);
+        const at = s.memory.readU32(mapped);
+        assert.equal(s.memory.readU32(mapped + 4), 0, 'pData whole');
+        assert.deepEqual([8, 12].map(offset=>s.memory.readU32(mapped + offset)), [16, 16]);
+        assert.deepEqual([0, 1, 2, 3].map(index=>s.memory.readU32(at + 4 * index)),
+            [10, 11, 12, 13], 'the initial data read from its quadword pointer');
+    });
 
 test('a deferred map leaves the buffer as it was until its list plays, and refuses what it'
     + ' must (test_deferred_context_map, d3d11.c:33978)', async()=>{
@@ -556,3 +583,29 @@ test('a texture made shared is opened by another device through its handle: a le
 test('a shared texture is opened alike on a device recorded and played elsewhere', ()=>{
     sharedThrough(true);
 });
+
+for (const elsewhere of [false, true])
+{
+    test(`a window's swap chain from the factory its device's adapter belongs to${
+        elsewhere ? ', the device drawn elsewhere' : ''}`, ()=>{
+        const s = seamed({ elsewhere, pointerSize: 8 });
+        const { device } = s.create();
+        // As an engine finds the factory: the DXGI device, its adapter, the adapter's parent.
+        const adapterAt = s.place([0, 0]);
+        assert.equal(s.call(s.query(device, IID.IDXGIDevice), slot(IDXGIDEVICE_SLOTS,
+            'GetAdapter'), [adapterAt]), S_OK);
+        const factoryAt = s.place([0, 0]);
+        assert.equal(s.call(s.memory.readU32(adapterAt), slot(IDXGIDEVICE_SLOTS, 'GetParent'),
+            [s.placeGuid(IID.IDXGIFactory1), factoryAt]), S_OK);
+        // DXGI_SWAP_CHAIN_DESC1: 640 by 480, B8G8R8A8, one sample, a render target, two
+        // buffers, FLIP_DISCARD.
+        const desc1 = s.place([640, 480, 87, 0, 1, 0, 0x20, 2, 0, 4, 0, 0]);
+        const chainAt = s.place([0xcccccccc, 0xcccccccc]);
+        // IDXGIFactory2's method through the IDXGIFactory1 pointer, as an engine calls it:
+        // one object, its vtable the newest version's whatever it was asked as.
+        assert.equal(s.call(s.memory.readU32(factoryAt), slot(IDXGIFACTORY2_SLOTS,
+            'CreateSwapChainForHwnd'), [device, 0x1234, desc1, 0, 0, chainAt]), S_OK);
+        assert.notEqual(s.memory.readU32(chainAt), 0, 'the swap chain handed back');
+        assert.equal(s.memory.readU32(chainAt + 4), 0, 'whole');
+    });
+}

@@ -24,11 +24,11 @@
  * register held), which the region's exit writes out when one ran.
  */
 
-import { registerLocal } from './width.js';
+import { LONG_WIDE, registerLocal } from './width.js';
 import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
-import { I32 } from './flags.js';
+import { I32, I64 } from './flags.js';
 import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
 import { prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore, ram, ramAt } from './memory.js';
@@ -1555,9 +1555,30 @@ function stringCompare(e, instruction, flagsLive){
         if (op.startsWith('pcmpe'))
         {
             // |length| saturated to the element count: |INT_MIN| is past any count.
+            // In long mode the register is a quadword: its dword, or with REX.W
+            // the whole of it held to a dword's range, which saturates alike.
             const reg = registerLocal(e, length);
-            b.localGet(reg).localGet(reg).i32const(31).op(I32.shrS).op(I32.xor)
-                .localGet(reg).i32const(31).op(I32.shrS).op(I32.sub).localSet(into);
+            if (e.width.bits === 64)
+            {
+                if (((instruction.prefixes.rex ?? 0) & 8) !== 0)
+                {
+                    b.localGet(reg).i64const(-(2n ** 31n)).localGet(reg).i64const(-(2n ** 31n))
+                        .op(I64.gtS).select();
+                    b.localTee(LONG_WIDE).i64const(2n ** 31n - 1n).localGet(LONG_WIDE)
+                        .i64const(2n ** 31n - 1n).op(I64.ltS).select();
+                }
+                else
+                {
+                    b.localGet(reg);
+                }
+                b.op(I64.wrap).localSet(into);
+            }
+            else
+            {
+                b.localGet(reg).localSet(into);
+            }
+            b.localGet(into).localGet(into).i32const(31).op(I32.shrS).op(I32.xor)
+                .localGet(into).i32const(31).op(I32.shrS).op(I32.sub).localSet(into);
             b.localGet(into).i32const(n).localGet(into).i32const(n).op(0x4d) // i32.le_u
                 .select();
             b.localSet(into);

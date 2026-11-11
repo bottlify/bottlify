@@ -67,3 +67,15 @@ export function pointerWidth(size = 4){
     widths.set(size, width);
     return width;
 }
+
+/**
+ * A pointer argument whole: its low dword, which every handler is given, and
+ * the high one a 64-bit call carries beside it (the bridge's `args.high`). A
+ * wide window's image and its data lie past 4 GiB (cork's `wideLayout`); in a
+ * 32-bit process, or a 64-bit one in 4 GiB, the high half is zero and this is
+ * the low dword unsigned.
+ *
+ * @param {number[] & { high?: number[] }} args @param {number} index
+ */
+export const pointerArg = (args, index)=>(args.high?.[index] ?? 0) * 2 ** 32
+    + (args[index] >>> 0);

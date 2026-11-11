@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
-import { createVolume, FETCHED_PIECE_BYTES, MISS_FETCHES } from './vfs.js';
+import { createVolume, FETCHED_PIECE_BYTES, KEPT_READ_MIN, MISS_FETCHES } from './vfs.js';
 
 async function volume(){
     const fs = await filesystemModule.create({});
@@ -539,4 +539,48 @@ test('a name renamed to itself in other letters is respelled, its contents kept'
     assert.equal(vol.rename('C:\\Dir', 'C:\\DIR'), true);
     assert.deepEqual(vol.list('C:\\', 'd*').map((/** @type {any} */ entry)=>entry.name), ['DIR']);
     assert.equal(vol.stat('C:\\dir\\f')?.exists, true, 'what was in it, still in it');
+});
+
+test('a large read of an unchanged file is kept; a write makes the next one fresh', async()=>{
+    // An engine maps its executable whole hundreds of times while it loads;
+    // each map decoded the file's blocks again. What tells a kept copy is
+    // still the file is its identity, size and last write.
+    const fs = await filesystemModule.create({});
+    let reads = 0;
+    const counted = Object.create(fs);
+    counted.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        reads++;
+        return fs.read(node, length);
+    };
+    const vol = /** @type {any} */ (createVolume(counted));
+    const size = KEPT_READ_MIN * 2;
+    const path = 'C:\\game.exe';
+    const node = vol.open(path, { read: true, write: true, create: true });
+    vol.write(node, 0, new Uint8Array(size).fill(1));
+    const settled = ()=>vol.setModified(path, Date.now() - 60000);
+    settled();
+
+    const first = vol.read(node, 0, size);
+    first[0] = 7;
+    assert.equal(vol.read(node, 0, size)[0], 1,
+        'a caller writing into its copy changes nothing kept');
+    assert.equal(reads, 1, 'the second read was the kept one');
+    vol.read(node, 0, 100);
+    assert.equal(reads, 2, 'a small read is not kept');
+    assert.equal(vol.read(node, 0, size, true), vol.read(node, 0, size, true),
+        'a reader that only copies out gets the kept bytes themselves');
+
+    vol.write(node, 0, new Uint8Array([5]));
+    assert.equal(vol.read(node, 0, size)[0], 5, 'written moments ago: read fresh');
+    assert.equal(vol.read(node, 0, size)[0], 5);
+    assert.equal(reads, 4, 'and not kept while its stamp is that young');
+    settled();
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    assert.equal(reads, 5, 'settled again: kept again');
+    const section = vol.section(node, 'readonly');
+    vol.read(section, 0, size);
+    assert.equal(reads, 5, 'a section\'s own hold on the file reads what is kept');
+    vol.close(section);
+    vol.close(node);
 });

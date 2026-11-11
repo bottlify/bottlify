@@ -174,7 +174,7 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
         framesFrom: {}, uploadsFrom: { unnamed: 1 }, layers: [], composes: false,
         // No queue was handed over, so nothing is counted against the bound.
         latency: { limit: 3, counting: false, inFlight: 0, peak: 0, frames: 0, held: 0,
-            heldMs: 0, waiting: 0 },
+            heldMs: 0, waiting: 0, timed: 0, toQueueMs: 0, gpuMs: 0 },
     });
 
     h.presenter.present(surface);

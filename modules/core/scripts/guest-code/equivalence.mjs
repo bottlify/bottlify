@@ -293,11 +293,24 @@ export function equivalence(compiled, sources, model, long){
             const handed = `${what} handed to the host`;
             assert.equal(m.reg('rsp'), BigInt(STACK_64), `${handed}: RSP at the return address`);
             assert.equal(m.quad(STACK_64), BigInt(HALT), `${handed}: the return address kept`);
-            // The registers that carry arguments, and those a callee keeps.
-            const owed = [...['rcx', 'rdx', 'r8', 'r9'].slice(0, fn.params.length), ...KEPT_64];
+            // The registers that carry arguments, and those a callee keeps:
+            // an integer's register, or a double's or a float's XMM register
+            // of its place, which the trap reads it from.
+            const places = fn.params.slice(0, 4);
+            const owed = [...['rcx', 'rdx', 'r8', 'r9'].slice(0, places.length)
+                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'), ...KEPT_64];
             assert.deepEqual(Object.fromEntries(owed.map(reg=>[reg, m.reg(reg)])),
                 Object.fromEntries(owed.map(reg=>[reg, entry[reg]])),
                 `${handed}: the argument registers and the kept ones as the call left them`);
+            places.forEach((type, i)=>{
+                if (type === 'f64' || type === 'f32')
+                {
+                    const size = type === 'f64' ? 8 : 4;
+                    assert.deepEqual(Array.from(m.xmm(i).slice(0, size)),
+                        Array.from(xmm[i].slice(0, size)),
+                        `${handed}: XMM${i} as the call left it`);
+                }
+            });
             assert.deepEqual(slots.map((_, i)=>m.quad(STACK_64 + 40 + i * 8)), slots,
                 `${handed}: the stack's arguments kept`);
             assert.equal(df, false, `${handed}: the direction flag clear`);
@@ -314,8 +327,18 @@ export function equivalence(compiled, sources, model, long){
             }
             const memory = new Uint8Array(1 << 20);
             memory.set(data, DATA);
-            // What the trap reads: the low half of each argument.
-            const answer = double.host(memory, args.map(arg=>Number(BigInt.asUintN(32, arg))), []);
+            // What the trap reads, as the bridge lays it out for the handler:
+            // an integer's low half, a double's two dwords and a float's one
+            // out of the XMM register of its place among the first four.
+            const trapWords = fn.params.flatMap((type, i)=>{
+                const bits = i < 4 && (type === 'f64' || type === 'f32')
+                    ? new DataView(xmm[i].buffer, xmm[i].byteOffset).getBigUint64(0, true)
+                    : BigInt(args[i] ?? 0n);
+                return type === 'f64'
+                    ? [Number(BigInt.asUintN(32, bits)), Number(BigInt.asUintN(32, bits >> 32n))]
+                    : [Number(BigInt.asUintN(32, bits))];
+            });
+            const answer = double.host(memory, trapWords, []);
             // The trap answers as the bridge does: the dword extended by its sign.
             return {
                 rax: BigInt.asUintN(64, BigInt(typeof answer === 'number' ? answer | 0 : 0)),

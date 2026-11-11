@@ -117,7 +117,7 @@ test('a bound of zero, or a queue that cannot say when work is done, holds nothi
         await drain();
         assert.deepEqual(unbounded.latency.diagnostics(), {
             limit: 0, counting: true, inFlight: 20, peak: 20, frames: 20, held: 0, heldMs: 0,
-            waiting: 0,
+            waiting: 0, timed: 0, toQueueMs: 0, gpuMs: 0,
         }, 'the frames are still counted, so how far behind the device is can be read');
 
         const silent = createFrameLatency({ queue: createFakeDevice().queue });
@@ -198,15 +198,15 @@ test('the diagnostics say how far behind the device is and how often a call wait
         await drain();
         assert.deepEqual(latency.diagnostics(), {
             limit: 2, counting: true, inFlight: 3, peak: 3, frames: 3, held: 1, heldMs: 0,
-            waiting: 1,
+            waiting: 1, timed: 0, toQueueMs: 0, gpuMs: 0,
         });
         clock = 25;
         gpu.finish();
         await drain();
         assert.deepEqual(latency.diagnostics(), {
             limit: 2, counting: true, inFlight: 0, peak: 3, frames: 3, held: 1, heldMs: 25,
-            waiting: 0,
-        });
+            waiting: 0, timed: 3, toQueueMs: 0, gpuMs: 25,
+        }, 'and where the finished frames\' time went: all of it the GPU\'s');
     });
 
 test('a finished frame is timed to its queue and on the GPU, a backed-up queue counted once',

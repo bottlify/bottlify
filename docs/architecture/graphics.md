@@ -129,6 +129,9 @@ flowchart TB
   thirty-two bits a channel as half floats (`rgba16float`, `rg16float`, `r16float`), the formats
   every WebGPU device filters and blends; DXT-compressed ones are decoded on the CPU by
   default (`graphics.compressedTextures` in [`core/configuration.md`](../core/configuration.md#graphics)).
+  In Direct3D 10 and 11 a DXT volume stays compressed only where the GPU has
+  `texture-compression-bc-sliced-3d`, and a 16-bit normalised texture is kept in 32-bit floats
+  where those filter: a browser samples its 16-bit normalised formats unfiltered alone.
 - **Windows on surfaces of their own.** Inside a process the screen is composed as Windows 7's
   desktop window manager composes it (`graphics/gdi/screen.js`): each top-level window draws on a
   surface of its own, unclipped by the other top-level windows, and the screen is the desktop's

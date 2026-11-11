@@ -29,6 +29,11 @@ const COFF_DLL = 0x2000;
 const COFF_RELOCS_STRIPPED = 0x0001;
 
 const OPTIONAL_HEADER_SIZE = 0xe0;
+/** A 64-bit module's (PE32+): AMD64, its optional header the wider one. */
+const MACHINE_AMD64 = 0x8664;
+const PE32_PLUS_MAGIC = 0x020b;
+const OPTIONAL_HEADER_SIZE_PLUS = 0xf0;
+const COFF_LARGE_ADDRESS_AWARE = 0x0020;
 const SUBSYSTEM_CONSOLE = 3;
 const SUBSYSTEM_WINDOWS_GUI = 2;
 /** What a program's linker asks for by default: a megabyte of stack, and of heap. */
@@ -224,7 +229,7 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
 
     writeHeaders(bytes, view, {
         base, size, sectionSize, dataRva, dataSize,
-        exportDirectoryRva, exportDirectorySize, entryPointRva,
+        exportDirectoryRva, exportDirectorySize, entryPointRva, long,
     });
 
     exports.forEach((entry, index)=>{
@@ -472,6 +477,8 @@ function assignOrdinals(exports){
  * @param {number} layout.exportDirectoryRva
  * @param {number} layout.exportDirectorySize
  * @param {number} layout.entryPointRva
+ * @param {boolean} [layout.long]  a 64-bit process's module: PE32+, as the program
+ *     that walks its headers itself (a packer finding its imports) reads them
  * @param {{ base: number, importDirectoryRva: number, importDirectorySize: number,
  *     iatRva: number, iatSize: number }} [layout.program]
  *     A program rather than a library: loaded at `base` as an executable is,
@@ -485,14 +492,39 @@ function writeHeaders(bytes, view, layout){
     view.setUint32(PE_OFFSET, PE_SIGNATURE, true);
 
     const coff = PE_OFFSET + 4;
-    view.setUint16(coff, MACHINE_I386, true);
+    const plus = layout.long === true && !layout.program;
+    view.setUint16(coff, plus ? MACHINE_AMD64 : MACHINE_I386, true);
     view.setUint16(coff + 2, layout.dataRva === 0 ? 1 : 2, true); // NumberOfSections
-    view.setUint16(coff + 16, OPTIONAL_HEADER_SIZE, true);
+    view.setUint16(coff + 16, plus ? OPTIONAL_HEADER_SIZE_PLUS : OPTIONAL_HEADER_SIZE, true);
     view.setUint16(coff + 18, layout.program
         ? COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_RELOCS_STRIPPED
-        : COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_DLL, true);
+        : COFF_EXECUTABLE_IMAGE | (plus ? COFF_LARGE_ADDRESS_AWARE : COFF_32BIT_MACHINE)
+            | COFF_DLL, true);
 
     const optional = coff + 20;
+    if (plus)
+    {
+        // PE32+: no BaseOfData, ImageBase a quadword at 24, the sizes of the stack
+        // and heap quadwords, the data directories from 112.
+        view.setUint16(optional, PE32_PLUS_MAGIC, true);
+        view.setUint32(optional + 4, rawSize, true); // SizeOfCode
+        view.setUint32(optional + 8, align(layout.dataSize, PAGE), true); // SizeOfInitializedData
+        view.setUint32(optional + 16, layout.entryPointRva, true); // AddressOfEntryPoint
+        view.setUint32(optional + 20, SECTION_RVA, true); // BaseOfCode
+        view.setBigUint64(optional + 24, BigInt(layout.base), true); // ImageBase
+        view.setUint32(optional + 32, PAGE, true); // SectionAlignment
+        view.setUint32(optional + 36, PAGE, true); // FileAlignment
+        view.setUint16(optional + 40, 6, true); // MajorOperatingSystemVersion
+        view.setUint16(optional + 48, 6, true); // MajorSubsystemVersion
+        view.setUint32(optional + 56, layout.size, true); // SizeOfImage
+        view.setUint32(optional + 60, HEADERS_SIZE, true); // SizeOfHeaders
+        view.setUint16(optional + 68, SUBSYSTEM_CONSOLE, true);
+        view.setUint32(optional + 108, 16, true); // NumberOfRvaAndSizes
+        view.setUint32(optional + 112, layout.exportDirectoryRva, true);
+        view.setUint32(optional + 116, layout.exportDirectorySize, true);
+        writeSections(bytes, view, layout, optional + OPTIONAL_HEADER_SIZE_PLUS, rawSize);
+        return;
+    }
     view.setUint16(optional, PE32_MAGIC, true);
     view.setUint32(optional + 4, rawSize, true); // SizeOfCode
     view.setUint32(optional + 8, align(layout.dataSize, PAGE), true); // SizeOfInitializedData
@@ -524,7 +556,17 @@ function writeHeaders(bytes, view, layout){
         view.setUint32(optional + 196, layout.program.iatSize, true);
     }
 
-    const section = optional + OPTIONAL_HEADER_SIZE;
+    writeSections(bytes, view, layout, optional + OPTIONAL_HEADER_SIZE, rawSize);
+}
+
+/**
+ * The section table, after the optional header of either width.
+ *
+ * @param {Uint8Array} bytes @param {DataView} view
+ * @param {{ sectionSize: number, dataRva: number, dataSize: number }} layout
+ * @param {number} section  where the table starts @param {number} rawSize
+ */
+function writeSections(bytes, view, layout, section, rawSize){
     bytes.set(encoder.encode('.text'), section);
     view.setUint32(section + 8, layout.sectionSize, true); // VirtualSize
     view.setUint32(section + 12, SECTION_RVA, true);

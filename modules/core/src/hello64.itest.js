@@ -14,6 +14,7 @@
  */
 
 import { test } from 'node:test';
+import v8 from 'node:v8';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
@@ -56,3 +57,25 @@ test('fed every slice, as a program that presents frames is, a 64-bit process\'s
     const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
     assert.ok(cpu.metrics.cork.regions > 0, 'the shared runtime translated it');
 });
+
+test('linked at 0x140000000 with no relocations, it runs there, over an 8 GiB window',
+    { timeout: 120000 }, async t=>{
+        v8.setFlagsFromString('--experimental-wasm-memory64');
+        // The fixture as a 64-bit game ships: its relocations stripped, its base fixed.
+        const bytes = new Uint8Array(await readFile(FIXTURE));
+        const view = new DataView(bytes.buffer);
+        const pe = view.getUint32(0x3c, true);
+        const optional = pe + 24;
+        assert.equal(view.getBigUint64(optional + 24, true), 0x140000000n);
+        view.setUint16(pe + 22, view.getUint16(pe + 22, true) | 1, true); // RELOCS_STRIPPED
+        view.setBigUint64(optional + 112 + 5 * 8, 0n, true); // no base relocation directory
+        view.setUint16(optional + 70, view.getUint16(optional + 70, true) & ~0x40, true);
+        const app = await createApp({ executable: bytes });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
+        const code = await app.run({ timeoutMs: 100000 });
+        assert.equal(output.join(''), 'hello from x64, fib(25)=75025\n');
+        assert.equal(code, 0);
+    });

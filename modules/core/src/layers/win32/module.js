@@ -36,6 +36,7 @@ import { createActivationContexts } from './kernel32/actctx.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createBcryptFunctions, createBcryptPrimitivesFunctions } from './bcrypt/functions.js';
+import { createGdiplusFunctions } from './gdiplus/functions.js';
 import { createNcryptFunctions, createSecur32Functions } from './secur32/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
@@ -104,6 +105,7 @@ import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerMsxmlClasses } from './msxml/dom.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
+import { registerMmDevApiClasses } from './ole32/mmdevapi.js';
 import { createWindowscodecs, gdiPixels } from './windowscodecs/functions.js';
 import { registerJScriptClass } from './jscript/active-script.js';
 import { registerVBScriptClass } from './vbscript/active-script.js';
@@ -337,6 +339,13 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 /** Every right a token has, which a service asks of the user's token for its programs. */
 const TOKEN_ALL_ACCESS = 0x000f01ff;
+
+/**
+ * The nvapi interfaces there are, by the id nvapi_QueryInterface is asked
+ * with (the SDK's nvapi_interface.h): a start and an end that succeed, and
+ * nothing between them, every other id absent.
+ */
+const NVAPI_INTERFACES = new Map([[0x0150e828, 'NvAPI_Initialize'], [0xd22bdd7e, 'NvAPI_Unload']]);
 
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
@@ -708,6 +717,26 @@ export function createWin32Module(){
                 find: ()=>null, byBase: ()=>null, imagePath: ()=>'',
             };
             const idle = config?.idle ?? (()=>Promise.resolve());
+            /**
+             * nvapi under its name: the library a program links for it starts
+             * the driver's interface, and loads it again at every call while
+             * that fails.
+             *
+             * @param {string} name
+             */
+            const nvapi = name=>({
+                /** void *nvapi_QueryInterface(unsigned int id) */
+                nvapi_QueryInterface: { argBytes: 4, convention: 'cdecl',
+                    /** @param {number[]} args */
+                    handler: ([id])=>{
+                        const found = NVAPI_INTERFACES.get(id >>> 0);
+                        return found ? /** @type {any} */ (modules.find(name))?.addressOf(found) ?? 0
+                            : 0;
+                    } },
+                // NVAPI_OK: started, and nothing it offers.
+                NvAPI_Initialize: { argBytes: 0, convention: 'cdecl', handler: ()=>0 },
+                NvAPI_Unload: { argBytes: 0, convention: 'cdecl', handler: ()=>0 },
+            });
 
             const readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>
                 memory.readBytes(address, length);
@@ -2091,6 +2120,12 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
+            // The audio endpoints a program walks to find the device it plays to.
+            registerMmDevApiClasses({
+                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                pointerSize, divergence: config?.divergence,
+            });
+
             // DirectPlay's session and lobby objects, which a program makes
             // through COM as often as through dplayx's exports.
             /** @type {import('./dplayx/session.js').SessionHost} */
@@ -2636,6 +2671,8 @@ export function createWin32Module(){
                         regionAt: address=>memory.find(address),
                         /** @param {number} address */
                         nextRegionAfter: address=>memory.nextRegionAfter(address) ?? null,
+                        mappedTop: ()=>memory.list().reduce((/** @type {number} */ top,
+                            /** @type {any} */ region)=>Math.max(top, region.base + region.size), 0),
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,
@@ -2855,7 +2892,9 @@ export function createWin32Module(){
                              *
                              * @param {any} node @param {number} offset @param {number} length
                              */
-                            read: (node, offset, length)=>volume.read(node, offset, length),
+                            // Copied into the view and never written into: a
+                            // kept read comes as it is.
+                            read: (node, offset, length)=>volume.read(node, offset, length, true),
                             /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                             write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                             /** @param {any} node */
@@ -3043,6 +3082,7 @@ export function createWin32Module(){
                     ...seh64 ? seh64.table : {},
                     ...createModuleFunctions({
                         readCString,
+                        pointerSize,
                         readWideString,
                         writeMemory,
                         readMemory,
@@ -3625,6 +3665,7 @@ export function createWin32Module(){
                 'DBGHELP.dll': createDbghelpFunctions({
                     writeMemory, readMemory, files: volume, setRegisters,
                     readCString: (/** @type {number} */ address)=>readCString(address, 260),
+                    readWide: (/** @type {number} */ address)=>readWideString(address, 260 * 2),
                     modules: ()=>modules.list?.() ?? [],
                     setLastError: setError,
                 }),
@@ -3676,6 +3717,11 @@ export function createWin32Module(){
                 'pdh.dll': createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
                 'bcrypt.dll': createBcryptFunctions({ writeMemory, readMemory }),
+                // GDI+'s bitmaps over guest memory; its codecs and drawing say they are not here.
+                'gdiplus.dll': createGdiplusFunctions({ writeMemory, readMemory, pointerSize,
+                    allocate: bytes=>allocator.allocate(bytes),
+                    free: address=>allocator.free(address),
+                    divergence: config?.divergence }),
                 // The per-process generator under it, which a browser imports
                 // and then finds by GetModuleHandle: it must be a module.
                 // The Windows Runtime's start and strings, and no class of it:
@@ -3691,6 +3737,19 @@ export function createWin32Module(){
                     setLastError: setError }),
                 'ncrypt.dll': createNcryptFunctions({ writeMemory, readMemory,
                     setLastError: setError }),
+
+                // Libraries every Windows has and nothing here calls into: a
+                // program loads them to learn whether LoadLibraryEx searches
+                // System32 alone, and asks again on every call while they fail.
+                // The display driver's interface, there because the adapter is
+                // NVIDIA's: it offers no function, so a program takes the path
+                // it takes on a driver without the one it asks for. Missing,
+                // the library linked into a program loads it at every call.
+                'nvapi.dll': nvapi('nvapi.dll'),
+                'nvapi64.dll': nvapi('nvapi64.dll'),
+                'cryptbase.dll': {},
+                'cryptnet.dll': {},
+                'msasn1.dll': {},
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
                 'faultrep.dll': createFaultrepFunctions(),
@@ -4678,6 +4737,9 @@ export function createWin32Module(){
                     // A bitmap's size, for a caret drawn in it and an icon made from it.
                     /** @param {number} bitmap */
                     bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+                    // And its pixels, which an icon or a cursor made of it is drawn from.
+                    /** @param {number} bitmap */
+                    bitmapPixels: bitmap=>gdi.bitmapPixels(bitmap),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands

@@ -19,6 +19,7 @@
  * about.
  */
 
+import { pointerArg } from '../common/pointers.js';
 import { askChild } from './cross-process.js';
 import {
     globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
@@ -542,6 +543,8 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
      * committed page is a promise the first touch collects on.
      */
     let handedTo = base;
+    /** What the free spans hold, kept as they change: a program asks every frame. */
+    let freeBytes = 0;
 
     /** @param {number} spanBase @param {number} spanSize */
     const insert = (spanBase, spanSize)=>{
@@ -551,6 +554,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
         byBase.set(spanBase, span);
         byEnd.set(spanBase + spanSize, span);
         liveSpans++;
+        freeBytes += spanSize;
     };
 
     /** @param {FreeSpan} span */
@@ -565,6 +569,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
         byBase.set(span.base, null);
         byEnd.set(span.base + span.size, null);
         liveSpans--;
+        freeBytes -= span.size;
         forget();
     };
 
@@ -833,6 +838,9 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
          */
         handedTo: ()=>handedTo,
 
+        /** The free spans' total, without walking them. */
+        freeTotal: ()=>freeBytes,
+
         diagnostics(){
             let used = 0;
             for (const block of live.values())
@@ -909,6 +917,9 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  *           The memory layer's region map, when the assembling caller wired one.
  *           A region of kind `image` is answered as MEM_IMAGE.
  *           Without it VirtualQuery knows only the arena.
+ * @property {() => number} [mappedTop]  One past the highest region mapped: a 64-bit
+ *           process's space reaches past an image placed above 4 GiB, where VirtualQuery
+ *           answers it.
  * @property {(address: number) => { base: number, size: number } | null} [nextRegionAfter]
  *           The mapped region with the lowest base above an address, when the
  *           assembling caller wired one. VirtualQuery uses it to coalesce a
@@ -950,12 +961,16 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
 export function createHeapFunctions(host){
     const MEMORY_BASIC_INFORMATION = memoryBasicInformation(host.pointerSize);
     /** This process's user address space's end, read when asked (`userSpaceTop`). */
-    const spaceTop = ()=>userSpaceTop(host.arena);
+    const spaceTop = ()=>Math.max(userSpaceTop(host.arena),
+        host.pointerSize === 8 && host.mappedTop ? host.mappedTop() + 0x10000 : 0);
     // One allocator for the whole arena, whoever asks. The caller may bring its
     // own so that everything guest memory is handed out from -- the heap, a DIB
     // section, COM task memory -- comes from the same free list rather than from
     // arenas carved up in advance into sizes nobody can predict.
     const allocator = host.allocator ?? createHeapAllocator(host.arena);
+    /** The arena's free bytes; a wrapped allocator without the running total walks its spans. */
+    const freeInArena = ()=>(/** @type {any} */ (allocator).freeTotal?.()
+        ?? allocator.diagnostics().free);
     /** The most the arena has had handed out at any GetProcessMemoryInfo. */
     let peakUsed = 0;
 
@@ -1311,7 +1326,8 @@ export function createHeapFunctions(host){
      * @returns {[number, number, number, number, number, number, number]}
      */
     const regionAnswer = at=>{
-        const page = (at & ~(PAGE_SIZE - 1)) >>> 0;
+        // Not masked: a 64-bit process's address runs past 32 bits.
+        const page = at - at % PAGE_SIZE;
         const arenaEnd = host.arena.base + host.arena.size;
         const inArena = page >= host.arena.base && page < arenaEnd;
         const region = inArena ? null : host.regionAt ? host.regionAt(at) : null;
@@ -1329,6 +1345,13 @@ export function createHeapFunctions(host){
         if (inArena)
         {
             return arenaAnswer(page, arenaEnd);
+        }
+        if (region && region.kind === 'reserved')
+        {
+            // Kept from everything (a wide window's image's low dword span): reserved,
+            // nothing the program may touch.
+            return [page, region.base, PAGE_NOACCESS, region.base + region.size - page,
+                MEM_RESERVE, 0, MEM_PRIVATE];
         }
         if (region && region.kind === 'image')
         {
@@ -2591,13 +2614,15 @@ export function createHeapFunctions(host){
         VirtualQuery: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([address, buffer, length])=>{
+            handler: args=>{
+                const [, buffer, length] = args;
                 if (buffer === 0 || (length >>> 0) < MEMORY_BASIC_INFORMATION.SIZE)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const at = address >>> 0;
+                // Whole: a walk past 4 GiB that came back with the low half would go round.
+                const at = pointerArg(args, 0);
                 if (at >= spaceTop())
                 {
                     // Windows refuses a query at or above lpMaximumApplicationAddress
@@ -2611,11 +2636,19 @@ export function createHeapFunctions(host){
                 const view = new DataView(data.buffer);
                 const [base, allocationBase, allocationProtect, size, state, protect, type]
                     = answer;
-                view.setUint32(MEMORY_BASIC_INFORMATION.BaseAddress, base, true);
-                view.setUint32(MEMORY_BASIC_INFORMATION.AllocationBase, allocationBase, true);
+                /** A pointer-sized field whole: a quadword's high half past 4 GiB. */
+                const sized = (/** @type {number} */ offset, /** @type {number} */ value)=>{
+                    view.setUint32(offset, value >>> 0, true);
+                    if (MEMORY_BASIC_INFORMATION.SIZE === 48)
+                    {
+                        view.setUint32(offset + 4, Math.floor(value / 2 ** 32), true);
+                    }
+                };
+                sized(MEMORY_BASIC_INFORMATION.BaseAddress, base);
+                sized(MEMORY_BASIC_INFORMATION.AllocationBase, allocationBase);
                 view.setUint32(MEMORY_BASIC_INFORMATION.AllocationProtect, allocationProtect,
                     true);
-                view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize, size, true);
+                sized(MEMORY_BASIC_INFORMATION.RegionSize, size);
                 view.setUint32(MEMORY_BASIC_INFORMATION.State, state, true);
                 view.setUint32(MEMORY_BASIC_INFORMATION.Protect, protect, true);
                 view.setUint32(MEMORY_BASIC_INFORMATION.Type, type, true);
@@ -2724,7 +2757,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                const free = allocator.diagnostics().free;
+                const free = freeInArena();
                 const total = host.arena.size;
                 const data = new Uint8Array(MEMORYSTATUS.SIZE);
                 const view = new DataView(data.buffer);
@@ -2778,7 +2811,7 @@ export function createHeapFunctions(host){
                 const size = (cb >>> 0) >= PROCESS_MEMORY_COUNTERS.SIZE_EX
                     ? PROCESS_MEMORY_COUNTERS.SIZE_EX
                     : PROCESS_MEMORY_COUNTERS.SIZE;
-                const used = Math.max(0, host.arena.size - allocator.diagnostics().free);
+                const used = Math.max(0, host.arena.size - freeInArena());
                 peakUsed = Math.max(peakUsed, used);
                 const data = new Uint8Array(size);
                 const view = new DataView(data.buffer);
@@ -2822,7 +2855,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const used = Math.max(0, host.arena.size - allocator.diagnostics().free);
+                const used = Math.max(0, host.arena.size - freeInArena());
                 peakUsed = Math.max(peakUsed, used);
                 const pages = (/** @type {number} */ bytes)=>Math.floor(bytes / PAGE_SIZE);
                 const counts = host.systemCounts?.() ?? { processes: 1, threads: 1 };
@@ -2859,7 +2892,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const free = allocator.diagnostics().free;
+                const free = freeInArena();
                 const total = host.arena.size;
                 const data = new Uint8Array(MEMORYSTATUSEX.SIZE);
                 const view = new DataView(data.buffer);

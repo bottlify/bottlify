@@ -39,7 +39,7 @@ import { createArena, openArena } from './arena.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
-import { PageFlag, createPageTable } from './pages.js';
+import { PageFlag, codeBlockPages, createPageTable } from './pages.js';
 import { SharedSwitch, createSharedCode } from './shared-code.js';
 import { Tables, basesOf, tablesSize } from './layout.js';
 import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTargets }
@@ -181,6 +181,16 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         throw new Error('cork: a wide window\'s RAM is its own memory, given with it');
     }
     const ramOf = ram ?? memory;
+    // A code block's (`codeBase`): the translator's addresses are offsets in it, the host's,
+    // its bytes' and the page table's the window's.
+    const codeBase = layout.codeBase ?? 0;
+    if (codeBase !== 0)
+    {
+        const byte = read;
+        const bytes = readBytes;
+        read = byte && (address=>byte(address + codeBase));
+        readBytes = bytes && ((start, end)=>bytes(start + codeBase, end + codeBase));
+    }
     const settings = {
         maxRegionBlocks: 128, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
@@ -541,6 +551,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const codeShared = settings.sharedCode
         ? createSharedCode(memory, settings.sharedCode.at, settings.sharedCode.index) : null;
     const pages = createPageTable(memory, layout, codeShared);
+    const codePages = codeBlockPages(pages, codeBase);
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
     /** @type {any} */
@@ -949,7 +960,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             else
             {
                 closedPages.delete(page);
-                pages.clear(page, PageFlag.CLOSED);
+                codePages.clear(page, PageFlag.CLOSED);
             }
         }
     };
@@ -1047,7 +1058,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             if (at >= until)
             {
                 volatileUntil.delete(page);
-                pages.clear(page, PageFlag.VOLATILE);
+                codePages.clear(page, PageFlag.VOLATILE);
                 // What was asked for there while it was left formed nothing: asked
                 // again, it is translated.
                 for (const key of pageKeys.get(page) ?? [])
@@ -1206,19 +1217,21 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @param {number} address @param {number} end
      */
     const guestBytes = (address, end)=>{
-        if (typeof layout.ramSize !== 'number' || address < 0 || end > layout.ramSize)
+        if (typeof layout.ramSize !== 'number' || address < 0
+            || codeBase + end > layout.ramSize)
         {
             return null;
         }
         // A shared memory that grew keeps its old buffer whole, only shorter
         // than the memory now is: taken again once a range reaches past it.
         if (cachedBytes === null || cachedBytes.buffer.byteLength === 0
-            || cachedBytes.length < layout.ramBase + end)
+            || cachedBytes.length < layout.ramBase + codeBase + end)
         {
             cachedBytes = new Uint8Array(ramOf.buffer);
         }
-        return cachedBytes.length < layout.ramBase + end ? null
-            : cachedBytes.subarray(layout.ramBase + address, layout.ramBase + end);
+        return cachedBytes.length < layout.ramBase + codeBase + end ? null
+            : cachedBytes.subarray(layout.ramBase + codeBase + address,
+                layout.ramBase + codeBase + end);
     };
     const counterWord = ()=>view().getUint32(layout.counter, true);
     const fold = ()=>{
@@ -1277,7 +1290,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         for (const p of touched)
         {
             const left = byPage.get(p);
-            pages.clearCode(p);
+            codePages.clearCode(p);
             if (!left?.size)
             {
                 watched[p] &= ~WATCH_REGIONS;
@@ -1302,7 +1315,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             if (to > from)
             {
-                pages.markCode(p * 4096 + (from << Tables.CODE_GRANULE_SHIFT),
+                codePages.markCode(p * 4096 + (from << Tables.CODE_GRANULE_SHIFT),
                     (to - from) << Tables.CODE_GRANULE_SHIFT);
             }
         }
@@ -1361,7 +1374,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         record.times++;
         if (record.times === settings.volatileAfter && !volatileUntil.has(page))
         {
-            pages.set(page, PageFlag.VOLATILE);
+            codePages.set(page, PageFlag.VOLATILE);
             volatileUntil.set(page, at + settings.volatileHoldMs * 2 ** Math.min(record.left, 5));
             leftEntries.set(page, new Map(going.map(one=>[one.entry, one.entryTop])));
             record.left++;
@@ -1593,6 +1606,20 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             generation.set(page, (generation.get(page) ?? 0) + 1);
         }
     };
+    /**
+     * `storedInto` for a store the host tells of, at its address in the window: the
+     * translator's code is the code block's (`codeBase`), and a store outside the
+     * block reaches none of it.
+     *
+     * @param {number} address @param {number} size @param {boolean} [own]
+     */
+    const storeIntoBlock = (address, size, own = true)=>{
+        const offset = address - codeBase;
+        if (codeBase === 0 || (offset > -size && offset < 2 ** 32))
+        {
+            storedInto(offset, size, own);
+        }
+    };
 
     /**
      * Whether a region's code reaches memory through esp alone (a push, a call,
@@ -1740,7 +1767,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         && (!settings.x87Shapes || checkedKeys.has(keyOf(region.entry, entryTop)));
 
     /** @param {number} address */
-    const translatable = address=>(pages.get(address >>> 12)
+    const translatable = address=>(codePages.get(address >>> 12)
         & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0
         // A diagnostic: a range left to the interpreter, to find which code a
         // translation goes wrong in by halving it.
@@ -1759,7 +1786,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @returns {string}
      */
     const missReason = address=>{
-        if (pages.get(address >>> 12) & PageFlag.VOLATILE)
+        if (codePages.get(address >>> 12) & PageFlag.VOLATILE)
         {
             return 'volatile';
         }
@@ -2720,13 +2747,13 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 closedIn.set(start, holders);
                 const page = start >>> 12;
                 closedPages.set(page, (closedPages.get(page) ?? 0) + 1);
-                pages.set(page, PageFlag.CLOSED);
+                codePages.set(page, PageFlag.CLOSED);
             }
             holders.add(record);
         }
         for (const [start, end] of code)
         {
-            pages.markCode(start, end - start);
+            codePages.markCode(start, end - start);
         }
         if (loose && (stackPages.size > 0 || codeShared !== null)
             && [...region.pages].some(page=>stackPages.has(page)
@@ -3271,7 +3298,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             {
                 if (!copies.has(page))
                 {
-                    const at = layout.ramBase + page * 4096;
+                    const at = layout.ramBase + codeBase + page * 4096;
                     // A copy of its own: a slice of a shared memory's buffer is
                     // shared too, and cannot be transferred to the translator.
                     // A page forming read past the memory -- an import slot that
@@ -5193,7 +5220,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             {
                 // Every page the run's stores into code reached, from the
                 // lowest of them to the highest.
-                const address = pages.staleAddress();
+                const address = codePages.staleAddress();
                 const size = pages.staleSize();
                 pages.clearStale();
                 storedInto(address, size);
@@ -5435,7 +5462,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
          */
         stored(address, size, own = false){
             pages.markWrittenRange(address, size);
-            storedInto(address, size, own);
+            storeIntoBlock(address, size, own);
         },
         /**
          * A store this executor met reached code: its translations of the pages
@@ -5449,7 +5476,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 return;
             }
             pages.markWrittenRange(address, size);
-            storedInto(address, size);
+            storeIntoBlock(address, size);
             codeShared?.publish(address, size);
         },
         /**

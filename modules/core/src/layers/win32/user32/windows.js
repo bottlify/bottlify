@@ -511,6 +511,7 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_HANDLE = 6;
 /** GetScrollBarInfo's objects: a window's own bars, and a scroll bar control's client area. */
 const OBJID_HSCROLL = -6;
 const OBJID_VSCROLL = -5;
@@ -8515,6 +8516,79 @@ export function createWindowFunctions(host){
          * only has to round-trip. LWA_COLORKEY and LWA_ALPHA name which of the
          * two the caller set, and the getter answers what the setter stored.
          */
+        /**
+         * BOOL RegisterTouchWindow(HWND hwnd, ULONG ulFlags), and the touch input
+         * a registered window would be sent: there is no touch digitizer here
+         * (GetSystemMetrics(SM_DIGITIZER) is zero), so a window registers and no
+         * WM_TOUCH ever comes. GetTouchInputInfo is handed no handle Windows gave
+         * and fails as it does for one: ERROR_INVALID_HANDLE.
+         */
+        RegisterTouchWindow: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+        },
+        UnregisterTouchWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+        },
+        /** BOOL IsTouchWindow(HWND hwnd, PULONG pulFlags): never registered for touch that comes. */
+        IsTouchWindow: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+        GetTouchInputInfo: {
+            argBytes: 16,
+            handler: ()=>{
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+                return 0;
+            },
+        },
+        CloseTouchInputHandle: {
+            argBytes: 4,
+            handler: ()=>{
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL SetWindowDisplayAffinity(HWND hWnd, DWORD dwAffinity) and its getter:
+         * whether a capture of the screen may show the window. Nothing here
+         * captures the screen; the affinity is kept on the window and answered.
+         * WDA_NONE (0), WDA_MONITOR (1) and WDA_EXCLUDEFROMCAPTURE (0x11) are the values.
+         */
+        SetWindowDisplayAffinity: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, affinity])=>{
+                const record = live(hwnd);
+                if (!record || ![0, 1, 0x11].includes(affinity >>> 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                record.displayAffinity = affinity >>> 0;
+                return 1;
+            },
+        },
+        GetWindowDisplayAffinity: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, out])=>{
+                const record = live(hwnd);
+                if (!record || (out >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(out >>> 0,
+                    new Uint8Array(Uint32Array.of(record.displayAffinity ?? 0).buffer));
+                return 1;
+            },
+        },
+
         SetLayeredWindowAttributes: {
             argBytes: 16,
             /** @param {number[]} args */

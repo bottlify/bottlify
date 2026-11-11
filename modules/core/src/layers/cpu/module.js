@@ -434,6 +434,10 @@ export function createCpuModule(){
                 // 64 for an x86-64 process (`roadmap/x64.md`): cork's long-mode
                 // state block and interpreter, on one executor.
                 bits: config?.bits === 64 ? /** @type {64} */ (64) : /** @type {32} */ (32),
+                // An image past 4 GiB: the wide window it runs over and the block its code lies in.
+                ...(config?.bits === 64 && config?.window ? { window: config.window,
+                    codeBase: config.codeBase ?? 0,
+                    ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
             };
             if (settings.bits === 64)
             {
@@ -564,6 +568,10 @@ export function createCpuModule(){
                 setControlWord: word=>activeFpu().setControlWord?.(word),
                 statusWord: ()=>activeFpu().statusWord?.() ?? 0,
                 clearExceptions: ()=>activeFpu().clearExceptions?.(),
+                // SSE's control and status register, the running thread's.
+                mxcsr: ()=>started().readMxcsr() >>> 0,
+                /** @param {number} word */
+                setMxcsr: word=>started().writeMxcsr(word >>> 0),
             };
 
             current = state;
@@ -653,6 +661,10 @@ export function createCpuModule(){
                         gcNudge: nudging ?? /** @type {false} */ (false),
                         translationZone: TRANSLATION_ZONE_BYTES,
                         bits: settings.bits,
+                        ...(settings.window ? { window: settings.window,
+                            codeBase: settings.codeBase ?? 0,
+                            ...settings.hostAlias ? { hostAlias: settings.hostAlias } : {} }
+                            : {}),
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                         reused: settings.reused });

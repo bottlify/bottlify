@@ -559,6 +559,99 @@ export function queryPerformanceCounterCode(at, trap, block){
 }
 
 /**
+ * QueryPerformanceCounter's x86-64, for a 64-bit process: the routine above
+ * under the x64 convention -- the LARGE_INTEGER in RCX, which a null leaves
+ * for the trap untouched -- the block's address in R8 and the counter read
+ * whole between two looks at the sequence, the last answer moved by
+ * `lock cmpxchg` on its quadword. It changes RAX, RDX, R8 and R9 alone, the
+ * registers a callee may.
+ *
+ *     test rcx, rcx / jz slow
+ *     mov r8d, block
+ *   read:
+ *     mov eax, [r8+sequence] / test al, 1 / jnz spin
+ *     mov r9, [r8+counter]
+ *     cmp eax, [r8+sequence] / jne read
+ *     mov rax, [r8+last]
+ *   next:                         ; rdx = the counter if later, else last + 1
+ *     mov rdx, r9 / cmp rdx, rax / ja swap
+ *     lea rdx, [rax+1]
+ *   swap:
+ *     lock cmpxchg [r8+last], rdx / jne next
+ *     mov [rcx], rdx / mov eax, 1 / ret
+ *   spin: pause / jmp read
+ *   slow: jmp trap
+ *
+ * @param {number} at @param {number} trap @param {number} block  below 4 GiB
+ */
+export function queryPerformanceCounterCode64(at, trap, block){
+    const slow = 85;
+    return new Uint8Array([
+        0x48, 0x85, 0xc9,                                            // test rcx, rcx
+        0x0f, 0x84, ...dword(slow - 9),                              // jz slow
+        0x41, 0xb8, ...dword(block),                                 // mov r8d, block
+        // read: (15)
+        0x41, 0x8b, 0x80, ...dword(CLOCK.SEQUENCE),                  // mov eax, [r8+sequence]
+        0xa8, 0x01,                                                  // test al, 1
+        0x75, 81 - 26,                                               // jnz spin
+        0x4d, 0x8b, 0x88, ...dword(CLOCK.COUNTER),                   // mov r9, [r8+counter]
+        0x41, 0x3b, 0x80, ...dword(CLOCK.SEQUENCE),                  // cmp eax, [r8+sequence]
+        0x75, (15 - 42) & 0xff,                                      // jne read
+        0x49, 0x8b, 0x80, ...dword(CLOCK.LAST),                      // mov rax, [r8+last]
+        // next: (49)
+        0x4c, 0x89, 0xca,                                            // mov rdx, r9
+        0x48, 0x39, 0xc2,                                            // cmp rdx, rax
+        0x77, 61 - 57,                                               // ja swap
+        0x48, 0x8d, 0x50, 0x01,                                      // lea rdx, [rax+1]
+        // swap: (61)
+        0xf0, 0x49, 0x0f, 0xb1, 0x90, ...dword(CLOCK.LAST),          // lock cmpxchg [r8+last], rdx
+        0x75, (49 - 72) & 0xff,                                      // jne next
+        0x48, 0x89, 0x11,                                            // mov [rcx], rdx
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc3,                                                        // ret
+        // spin: (81)
+        0xf3, 0x90,                                                  // pause
+        0xeb, (15 - 85) & 0xff,                                      // jmp read
+        // slow: (85)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * QueryPerformanceFrequency's x86-64: the frequency into the LARGE_INTEGER in
+ * RCX, a null left for the trap.
+ *
+ * @param {number} at @param {number} trap @param {number} [frequency]  a dword, zero-extended
+ */
+export function queryPerformanceFrequencyCode64(at, trap,
+    frequency = Number(PERFORMANCE_FREQUENCY))
+{
+    const slow = 19;
+    return new Uint8Array([
+        0x48, 0x85, 0xc9,                                            // test rcx, rcx
+        0x74, slow - 5,                                              // jz slow
+        0xb8, ...dword(frequency),                                   // mov eax, frequency
+        0x48, 0x89, 0x01,                                            // mov [rcx], rax
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc3,                                                        // ret
+        // slow: (19)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * GetTickCount's x86-64: the block's word, read through an absolute address.
+ *
+ * @param {number} block  below 4 GiB
+ */
+export function tickCountCode64(block){
+    return new Uint8Array([
+        0x8b, 0x04, 0x25, ...dword(block + CLOCK.TICKS),             // mov eax, [block+ticks]
+        0xc3,                                                        // ret
+    ]);
+}
+
+/**
  * QueryPerformanceFrequency as guest code. The frequency is a constant of
  * this machine, so it is an immediate rather than a word of the block.
  *
@@ -947,12 +1040,16 @@ export function createProcessFunctions(host){
             host.writeMemory(at, code(at, trap));
             return at;
         };
+        const long = host.pointerSize === 8;
         clocks = {
             counter: place('<performance-counter>', 'QueryPerformanceCounter',
-                (at, trap)=>queryPerformanceCounterCode(at, trap, block)),
+                (at, trap)=>(long ? queryPerformanceCounterCode64 : queryPerformanceCounterCode)(
+                    at, trap, block)),
             frequency: place('<performance-frequency>', 'QueryPerformanceFrequency',
-                (at, trap)=>queryPerformanceFrequencyCode(at, trap, performanceFrequency)),
-            ticks: place('<tick-count>', 'GetTickCount', ()=>tickCountCode(block)),
+                (at, trap)=>(long ? queryPerformanceFrequencyCode64
+                    : queryPerformanceFrequencyCode)(at, trap, performanceFrequency)),
+            ticks: place('<tick-count>', 'GetTickCount',
+                ()=>(long ? tickCountCode64 : tickCountCode)(block)),
         };
         return clocks;
     };
@@ -1003,6 +1100,8 @@ export function createProcessFunctions(host){
         ? {
             /** @param {import('./sync.js').GuestBuilder} builder */
             guest: builder=>placedClocks(builder)[which],
+            // Its x86-64 in a 64-bit process, placed the same way.
+            guestLong: true,
         }
         : {});
 

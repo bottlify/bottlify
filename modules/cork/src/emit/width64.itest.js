@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    CORPUS, FAR_CALL, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, flagsLeftUndefined,
+    CORPUS, FAR_CALL, HOISTED_SWITCHES, MASKED_SWITCHES, OVERWRITTEN_SWITCH, SWITCHES, compare,
+    flagsLeftUndefined,
     load, loopCases, machine, nested, pool, program, run, stacked,
 } from '../testing/long-machine.js';
 import { createSharedRunner64 } from '../testing/shared-runner64.js';
@@ -243,6 +244,17 @@ test('switches run in the shared emitter\'s regions as interpreted, their index 
     }
 });
 
+test('a switch whose table read writes its index over keeps its cases in its region', ()=>{
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `overwritten ${i}`, code: OVERWRITTEN_SWITCH }));
+    const { failures, exits, stats } = compare(cases, { budget: 100000, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.equal(exits, cases.length);
+    // One region a program: a case picked by the target, not by the register the
+    // read wrote over, is a jump inside it, never an exit that forms one of its own.
+    assert.equal(stats.regions, cases.length, JSON.stringify(stats));
+});
+
 test('seeded long programs run in the shared emitter\'s regions as interpreted', ()=>{
     const instructions = pool();
     const straight = Array.from({ length: 600 },
@@ -301,4 +313,26 @@ test('seeded stack traffic and untested reads run in loose regions as interprete
         assert.equal(exits, cases.length);
         assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
     }
+});
+
+test('a non-temporal store with REX.W stores its quadword whole, in the shared emitter\'s regions'
+    + ' as interpreted', ()=>{
+    // movnti [rbx], rdx / [rbx], edx / [rbx+8], r10: the C runtime's memset of
+    // a large block, whose regions were refused whole while the store was
+    // read as a dword's.
+    const cases = edges(['480fc313', '0fc313', '4c0fc35308'], [0]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+});
+
+test('an explicit-length string compare reads its lengths as dwords, or with REX.W as saturated'
+    + ' quadwords, in the shared emitter\'s regions as interpreted', ()=>{
+    // pcmpestri xmm0, xmm1, 0x0c / with REX.W / pcmpestrm; rax and rdx with
+    // their high halves set, then small, negative and past the element count.
+    const cases = edges(['660f3a61c10c', '66480f3a61c10c', '660f3a60c118'], [0],
+        ['', 'b805000000ba03000000', '48c7c0f6ffffff48c7c2feffffff', 'b828000000ba11000000']);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
 });

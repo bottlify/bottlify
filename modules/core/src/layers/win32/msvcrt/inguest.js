@@ -22,6 +22,7 @@
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
 /** @typedef {import('./guest-code.js').f64} f64 */
+/** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').x87} x87 */
 /** @typedef {import('./guest-code.js').i64} i64 */
 
@@ -1879,4 +1880,55 @@ export function strpbrk({ u8 }, text, accept){
             }
         }
     }
+}
+
+/** ln 2, and the series' coefficients 2 / (2i + 1), i = 0..9 (`logf`). */
+const LN2 = 0.6931471805599453;
+const SERIES1 = 2;
+const SERIES3 = 2 / 3;
+const SERIES5 = 2 / 5;
+const SERIES7 = 2 / 7;
+const SERIES9 = 2 / 9;
+const SERIES11 = 2 / 11;
+const SERIES13 = 2 / 13;
+const SERIES15 = 2 / 15;
+const SERIES17 = 2 / 17;
+const SERIES19 = 2 / 19;
+
+/**
+ * logf, a world built procedurally asks for a hundred thousand times a
+ * second: the float taken apart into its exponent and a mantissa brought into
+ * [sqrt(1/2), sqrt(2)), log(m) = 2 atanh(s), s = (m - 1) / (m + 1), summed to
+ * s^19 in doubles (|s| < 0.172: the rest is below a double's precision), and
+ * k ln 2 added. Within a float's step of the logarithm; zero, a negative, an
+ * infinity, a NaN or a denormal is the host's, which sets errno.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function logf({ floatBits, floatOfBits, host }, x){
+    const bits = floatBits(x);
+    if ((bits - 0x00800000 >>> 0) > 0x7effffff)
+    {
+        return host();
+    }
+    let k = (bits >>> 23) - 127 | 0;
+    let mantissa = bits & 0x7fffff;
+    if (mantissa > 0x3504f3)
+    {
+        mantissa = mantissa | 0x3f000000;
+        k = k + 1 | 0;
+    }
+    else
+    {
+        mantissa = mantissa | 0x3f800000;
+    }
+    const m = floatOfBits(mantissa);
+    const s = (m - 1) / (m + 1);
+    const s2 = s * s;
+    const p = ((((((((SERIES19 * s2 + SERIES17) * s2 + SERIES15) * s2 + SERIES13) * s2
+        + SERIES11) * s2 + SERIES9) * s2 + SERIES7) * s2 + SERIES5) * s2 + SERIES3) * s2
+        + SERIES1;
+    return Math.fround(k * LN2 + p * s);
 }

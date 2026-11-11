@@ -208,6 +208,71 @@ export function installFramebufferCalls(context, kernel){
         : target === GL.DRAW_FRAMEBUFFER ? ['draw'] : target === GL.READ_FRAMEBUFFER
             ? ['read'] : null);
 
+    /** @param {number} query */
+    const stateOf = query=>kernel.record(query)?.values?.[0] ?? 0;
+
+    /**
+     * glGetFramebufferAttachmentParameteriv of the default framebuffer: its
+     * buffers by name (FRONT_LEFT, BACK_LEFT, the stereo ones, DEPTH,
+     * STENCIL), each FRAMEBUFFER_DEFAULT where the pixel format has it and
+     * NONE where not, its sizes the pixel format's as glGetIntegerv answers
+     * them: what a windowing library reads the pixel format back with.
+     *
+     * @param {number} attachment @param {number} pname
+     * @returns {number[] | null}
+     */
+    const defaultAttachmentParameter = (attachment, pname)=>{
+        const kind = attachment === GL.FRONT_LEFT ? 'front'
+            : attachment === GL.BACK_LEFT ? 'back'
+                : attachment === GL.FRONT_RIGHT || attachment === GL.BACK_RIGHT ? 'stereo'
+                    : attachment === GL.DEPTH ? 'depth' : attachment === GL.STENCIL ? 'stencil'
+                        : null;
+        if (!kind)
+        {
+            setError(GL.INVALID_ENUM);
+            return null;
+        }
+        const present = kind === 'front' || (kind === 'back' && stateOf(GL.DOUBLEBUFFER) !== 0)
+            || (kind === 'depth' && stateOf(GL.DEPTH_BITS) > 0)
+            || (kind === 'stencil' && stateOf(GL.STENCIL_BITS) > 0);
+        if (pname === GL.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE)
+        {
+            return [present ? GL.FRAMEBUFFER_DEFAULT : GL.NONE];
+        }
+        if (!present)
+        {
+            if (pname === GL.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME)
+            {
+                return [0];
+            }
+            setError(GL.INVALID_OPERATION);
+            return null;
+        }
+        const colour = kind === 'front' || kind === 'back';
+        switch (pname)
+        {
+            case GL.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+                return [colour ? stateOf(GL.RED_BITS) : 0];
+            case GL.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+                return [colour ? stateOf(GL.GREEN_BITS) : 0];
+            case GL.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+                return [colour ? stateOf(GL.BLUE_BITS) : 0];
+            case GL.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+                return [colour ? stateOf(GL.ALPHA_BITS) : 0];
+            case GL.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                return [kind === 'depth' ? stateOf(GL.DEPTH_BITS) : 0];
+            case GL.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+                return [kind === 'stencil' ? stateOf(GL.STENCIL_BITS) : 0];
+            case GL.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                return [kind === 'stencil' ? GL.UNSIGNED_INT : GL.UNSIGNED_NORMALIZED];
+            case GL.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                return [GL.LINEAR];
+            default:
+                setError(GL.INVALID_ENUM);
+                return null;
+        }
+    };
+
     /** @param {number} target @returns {FramebufferObject | null | undefined} undefined: bad target */
     const boundTo = target=>{
         if (target === GL.FRAMEBUFFER || target === GL.DRAW_FRAMEBUFFER)
@@ -692,8 +757,7 @@ export function installFramebufferCalls(context, kernel){
             }
             if (!fbo)
             {
-                setError(GL.INVALID_OPERATION);
-                return null;
+                return defaultAttachmentParameter(attachment, pname);
             }
             if (!validAttachment(attachment))
             {

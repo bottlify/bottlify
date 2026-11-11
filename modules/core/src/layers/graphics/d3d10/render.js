@@ -572,7 +572,14 @@ export function createRenderer(services){
         formatsTier1: backend ? backend.hasFeature?.('texture-formats-tier1') === true
             : services.formatsTier1 ?? true,
         rg11b10Renderable: backend ? backend.hasFeature?.('rg11b10ufloat-renderable') === true
-            : services.rg11b10Renderable ?? true };
+            : services.rg11b10Renderable ?? true,
+        // A 16-bit normalised texture samples unfiltered alone, which a
+        // shader's filtering sampler cannot bind; a 32-bit float filters.
+        sixteenBitStandIn: backend ? backend.hasFeature?.('float32-filterable') === true : false };
+
+    /** Whether a 3D texture may keep BC blocks (texture-compression-bc-sliced-3d). */
+    const compressedVolumes = backend
+        ? backend.hasFeature?.('texture-compression-bc-sliced-3d') === true : compressed;
 
     /** Whether the device blends 32-bit float targets (float32-blendable). */
     const float32Blending = backend ? backend.hasFeature?.('float32-blendable') === true : false;
@@ -786,6 +793,10 @@ export function createRenderer(services){
     };
 
     const counters = {
+        // A frame's replay, and how much of it waited on its pipelines: where
+        // the time from a present to the queue goes.
+        replayMs: 0,
+        pipelineWaitMs: 0,
         frames: 0,
         draws: 0,
         clears: 0,
@@ -858,15 +869,19 @@ export function createRenderer(services){
                 slices: 1,
             };
         }
-        const storage = textureStorage(desc.Format, desc.BindFlags, formatOptions);
+        // A volume of BC blocks needs its own feature, which an adapter with
+        // BC may still lack: without it the volume is decoded on the way in.
+        const storage = textureStorage(desc.Format, desc.BindFlags,
+            resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D && !compressedVolumes
+                ? { ...formatOptions, compressed: false } : formatOptions);
         // What is written into a 16-bit normalised target kept in floats keeps
         // the float a draw or a shader wrote: held to the format's range and
         // rounded to its codes only when it is read back.
         if (isSixteenBit(storage?.conversion)
             && (desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)) !== 0)
         {
-            diverge(`a ${storage?.conversion} target is kept in ${storage?.format} on a GPU`
-                + ' without texture-formats-tier1: what is drawn into it is not held to its range'
+            diverge(`a ${storage?.conversion} target is kept in ${storage?.format}, which`
+                + ' this GPU filters: what is drawn into it is not held to its range'
                 + ' nor rounded to sixteen bits until it is read back');
         }
         const info = FORMAT_INFO[desc.Format];
@@ -1181,7 +1196,8 @@ export function createRenderer(services){
      *     or the bytes cannot be carried between the two
      */
     const twinOf = (backing, viewFormat)=>{
-        const own = textureStorage(viewFormat, 0, formatOptions);
+        const own = textureStorage(viewFormat, 0, backing.made?.dimension === '3d'
+            && !compressedVolumes ? { ...formatOptions, compressed: false } : formatOptions);
         const format = own?.format;
         const storage = backing.layout.storage;
         if (!format || !backing.texture || !backing.made || format === backing.layout.format
@@ -2535,7 +2551,11 @@ export function createRenderer(services){
             passOp: STENCIL_OP[depthStencil[which].StencilPassOp],
         });
         const depthEnabled = depthStencil.DepthEnable;
-        const gpu = backend.createRenderPipeline({
+        // Built off the device's queue: a pipeline made synchronously is
+        // compiled in turn with every other, and a frame of a few new ones
+        // waited on all of them; made asynchronously they compile side by
+        // side, and one the device refuses is this draw's loss alone.
+        const gpu = await backend.createRenderPipelineAsync({
             label: `d3d10:${pipelineKey(state)}`,
             layout: pipelineLayout,
             vertex: { module: vertexModule, entryPoint: 'vertexMain', buffers: layout.buffers },
@@ -2604,9 +2624,18 @@ export function createRenderer(services){
         {
             promise = buildPipeline(state);
             pipelines.set(key, promise);
+            // The last pipelines made, by key: a count that grows every frame
+            // is a key that changes every frame, and these say which part.
+            recentKeys.push(key);
+            if (recentKeys.length > 16)
+            {
+                recentKeys.shift();
+            }
         }
         return promise;
     };
+    /** @type {string[]} */
+    const recentKeys = [];
 
     // --- recording ---
 
@@ -5673,6 +5702,10 @@ export function createRenderer(services){
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
                 pipelines: pipelines.size,
+                recentPipelineKeys: [...recentKeys],
+                replayMs: Math.round(counters.replayMs),
+                pipelineWaitMs: Math.round(counters.pipelineWaitMs),
+                shaders: backend?.shaderStats?.() ?? null,
                 tessellation: tessellation ? tessellation.diagnostics() : null,
                 geometry: geometryPasses ? geometryPasses.diagnostics() : null,
             }, 'lastFrame', { value: lastFrame });
@@ -5692,7 +5725,17 @@ export function createRenderer(services){
         const counting = recordingCounters;
         recordingCounters = new Set();
         const cut = backend.markPresent();
-        chain = chain.then(()=>replay(recorded, surface, cut)).catch(failure=>{
+        chain = chain.then(async()=>{
+            const began = performance.now();
+            try
+            {
+                await replay(recorded, surface, cut);
+            }
+            finally
+            {
+                counters.replayMs += performance.now() - began;
+            }
+        }).catch(failure=>{
             counters.failures.push(String(failure && failure.message || failure));
             divergence?.('Direct3D 10', `lost a frame: ${failure && failure.message || failure}`,
                 'loss');
@@ -5725,8 +5768,10 @@ export function createRenderer(services){
      * @param {number} cut   the backend's cut the recording was queued as
      */
     async function replay(recorded, surface, cut){
+        const began = performance.now();
         const pipelinesNeeded = await Promise.allSettled(
             recorded.map(command=>command.pipeline ?? null));
+        counters.pipelineWaitMs += performance.now() - began;
         const frame = backend.beginFrame({ cut });
         /** @type {{ read: () => Promise<any>, command: any }[]} */
         const readers = [];

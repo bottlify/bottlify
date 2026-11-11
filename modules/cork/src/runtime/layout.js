@@ -248,7 +248,7 @@ export const WRAP_SLACK = 2 * PAGE;
  *
  * @param {{ ramSize: number, hashSlots?: number, processors?: number,
  *     ramBase?: number, bits?: 32 | 64, tablesAt?: number, ramFloor?: number,
- *     window?: number }} options
+ *     window?: number, codeBase?: number }} options
  *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
  *     `processors`: the process's executors, which `cpuid` says the machine has --
  *     a field only past one, so one processor's layout, and its translations, are
@@ -263,12 +263,18 @@ export const WRAP_SLACK = 2 * PAGE;
  *     then read from the process's word at `wrap` (`WRAP_WORD`), which the host sets to
  *     the RAM the memory holds now, less one, as it grows;
  *     `window`: long mode's address space, 4 GiB (the default), 8 or 16 GiB
- *     (`wideLayout`)
+ *     (`wideLayout`); `codeBase`: a wide window's 4 GiB block its code lies in
+ *     (`wideLayout`), 0 by default
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
-    ramBase = PAGE, bits = 32, tablesAt, ramFloor, window = WINDOW })
+    ramBase = PAGE, bits = 32, tablesAt, ramFloor, window = WINDOW, codeBase = 0 })
 {
+    if (codeBase !== 0 && (window === WINDOW || codeBase % WINDOW !== 0 || codeBase < 0
+        || codeBase >= window))
+    {
+        throw new Error(`cork: code at ${codeBase}, not a 4 GiB block of a wide window`);
+    }
     if (window !== WINDOW && (bits !== 64 || !WIDE_WINDOWS.includes(window)))
     {
         throw new Error(`cork: a window of ${window} bytes, not long mode's 4, 8 or 16 GiB`);
@@ -301,7 +307,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
             throw new Error('cork: long mode runs on one executor so far');
         }
         return window === WINDOW ? longLayout(state, ramBase, ramSize, hashSlots)
-            : wideLayout(window, ramSize, hashSlots);
+            : wideLayout(window, ramSize, hashSlots, codeBase);
     }
     const fields = {
         bits: /** @type {32} */ (32),
@@ -416,10 +422,18 @@ export const WIDE_WINDOWS = Object.freeze([2 ** 33, 2 ** 34]);
  * code the stores since the runtime last looked reached (`staleSpan`), as
  * quadwords. As in 4 GiB, the window's last page is never RAM.
  *
+ * The process's code lies in one 4 GiB block of the window, from `codeBase`
+ * (a 64-bit image without relocations at 0x140000000 is in the one from
+ * 4 GiB): the translator keeps an instruction's address as its offset in the
+ * block, 32 bits as in 4 GiB, and the block's start goes into RIP where an
+ * address leaves the translated code -- RIP written back, a return address,
+ * a RIP-relative operand -- and comes out of a target that enters it.
+ *
  * @param {number} window @param {number} ramSize @param {number} hashSlots
+ * @param {number} codeBase
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function wideLayout(window, ramSize, hashSlots){
+function wideLayout(window, ramSize, hashSlots, codeBase){
     if (!(ramSize > 0 && ramSize <= window - 4096 && ramSize % 4096 === 0))
     {
         throw new RangeError(`cork: ${ramSize} bytes of RAM in a window of ${window}`);
@@ -427,7 +441,8 @@ function wideLayout(window, ramSize, hashSlots){
     /** @type {Record<string, any>} */
     const fields = { ...longLayout(LOW_STATE, 0, 4096, hashSlots), ramSize, window,
         ramMemory: 1, pageFlags: PAGE, codeRanges: PAGE + window / 4096,
-        staleSpan: PAGE + window / 4096 * 3, tables: PAGE * 2 + window / 4096 * 3 };
+        staleSpan: PAGE + window / 4096 * 3, tables: PAGE * 2 + window / 4096 * 3,
+        ...codeBase === 0 ? {} : { codeBase } };
     delete fields.id;
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }

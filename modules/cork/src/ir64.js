@@ -500,6 +500,25 @@ export function evaluate64(instruction, state){
             writeWide(state, size, BigInt.asUintN(bits, quotient), BigInt.asUintN(bits, remainder));
             break;
         }
+        case 'crc32':
+        {
+            // CRC-32C (the Castagnoli polynomial, reflected: 0x82F63B78) of the
+            // source's bytes, low first -- a quadword's all eight under REX.W --
+            // over the destination's low dword, no inversion before or after (the
+            // SDM's CRC32); a 32-bit result, zero-extended as any dword write is.
+            let crc = Number(state.r[/** @type {number} */ (operands[0].reg)] & 0xffffffffn);
+            const value = read(operands[1]);
+            for (let i = 0; i < operands[1].size; i++)
+            {
+                crc ^= Number(value >> BigInt(i * 8) & 0xffn);
+                for (let bit = 0; bit < 8; bit++)
+                {
+                    crc = (crc >>> 1 ^ (crc & 1 ? 0x82f63b78 : 0)) >>> 0;
+                }
+            }
+            state.r[/** @type {number} */ (operands[0].reg)] = BigInt(crc >>> 0);
+            break;
+        }
         case 'popcnt':
         {
             let value = read(operands[1]);
@@ -1113,6 +1132,11 @@ function simd(instruction, state){
     {
         const reg = /** @type {number} */ (dst.reg);
         setRegister(state, reg, Math.max(dst.size, 4), BigInt(view.reg[reg]));
+    }
+    if (op === 'pcmpistri' || op === 'pcmpestri')
+    {
+        // The index goes to ecx, an operand of no field: written as a dword, zero-extended.
+        setRegister(state, 1, 4, BigInt(view.reg[1]));
     }
 }
 
