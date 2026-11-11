@@ -156,24 +156,6 @@ keeps a headless launcher tab of its own. A worker is reached through the
 page's auto-attach (`connect.mjs`), because a cross-origin-isolated page's
 workers answer nothing to a direct attach.
 
-### Starting it, with a store
-
-1. The launcher: in `bottlify-ui`, `TLS_DIR=../bottlify/.certs RELAY_ALLOW='*' node server.mjs`
-   (port 5180, TLS). Rebuilt dists (`npm run build` in both repositories) are what it serves.
-2. The browser: `node tools/cdp_test/live/browser.mjs`, left running. It opens
-   `https://192.168.100.22:5180/library` on the profile in `dbg/chrome-profile`, and
-   **always loads the GameHub extension** (`../bottlify-ui/gamehub/dist/dev`, or `GAMEHUB_DIR`):
-   a store's sign-in, its games and their installs go through it, and without it the library
-   lists no store games. It prints `GameHub loaded <id>` or exits saying why not.
-   OPFS is per origin and per profile: the bottles, the store sign-in and the saves are those of
-   that address in that profile (`BROWSER_PROFILE` names another), and another address or
-   profile shows none of them.
-3. A game: the library's "On Steam, not installed" installs one into a bottle; an installed
-   one starts at `/play/<bundle id>` (`steam-<appid>` for a Steam game). The scripts below read
-   it while it runs; a click or a key is the person's, not a script's, unless asked.
-4. Closing: `Browser.close` over CDP, never by killing the process or deleting the profile.
-
-
 | script | what it answers | run it as |
 |---|---|---|
 | [`browser.mjs`](browser.mjs) | opens the headed browser on the launcher with the GameHub extension always loaded (`GAMEHUB_DIR`, default `../bottlify-ui/gamehub/dist/dev`), profile in `dbg/chrome-profile` or `BROWSER_PROFILE` | `node tools/cdp_test/live/browser.mjs [url] [chrome flags]` (`--use-webgpu-adapter=swiftshader` for the software adapter) |
