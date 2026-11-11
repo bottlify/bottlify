@@ -30,6 +30,7 @@
 - Fallout (demo)
 - Far Cry (demo) (+shader model 2)
 - FIFA 08 (demo)
+- Five Nights at Freddy's
 - FlatOut (demo)
 - FlatOut 2 (demo)
 - Grand Theft Auto: San Andreas
