@@ -25,10 +25,13 @@ event, an error. Neither stops the program.
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
   title's code uses.
-- A .NET program runs under Mono: `mscoree.dll`'s `_CorExeMain` loads the bottle's runtime from
+- A .NET program in a bottle the .NET Framework 4 was installed into runs on Microsoft's own
+  runtime: `mscoree.dll`'s `_CorExeMain` hands it to the Framework's shim,
+  `C:\WINDOWS\Microsoft.NET\Framework\v4.0.30319\mscoreei.dll`, as Windows' own `mscoree.dll`
+  does. Otherwise it runs under Mono: `_CorExeMain` loads the bottle's runtime from
   `C:\Windows\Mono` (Mono's own Windows build: `bin\libmono-2.0-x86.dll`, `lib\mono\4.5`,
-  `etc\mono`), which the bottle has to hold; without it the program does not run and the loss is
-  said. A native program hosts the same runtime through the shim (`CLRCreateInstance`,
+  `etc\mono`), which the bottle has to hold; with neither the program does not run and the loss
+  is said. A native program hosts the same runtime through the shim (`CLRCreateInstance`,
   `ICLRMetaHost`, `ICLRRuntimeInfo`, `ICorRuntimeHost`, `ICLRRuntimeHost`, `GetCORVersion` and
   kin), which reports runtimes 2.0.50727 and 4.0.30319 and hands application domains out through
   Mono's COM interop; logical thread state, mapped files, domain enumeration, evidence and

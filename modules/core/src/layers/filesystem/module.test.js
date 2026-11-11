@@ -70,6 +70,30 @@ test('an empty directory a program made is exported, one holding something is no
     assert.deepEqual(fs.exportDirectories(), []);
 });
 
+test('a junction\'s files are exported under its name for a reader that keeps no links',
+    async()=>{
+        // A bottle keeps no junctions: the .NET Framework's assembly cache,
+        // whose GAC folder stands for a WinSxS one, goes into it as copies.
+        const fs = await filesystemModule.create(undefined);
+        fs.createDirectory('C:\\SxS');
+        fs.createDirectory('C:\\SxS\\Lib');
+        const handle = fs.open('C:\\SxS\\Lib\\a.dll',
+            { write: true, disposition: fs.Disposition.CREATE_NEW });
+        fs.write(handle, bytes('lib'));
+        fs.close(handle);
+        fs.createDirectory('C:\\Gac');
+        fs.setJunction('C:\\Gac', 'C:\\SxS\\Lib');
+
+        const paths = (/** @type {any} */ files)=>files.map((/** @type {any} */ one)=>one.path)
+            .sort();
+        assert.deepEqual(paths(fs.export()), ['C:\\SxS\\Lib\\a.dll'], 'once, where it is kept');
+        const every = fs.export(undefined, { everyName: true });
+        assert.deepEqual(paths(every), ['C:\\Gac\\a.dll', 'C:\\SxS\\Lib\\a.dll']);
+        assert.equal(new TextDecoder().decode(every.find(one=>one.path === 'C:\\Gac\\a.dll')
+            ?.bytes), 'lib');
+        await filesystemModule.dispose();
+    });
+
 test('a file written in one case is found in another and listed in its own', async()=>{
     const fs = await volume();
 

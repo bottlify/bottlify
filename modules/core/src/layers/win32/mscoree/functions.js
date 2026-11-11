@@ -7,10 +7,13 @@
 /**
  * mscoree -- the .NET runtime's shim. Every managed executable imports it for
  * its one entry, `_CorExeMain`, and native programs host the runtime through
- * it (`hosting.js`); here both reach the bottle's Mono runtime (`runtime.js`),
- * started once for the process by whichever comes first. The runtime is the
- * program's guest code, so its JIT, its threads and its exceptions are cork's
- * and Win32's like a game's.
+ * it (`hosting.js`). A bottle the .NET Framework 4 was installed into has
+ * Microsoft's own shim, `mscoreei.dll`, beside the runtime; `_CorExeMain`
+ * hands the program to it, as Windows' mscoree.dll does, and the program runs
+ * on the real CLR. Otherwise both reach the bottle's Mono runtime
+ * (`runtime.js`), started once for the process by whichever comes first.
+ * Either runtime is the program's guest code, so its JIT, its threads and its
+ * exceptions are cork's and Win32's like a game's.
  *
  * A bottle without the runtime is told so as Windows tells a machine without
  * .NET: the program does not run, and the loss is said.
@@ -21,6 +24,9 @@ import { createRuntimeHosts } from './corhost.js';
 import { MONO_DIRECTORY, MONO_LIBRARY, createMonoRuntime } from './runtime.js';
 
 export { MONO_DIRECTORY };
+
+/** Where the .NET Framework 4 installs its shim, under the Windows directory. */
+export const FRAMEWORK_SHIM = 'Microsoft.NET\\Framework\\v4.0.30319\\mscoreei.dll';
 
 /** What ends a process whose runtime is missing: STATUS_DLL_NOT_FOUND. */
 const STATUS_DLL_NOT_FOUND = 0xc0000135;
@@ -74,6 +80,24 @@ export function createMscoreeFunctions(host){
         imagePath: host.imagePath,
         divergence: host.divergence,
     });
+
+    /**
+     * The installed Framework's shim's own export, or 0 when the bottle has
+     * no Framework (or its shim lacks the name): the shim is loaded from the
+     * Framework's directory, where it finds the runtime the program asks for.
+     *
+     * @param {string} name
+     */
+    const frameworkShim = async name=>{
+        const windows = (host.windowsDirectory?.() ?? 'C:\\WINDOWS').replace(/\\$/, '');
+        const path = `${windows}\\${FRAMEWORK_SHIM}`;
+        if (!host.exists(path))
+        {
+            return 0;
+        }
+        const module = await host.loadLibrary(path);
+        return module === 0 ? 0 : host.procAddress(module, name);
+    };
 
     /** Where the shim's own two callback routines are, once looked up. */
     /** @type {{ set: number, unset: number } | null} */
@@ -148,6 +172,14 @@ export function createMscoreeFunctions(host){
         _CorExeMain: {
             argBytes: 0,
             handler: async()=>{
+                const shim = await frameworkShim('_CorExeMain');
+                if (shim !== 0)
+                {
+                    const code = await host.callGuest({ entry: shim, args: [],
+                        thread: host.currentThread() });
+                    await host.exitProcess(code >>> 0);
+                    return code;
+                }
                 const image = host.imagePath();
                 const started = await runtime.start(image);
                 if ('failed' in started)
