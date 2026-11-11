@@ -927,22 +927,22 @@ async function installValidate(engine){
 
 /** @param {Engine} engine */
 async function installInitialize(engine){
-    engine.session.mode.scheduled = true;
+    engine.session.scripting = true;
     engine.session.script.length = 0;
     return ERROR_SUCCESS;
 }
 
 /** @param {Engine} engine */
 async function installExecute(engine){
-    engine.session.mode.scheduled = false;
+    engine.session.scripting = false;
     const code = await runScript(engine);
-    engine.session.mode.scheduled = true;
+    engine.session.scripting = true;
     return code;
 }
 
 /** @param {Engine} engine */
 async function installFinalize(engine){
-    engine.session.mode.scheduled = false;
+    engine.session.scripting = false;
     const code = await runScript(engine);
     if (code !== ERROR_SUCCESS)
     {

@@ -85,10 +85,10 @@ const tables = actions=>/** @type {import('./install.fixture.js').Tables} */ ({
         ...actions.map(([action], index)=>/** @type {[string, null, number]} */ (
             [action, null, 1100 + index])),
         ['InstallValidate', null, 1400], ['InstallInitialize', null, 1500],
-        ['Deferred', null, 1550], ['ProcessComponents', null, 1600],
+        ['Deferred', null, 1550], ['Within', null, 1560], ['ProcessComponents', null, 1600],
         ['WriteRegistryValues', null, 5000], ['RegisterProduct', null, 6100],
-        ['InstallFinalize', null, 6600]].filter(entry=>entry[0] !== 'Deferred'
-        || actions.some(([action])=>action === 'Deferred'))],
+        ['InstallFinalize', null, 6600]].filter(entry=>(entry[0] !== 'Deferred'
+        && entry[0] !== 'Within') || actions.some(([action])=>action === entry[0]))],
 });
 
 /** Installs the package through msi.dll; its answer and the machine. */
@@ -140,6 +140,19 @@ test('JScript actions work the Session, its Installer, records and views', async
     assert.equal(value('Name'), 'Game!', 'a record formatted by the session');
     assert.equal(value('Folder'), 'INSTALLDIR:true', 'a view fetched to its end');
 });
+
+test('only an action the script runs is in MSIRUNMODE_SCHEDULED, not one run while it is written',
+    async()=>{
+        // An immediate action between InstallInitialize and InstallFinalize
+        // asks the mode to choose between scheduling its work and reading
+        // CustomActionData; told it was scheduled, it read nothing and failed.
+        const { code, value, said } = await install([
+            ['Within', 37, null, 'Session.Property("INLINE") = String(Session.Mode(16));'],
+            ['Deferred', 37 | 0x400, null, 'if (!Session.Mode(16)) throw new Error("immediate");'],
+        ]);
+        assert.equal(code, 0, said.join('\n'));
+        assert.equal(value('Inline'), 'false');
+    });
 
 test('a script that fails fails its action, unless the action ignores it', async()=>{
     const broken = await install([['Inline', 37, null, 'this is not JScript ;;; (']]);

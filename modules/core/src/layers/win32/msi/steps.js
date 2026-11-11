@@ -134,7 +134,7 @@ export const actionData = (engine, action, fields)=>{
  * @param {Engine} engine @param {string} name @param {() => Promise<number | void>} run
  */
 export async function schedule(engine, name, run){
-    if (engine.session.mode.scheduled)
+    if (engine.session.scripting)
     {
         engine.session.script.push({ name, run: async()=>(await run()) ?? ERROR_SUCCESS });
         return ERROR_SUCCESS;
