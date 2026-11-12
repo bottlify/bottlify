@@ -1089,6 +1089,41 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(store.size(), 5);
     });
 
+test('a runtime sharing a store instantiates the batch modules another compiled, and runs them '
+    + 'as its own', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    /** @param {any} store @param {object} [config] */
+    const run = async(store, config = {})=>{
+        const m = machine({ store, bundleId: 'test', ...config });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await settle();
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+        assert.equal(exit.kind, 'halt');
+        assert.equal(m.reg(1), 0);
+        assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+        return m.runtime.diagnostics();
+    };
+    const store = memoryTranslationStore();
+    const first = await run(store);
+    assert.deepEqual([first.cacheMisses, first.sharedModules], [1, 0]);
+    assert.equal(first.sharedHeld?.held, 1, 'the module it emitted, kept for the others');
+    const second = await run(store);
+    assert.deepEqual([second.cacheHits, second.sharedModules], [1, 1],
+        'the hit\'s module compiled already');
+    // Another store: nothing of the first's.
+    const apart = await run(memoryTranslationStore());
+    assert.deepEqual([apart.cacheMisses, apart.sharedModules], [1, 0]);
+    // None kept (0): the bytes are compiled again.
+    const none = memoryTranslationStore();
+    await run(none, { sharedModuleBytes: 0 });
+    const again = await run(none, { sharedModuleBytes: 0 });
+    assert.deepEqual([again.cacheHits, again.sharedModules, again.sharedHeld], [1, 0, null]);
+});
+
 test('a region the store answers for at once is formed once, as its record says', async()=>{
     // A loop, then its function's entry, translated twice over a store that answers
     // before forming: at once (`getNow`, a directory store's records file), or for many

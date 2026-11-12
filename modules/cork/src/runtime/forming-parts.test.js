@@ -41,8 +41,10 @@ for (const seed of [31, 32, 33])
 {
     test(`the store's hits compiled apart and published a few at a call run as published at`
         + ` once (seed ${seed})`, async()=>{
-        const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
+        const kept = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
             bundleId: 'test' };
+        // Each runtime compiles its hits' modules itself: none kept for the others.
+        const config = { ...kept, sharedModuleBytes: 0 };
         const store = memoryTranslationStore();
         const filled = await observe(seed, { ...config, store, holdMs: 0 });
         const whole = await observe(seed, { ...config, store, holdMs: 0 });
@@ -54,6 +56,12 @@ for (const seed of [31, 32, 33])
         assert.ok(parts.publishedInPart > 0, 'hits published over several calls');
         assert.deepEqual(whole.runs, filled.runs);
         assert.deepEqual(parts.runs, filled.runs);
+        // And with them kept: the modules the first compiled, published a few at a call.
+        const sharing = memoryTranslationStore();
+        await observe(seed, { ...kept, store: sharing, holdMs: 0 });
+        const shared = await observe(seed, { ...kept, store: sharing, ...ONE_A_CALL });
+        assert.ok(shared.sharedModules > 0, 'modules taken as the first compiled them');
+        assert.deepEqual(shared.runs, filled.runs);
     });
 }
 
@@ -431,7 +439,8 @@ test('with no translator left, a batch emitted here is one region', async()=>{
 });
 
 test('a batch\'s store hits start compiling their modules a share at a call', async()=>{
-    const config = { worker: true, translators: 1, bundleId: 'test' };
+    // Compiled by the runtime itself, not taken as the filling one compiled them.
+    const config = { worker: true, translators: 1, bundleId: 'test', sharedModuleBytes: 0 };
     const store = memoryTranslationStore();
     const starts = [0x2000, 0x3000, 0x4000, 0x5000];
     /** @param {ReturnType<typeof machine>} m */

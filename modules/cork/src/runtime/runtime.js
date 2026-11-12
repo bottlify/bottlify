@@ -47,6 +47,8 @@ import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTarg
     from './block-profile.js';
 import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
+import { sharedModulesOf } from './shared-modules.js';
+import { sharedFormsOf } from './shared-forms.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
 } from './cache.js';
@@ -249,6 +251,16 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // the store, and are brought back from it as any miss is
         // (`EVICT_HOLD`).
         cacheBytes: 256 << 20,
+        // The wasm bytes of compiled batch modules kept for every runtime
+        // sharing this one's store (`shared-modules.js`): a process started again
+        // instantiates what an earlier one compiled (0: none kept).
+        sharedModuleBytes: 256 << 20,
+        // The formed regions kept for every runtime sharing this one's store
+        // and forming as it does (`shared-forms.js`): a store hit whose bytes
+        // and pages answer as they did is not decoded again (0: none kept).
+        // Each is many small objects; 32 768 of them held 1.8 GB of the
+        // engine thread's heap, whose collections cost more than they saved.
+        sharedFormed: 8192,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
@@ -650,6 +662,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
+    /** The compiled modules of every runtime sharing the store, by store key
+     * (`shared-modules.js`): none for a run that keeps no store. */
+    const sharedModules = sharedModulesOf(leaveOut.size > 0 || settings.blockProfile === true
+        ? null : settings.store ?? null, settings.sharedModuleBytes);
     // Past three quarters of the entry hash's slots live, a block start is kept
     // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
@@ -1126,7 +1142,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // precision, floats, the stack shape's tests).
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
         missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
-        hitsFormedAgain: 0, formedAsRecorded: 0, toStoredRegion: 0, precisionSwitches: 0,
+        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0, formedShared: 0,
+        toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
         // Inner entries that left held at their start, nothing run (`heldOnEntry`).
@@ -1985,7 +2002,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * known by (`instanceFor`). With `relink`, `one` is a running region a
      * relink moves to the instance, and where the store keeps the module.
      * @typedef {{ one: any, built: any, instance: WebAssembly.Instance | null,
-     *     source?: string | object, bytes?: Uint8Array,
+     *     source?: string | object, bytes?: Uint8Array | WebAssembly.Module,
      *     relink?: { store: any, key: string | undefined } }} Waiting
      */
     /**
@@ -2047,7 +2064,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * records read.
      * @typedef {{ records: (Uint8Array | null | undefined)[] | null,
      *     cached: (import('./cache.js').CachedRegion | null)[], wanted: string[] | null,
-     *     modules: Map<string, Uint8Array | null>, done: boolean, keys?: string[] }} Lookup
+     *     modules: Map<string, Uint8Array | WebAssembly.Module | null>, done: boolean,
+     *     keys?: string[] }} Lookup
      * @typedef {{ batch: [number, number][], next: number, formed: any[],
      *     covered: Set<number>, ceiling: number, takenAt: number,
      *     forTranslator: boolean, lookup?: Lookup | null,
@@ -2453,9 +2471,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      *
      * @param {Uint8Array | WebAssembly.Module} module
      * @param {number} [bytes]  its wasm bytes, room made for under `cacheBytes` first
+     * @param {string} [shareAs]  the store key of a batch's module, under which the
+     *     runtimes sharing the store find it compiled (`share`)
      * @returns {WebAssembly.Instance | null}
      */
-    const instantiate = (module, bytes = bytesOf(module))=>{
+    const instantiate = (module, bytes = bytesOf(module), shareAs = undefined)=>{
         makeRoom(bytes);
         const instantiateAt = clock();
         try
@@ -2463,6 +2483,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             const compiled = module instanceof WebAssembly.Module
                 ? module
                 : new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (module));
+            if (shareAs !== undefined)
+            {
+                share(shareAs, compiled, bytes);
+            }
             const instance = new WebAssembly.Instance(compiled, {
                 env: {
                     memory, ...ram === undefined ? {} : { ram }, trap: imports.trap,
@@ -2924,6 +2948,84 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         ...(one.checked === true ? { checked: true } : {}),
         ...(one.copies === true ? { copies: true } : {}) });
     /**
+     * The formed regions of the runtimes sharing the store and forming as this
+     * one does (`sharedFormed`), by entry and the callees formed in. None for a
+     * run that keeps no store, and for a diagnostic range left to the
+     * interpreter, which `translatable` answers by address rather than by page.
+     */
+    const sharedForms = settings.interpretRange || leaveOut.size > 0 || profiling ? null
+        : sharedFormsOf(settings.store ?? null, JSON.stringify(formOptions), settings.sharedFormed);
+    /**
+     * Whether a region formed earlier would be formed the same here now: every
+     * page forming asked about answers as it did, and every byte it read is as
+     * it was.
+     *
+     * @param {import('./shared-forms.js').Formed} formed
+     */
+    const formsAsBefore = ({ region, answers })=>{
+        for (const [page, yes] of answers)
+        {
+            if (translatable(page * 4096) !== yes)
+            {
+                return false;
+            }
+        }
+        for (const { start, bytes } of region.sources ?? [])
+        {
+            const now = readBytes?.(start, start + bytes.length);
+            for (let at = 0; at < bytes.length; at++)
+            {
+                if ((now === undefined ? read(start + at) : now[at]) !== bytes[at])
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    /**
+     * A region formed at `eip` with these callees formed in (`callTargets`), or
+     * the one a runtime sharing the store formed so where it forms the same
+     * (`formsAsBefore`). One formed to be kept is formed alone, without what
+     * other regions of the call decoded (`shared`): forming reads and asks
+     * about only what it did not find there, and the region's own reads must
+     * be all of them.
+     *
+     * @param {number} eip @param {[number, number[]][] | undefined} targets
+     * @param {import('../region.js').FormShared} [shared]
+     * @returns {import('../region.js').Region}
+     */
+    const formAt = (eip, targets, shared)=>{
+        const called = targets === undefined ? {} : { callTargets: new Map(targets) };
+        if (sharedForms === null)
+        {
+            return formRegion(read, eip, { ...formHere, translatable, shared, ...called });
+        }
+        const key = `${eip}/${targets === undefined ? '' : JSON.stringify(targets)}`;
+        const known = sharedForms.get(key);
+        if (known !== undefined && formsAsBefore(known))
+        {
+            counts.formedShared++;
+            return known.region;
+        }
+        /** @type {Map<number, boolean>} */
+        const answers = new Map();
+        const region = formRegion(read, eip, { ...formHere, ...called,
+            translatable: address=>{
+                const page = Math.floor(address / 4096);
+                let yes = answers.get(page);
+                if (yes === undefined)
+                {
+                    yes = translatable(address);
+                    answers.set(page, yes);
+                }
+                return yes;
+            } });
+        sharedForms.set(key, { region, answers });
+        return region;
+    };
+
+    /**
      * The stored region for a formed one, or null. Formed here beside other
      * regions than the run that stored it had, or before the callees it was
      * formed with were known, a region is formed again as its record says
@@ -2959,8 +3061,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         }
         if (region.hash !== shape.hash)
         {
-            region = formRegion(read, region.entry, { ...formHere, translatable,
-                ...(shape.targets === undefined ? {} : { callTargets: new Map(shape.targets) }) });
+            region = formAt(region.entry, shape.targets);
             if (region.hash !== shape.hash)
             {
                 counts.missChanged++;
@@ -3095,6 +3196,34 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const storeVersionFor = store=>(store === null ? {} : { storeVersion: cacheVersion });
 
     /**
+     * A compiled batch module for the other runtimes sharing the store, under
+     * the key its bytes are kept under.
+     *
+     * @param {string} key @param {WebAssembly.Module | null} module @param {number} bytes
+     */
+    const share = (key, module, bytes)=>{
+        if (sharedModules !== null && module !== null)
+        {
+            compiledBytes.set(module, bytes);
+            sharedModules.set(key, module, bytes);
+        }
+    };
+    /**
+     * A batch module another runtime sharing the store compiled, or undefined.
+     * @param {string} key
+     */
+    const sharedModule = key=>{
+        const one = sharedModules?.get(key);
+        if (one === undefined)
+        {
+            return undefined;
+        }
+        counts.sharedModules++;
+        compiledBytes.set(one.module, one.bytes);
+        return one.module;
+    };
+
+    /**
      * Puts a batch's module in the store, as the translation worker digested
      * and packed it where it did, and answers the key it is kept under.
      *
@@ -3147,19 +3276,19 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             return 0;
         }
         counts.moduleBytes += batch.module.length;
-        const instance = instantiate(compiled ?? batch.module, batch.module.length);
-        modulesSinceRelink++;
         /** @type {string | undefined} */
         let key;
         if (store !== null)
         {
             const storeAt = clock();
             key = storeModule(store, batch);
-            if (instance !== null)
-            {
-                keepBatch(key, instance);
-            }
             counts.storeMs += clock() - storeAt;
+        }
+        const instance = instantiate(compiled ?? batch.module, batch.module.length, key);
+        modulesSinceRelink++;
+        if (key !== undefined && instance !== null)
+        {
+            keepBatch(key, instance);
         }
         let published = 0;
         /** @type {Waiting[] | null} */
@@ -3224,16 +3353,15 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             return;
         }
         counts.moduleBytes += batch.module.length;
-        const instance = instantiate(compiled ?? batch.module, batch.module.length);
+        /** @type {string | undefined} */
+        const key = store === null ? undefined : storeModule(store, batch);
+        const instance = instantiate(compiled ?? batch.module, batch.module.length, key);
         if (instance === null)
         {
             return;
         }
-        /** @type {string | undefined} */
-        let key;
-        if (store !== null)
+        if (key !== undefined)
         {
-            key = storeModule(store, batch);
             keepBatch(key, instance);
         }
         // A region left on its old module until it is moved runs the same
@@ -4155,7 +4283,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      *
      * @param {any} one  a formed region
      * @param {import('./cache.js').CachedRegion | null} cached
-     * @param {Uint8Array | null} [moduleBytes]
+     * @param {Uint8Array | WebAssembly.Module | null} [moduleBytes]  compiled
+     *     already where a runtime sharing the store compiled it
      */
     const settle = (one, cached, moduleBytes)=>{
         one.cached = cached;
@@ -4402,6 +4531,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 }
                 any = true;
                 const key = lookup.wanted[lookup.modules.size];
+                const compiled = sharedModule(key);
+                if (compiled !== undefined)
+                {
+                    lookup.modules.set(key, compiled);
+                    continue;
+                }
                 const bytes = one(key);
                 if (bytes === undefined)
                 {
@@ -4439,17 +4574,27 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         const compile = [];
         /** @type {Set<string | object>} */
         const named = new Set();
+        /** @type {Publishing['compiled']} */
+        const compiled = new Map();
         for (const { instance, source, bytes } of waiting)
         {
             if (instance === null && source !== undefined && bytes !== undefined
                 && !named.has(source))
             {
                 named.add(source);
-                compile.push({ source, bytes });
+                // Compiled already by a runtime sharing the store.
+                if (bytes instanceof WebAssembly.Module)
+                {
+                    compiled.set(source, bytes);
+                }
+                else
+                {
+                    compile.push({ source, bytes });
+                }
             }
         }
         toPublish.push({ waiting, next: 0, ready: compile.length === 0, compile, started: [],
-            compiled: new Map(), instances: new Map(), covers });
+            compiled, instances: new Map(), covers });
         queueMicrotask(sendNext);
     };
 
@@ -4487,6 +4632,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 .then(module=>{
                     compiledBytes.set(module, bytes.length);
                     batch.compiled.set(source, module);
+                    if (typeof source === 'string')
+                    {
+                        share(source, module, bytes.length);
+                    }
                 }, (/** @type {unknown} */ e)=>{
                     refused.batch = (refused.batch ?? 0) + 1;
                     refused[`batch: ${String(e).slice(0, 120)}`] = 1;
@@ -4639,8 +4788,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             if (instance === undefined)
             {
-                instance = instantiate(key === undefined ? one.cached.module : one.moduleBytes)
-                    ?? undefined;
+                instance = instantiate(key === undefined ? one.cached.module : one.moduleBytes,
+                    undefined, key) ?? undefined;
                 if (instance !== undefined && key !== undefined)
                 {
                     keepBatch(key, instance);
@@ -4959,9 +5108,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             // One the store holds is formed as its record says (`recordBefore`).
             const record = recordBefore(step, store, eip, entryTop);
-            const region = formRegion(read, eip, { ...formHere, translatable, shared,
-                ...(record?.shape.targets === undefined ? {}
-                    : { callTargets: new Map(record.shape.targets) }) });
+            const region = formAt(eip, record?.shape.targets, shared);
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -5116,7 +5263,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         storePending = true;
         counts.lookedUpLater++;
         // A batch module's bytes are read once for every record naming it.
-        /** @type {Map<string, Promise<Uint8Array | null>>} */
+        /** @type {Map<string, Promise<Uint8Array | WebAssembly.Module | null>>} */
         const modules = new Map();
         /** @param {string} key */
         const moduleBytes = key=>{
@@ -5126,7 +5273,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 /** @param {Uint8Array | null} bytes */
                 const unpack = bytes=>(bytes === null
                     ? null : unpackRegion(bytes, cacheVersion)?.module ?? null);
-                pending = /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(unpack));
+                const compiled = sharedModule(key);
+                pending = compiled !== undefined ? Promise.resolve(compiled)
+                    : /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(unpack));
                 modules.set(key, pending);
             }
             return pending;
@@ -5760,6 +5909,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 formedAsRecorded: counts.formedAsRecorded,
                 toStoredRegion: counts.toStoredRegion,
                 missNoModule: counts.missNoModule,
+                // Store hits whose batch module a runtime sharing the store had
+                // compiled already, and what the shared modules hold.
+                sharedModules: counts.sharedModules,
+                sharedHeld: sharedModules?.stats() ?? null,
+                // Regions taken as a runtime sharing the store formed them, and
+                // what the shared regions hold.
+                formedShared: counts.formedShared,
+                sharedForms: sharedForms?.stats() ?? null,
                 // What the store holds and what its opening kept, where it says.
                 store: settings.store?.stats?.() ?? null,
                 lookedUpNow: counts.lookedUpNow,

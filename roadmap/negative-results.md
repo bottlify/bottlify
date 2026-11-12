@@ -2754,3 +2754,78 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13; power plan not recorded.
 - **Decision.** `install-watch --store memory` again, as a page has its origin's store; the
   2026-11-11 entry's decision is superseded by this one, not rewritten.
+
+### 2026-11-12: formed regions kept for the processes sharing a store (`sharedFormed`) slow ngen down (cork, multi-process)
+
+- **Idea.** In the .NET Framework 4 setup's ngen, every `mscorsvw.exe` after the first few finds
+  nearly all its regions in the run's store (about 5 000 hits against 150 misses) and still spends
+  about 4 s of the engine thread forming them again (`formingMs`). Keeping every formed region,
+  run-wide, beside the store (32 768 at most, least recently used out), and taking one where every
+  byte forming read (`sources`) and every page `translatable` answered for are as they were,
+  would leave a process started again nothing to decode. A region kept so is formed without the
+  call's shared decode cache (`formShared`), whose regions do not note the bytes another decoded.
+- **Workload.** `dotNetFx40_Full_x86_x64.exe` (sha256 65e06425...) under `tools/install-watch.mjs
+  --args '/q /norestart' --minutes 16 --memory 2048 --store memory --cork-figures --cork
+  '{"worker":true,"timings":true,...}'`, Node 26.13.1 with `--max-old-space-size=8192`, commit
+  baa8d5a. Measured: the seconds from the third `mscorsvw.exe` start (the first after mscorlib's)
+  to the 56th. One run with the kept regions alone (`sharedModuleBytes` 0), one with them and two
+  other levers (shared modules, `storedThreshold` 1); arms run one after another, never two at once.
+- **Values.** Kept regions alone 817.5 s against 717.8, 731.0 and 691.5 without (three runs, the
+  noise 40 s); the engine thread's forming of a later process 0.8 s against 4.1 s (median of the
+  status lines of processes past 3 000 hits); V8 heap at the end 2.30 GB against 0.51-0.61 GB.
+  With the three levers together, to the 62nd start: 713.9 s against 733.9; the gaps under 6 s
+  (36 of them) 138.2 s against 88.6, each about 1.5 s longer.
+- **Why.** The kept regions are millions of small objects: 1.8 GB more heap that every collection
+  of the engine's thread marks, which costs the short processes more than the decoding they save.
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
+- **Decision.** Not at this size. Measured again at 8 192 regions beside the shared compiled
+  modules (same workload, to the 62nd start, runs alternated with the modules alone): 617.7,
+  632.4 and 603.6 s against 655.1, 691.2, 672.2 and 648.7 with the modules alone, and 733.9,
+  747.3 and 708.0 with neither; heap 1.17-1.22 GB against 0.57; the engine thread's forming of a
+  later process 1.2 s against 3.6. Kept at that cap (`sharedFormed`, `shared-forms.js`).
+
+### 2026-11-12: a target the store's map knows, a candidate at its first exit (`storedThreshold`), does not speed up ngen (cork, multi-process)
+
+- **Idea.** A process started again interprets each address 64 times (`missThreshold`) before it
+  is a candidate, though the store's map of blocks says an earlier process had an entry there and
+  the region is a hit; at the first exit the region would be there sooner.
+- **Workload.** As the entry above (commit baa8d5a), `storedThreshold` 1 with the other two levers
+  off; to the 62nd `mscorsvw.exe` start. One run.
+- **Values.** 729.9 s against 733.9, 747.3 and 708.0 without; the gaps under 6 s 93.1 s against
+  88.1-90.8, the larger ones 636.8 s against 619.9-656.5.
+- **Why.** Within the noise of the three runs without it (39 s): the regions a later process
+  waits for are the hot ones, which reach 64 exits in moments anyway, and the cold ones taken at
+  once cost the short processes their publishing.
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
+- **Decision.** Removed.
+
+### 2026-11-12: more room for the processes' shared compiled modules (`sharedModuleBytes` 1 GiB) (cork, multi-process)
+
+- **Idea.** With the default 256 MiB the shared compiled modules of ngen's run were full by its
+  end (967 held, 1 607 let go); room for all of them would leave fewer to compile again.
+- **Workload.** As the entries above, at commit df9cfac (shared modules on), `sharedModuleBytes`
+  1 GiB; to the 62nd `mscorsvw.exe` start. One run.
+- **Values.** 671.1 s against 655.1, 691.2 and 672.2 at 256 MiB; 2 533 modules held, 515 MiB, none
+  let go; RSS at the end 6.7 GB against 6.3.
+- **Why.** The modules let go are the ones least recently used, which the later processes do not
+  ask for.
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
+- **Decision.** 256 MiB stays.
+
+### 2026-11-12: the shared formed regions (`sharedFormed` 8192) cost ngen's short processes what they save its long ones (cork, multi-process)
+
+- **Idea.** The entry above kept the formed regions at 8 192 on three runs of commit baa8d5a; the
+  commit that keeps them (0d43f09) measured again at its defaults, alternated with the same build
+  sharing no regions (`sharedFormed` 0), to see where the gain lies.
+- **Workload.** As the entries above, to the 62nd `mscorsvw.exe` start; the gaps split by their
+  length in a run sharing nothing: 36 under 6 s (the short assemblies), 23 longer.
+- **Values.** At 0d43f09: 685.2 and 618.7 s with the regions shared, 654.8 without. All runs with
+  the regions shared (five) against the modules alone (five): totals 603.6-685.2 s, median 618.7,
+  against 648.7-691.2, median 655.1; the short gaps 89.7-101.8 s against 81.0-84.9, the long ones
+  513.4-583.4 s against 567.7-607.5. Heap at the end 1.17-1.26 GB against 0.54-0.61.
+- **Why.** A short process takes few regions from the others and still pays for the heap their
+  collections mark; a long one forms thousands it now takes. The two arms overlap in one run of
+  five.
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
+- **Decision.** Kept at 8 192: the median is 36 s (5.5%) shorter. What a short process pays is the
+  next thing to take back - a region kept in fewer objects than its decoded instructions.

@@ -25,6 +25,8 @@ shipped program to change.
 | `feed` | `'frame'` | When candidates are formed: once a frame, or after every slice (`'slice'`, a program that never presents; `createMachine`'s). |
 | `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer` where the page is cross-origin isolated; `false` keeps it private and the program on one executor. |
 | `cacheBytes` | 256 MiB | The wasm bytes of the modules running regions are in, past which those gone longest without running are let go (0: no ceiling); the core sets a ceiling only on the iOS path below. |
+| `sharedModuleBytes` | 256 MiB | The wasm bytes of compiled batch modules kept for every runtime handed the same `store` (`shared-modules.js`): a process the run starts again instantiates what an earlier one compiled, its lazily compiled and tiered-up code with it (0: none kept). |
+| `sharedFormed` | 8192 | Formed regions kept for every runtime handed the same `store` that forms as this one does (`shared-forms.js`): a store hit whose every byte and page forming read answer as they did takes the region formed earlier instead of decoding it again (0: none kept). |
 | `crossTailCalls`, `dispatch`, `callDepth` | `true`, `false`, `CallStack.LIMIT` (256) | HACK until iOS ships [WebKit PR #76671](https://github.com/WebKit/WebKit/pull/76671): iOS 27 kills the page on a tail call into another instance ([WebKit bug 325447](https://bugs.webkit.org/show_bug.cgi?id=325447)) and overflows a 512 KB worker stack, so the core gives an iPhone `crossTailCalls: false`, `dispatch: true` and `callDepth: 64`. |
 
 The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolCapacity`, `cork.poolWindowMs` and `cork.poolDriver`
