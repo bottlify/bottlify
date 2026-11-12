@@ -220,3 +220,31 @@ test('a registered class object is held by the registration\'s count alone', asy
     assert.equal(await remoting.revokeClass(7), true);
     assert.deepEqual(calls, [], 'and revoking it releases nothing the channel did not take');
 });
+
+test('the manager starts a service once: a second start finds it running, a class it serves is'
+    + ' waited for in that process, and once the process ends the service is stopped', async()=>{
+    /** @type {any[]} */
+    const launched = [];
+    /** @type {(code: number) => void} */
+    let end = ()=>{};
+    const table = createClassTable({ launch: request=>{
+        launched.push(request);
+        return { exited: new Promise(resolve=>{
+            end = resolve;
+        }) };
+    } });
+    assert.equal(table.serviceRunning('Svc'), false);
+    assert.equal(table.startService({ command: 'C:\\svc.exe', service: 'Svc' }, null), 'started');
+    assert.equal(table.serviceRunning('svc'), true, 'by its name in any case');
+    assert.equal(table.startService({ command: 'C:\\svc.exe', service: 'SVC' }, null), 'running');
+    const asked = table.serviceProcess({ command: 'C:\\svc.exe', service: 'Svc', clsid: '{C}' },
+        null);
+    assert.equal(asked?.fresh, false, 'COM asking for the class finds the process standing');
+    assert.equal(launched.length, 1, 'one process');
+    assert.deepEqual(launched[0], { command: 'C:\\svc.exe', service: 'Svc', clsid: '' });
+    end(0);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.equal(table.serviceRunning('Svc'), false, 'its process is gone');
+    assert.equal(createClassTable().startService({ command: 'C:\\svc.exe', service: 'Svc' }, null),
+        null, 'nothing here starts a process');
+});

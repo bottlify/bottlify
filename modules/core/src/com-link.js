@@ -132,6 +132,31 @@ export function comHandlers(table, side){
                 started.exited.finally(()=>launched.delete(number)).catch(()=>{});
                 return number;
             },
+            /**
+             * A service's process for the run, standing or started now in a worker of
+             * its own: named by a number to wait on, and whether it was started now.
+             * Null when the run has no room: the process starts it beside itself
+             * (`holdService`).
+             *
+             * @param {{ command: string, service: string, clsid?: string }} request
+             */
+            serviceProcess(request){
+                const one = table.serviceProcess(request, null, side.launch ?? (()=>null));
+                if (!one)
+                {
+                    return null;
+                }
+                const number = nextLaunch++;
+                launched.set(number, one.exited);
+                one.exited.finally(()=>launched.delete(number)).catch(()=>{});
+                return { number, fresh: one.fresh };
+            },
+            /** @param {string} name */
+            serviceRunning: name=>table.serviceRunning(name),
+            /** @param {string} name */
+            holdService: name=>table.holdService(name),
+            /** @param {string} name */
+            releaseService: name=>table.releaseService(name),
             /** @param {number} number */
             exited: number=>launched.get(number) ?? null,
             /** @param {string} clsid @param {number} number */
@@ -194,6 +219,52 @@ export function remoteClassTable(link, hooks = {}){
                 return hooks.launch?.(request, process) ?? null;
             },
         },
+
+        /**
+         * A service's process for the run: started in a worker of the run's, or,
+         * where the run has no room, beside this process and held in the run's
+         * table while it stands.
+         *
+         * @param {{ command: string, service: string, clsid?: string }} request
+         * @param {unknown} process
+         * @returns {{ exited: Promise<unknown>, fresh: boolean } | null}
+         */
+        serviceProcess(request, process){
+            const answer = link.ask('serviceProcess', [request]);
+            if (answer)
+            {
+                const exited = link.call('exited', [answer.number]);
+                started.set(exited, answer.number);
+                return { exited, fresh: answer.fresh };
+            }
+            if (!link.ask('holdService', [request.service]))
+            {
+                // Another process started it meanwhile.
+                return this.serviceProcess(request, process);
+            }
+            const launched = hooks.launch?.({ command: request.command, service: request.service,
+                clsid: request.clsid ?? '' }, process) ?? null;
+            if (!launched)
+            {
+                link.ask('releaseService', [request.service]);
+                return null;
+            }
+            const release = ()=>link.call('releaseService', [request.service]).catch(()=>{});
+            launched.exited.then(release, release);
+            return { exited: launched.exited, fresh: true };
+        },
+
+        /**
+         * @param {{ command: string, service: string }} request @param {unknown} process
+         * @returns {'started' | 'running' | null}
+         */
+        startService(request, process){
+            const one = this.serviceProcess(request, process);
+            return one === null ? null : one.fresh ? 'started' : 'running';
+        },
+
+        /** @param {string} name */
+        serviceRunning: name=>link.ask('serviceRunning', [name]) === true,
 
         /** @param {import('./layers/win32/ole32/remote.js').Endpoint} endpoint */
         attach(endpoint){

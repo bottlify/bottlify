@@ -21,10 +21,14 @@
   32-bit executable with the executable transforms (that layout is not public) or against an old
   file only Windows' PE normalisation would match; such a patch fails with
   `ERROR_PATCH_DECODE_FAILURE`.
-- A service a package installs is registered with the service manager and stays stopped
-  (`StartService` starts nothing) until COM starts it for a class it serves as its
-  `LocalService`. It then runs until the program the run started ends, and is ended with it
-  without being told `SERVICE_CONTROL_SHUTDOWN`. ODBC drivers and data sources, COM+ applications and side-by-side or global assembly
+- A service a package installs is registered with the service manager and stays stopped until
+  `StartService` starts it, or COM for a class it serves as its `LocalService`: its process on
+  the service's own command line, once for the run whoever asks (a second start is
+  `ERROR_SERVICE_ALREADY_RUNNING`). Another process's `QueryServiceStatus` finds it running from
+  the moment its process stands, before its `ServiceMain` reports so, and stopped once the
+  process is gone. It runs until the program the run started ends, and is ended with it without
+  being told `SERVICE_CONTROL_SHUTDOWN`; a service set to start with the machine is not started
+  when a run begins. ODBC drivers and data sources, COM+ applications and side-by-side or global assembly
   cache assemblies are not installed.
 - An advertise script cannot be written or read (`MsiAdvertiseScript`,
   `MsiProcessAdvertiseScript`, `MsiGetProductInfoFromScript`, `MsiAdvertiseProduct` to a file).

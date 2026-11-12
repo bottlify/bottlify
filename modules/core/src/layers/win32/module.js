@@ -4795,6 +4795,11 @@ export function createWin32Module(){
                         computerName: COMPUTER_NAME,
                         // The service the manager started this process for: COM's LocalService.
                         service: config?.service ?? null,
+                        // The run's service control manager starts a service's process,
+                        // once, as COM starts a class's LocalService (`ole32/remote.js`).
+                        startService: (name, command)=>comHost.table.startService?.(
+                            { command, service: name }, comHost.process) ?? null,
+                        serviceRunning: name=>comHost.table.serviceRunning?.(name) === true,
                         call: (entry, args)=>bridge.callGuest({ entry, args,
                             thread: bridge.callerThread() }),
                     }),
