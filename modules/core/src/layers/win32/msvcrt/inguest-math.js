@@ -36,6 +36,7 @@ import { X87 } from './x87.js';
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').f64} f64 */
+/** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').x87} x87 */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
@@ -1014,4 +1015,75 @@ export function _CIfloor(x){
  */
 export function _CIceil(x){
     return Math.ceil(x);
+}
+
+/**
+ * sinhf, coshf, tanhf and log10f, a 64-bit runtime's: the double form's way
+ * on the float, rounded to a float as the host's handler rounds the double
+ * answer (no float of the 2e6 compared rounds apart from Math's); what the
+ * double form leaves to its handler, theirs.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function sinhf({ host }, x){
+    if (!(Math.abs(x) < EXP_RANGE))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return Math.fround(x);
+    }
+    const s = sinhOf(expm1Of(Math.abs(x)));
+    return Math.fround(x < 0 ? -s : s);
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function coshf({ host }, x){
+    if (!(Math.abs(x) < EXP_RANGE))
+    {
+        return host();
+    }
+    return Math.fround(coshOf(expOf(Math.abs(x))));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function tanhf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    if (!(Math.abs(x) < 22))
+    {
+        return Math.fround(x < 0 ? -1 : 1);
+    }
+    if (x === 0)
+    {
+        return Math.fround(x);
+    }
+    const t = tanhOf(expm1Of(2 * Math.abs(x)));
+    return Math.fround(x < 0 ? -t : t);
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function log10f({ host }, x){
+    if (!(x > 0))
+    {
+        return host();
+    }
+    return Math.fround(X87.yl2x(LOG10_2, x));
 }

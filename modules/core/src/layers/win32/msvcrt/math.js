@@ -416,6 +416,13 @@ export function createMathFunctions(host){
             singles[name] = guestEntry(inGuest[name], COMPILED[name], host, singles[name]);
         }
     }
+    for (const name of /** @type {const} */ (['sinhf', 'coshf', 'tanhf', 'log10f']))
+    {
+        if (singles[name])
+        {
+            singles[name] = guestEntry(inGuestMath[name], MATH_CODE[name], host, singles[name]);
+        }
+    }
 
     const guest = {
         readMemory: host.readMemory,
