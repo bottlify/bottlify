@@ -1011,7 +1011,7 @@ export function createConversionFunctions(host){
     // Code in the guest (`inguest-float.js`), which reads the number and
     // computes the values Clinger's fast path makes exact; the handlers above
     // answer the rest, and set errno for an overflow or an underflow.
-    const guest = { readMemory, writeMemory, fpu: host.fpu };
+    const guest = { readMemory, writeMemory, fpu: host.fpu, pointerSize: host.pointerSize };
     return {
         ...table,
         ...readMemory ? {

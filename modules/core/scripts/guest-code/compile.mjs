@@ -1035,11 +1035,6 @@ class FunctionCompiler {
                 {
                     this.bind(property.key, { constant: this.word });
                 }
-                if (this.long && X87_WORDS.has(property.key.name))
-                {
-                    this.fail(property, `${property.key.name}: the x87's control and status `
-                        + 'words are the 32-bit runtime\'s, refused at 64 bits');
-                }
                 if (this.long && property.key.name === 'compareExchange')
                 {
                     this.fail(property, 'compareExchange: the 32-bit kernel\'s exchange of a '
@@ -1934,8 +1929,8 @@ class FunctionCompiler {
 
     /**
      * A comparison of two constants -- `pointerBytes === 8` -- as the
-     * condition it is, or undefined when it is not one: an `if` on it keeps
-     * only the way it takes.
+     * condition it is, or undefined when it is not one: an `if` or a `?:` on
+     * it keeps only the way it takes.
      *
      * @param {any} node
      * @returns {boolean | undefined}
@@ -1960,6 +1955,21 @@ class FunctionCompiler {
             case '>': return left > right;
             case '>=': return left >= right;
             default: return undefined;
+        }
+    }
+
+    /**
+     * The x87's words are the 32-bit runtime's: a use of one in x86-64 code is
+     * refused where it is made, so a source may take them and use them only
+     * in a way `pointerBytes` keeps from the x86-64.
+     *
+     * @param {any} node @param {string} name
+     */
+    wordsAt64(node, name){
+        if (this.long)
+        {
+            this.fail(node, `${name}: the x87's control and status words are the 32-bit `
+                + 'runtime\'s, refused at 64 bits');
         }
     }
 
@@ -2446,6 +2456,7 @@ class FunctionCompiler {
                 if (name === 'setControlWord' && this.helpers.has(name))
                 {
                     this.arity(node, 1);
+                    this.wordsAt64(node, name);
                     const value = this.expr(node.arguments[0]);
                     this.integer(value, node.arguments[0], 'typed');
                     this.toEax(value, node.arguments[0]);
@@ -2456,6 +2467,7 @@ class FunctionCompiler {
                 if (name === 'setMxcsr' && this.helpers.has(name))
                 {
                     this.arity(node, 1);
+                    this.wordsAt64(node, name);
                     const value = this.expr(node.arguments[0]);
                     this.integer(value, node.arguments[0], 'typed');
                     this.toEax(value, node.arguments[0]);
@@ -2465,6 +2477,7 @@ class FunctionCompiler {
                 if (name === 'clearExceptions' && this.helpers.has(name))
                 {
                     this.arity(node, 0);
+                    this.wordsAt64(node, name);
                     a.emit(0xdb, 0xe2);                                    // fnclex
                     this.x87Used = true;
                     return;
@@ -3469,6 +3482,12 @@ class FunctionCompiler {
                     + 'write c ? 1 : 0');
             case 'ConditionalExpression':
             {
+                // A comparison of constants keeps only the value it takes.
+                const known = this.foldTest(node.test);
+                if (known !== undefined)
+                {
+                    return this.expr(known ? node.consequent : node.alternate);
+                }
                 const otherwise = a.fresh('else');
                 const end = a.fresh('end');
                 this.branch(node.test, otherwise, false);
@@ -4330,6 +4349,7 @@ class FunctionCompiler {
             if (name === 'mxcsr')
             {
                 this.arity(node, 0);
+                this.wordsAt64(node, name);
                 a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
                 a.emit(0x0f, 0xae, 0x1c, 0x24);                            // stmxcsr [esp]
                 a.emit(0x8b, 0x04, 0x24);                                  // mov eax, [esp]
@@ -4339,6 +4359,7 @@ class FunctionCompiler {
             if (name === 'controlWord' || name === 'statusWord')
             {
                 this.arity(node, 0);
+                this.wordsAt64(node, name);
                 this.x87Used = true;
                 if (name === 'controlWord')
                 {

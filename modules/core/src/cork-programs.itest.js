@@ -852,3 +852,46 @@ test('a 64-bit program\'s sprintf of a double is the host\'s, its va_list the sp
         const cork = await run(exe);
         assert.equal(cork.code, 8, 'eight bytes, as the host printed them');
     });
+
+test('a 64-bit program\'s msvcrt strtod and atof run as guest code, *end a whole pointer',
+    async()=>{
+        // strtod("1.25e2xy", &end) + atof("-0.5"): 124.5, its double's low dword the exit
+        // code's low half; end - text (6) in its high half, and the quadword end's upper half
+        // (preset to all ones) added in.
+        const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['strtod', 'atof'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: { number: [...text('1.25e2xy'), 0], half: [...text('-0.5'), 0],
+                end: new Array(8).fill(0xff), sum: new Array(8).fill(0) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x48, 0x83, 0xec, 0x28);
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('number'), 7));       // lea rcx, number
+                out.push(0x48, 0x8d, 0x15, ...rip(at('end'), 7));          // lea rdx, end
+                out.push(0xff, 0x15, ...rip(iat('strtod'), 6));
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));    // movsd [sum], xmm0
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('half'), 7));
+                out.push(0xff, 0x15, ...rip(iat('atof'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));    // addsd xmm0, [sum]
+                out.push(0xf2, 0x0f, 0x2c, 0xc8);                          // cvttsd2si ecx, xmm0
+                out.push(0x48, 0x8b, 0x05, ...rip(at('end'), 7));          // mov rax, [end]
+                out.push(0x48, 0x8d, 0x15, ...rip(at('number'), 7));       // lea rdx, number
+                out.push(0x48, 0x29, 0xd0);                                // sub rax, rdx
+                out.push(0x48, 0xc1, 0xe0, 0x10);                          // shl rax, 16
+                out.push(0x01, 0xc1);                                      // add ecx, eax
+                out.push(0x48, 0xc1, 0xe8, 0x20);                          // shr rax, 32
+                out.push(0x01, 0xc1);                                      // add ecx, eax
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code, 124 + (6 << 16), 'the sum, the end six bytes in, its upper half 0');
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/strtod|atof/.test(name));
+        assert.deepEqual(hosted, [], 'neither crossed to the host');
+    });

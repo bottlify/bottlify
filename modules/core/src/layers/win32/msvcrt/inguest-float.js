@@ -386,7 +386,9 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
  * @param {Guest} guest @param {u32} text @param {u32} end
  * @returns {f64}
  */
-export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, end){
+export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerBytes }, text,
+    end)
+{
     if (text === 0)
     {
         return host();
@@ -453,6 +455,10 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         if (end !== 0)
         {
             setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return 0;
     }
@@ -486,6 +492,10 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         if (end !== 0)
         {
             setU32(end, at);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return negative !== 0 ? -0 : 0;
     }
@@ -493,8 +503,12 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
     {
         return host();
     }
-    const word = controlWord();
-    setControlWord(exactly(word));
+    // The i386's x87 rounds to doubles for the computation; x86-64's SSE2 does already.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(exactly(word));
+    }
     /** @type {f64} */
     let whole = +high;
     let k = (digits - 9) | 0;
@@ -513,10 +527,17 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         k--;
     }
     const value = scale < 0 ? whole / power : whole * power;
-    setControlWord(word);
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
     if (end !== 0)
     {
         setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
     }
     return negative !== 0 ? -value : value;
 }
@@ -529,7 +550,7 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
  * @param {Guest} guest @param {u32} text
  * @returns {f64}
  */
-export function atof({ u8, controlWord, setControlWord, host }, text){
+export function atof({ u8, controlWord, setControlWord, host, pointerBytes }, text){
     if (text === 0)
     {
         return host();
@@ -617,8 +638,12 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
     {
         return host();
     }
-    const word = controlWord();
-    setControlWord(exactly(word));
+    // The i386's x87 rounds to doubles for the computation; x86-64's SSE2 does already.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(exactly(word));
+    }
     /** @type {f64} */
     let whole = +high;
     let k = (digits - 9) | 0;
@@ -637,6 +662,9 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
         k--;
     }
     const value = scale < 0 ? whole / power : whole * power;
-    setControlWord(word);
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
     return negative !== 0 ? -value : value;
 }

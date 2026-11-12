@@ -430,7 +430,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32'],
         returns: 'f64',
-        uses: ['u8', 'setU32', 'controlWord', 'setControlWord', 'host'],
+        uses: ['u8', 'setU32', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 822,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x48, 0xe8, 0x30, 0x03, 0x00, 0x00,
@@ -509,7 +509,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32'],
         returns: 'f64',
-        uses: ['u8', 'controlWord', 'setControlWord', 'host'],
+        uses: ['u8', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 698,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x40, 0xe8, 0xb4, 0x02, 0x00, 0x00,
