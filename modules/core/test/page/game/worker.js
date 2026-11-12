@@ -123,6 +123,10 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.journalRecent(data.count) ?? [] });
             break;
+        case 'readFile':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.readFile(data.path, data.tail) ?? null });
+            break;
         case 'input':
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.input(data.event) ?? false });

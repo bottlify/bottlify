@@ -1400,6 +1400,20 @@ function desktopOf(app){
 }
 
 /**
+ * A file's bytes as text: UTF-16 when it opens with that order mark, as a
+ * Windows log often does, and one byte a character otherwise; its last
+ * `tail` characters.
+ *
+ * @param {Uint8Array} bytes @param {number} tail
+ */
+export function textTail(bytes, tail){
+    const wide = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
+    const text = new TextDecoder(wide ? 'utf-16le' : 'latin1')
+        .decode(wide ? bytes.subarray(2) : bytes);
+    return tail > 0 && text.length > tail ? text.slice(text.length - tail) : text;
+}
+
+/**
  * Every file under a directory of the volume, as the program sees it: what an
  * install has laid down so far.
  *
@@ -2369,6 +2383,23 @@ export function createHarness(canvas, how = {}){
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
         journalRecent: count=>running ? running.log.recent(count) : [],
+        // A text file of the volume read while the run goes on - the log a
+        // setup or a tool keeps of what it decided - its last `tail`
+        // characters, or null when there is no run or no such file.
+        /** @param {string} path @param {number} [tail] */
+        readFile: (path, tail = 65536)=>{
+            if (!running)
+            {
+                return null;
+            }
+            try
+            {
+                return textTail(running.files.read(path), tail);
+            }
+            catch {
+                return null;
+            }
+        },
         standing: async list=>(running
             ? { processes: await standingOf(running), events: runningEvents,
                 desktop: desktopOf(running), files: list ? filesUnder(running, list) : [] }

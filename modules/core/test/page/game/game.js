@@ -155,6 +155,8 @@ if (inWorker)
     namespace.debug = (/** @type {string} */ name, /** @type {any[]} */ ...args)=>
         ask('debug', { name, args });
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
+    namespace.readFile = (/** @type {string} */ path, /** @type {number | undefined} */ tail)=>
+        ask('readFile', { path, tail });
     namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
     namespace.input = (/** @type {any} */ event)=>ask('input', { event });
     namespace.stop = ()=>ask('stop');
@@ -178,6 +180,7 @@ else
     namespace.lastDumped = harness.lastDumped;
     namespace.debug = harness.debug;
     namespace.journalRecent = harness.journalRecent;
+    namespace.readFile = harness.readFile;
     namespace.standing = harness.standing;
     namespace.input = harness.input;
     namespace.stop = harness.stop;
