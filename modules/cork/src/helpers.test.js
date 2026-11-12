@@ -117,12 +117,16 @@ test('a helper whose bytes differ by one is called, and its bytes are in the reg
  * @param {(address: number) => number} read @param {number} target
  * @param {readonly import('./helpers.js').RuntimeHelper[]} helpers @param {32 | 64} bits
  */
-const helperAtEach = (read, target, helpers, bits)=>helpers.find(helper=>{
-    if ((helper.bits ?? 32) !== bits)
-    {
-        return false;
-    }
-    const { spans, masks = [], quick } = helper;
+const helperAtEach = (read, target, helpers, bits)=>helpers.find(helper=>
+    (helper.bits ?? 32) === bits && isAtEach(read, target, helper)) ?? null;
+
+/**
+ * @param {(address: number) => number} read @param {number} target
+ * @param {import('./helpers.js').RuntimeHelper} helper
+ * @returns {boolean}
+ */
+const isAtEach = (read, target, helper)=>{
+    const { spans, masks = [], quick, via } = helper;
     if (spans === undefined)
     {
         return fingerprint(read, target, helper.length) === helper.hash;
@@ -130,8 +134,11 @@ const helperAtEach = (read, target, helpers, bits)=>helpers.find(helper=>{
     return (quick === undefined
         || maskedFingerprint(read, target, [[0, Math.min(QUICK_BYTES, spans[0][1])]], masks)
             === quick)
-        && maskedFingerprint(read, target, spans, masks) === helper.hash;
-}) ?? null;
+        && maskedFingerprint(read, target, spans, masks) === helper.hash
+        && (via === undefined || isAtEach(read, target + via.at + 4
+            + ([0, 1, 2, 3].reduce((word, k)=>word + read(target + via.at + k) * 2 ** (8 * k), 0)
+                | 0) + (via.offset ?? 0), via));
+};
 
 test('the helper lookup answers as every helper looked at in turn does: seeded memory with helpers'
     + ' of masked and unmasked heads planted, the dictionary\'s and others alike', ()=>{
