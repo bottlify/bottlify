@@ -117,7 +117,8 @@ test('a database signed with its metadata digests that first, and a changed entr
     const zeroTimes = new Uint8Array(16);
     const prehash = createSha1();
     // The root: its class and state bits. Then 'B', 'a', 'ab' and its 'x', by bytes.
-    for (const piece of [(parseGuid(ROOT_CLASS)), little(0x11, 4),
+    const rootClass = /** @type {Uint8Array} */ (parseGuid(ROOT_CLASS));
+    for (const piece of [rootClass, little(0x11, 4),
         utf16('B'), little(20, 4), little(3, 4), zeroTimes,
         utf16('a'), little(10, 4), little(3, 4), zeroTimes,
         utf16('ab'), /** @type {Uint8Array} */ (parseGuid(INNER_CLASS)), little(0, 4),
