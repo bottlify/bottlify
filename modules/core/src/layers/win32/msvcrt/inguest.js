@@ -1970,3 +1970,166 @@ export function expf({ floatBits, floatOfBits, host }, x){
         + FACTORIAL2) * r + 1) * r + 1;
     return Math.fround(p * floatOfBits(k + 127 << 23));
 }
+
+/** Below it in magnitude `fsin`, `fcos` and `fptan` reduce their argument themselves. */
+const FLOAT_REDUCED = 2 ** 63;
+
+/**
+ * sinf, cosf and tanf: the double form's instruction on the float, the answer
+ * rounded to a float as the host's handler rounds the double one; past the
+ * instruction's reduction, an infinity and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function sinf({ host }, x){
+    if (!(Math.abs(x) < FLOAT_REDUCED))
+    {
+        return host();
+    }
+    return Math.fround(Math.sin(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function cosf({ host }, x){
+    if (!(Math.abs(x) < FLOAT_REDUCED))
+    {
+        return host();
+    }
+    return Math.fround(Math.cos(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function tanf({ host }, x){
+    if (!(Math.abs(x) < FLOAT_REDUCED))
+    {
+        return host();
+    }
+    return Math.fround(Math.tan(x));
+}
+
+/**
+ * asinf and acosf: atan2 of the float and its cosine's (sine's) square root, in
+ * doubles; past one in magnitude (EDOM) and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function asinf({ host }, x){
+    if (!(Math.abs(x) <= 1))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan2(x, Math.sqrt(1 - x * x)));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function acosf({ host }, x){
+    if (!(Math.abs(x) <= 1))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan2(Math.sqrt(1 - x * x), x));
+}
+
+/**
+ * atanf and atan2f: `fpatan`; a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function atanf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} y @param {f32} x
+ * @returns {f32}
+ */
+export function atan2f({ host }, y, x){
+    if (Number.isNaN(y) || Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan2(y, x));
+}
+
+/**
+ * sqrtf: the double's root rounded to a float, which is the float's own
+ * correctly rounded root; a negative (EDOM) and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function sqrtf({ host }, x){
+    if (!(x >= 0))
+    {
+        return host();
+    }
+    return Math.fround(Math.sqrt(x));
+}
+
+/**
+ * floorf and ceilf, exact; a NaN the host's, which hands its payload through.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function floorf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.floor(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function ceilf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.ceil(x));
+}
+
+/**
+ * fmodf: the exact remainder, the dividend's sign; an infinite dividend or a
+ * zero divisor (EDOM) and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function fmodf({ host }, x, y){
+    if (!(Math.abs(x) <= 3.4028234663852886e38) || y === 0 || Number.isNaN(y))
+    {
+        return host();
+    }
+    return Math.fround(x % y);
+}

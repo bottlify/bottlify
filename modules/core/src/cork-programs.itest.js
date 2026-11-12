@@ -698,3 +698,43 @@ test('a 64-bit program\'s msvcrt sin, atan2 and acos run as guest code, with no 
         const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/sin|atan2|acos/.test(name));
         assert.deepEqual(hosted, [], 'none of them crossed to the host');
     });
+
+test('a 64-bit program\'s msvcrt sinf, atan2f and sqrtf run as guest code, none calling the host',
+    async()=>{
+        // xmm0 = sinf(0.5f) + atan2f(0.25f, 2f) + sqrtf(2f), a float; its bits the exit code.
+        const f32 = (/** @type {number} */ x)=>[...new Uint8Array(new Float32Array([x]).buffer)];
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sinf', 'atan2f', 'sqrtf'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: { half: f32(0.5), quarter: f32(0.25), two: f32(2), sum: new Array(4).fill(0) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x48, 0x83, 0xec, 0x28);                              // sub rsp, 40
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('half'), 8));       // movss xmm0, [half]
+                out.push(0xff, 0x15, ...rip(iat('sinf'), 6));
+                out.push(0xf3, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));        // movss [sum], xmm0
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('quarter'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x0d, ...rip(at('two'), 8));        // movss xmm1, [two]
+                out.push(0xff, 0x15, ...rip(iat('atan2f'), 6));
+                out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));        // addss xmm0, [sum]
+                out.push(0xf3, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
+                out.push(0xff, 0x15, ...rip(iat('sqrtf'), 6));
+                out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0x66, 0x0f, 0x7e, 0xc1);                              // movd ecx, xmm0
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        const sum = Math.fround(Math.fround(Math.fround(Math.sin(0.5))
+            + Math.fround(Math.atan2(0.25, 2))) + Math.fround(Math.sqrt(2)));
+        assert.equal(cork.code >>> 0, new Uint32Array(new Float32Array([sum]).buffer)[0]);
+        const hosted = cork.trapsHot.map(([name])=>name)
+            .filter(name=>/sinf|atan2f|sqrtf/.test(name));
+        assert.deepEqual(hosted, [], 'none of them crossed to the host');
+    });

@@ -407,6 +407,15 @@ export function createMathFunctions(host){
     {
         singles.expf = guestEntry(inGuest.expf, COMPILED.expf, host, singles.expf);
     }
+    // The float forms of one instruction, or of a few, in the guest too.
+    for (const name of /** @type {const} */ (['sinf', 'cosf', 'tanf', 'asinf', 'acosf',
+        'atanf', 'atan2f', 'sqrtf', 'floorf', 'ceilf', 'fmodf']))
+    {
+        if (singles[name])
+        {
+            singles[name] = guestEntry(inGuest[name], COMPILED[name], host, singles[name]);
+        }
+    }
 
     const guest = {
         readMemory: host.readMemory,
