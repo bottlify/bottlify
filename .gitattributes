@@ -3,3 +3,9 @@
 # core.autocrlf must not hand them over with CRLF line ends.
 *.c text eol=lf
 *.h text eol=lf
+
+# The guest routines `npm run build` writes beside their JavaScript come out
+# with LF line ends; under core.autocrlf a checkout's CRLF made every build
+# show them as changed when nothing in them was.
+*.x86.js text eol=lf
+*.x64.js text eol=lf
