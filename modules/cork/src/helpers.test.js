@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FTOL2, fingerprint, helperAt, helperInstructions } from './helpers.js';
+import { FTOL2, QUICK_BYTES, RUNTIME_HELPERS, fingerprint, helperAt, helperInstructions,
+    maskedFingerprint } from './helpers.js';
 import { formRegion } from './region.js';
 import { createTestMachine } from './testing/machine.js';
 
@@ -107,4 +108,72 @@ test('a helper whose bytes differ by one is called, and its bytes are in the reg
     const a = formRegion(readOf(machineWith(OWN)), CODE, { helpers: [helper] });
     const b = formRegion(readOf(machineWith(OWN)), CODE, { helpers: false });
     assert.notEqual(a.hash, b.hash, 'a region formed with the helper is keyed apart');
+});
+
+/**
+ * The helper lookup as it was written first, every helper's quick key taken
+ * for every target: what the grouped lookup must answer exactly as.
+ *
+ * @param {(address: number) => number} read @param {number} target
+ * @param {readonly import('./helpers.js').RuntimeHelper[]} helpers @param {32 | 64} bits
+ */
+const helperAtEach = (read, target, helpers, bits)=>helpers.find(helper=>{
+    if ((helper.bits ?? 32) !== bits)
+    {
+        return false;
+    }
+    const { spans, masks = [], quick } = helper;
+    if (spans === undefined)
+    {
+        return fingerprint(read, target, helper.length) === helper.hash;
+    }
+    return (quick === undefined
+        || maskedFingerprint(read, target, [[0, Math.min(QUICK_BYTES, spans[0][1])]], masks)
+            === quick)
+        && maskedFingerprint(read, target, spans, masks) === helper.hash;
+}) ?? null;
+
+test('the helper lookup answers as every helper looked at in turn does: seeded memory with helpers'
+    + ' of masked and unmasked heads planted, the dictionary\'s and others alike', ()=>{
+    let seed = 0x2545f491;
+    const random = ()=>{
+        seed ^= seed << 13;
+        seed ^= seed >>> 17;
+        seed ^= seed << 5;
+        return seed >>> 0;
+    };
+    const memory = Uint8Array.from({ length: 1 << 16 }, ()=>random() & 0xff);
+    const read = (/** @type {number} */ address)=>memory[address & 0xffff];
+    /** @type {import('./helpers.js').RuntimeHelper[]} */
+    const planted = [];
+    for (let n = 0; n < 24; n++)
+    {
+        const at = 0x100 + n * 0x400;
+        const length = 8 + random() % 60;
+        const spans = n % 3 === 0 ? [[0, length]] : [[0, Math.min(length, 12)], [20, length]];
+        const masks = n % 2 === 0 ? [] : [1 + random() % 6, 9, 21].filter((m, i, all)=>
+            all.indexOf(m) === i).sort((a, b)=>a - b);
+        const helper = { name: `planted${n}`, length: 0, spans, masks,
+            hash: maskedFingerprint(read, at, spans, masks),
+            quick: n % 4 === 3 ? undefined
+                : maskedFingerprint(read, at, [[0, Math.min(QUICK_BYTES, spans[0][1])]], masks) };
+        planted.push(helper);
+        // Its twin elsewhere differs only in a masked byte: still the helper.
+        if (masks.length > 0)
+        {
+            memory.copyWithin(at + 0x200, at, at + 0x60);
+            memory[at + 0x200 + masks[0]] ^= 0x5a;
+        }
+    }
+    const all = [...RUNTIME_HELPERS, ...planted, FTOL2];
+    for (let target = 0; target < 0x6200; target++)
+    {
+        for (const bits of /** @type {const} */ ([32, 64]))
+        {
+            assert.equal(helperAt(read, target, all, bits), helperAtEach(read, target, all, bits),
+                `at 0x${target.toString(16)}, ${bits}-bit`);
+        }
+    }
+    const found = planted.filter((helper, n)=>helperAt(read, 0x100 + n * 0x400, all) === helper);
+    assert.equal(found.length, planted.length, 'every planted helper is found where it lies');
 });

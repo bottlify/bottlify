@@ -120,7 +120,8 @@ export const plainOf = (read, failed = ()=>null)=>{
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
  *     windowCells?: Int32Array | null }} start
- * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any }>} its exit
+ * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any,
+ *     journal?: { time: number, text: string }[] | null }>} its exit
  *     code, its layers' diagnostics as it ended and the system libraries it knew, as
  *     plain data, or null
  */

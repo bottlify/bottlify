@@ -11257,11 +11257,11 @@ export async function createApp(options){
             pipeHandlers(request.inheritedHandles);
         // In the run's directory of processes, where another process opens it
         // by id, unless its parent here put it there already.
-        const listed = system.processDirectory && !system.processDirectory.has(request.id)
-            ? listedAcross(request) : null;
-        if (listed)
+        const directory = system.processDirectory;
+        const listed = directory && !directory.has(request.id) ? listedAcross(request) : null;
+        if (directory && listed)
         {
-            system.processDirectory.set(request.id, listed);
+            directory.set(request.id, listed);
         }
         const { dispose: forgetObjects, ...objects } = objectHandlers({
             table: system.namedObjects,

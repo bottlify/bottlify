@@ -704,6 +704,8 @@ setInterval(async()=>{
                     volatilePages: figures.volatilePages, volatileNow: figures.volatileNow,
                     exits: figures.exits, untranslatedBy: figures.untranslatedBy,
                     interpretedFrom: (figures.interpretedFrom ?? []).slice(0, 8),
+                    refused: figures.refused, refusedWhy: figures.refusedWhy,
+                    forcedSteps: figures.forcedSteps, forcedAt: figures.forcedAt,
                     exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 6),
                 }));
             }
