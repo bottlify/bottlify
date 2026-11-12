@@ -643,10 +643,34 @@ const ranSince = (image, cpu)=>{
         .sort((left, right)=>right[1] - left[1])
         .slice(0, 6)
         .map(([address, grew])=>{
-            const at = app.debug.moduleAt(address);
+            // Named from the modules of the process the engine's debug window
+            // stands for, and only for that process: another process maps other
+            // images at the same addresses (ngen's mscorsvc.dll is mscorsvw's
+            // clr.dll), and a name read from the wrong table is worse than none.
+            const own = speaksFor(image);
+            const at = own ? app.debug.moduleAt(address) : null;
             return `0x${address.toString(16)}${at ? `(${at.name.split('\\').pop()}`
-                + `+0x${at.offset.toString(16)})` : ''}:${grew}`;
+                + `+0x${at.offset.toString(16)})` : own ? '' : '(another process\'s module)'}`
+                + `:${grew}`;
         });
+};
+
+/**
+ * Whether the engine's debug window (`app.debug`) reads the memory of the
+ * process running `image`: its main module is that image's file.
+ *
+ * @param {string} image
+ */
+const speaksFor = image=>{
+    const named = image.split('\\').pop()?.toLowerCase() ?? '';
+    try
+    {
+        return app.debug.modules().some((/** @type {any} */ one)=>
+            String(one.name).toLowerCase() === named);
+    }
+    catch {
+        return false;
+    }
 };
 
 setInterval(async()=>{
@@ -706,7 +730,8 @@ setInterval(async()=>{
                     interpretedFrom: (figures.interpretedFrom ?? []).slice(0, 8),
                     refused: figures.refused, refusedWhy: figures.refusedWhy,
                     forcedSteps: figures.forcedSteps, forcedAt: figures.forcedAt,
-                    exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 6),
+                    crtFormed: figures.crtFormed,
+                    exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 32),
                 }));
             }
             // What the devices drew against what reached the screen: a
